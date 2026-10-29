@@ -36,6 +36,10 @@ pub struct H264Encoder {
     held: Option<Held>,
     sps: Vec<u8>,
     pps: Vec<u8>,
+    qp: i32,
+    bitrate: u32,
+    spent: u64,
+    budget: u64,
 }
 
 struct Held {
@@ -111,6 +115,10 @@ impl H264Encoder {
             held: None,
             sps,
             pps,
+            qp: initial_qp(params.bitrate, params.width, params.height),
+            bitrate: params.bitrate,
+            spent: 0,
+            budget: 0,
         })
     }
 
@@ -140,12 +148,14 @@ impl H264Encoder {
                 width: self.width,
                 height: self.height,
             },
+            self.qp,
         );
         self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
         self.next_fn = 1;
         self.display = 1;
         let unit = self.unit(3, 5, &slice);
         self.absorb(&unit, frame.pts, true)?;
+        self.note(unit.len(), frame.duration, frame.timescale);
         Ok(Packet::video(
             unit,
             frame.pts,
@@ -175,13 +185,22 @@ impl H264Encoder {
             .as_ref()
             .is_some_and(|plane| plane.y == frame.y && plane.u == frame.u && plane.v == frame.v)
         {
-            p_skip_slice(self.mb_w, self.mb_h, self.next_fn, poc)
+            p_skip_slice(self.mb_w, self.mb_h, self.next_fn, poc, self.qp)
         } else {
-            p_slice(self.mb_w, self.mb_h, self.next_fn, poc, &src, &reference)
+            p_slice(
+                self.mb_w,
+                self.mb_h,
+                self.next_fn,
+                poc,
+                &src,
+                &reference,
+                self.qp,
+            )
         };
         self.next_fn = (self.next_fn + 1) & 15;
         let unit = self.unit(3, 1, &slice);
         self.absorb(&unit, frame.pts, true)?;
+        self.note(unit.len(), frame.duration, frame.timescale);
         Ok(Packet::video(
             unit,
             frame.pts,
@@ -205,9 +224,18 @@ impl H264Encoder {
             height: self.height,
         };
         let poc = (frame.index.wrapping_mul(2)) & 15;
-        let slice = b_slice(self.mb_w, self.mb_h, self.next_fn, poc, &src, past, future);
+        let slice = b_slice(
+            (self.mb_w, self.mb_h),
+            self.next_fn,
+            poc,
+            &src,
+            past,
+            future,
+            self.qp,
+        );
         let unit = self.unit(0, 1, &slice);
         self.absorb(&unit, frame.pts, false)?;
+        self.note(unit.len(), frame.duration, frame.timescale);
         Ok(Packet::video(
             unit,
             frame.pts,
@@ -231,6 +259,17 @@ impl H264Encoder {
         } else {
             nal::length_nal(self.length_size, ref_idc, kind, rbsp)
         }
+    }
+
+    fn note(&mut self, bytes: usize, duration: i64, timescale: u32) {
+        if self.bitrate == 0 || timescale == 0 || duration <= 0 {
+            return;
+        }
+        let target = u64::from(self.bitrate).saturating_mul(u64::try_from(duration).unwrap_or(0))
+            / u64::from(timescale);
+        self.budget = self.budget.saturating_add(target);
+        self.spent = self.spent.saturating_add((bytes as u64).saturating_mul(8));
+        self.qp = next_qp(self.qp, self.spent, self.budget);
     }
 
     fn absorb(&mut self, unit: &[u8], pts: i64, keep: bool) -> Result<(), CodecError> {
@@ -319,6 +358,9 @@ impl VideoEncoder for H264Encoder {
         self.display = 0;
         self.anchor = None;
         self.held = None;
+        self.qp = initial_qp(self.bitrate, self.width, self.height);
+        self.spent = 0;
+        self.budget = 0;
         self.mirror.reset();
         self.cancel.store(false, Ordering::Relaxed);
     }
@@ -330,6 +372,64 @@ impl VideoEncoder for H264Encoder {
     fn extradata(&self) -> &[u8] {
         &self.extra
     }
+}
+
+fn initial_qp(bitrate: u32, width: u32, height: u32) -> i32 {
+    if bitrate == 0 || width == 0 || height == 0 {
+        return 26;
+    }
+    let pixels = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(30);
+    if pixels == 0 {
+        return 26;
+    }
+    let bpp_milli = u64::from(bitrate).saturating_mul(1000) / pixels;
+    if bpp_milli == 0 {
+        return 40;
+    }
+    (28 + 6 * log2_ratio(200, bpp_milli)).clamp(10, 42)
+}
+
+fn log2_ratio(numer: u64, denom: u64) -> i32 {
+    if numer == 0 || denom == 0 {
+        return 0;
+    }
+    let mut n = numer;
+    let mut d = denom;
+    let mut shift = 0i32;
+    while n < d && shift > -8 {
+        n = n.saturating_mul(2);
+        shift -= 1;
+    }
+    while n >= d.saturating_mul(2) && shift < 8 {
+        d = d.saturating_mul(2);
+        shift += 1;
+    }
+    shift
+}
+
+fn next_qp(qp: i32, spent: u64, budget: u64) -> i32 {
+    if budget == 0 {
+        return qp.clamp(10, 42);
+    }
+    let ratio = spent.saturating_mul(100) / budget;
+    let stepped = if ratio > 150 {
+        qp + 4
+    } else if ratio > 120 {
+        qp + 2
+    } else if ratio > 105 {
+        qp + 1
+    } else if ratio < 50 {
+        qp - 4
+    } else if ratio < 80 {
+        qp - 2
+    } else if ratio < 95 {
+        qp - 1
+    } else {
+        qp
+    };
+    stepped.clamp(10, 42)
 }
 
 fn sequence(mb_w: u32, mb_h: u32, width: u32, height: u32) -> Vec<u8> {
@@ -412,8 +512,6 @@ fn picture() -> Vec<u8> {
     bits.bytes
 }
 
-const QP: i32 = 26;
-
 struct Source<'a> {
     y: &'a [u8],
     u: &'a [u8],
@@ -448,7 +546,7 @@ struct Flags<'a> {
 /// P slice, cabac_init_idc 0. Every macroblock is skipped, so the decoder copies
 /// the previous reference. FFmpeg's skip context is 11 when both neighbours are
 /// skipped or absent, which is this whole picture.
-fn p_skip_slice(mb_w: u32, mb_h: u32, frame_num: u32, poc: u32) -> Vec<u8> {
+fn p_skip_slice(mb_w: u32, mb_h: u32, frame_num: u32, poc: u32, qp: i32) -> Vec<u8> {
     let mut bits = Writer::new();
     bits.ue(0);
     bits.ue(0);
@@ -459,13 +557,13 @@ fn p_skip_slice(mb_w: u32, mb_h: u32, frame_num: u32, poc: u32) -> Vec<u8> {
     bits.bit(false);
     bits.bit(false);
     bits.ue(0);
-    bits.se(0);
+    bits.se(qp - 26);
     bits.ue(0);
     bits.se(0);
     bits.se(0);
     bits.ones_to_byte();
     {
-        let mut cab = CabacEnc::start(&mut bits, QP, 1);
+        let mut cab = CabacEnc::start(&mut bits, qp, 1);
         let total = mb_w.saturating_mul(mb_h);
         for addr in 0..total {
             cab.decision(11, 1);
@@ -488,6 +586,7 @@ fn p_slice(
     poc: u32,
     src: &Source<'_>,
     reference: &Planes,
+    qp: i32,
 ) -> Vec<u8> {
     let mut bits = Writer::new();
     bits.ue(0);
@@ -499,14 +598,14 @@ fn p_slice(
     bits.bit(false);
     bits.bit(false);
     bits.ue(0);
-    bits.se(0);
+    bits.se(qp - 26);
     bits.ue(0);
     bits.se(0);
     bits.se(0);
     bits.ones_to_byte();
     {
-        let mut cab = CabacEnc::start(&mut bits, QP, 1);
-        write_p(&mut cab, mb_w, mb_h, src, reference);
+        let mut cab = CabacEnc::start(&mut bits, qp, 1);
+        write_p(&mut cab, mb_w, mb_h, src, reference, qp);
     }
     bits.pad_byte();
     bits.bytes
@@ -516,14 +615,15 @@ fn p_slice(
 /// previous reference and list 1 is the next one. Each macroblock is 16×16
 /// on list 0, list 1, or both.
 fn b_slice(
-    mb_w: u32,
-    mb_h: u32,
+    grid: (u32, u32),
     frame_num: u32,
     poc: u32,
     src: &Source<'_>,
     past: &Planes,
     future: &Planes,
+    qp: i32,
 ) -> Vec<u8> {
+    let (mb_w, mb_h) = grid;
     let mut bits = Writer::new();
     bits.ue(0);
     bits.ue(1);
@@ -535,14 +635,14 @@ fn b_slice(
     bits.bit(false);
     bits.bit(false);
     bits.ue(0);
-    bits.se(0);
+    bits.se(qp - 26);
     bits.ue(0);
     bits.se(0);
     bits.se(0);
     bits.ones_to_byte();
     {
-        let mut cab = CabacEnc::start(&mut bits, QP, 1);
-        write_b(&mut cab, mb_w, mb_h, src, past, future);
+        let mut cab = CabacEnc::start(&mut bits, qp, 1);
+        write_b(&mut cab, mb_w, mb_h, src, past, future, qp);
     }
     bits.pad_byte();
     bits.bytes
@@ -555,6 +655,7 @@ fn write_b(
     src: &Source<'_>,
     past: &Planes,
     future: &Planes,
+    qp: i32,
 ) {
     let count = mb_w as usize * mb_h as usize;
     let skipped = vec![false; count];
@@ -599,21 +700,21 @@ fn write_b(
         let blocks0 = [use0.unwrap_or([0, 0]); 16];
         let blocks1 = [use1.unwrap_or([0, 0]); 16];
         let residual = if kind == 3 {
-            bi_residual(src, past, future, mx, my, &blocks0, &blocks1)
+            bi_residual(src, past, future, (mx, my), &blocks0, &blocks1, qp)
         } else if kind == 2 {
-            uni_residual(src, future, mx, my, &blocks1)
+            uni_residual(src, future, mx, my, &blocks1, qp)
         } else {
-            uni_residual(src, past, mx, my, &blocks0)
+            uni_residual(src, past, mx, my, &blocks0, qp)
         };
         let picked = if kind == 3 {
             pick_luma_bi(
-                &past.y,
-                &future.y,
+                (&past.y, &future.y),
                 src.y,
                 (src.width, src.height),
                 (mx, my),
                 (&blocks0, &blocks1),
                 &residual.luma,
+                qp,
             )
         } else if kind == 2 {
             pick_luma_uni(
@@ -623,6 +724,7 @@ fn write_b(
                 (mx, my),
                 &blocks1,
                 &residual.luma,
+                qp,
             )
         } else {
             pick_luma_uni(
@@ -632,6 +734,7 @@ fn write_b(
                 (mx, my),
                 &blocks0,
                 &residual.luma,
+                qp,
             )
         };
         let luma = picked.cbp;
@@ -876,11 +979,12 @@ fn bi_residual(
     src: &Source<'_>,
     past: &Planes,
     future: &Planes,
-    mx: u32,
-    my: u32,
+    at: (u32, u32),
     mv0: &[[i16; 2]; 16],
     mv1: &[[i16; 2]; 16],
+    qp: i32,
 ) -> Residual {
+    let (mx, my) = at;
     let mut luma = [[0i32; 16]; 16];
     let x0 = mx * 16;
     let y0 = my * 16;
@@ -895,7 +999,7 @@ fn bi_residual(
         for sample in 0..16 {
             pred[sample] = crate::recon::avg(a[sample], b[sample]);
         }
-        *levels = quant4(&pred, src.y, src.width, src.height, x, y);
+        *levels = quant4(&pred, src.y, src.width, src.height, x, y, qp);
     }
     let (cb, cb_ac) = chroma_bi(
         &past.u,
@@ -903,8 +1007,8 @@ fn bi_residual(
         src.u,
         (src.width / 2, src.height / 2),
         (mx, my),
-        mv0,
-        mv1,
+        (mv0, mv1),
+        qp,
     );
     let (cr, cr_ac) = chroma_bi(
         &past.v,
@@ -912,8 +1016,8 @@ fn bi_residual(
         src.v,
         (src.width / 2, src.height / 2),
         (mx, my),
-        mv0,
-        mv1,
+        (mv0, mv1),
+        qp,
     );
     Residual {
         luma,
@@ -930,25 +1034,31 @@ fn uni_residual(
     mx: u32,
     my: u32,
     mv: &[[i16; 2]; 16],
+    qp: i32,
 ) -> Residual {
-    let luma = inter4(&reference.y, src.y, src.width, src.height, mx, my, mv);
+    let luma = inter4(
+        &reference.y,
+        src.y,
+        (src.width, src.height),
+        (mx, my),
+        mv,
+        qp,
+    );
     let (cb, cb_ac) = chroma_inter(
         &reference.u,
         src.u,
-        src.width / 2,
-        src.height / 2,
-        mx,
-        my,
+        (src.width / 2, src.height / 2),
+        (mx, my),
         mv,
+        qp,
     );
     let (cr, cr_ac) = chroma_inter(
         &reference.v,
         src.v,
-        src.width / 2,
-        src.height / 2,
-        mx,
-        my,
+        (src.width / 2, src.height / 2),
+        (mx, my),
         mv,
+        qp,
     );
     Residual {
         luma,
@@ -965,9 +1075,10 @@ fn chroma_bi(
     src: &[u8],
     size: (u32, u32),
     at: (u32, u32),
-    mv0: &[[i16; 2]; 16],
-    mv1: &[[i16; 2]; 16],
+    mv: (&[[i16; 2]; 16], &[[i16; 2]; 16]),
+    luma_qp: i32,
 ) -> ([i32; 4], [[i32; 15]; 4]) {
+    let (mv0, mv1) = mv;
     let (width, height) = size;
     let (mx, my) = at;
     let a = moved_chroma(past, width, height, mx, my, mv0);
@@ -976,10 +1087,17 @@ fn chroma_bi(
     for sample in 0..64 {
         pred[sample] = crate::recon::avg(a[sample], b[sample]);
     }
-    chroma_from_pred(&pred, src, width, height, mx, my)
+    chroma_from_pred(&pred, src, width, height, mx, my, luma_qp)
 }
 
-fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, reference: &Planes) {
+fn write_p(
+    cab: &mut CabacEnc<'_>,
+    mb_w: u32,
+    mb_h: u32,
+    src: &Source<'_>,
+    reference: &Planes,
+    qp: i32,
+) {
     let count = mb_w as usize * mb_h as usize;
     let mut skipped = vec![false; count];
     let mut used8 = vec![false; count];
@@ -1000,7 +1118,7 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
         let none = [None; 16];
         let predicted = predict_part(&motion, &none, mb_w, (mx, my), (0, 0, 16, 16));
         let skipped_mv = derived_skip(&motion, mb_w, mx, my, predicted);
-        if inter_empty(src, reference, mx, my, skipped_mv) {
+        if inter_empty(src, reference, mx, my, skipped_mv, qp) {
             let ctx = skip_context(&skipped, mb_w, mx, my);
             cab.decision(11 + ctx, 1);
             skipped[index] = true;
@@ -1009,24 +1127,29 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
             continue;
         }
         let (kind, blocks) = choose_partition(src, reference, &motion, mb_w, mx, my);
-        let luma_blocks = inter4(&reference.y, src.y, src.width, src.height, mx, my, &blocks);
+        let luma_blocks = inter4(
+            &reference.y,
+            src.y,
+            (src.width, src.height),
+            (mx, my),
+            &blocks,
+            qp,
+        );
         let (cb_levels, cb_ac) = chroma_inter(
             &reference.u,
             src.u,
-            src.width / 2,
-            src.height / 2,
-            mx,
-            my,
+            (src.width / 2, src.height / 2),
+            (mx, my),
             &blocks,
+            qp,
         );
         let (cr_levels, cr_ac) = chroma_inter(
             &reference.v,
             src.v,
-            src.width / 2,
-            src.height / 2,
-            mx,
-            my,
+            (src.width / 2, src.height / 2),
+            (mx, my),
             &blocks,
+            qp,
         );
         let residual = Residual {
             luma: luma_blocks,
@@ -1042,6 +1165,7 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
             (mx, my),
             &blocks,
             &residual.luma,
+            qp,
         );
         let luma = picked.cbp;
         let chroma = chroma_pattern(&residual);
@@ -1118,26 +1242,38 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
 
 const SEARCH: i32 = 16;
 
-fn inter_empty(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, mv: [i16; 2]) -> bool {
+fn inter_empty(
+    src: &Source<'_>,
+    reference: &Planes,
+    mx: u32,
+    my: u32,
+    mv: [i16; 2],
+    qp: i32,
+) -> bool {
     let blocks = [mv; 16];
-    let luma = inter4(&reference.y, src.y, src.width, src.height, mx, my, &blocks);
+    let luma = inter4(
+        &reference.y,
+        src.y,
+        (src.width, src.height),
+        (mx, my),
+        &blocks,
+        qp,
+    );
     let (cb, cb_ac) = chroma_inter(
         &reference.u,
         src.u,
-        src.width / 2,
-        src.height / 2,
-        mx,
-        my,
+        (src.width / 2, src.height / 2),
+        (mx, my),
         &blocks,
+        qp,
     );
     let (cr, cr_ac) = chroma_inter(
         &reference.v,
         src.v,
-        src.width / 2,
-        src.height / 2,
-        mx,
-        my,
+        (src.width / 2, src.height / 2),
+        (mx, my),
         &blocks,
+        qp,
     );
     luma_pattern(&luma) == 0
         && chroma_pattern(&Residual {
@@ -1551,7 +1687,7 @@ fn skip_context(skipped: &[bool], mb_w: u32, mx: u32, my: u32) -> usize {
     ctx
 }
 
-fn intra_slice(mb_w: u32, mb_h: u32, idr_pic_id: u32, src: &Source<'_>) -> Vec<u8> {
+fn intra_slice(mb_w: u32, mb_h: u32, idr_pic_id: u32, src: &Source<'_>, qp: i32) -> Vec<u8> {
     let mut bits = Writer::new();
     bits.ue(0);
     bits.ue(2);
@@ -1561,20 +1697,20 @@ fn intra_slice(mb_w: u32, mb_h: u32, idr_pic_id: u32, src: &Source<'_>) -> Vec<u
     bits.u(4, 0);
     bits.bit(false);
     bits.bit(false);
-    bits.se(0);
+    bits.se(qp - 26);
     bits.ue(0);
     bits.se(0);
     bits.se(0);
     bits.ones_to_byte();
     {
-        let mut cab = CabacEnc::start(&mut bits, QP, 0);
-        write_picture(&mut cab, mb_w, mb_h, src);
+        let mut cab = CabacEnc::start(&mut bits, qp, 0);
+        write_picture(&mut cab, mb_w, mb_h, src, qp);
     }
     bits.pad_byte();
     bits.bytes
 }
 
-fn write_picture(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>) {
+fn write_picture(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, qp: i32) {
     let coded_w = mb_w.saturating_mul(16);
     let coded_h = mb_h.saturating_mul(16);
     let chroma_w = mb_w.saturating_mul(8);
@@ -1593,11 +1729,30 @@ fn write_picture(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>)
     for addr in 0..total {
         let mx = addr % mb_w;
         let my = addr / mb_w;
-        let luma_blocks = intra4(&mut luma, coded_w, src.y, src.width, src.height, mx, my);
-        let (cb_levels, cb_ac) =
-            chroma_mb(&cb, chroma_w, src.u, src.width / 2, src.height / 2, mx, my);
-        let (cr_levels, cr_ac) =
-            chroma_mb(&cr, chroma_w, src.v, src.width / 2, src.height / 2, mx, my);
+        let luma_blocks = intra4(
+            &mut luma,
+            coded_w,
+            src.y,
+            (src.width, src.height),
+            (mx, my),
+            qp,
+        );
+        let (cb_levels, cb_ac) = chroma_mb(
+            &cb,
+            chroma_w,
+            src.u,
+            (src.width / 2, src.height / 2),
+            (mx, my),
+            qp,
+        );
+        let (cr_levels, cr_ac) = chroma_mb(
+            &cr,
+            chroma_w,
+            src.v,
+            (src.width / 2, src.height / 2),
+            (mx, my),
+            qp,
+        );
         let residual = Residual {
             luma: luma_blocks,
             cb: cb_levels,
@@ -1623,8 +1778,8 @@ fn write_picture(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>)
                 cr: &mut cr_nnz,
             },
         );
-        reconstruct_chroma(&mut cb, chroma_w, mx, my, &residual.cb, &residual.cb_ac);
-        reconstruct_chroma(&mut cr, chroma_w, mx, my, &residual.cr, &residual.cr_ac);
+        reconstruct_chroma(&mut cb, chroma_w, mx, my, &residual.cb, &residual.cb_ac, qp);
+        reconstruct_chroma(&mut cr, chroma_w, mx, my, &residual.cr, &residual.cr_ac, qp);
         let index = addr as usize;
         luma_cbp[index] = luma_pattern(&residual.luma);
         chroma_cbp[index] = chroma_pattern(&residual);
@@ -1884,11 +2039,12 @@ fn intra4(
     recon: &mut [u8],
     stride: u32,
     src: &[u8],
-    width: u32,
-    height: u32,
-    mx: u32,
-    my: u32,
+    size: (u32, u32),
+    at: (u32, u32),
+    qp: i32,
 ) -> [[i32; 16]; 16] {
+    let (width, height) = size;
+    let (mx, my) = at;
     let mut blocks = [[0i32; 16]; 16];
     let x0 = mx * 16;
     let y0 = my * 16;
@@ -1896,8 +2052,8 @@ fn intra4(
         let x = x0 + blk_x(i) as u32 * 4;
         let y = y0 + blk_y(i) as u32 * 4;
         let pred = predict4(recon, stride, x, y);
-        *levels = quant4(&pred, src, width, height, x, y);
-        paint4(recon, stride, x, y, &pred, levels);
+        *levels = quant4(&pred, src, width, height, x, y, qp);
+        paint4(recon, stride, x, y, &pred, levels, qp);
     }
     blocks
 }
@@ -1923,12 +2079,13 @@ fn predict4(recon: &[u8], stride: u32, x: u32, y: u32) -> [u8; 16] {
 fn inter4(
     reference: &[u8],
     src: &[u8],
-    width: u32,
-    height: u32,
-    mx: u32,
-    my: u32,
+    size: (u32, u32),
+    at: (u32, u32),
     mv: &[[i16; 2]; 16],
+    qp: i32,
 ) -> [[i32; 16]; 16] {
+    let (width, height) = size;
+    let (mx, my) = at;
     let mut blocks = [[0i32; 16]; 16];
     let x0 = mx * 16;
     let y0 = my * 16;
@@ -1938,7 +2095,7 @@ fn inter4(
         let x = x0 + bx as u32 * 4;
         let y = y0 + by as u32 * 4;
         let pred = moved_luma(reference, width, height, x, y, mv[by * 4 + bx]);
-        *levels = quant4(&pred, src, width, height, x, y);
+        *levels = quant4(&pred, src, width, height, x, y, qp);
     }
     blocks
 }
@@ -2006,14 +2163,15 @@ fn moved_chroma(
 fn chroma_inter(
     reference: &[u8],
     src: &[u8],
-    width: u32,
-    height: u32,
-    mx: u32,
-    my: u32,
+    size: (u32, u32),
+    at: (u32, u32),
     mv: &[[i16; 2]; 16],
+    luma_qp: i32,
 ) -> ([i32; 4], [[i32; 15]; 4]) {
+    let (width, height) = size;
+    let (mx, my) = at;
     let pred = moved_chroma(reference, width, height, mx, my, mv);
-    chroma_from_pred(&pred, src, width, height, mx, my)
+    chroma_from_pred(&pred, src, width, height, mx, my, luma_qp)
 }
 
 fn chroma_from_pred(
@@ -2023,8 +2181,9 @@ fn chroma_from_pred(
     height: u32,
     mx: u32,
     my: u32,
+    luma_qp: i32,
 ) -> ([i32; 4], [[i32; 15]; 4]) {
-    let qp = crate::recon::chroma_qp(QP, 0);
+    let qp = crate::recon::chroma_qp(luma_qp, 0);
     let mut dc = [0i32; 4];
     let mut ac = [[0i32; 15]; 4];
     let x0 = mx * 8;
@@ -2046,7 +2205,15 @@ fn chroma_from_pred(
     (levels, ac)
 }
 
-fn quant4(pred: &[u8; 16], src: &[u8], width: u32, height: u32, x: u32, y: u32) -> [i32; 16] {
+fn quant4(
+    pred: &[u8; 16],
+    src: &[u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    qp: i32,
+) -> [i32; 16] {
     let mut pix = [0i32; 16];
     for row in 0..4u32 {
         for col in 0..4u32 {
@@ -2058,16 +2225,24 @@ fn quant4(pred: &[u8; 16], src: &[u8], width: u32, height: u32, x: u32, y: u32) 
     forward4(&mut pix);
     let mut levels = [0i32; 16];
     for (n, &pos) in crate::set::ZIGZAG4.iter().enumerate() {
-        levels[n] = quant_coeff(pix[pos], QP, 15, qclass(pos % 4, pos / 4));
+        levels[n] = quant_coeff(pix[pos], qp, 15, qclass(pos % 4, pos / 4));
     }
     levels
 }
 
-fn paint4(recon: &mut [u8], stride: u32, x: u32, y: u32, pred: &[u8; 16], levels: &[i32; 16]) {
+fn paint4(
+    recon: &mut [u8],
+    stride: u32,
+    x: u32,
+    y: u32,
+    pred: &[u8; 16],
+    levels: &[i32; 16],
+    qp: i32,
+) {
     let mut block = [0i32; 16];
     for (n, &pos) in crate::set::ZIGZAG4.iter().enumerate() {
         let (ry, rx) = (pos / 4, pos % 4);
-        block[ry * 4 + rx] = crate::recon::scale4(levels[n], QP, rx, ry, 16);
+        block[ry * 4 + rx] = crate::recon::scale4(levels[n], qp, rx, ry, 16);
     }
     crate::recon::idct4(&mut block);
     let step = stride as usize;
@@ -2094,13 +2269,14 @@ fn chroma_mb(
     recon: &[u8],
     stride: u32,
     src: &[u8],
-    width: u32,
-    height: u32,
-    mx: u32,
-    my: u32,
+    size: (u32, u32),
+    at: (u32, u32),
+    luma_qp: i32,
 ) -> ([i32; 4], [[i32; 15]; 4]) {
+    let (width, height) = size;
+    let (mx, my) = at;
     let pred = predict_chroma(recon, stride, mx, my);
-    let qp = crate::recon::chroma_qp(QP, 0);
+    let qp = crate::recon::chroma_qp(luma_qp, 0);
     let mut dc = [0i32; 4];
     let mut ac = [[0i32; 15]; 4];
     let x0 = mx * 8;
@@ -2278,22 +2454,22 @@ fn quant8(coeff: i32, qp: i32, class: usize) -> i32 {
     if coeff < 0 { -level } else { level }
 }
 
-fn quant_block8(pix: &[i32; 64]) -> [i32; 64] {
+fn quant_block8(pix: &[i32; 64], qp: i32) -> [i32; 64] {
     let mut block = *pix;
     forward8(&mut block);
     let mut levels = [0i32; 64];
     for (n, &pos) in crate::set::ZIGZAG8.iter().enumerate() {
         let (ry, rx) = (pos / 8, pos % 8);
-        levels[n] = quant8(block[pos], QP, crate::recon::class8(rx, ry));
+        levels[n] = quant8(block[pos], qp, crate::recon::class8(rx, ry));
     }
     levels
 }
 
-fn inverse8(levels: &[i32; 64]) -> [i32; 64] {
+fn inverse8(levels: &[i32; 64], qp: i32) -> [i32; 64] {
     let mut block = [0i32; 64];
     for (n, &pos) in crate::set::ZIGZAG8.iter().enumerate() {
         let (ry, rx) = (pos / 8, pos % 8);
-        block[ry * 8 + rx] = crate::recon::scale8(levels[n], QP, rx, ry, 16);
+        block[ry * 8 + rx] = crate::recon::scale8(levels[n], qp, rx, ry, 16);
     }
     crate::recon::idct8(&mut block);
     block
@@ -2312,40 +2488,64 @@ fn pick_luma_uni(
     at: (u32, u32),
     mv: &[[i16; 2]; 16],
     luma4: &[[i32; 16]; 16],
+    qp: i32,
 ) -> CodedLuma {
     let (width, height) = size;
     let (mx, my) = at;
-    let (blocks8, sad8) = code8(src, size, at, |x, y| {
-        pel_mv(reference, width, height, (mx, my), (x, y), mv)
-    });
-    let sad4 = sad4_blocks(luma4, src, size, at, |x, y| {
-        pel_mv(reference, width, height, (mx, my), (x, y), mv)
-    });
+    let (blocks8, sad8) = code8(
+        src,
+        size,
+        at,
+        |x, y| pel_mv(reference, width, height, (mx, my), (x, y), mv),
+        qp,
+    );
+    let sad4 = sad4_blocks(
+        luma4,
+        src,
+        size,
+        at,
+        |x, y| pel_mv(reference, width, height, (mx, my), (x, y), mv),
+        qp,
+    );
     choose_luma(luma4, blocks8, sad8, sad4)
 }
 
 fn pick_luma_bi(
-    past: &[u8],
-    future: &[u8],
+    refs: (&[u8], &[u8]),
     src: &[u8],
     size: (u32, u32),
     at: (u32, u32),
     mv: (&[[i16; 2]; 16], &[[i16; 2]; 16]),
     luma4: &[[i32; 16]; 16],
+    qp: i32,
 ) -> CodedLuma {
+    let (past, future) = refs;
     let (width, height) = size;
     let (mx, my) = at;
     let (mv0, mv1) = mv;
-    let (blocks8, sad8) = code8(src, size, at, |x, y| {
-        let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
-        let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
-        crate::recon::avg(a, b)
-    });
-    let sad4 = sad4_blocks(luma4, src, size, at, |x, y| {
-        let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
-        let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
-        crate::recon::avg(a, b)
-    });
+    let (blocks8, sad8) = code8(
+        src,
+        size,
+        at,
+        |x, y| {
+            let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
+            let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
+            crate::recon::avg(a, b)
+        },
+        qp,
+    );
+    let sad4 = sad4_blocks(
+        luma4,
+        src,
+        size,
+        at,
+        |x, y| {
+            let a = pel_mv(past, width, height, (mx, my), (x, y), mv0);
+            let b = pel_mv(future, width, height, (mx, my), (x, y), mv1);
+            crate::recon::avg(a, b)
+        },
+        qp,
+    );
     choose_luma(luma4, blocks8, sad8, sad4)
 }
 
@@ -2384,6 +2584,7 @@ fn code8(
     size: (u32, u32),
     origin: (u32, u32),
     predicted: impl Fn(u32, u32) -> u8,
+    qp: i32,
 ) -> ([[i32; 64]; 4], u32) {
     let (width, height) = size;
     let (mx, my) = origin;
@@ -2404,10 +2605,10 @@ fn code8(
                     i32::from(at(src, width, height, x, y)) - i32::from(sample);
             }
         }
-        *block = quant_block8(&pix);
+        *block = quant_block8(&pix, qp);
         sad += plane_sad(
             &pred,
-            &inverse8(block),
+            &inverse8(block, qp),
             8,
             src,
             (width, height),
@@ -2423,6 +2624,7 @@ fn sad4_blocks(
     size: (u32, u32),
     origin: (u32, u32),
     predicted: impl Fn(u32, u32) -> u8,
+    qp: i32,
 ) -> u32 {
     let (width, height) = size;
     let (mx, my) = origin;
@@ -2436,16 +2638,16 @@ fn sad4_blocks(
                 pred[(row * 4 + col) as usize] = predicted(x + col, y + row);
             }
         }
-        sad += plane_sad(&pred, &inverse4(block), 4, src, (width, height), (x, y));
+        sad += plane_sad(&pred, &inverse4(block, qp), 4, src, (width, height), (x, y));
     }
     sad
 }
 
-fn inverse4(levels: &[i32; 16]) -> [i32; 16] {
+fn inverse4(levels: &[i32; 16], qp: i32) -> [i32; 16] {
     let mut block = [0i32; 16];
     for (n, &pos) in crate::set::ZIGZAG4.iter().enumerate() {
         let (ry, rx) = (pos / 4, pos % 4);
-        block[ry * 4 + rx] = crate::recon::scale4(levels[n], QP, rx, ry, 16);
+        block[ry * 4 + rx] = crate::recon::scale4(levels[n], qp, rx, ry, 16);
     }
     crate::recon::idct4(&mut block);
     block
@@ -2514,9 +2716,10 @@ fn reconstruct_chroma(
     my: u32,
     levels: &[i32; 4],
     ac: &[[i32; 15]; 4],
+    luma_qp: i32,
 ) {
     let pred = predict_chroma(recon, stride, mx, my);
-    let qp = crate::recon::chroma_qp(QP, 0);
+    let qp = crate::recon::chroma_qp(luma_qp, 0);
     let scaled = crate::recon::chroma_dc(levels[0], levels[1], levels[2], levels[3], qp, 16);
     let x0 = (mx * 8) as usize;
     let y0 = (my * 8) as usize;
@@ -2979,9 +3182,9 @@ mod tests {
                 residual[row * 8 + col] = row as i32 * 3 + col as i32 - 12;
             }
         }
-        let levels = super::quant_block8(&residual);
+        let levels = super::quant_block8(&residual, 26);
         assert!(levels.iter().any(|level| *level != 0));
-        let back = super::inverse8(&levels);
+        let back = super::inverse8(&levels, 26);
         let mut err = 0i32;
         for i in 0..64 {
             err += (back[i] - residual[i]).abs();
@@ -2999,9 +3202,51 @@ mod tests {
             }
         }
         let mv = [[0i16; 2]; 16];
-        let luma4 = super::inter4(&reference, &src, 16, 16, 0, 0, &mv);
-        let picked = super::pick_luma_uni(&reference, &src, (16, 16), (0, 0), &mv, &luma4);
+        let luma4 = super::inter4(&reference, &src, (16, 16), (0, 0), &mv, 26);
+        let picked = super::pick_luma_uni(&reference, &src, (16, 16), (0, 0), &mv, &luma4, 26);
         assert!(picked.use8, "4x4 won, cbp {}", picked.cbp);
+    }
+
+    #[test]
+    fn bitrate_stays_inside_a_quarter_of_the_request() {
+        for target in [30_000u32, 50_000, 80_000] {
+            let mut params = CodecParams::video(CodecId::H264, 64, 64);
+            params.nal_length_size = 0;
+            params.bitrate = target;
+            let mut encoder = H264Encoder::open(&params).unwrap();
+            let mut bytes = 0usize;
+            for n in 0..30usize {
+                let mut y = vec![0u8; 64 * 64];
+                for row in 0..64usize {
+                    for col in 0..64usize {
+                        let shift = (n * 2) % 16;
+                        y[row * 64 + col] =
+                            u8::try_from(((row + col + shift).wrapping_mul(8)) & 255).unwrap_or(0);
+                    }
+                }
+                let picture =
+                    Yuv420p::try_new(64, 64, y, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+                let input = VideoInput {
+                    picture,
+                    pts: i64::try_from(n).unwrap_or(0),
+                    duration: 1,
+                    timescale: 30,
+                    force_keyframe: n == 0,
+                };
+                for packet in settle(&mut encoder, &input) {
+                    bytes += packet.data.len();
+                }
+            }
+            let bits = bytes.saturating_mul(8);
+            let wanted = usize::try_from(target).unwrap_or(0);
+            let low = wanted * 3 / 4;
+            let high = wanted * 5 / 4;
+            assert!(
+                bits >= low && bits <= high,
+                "target {target}: payload {bits} bits, qp {}, wanted {low}..={high}",
+                encoder.qp
+            );
+        }
     }
 
     #[test]
@@ -3079,6 +3324,7 @@ mod tests {
                 width: 64,
                 height: 64,
             },
+            26,
         );
         let mut reader = Bits::new(&rbsp);
         let _first = reader.ue().unwrap();
@@ -3149,6 +3395,7 @@ mod tests {
                     width: 64,
                     height: 64,
                 },
+                26,
             )
         });
         let sps_nal = nals.iter().find(|nal| nal.kind == 7).unwrap();

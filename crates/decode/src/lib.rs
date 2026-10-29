@@ -268,9 +268,7 @@ mod tests {
 
     fn open_solid(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
         if params.codec != CodecId::H264 {
-            return Err(CodecError::Unsupported {
-                what: "solid test",
-            });
+            return Err(CodecError::Unsupported { what: "solid test" });
         }
         Ok(Box::new(Solid))
     }

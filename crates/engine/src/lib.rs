@@ -6,11 +6,19 @@
 
 #![forbid(unsafe_code)]
 
+mod cache;
+mod clock;
 mod error;
 mod map;
+mod mix;
 
+pub use cache::{FrameWindow, MAX_WINDOW};
+pub use clock::{ClockKind, MediaClock};
 pub use error::EngineError;
 pub use map::{
     MapError, MapSpeed, TimelineMap, map_timeline, media_path, micros_to_ticks, placement_of,
     speed_at, ticks_to_micros,
+};
+pub use mix::{
+    AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, mix_inputs, render, volume_at,
 };

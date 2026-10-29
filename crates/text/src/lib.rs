@@ -11,11 +11,13 @@ mod layout;
 mod mesh;
 mod richtext;
 mod shape;
+mod source;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
+pub use source::TextSource;
 
 use std::error::Error;
 use std::fmt;
@@ -39,6 +41,8 @@ pub enum TextError {
     Limit,
     /// The face has no outlines. The bitmap atlas is not built in this pass.
     BitmapAtlas,
+    /// `text_color` is not empty and not a 6- or 8-digit hex color.
+    Color,
 }
 
 impl fmt::Display for TextError {
@@ -53,6 +57,7 @@ impl fmt::Display for TextError {
             Self::BitmapAtlas => {
                 formatter.write_str("a font without outlines needs a bitmap atlas")
             }
+            Self::Color => formatter.write_str("text color is not a hex color"),
         }
     }
 }
@@ -66,7 +71,8 @@ impl Error for TextError {
             | Self::Alignment
             | Self::Measure
             | Self::Limit
-            | Self::BitmapAtlas => None,
+            | Self::BitmapAtlas
+            | Self::Color => None,
         }
     }
 }

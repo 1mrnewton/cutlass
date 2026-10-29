@@ -57,6 +57,12 @@ impl EncodeFactory {
         }
     }
 
+    /// Later registrations do not hide an earlier one for the same id.
+    /// The desktop registers a platform opener first, then the Rust opener.
+    ///
+    /// An opener that returns [`CodecError::Unsupported`] does not accept
+    /// those parameters, so the next opener for that id is asked. Any other
+    /// error is the answer and the walk stops.
     pub fn register(
         &mut self,
         id: CodecId,
@@ -66,13 +72,24 @@ impl EncodeFactory {
     }
 
     pub fn open(&self, params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
+        let mut matched = false;
         for opener in &self.openers {
-            if opener.id == params.codec {
-                return (opener.open)(params);
+            if opener.id != params.codec {
+                continue;
+            }
+            matched = true;
+            match (opener.open)(params) {
+                Ok(encoder) => return Ok(encoder),
+                Err(CodecError::Unsupported { .. }) => {}
+                Err(err) => return Err(err),
             }
         }
         Err(CodecError::Unsupported {
-            what: "encoder is not registered",
+            what: if matched {
+                "encoder rejected the parameters"
+            } else {
+                "encoder is not registered"
+            },
         })
     }
 }
@@ -154,6 +171,14 @@ mod tests {
         assert!(encoder.drain().expect("drain").is_empty());
     }
 
+    fn refuse_params(_params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
+        Err(CodecError::Unsupported { what: "platform" })
+    }
+
+    fn reject_params(_params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
+        Err(CodecError::InvalidApi { what: "layout" })
+    }
+
     #[test]
     fn missing_encoder_is_unsupported() {
         let err = match EncodeFactory::new().open(&CodecParams::audio(
@@ -168,6 +193,58 @@ mod tests {
             err,
             CodecError::Unsupported {
                 what: "encoder is not registered",
+            }
+        );
+    }
+
+    #[test]
+    fn a_declining_opener_falls_through_to_the_next() {
+        let mut factory = EncodeFactory::new();
+        factory.register(CodecId::Pcm, refuse_params);
+        factory.register(CodecId::Pcm, open_copy);
+        let params = CodecParams::audio(CodecId::Pcm, 48_000, ChannelLayout::mono());
+        let encoder = factory.open(&params).expect("open");
+        assert_eq!(encoder.codec(), CodecId::Pcm);
+    }
+
+    #[test]
+    fn the_first_opener_that_accepts_is_used() {
+        let mut factory = EncodeFactory::new();
+        factory.register(CodecId::Pcm, open_copy);
+        factory.register(CodecId::Pcm, reject_params);
+        let params = CodecParams::audio(CodecId::Pcm, 48_000, ChannelLayout::mono());
+        assert!(factory.open(&params).is_ok());
+    }
+
+    #[test]
+    fn a_hard_error_stops_the_walk() {
+        let mut factory = EncodeFactory::new();
+        factory.register(CodecId::Pcm, reject_params);
+        factory.register(CodecId::Pcm, open_copy);
+        let params = CodecParams::audio(CodecId::Pcm, 48_000, ChannelLayout::mono());
+        let err = match factory.open(&params) {
+            Err(err) => err,
+            Ok(_) => panic!("accepted"),
+        };
+        assert_eq!(err, CodecError::InvalidApi { what: "layout" });
+    }
+
+    #[test]
+    fn every_opener_declining_is_a_named_error() {
+        let mut factory = EncodeFactory::new();
+        factory.register(CodecId::Aac, refuse_params);
+        let err = match factory.open(&CodecParams::audio(
+            CodecId::Aac,
+            48_000,
+            ChannelLayout::mono(),
+        )) {
+            Err(err) => err,
+            Ok(_) => panic!("accepted"),
+        };
+        assert_eq!(
+            err,
+            CodecError::Unsupported {
+                what: "encoder rejected the parameters",
             }
         );
     }

@@ -12,6 +12,7 @@ mod approval;
 mod draft;
 mod r#loop;
 mod model;
+mod settings_tool;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
 pub use draft::{
@@ -23,3 +24,4 @@ pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,
 };
+pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};

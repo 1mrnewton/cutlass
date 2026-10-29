@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, Plane, SampleFormat, SideData,
-    Yuv420,
+    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, PixelFormat, Plane, SampleFormat,
+    SideData, Yuv420,
 };
 
 /// PCM presented to an encoder, contiguous with the samples already accepted.

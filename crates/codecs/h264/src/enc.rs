@@ -2,9 +2,11 @@
 //!
 //! Each picture is one slice. A new picture is an intra slice. A later picture
 //! is a P slice: skipped when it matches the previous reconstruction, and
-//! 16×16 motion otherwise. The search is a radius-1 diamond, the same shape
-//! x264 uses, then a half-pel diamond and a quarter-pel diamond. A macroblock
-//! stays 16×16 unless a 16×8, 8×16, or four 8×8 blocks predict it more cheaply.
+//! 16×16 motion otherwise. One frame is held back so the picture in between
+//! can be a B slice, using the previous and next reconstructions. The search
+//! is a radius-1 diamond, the same shape x264 uses, then a half-pel diamond
+//! and a quarter-pel diamond. A macroblock stays 16×16 unless a 16×8, 8×16,
+//! or four 8×8 blocks predict it more cheaply.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,11 +29,22 @@ pub struct H264Encoder {
     drained: bool,
     idr_pic_id: u32,
     next_fn: u32,
-    next_poc: u32,
+    display: u32,
     mirror: H264Decoder,
-    reference: Option<Planes>,
+    anchor: Option<Planes>,
+    held: Option<Held>,
     sps: Vec<u8>,
     pps: Vec<u8>,
+}
+
+struct Held {
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    pts: i64,
+    duration: i64,
+    timescale: u32,
+    index: u32,
 }
 
 #[derive(Clone)]
@@ -91,71 +104,147 @@ impl H264Encoder {
             drained: false,
             idr_pic_id: 0,
             next_fn: 1,
-            next_poc: 2,
+            display: 0,
             mirror: H264Decoder::open(params)?,
-            reference: None,
+            anchor: None,
+            held: None,
             sps,
             pps,
         })
     }
 
-    fn access_unit(&mut self, y: &[u8], u: &[u8], v: &[u8], key: bool) -> Vec<u8> {
-        if !key && let Some(reference) = self.reference.clone() {
-            let src = Source {
-                y,
-                u,
-                v,
-                width: self.width,
-                height: self.height,
-            };
-            let slice = if self.same_as_reference(y, u, v) {
-                p_skip_slice(self.mb_w, self.mb_h, self.next_fn, self.next_poc)
-            } else {
-                p_slice(
-                    self.mb_w,
-                    self.mb_h,
-                    self.next_fn,
-                    self.next_poc,
-                    &src,
-                    &reference,
-                )
-            };
-            self.next_fn = (self.next_fn + 1) & 15;
-            self.next_poc = (self.next_poc + 2) & 15;
-            let mut unit = Vec::new();
-            unit.extend(self.wrap(7, &self.sps));
-            unit.extend(self.wrap(8, &self.pps));
-            unit.extend(self.wrap(1, &slice));
-            return unit;
-        }
+    fn hold(&mut self, input: &VideoInput, duration: i64) -> Held {
+        let frame = Held {
+            y: input.picture.y().to_vec(),
+            u: input.picture.u().to_vec(),
+            v: input.picture.v().to_vec(),
+            pts: input.pts,
+            duration,
+            timescale: input.timescale,
+            index: self.display,
+        };
+        self.display = self.display.wrapping_add(1);
+        frame
+    }
+
+    fn encode_idr(&mut self, frame: Held) -> Result<Packet, CodecError> {
         let slice = intra_slice(
             self.mb_w,
             self.mb_h,
             self.idr_pic_id,
             &Source {
-                y,
-                u,
-                v,
+                y: &frame.y,
+                u: &frame.u,
+                v: &frame.v,
                 width: self.width,
                 height: self.height,
             },
         );
         self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
         self.next_fn = 1;
-        self.next_poc = 2;
+        self.display = 1;
+        let unit = self.unit(3, 5, &slice);
+        self.absorb(&unit, frame.pts, true)?;
+        Ok(Packet::video(
+            unit,
+            frame.pts,
+            frame.duration,
+            frame.timescale,
+            true,
+        ))
+    }
+
+    fn encode_p(&mut self, frame: Held) -> Result<Packet, CodecError> {
+        let Some(reference) = self.anchor.clone() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "reference picture",
+            });
+        };
+        let src = Source {
+            y: &frame.y,
+            u: &frame.u,
+            v: &frame.v,
+            width: self.width,
+            height: self.height,
+        };
+        let poc = (frame.index.wrapping_mul(2)) & 15;
+        let slice = if self
+            .anchor
+            .as_ref()
+            .is_some_and(|plane| plane.y == frame.y && plane.u == frame.u && plane.v == frame.v)
+        {
+            p_skip_slice(self.mb_w, self.mb_h, self.next_fn, poc)
+        } else {
+            p_slice(self.mb_w, self.mb_h, self.next_fn, poc, &src, &reference)
+        };
+        self.next_fn = (self.next_fn + 1) & 15;
+        let unit = self.unit(3, 1, &slice);
+        self.absorb(&unit, frame.pts, true)?;
+        Ok(Packet::video(
+            unit,
+            frame.pts,
+            frame.duration,
+            frame.timescale,
+            false,
+        ))
+    }
+
+    fn encode_b(
+        &mut self,
+        frame: Held,
+        past: &Planes,
+        future: &Planes,
+    ) -> Result<Packet, CodecError> {
+        let src = Source {
+            y: &frame.y,
+            u: &frame.u,
+            v: &frame.v,
+            width: self.width,
+            height: self.height,
+        };
+        let poc = (frame.index.wrapping_mul(2)) & 15;
+        let slice = b_slice(self.mb_w, self.mb_h, self.next_fn, poc, &src, past, future);
+        let unit = self.unit(0, 1, &slice);
+        self.absorb(&unit, frame.pts, false)?;
+        Ok(Packet::video(
+            unit,
+            frame.pts,
+            frame.duration,
+            frame.timescale,
+            false,
+        ))
+    }
+
+    fn unit(&self, ref_idc: u8, kind: u8, slice: &[u8]) -> Vec<u8> {
         let mut unit = Vec::new();
-        unit.extend(self.wrap(7, &self.sps));
-        unit.extend(self.wrap(8, &self.pps));
-        unit.extend(self.wrap(5, &slice));
+        unit.extend(self.wrap(3, 7, &self.sps));
+        unit.extend(self.wrap(3, 8, &self.pps));
+        unit.extend(self.wrap(ref_idc, kind, slice));
         unit
     }
 
-    fn wrap(&self, kind: u8, rbsp: &[u8]) -> Vec<u8> {
+    fn wrap(&self, ref_idc: u8, kind: u8, rbsp: &[u8]) -> Vec<u8> {
         if self.length_size == 0 {
-            nal::annex_b_nal(3, kind, rbsp)
+            nal::annex_b_nal(ref_idc, kind, rbsp)
         } else {
-            nal::length_nal(self.length_size, 3, kind, rbsp)
+            nal::length_nal(self.length_size, ref_idc, kind, rbsp)
         }
+    }
+
+    fn absorb(&mut self, unit: &[u8], pts: i64, keep: bool) -> Result<(), CodecError> {
+        let packet = Packet::video(unit.to_vec(), pts, 1, 1, true);
+        self.mirror.push(&packet)?;
+        if keep {
+            let Some((y, u, v)) = self.mirror.picture_at(pts) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "reference picture",
+                });
+            };
+            self.anchor = Some(Planes { y, u, v });
+        }
+        Ok(())
     }
 }
 
@@ -182,20 +271,33 @@ impl VideoEncoder for H264Encoder {
         } else {
             input.duration
         };
-        let unit = self.access_unit(
-            input.picture.y(),
-            input.picture.u(),
-            input.picture.v(),
-            input.force_keyframe,
-        );
-        self.remember(&unit)?;
-        Ok(vec![Packet::video(
-            unit,
-            input.pts,
-            duration,
-            input.timescale,
-            true,
-        )])
+        if input.force_keyframe || self.anchor.is_none() {
+            let mut packets = Vec::new();
+            if let Some(held) = self.held.take() {
+                packets.push(self.encode_p(held)?);
+            }
+            let frame = self.hold(input, duration);
+            packets.push(self.encode_idr(frame)?);
+            return Ok(packets);
+        }
+        let arrival = self.hold(input, duration);
+        let Some(held) = self.held.take() else {
+            self.held = Some(arrival);
+            return Ok(Vec::new());
+        };
+        let past = self.anchor.clone().ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "reference picture",
+        })?;
+        let p = self.encode_p(arrival)?;
+        let Some(future) = self.anchor.clone() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "reference picture",
+            });
+        };
+        let b = self.encode_b(held, &past, &future)?;
+        Ok(vec![p, b])
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -203,6 +305,9 @@ impl VideoEncoder for H264Encoder {
             return Ok(Vec::new());
         }
         self.drained = true;
+        if let Some(held) = self.held.take() {
+            return Ok(vec![self.encode_p(held)?]);
+        }
         Ok(Vec::new())
     }
 
@@ -210,8 +315,9 @@ impl VideoEncoder for H264Encoder {
         self.drained = false;
         self.idr_pic_id = 0;
         self.next_fn = 1;
-        self.next_poc = 2;
-        self.reference = None;
+        self.display = 0;
+        self.anchor = None;
+        self.held = None;
         self.mirror.reset();
         self.cancel.store(false, Ordering::Relaxed);
     }
@@ -239,7 +345,7 @@ fn sequence(mb_w: u32, mb_h: u32, width: u32, height: u32) -> Vec<u8> {
     bits.ue(0);
     bits.ue(0);
     bits.ue(0);
-    bits.ue(1);
+    bits.ue(2);
     bits.bit(false);
     bits.ue(mb_w.saturating_sub(1));
     bits.ue(mb_h.saturating_sub(1));
@@ -277,8 +383,8 @@ fn write_vui(bits: &mut Writer) {
     bits.ue(0);
     bits.ue(16);
     bits.ue(16);
-    bits.ue(0);
     bits.ue(1);
+    bits.ue(2);
 }
 
 fn picture() -> Vec<u8> {
@@ -336,31 +442,6 @@ struct Flags<'a> {
     cr: &'a [bool],
     luma_cbp: &'a [u8],
     chroma_cbp: &'a [u8],
-}
-
-impl H264Encoder {
-    fn same_as_reference(&self, y: &[u8], u: &[u8], v: &[u8]) -> bool {
-        self.reference
-            .as_ref()
-            .is_some_and(|plane| plane.y == y && plane.u == u && plane.v == v)
-    }
-
-    fn remember(&mut self, unit: &[u8]) -> Result<(), CodecError> {
-        let packet = Packet::video(unit.to_vec(), 0, 1, 1, true);
-        let frames = self.mirror.push(&packet)?;
-        let Some(frame) = frames.first() else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "reference picture",
-            });
-        };
-        self.reference = Some(Planes {
-            y: frame.picture.y().to_vec(),
-            u: frame.picture.u().to_vec(),
-            v: frame.picture.v().to_vec(),
-        });
-        Ok(())
-    }
 }
 
 /// P slice, cabac_init_idc 0. Every macroblock is skipped, so the decoder copies
@@ -428,6 +509,433 @@ fn p_slice(
     }
     bits.pad_byte();
     bits.bytes
+}
+
+/// B slice, cabac_init_idc 0. The picture is not a reference. List 0 is the
+/// previous reference and list 1 is the next one. Each macroblock is 16×16
+/// on list 0, list 1, or both.
+fn b_slice(
+    mb_w: u32,
+    mb_h: u32,
+    frame_num: u32,
+    poc: u32,
+    src: &Source<'_>,
+    past: &Planes,
+    future: &Planes,
+) -> Vec<u8> {
+    let mut bits = Writer::new();
+    bits.ue(0);
+    bits.ue(1);
+    bits.ue(0);
+    bits.u(4, frame_num & 15);
+    bits.u(4, poc & 15);
+    bits.bit(true);
+    bits.bit(false);
+    bits.bit(false);
+    bits.bit(false);
+    bits.ue(0);
+    bits.se(0);
+    bits.ue(0);
+    bits.se(0);
+    bits.se(0);
+    bits.ones_to_byte();
+    {
+        let mut cab = CabacEnc::start(&mut bits, QP, 1);
+        write_b(&mut cab, mb_w, mb_h, src, past, future);
+    }
+    bits.pad_byte();
+    bits.bytes
+}
+
+fn write_b(
+    cab: &mut CabacEnc<'_>,
+    mb_w: u32,
+    mb_h: u32,
+    src: &Source<'_>,
+    past: &Planes,
+    future: &Planes,
+) {
+    let count = mb_w as usize * mb_h as usize;
+    let skipped = vec![false; count];
+    let mut cb_dc = vec![false; count];
+    let mut cr_dc = vec![false; count];
+    let mut luma_cbp = vec![0u8; count];
+    let mut chroma_cbp = vec![0u8; count];
+    let mut luma_nnz = vec![0u8; count * 16];
+    let mut cb_nnz = vec![0u8; count * 4];
+    let mut cr_nnz = vec![0u8; count * 4];
+    let mut list0 = vec![None; count * 16];
+    let mut list1 = vec![None; count * 16];
+    let mut diff0 = vec![[0i16; 2]; count * 16];
+    let mut diff1 = vec![[0i16; 2]; count * 16];
+    let total = mb_w.saturating_mul(mb_h);
+    for addr in 0..total {
+        let mx = addr % mb_w;
+        let my = addr / mb_w;
+        let index = addr as usize;
+        let none = [None; 16];
+        let pred0 = predict_listed(&list0, &none, mb_w, (mx, my), (0, 0, 16, 16));
+        let pred1 = predict_listed(&list1, &none, mb_w, (mx, my), (0, 0, 16, 16));
+        let area = Area {
+            x: mx * 16,
+            y: my * 16,
+            w: 16,
+            h: 16,
+        };
+        let mv0 = search_area(src, past, area, pred0);
+        let mv1 = search_area(src, future, area, pred1);
+        let cost0 = sad_mv(src, past, area, mv0);
+        let cost1 = sad_mv(src, future, area, mv1);
+        let cost_bi = sad_bi(src, past, future, area, mv0, mv1);
+        let (kind, use0, use1) = if cost_bi <= cost0 && cost_bi <= cost1 {
+            (3u8, Some(mv0), Some(mv1))
+        } else if cost1 < cost0 {
+            (2, None, Some(mv1))
+        } else {
+            (1, Some(mv0), None)
+        };
+        let blocks0 = [use0.unwrap_or([0, 0]); 16];
+        let blocks1 = [use1.unwrap_or([0, 0]); 16];
+        let residual = if kind == 3 {
+            bi_residual(src, past, future, mx, my, &blocks0, &blocks1)
+        } else if kind == 2 {
+            uni_residual(src, future, mx, my, &blocks1)
+        } else {
+            uni_residual(src, past, mx, my, &blocks0)
+        };
+        let luma = luma_pattern(&residual.luma);
+        let chroma = chroma_pattern(&residual);
+        cab.decision(24 + skip_context(&skipped, mb_w, mx, my), 0);
+        let ctx = usize::from(mx > 0) + usize::from(my > 0);
+        write_b16(cab, kind, ctx);
+        if let Some(mv) = use0 {
+            let dx = i32::from(mv[0]) - i32::from(pred0[0]);
+            let dy = i32::from(mv[1]) - i32::from(pred0[1]);
+            write_mvd(cab, dx, mvd_at(&diff0, mb_w, mx, my, 0), 40);
+            write_mvd(cab, dy, mvd_at(&diff0, mb_w, mx, my, 1), 47);
+            let written = [clip_mv(dx), clip_mv(dy)];
+            fill_option(&mut list0, mb_w, mx, my, Some(mv));
+            fill_mvd(&mut diff0, mb_w, mx, my, written);
+        }
+        if let Some(mv) = use1 {
+            let dx = i32::from(mv[0]) - i32::from(pred1[0]);
+            let dy = i32::from(mv[1]) - i32::from(pred1[1]);
+            write_mvd(cab, dx, mvd_at(&diff1, mb_w, mx, my, 0), 40);
+            write_mvd(cab, dy, mvd_at(&diff1, mb_w, mx, my, 1), 47);
+            let written = [clip_mv(dx), clip_mv(dy)];
+            fill_option(&mut list1, mb_w, mx, my, Some(mv));
+            fill_mvd(&mut diff1, mb_w, mx, my, written);
+        }
+        write_luma_cbp(cab, luma, &luma_cbp, mb_w, mx, my);
+        write_chroma_cbp(cab, chroma, &chroma_cbp, mb_w, mx, my);
+        if luma != 0 {
+            cab.decision(399, 0);
+        }
+        if luma != 0 || chroma != 0 {
+            cab.decision(60, 0);
+        }
+        write_luma4(cab, &residual.luma, luma, &mut luma_nnz, (mb_w, mx, my, 0));
+        if chroma != 0 {
+            write_dc4(cab, &residual.cb, dc_inc(mx, my, &cb_dc, mb_w, 0));
+            write_dc4(cab, &residual.cr, dc_inc(mx, my, &cr_dc, mb_w, 0));
+        }
+        if chroma == 2 {
+            write_chroma_ac(cab, &residual.cb_ac, &mut cb_nnz, (mb_w, mx, my, 0));
+            write_chroma_ac(cab, &residual.cr_ac, &mut cr_nnz, (mb_w, mx, my, 0));
+        }
+        luma_cbp[index] = luma;
+        chroma_cbp[index] = chroma;
+        cb_dc[index] = residual.cb.iter().any(|level| *level != 0);
+        cr_dc[index] = residual.cr.iter().any(|level| *level != 0);
+        cab.terminate(addr + 1 == total);
+    }
+}
+
+fn write_b16(cab: &mut CabacEnc<'_>, kind: u8, ctx: usize) {
+    cab.decision(27 + ctx, 1);
+    if kind == 3 {
+        cab.decision(30, 1);
+        cab.decision(31, 0);
+        cab.decision(32, 0);
+        cab.decision(32, 0);
+        cab.decision(32, 0);
+        return;
+    }
+    cab.decision(30, 0);
+    cab.decision(32, u8::from(kind == 2));
+}
+
+fn fill_option(grid: &mut [Option<[i16; 2]>], mb_w: u32, mx: u32, my: u32, mv: Option<[i16; 2]>) {
+    for slot in 0..16u32 {
+        let index = ((my * mb_w + mx) * 16 + slot) as usize;
+        if let Some(cell) = grid.get_mut(index) {
+            *cell = mv;
+        }
+    }
+}
+
+fn fill_mvd(grid: &mut [[i16; 2]], mb_w: u32, mx: u32, my: u32, mv: [i16; 2]) {
+    for slot in 0..16u32 {
+        let index = ((my * mb_w + mx) * 16 + slot) as usize;
+        if let Some(cell) = grid.get_mut(index) {
+            *cell = mv;
+        }
+    }
+}
+
+fn mvd_at(grid: &[[i16; 2]], mb_w: u32, mx: u32, my: u32, component: usize) -> i32 {
+    let left = if mx > 0 {
+        grid.get(((my * mb_w + mx - 1) * 16 + 3) as usize)
+            .map(|mv| i32::from(mv[component]).abs())
+    } else {
+        None
+    };
+    let above = if my > 0 {
+        grid.get((((my - 1) * mb_w + mx) * 16 + 12) as usize)
+            .map(|mv| i32::from(mv[component]).abs())
+    } else {
+        None
+    };
+    left.unwrap_or(0) + above.unwrap_or(0)
+}
+
+fn predict_listed(
+    grid: &[Option<[i16; 2]>],
+    here: &[Option<Option<[i16; 2]>>; 16],
+    mb_w: u32,
+    at: (u32, u32),
+    piece: (u32, u32, u32, u32),
+) -> [i16; 2] {
+    let (x, y, w, h) = piece;
+    let bx = (x / 4) as i32;
+    let by = (y / 4) as i32;
+    let a = listed_at(grid, here, mb_w, at, (bx - 1, by));
+    let mut b = listed_at(grid, here, mb_w, at, (bx, by - 1));
+    let above_right = listed_at(grid, here, mb_w, at, (bx + (w / 4) as i32, by - 1));
+    let mut c = if above_right.0 {
+        above_right
+    } else {
+        listed_at(grid, here, mb_w, at, (bx - 1, by - 1))
+    };
+    if w == 16 && h == 8 && by == 0 && b.2 == 0 {
+        return b.1;
+    }
+    if w == 16 && h == 8 && by == 2 && a.2 == 0 {
+        return a.1;
+    }
+    if w == 8 && h == 16 && bx == 0 && a.2 == 0 {
+        return a.1;
+    }
+    if w == 8 && h == 16 && bx == 2 && c.2 == 0 {
+        return c.1;
+    }
+    if !b.0 && !c.0 && a.0 {
+        b = a;
+        c = a;
+    }
+    let same = [a, b, c]
+        .into_iter()
+        .filter(|neighbor| neighbor.2 == 0)
+        .count();
+    if same == 1 {
+        return [a, b, c]
+            .into_iter()
+            .find(|neighbor| neighbor.2 == 0)
+            .map_or([0, 0], |neighbor| neighbor.1);
+    }
+    [
+        median(a.1[0], b.1[0], c.1[0]),
+        median(a.1[1], b.1[1], c.1[1]),
+    ]
+}
+
+fn listed_at(
+    grid: &[Option<[i16; 2]>],
+    here: &[Option<Option<[i16; 2]>>; 16],
+    mb_w: u32,
+    at: (u32, u32),
+    cell: (i32, i32),
+) -> (bool, [i16; 2], i8) {
+    let (cur_mx, cur_my) = at;
+    let (mut bx, mut by) = cell;
+    let mut mx = cur_mx as i32;
+    let mut my = cur_my as i32;
+    if bx < 0 {
+        mx -= 1;
+        bx += 4;
+    } else if bx >= 4 {
+        mx += 1;
+        bx -= 4;
+    }
+    if by < 0 {
+        my -= 1;
+        by += 4;
+    } else if by >= 4 {
+        my += 1;
+        by -= 4;
+    }
+    if mx < 0 || my < 0 || mx as u32 >= mb_w || !(0..4).contains(&bx) || !(0..4).contains(&by) {
+        return (false, [0, 0], -1);
+    }
+    let slot = (by * 4 + bx) as usize;
+    if mx as u32 == cur_mx && my as u32 == cur_my {
+        return match here[slot] {
+            None => (false, [0, 0], -1),
+            Some(None) => (true, [0, 0], -1),
+            Some(Some(mv)) => (true, mv, 0),
+        };
+    }
+    let earlier = my < cur_my as i32 || (my == cur_my as i32 && mx < cur_mx as i32);
+    if !earlier {
+        return (false, [0, 0], -1);
+    }
+    let index = ((my as u32 * mb_w + mx as u32) * 16 + slot as u32) as usize;
+    match grid.get(index) {
+        Some(Some(mv)) => (true, *mv, 0),
+        Some(None) => (true, [0, 0], -1),
+        None => (false, [0, 0], -1),
+    }
+}
+
+fn sad_bi(
+    src: &Source<'_>,
+    past: &Planes,
+    future: &Planes,
+    area: Area,
+    mv0: [i16; 2],
+    mv1: [i16; 2],
+) -> i32 {
+    let mut cost = 0i32;
+    for row in 0..area.h {
+        for col in 0..area.w {
+            let sample = i32::from(at(src.y, src.width, src.height, area.x + col, area.y + row));
+            let a = moved_pel(
+                &past.y,
+                src.width,
+                src.height,
+                area.x + col,
+                area.y + row,
+                mv0,
+            );
+            let b = moved_pel(
+                &future.y,
+                src.width,
+                src.height,
+                area.x + col,
+                area.y + row,
+                mv1,
+            );
+            cost += (sample - i32::from(crate::recon::avg(a, b))).abs();
+        }
+    }
+    cost
+}
+
+fn bi_residual(
+    src: &Source<'_>,
+    past: &Planes,
+    future: &Planes,
+    mx: u32,
+    my: u32,
+    mv0: &[[i16; 2]; 16],
+    mv1: &[[i16; 2]; 16],
+) -> Residual {
+    let mut luma = [[0i32; 16]; 16];
+    let x0 = mx * 16;
+    let y0 = my * 16;
+    for (i, levels) in luma.iter_mut().enumerate() {
+        let bx = blk_x(i);
+        let by = blk_y(i);
+        let x = x0 + bx as u32 * 4;
+        let y = y0 + by as u32 * 4;
+        let a = moved_luma(&past.y, src.width, src.height, x, y, mv0[by * 4 + bx]);
+        let b = moved_luma(&future.y, src.width, src.height, x, y, mv1[by * 4 + bx]);
+        let mut pred = [0u8; 16];
+        for sample in 0..16 {
+            pred[sample] = crate::recon::avg(a[sample], b[sample]);
+        }
+        *levels = quant4(&pred, src.y, src.width, src.height, x, y);
+    }
+    let (cb, cb_ac) = chroma_bi(
+        &past.u,
+        &future.u,
+        src.u,
+        (src.width / 2, src.height / 2),
+        (mx, my),
+        mv0,
+        mv1,
+    );
+    let (cr, cr_ac) = chroma_bi(
+        &past.v,
+        &future.v,
+        src.v,
+        (src.width / 2, src.height / 2),
+        (mx, my),
+        mv0,
+        mv1,
+    );
+    Residual {
+        luma,
+        cb,
+        cr,
+        cb_ac,
+        cr_ac,
+    }
+}
+
+fn uni_residual(
+    src: &Source<'_>,
+    reference: &Planes,
+    mx: u32,
+    my: u32,
+    mv: &[[i16; 2]; 16],
+) -> Residual {
+    let luma = inter4(&reference.y, src.y, src.width, src.height, mx, my, mv);
+    let (cb, cb_ac) = chroma_inter(
+        &reference.u,
+        src.u,
+        src.width / 2,
+        src.height / 2,
+        mx,
+        my,
+        mv,
+    );
+    let (cr, cr_ac) = chroma_inter(
+        &reference.v,
+        src.v,
+        src.width / 2,
+        src.height / 2,
+        mx,
+        my,
+        mv,
+    );
+    Residual {
+        luma,
+        cb,
+        cr,
+        cb_ac,
+        cr_ac,
+    }
+}
+
+fn chroma_bi(
+    past: &[u8],
+    future: &[u8],
+    src: &[u8],
+    size: (u32, u32),
+    at: (u32, u32),
+    mv0: &[[i16; 2]; 16],
+    mv1: &[[i16; 2]; 16],
+) -> ([i32; 4], [[i32; 15]; 4]) {
+    let (width, height) = size;
+    let (mx, my) = at;
+    let a = moved_chroma(past, width, height, mx, my, mv0);
+    let b = moved_chroma(future, width, height, mx, my, mv1);
+    let mut pred = [0u8; 64];
+    for sample in 0..64 {
+        pred[sample] = crate::recon::avg(a[sample], b[sample]);
+    }
+    chroma_from_pred(&pred, src, width, height, mx, my)
 }
 
 fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, reference: &Planes) {
@@ -1411,6 +1919,17 @@ fn chroma_inter(
     mv: &[[i16; 2]; 16],
 ) -> ([i32; 4], [[i32; 15]; 4]) {
     let pred = moved_chroma(reference, width, height, mx, my, mv);
+    chroma_from_pred(&pred, src, width, height, mx, my)
+}
+
+fn chroma_from_pred(
+    pred: &[u8; 64],
+    src: &[u8],
+    width: u32,
+    height: u32,
+    mx: u32,
+    my: u32,
+) -> ([i32; 4], [[i32; 15]; 4]) {
     let qp = crate::recon::chroma_qp(QP, 0);
     let mut dc = [0i32; 4];
     let mut ac = [[0i32; 15]; 4];
@@ -1419,7 +1938,7 @@ fn chroma_inter(
     for (i, block) in ac.iter_mut().enumerate() {
         let bx = i & 1;
         let by = i >> 1;
-        let pix = chroma_forward(&pred, src, width, height, (x0, y0), (bx, by));
+        let pix = chroma_forward(pred, src, width, height, (x0, y0), (bx, by));
         dc[i] = pix[0];
         for (n, &pos) in crate::set::ZIGZAG4.iter().enumerate().skip(1) {
             block[n - 1] = quant_coeff(pix[pos], qp, 15, qclass(pos % 4, pos / 4));
@@ -1977,6 +2496,21 @@ mod tests {
 
     use crate::dec::H264Decoder;
 
+    fn settle(encoder: &mut H264Encoder, input: &VideoInput) -> Vec<Packet> {
+        let packets = encoder.push(input).unwrap();
+        if packets.is_empty() {
+            encoder.drain().unwrap()
+        } else {
+            packets
+        }
+    }
+
+    fn reveal(decoder: &mut H264Decoder, packet: &Packet) -> Vec<cutlass_decode::VideoOutput> {
+        let mut frames = decoder.push(packet).unwrap();
+        frames.extend(decoder.drain().unwrap());
+        frames
+    }
+
     #[test]
     fn redundant_picture_is_discarded() {
         let sps = super::sequence(1, 1, 16, 16);
@@ -2122,7 +2656,7 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let packets = encoder.push(&input).unwrap();
+        let packets = settle(&mut encoder, &input);
         assert_eq!(packets.len(), 1);
         let nals = crate::nal::access_unit(&packets[0].data, 0).unwrap();
         assert!(nals.len() >= 3, "nals {}", nals.len());
@@ -2159,7 +2693,7 @@ mod tests {
         assert!(!pps.weighted_pred);
         assert_eq!(pps.weighted_bipred, 0);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let frames = decoder.push(&packets[0]).unwrap();
+        let frames = reveal(&mut decoder, &packets[0]);
         let rest = decoder.drain().unwrap();
         let frames = if frames.is_empty() { rest } else { frames };
         assert_eq!(frames.len(), 1);
@@ -2198,11 +2732,11 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let packets = encoder.push(&input).unwrap();
+        let packets = settle(&mut encoder, &input);
         let mut open = params.clone();
         open.extra = encoder.extradata().to_vec();
         let mut decoder = H264Decoder::open(&open).unwrap();
-        let frames = decoder.push(&packets[0]).unwrap();
+        let frames = reveal(&mut decoder, &packets[0]);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].picture.width(), 32);
         assert!(frames[0].picture.y().iter().all(|sample| *sample == 128));
@@ -2221,9 +2755,9 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let packets = encoder.push(&input).unwrap();
+        let packets = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let frames = decoder.push(&packets[0]).unwrap();
+        let frames = reveal(&mut decoder, &packets[0]);
         assert_eq!(frames.len(), 1);
         let y = frames[0].picture.y();
         let worst = y
@@ -2292,9 +2826,9 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let packets = encoder.push(&input).unwrap();
+        let packets = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let frames = decoder.push(&packets[0]).unwrap();
+        let frames = reveal(&mut decoder, &packets[0]);
         assert_eq!(frames.len(), 1);
         let got = frames[0].picture.y();
         let left: u32 = (0..64).map(|row| u32::from(got[row * 64])).sum::<u32>() / 64;
@@ -2346,9 +2880,9 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let packets = encoder.push(&input).unwrap();
+        let packets = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let frames = decoder.push(&packets[0]).unwrap();
+        let frames = reveal(&mut decoder, &packets[0]);
         assert_eq!(frames.len(), 1);
         let got = frames[0].picture.u();
         let left: u32 = (0..32).map(|row| u32::from(got[row * 32])).sum::<u32>() / 32;
@@ -2397,18 +2931,18 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let second_nals = crate::nal::access_unit(&second[0].data, 0).unwrap();
         assert!(
             second_nals.iter().any(|nal| nal.kind == 1),
             "a repeated constant picture stays intra"
         );
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let a = decoder.push(&first[0]).unwrap();
-        let b = decoder.push(&second[0]).unwrap();
+        let a = reveal(&mut decoder, &first[0]);
+        let b = reveal(&mut decoder, &second[0]);
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
         assert!(b[0].picture.y().iter().all(|sample| *sample == 128));
@@ -2425,9 +2959,9 @@ mod tests {
         input.picture = ramp_pic.clone();
         input.force_keyframe = false;
         input.pts = 2;
-        let _ = encoder.push(&input).unwrap();
+        let _ = settle(&mut encoder, &input);
         input.pts = 3;
-        let again = encoder.push(&input).unwrap();
+        let again = settle(&mut encoder, &input);
         let again_nals = crate::nal::access_unit(&again[0].data, 0).unwrap();
         assert!(
             again_nals.iter().any(|nal| nal.kind == 1),
@@ -2475,9 +3009,9 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let decoded = decoder.push(&first[0]).unwrap();
+        let decoded = reveal(&mut decoder, &first[0]);
         let again = Yuv420p::try_new(
             64,
             64,
@@ -2489,13 +3023,13 @@ mod tests {
         input.picture = again;
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let nals = crate::nal::access_unit(&second[0].data, 0).unwrap();
         assert!(
             nals.iter().any(|nal| nal.kind == 1),
             "the reconstructed picture is coded again"
         );
-        let frames = decoder.push(&second[0]).unwrap();
+        let frames = reveal(&mut decoder, &second[0]);
         assert_eq!(frames[0].picture.y(), decoded[0].picture.y());
         assert_eq!(frames[0].picture.u(), decoded[0].picture.u());
         assert_eq!(frames[0].picture.v(), decoded[0].picture.v());
@@ -2513,19 +3047,19 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         input.picture = Yuv420p::solid(64, 64, 180, 128, 128).unwrap();
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let nals = crate::nal::access_unit(&second[0].data, 0).unwrap();
         assert!(
             nals.iter().any(|nal| nal.kind == 1),
             "a changed picture stays intra"
         );
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let _ = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let _ = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         assert_eq!(frames.len(), 1);
         let y = frames[0].picture.y();
         let mean = y.iter().map(|sample| u32::from(*sample)).sum::<u32>() / y.len() as u32;
@@ -2578,13 +3112,13 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let _ = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let _ = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         let dir = std::env::temp_dir().join("cutlass-h264-enc-pramp");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2635,7 +3169,7 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         let mut shifted = vec![0u8; 64 * 64];
         for row in 0..64usize {
             for col in 0..64usize {
@@ -2647,10 +3181,10 @@ mod tests {
             Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let opened = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let opened = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         assert_eq!(frames.len(), 1);
         let recon = opened[0].picture.y();
         let got = frames[0].picture.y();
@@ -2717,7 +3251,7 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         let mut shifted = vec![0u8; 64 * 64];
         for row in 0..64usize {
             for col in 0..64usize {
@@ -2731,10 +3265,10 @@ mod tests {
             Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let opened = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let opened = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         let recon = opened[0].picture.y();
         let got = frames[0].picture.y();
         let mut half = 0i32;
@@ -2799,7 +3333,7 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         let mut shifted = vec![0u8; 64 * 64];
         for row in 0..64usize {
             let band = row % 16;
@@ -2816,10 +3350,10 @@ mod tests {
             Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let opened = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let opened = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         let recon = opened[0].picture.y();
         let got = frames[0].picture.y();
         let mut split = 0i32;
@@ -2890,7 +3424,7 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         let mut shifted = vec![0u8; 64 * 64];
         for row in 0..64usize {
             for col in 0..64usize {
@@ -2912,10 +3446,10 @@ mod tests {
             Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let opened = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let opened = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         let recon = opened[0].picture.y();
         let got = frames[0].picture.y();
         let mut split = 0i32;
@@ -2986,7 +3520,7 @@ mod tests {
             timescale: 30,
             force_keyframe: true,
         };
-        let first = encoder.push(&input).unwrap();
+        let first = settle(&mut encoder, &input);
         let mut shifted = vec![0u8; 64 * 64];
         for row in 0..64usize {
             for col in 0..64usize {
@@ -2998,10 +3532,10 @@ mod tests {
             Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
         input.force_keyframe = false;
         input.pts = 1;
-        let second = encoder.push(&input).unwrap();
+        let second = settle(&mut encoder, &input);
         let mut decoder = H264Decoder::open(&params).unwrap();
-        let opened = decoder.push(&first[0]).unwrap();
-        let frames = decoder.push(&second[0]).unwrap();
+        let opened = reveal(&mut decoder, &first[0]);
+        let frames = reveal(&mut decoder, &second[0]);
         let recon = opened[0].picture.y();
         let got = frames[0].picture.y();
         let mut split = 0i32;
@@ -3049,6 +3583,73 @@ mod tests {
             (row.saturating_sub(6), col)
         } else {
             ((row + 6).min(63), col)
+        }
+    }
+
+    #[test]
+    fn b_frame_comes_out_in_display_order() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut packets = Vec::new();
+        for (index, luma) in [40u8, 80, 120].into_iter().enumerate() {
+            let input = VideoInput {
+                picture: Yuv420p::solid(64, 64, luma, 128, 128).unwrap(),
+                pts: index as i64,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: index == 0,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        assert_eq!(packets.len(), 3, "idr, p, and b");
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut shown = Vec::new();
+        for packet in &packets {
+            shown.extend(decoder.push(packet).unwrap());
+        }
+        shown.extend(decoder.drain().unwrap());
+        assert_eq!(shown.len(), 3);
+        let mean = |picture: &Yuv420p| {
+            let y = picture.y();
+            y.iter().map(|sample| u32::from(*sample)).sum::<u32>() / y.len() as u32
+        };
+        assert!((mean(&shown[0].picture) as i32 - 40).abs() <= 8);
+        assert!((mean(&shown[1].picture) as i32 - 80).abs() <= 8);
+        assert!((mean(&shown[2].picture) as i32 - 120).abs() <= 8);
+        assert_eq!(shown[0].pts, 0);
+        assert_eq!(shown[1].pts, 1);
+        assert_eq!(shown[2].pts, 2);
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-b");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("b.h264");
+        let yuv = dir.join("b.yuv");
+        let mut bytes = Vec::new();
+        for packet in &packets {
+            bytes.extend_from_slice(&packet.data);
+        }
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the b frame");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 64 * 64 * 3 / 2;
+        for (index, picture) in shown.iter().enumerate() {
+            let start = index * frame;
+            assert_eq!(
+                &raw[start..start + picture.picture.y().len()],
+                picture.picture.y()
+            );
         }
     }
 

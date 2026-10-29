@@ -249,6 +249,21 @@ impl H264Decoder {
         }
         Ok(())
     }
+
+    /// The reconstructed picture for `pts`, including one still held for reorder.
+    pub(crate) fn picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let frame = self
+            .dpb
+            .iter()
+            .rev()
+            .find(|frame| frame.pts == pts && !frame.nonexisting)?;
+        let output = emit(frame)?;
+        Some((
+            output.picture.y().to_vec(),
+            output.picture.u().to_vec(),
+            output.picture.v().to_vec(),
+        ))
+    }
 }
 
 impl VideoDecoder for H264Decoder {
@@ -1853,18 +1868,20 @@ mod tests {
             .unwrap();
         let annex = &packets[0].data;
         let mut annex_decoder = H264Decoder::open(&params).unwrap();
-        let want = annex_decoder
+        let mut want = annex_decoder
             .push(&Packet::video(annex.clone(), 0, 1, 30, true))
             .unwrap();
+        want.extend(annex_decoder.drain().unwrap());
         assert_eq!(want.len(), 1);
         for size in [1u8, 2] {
             let prefixed = length_prefix(annex, size);
             let mut sized = params.clone();
             sized.nal_length_size = size;
             let mut decoder = H264Decoder::open(&sized).unwrap();
-            let got = decoder
+            let mut got = decoder
                 .push(&Packet::video(prefixed, 0, 1, 30, true))
                 .unwrap();
+            got.extend(decoder.drain().unwrap());
             assert_eq!(got.len(), 1, "length size {size}");
             assert_eq!(got[0].picture.y(), want[0].picture.y());
             assert_eq!(got[0].picture.u(), want[0].picture.u());

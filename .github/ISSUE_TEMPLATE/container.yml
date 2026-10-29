@@ -1,0 +1,53 @@
+name: Container
+description: A demuxer, a muxer, or a gap in a container already started
+title: "[container] "
+labels: ["feature", "area:container", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One family and one behavior. Packet timestamps stay in the file timescale. This form is not for bitstream decode.
+  - type: dropdown
+    id: family
+    attributes:
+      label: Family
+      options:
+        - ISO base media
+        - Matroska and WebM
+        - MPEG-TS
+        - AVI
+        - WAV
+        - AIFF
+        - still image
+        - MP3
+        - raw AAC
+        - Ogg
+        - FLAC
+        - CAF
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction
+      options:
+        - demux
+        - mux
+        - both
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Which files, tracks, and timestamps this covers.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Independent files, packet bytes and timestamps, hostile input, and the test command.
+    validations:
+      required: true

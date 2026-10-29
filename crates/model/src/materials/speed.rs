@@ -15,8 +15,10 @@ pub enum ConstantSpeedError {
     NonPositiveDuration,
     NonPositiveSpeed,
     Unrepresentable,
-    /// The curve formula is still open, so a curve is not mapped.
+    /// Curve mode is mapped by [`curve_target_duration`], not the constant quotient.
     Curve,
+    /// Fewer than two points. The constant speed number stays in force.
+    TooFewPoints,
 }
 
 /// Target duration of a constant speed: the source duration divided by `speed`,
@@ -37,6 +39,122 @@ pub fn constant_target_duration(source: Micros, speed: f64) -> Result<Micros, Co
         return Err(ConstantSpeedError::Unrepresentable);
     }
     Ok(Micros(target as i64))
+}
+
+/// Integral from 0 to 1 of `dx / y` for a curve whose `y` is linear in `x`.
+///
+/// `x` is the fraction of the source duration. Ahead of the first point and
+/// behind the last, `y` holds. A point outside 0 to 1 stays in the list; only
+/// the span inside that interval is integrated. Two points with the same `x`
+/// keep the later `y`. A `y` at or below 0 is refused.
+pub fn curve_speed_factor(points: &[SpeedPoint]) -> Result<f64, ConstantSpeedError> {
+    let prepared = prepared_points(points)?;
+    let mut total = 0.0;
+    let Some(&(first_x, first_y)) = prepared.first() else {
+        return Err(ConstantSpeedError::TooFewPoints);
+    };
+    let Some(&(last_x, last_y)) = prepared.last() else {
+        return Err(ConstantSpeedError::TooFewPoints);
+    };
+    if first_x > 0.0 {
+        total += speed_piece(0.0, first_x.min(1.0), first_y, first_y)?;
+    }
+    for pair in prepared.windows(2) {
+        let (left_x, left_y) = pair[0];
+        let (right_x, right_y) = pair[1];
+        let start = left_x.max(0.0);
+        let end = right_x.min(1.0);
+        if end <= start {
+            continue;
+        }
+        let y0 = interpolate(left_x, left_y, right_x, right_y, start);
+        let y1 = interpolate(left_x, left_y, right_x, right_y, end);
+        total += speed_piece(start, end, y0, y1)?;
+    }
+    if last_x < 1.0 {
+        total += speed_piece(last_x.max(0.0), 1.0, last_y, last_y)?;
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return Err(ConstantSpeedError::Unrepresentable);
+    }
+    Ok(total)
+}
+
+/// Target duration is the source duration times [`curve_speed_factor`].
+pub fn curve_target_duration(
+    source: Micros,
+    points: &[SpeedPoint],
+) -> Result<Micros, ConstantSpeedError> {
+    if source.0 <= 0 {
+        return Err(ConstantSpeedError::NonPositiveDuration);
+    }
+    if source.0 > (1_i64 << 53) {
+        return Err(ConstantSpeedError::Unrepresentable);
+    }
+    let target = (source.0 as f64) * curve_speed_factor(points)?;
+    let target = target.round();
+    if !(target.is_finite() && target > 0.0 && target < i64::MAX as f64) {
+        return Err(ConstantSpeedError::Unrepresentable);
+    }
+    Ok(Micros(target as i64))
+}
+
+fn prepared_points(points: &[SpeedPoint]) -> Result<Vec<(f64, f64)>, ConstantSpeedError> {
+    let mut indexed = Vec::with_capacity(points.len());
+    for (index, point) in points.iter().enumerate() {
+        if !point.x.is_finite() {
+            return Err(ConstantSpeedError::Unrepresentable);
+        }
+        if !point.y.is_finite() || point.y <= 0.0 {
+            return Err(ConstantSpeedError::NonPositiveSpeed);
+        }
+        indexed.push((index, point.x, point.y));
+    }
+    indexed.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
+    let mut prepared: Vec<(f64, f64)> = Vec::new();
+    for (_, x, y) in indexed {
+        if let Some(last) = prepared.last_mut()
+            && last.0 == x
+        {
+            last.1 = y;
+            continue;
+        }
+        prepared.push((x, y));
+    }
+    if prepared.len() < 2 {
+        return Err(ConstantSpeedError::TooFewPoints);
+    }
+    Ok(prepared)
+}
+
+fn interpolate(x0: f64, y0: f64, x1: f64, y1: f64, x: f64) -> f64 {
+    let span = x1 - x0;
+    if span == 0.0 {
+        return y1;
+    }
+    let t = (x - x0) / span;
+    y0 + (y1 - y0) * t
+}
+
+/// One straight piece. Constant `y` is `width / y`. A changing piece is
+/// `(x1 - x0) * ln(y1 / y0) / (y1 - y0)`.
+fn speed_piece(x0: f64, x1: f64, y0: f64, y1: f64) -> Result<f64, ConstantSpeedError> {
+    if !(y0.is_finite() && y1.is_finite()) || y0 <= 0.0 || y1 <= 0.0 {
+        return Err(ConstantSpeedError::NonPositiveSpeed);
+    }
+    let width = x1 - x0;
+    if width <= 0.0 {
+        return Ok(0.0);
+    }
+    let value = if y0 == y1 {
+        width / y0
+    } else {
+        width * (y1 / y0).ln() / (y1 - y0)
+    };
+    if !value.is_finite() {
+        return Err(ConstantSpeedError::Unrepresentable);
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -159,6 +277,56 @@ mod tests {
         assert_eq!(
             constant_target_duration(Micros(1_000), f64::NAN),
             Err(ConstantSpeedError::NonPositiveSpeed)
+        );
+    }
+
+    fn point(x: f64, y: f64) -> SpeedPoint {
+        SpeedPoint {
+            x,
+            y,
+            rest: Map::new(),
+        }
+    }
+
+    #[test]
+    fn a_curve_integrates_dx_over_linear_y() {
+        let flat = [point(0.0, 1.0), point(1.0, 1.0)];
+        assert_eq!(
+            curve_target_duration(Micros(2_000_000), &flat),
+            Ok(Micros(2_000_000))
+        );
+        let twice = [point(0.0, 2.0), point(1.0, 2.0)];
+        assert_eq!(
+            curve_target_duration(Micros(2_000_000), &twice),
+            Ok(Micros(1_000_000))
+        );
+        let ramp = [point(0.0, 1.0), point(1.0, 2.0)];
+        assert_eq!(
+            curve_target_duration(Micros(1_000_000), &ramp),
+            Ok(Micros(693_147))
+        );
+        let held = [point(0.25, 2.0), point(0.75, 2.0)];
+        assert_eq!(
+            curve_target_duration(Micros(2_000_000), &held),
+            Ok(Micros(1_000_000))
+        );
+        let later = [point(0.0, 1.0), point(0.0, 4.0), point(1.0, 4.0)];
+        assert_eq!(
+            curve_target_duration(Micros(1_000_000), &later),
+            Ok(Micros(250_000))
+        );
+        assert_eq!(
+            curve_speed_factor(&[point(0.0, 0.0), point(1.0, 1.0)]),
+            Err(ConstantSpeedError::NonPositiveSpeed)
+        );
+        assert_eq!(
+            curve_speed_factor(&[point(0.0, 1.0)]),
+            Err(ConstantSpeedError::TooFewPoints)
+        );
+        let crossing = [point(-0.2, 1.0), point(1.2, 3.0)];
+        assert_eq!(
+            curve_target_duration(Micros(1_000_000), &crossing),
+            Ok(Micros(523_050))
         );
     }
 }

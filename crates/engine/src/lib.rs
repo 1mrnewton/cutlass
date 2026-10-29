@@ -1,1 +1,16 @@
+//! The media graph under the draft.
+//!
+//! The shell registers container and decoder implementations. This crate
+//! opens them, maps timeline time, caches pictures, and mixes audio.
+//! Filmstrips, waveforms, preload, and nested playback are not in this crate yet.
+
 #![forbid(unsafe_code)]
+
+mod error;
+mod map;
+
+pub use error::EngineError;
+pub use map::{
+    MapError, MapSpeed, TimelineMap, map_timeline, media_path, micros_to_ticks, placement_of,
+    speed_at, ticks_to_micros,
+};

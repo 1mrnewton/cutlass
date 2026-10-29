@@ -20,6 +20,30 @@ pub struct CdefParams {
     pub uv_sec: [u8; 8],
 }
 
+/// Which restoration filter a plane uses, after the specification's remap.
+pub const RESTORE_NONE: u8 = 0;
+pub const RESTORE_WIENER: u8 = 1;
+pub const RESTORE_SGRPROJ: u8 = 2;
+pub const RESTORE_SWITCHABLE: u8 = 3;
+
+/// Per-plane restoration type and unit size from the frame header.
+#[derive(Clone, Copy, Debug)]
+pub struct Restoration {
+    pub plane: [u8; 3],
+    pub unit: [u16; 3],
+    pub uses: bool,
+}
+
+impl Restoration {
+    const fn off() -> Self {
+        Self {
+            plane: [RESTORE_NONE; 3],
+            unit: [0; 3],
+            uses: false,
+        }
+    }
+}
+
 impl CdefParams {
     const fn off() -> Self {
         Self {
@@ -54,6 +78,7 @@ pub struct Sequence {
     pub enable_ref_mvs: bool,
     pub enable_superres: bool,
     pub enable_cdef: bool,
+    pub enable_restoration: bool,
     pub screen_select: bool,
     pub force_integer_select: bool,
     pub force_screen: u8,
@@ -114,6 +139,7 @@ pub struct FrameInfo {
     pub lf_ref_deltas: [i8; 8],
     pub lf_mode_deltas: [i8; 2],
     pub cdef: CdefParams,
+    pub restoration: Restoration,
     pub segmentation: bool,
     pub lossless: bool,
     pub all_lossless: bool,
@@ -328,11 +354,6 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let enable_superres = bits.read_bool()?;
     let enable_cdef = bits.read_bool()?;
     let enable_restoration = bits.read_bool()?;
-    if enable_restoration {
-        return Err(CodecError::Unsupported {
-            what: "loop restoration",
-        });
-    }
     let high = bits.read_bool()?;
     if high {
         return Err(CodecError::Unsupported { what: "bit depth" });
@@ -375,6 +396,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         enable_ref_mvs,
         enable_superres,
         enable_cdef,
+        enable_restoration,
         screen_select,
         force_integer_select,
         force_screen,
@@ -685,6 +707,12 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         }
     }
     let cdef = read_cdef_params(bits, sequence)?;
+    let restoration = read_lr_params(bits, sequence, lossless && width == upscaled_width, false)?;
+    if restoration.uses {
+        return Err(CodecError::Unsupported {
+            what: "loop restoration",
+        });
+    }
     let tx_select = if lossless { false } else { bits.read_bool()? };
     let reference_select = if intra { false } else { bits.read_bool()? };
     if reference_select {
@@ -757,6 +785,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         lf_ref_deltas: ref_deltas,
         lf_mode_deltas: mode_deltas,
         cdef,
+        restoration,
         segmentation: false,
         lossless,
         all_lossless: lossless,
@@ -845,6 +874,61 @@ fn read_cdef_params(
         params.uv_sec[index] = read_cdef_sec(bits)?;
     }
     Ok(params)
+}
+
+const REMAP_LR: [u8; 4] = [
+    RESTORE_NONE,
+    RESTORE_SWITCHABLE,
+    RESTORE_WIENER,
+    RESTORE_SGRPROJ,
+];
+
+fn read_lr_params(
+    bits: &mut BitReader<'_>,
+    sequence: &Sequence,
+    all_lossless: bool,
+    allow_intrabc: bool,
+) -> Result<Restoration, CodecError> {
+    if all_lossless || allow_intrabc || !sequence.enable_restoration {
+        return Ok(Restoration::off());
+    }
+    let mut plane = [RESTORE_NONE; 3];
+    let mut uses = false;
+    let mut chroma = false;
+    for (index, slot) in plane.iter_mut().enumerate() {
+        let raw = bits.read(2)? as usize;
+        *slot = REMAP_LR[raw];
+        if *slot != RESTORE_NONE {
+            uses = true;
+            chroma = chroma || index > 0;
+        }
+    }
+    if !uses {
+        return Ok(Restoration {
+            plane,
+            unit: [0; 3],
+            uses: false,
+        });
+    }
+    let mut shift = bits.read(1)?;
+    if sequence.use_128 {
+        shift += 1;
+    } else if shift == 1 {
+        shift += bits.read(1)?;
+    }
+    let shift = u16::try_from(shift).unwrap_or(0);
+    let luma = 256u16 >> 2u16.saturating_sub(shift);
+    let uv_shift = if sequence.subsampling_x && sequence.subsampling_y && chroma {
+        bits.read(1)?
+    } else {
+        0
+    };
+    let chroma_size = luma >> u16::try_from(uv_shift).unwrap_or(0);
+    Ok(Restoration {
+        plane,
+        unit: [luma, chroma_size, chroma_size],
+        uses: true,
+    })
 }
 
 fn read_cdef_sec(bits: &mut BitReader<'_>) -> Result<u8, CodecError> {
@@ -946,6 +1030,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         lf_ref_deltas: [1, 0, 0, 0, 0, -1, -1, -1],
         lf_mode_deltas: [0; 2],
         cdef: CdefParams::off(),
+        restoration: Restoration::off(),
         segmentation: false,
         lossless: false,
         all_lossless: false,
@@ -967,6 +1052,10 @@ pub(crate) fn header_is_addressable(
         .wrapping_add(u32::from(sequence.enable_dual_filter))
         .wrapping_add(u32::from(sequence.enable_jnt))
         .wrapping_add(u32::from(sequence.enable_superres))
+        .wrapping_add(u32::from(sequence.enable_restoration))
+        .wrapping_add(u32::from(frame.restoration.uses))
+        .wrapping_add(u32::from(frame.restoration.plane[0]))
+        .wrapping_add(u32::from(frame.restoration.unit[0]))
         .wrapping_add(u32::from(sequence.screen_select))
         .wrapping_add(u32::from(sequence.force_integer_select))
         .wrapping_add(u32::from(sequence.bit_depth))

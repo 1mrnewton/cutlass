@@ -1,9 +1,8 @@
 //! AV1 encoder and decoder.
 //!
-//! The support record is `STATUS.md` next to this crate. Wiener and self-guided
-//! loop restoration are applied. Switchable restoration, film grain, lossless,
-//! and bit depths other than 8 are rejected. Compound, warped, and overlapped
-//! motion are rejected.
+//! The support record is `STATUS.md` next to this crate. Loop restoration is
+//! applied. Film grain, lossless, and bit depths other than 8 are rejected.
+//! Compound, warped, and overlapped motion are rejected.
 
 #![forbid(unsafe_code)]
 

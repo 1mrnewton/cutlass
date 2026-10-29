@@ -708,11 +708,12 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     }
     let cdef = read_cdef_params(bits, sequence)?;
     let restoration = read_lr_params(bits, sequence, lossless && width == upscaled_width, false)?;
-    if restoration
-        .plane
-        .iter()
-        .any(|kind| *kind != RESTORE_NONE && *kind != RESTORE_SGRPROJ && *kind != RESTORE_WIENER)
-    {
+    if restoration.plane.iter().any(|kind| {
+        *kind != RESTORE_NONE
+            && *kind != RESTORE_SGRPROJ
+            && *kind != RESTORE_WIENER
+            && *kind != RESTORE_SWITCHABLE
+    }) {
         return Err(CodecError::Unsupported {
             what: "loop restoration",
         });

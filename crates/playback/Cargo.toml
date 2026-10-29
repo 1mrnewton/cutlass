@@ -8,7 +8,15 @@ description = "The playhead, the preview, and the audio device."
 
 [dependencies]
 cutlass-eval = { path = "../eval", version = "0.1.0" }
+cutlass-gpu = { path = "../gpu", version = "0.1.0" }
+cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+cutlass-platform-apple = { path = "../platform-apple", version = "0.1.0" }
+
+[dev-dependencies]
+cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
 
 [lints]
 workspace = true

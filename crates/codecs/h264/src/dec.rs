@@ -133,6 +133,9 @@ pub(crate) struct Frame {
     nonexisting: bool,
     max_ref: usize,
     reorder: usize,
+    adaptive: bool,
+    mmco: Vec<Mark>,
+    max_fn: u32,
 }
 
 #[derive(Clone)]
@@ -157,6 +160,7 @@ struct Poc {
     prev_poc_msb: i32,
     prev_poc_lsb: i32,
     have_ref: bool,
+    max_long: Option<u8>,
 }
 
 impl Poc {
@@ -167,6 +171,7 @@ impl Poc {
             prev_poc_msb: 0,
             prev_poc_lsb: 0,
             have_ref: false,
+            max_long: None,
         }
     }
 }
@@ -363,11 +368,15 @@ fn decode_au(
 fn finish_picture(
     _poc: &mut Poc,
     dpb: &mut Vec<Frame>,
-    pic: Frame,
+    mut pic: Frame,
 ) -> Result<Vec<VideoOutput>, CodecError> {
     let max_ref = dpb_max(dpb, &pic);
     if pic.referenced {
-        mark_ref(dpb, &pic, max_ref);
+        if pic.adaptive {
+            apply_mmco(dpb, &mut pic, _poc)?;
+        } else {
+            mark_ref(dpb, &pic, max_ref);
+        }
     }
     let reorder = pic_reorder(&pic);
     dpb.push(pic);
@@ -397,6 +406,154 @@ fn mark_ref(dpb: &mut [Frame], pic: &Frame, max_ref: usize) {
         }
     }
     let _ = pic;
+}
+
+/// Clause 8.2.5. Adaptive marking replaces the sliding window for this picture.
+fn apply_mmco(dpb: &mut [Frame], pic: &mut Frame, poc: &mut Poc) -> Result<(), CodecError> {
+    let mut current_long = false;
+    for mark in pic.mmco.clone() {
+        match mark.op {
+            1 | 3 => {
+                let target = i32::try_from(pic.frame_num).unwrap_or(0)
+                    - i32::try_from(mark.arg).unwrap_or(0)
+                    - 1;
+                let Some(pos) = short_at(dpb, target, pic.frame_num, pic.max_fn) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "mmco",
+                    });
+                };
+                if mark.op == 1 {
+                    dpb[pos].referenced = false;
+                } else {
+                    let idx = i32::try_from(mark.arg2).unwrap_or(i32::MAX);
+                    assign_long(dpb, pos, idx, poc.max_long)?;
+                }
+            }
+            2 => {
+                let idx = i32::try_from(mark.arg).unwrap_or(i32::MAX);
+                if let Some(frame) = dpb
+                    .iter_mut()
+                    .find(|frame| frame.referenced && frame.long_term && frame.long_idx == idx)
+                {
+                    frame.referenced = false;
+                }
+            }
+            4 => {
+                if mark.arg > 16 {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "mmco",
+                    });
+                }
+                if mark.arg == 0 {
+                    poc.max_long = None;
+                    for frame in dpb.iter_mut().filter(|frame| frame.long_term) {
+                        frame.referenced = false;
+                    }
+                } else {
+                    let max = mark.arg - 1;
+                    poc.max_long = Some(u8::try_from(max).unwrap_or(0));
+                    for frame in dpb.iter_mut() {
+                        if frame.long_term && frame.long_idx > i32::try_from(max).unwrap_or(0) {
+                            frame.referenced = false;
+                        }
+                    }
+                }
+            }
+            5 => {
+                for frame in dpb.iter_mut() {
+                    frame.referenced = false;
+                }
+                pic.frame_num = 0;
+                poc.prev_frame_num = 0;
+                poc.prev_frame_num_offset = 0;
+                poc.max_long = None;
+            }
+            6 => {
+                let idx = i32::try_from(mark.arg).unwrap_or(i32::MAX);
+                let allowed = poc
+                    .max_long
+                    .is_some_and(|max| idx >= 0 && idx <= i32::from(max));
+                if !allowed {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "mmco",
+                    });
+                }
+                for frame in dpb.iter_mut() {
+                    if frame.long_term && frame.long_idx == idx {
+                        frame.referenced = false;
+                    }
+                }
+                pic.long_term = true;
+                pic.long_idx = idx;
+                current_long = true;
+            }
+            _ => {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "mmco",
+                });
+            }
+        }
+    }
+    if !current_long {
+        pic.long_term = false;
+    }
+    pic.mmco.clear();
+    let refs = dpb.iter().filter(|frame| frame.referenced).count() + 1;
+    if refs > pic.max_ref {
+        return Err(CodecError::Limit {
+            what: "reference frames",
+        });
+    }
+    Ok(())
+}
+
+fn short_at(dpb: &[Frame], pic_num: i32, current: u32, max_fn: u32) -> Option<usize> {
+    dpb.iter().enumerate().find_map(|(index, frame)| {
+        if frame.referenced
+            && !frame.long_term
+            && !frame.nonexisting
+            && wrapped(frame, current, max_fn) == pic_num
+        {
+            Some(index)
+        } else {
+            None
+        }
+    })
+}
+
+fn wrapped(frame: &Frame, current: u32, max_fn: u32) -> i32 {
+    let mut number = i32::try_from(frame.frame_num).unwrap_or(0);
+    if frame.frame_num > current {
+        number -= i32::try_from(max_fn).unwrap_or(0);
+    }
+    number
+}
+
+fn assign_long(
+    dpb: &mut [Frame],
+    pos: usize,
+    idx: i32,
+    max_long: Option<u8>,
+) -> Result<(), CodecError> {
+    let allowed = max_long.is_some_and(|max| idx >= 0 && idx <= i32::from(max));
+    if !allowed {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "mmco",
+        });
+    }
+    for (index, frame) in dpb.iter_mut().enumerate() {
+        if index != pos && frame.long_term && frame.long_idx == idx {
+            frame.referenced = false;
+        }
+    }
+    dpb[pos].long_term = true;
+    dpb[pos].long_idx = idx;
+    Ok(())
 }
 
 fn oldest_short(dpb: &[Frame]) -> Option<usize> {
@@ -527,6 +684,7 @@ fn decode_slice(
         // drops pictures that were still waiting; otherwise they are returned
         // before this picture. The flag does not hide the IDR itself.
         if idr {
+            poc_state.max_long = if header.long_term_ref { Some(0) } else { None };
             for frame in dpb.iter_mut() {
                 frame.referenced = false;
                 if header.no_output_prior {
@@ -578,6 +736,13 @@ pub(crate) enum Entropy<'a, 'b> {
     Cabac(&'a mut Cabac<'b>),
 }
 
+#[derive(Clone)]
+struct Mark {
+    op: u8,
+    arg: u32,
+    arg2: u32,
+}
+
 struct Header {
     first_mb: usize,
     pps_id: u8,
@@ -597,6 +762,8 @@ struct Header {
     nal_ref: bool,
     no_output_prior: bool,
     long_term_ref: bool,
+    adaptive: bool,
+    mmco: Vec<Mark>,
     ref_mod_l0: Vec<Mod>,
     ref_mod_l1: Vec<Mod>,
     weights: bool,
@@ -736,11 +903,14 @@ fn read_header(
     }
     let mut no_output_prior = false;
     let mut long_term_ref = false;
+    let mut adaptive = false;
+    let mut mmco = Vec::new();
     if nal_ref {
         if idr {
             no_output_prior = bits.bit()?;
             long_term_ref = bits.bit()?;
         } else if bits.bit()? {
+            adaptive = true;
             loop {
                 let op = bits.ue()?;
                 if op == 0 {
@@ -749,12 +919,23 @@ fn read_header(
                 if op > 6 {
                     return Err(bits.malformed("mmco"));
                 }
+                let mut arg = 0u32;
+                let mut arg2 = 0u32;
                 if matches!(op, 1..=4) {
-                    let _arg = bits.ue()?;
+                    arg = bits.ue()?;
                 }
                 if matches!(op, 3 | 6) {
-                    let _arg2 = bits.ue()?;
+                    arg2 = bits.ue()?;
                 }
+                if op == 6 {
+                    arg = arg2;
+                    arg2 = 0;
+                }
+                mmco.push(Mark {
+                    op: u8::try_from(op).unwrap_or(0),
+                    arg,
+                    arg2,
+                });
             }
         }
     }
@@ -804,6 +985,8 @@ fn read_header(
         nal_ref,
         no_output_prior,
         long_term_ref,
+        adaptive,
+        mmco,
         ref_mod_l0,
         ref_mod_l1,
         weights,
@@ -1025,6 +1208,9 @@ fn new_frame(
         nonexisting: false,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder,
+        adaptive: header.adaptive,
+        mmco: header.mmco.clone(),
+        max_fn: 1u32 << sps.log2_max_frame_num,
     })
 }
 
@@ -1185,6 +1371,103 @@ mod tests {
         assert_eq!(order(2, false, [3, -8]), -3);
         let wide = type1_sps(&[2_000_000_000], 0, 0);
         assert!(super::poc_type1(&wide, 0, 2, true, [0, 0]).is_err());
+    }
+
+    #[test]
+    fn memory_management_commands_change_which_pictures_stay_referenced() {
+        let mut dpb = vec![held(0), held(1)];
+        let mut current = held(2);
+        current.mmco = vec![super::Mark {
+            op: 1,
+            arg: 0,
+            arg2: 0,
+        }];
+        let mut poc = super::Poc::new();
+        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        assert!(dpb[0].referenced);
+        assert!(!dpb[1].referenced);
+
+        let mut dpb = vec![held(0), held(1)];
+        let mut current = held(2);
+        current.mmco = vec![
+            super::Mark {
+                op: 4,
+                arg: 1,
+                arg2: 0,
+            },
+            super::Mark {
+                op: 3,
+                arg: 1,
+                arg2: 0,
+            },
+        ];
+        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        assert!(dpb[0].long_term && dpb[0].long_idx == 0);
+        assert!(dpb[1].referenced && !dpb[1].long_term);
+
+        current.mmco = vec![super::Mark {
+            op: 2,
+            arg: 0,
+            arg2: 0,
+        }];
+        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        assert!(!dpb[0].referenced);
+
+        current.mmco = vec![super::Mark {
+            op: 6,
+            arg: 0,
+            arg2: 0,
+        }];
+        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        assert!(current.long_term && current.long_idx == 0);
+
+        current.mmco = vec![super::Mark {
+            op: 5,
+            arg: 0,
+            arg2: 0,
+        }];
+        super::apply_mmco(&mut dpb, &mut current, &mut poc).unwrap();
+        assert!(dpb.iter().all(|frame| !frame.referenced));
+        assert_eq!(current.frame_num, 0);
+        assert_eq!(poc.prev_frame_num, 0);
+        assert!(poc.max_long.is_none());
+    }
+
+    fn held(frame_num: u32) -> super::Frame {
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        super::Frame {
+            y: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
+            mb: Vec::new(),
+            w: 16,
+            h: 16,
+            mb_w: 1,
+            poc: i32::try_from(frame_num).unwrap_or(0),
+            frame_num,
+            referenced: true,
+            long_term: false,
+            long_idx: -1,
+            output: false,
+            key: false,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            crop_x: 0,
+            crop_y: 0,
+            vis_w: 16,
+            vis_h: 16,
+            range: ColorRange::Limited,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+            matrix: ColorMatrix::Unspecified,
+            nonexisting: false,
+            max_ref: 4,
+            reorder: 0,
+            adaptive: true,
+            mmco: Vec::new(),
+            max_fn: 16,
+        }
     }
 
     fn type1_sps(offsets: &[i32], non_ref: i32, top_bottom: i32) -> super::Sps {

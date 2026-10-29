@@ -26,7 +26,7 @@ Main profile allows 10-bit 4:2:0 and monochrome. This crate rejects both. It is 
 
 Film grain, super-resolution, and loop restoration are legal in profile 0 and are not required to be switched on. A stream that turns one of them on is rejected. The picture is not published with that stage skipped. Consequence: a production encode that leaves restoration or film grain on will not open.
 
-Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond operating point 0, large-scale tile lists, warped motion, OBMC, palette, intra block copy, chroma-from-luma, filter intra, masked and distance-weighted compound, 128×128 superblocks, quantization matrices, and screen-content tools. The encoder does not emit them.
+Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond operating point 0, large-scale tile lists, warped motion, OBMC, palette, intra block copy, filter intra, masked and distance-weighted compound, 128×128 superblocks, quantization matrices, screen-content tools, and CDEF. The encoder does not emit them. Chroma-from-luma is implemented for profile 0 and matched on an `aomenc` stream that uses it.
 
 ## Gates declared before tuning
 
@@ -41,3 +41,33 @@ Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond oper
 ## Fixture rules
 
 `aomenc` and `dav1d` are oracles. A test skips, and says so, when the binary or `../local-files` is absent. Local media stays in that folder. An AV1 sample in that folder is opened by extracting its video payload with the oracle, not by a container parser in this crate.
+
+## Readiness
+
+This is what the code does after `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo deny check`. Those four passed on this machine. Nothing was published.
+
+### Decoder
+
+Partial. Progressive 8-bit 4:2:0 keyframes and intra-only frames are reconstructed. Sequence headers, frame headers, temporal delimiters, frame OBUs, eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0`, empty output) are implemented. A failed packet does not change the slots. `drain` is empty. `reset` drops the slots and keeps the sequence.
+
+Matched exactly against dav1d 1.5.3, with default in-loop filters:
+
+- The embedded 64×64 constrained keyframe in the crate.
+- When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
+
+Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d.
+
+Unsupported, refused with a typed error before a picture is published: inter prediction, CDEF, loop restoration, super resolution, film grain, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
+
+### Encoder
+
+Partial. It emits a temporal delimiter, a sequence header, and a keyframe of DC-predicted 4×4 and 8×8 blocks with the 2D DCT, loop filter off, and CDF update off. A repeated picture is a frame that shows reference slot 0. dav1d 1.5.3 accepted one 64×64 step bitstream and its pixels matched this decoder. A constant-128 picture is exact. The same step at quality index 40 has luma PSNR at least 28 dB against the source. Thirty 320×180 frames at 500 kbit/s landed inside 0.60×–1.40× of the target. One scaled 64×64 frame from `../local-files` round-tripped through this encoder and this decoder.
+
+The encoder does not emit inter frames, film grain, super resolution, restoration, or CDEF.
+
+### Gates still open
+
+- Fuzz: not run. The 30-minute packet campaign did not run. The stand-in is 200 random packets, which leave the stored reference usable and return an error. A LEB128 value that does not fit in `u32` returns `Limit` instead of panicking.
+- Speed: miss. One release thread encoded and decoded one 720×480 4:2:0 frame in 0.19s. That is about five round trips a second, short of 30 fps playback.
+- Memory: the decoder keeps eight reference pictures plus the frame being decoded. Planes are cropped to the visible size, and a frame edge above 4096 is `Limit`. Peak resident memory was not measured.
+- Containers: not this crate. AV1 inside MP4, WebM, and AVIF stays with the container crates.

@@ -1012,6 +1012,7 @@ pub fn avg(a: u8, b: u8) -> u8 {
     clip_u8((i32::from(a) + i32::from(b) + 1) >> 1)
 }
 
+#[derive(Clone, Copy)]
 pub struct Edge {
     pub vertical: bool,
     pub bs: u8,

@@ -4169,24 +4169,52 @@ fn store_block(
     let (x, y) = origin;
     let (w, h) = size;
     let (left, right) = pred;
-    for row in 0..h {
-        let at = (y + row) * stride + x;
-        for col in 0..w {
-            let a = left[row * w + col];
-            let b = right[row * w + col];
-            dst[at + col] = match mix {
-                Mix::Fill => fill,
-                Mix::Copy(0) => a,
-                Mix::Copy(_) => b,
-                Mix::Uni {
-                    weight,
-                    offset,
-                    denom,
-                    from,
-                } => recon::weight_uni(if from == 0 { a } else { b }, weight, offset, denom),
-                Mix::Avg => recon::avg(a, b),
-                Mix::Weighted(weight) => recon::weight_bi(a, b, weight),
-            };
+    match mix {
+        Mix::Fill => {
+            for row in 0..h {
+                let at = (y + row) * stride + x;
+                dst[at..at + w].fill(fill);
+            }
+        }
+        Mix::Copy(which) => {
+            let src = if which == 0 { left } else { right };
+            for row in 0..h {
+                let at = (y + row) * stride + x;
+                dst[at..at + w].copy_from_slice(&src[row * w..row * w + w]);
+            }
+        }
+        Mix::Uni {
+            weight,
+            offset,
+            denom,
+            from,
+        } => {
+            let src = if from == 0 { left } else { right };
+            for row in 0..h {
+                let at = (y + row) * stride + x;
+                for col in 0..w {
+                    dst[at + col] = recon::weight_uni(src[row * w + col], weight, offset, denom);
+                }
+            }
+        }
+        Mix::Avg => {
+            for row in 0..h {
+                let at = (y + row) * stride + x;
+                let a = &left[row * w..row * w + w];
+                let b = &right[row * w..row * w + w];
+                for col in 0..w {
+                    dst[at + col] = recon::avg(a[col], b[col]);
+                }
+            }
+        }
+        Mix::Weighted(weight) => {
+            for row in 0..h {
+                let at = (y + row) * stride + x;
+                for col in 0..w {
+                    dst[at + col] =
+                        recon::weight_bi(left[row * w + col], right[row * w + col], weight);
+                }
+            }
         }
     }
 }
@@ -4396,75 +4424,48 @@ pub(crate) fn deblock(pic: &mut Frame) {
                 continue;
             }
             let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
+            let off = offsets(pic, index);
             for edge in 0..4 {
                 if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
                     continue;
                 }
                 let x = mx * 16 + edge * 4;
+                let bs = edge_strength(pic, mx, my, edge, true);
                 // An 8×8 transform has no luma edge at 4 or 12.
-                if !(transform8 && (edge == 1 || edge == 3)) {
-                    for row in 0..4 {
-                        let bs = strength(pic, mx, my, edge, row, true);
-                        if bs == 0 || x < 4 {
-                            continue;
-                        }
-                        let qpav = edge_qp(pic, mx, my, true, true, edge == 0);
-                        let (oa, ob) = offsets(pic, index);
-                        recon::filter_edge(
-                            &mut pic.y,
-                            pic.w,
-                            x,
-                            my * 16 + row * 4,
-                            recon::Edge {
-                                vertical: true,
-                                bs,
-                                qpav,
-                                offset_a: oa,
-                                offset_b: ob,
-                                chroma: false,
-                                len: 4,
-                            },
-                        );
-                    }
+                if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                    let qpav = edge_qp(pic, mx, my, true, true, edge == 0);
+                    filter_groups(
+                        &mut pic.y,
+                        pic.w,
+                        (x, my * 16),
+                        (true, false, 4),
+                        bs,
+                        qpav,
+                        off,
+                    );
                 }
                 if edge % 2 == 0 {
                     let cx = mx * 8 + edge * 2;
                     if cx >= 2 {
-                        for row in 0..4 {
-                            let bs = strength(pic, mx, my, edge, row, true);
-                            let qpc = edge_qp(pic, mx, my, false, true, edge == 0);
-                            let (oa, ob) = offsets(pic, index);
-                            recon::filter_edge(
-                                &mut pic.u,
-                                pic.w / 2,
-                                cx,
-                                my * 8 + row * 2,
-                                recon::Edge {
-                                    vertical: true,
-                                    bs,
-                                    qpav: qpc,
-                                    offset_a: oa,
-                                    offset_b: ob,
-                                    chroma: true,
-                                    len: 2,
-                                },
-                            );
-                            recon::filter_edge(
-                                &mut pic.v,
-                                pic.w / 2,
-                                cx,
-                                my * 8 + row * 2,
-                                recon::Edge {
-                                    vertical: true,
-                                    bs,
-                                    qpav: qpc,
-                                    offset_a: oa,
-                                    offset_b: ob,
-                                    chroma: true,
-                                    len: 2,
-                                },
-                            );
-                        }
+                        let qpc = edge_qp(pic, mx, my, false, true, edge == 0);
+                        filter_groups(
+                            &mut pic.u,
+                            pic.w / 2,
+                            (cx, my * 8),
+                            (true, true, 2),
+                            bs,
+                            qpc,
+                            off,
+                        );
+                        filter_groups(
+                            &mut pic.v,
+                            pic.w / 2,
+                            (cx, my * 8),
+                            (true, true, 2),
+                            bs,
+                            qpc,
+                            off,
+                        );
                     }
                 }
             }
@@ -4473,73 +4474,112 @@ pub(crate) fn deblock(pic: &mut Frame) {
                     continue;
                 }
                 let y = my * 16 + edge * 4;
-                if !(transform8 && (edge == 1 || edge == 3)) {
-                    for col in 0..4 {
-                        let bs = strength(pic, mx, my, edge, col, false);
-                        if bs == 0 || y < 4 {
-                            continue;
-                        }
-                        let qpav = edge_qp(pic, mx, my, true, false, edge == 0);
-                        let (oa, ob) = offsets(pic, index);
-                        recon::filter_edge(
-                            &mut pic.y,
-                            pic.w,
-                            mx * 16 + col * 4,
-                            y,
-                            recon::Edge {
-                                vertical: false,
-                                bs,
-                                qpav,
-                                offset_a: oa,
-                                offset_b: ob,
-                                chroma: false,
-                                len: 4,
-                            },
-                        );
-                    }
+                let bs = edge_strength(pic, mx, my, edge, false);
+                if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                    let qpav = edge_qp(pic, mx, my, true, false, edge == 0);
+                    filter_groups(
+                        &mut pic.y,
+                        pic.w,
+                        (mx * 16, y),
+                        (false, false, 4),
+                        bs,
+                        qpav,
+                        off,
+                    );
                 }
                 if edge % 2 == 0 {
                     let cy = my * 8 + edge * 2;
                     if cy >= 2 {
-                        for col in 0..4 {
-                            let bs = strength(pic, mx, my, edge, col, false);
-                            let qpc = edge_qp(pic, mx, my, false, false, edge == 0);
-                            let (oa, ob) = offsets(pic, index);
-                            recon::filter_edge(
-                                &mut pic.u,
-                                pic.w / 2,
-                                mx * 8 + col * 2,
-                                cy,
-                                recon::Edge {
-                                    vertical: false,
-                                    bs,
-                                    qpav: qpc,
-                                    offset_a: oa,
-                                    offset_b: ob,
-                                    chroma: true,
-                                    len: 2,
-                                },
-                            );
-                            recon::filter_edge(
-                                &mut pic.v,
-                                pic.w / 2,
-                                mx * 8 + col * 2,
-                                cy,
-                                recon::Edge {
-                                    vertical: false,
-                                    bs,
-                                    qpav: qpc,
-                                    offset_a: oa,
-                                    offset_b: ob,
-                                    chroma: true,
-                                    len: 2,
-                                },
-                            );
-                        }
+                        let qpc = edge_qp(pic, mx, my, false, false, edge == 0);
+                        filter_groups(
+                            &mut pic.u,
+                            pic.w / 2,
+                            (mx * 8, cy),
+                            (false, true, 2),
+                            bs,
+                            qpc,
+                            off,
+                        );
+                        filter_groups(
+                            &mut pic.v,
+                            pic.w / 2,
+                            (mx * 8, cy),
+                            (false, true, 2),
+                            bs,
+                            qpc,
+                            off,
+                        );
                     }
                 }
             }
         }
+    }
+}
+
+fn edge_strength(pic: &Frame, mx: usize, my: usize, edge: usize, vertical: bool) -> [u8; 4] {
+    [
+        strength(pic, mx, my, edge, 0, vertical),
+        strength(pic, mx, my, edge, 1, vertical),
+        strength(pic, mx, my, edge, 2, vertical),
+        strength(pic, mx, my, edge, 3, vertical),
+    ]
+}
+
+fn filter_groups(
+    plane: &mut [u8],
+    stride: usize,
+    at: (usize, usize),
+    kind: (bool, bool, usize),
+    bs: [u8; 4],
+    qpav: i32,
+    off: (i32, i32),
+) {
+    let (x, y) = at;
+    let (vertical, chroma, step) = kind;
+    let (offset_a, offset_b) = off;
+    if bs[0] != 0 && bs[1] == bs[0] && bs[2] == bs[0] && bs[3] == bs[0] {
+        recon::filter_edge(
+            plane,
+            stride,
+            x,
+            y,
+            recon::Edge {
+                vertical,
+                bs: bs[0],
+                qpav,
+                offset_a,
+                offset_b,
+                chroma,
+                len: step * 4,
+            },
+        );
+        return;
+    }
+    for (group, group_bs) in bs.into_iter().enumerate() {
+        if group_bs == 0 {
+            continue;
+        }
+        let shift = group * step;
+        let (gx, gy) = if vertical {
+            (x, y + shift)
+        } else {
+            (x + shift, y)
+        };
+        recon::filter_edge(
+            plane,
+            stride,
+            gx,
+            gy,
+            recon::Edge {
+                vertical,
+                bs: group_bs,
+                qpav,
+                offset_a,
+                offset_b,
+                chroma,
+                len: step,
+            },
+        );
     }
 }
 

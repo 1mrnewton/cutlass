@@ -11,6 +11,7 @@
 mod approval;
 mod draft;
 mod r#loop;
+mod mcp;
 mod model;
 mod sandbox;
 mod settings_tool;
@@ -22,6 +23,7 @@ pub use draft::{
     ProjectSnapshot, QueryView, RangeSnapshot, SegmentSnapshot, TrackSnapshot, request_name,
 };
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run};
+pub use mcp::{McpClient, McpError, McpTransport};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,

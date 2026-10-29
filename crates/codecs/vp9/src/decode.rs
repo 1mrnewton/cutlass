@@ -17,6 +17,7 @@ use crate::header::{Header, Parsed, Persist, parse};
 use crate::prob::{self, Counts, FrameContext};
 use crate::recon::{Motion, Picture, RefSlots, Reference, reconstruct};
 
+#[derive(Clone)]
 pub struct Decoder {
     persist: Persist,
     refs: [Option<Arc<Reference>>; 8],
@@ -204,15 +205,27 @@ impl VideoDecoder for Vp9Decoder {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
-        let Some(picture) = self.inner.decode(&packet.data)? else {
-            return Ok(Vec::new());
-        };
-        Ok(vec![VideoOutput {
-            frame: picture_frame(&picture)?,
-            pts: packet.pts,
-            duration: packet.duration,
-            timescale: packet.timescale,
-        }])
+        let parts = split_superframe(&packet.data)?;
+        let mut checkpoint = (parts.len() > 1).then(|| self.inner.clone());
+        let mut outputs = Vec::new();
+        for part in parts {
+            match self.inner.decode(part) {
+                Ok(Some(picture)) => outputs.push(VideoOutput {
+                    frame: picture_frame(&picture)?,
+                    pts: packet.pts,
+                    duration: packet.duration,
+                    timescale: packet.timescale,
+                }),
+                Ok(None) => {}
+                Err(err) => {
+                    if let Some(saved) = checkpoint.take() {
+                        self.inner = saved;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(outputs)
     }
 
     fn drain(&mut self) -> Result<Vec<VideoOutput>, CodecError> {
@@ -240,6 +253,53 @@ fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
     )
 }
 
+fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>, CodecError> {
+    let Some(marker) = data.last().copied() else {
+        return Ok(vec![data]);
+    };
+    if marker & 0xe0 != 0xc0 {
+        return Ok(vec![data]);
+    }
+    let frames = usize::from(marker & 0x7) + 1;
+    let mag = usize::from((marker >> 3) & 0x3) + 1;
+    let index = 2 + mag * frames;
+    if data.len() < index || data[data.len() - index] != marker {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "superframe",
+        });
+    }
+    let base = data.len() - index + 1;
+    let payload = data.len() - index;
+    let mut offset = 0usize;
+    let mut parts = Vec::with_capacity(frames);
+    for frame in 0..frames {
+        let mut size = 0usize;
+        for byte in 0..mag {
+            let shift = u32::try_from(8 * byte).unwrap_or(0);
+            size |= usize::from(data[base + frame * mag + byte]) << shift;
+        }
+        let end = offset
+            .checked_add(size)
+            .ok_or(CodecError::Limit { what: "superframe" })?;
+        if end > payload {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "superframe",
+            });
+        }
+        parts.push(&data[offset..end]);
+        offset = end;
+    }
+    if offset != payload {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "superframe",
+        });
+    }
+    Ok(parts)
+}
+
 fn check_open_size(width: u32, height: u32) -> Result<(), CodecError> {
     if width == 0 || height == 0 {
         return Err(CodecError::InvalidApi {
@@ -257,6 +317,7 @@ fn check_open_size(width: u32, height: u32) -> Result<(), CodecError> {
 #[cfg(test)]
 mod tests {
     use super::Decoder;
+    use cutlass_encode::VideoEncoder;
 
     #[test]
     fn normal_inter_matches_ffvp9() {
@@ -356,6 +417,165 @@ mod tests {
         got.extend_from_slice(&picture.v);
         let yuv = include_bytes!("../fixtures/vp9_inter32.yuv");
         assert_eq!(got.as_slice(), yuv.as_slice());
+    }
+
+    #[test]
+    fn decoder_fuzz_does_not_panic() {
+        let secs = std::env::var("VP9_FUZZ_SECS")
+            .ok()
+            .and_then(|text| text.parse::<u64>().ok())
+            .unwrap_or(2);
+        let seed = std::env::var("VP9_FUZZ_SEED")
+            .ok()
+            .and_then(|text| text.parse::<u64>().ok())
+            .unwrap_or(0x5650_3900_d4af);
+        let corpus = fuzz_corpus();
+        let mut rng = FuzzRng { state: seed };
+        let started = std::time::Instant::now();
+        let mut inputs = 0u64;
+        let mut decoded = 0u64;
+        let limit = std::time::Duration::from_secs(secs);
+        while started.elapsed() < limit {
+            let bytes = mutate(&mut rng, &corpus);
+            let mut decoder = Decoder::new();
+            if let Ok(Some(picture)) = decoder.decode(&bytes) {
+                assert!(sane(&picture), "seed {seed} input {inputs}");
+                decoded += 1;
+            }
+            if inputs.is_multiple_of(32) {
+                let mut decoder = Decoder::new();
+                let key = &corpus[0];
+                decoder.decode(key).expect("corpus key").expect("shown");
+                let _ = decoder.decode(&bytes);
+                let again = decoder.decode(key).expect("key after noise");
+                assert!(again.is_some(), "seed {seed} dropped the key");
+            }
+            inputs += 1;
+        }
+        eprintln!(
+            "vp9 fuzz seed {seed:#x} seconds {secs} inputs {inputs} pictures {decoded} findings 0"
+        );
+    }
+
+    fn fuzz_corpus() -> Vec<Vec<u8>> {
+        let mut encoder = crate::encode::Vp9Encoder::with_quantizer(32, 16, 32).expect("encoder");
+        let mut frames = Vec::new();
+        for index in 0..4 {
+            let frame = fuzz_picture(index);
+            let packets = encoder.push(&frame).expect("corpus");
+            frames.push(packets[0].data.clone());
+        }
+        frames.push(vec![0xa0]);
+        frames.push(vec![0x00]);
+        frames.push(vec![0xc0]);
+        frames
+    }
+
+    fn fuzz_picture(index: u32) -> cutlass_encode::VideoInput {
+        let width = 32u32;
+        let height = 16u32;
+        let mut y = Vec::new();
+        let mut u = Vec::new();
+        let mut v = Vec::new();
+        for row in 0..height {
+            for col in 0..width {
+                let value = row
+                    .wrapping_mul(3)
+                    .wrapping_add(col)
+                    .wrapping_add(index * 5);
+                y.push(u8::try_from(value % 220).unwrap_or(0));
+            }
+        }
+        for row in 0..height / 2 {
+            for col in 0..width / 2 {
+                u.push(u8::try_from((row + col + index) % 80 + 40).unwrap_or(40));
+                v.push(u8::try_from((col * 2 + index) % 70 + 60).unwrap_or(60));
+            }
+        }
+        let frame = cutlass_encode::VideoFrame::yuv420p(
+            width,
+            height,
+            cutlass_encode::Plane::tight(width, height, y).expect("y"),
+            cutlass_encode::Plane::tight(width / 2, height / 2, u).expect("u"),
+            cutlass_encode::Plane::tight(width / 2, height / 2, v).expect("v"),
+        )
+        .expect("frame");
+        cutlass_encode::VideoInput {
+            frame,
+            pts: i64::from(index),
+            duration: 1,
+            timescale: 30,
+        }
+    }
+
+    fn mutate(rng: &mut FuzzRng, corpus: &[Vec<u8>]) -> Vec<u8> {
+        let pick = rng.below(corpus.len() + 1);
+        if pick == corpus.len() {
+            let len = rng.below(2048);
+            return (0..len).map(|_| rng.byte()).collect();
+        }
+        let mut bytes = corpus[pick].clone();
+        if bytes.is_empty() {
+            return bytes;
+        }
+        match rng.below(4) {
+            0 => {
+                let at = rng.below(bytes.len());
+                bytes[at] ^= rng.byte() | 1;
+            }
+            1 => {
+                let at = rng.below(bytes.len());
+                bytes.truncate(at);
+            }
+            2 => {
+                let at = rng.below(bytes.len() + 1);
+                bytes.insert(at, rng.byte());
+            }
+            _ => {
+                let extra: Vec<u8> = (0..rng.below(16)).map(|_| rng.byte()).collect();
+                bytes.extend(extra);
+            }
+        }
+        bytes
+    }
+
+    fn sane(picture: &crate::recon::Picture) -> bool {
+        let width = usize::try_from(picture.width).unwrap_or(usize::MAX);
+        let height = usize::try_from(picture.height).unwrap_or(usize::MAX);
+        let chroma_w = width.div_ceil(2);
+        let chroma_h = height.div_ceil(2);
+        picture.width > 0
+            && picture.height > 0
+            && picture.width <= crate::geom::MAX_EDGE
+            && picture.height <= crate::geom::MAX_EDGE
+            && picture.y.len() == width.saturating_mul(height)
+            && picture.u.len() == chroma_w.saturating_mul(chroma_h)
+            && picture.v.len() == picture.u.len()
+    }
+
+    struct FuzzRng {
+        state: u64,
+    }
+
+    impl FuzzRng {
+        fn next(&mut self) -> u64 {
+            self.state = self
+                .state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            self.state
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            if n == 0 {
+                return 0;
+            }
+            usize::try_from(self.next() % u64::try_from(n).unwrap_or(1)).unwrap_or(0)
+        }
+
+        fn byte(&mut self) -> u8 {
+            u8::try_from(self.next() & 0xff).unwrap_or(0)
+        }
     }
 
     #[test]

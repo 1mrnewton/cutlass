@@ -32,6 +32,8 @@ pub struct MetalDevice {
     next_id: u64,
     slots: Vec<Slot>,
     open: Option<OpenPass>,
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    gpu: Option<crate::metal::Backend>,
 }
 
 impl MetalDevice {
@@ -42,7 +44,45 @@ impl MetalDevice {
             next_id: 1,
             slots: Vec::new(),
             open: None,
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            gpu: None,
         }
+    }
+
+    /// Blit a submitted framebuffer through Metal.
+    ///
+    /// The CPU bytes stay in place. The readback has to match them.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn submit_metal(&mut self, framebuffer: Framebuffer) -> Result<(), DeviceError> {
+        let extent = self.framebuffer_extent(framebuffer)?;
+        let rgba = self.read_rgba(framebuffer)?.to_vec();
+        self.backend()?
+            .submit_rgba(extent, &rgba)
+            .map_err(|_| DeviceError::Backend)
+    }
+
+    /// Upload CPU RGBA as a Metal texture. The token is nonzero.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn insert_texture(&mut self, extent: Extent, rgba: &[u8]) -> Result<u64, DeviceError> {
+        self.backend()?
+            .insert_texture(extent, rgba)
+            .map_err(|_| DeviceError::Backend)
+    }
+
+    /// Read a texture token this device stored.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn read_texture(&mut self, token: u64, extent: Extent) -> Result<Vec<u8>, DeviceError> {
+        self.backend()?
+            .read_texture(token, extent)
+            .map_err(|_| DeviceError::Backend)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn backend(&mut self) -> Result<&mut crate::metal::Backend, DeviceError> {
+        if self.gpu.is_none() {
+            self.gpu = Some(crate::metal::Backend::open().map_err(|_| DeviceError::Backend)?);
+        }
+        self.gpu.as_mut().ok_or(DeviceError::Backend)
     }
 
     /// Width and height of a framebuffer on this device.
@@ -794,5 +834,38 @@ mod tests {
         device.end(pass).unwrap();
         device.submit(pass).unwrap();
         assert_eq!(device.read_rgba(framebuffer).unwrap(), &[0, 0, 0, 0]);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn a_submitted_frame_round_trips_through_metal() {
+        let mut device = MetalDevice::new();
+        let extent = Extent {
+            width: 2,
+            height: 2,
+        };
+        let pattern = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let framebuffer = device.create_framebuffer(extent).unwrap();
+        let pass = device.begin(framebuffer).unwrap();
+        device
+            .draw(
+                pass,
+                TexelSource::Rgba {
+                    extent,
+                    bytes: &pattern,
+                },
+            )
+            .unwrap();
+        device.end(pass).unwrap();
+        device.submit(pass).unwrap();
+        device.submit_metal(framebuffer).unwrap();
+        assert_eq!(device.read_rgba(framebuffer).unwrap(), &pattern);
+        let token = device.insert_texture(extent, &pattern).unwrap();
+        assert_ne!(token, 0);
+        assert_eq!(device.read_texture(token, extent).unwrap(), pattern);
+        assert_eq!(
+            device.read_texture(0, extent).unwrap_err(),
+            DeviceError::Backend
+        );
     }
 }

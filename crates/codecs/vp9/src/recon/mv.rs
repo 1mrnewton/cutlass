@@ -165,6 +165,9 @@ struct Paint {
     mv_col: i32,
     filter: u8,
     average: bool,
+    scale: Option<mc::Scale>,
+    scale_x: i32,
+    scale_y: i32,
 }
 
 impl<'a> Scratch<'a> {
@@ -173,9 +176,14 @@ impl<'a> Scratch<'a> {
         reader: &mut BoolDecoder<'_>,
         at: BlockAt,
     ) -> Result<Mi, CodecError> {
-        let mut mi = Mi::default();
-        mi.bsize = at.bsize;
-        mi.seg = self.read_segment(reader, at.mi_row, at.mi_col, at.x_mis, at.y_mis)?;
+        let (seg, predicted) =
+            self.read_segment(reader, at.mi_row, at.mi_col, at.x_mis, at.y_mis)?;
+        let mut mi = Mi {
+            bsize: at.bsize,
+            seg,
+            seg_predicted: predicted,
+            ..Mi::default()
+        };
         mi.skip = self.read_skip(reader, at.mi_row, at.mi_col, mi.seg)?;
         let inter = self.read_is_inter(reader, at.mi_row, at.mi_col, mi.seg)?;
         let allow = !mi.skip || !inter;
@@ -908,20 +916,22 @@ impl<'a> Scratch<'a> {
         let nref = 1 + usize::from(compound);
         for ref_i in 0..nref {
             let frame = mi.refs[ref_i];
-            let (width, height) = {
-                let reference = self.reference(frame)?;
-                (reference.width, reference.height)
-            };
-            if width != self.header.width || height != self.header.height {
-                return Err(CodecError::Unsupported {
-                    what: "vp9 scaled reference",
-                });
-            }
+            let scale = self.frame_scale(frame)?;
             for plane in 0..3 {
-                self.predict_plane(mi, pos, plane, ref_i, ref_i > 0)?;
+                self.predict_plane(mi, pos, plane, ref_i, ref_i > 0, scale)?;
             }
         }
         Ok(())
+    }
+
+    fn frame_scale(&self, frame: u8) -> Result<Option<mc::Scale>, CodecError> {
+        let reference = self.reference(frame)?;
+        mc::Scale::between(
+            reference.width,
+            reference.height,
+            self.header.width,
+            self.header.height,
+        )
     }
 
     fn predict_plane(
@@ -931,10 +941,13 @@ impl<'a> Scratch<'a> {
         plane: usize,
         ref_i: usize,
         average: bool,
+        scale: Option<mc::Scale>,
     ) -> Result<(), CodecError> {
         let ss = u32::from(plane > 0);
         let origin_x = (pos.mi_col << 3) >> ss;
         let origin_y = (pos.mi_row << 3) >> ss;
+        let at_x = luma_px(pos.mi_col, 0);
+        let at_y = luma_px(pos.mi_row, 0);
         if mi.bsize < BLOCK_8X8 {
             let n4_w = (pos.bw << 1) >> ss;
             let n4_h = (pos.bh << 1) >> ss;
@@ -954,6 +967,9 @@ impl<'a> Scratch<'a> {
                         mv_col,
                         filter: mi.interp,
                         average,
+                        scale,
+                        scale_x: luma_px(pos.mi_col, 4 * col),
+                        scale_y: luma_px(pos.mi_row, 4 * row),
                     })?;
                 }
             }
@@ -971,6 +987,9 @@ impl<'a> Scratch<'a> {
             mv_col,
             filter: mi.interp,
             average,
+            scale,
+            scale_x: at_x,
+            scale_y: at_y,
         })
     }
 
@@ -987,18 +1006,44 @@ impl<'a> Scratch<'a> {
         let mut pred = vec![0u8; w.saturating_mul(h)];
         {
             let source = self.plane_ref(paint.frame, paint.plane)?;
-            mc::render(mc::Job {
-                pred: &mut pred,
-                pred_stride: w,
-                w,
-                h,
-                origin_x: i32::try_from(paint.x).unwrap_or(0),
-                origin_y: i32::try_from(paint.y).unwrap_or(0),
-                mv_row: paint.mv_row,
-                mv_col: paint.mv_col,
-                filter: usize::from(paint.filter),
-                reference: source,
-            })?;
+            if let Some(scale) = paint.scale {
+                let (x0, y0, sub_x, sub_y) = mc::scaled_point(
+                    i32::try_from(paint.x).unwrap_or(0),
+                    i32::try_from(paint.y).unwrap_or(0),
+                    paint.mv_col,
+                    paint.mv_row,
+                    paint.scale_x,
+                    paint.scale_y,
+                    &scale,
+                )?;
+                mc::render_scaled(mc::ScaledJob {
+                    pred: &mut pred,
+                    pred_stride: w,
+                    w,
+                    h,
+                    x0,
+                    y0,
+                    sub_x,
+                    sub_y,
+                    x_step: scale.x_step(),
+                    y_step: scale.y_step(),
+                    filter: usize::from(paint.filter),
+                    reference: source,
+                })?;
+            } else {
+                mc::render(mc::Job {
+                    pred: &mut pred,
+                    pred_stride: w,
+                    w,
+                    h,
+                    origin_x: i32::try_from(paint.x).unwrap_or(0),
+                    origin_y: i32::try_from(paint.y).unwrap_or(0),
+                    mv_row: paint.mv_row,
+                    mv_col: paint.mv_col,
+                    filter: usize::from(paint.filter),
+                    reference: source,
+                })?;
+            }
         }
         self.blit(&paint, w, h, &pred)
     }
@@ -1529,6 +1574,10 @@ fn add_mv(base: Mv, diff: Mv) -> Result<Mv, CodecError> {
 
 fn component_i16(value: i32) -> Result<i16, CodecError> {
     i16::try_from(value).map_err(|_| super::bad("motion vector"))
+}
+
+fn luma_px(mi: usize, offset: usize) -> i32 {
+    i32::try_from(mi.saturating_mul(8).saturating_add(offset)).unwrap_or(0)
 }
 
 fn q4_mv(mi: &Mi, plane: usize, block: usize, ref_i: usize) -> (i32, i32) {

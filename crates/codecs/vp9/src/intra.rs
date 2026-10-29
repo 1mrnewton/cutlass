@@ -1,7 +1,10 @@
 //! Intra prediction for 8-bit 4:2:0.
 //!
-//! Edge samples follow libvpx: unavailable above is 127, unavailable left is
-//! 129, and samples past the crop repeat the last sample inside the crop.
+//! Edge samples follow libvpx `build_intra_predictors`: unavailable above is
+//! 127, unavailable left is 129, and samples past the aligned plane
+//! (`y_width` / `uv_width`, not the visible crop) repeat the last sample
+//! inside that plane. Pixels between the crop and the aligned edge are real
+//! reconstructed samples.
 
 #![allow(dead_code)]
 

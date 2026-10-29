@@ -12,7 +12,7 @@ use cutlass_decode::{
 };
 use cutlass_encode::PixelFormat;
 
-use crate::geom::{SWITCHABLE, TX_MODE_SELECT};
+use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
 use crate::prob::{self, Counts, FrameContext};
 use crate::recon::{Motion, Picture, RefSlots, Reference, reconstruct};
@@ -22,6 +22,7 @@ pub struct Decoder {
     persist: Persist,
     refs: [Option<Arc<Reference>>; 8],
     prev: Option<Arc<Motion>>,
+    last_seg: Vec<u8>,
 }
 
 impl Decoder {
@@ -30,6 +31,7 @@ impl Decoder {
             persist: Persist::new(),
             refs: [const { None }; 8],
             prev: None,
+            last_seg: Vec::new(),
         }
     }
 
@@ -47,11 +49,18 @@ impl Decoder {
             return Ok(Some(picture));
         }
         let prev = self.prev.clone();
+        let last_seg = seg_source(&self.last_seg, &parsed.header);
         let built = {
             let slots = self.slots();
-            reconstruct(&parsed, &slots, prev.as_deref())?
+            reconstruct(&parsed, &slots, prev.as_deref(), &last_seg)?
         };
-        self.commit(&parsed, &built.picture, &built.counts, built.motion);
+        self.commit(
+            &parsed,
+            &built.picture,
+            &built.counts,
+            built.motion,
+            built.segmap,
+        );
         if parsed.header.show_frame {
             Ok(Some(built.picture))
         } else {
@@ -63,6 +72,7 @@ impl Decoder {
         self.persist = Persist::new();
         self.refs = [const { None }; 8];
         self.prev = None;
+        self.last_seg.clear();
     }
 
     fn slots(&self) -> RefSlots<'_> {
@@ -90,7 +100,14 @@ impl Decoder {
         })
     }
 
-    fn commit(&mut self, parsed: &Parsed<'_>, picture: &Picture, counts: &Counts, motion: Motion) {
+    fn commit(
+        &mut self,
+        parsed: &Parsed<'_>,
+        picture: &Picture,
+        counts: &Counts,
+        motion: Motion,
+        segmap: Vec<u8>,
+    ) {
         let header = &parsed.header;
         let after_key = self.persist.key_frame;
         let fc = adapted(parsed, counts, after_key);
@@ -113,6 +130,16 @@ impl Decoder {
         }
         self.prev = Some(Arc::new(motion));
         self.store_refs(header, picture);
+        self.store_seg(header, segmap);
+    }
+
+    fn store_seg(&mut self, header: &Header, segmap: Vec<u8>) {
+        let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
+        if header.seg.enabled {
+            self.last_seg = segmap;
+        } else if header.is_intra() || header.error_resilient {
+            self.last_seg = vec![0u8; cells];
+        }
     }
 
     fn store_refs(&mut self, header: &Header, picture: &Picture) {
@@ -133,6 +160,15 @@ impl Decoder {
             self.persist.ref_w[slot] = header.width;
             self.persist.ref_h[slot] = header.height;
         }
+    }
+}
+
+fn seg_source(last: &[u8], header: &Header) -> Vec<u8> {
+    let cells = geom::mi_count(header.width).saturating_mul(geom::mi_count(header.height));
+    if header.is_intra() || header.error_resilient || last.len() != cells {
+        vec![0u8; cells]
+    } else {
+        last.to_vec()
     }
 }
 
@@ -306,7 +342,7 @@ fn check_open_size(width: u32, height: u32) -> Result<(), CodecError> {
             what: "empty picture",
         });
     }
-    if width > crate::geom::MAX_EDGE || height > crate::geom::MAX_EDGE {
+    if width > geom::MAX_EDGE || height > geom::MAX_EDGE {
         return Err(CodecError::Limit {
             what: "vp9 frame edge",
         });
@@ -576,6 +612,57 @@ mod tests {
         fn byte(&mut self) -> u8 {
             u8::try_from(self.next() & 0xff).unwrap_or(0)
         }
+    }
+
+    #[test]
+    fn scaled_references_match_libvpx() {
+        let frames: [&[u8]; 3] = [
+            include_bytes!("../fixtures/vp9_scale_0.bin"),
+            include_bytes!("../fixtures/vp9_scale_1.bin"),
+            include_bytes!("../fixtures/vp9_scale_2.bin"),
+        ];
+        let yuv = include_bytes!("../fixtures/vp9_scale.yuv");
+        let mut decoder = Decoder::new();
+        let mut got = Vec::new();
+        let mut sizes = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let picture = decoder
+                .decode(frame)
+                .unwrap_or_else(|err| panic!("frame {index}: {err}"))
+                .expect("shown");
+            sizes.push((picture.width, picture.height));
+            got.extend_from_slice(&picture.y);
+            got.extend_from_slice(&picture.u);
+            got.extend_from_slice(&picture.v);
+        }
+        assert_eq!(sizes, [(64, 64), (32, 32), (52, 52)]);
+        assert_eq!(got, yuv);
+    }
+
+    #[test]
+    fn segmentation_matches_libvpx() {
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/vp9_aq_0.bin"),
+            include_bytes!("../fixtures/vp9_aq_1.bin"),
+            include_bytes!("../fixtures/vp9_aq_2.bin"),
+            include_bytes!("../fixtures/vp9_aq_3.bin"),
+            include_bytes!("../fixtures/vp9_aq_4.bin"),
+            include_bytes!("../fixtures/vp9_aq_5.bin"),
+            include_bytes!("../fixtures/vp9_aq_6.bin"),
+            include_bytes!("../fixtures/vp9_aq_7.bin"),
+        ];
+        let yuv = include_bytes!("../fixtures/vp9_aq.yuv");
+        let mut decoder = Decoder::new();
+        let mut got = Vec::new();
+        for frame in frames {
+            let picture = decoder.decode(frame).expect("frame").expect("shown");
+            got.extend_from_slice(&picture.y);
+            got.extend_from_slice(&picture.u);
+            got.extend_from_slice(&picture.v);
+        }
+        assert_eq!(got.len(), yuv.len());
+        let mismatch = got.iter().zip(yuv.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "first mismatch {mismatch:?}");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Profile 0 reconstruction.
 //!
 //! Partition walk, mode decode, and coefficient reconstruction follow
-//! libvpx `decode_partition` and `decode_block`. Inter prediction is unscaled.
-//! A loop filter level of zero skips the filter.
+//! libvpx `decode_partition` and `decode_block`. Inter prediction scales a
+//! reference when its crop differs from the frame. A loop filter level of
+//! zero skips the filter.
 
 #![allow(dead_code)]
 
@@ -17,6 +18,7 @@ pub struct Recon {
     pub picture: Picture,
     pub counts: Counts,
     pub motion: Motion,
+    pub segmap: Vec<u8>,
 }
 
 use cutlass_decode::CodecError;
@@ -63,6 +65,7 @@ struct Mi {
     refs: [u8; 2],
     mv: [mc::Mv; 2],
     sub_mv: [[mc::Mv; 2]; 4],
+    seg_predicted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +145,7 @@ impl Default for Mi {
             refs: [INTRA_FRAME, INTRA_FRAME],
             mv: [mc::Mv::default(); 2],
             sub_mv: [[mc::Mv::default(); 2]; 4],
+            seg_predicted: false,
         }
     }
 }
@@ -181,12 +185,14 @@ struct Scratch<'a> {
     slots: &'a RefSlots<'a>,
     tile_col_end: usize,
     prev: Option<&'a Motion>,
+    last_seg: &'a [u8],
 }
 
 pub fn reconstruct<'a>(
     parsed: &'a Parsed<'_>,
     slots: &'a RefSlots<'a>,
     prev: Option<&'a Motion>,
+    last_seg: &'a [u8],
 ) -> Result<Recon, CodecError> {
     if parsed.header.show_existing {
         return Err(CodecError::Unsupported {
@@ -204,7 +210,7 @@ pub fn reconstruct<'a>(
     } else {
         None
     };
-    let mut frame = Scratch::new(&parsed.header, &parsed.fc, slots, prev)?;
+    let mut frame = Scratch::new(&parsed.header, &parsed.fc, slots, prev, last_seg)?;
     frame.decode_tiles(parsed.tiles)?;
     frame.loop_filter()?;
     let picture = frame.picture()?;
@@ -213,6 +219,7 @@ pub fn reconstruct<'a>(
         picture,
         counts: frame.counts,
         motion,
+        segmap: frame.segmap,
     })
 }
 
@@ -222,6 +229,7 @@ impl<'a> Scratch<'a> {
         fc: &'a FrameContext,
         slots: &'a RefSlots<'a>,
         prev: Option<&'a Motion>,
+        last_seg: &'a [u8],
     ) -> Result<Self, CodecError> {
         let width = header.width;
         let height = header.height;
@@ -282,6 +290,7 @@ impl<'a> Scratch<'a> {
             slots,
             tile_col_end: mi_cols,
             prev,
+            last_seg,
         })
     }
 
@@ -543,9 +552,13 @@ impl<'a> Scratch<'a> {
         x_mis: usize,
         y_mis: usize,
     ) -> Result<Mi, CodecError> {
-        let mut mi = Mi::default();
-        mi.bsize = bsize;
-        mi.seg = self.read_segment(reader, mi_row, mi_col, x_mis, y_mis)?;
+        let (seg, predicted) = self.read_segment(reader, mi_row, mi_col, x_mis, y_mis)?;
+        let mut mi = Mi {
+            bsize,
+            seg,
+            seg_predicted: predicted,
+            ..Mi::default()
+        };
         mi.skip = self.read_skip(reader, mi_row, mi_col, mi.seg)?;
         mi.tx = self.read_tx(reader, bsize, mi_row, mi_col, true)?;
         self.read_y_modes(reader, &mut mi, mi_row, mi_col)?;
@@ -561,15 +574,122 @@ impl<'a> Scratch<'a> {
         mi_col: usize,
         x_mis: usize,
         y_mis: usize,
-    ) -> Result<u8, CodecError> {
-        let seg = &self.header.seg;
-        if !seg.enabled || !seg.update_map {
-            return Ok(0);
+    ) -> Result<(u8, bool), CodecError> {
+        if !self.header.seg.enabled {
+            return Ok((0, false));
         }
-        let id = prob::read_tree(reader, &prob::SEG_TREE, &seg.tree_probs)?;
+        if self.header.is_intra() {
+            return self.intra_segment(reader, mi_row, mi_col, x_mis, y_mis);
+        }
+        self.inter_segment(reader, mi_row, mi_col, x_mis, y_mis)
+    }
+
+    fn intra_segment(
+        &mut self,
+        reader: &mut BoolDecoder<'_>,
+        mi_row: usize,
+        mi_col: usize,
+        x_mis: usize,
+        y_mis: usize,
+    ) -> Result<(u8, bool), CodecError> {
+        if !self.header.seg.update_map {
+            self.copy_segment(mi_row, mi_col, x_mis, y_mis);
+            return Ok((0, false));
+        }
+        let id = self.read_seg_id(reader)?;
+        self.write_segment(mi_row, mi_col, x_mis, y_mis, id);
+        Ok((id, false))
+    }
+
+    fn inter_segment(
+        &mut self,
+        reader: &mut BoolDecoder<'_>,
+        mi_row: usize,
+        mi_col: usize,
+        x_mis: usize,
+        y_mis: usize,
+    ) -> Result<(u8, bool), CodecError> {
+        let predicted = self.predicted_segment(mi_row, mi_col, x_mis, y_mis)?;
+        if !self.header.seg.update_map {
+            self.copy_segment(mi_row, mi_col, x_mis, y_mis);
+            return Ok((predicted, false));
+        }
+        if !self.header.seg.temporal {
+            let id = self.read_seg_id(reader)?;
+            self.write_segment(mi_row, mi_col, x_mis, y_mis, id);
+            return Ok((id, false));
+        }
+        let ctx = self.seg_pred_ctx(mi_row, mi_col);
+        let prob = u32::from(self.header.seg.pred_probs.get(ctx).copied().unwrap_or(255));
+        let keep = reader.read(prob)? == 1;
+        let id = if keep {
+            predicted
+        } else {
+            self.read_seg_id(reader)?
+        };
+        self.write_segment(mi_row, mi_col, x_mis, y_mis, id);
+        Ok((id, keep))
+    }
+
+    fn read_seg_id(&self, reader: &mut BoolDecoder<'_>) -> Result<u8, CodecError> {
+        let id = prob::read_tree(reader, &prob::SEG_TREE, &self.header.seg.tree_probs)?;
         if id > 7 {
             return Err(bad("segment id"));
         }
+        Ok(id)
+    }
+
+    fn predicted_segment(
+        &self,
+        mi_row: usize,
+        mi_col: usize,
+        x_mis: usize,
+        y_mis: usize,
+    ) -> Result<u8, CodecError> {
+        let mut id = u8::MAX;
+        let mut saw = false;
+        for y in 0..y_mis {
+            for x in 0..x_mis {
+                let i = (mi_row + y) * self.mi_cols + mi_col + x;
+                let Some(value) = self.last_seg.get(i).copied() else {
+                    continue;
+                };
+                saw = true;
+                id = id.min(value);
+            }
+        }
+        if !saw {
+            return Ok(0);
+        }
+        if id > 7 {
+            return Err(bad("segment id"));
+        }
+        Ok(id)
+    }
+
+    fn seg_pred_ctx(&self, mi_row: usize, mi_col: usize) -> usize {
+        let above = self
+            .above_mi(mi_row, mi_col)
+            .is_some_and(|mi| mi.seg_predicted);
+        let left = self
+            .left_mi(mi_row, mi_col)
+            .is_some_and(|mi| mi.seg_predicted);
+        usize::from(above) + usize::from(left)
+    }
+
+    fn copy_segment(&mut self, mi_row: usize, mi_col: usize, x_mis: usize, y_mis: usize) {
+        for y in 0..y_mis {
+            for x in 0..x_mis {
+                let i = (mi_row + y) * self.mi_cols + mi_col + x;
+                let value = self.last_seg.get(i).copied().unwrap_or(0);
+                if let Some(slot) = self.segmap.get_mut(i) {
+                    *slot = value;
+                }
+            }
+        }
+    }
+
+    fn write_segment(&mut self, mi_row: usize, mi_col: usize, x_mis: usize, y_mis: usize, id: u8) {
         for y in 0..y_mis {
             for x in 0..x_mis {
                 let i = (mi_row + y) * self.mi_cols + mi_col + x;
@@ -578,7 +698,6 @@ impl<'a> Scratch<'a> {
                 }
             }
         }
-        Ok(id)
     }
 
     fn read_skip(
@@ -915,10 +1034,26 @@ impl<'a> Scratch<'a> {
     }
 
     fn plane_mut(&mut self, plane: usize) -> (usize, usize, usize, &mut [u8]) {
+        // Intra edges use the aligned plane, libvpx `y_width` / `uv_width`.
         match plane {
-            0 => (self.crop_w, self.crop_h, self.y_stride, &mut self.y),
-            1 => (self.uv_w, self.uv_h, self.uv_stride, &mut self.u),
-            _ => (self.uv_w, self.uv_h, self.uv_stride, &mut self.v),
+            0 => (
+                self.y_stride,
+                self.y.len() / self.y_stride.max(1),
+                self.y_stride,
+                &mut self.y,
+            ),
+            1 => (
+                self.uv_stride,
+                self.u.len() / self.uv_stride.max(1),
+                self.uv_stride,
+                &mut self.u,
+            ),
+            _ => (
+                self.uv_stride,
+                self.v.len() / self.uv_stride.max(1),
+                self.uv_stride,
+                &mut self.v,
+            ),
         }
     }
 
@@ -1277,7 +1412,7 @@ mod tests {
     #[test]
     fn lossless_red_keyframe_matches_ffmpeg() {
         let parsed = parse(&Persist::new(), &RED_16).expect("header");
-        let pic = reconstruct(&parsed, &RefSlots::none(), None)
+        let pic = reconstruct(&parsed, &RefSlots::none(), None, &[])
             .expect("recon")
             .picture;
         assert_eq!((pic.width, pic.height), (16, 16));
@@ -1319,7 +1454,7 @@ mod tests {
         ];
         for (name, payload, raw, w, h) in cases {
             let parsed = parse(&Persist::new(), payload).expect("header");
-            let pic = reconstruct(&parsed, &RefSlots::none(), None)
+            let pic = reconstruct(&parsed, &RefSlots::none(), None, &[])
                 .unwrap_or_else(|err| panic!("{name} recon {err}"))
                 .picture;
             assert_eq!((pic.width, pic.height), (w, h), "{name}");

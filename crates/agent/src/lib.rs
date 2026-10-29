@@ -14,6 +14,7 @@ mod r#loop;
 mod model;
 mod sandbox;
 mod settings_tool;
+mod skill;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
 pub use draft::{
@@ -30,3 +31,4 @@ pub use sandbox::{
     SandboxRoute, route_for,
 };
 pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
+pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};

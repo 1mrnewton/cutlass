@@ -16,8 +16,8 @@ use crate::dims::{
     V_DCT, V_FLIPADST, block_height, block_width, intra_tx_type, partition_subsize,
     subsampled_size,
 };
-use crate::header::RESTORE_SGRPROJ;
 use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
+use crate::header::{RESTORE_SGRPROJ, RESTORE_WIENER};
 use crate::idct::inverse_2d;
 use crate::inter::{
     BlockPlace, Candidates, GLOBALMV, InterSample, LAST_FRAME, Motion, MotionGrid, NEARESTMV,
@@ -267,10 +267,10 @@ fn restore_plane(
     plane: usize,
     frame: &FrameInfo,
 ) -> Vec<u8> {
-    if frame.restoration.plane.get(plane).copied() == Some(RESTORE_SGRPROJ) {
-        restore::apply_sgr(cdef, before, width, height, lr, plane)
-    } else {
-        cdef.to_vec()
+    match frame.restoration.plane.get(plane).copied() {
+        Some(RESTORE_WIENER) => restore::apply_wiener(cdef, before, width, height, lr, plane),
+        Some(RESTORE_SGRPROJ) => restore::apply_sgr(cdef, before, width, height, lr, plane),
+        _ => cdef.to_vec(),
     }
 }
 

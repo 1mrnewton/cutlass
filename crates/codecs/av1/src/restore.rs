@@ -6,7 +6,7 @@
 
 use cutlass_decode::CodecError;
 
-use crate::header::{FrameInfo, RESTORE_NONE, RESTORE_SGRPROJ};
+use crate::header::{FrameInfo, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER};
 use crate::symbol::SymbolDecoder;
 
 const SGR_PARAMS: [[i32; 4]; 16] = [
@@ -43,6 +43,9 @@ pub struct Unit {
     pub kind: u8,
     pub set: u8,
     pub xqd: [i32; 2],
+    /// Vertical coefficients, then horizontal. Each pass stores the three
+    /// signaled taps. The center tap is derived so the seven taps sum to 128.
+    pub coeff: [[i32; 3]; 2],
 }
 
 /// Restoration units for the planes that use the self-guided filter.
@@ -88,6 +91,7 @@ impl Grid {
                     kind: RESTORE_NONE,
                     set: 0,
                     xqd: [0; 2],
+                    coeff: [[0; 3]; 2],
                 };
                 count
             ],
@@ -162,6 +166,7 @@ fn read_sgr_unit(
             kind: RESTORE_NONE,
             set: 0,
             xqd: [0; 2],
+            coeff: [[0; 3]; 2],
         });
     }
     let set = symbols.read_literal(4)? as u8;
@@ -190,7 +195,21 @@ fn read_sgr_unit(
         kind: RESTORE_SGRPROJ,
         set,
         xqd,
+        coeff: [[0; 3]; 2],
     })
+}
+
+/// Seven symmetric taps. The signaled values occupy both ends, and the center
+/// keeps a unit DC gain.
+pub fn wiener_taps(coeff: [i32; 3]) -> [i32; 7] {
+    let mut filter = [0i32; 7];
+    filter[3] = 128;
+    for (index, tap) in coeff.iter().enumerate() {
+        filter[index] = *tap;
+        filter[6 - index] = *tap;
+        filter[3] -= 2 * *tap;
+    }
+    filter
 }
 
 fn signed_subexp(
@@ -553,6 +572,118 @@ fn box_ab(
     (a2 as i32, round2(b2, RECIP_BITS) as i32)
 }
 
+/// Filter one plane with the Wiener restoration filter.
+///
+/// `cdef` is the picture after CDEF. `before` is the deblocked picture, used
+/// for the two rows outside a restoration stripe. Pass 0 of `coeff` is the
+/// vertical filter. Pass 1 is the horizontal filter, and it runs first.
+pub fn apply_wiener(
+    cdef: &[u8],
+    before: &[u8],
+    width: usize,
+    height: usize,
+    grid: &Grid,
+    plane: usize,
+) -> Vec<u8> {
+    let mut out = cdef.to_vec();
+    if width == 0 || height == 0 || plane >= 3 || grid.rows[plane] == 0 {
+        return out;
+    }
+    let mut y = 0usize;
+    while y < height {
+        let stripe = (y + 8) / 64;
+        let start = stripe as i32 * 64 - 8;
+        let end = start + 63;
+        let last = (end.max(0) as usize).min(height - 1);
+        if last < y {
+            break;
+        }
+        let mut x = 0usize;
+        while x < width {
+            let size = grid.unit_size[plane].max(1);
+            let unit_col = (x / size).min(grid.cols[plane] - 1);
+            let mut x1 = x + 1;
+            while x1 < width && (x1 / size).min(grid.cols[plane] - 1) == unit_col {
+                x1 += 1;
+            }
+            let unit_row = (y / size).min(grid.rows[plane] - 1);
+            if let Some(slot) = grid.index(plane, unit_row, unit_col) {
+                let unit = grid.units[slot];
+                if unit.kind == RESTORE_WIENER {
+                    let source = Source {
+                        cdef,
+                        before,
+                        width,
+                        height: cdef.len() / width.max(1),
+                        stripe_start: start,
+                        stripe_end: end,
+                    };
+                    wiener_block(
+                        &mut out,
+                        &source,
+                        Block {
+                            x,
+                            y,
+                            w: x1 - x,
+                            h: last - y + 1,
+                        },
+                        unit.coeff[0],
+                        unit.coeff[1],
+                    );
+                }
+            }
+            x = x1;
+        }
+        y = last + 1;
+    }
+    out
+}
+
+fn wiener_block(
+    out: &mut [u8],
+    source: &Source<'_>,
+    block: Block,
+    vertical: [i32; 3],
+    horizontal: [i32; 3],
+) {
+    let hfilter = wiener_taps(horizontal);
+    let vfilter = wiener_taps(vertical);
+    let rows = block.h + 6;
+    let mut intermediate = vec![0i32; rows.saturating_mul(block.w)];
+    for row in 0..rows {
+        for col in 0..block.w {
+            let mut sum = 0i32;
+            for (tap_index, tap) in hfilter.iter().enumerate() {
+                let sample = source.sample(
+                    block.x as i32 + col as i32 + tap_index as i32 - 3,
+                    block.y as i32 + row as i32 - 3,
+                );
+                sum += *tap * sample;
+            }
+            let rounded = round2(i64::from(sum), 3) as i32;
+            if let Some(slot) = intermediate.get_mut(row * block.w + col) {
+                *slot = clip3(-2048, 6143, rounded);
+            }
+        }
+    }
+    for row in 0..block.h {
+        for col in 0..block.w {
+            let mut sum = 0i32;
+            for (tap_index, tap) in vfilter.iter().enumerate() {
+                let above = intermediate
+                    .get((row + tap_index) * block.w + col)
+                    .copied()
+                    .unwrap_or(0);
+                sum += *tap * above;
+            }
+            let rounded = round2(i64::from(sum), 11);
+            if let Some(slot) = out.get_mut((block.y + row) * source.width + block.x + col) {
+                *slot = u8::try_from(rounded.clamp(0, 255)).unwrap_or(0);
+            }
+        }
+    }
+}
+
 fn round2(value: i64, bits: i32) -> i64 {
     if bits <= 0 {
         return value;
@@ -562,7 +693,9 @@ fn round2(value: i64, bits: i32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Grid, SGR_PARAMS, Unit, XQD_REF, apply_sgr};
+    use super::{
+        Grid, RESTORE_WIENER, SGR_PARAMS, Unit, XQD_REF, apply_sgr, apply_wiener, wiener_taps,
+    };
 
     #[test]
     fn every_self_guided_set_has_four_parameters() {
@@ -584,11 +717,43 @@ mod tests {
                 kind: super::RESTORE_SGRPROJ,
                 set: 0,
                 xqd: [-32, 31],
+                coeff: [[0; 3]; 2],
             }],
             reference: [XQD_REF; 3],
             active: true,
         };
         let out = apply_sgr(&samples, &samples, width, height, &grid, 0);
+        assert!(out.iter().all(|sample| *sample == 40));
+    }
+
+    #[test]
+    fn wiener_taps_keep_unit_gain() {
+        assert_eq!(wiener_taps([0, 0, 0]), [0, 0, 0, 128, 0, 0, 0]);
+        let taps = wiener_taps([3, -7, 15]);
+        assert_eq!(taps.iter().sum::<i32>(), 128);
+        assert_eq!(taps[0], 3);
+        assert_eq!(taps[6], 3);
+    }
+
+    #[test]
+    fn a_constant_plane_stays_constant_under_wiener() {
+        let width = 16usize;
+        let height = 8usize;
+        let samples = vec![40u8; width * height];
+        let grid = Grid {
+            cols: [1, 0, 0],
+            rows: [1, 0, 0],
+            unit_size: [256, 0, 0],
+            units: vec![Unit {
+                kind: RESTORE_WIENER,
+                set: 0,
+                xqd: [0; 2],
+                coeff: [[3, -7, 15], [3, -7, 15]],
+            }],
+            reference: [XQD_REF; 3],
+            active: true,
+        };
+        let out = apply_wiener(&samples, &samples, width, height, &grid, 0);
         assert!(out.iter().all(|sample| *sample == 40));
     }
 }

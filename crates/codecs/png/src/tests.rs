@@ -608,6 +608,26 @@ fn ffmpeg_and_imagemagick_match_exact_samples_when_present() {
 }
 
 #[test]
+fn ffmpeg_sixteen_bit_truecolor_matches_exact_samples() {
+    let Some(ffmpeg) = tool("ffmpeg") else {
+        require_or_skip("ffmpeg");
+        return;
+    };
+    let png = ffmpeg_png(
+        &ffmpeg,
+        &[0x00, 0x01, 0x02, 0x03, 0xff, 0xfe],
+        1,
+        1,
+        "rgb48be",
+        None,
+    );
+    let image = decode_bytes(&png).expect("rgb48");
+    assert_eq!(image.color, ColorType::Rgb);
+    assert_eq!(image.depth, BitDepth::Sixteen);
+    assert_eq!(image.samples, vec![0x0001, 0x0203, 0xfffe]);
+}
+
+#[test]
 fn a_local_png_matches_ffmpeg_when_the_file_is_present() {
     let Some(path) = local_png() else {
         return;

@@ -2,13 +2,13 @@
 
 Native AV1 decoder and encoder. The support record is `STATUS.md`. These percentages are a scope estimate of that record, not a line count and not a coverage report.
 
-About **58%** of the full decoder-and-encoder job is done. The constrained 8-bit 4:2:0 path is further along than a file a normal encoder writes.
+About **62%** of the full decoder-and-encoder job is done. The constrained 8-bit 4:2:0 path is further along than a file a normal encoder writes.
 
 | Slice | Done | What that covers |
 | --- | --- | --- |
-| Decoder | ~80% | Headers, references, intra (including the recursive filter and the extended transform set), film grain, order hint, uniform tiles, a quantizer matrix, and a superblock quantizer delta. A normal file can be opened. Its picture is not yet a dav1d match. |
+| Decoder | ~85% | Headers, references, intra (including the recursive filter and the extended transform set), film grain, order hint, uniform tiles, a quantizer matrix, and a superblock quantizer delta. One real 2160p keyframe matches dav1d. |
 | Encoder | ~25% | Keyframes only. The rate and quality gates for that path already pass. |
-| Proof | ~40% | Exact dav1d matches on the supported subset. Speed, the long fuzz run, and a real production file are still open. |
+| Proof | ~55% | Exact dav1d matches on the supported subset, including one production 2160p keyframe. Speed and the long fuzz run are still open. |
 
 ## Decoder
 
@@ -16,7 +16,7 @@ About **58%** of the full decoder-and-encoder job is done. The constrained 8-bit
 | --- | --- |
 | OBUs, sequence and frame headers, eight reference slots, show-existing, hidden frames, failed-packet rollback | ~90% |
 | Intra prediction, partitions, chroma-from-luma, 2D inverse DCT through 64 | ~80% |
-| Identity and 1D transforms | ~70%. Horizontal-only and vertical-only coefficient contexts follow the specification. An extended-set keyframe matches dav1d. |
+| Identity and 1D transforms | ~85%. Horizontal-only and vertical-only coefficient contexts follow the specification. An extended-set keyframe matches dav1d. |
 | Single-reference inter | ~40%. An error-resilient frame may carry an order hint. Compound, warped, overlapped, reference motion vectors, and scaled references are refused. |
 | Deblocking | ~70% |
 | CDEF | ~90% |
@@ -40,10 +40,10 @@ Current decoder work stays on this table. The encoder is left as it is until the
 
 | Gate | Done |
 | --- | --- |
-| dav1d pixel match on the supported tools | ~70% |
+| dav1d pixel match on the supported tools | ~80% |
 | Hostile input returns an error | ~80% |
 | 30-minute fuzz | 0%. 200 random packets is the stand-in. |
 | 720×480 real time on one thread | 0%. About five round trips a second. |
-| A production 2160p file plays | 0%. The picture is produced and does not match dav1d. |
+| A production 2160p file plays | One keyframe matches dav1d. Later frames are not proven. |
 
-The 2160p keyframe now parses, including its four uniform tiles, quantizer matrix, superblock quantizer delta, and selectable transform sizes. After the loop filter, luma differs in a few thousand samples and chroma differs in about a quarter of its samples. Compound prediction and carrying CDF state from another frame are still refused. An inter frame that selects its transform size is still refused.
+The 2160p keyframe matches dav1d, including its four uniform tiles, quantizer matrix, superblock quantizer delta, and selectable transform sizes. Chroma neighbor flags stay inside the chroma superblock, and an extended intra edge does not cross into the next tile. Compound prediction and carrying CDF state from another frame are still refused. An inter frame that selects its transform size is still refused.

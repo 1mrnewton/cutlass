@@ -314,6 +314,19 @@ fn a_text_keyword_with_a_leading_space_is_refused() {
 }
 
 #[test]
+fn text_after_idat_is_kept() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&SIGNATURE);
+    bytes.extend(chunk(b"IHDR", &ihdr(1, 1, 8, 0, 0)));
+    bytes.extend(chunk(b"IDAT", &stored_zlib(&[0, 4])));
+    bytes.extend(chunk(b"tEXt", b"Title\0after"));
+    bytes.extend(chunk(b"IEND", &[]));
+    let image = decode_bytes(&bytes).expect("after");
+    assert_eq!(image.samples, vec![4]);
+    assert_eq!(image.texts[0].text, b"after");
+}
+
+#[test]
 fn a_failed_picture_does_not_block_the_next_one() {
     let mut decoder = PngDecoder::open(&png_params(false)).expect("open");
     let bad = Packet::audio(b"nope".to_vec(), 0, 0, 0);

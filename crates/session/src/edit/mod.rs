@@ -13,6 +13,7 @@ mod track;
 mod transition;
 mod trim;
 mod volume;
+mod words;
 
 use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TrackAttribute};
 
@@ -21,6 +22,7 @@ use crate::request::Request;
 pub use move_segment::move_segment;
 pub use place::place;
 pub use trim::trim;
+pub use words::set_words;
 
 /// Why one request did not change the draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +42,8 @@ pub enum EditError {
     Overlap,
     /// The constant-speed mapping refused the duration or the speed.
     Speed(cutlass_model::ConstantSpeedError),
+    /// Word columns disagree, or a word ends before it starts.
+    WordShape,
     Range(RangeError),
     EmptyUndo,
     EmptyRedo,
@@ -73,6 +77,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             edge,
             time,
         } => trim(draft, segment_id, *edge, *time),
+        Request::SetWords { material_id, words } => set_words(draft, material_id, words.clone()),
         Request::SetTrackAttribute { track_id, bit, on } => {
             track::set_track_attribute(draft, track_id, *bit, *on)
         }

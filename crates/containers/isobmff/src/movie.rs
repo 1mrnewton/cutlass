@@ -465,11 +465,16 @@ fn parse_ctts(payload: &[u8]) -> Result<Vec<CtsRun>, Error> {
     let mut rows = Vec::new();
     for _ in 0..count {
         let samples = reader.u32()?;
-        let offset = if version == 0 {
-            i64::from(reader.u32()?)
-        } else {
-            i64::from(reader.i32()?)
-        };
+        // The 2022 text makes version 0 unsigned. QuickTime stores a negative
+        // offset in that field, and the high bit is the sign. Versions 0 and 1
+        // are read as a signed 32-bit value so those files can be rewritten.
+        // A positive offset at or above 2^31 is not represented.
+        if version > 1 {
+            return Err(Error::Unsupported {
+                what: "composition offset version",
+            });
+        }
+        let offset = i64::from(reader.i32()?);
         if samples > 0 {
             rows.push(CtsRun {
                 count: samples,

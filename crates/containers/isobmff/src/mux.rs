@@ -7,7 +7,8 @@
 //!
 //! Packet decode times on a track start at 0 and advance by each sample's
 //! duration. Presentation time may differ; that difference is the composition
-//! offset.
+//! offset. Edit durations use `MuxOptions::movie_timescale` when the caller
+//! sets it, and the least common multiple of the track timescales otherwise.
 
 use crate::legacy::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
 use crate::limits::{
@@ -35,6 +36,9 @@ pub struct MuxOptions {
     pub moov_at_end: bool,
     pub fragmented: bool,
     pub samples_per_fragment: u32,
+    /// Movie-header timescale. Edit durations are in this scale.
+    /// `None` uses the least common multiple of the track timescales.
+    pub movie_timescale: Option<u32>,
 }
 
 impl Default for MuxOptions {
@@ -44,6 +48,7 @@ impl Default for MuxOptions {
             moov_at_end: true,
             fragmented: false,
             samples_per_fragment: DEFAULT_SAMPLES_PER_FRAGMENT,
+            movie_timescale: None,
         }
     }
 }
@@ -178,7 +183,7 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         let ftyp = ftyp_bytes(self.options.brand, self.options.fragmented);
         self.write_bytes(&ftyp)?;
         if self.options.fragmented {
-            let moov = init_moov(&self.tracks)?;
+            let moov = init_moov(&self.tracks, self.movie_scale()?)?;
             self.write_bytes(&moov)?;
         } else if self.options.moov_at_end {
             self.mdat_at = Some(self.cursor);
@@ -349,13 +354,15 @@ impl<W: Write + Seek> Mux for IsoBmffMux<W> {
             };
             let size = self.cursor.saturating_sub(mdat_at);
             self.patch(mdat_at + 8, &size.to_be_bytes())?;
-            let moov = movie_bytes(&self.tracks, &self.held, |offset| offset)?;
+            let scale = self.movie_scale()?;
+            let moov = movie_bytes(&self.tracks, &self.held, scale, |offset| offset)?;
             self.write_bytes(&moov)?;
         } else {
             let ftyp = ftyp_bytes(self.options.brand, false);
-            let probe = movie_bytes(&self.tracks, &self.held, |_| 0)?;
+            let scale = self.movie_scale()?;
+            let probe = movie_bytes(&self.tracks, &self.held, scale, |_| 0)?;
             let payload_at = u64::try_from(ftyp.len() + probe.len()).unwrap_or(0) + 16;
-            let moov = movie_bytes(&self.tracks, &self.held, |relative| {
+            let moov = movie_bytes(&self.tracks, &self.held, scale, |relative| {
                 payload_at.saturating_add(relative)
             })?;
             if moov.len() != probe.len() {
@@ -487,9 +494,9 @@ fn ftyp_bytes(brand: FileBrand, fragmented: bool) -> Vec<u8> {
 fn movie_bytes(
     tracks: &[TrackOut],
     held: &[Held],
+    movie_scale: u32,
     map_offset: impl Fn(u64) -> u64,
 ) -> Result<Vec<u8>, Error> {
-    let movie_scale = movie_timescale(tracks);
     let mut body = Vec::new();
     let duration = movie_duration(tracks, held, movie_scale)?;
     body.extend(mvhd(movie_scale, duration, tracks.len())?);
@@ -500,8 +507,7 @@ fn movie_bytes(
     Ok(box_bytes(b"moov", &body))
 }
 
-fn init_moov(tracks: &[TrackOut]) -> Result<Vec<u8>, Error> {
-    let movie_scale = movie_timescale(tracks);
+fn init_moov(tracks: &[TrackOut], movie_scale: u32) -> Result<Vec<u8>, Error> {
     let mut body = Vec::new();
     body.extend(mvhd(movie_scale, 0, tracks.len())?);
     for track in tracks {
@@ -513,6 +519,20 @@ fn init_moov(tracks: &[TrackOut]) -> Result<Vec<u8>, Error> {
     }
     body.extend(box_bytes(b"mvex", &mvex));
     Ok(box_bytes(b"moov", &body))
+}
+
+impl<W: Write + Seek> IsoBmffMux<W> {
+    fn movie_scale(&self) -> Result<u32, Error> {
+        if let Some(scale) = self.options.movie_timescale {
+            if scale == 0 {
+                return Err(Error::Unsupported {
+                    what: "movie timescale 0",
+                });
+            }
+            return Ok(scale);
+        }
+        Ok(movie_timescale(&self.tracks))
+    }
 }
 
 fn movie_timescale(tracks: &[TrackOut]) -> u32 {
@@ -593,8 +613,9 @@ fn trak(
     });
     let movie_duration = scale_u(media_duration, track.params.timescale.get(), movie_scale);
     let mut body = tkhd(track, movie_duration);
-    if !track.edits.is_empty() {
-        body.extend(elst(&track.edits));
+    let edits = present_edits(track, media_duration, movie_scale);
+    if !edits.is_empty() {
+        body.extend(elst(&edits));
     }
     let mut mdia = Vec::new();
     mdia.extend(mdhd(track, media_duration));
@@ -628,6 +649,32 @@ fn tkhd(track: &TrackOut, duration: u64) -> Vec<u8> {
     payload.extend_from_slice(&fixed_16_16(width).to_be_bytes());
     payload.extend_from_slice(&fixed_16_16(height).to_be_bytes());
     box_bytes(b"tkhd", &payload)
+}
+
+/// A zero segment duration with a media time does not describe a dwell.
+/// Fragmented files leave that duration unknown. Use the media length so a
+/// player does not treat the edit as empty.
+fn present_edits(track: &TrackOut, media_duration: u64, movie_scale: u32) -> Vec<Edit> {
+    track
+        .edits
+        .iter()
+        .map(|edit| {
+            if edit.segment_duration == 0 && edit.media_time.is_some() && media_duration > 0 {
+                Edit {
+                    segment_duration: scale_u(
+                        media_duration,
+                        track.params.timescale.get(),
+                        movie_scale,
+                    )
+                    .max(1),
+                    media_time: edit.media_time,
+                    media_rate: edit.media_rate,
+                }
+            } else {
+                *edit
+            }
+        })
+        .collect()
 }
 
 fn elst(edits: &[Edit]) -> Vec<u8> {

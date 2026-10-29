@@ -1,6 +1,6 @@
 use cutlass_model::{
     CommonKeyframeGroup, Crop, FreezeInfo, MaterialId, MaterialTransition, Micros, Segment,
-    SegmentId, SpeedPoint, TrackId,
+    SegmentId, SpeedPoint, TrackId, WordColumns,
 };
 
 /// Which edge of a segment a trim moves.
@@ -31,6 +31,14 @@ pub enum Request {
         segment_id: SegmentId,
         edge: TrimEdge,
         time: Micros,
+    },
+    /// Replace the recognized words and the current words on one text material.
+    ///
+    /// Word times are milliseconds. The caption string becomes those words
+    /// joined by spaces. Both word arrays receive this result.
+    SetWords {
+        material_id: MaterialId,
+        words: WordColumns,
     },
     /// Turn one track-attribute bit on or off. Mute and solo are not gains.
     SetTrackAttribute {

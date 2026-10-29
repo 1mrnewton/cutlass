@@ -640,6 +640,28 @@ mod tests {
     }
 
     #[test]
+    fn odd_size_loop_filter_matches_libvpx() {
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/vp9_odd_0.bin"),
+            include_bytes!("../fixtures/vp9_odd_1.bin"),
+        ];
+        let yuv = include_bytes!("../fixtures/vp9_odd.yuv");
+        let mut decoder = Decoder::new();
+        let mut got = Vec::new();
+        for (index, frame) in frames.iter().enumerate() {
+            let picture = decoder
+                .decode(frame)
+                .unwrap_or_else(|err| panic!("frame {index}: {err}"))
+                .expect("shown");
+            assert_eq!((picture.width, picture.height), (52, 52));
+            got.extend_from_slice(&picture.y);
+            got.extend_from_slice(&picture.u);
+            got.extend_from_slice(&picture.v);
+        }
+        assert_eq!(got, yuv);
+    }
+
+    #[test]
     fn segmentation_matches_libvpx() {
         let frames: [&[u8]; 8] = [
             include_bytes!("../fixtures/vp9_aq_0.bin"),

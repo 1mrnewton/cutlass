@@ -3,7 +3,9 @@
 //! Edge selection follows libvpx `vp9_build_mask` and `vp9_adjust_mask`.
 //! Pixel updates follow the scalar filters in `vpx_dsp/loopfilter.c`.
 //! A frame whose level is zero is left unchanged, which is what libvpx does
-//! even when a segment requests a different level.
+//! even when a segment requests a different level. Taps that leave the frame
+//! buffer read zero. The buffer keeps a border past the aligned plane, and a
+//! transform may have written real samples into that border.
 
 use cutlass_decode::CodecError;
 
@@ -730,7 +732,11 @@ fn vert4(
     thr: &Thresh,
 ) -> Result<(), CodecError> {
     for row in 0..8 {
-        let at = index(plane, stride, x, y + row, 4, 4)?;
+        let yy = y + row;
+        let Ok(at) = index(plane, stride, x, yy, 4, 4) else {
+            vert4_border(plane, stride, x, yy, thr);
+            continue;
+        };
         let p = side(plane, at, 4);
         let q = [plane[at], plane[at + 1], plane[at + 2], plane[at + 3]];
         let mask = filter_mask(thr, &p, &q);
@@ -755,7 +761,11 @@ fn vert8(
     thr: &Thresh,
 ) -> Result<(), CodecError> {
     for row in 0..8 {
-        let at = index(plane, stride, x, y + row, 4, 4)?;
+        let yy = y + row;
+        let Ok(at) = index(plane, stride, x, yy, 4, 4) else {
+            vert8_border(plane, stride, x, yy, thr);
+            continue;
+        };
         let p = side(plane, at, 4);
         let q = [plane[at], plane[at + 1], plane[at + 2], plane[at + 3]];
         let wide = filter8(thr, &p, &q);
@@ -778,7 +788,11 @@ fn vert16(
     thr: &Thresh,
 ) -> Result<(), CodecError> {
     for row in 0..rows {
-        let at = index(plane, stride, x, y + row, 8, 8)?;
+        let yy = y + row;
+        let Ok(at) = index(plane, stride, x, yy, 8, 8) else {
+            vert16_border(plane, stride, x, yy, thr);
+            continue;
+        };
         let p = side(plane, at, 8);
         let mut q = [0u8; 8];
         q.copy_from_slice(&plane[at..at + 8]);
@@ -797,14 +811,18 @@ fn horiz4(
     thr: &Thresh,
 ) -> Result<(), CodecError> {
     for col in 0..8 {
-        let samples = column(plane, stride, x + col, y, 4, 4)?;
+        let xx = x + col;
+        let Ok(samples) = column(plane, stride, xx, y, 4, 4) else {
+            horiz4_border(plane, stride, xx, y, thr);
+            continue;
+        };
         let mask = filter_mask(thr, &samples[..4], &samples[4..]);
         let mut p1 = samples[2];
         let mut p0 = samples[3];
         let mut q0 = samples[4];
         let mut q1 = samples[5];
         filter4(mask, thr.hev, &mut p1, &mut p0, &mut q0, &mut q1);
-        put_column(plane, stride, x + col, y, &[p1, p0, q0, q1], 2)?;
+        put_column(plane, stride, xx, y, &[p1, p0, q0, q1], 2)?;
     }
     Ok(())
 }
@@ -817,9 +835,13 @@ fn horiz8(
     thr: &Thresh,
 ) -> Result<(), CodecError> {
     for col in 0..8 {
-        let samples = column(plane, stride, x + col, y, 4, 4)?;
+        let xx = x + col;
+        let Ok(samples) = column(plane, stride, xx, y, 4, 4) else {
+            horiz8_border(plane, stride, xx, y, thr);
+            continue;
+        };
         let wide = filter8(thr, &samples[..4], &samples[4..]);
-        put_column(plane, stride, x + col, y, &wide, 3)?;
+        put_column(plane, stride, xx, y, &wide, 3)?;
     }
     Ok(())
 }
@@ -833,11 +855,163 @@ fn horiz16(
     thr: &Thresh,
 ) -> Result<(), CodecError> {
     for col in 0..pixels {
-        let samples = column(plane, stride, x + col, y, 8, 8)?;
+        let xx = x + col;
+        let Ok(samples) = column(plane, stride, xx, y, 8, 8) else {
+            horiz16_border(plane, stride, xx, y, thr);
+            continue;
+        };
         let wide = filter16(thr, &samples[..8], &samples[8..]);
-        put_column(plane, stride, x + col, y, &wide, 7)?;
+        put_column(plane, stride, xx, y, &wide, 7)?;
     }
     Ok(())
+}
+
+fn vert4_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+    let xi = isize::try_from(x).unwrap_or(0);
+    let yi = isize::try_from(y).unwrap_or(0);
+    let p = side_px(plane, stride, xi, yi, 4);
+    let q = ahead_px(plane, stride, xi, yi, 4);
+    let mask = filter_mask(thr, &p, &q);
+    let mut p1 = p[2];
+    let mut p0 = p[3];
+    let mut q0 = q[0];
+    let mut q1 = q[1];
+    filter4(mask, thr.hev, &mut p1, &mut p0, &mut q0, &mut q1);
+    put_px(plane, stride, xi - 2, yi, p1);
+    put_px(plane, stride, xi - 1, yi, p0);
+    put_px(plane, stride, xi, yi, q0);
+    put_px(plane, stride, xi + 1, yi, q1);
+}
+
+fn vert8_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+    let xi = isize::try_from(x).unwrap_or(0);
+    let yi = isize::try_from(y).unwrap_or(0);
+    let p = side_px(plane, stride, xi, yi, 4);
+    let q = ahead_px(plane, stride, xi, yi, 4);
+    let wide = filter8(thr, &p, &q);
+    for (i, sample) in wide.iter().enumerate() {
+        let dx = isize::try_from(i).unwrap_or(0) - 3;
+        put_px(plane, stride, xi + dx, yi, *sample);
+    }
+}
+
+fn vert16_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+    let xi = isize::try_from(x).unwrap_or(0);
+    let yi = isize::try_from(y).unwrap_or(0);
+    let p = side_px(plane, stride, xi, yi, 8);
+    let q = ahead_px(plane, stride, xi, yi, 8);
+    let wide = filter16(thr, &p, &q);
+    for (i, sample) in wide.iter().enumerate() {
+        let dx = isize::try_from(i).unwrap_or(0) - 7;
+        put_px(plane, stride, xi + dx, yi, *sample);
+    }
+}
+
+fn horiz4_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+    let samples = column_px(plane, stride, x, y, 4, 4);
+    let mask = filter_mask(thr, &samples[..4], &samples[4..]);
+    let mut p1 = samples[2];
+    let mut p0 = samples[3];
+    let mut q0 = samples[4];
+    let mut q1 = samples[5];
+    filter4(mask, thr.hev, &mut p1, &mut p0, &mut q0, &mut q1);
+    store_column_px(plane, stride, x, y, &[p1, p0, q0, q1], 2);
+}
+
+fn horiz8_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+    let samples = column_px(plane, stride, x, y, 4, 4);
+    let wide = filter8(thr, &samples[..4], &samples[4..]);
+    store_column_px(plane, stride, x, y, &wide, 3);
+}
+
+fn horiz16_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+    let samples = column_px(plane, stride, x, y, 8, 8);
+    let wide = filter16(thr, &samples[..8], &samples[8..]);
+    store_column_px(plane, stride, x, y, &wide, 7);
+}
+
+fn side_px(plane: &[u8], stride: usize, x: isize, y: isize, n: usize) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    for (i, slot) in out.iter_mut().take(n).rev().enumerate() {
+        let di = isize::try_from(i).unwrap_or(0);
+        *slot = px(plane, stride, x - 1 - di, y);
+    }
+    out
+}
+
+fn ahead_px(plane: &[u8], stride: usize, x: isize, y: isize, n: usize) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    for (i, slot) in out.iter_mut().enumerate().take(n) {
+        let di = isize::try_from(i).unwrap_or(0);
+        *slot = px(plane, stride, x + di, y);
+    }
+    out
+}
+
+fn column_px(
+    plane: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    above: usize,
+    below: usize,
+) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let xi = isize::try_from(x).unwrap_or(0);
+    let yi = isize::try_from(y).unwrap_or(0);
+    let above_i = isize::try_from(above).unwrap_or(0);
+    for (i, slot) in out.iter_mut().enumerate().take(above + below) {
+        let di = isize::try_from(i).unwrap_or(0);
+        *slot = px(plane, stride, xi, yi - above_i + di);
+    }
+    out
+}
+
+fn store_column_px(
+    plane: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    samples: &[u8],
+    radius: usize,
+) {
+    let xi = isize::try_from(x).unwrap_or(0);
+    let yi = isize::try_from(y).unwrap_or(0);
+    let radius_i = isize::try_from(radius).unwrap_or(0);
+    for (i, sample) in samples.iter().enumerate() {
+        let di = isize::try_from(i).unwrap_or(0);
+        put_px(plane, stride, xi, yi - radius_i + di, *sample);
+    }
+}
+
+fn px(plane: &[u8], stride: usize, x: isize, y: isize) -> u8 {
+    if stride == 0 || x < 0 || y < 0 {
+        return 0;
+    }
+    let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+        return 0;
+    };
+    let height = plane.len() / stride;
+    if x >= stride || y >= height {
+        return 0;
+    }
+    plane.get(y * stride + x).copied().unwrap_or(0)
+}
+
+fn put_px(plane: &mut [u8], stride: usize, x: isize, y: isize, value: u8) {
+    if stride == 0 || x < 0 || y < 0 {
+        return;
+    }
+    let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
+        return;
+    };
+    let height = plane.len() / stride;
+    if x >= stride || y >= height {
+        return;
+    }
+    if let Some(slot) = plane.get_mut(y * stride + x) {
+        *slot = value;
+    }
 }
 
 fn index(

@@ -13,6 +13,12 @@ mod mv;
 pub(crate) use mc::{Job, RefPlane, render};
 pub use mc::{Motion, RefSlots, Reference};
 
+/// Right and bottom samples past the aligned plane. libvpx allocates
+/// `VP9_DEC_BORDER_IN_PIXELS` (32) so a transform that crosses `y_width` or
+/// `uv_width` is stored in that border. A stride equal to the aligned width
+/// wraps those samples onto the next row.
+const FRAME_BORDER: usize = 32;
+
 /// A reconstructed picture plus the counts and motion the next frame adapts from.
 pub struct Recon {
     pub picture: Picture,
@@ -166,6 +172,13 @@ struct Scratch<'a> {
     v: Vec<u8>,
     y_stride: usize,
     uv_stride: usize,
+    /// Aligned plane size, libvpx `y_width` / `y_height`. The stride is wider
+    /// by `FRAME_BORDER` so a transform that extends past this edge stays on
+    /// its row.
+    plane_w: usize,
+    plane_h: usize,
+    uv_plane_w: usize,
+    uv_plane_h: usize,
     crop_w: usize,
     crop_h: usize,
     uv_w: usize,
@@ -243,6 +256,12 @@ impl<'a> Scratch<'a> {
         let aligned = mi_cols.div_ceil(8) * 8;
         let coded_w = usize::try_from(align8(width)).unwrap_or(0);
         let coded_h = usize::try_from(align8(height)).unwrap_or(0);
+        let uv_w = coded_w / 2;
+        let uv_h = coded_h / 2;
+        let y_stride = coded_w.saturating_add(FRAME_BORDER);
+        let uv_stride = uv_w.saturating_add(FRAME_BORDER);
+        let y_rows = coded_h.saturating_add(FRAME_BORDER);
+        let uv_rows = uv_h.saturating_add(FRAME_BORDER);
         let cells = mi_cols.saturating_mul(mi_rows);
         Ok(Self {
             header,
@@ -259,11 +278,15 @@ impl<'a> Scratch<'a> {
             mi_cols,
             mi_rows,
             tile_col: 0,
-            y: vec![0u8; coded_w.saturating_mul(coded_h)],
-            u: vec![0u8; (coded_w / 2).saturating_mul(coded_h / 2)],
-            v: vec![0u8; (coded_w / 2).saturating_mul(coded_h / 2)],
-            y_stride: coded_w,
-            uv_stride: coded_w / 2,
+            y: vec![0u8; y_stride.saturating_mul(y_rows)],
+            u: vec![0u8; uv_stride.saturating_mul(uv_rows)],
+            v: vec![0u8; uv_stride.saturating_mul(uv_rows)],
+            y_stride,
+            uv_stride,
+            plane_w: coded_w,
+            plane_h: coded_h,
+            uv_plane_w: uv_w,
+            uv_plane_h: uv_h,
             crop_w: usize::try_from(width).unwrap_or(0),
             crop_h: usize::try_from(height).unwrap_or(0),
             uv_w: usize::try_from(width.div_ceil(2)).unwrap_or(0),
@@ -1034,23 +1057,19 @@ impl<'a> Scratch<'a> {
     }
 
     fn plane_mut(&mut self, plane: usize) -> (usize, usize, usize, &mut [u8]) {
-        // Intra edges use the aligned plane, libvpx `y_width` / `uv_width`.
+        // Intra edges use the aligned plane, libvpx `y_width` / `uv_width`,
+        // not the stride. The stride includes the frame border.
         match plane {
-            0 => (
-                self.y_stride,
-                self.y.len() / self.y_stride.max(1),
-                self.y_stride,
-                &mut self.y,
-            ),
+            0 => (self.plane_w, self.plane_h, self.y_stride, &mut self.y),
             1 => (
-                self.uv_stride,
-                self.u.len() / self.uv_stride.max(1),
+                self.uv_plane_w,
+                self.uv_plane_h,
                 self.uv_stride,
                 &mut self.u,
             ),
             _ => (
-                self.uv_stride,
-                self.v.len() / self.uv_stride.max(1),
+                self.uv_plane_w,
+                self.uv_plane_h,
                 self.uv_stride,
                 &mut self.v,
             ),

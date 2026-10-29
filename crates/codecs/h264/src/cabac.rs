@@ -7,7 +7,11 @@ use crate::tables::{CABAC_MN, LAST_8X8, RANGE_LPS, SIG_8X8, TRANS_LPS, TRANS_MPS
 
 pub struct Cabac<'a> {
     data: &'a [u8],
-    bit: usize,
+    /// Next byte that has not been pulled into `cache`.
+    index: usize,
+    cache: u64,
+    /// Valid low bits of `cache`.
+    bits: u32,
     range: u32,
     offset: u32,
     state: [u8; 1024],
@@ -23,15 +27,15 @@ impl<'a> Cabac<'a> {
         }
         let mut eng = Self {
             data,
-            bit: 0,
+            index: 0,
+            cache: 0,
+            bits: 0,
             range: 510,
             offset: 0,
             state: [0; 1024],
             mps: [0; 1024],
         };
-        for _ in 0..9 {
-            eng.offset = (eng.offset << 1) | eng.read_bit()?;
-        }
+        eng.offset = eng.read_bits(9)?;
         let slice_qp = qp.clamp(0, 51);
         for (ctx, &(m, n)) in CABAC_MN[init].iter().enumerate() {
             if ctx == 276 {
@@ -51,29 +55,46 @@ impl<'a> Cabac<'a> {
         Ok(eng)
     }
 
-    fn read_bit(&mut self) -> Result<u32, CodecError> {
-        let byte_index = self.bit / 8;
-        // Clause 9.3.3.2.2 reads a zero once the slice is exhausted. cabac_zero_word is that padding.
-        if byte_index >= self.data.len() {
+    fn at_bit(&self) -> u64 {
+        u64::try_from(self.index.saturating_mul(8)).unwrap_or(u64::MAX) - u64::from(self.bits)
+    }
+
+    fn fill(&mut self) {
+        while self.bits <= 56 && self.index < self.data.len() {
+            self.cache = (self.cache << 8) | u64::from(self.data[self.index]);
+            self.index += 1;
+            self.bits += 8;
+        }
+    }
+
+    #[inline(always)]
+    fn read_bits(&mut self, n: u32) -> Result<u32, CodecError> {
+        self.fill();
+        if self.bits < n {
             return Err(CodecError::Truncated {
-                at_bit: self.bit as u64,
+                at_bit: self.at_bit(),
                 what: "cabac",
             });
         }
-        let shift = 7 - (self.bit % 8);
-        let bit = u32::from((self.data[byte_index] >> shift) & 1);
-        self.bit += 1;
-        Ok(bit)
+        self.bits -= n;
+        let mask = (1u64 << n) - 1;
+        Ok(((self.cache >> self.bits) & mask) as u32)
     }
 
+    #[inline(always)]
     fn renorm(&mut self) -> Result<(), CodecError> {
-        while self.range < 256 {
-            self.range <<= 1;
-            self.offset = (self.offset << 1) | self.read_bit()?;
+        if self.range >= 256 {
+            return Ok(());
         }
+        // One shift brings `range` back to 256..510. That is the same bits the
+        // one-at-a-time loop used to read.
+        let shift = self.range.leading_zeros() - 23;
+        self.range <<= shift;
+        self.offset = (self.offset << shift) | self.read_bits(shift)?;
         Ok(())
     }
 
+    #[inline(always)]
     pub fn decision(&mut self, ctx: usize) -> Result<u8, CodecError> {
         let state = usize::from(self.state[ctx]);
         let mps = self.mps[ctx];
@@ -96,8 +117,9 @@ impl<'a> Cabac<'a> {
         Ok(bin)
     }
 
+    #[inline(always)]
     pub fn bypass(&mut self) -> Result<u8, CodecError> {
-        self.offset = (self.offset << 1) | self.read_bit()?;
+        self.offset = (self.offset << 1) | self.read_bits(1)?;
         if self.offset >= self.range {
             self.offset -= self.range;
             Ok(1)
@@ -125,21 +147,22 @@ impl<'a> Cabac<'a> {
         }
         let mut eng = Self {
             data,
-            bit: 0,
+            index: 0,
+            cache: 0,
+            bits: 0,
             range: 510,
             offset: 0,
             state: [0; 1024],
             mps: [0; 1024],
         };
-        for _ in 0..9 {
-            eng.offset = (eng.offset << 1) | eng.read_bit()?;
-        }
+        eng.offset = eng.read_bits(9)?;
         eng.init_states(qp, init);
         Ok(eng)
     }
 
     pub fn tail(&self) -> &'a [u8] {
-        let byte = self.bit.div_ceil(8);
+        let consumed = self.index * 8 - usize::try_from(self.bits).unwrap_or(0);
+        let byte = consumed.div_ceil(8);
         self.data.get(byte..).unwrap_or(&[])
     }
 

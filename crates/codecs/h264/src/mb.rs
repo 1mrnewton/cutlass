@@ -969,7 +969,11 @@ fn read_block(
             } else {
                 nc_of(pic, mx, my, bx, by, mb, plane)
             };
-            cavlc::residual(bits, nc, max)?
+            let coeffs = cavlc::residual(bits, nc, max)?;
+            for (index, value) in coeffs.iter().enumerate() {
+                out[index] = *value;
+            }
+            out
         }
         Entropy::Cabac(cab) => {
             // Luma DC (cat 0) has a coded_block_flag. Its neighbours are Intra_16x16 DC blocks.
@@ -992,17 +996,15 @@ fn read_block(
                     *flag = true;
                 }
             }
-            cabac_residual(cab, cat, max)?
+            cabac_residual(cab, cat, &mut out[..max])?;
+            out
         }
     };
     let count = coeffs.iter().filter(|value| **value != 0).count() as u8;
     if plane == 0 && !dc {
         mb.nnz_y[by * 4 + bx] = count;
     }
-    for (index, value) in coeffs.iter().enumerate() {
-        out[index] = *value;
-    }
-    Ok(out)
+    Ok(coeffs)
 }
 
 fn read8(
@@ -1031,11 +1033,8 @@ fn read8(
             }
         }
         Entropy::Cabac(cab) => {
-            let coeffs = cabac_residual(cab, 5, 64)?;
-            for (index, value) in coeffs.iter().enumerate() {
-                out[index] = *value;
-            }
-            let count = coeffs.iter().filter(|value| **value != 0).count() as u8;
+            cabac_residual(cab, 5, &mut out)?;
+            let count = out.iter().filter(|value| **value != 0).count() as u8;
             for dy in 0..2 {
                 for dx in 0..2 {
                     mb.nnz_y[(by + dy) * 4 + bx + dx] = count;
@@ -1221,7 +1220,7 @@ fn cbf_inc(pic: &Frame, at: Place, cell: Cell, mb: &Mb, plane: u8, dc: bool) -> 
     usize::from(left > 0) + 2 * usize::from(above > 0)
 }
 
-fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, max: usize) -> Result<Vec<i32>, CodecError> {
+fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result<(), CodecError> {
     let (sig_base, last_base, level_base) = match cat {
         0 => (105, 166, 227),
         1 => (120, 181, 237),
@@ -1230,7 +1229,9 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, max: usize) -> Result<Vec<i32
         4 => (152, 213, 266),
         _ => (402, 417, 426),
     };
-    let mut index = Vec::new();
+    let max = coeffs.len();
+    let mut index = [0usize; 64];
+    let mut count = 0usize;
     let last_coded = max.saturating_sub(1);
     let mut pos = 0;
     while pos < last_coded {
@@ -1242,7 +1243,13 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, max: usize) -> Result<Vec<i32
             sig_base + pos
         };
         if cab.decision(sig_ctx)? == 1 {
-            index.push(pos);
+            let Some(slot) = index.get_mut(count) else {
+                return Err(CodecError::Limit {
+                    what: "cabac residual",
+                });
+            };
+            *slot = pos;
+            count += 1;
             let last_ctx = if cat == 5 {
                 last_base + cabac::last8(pos)
             } else if cat == 3 {
@@ -1258,21 +1265,27 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, max: usize) -> Result<Vec<i32
         pos += 1;
     }
     if pos == last_coded {
-        index.push(pos);
+        let Some(slot) = index.get_mut(count) else {
+            return Err(CodecError::Limit {
+                what: "cabac residual",
+            });
+        };
+        *slot = pos;
+        count += 1;
     }
-    if index.is_empty() {
+    if count == 0 {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "cabac residual",
         });
     }
-    let mut coeffs = vec![0i32; max];
     let mut node = 0usize;
     let level1 = [1usize, 2, 3, 4, 0, 0, 0, 0];
     let gt1 = [5usize, 5, 5, 5, 6, 7, 8, 9];
     let trans1 = [1usize, 2, 3, 3, 4, 5, 6, 7];
     let trans_gt = [4usize, 4, 4, 4, 5, 6, 7, 7];
-    for scan in index.into_iter().rev() {
+    for scan in index[..count].iter().rev() {
+        let scan = *scan;
         if cab.decision(level_base + level1[node])? == 0 {
             node = trans1[node];
             let sign = cab.bypass()?;
@@ -1299,7 +1312,7 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, max: usize) -> Result<Vec<i32
             coeffs[scan] = if sign == 1 { -abs } else { abs };
         }
     }
-    Ok(coeffs)
+    Ok(())
 }
 
 fn recon_intra(

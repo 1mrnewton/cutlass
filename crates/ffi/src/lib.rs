@@ -8,11 +8,13 @@
 
 #![forbid(unsafe_code)]
 
+mod cache;
 mod error;
 mod host;
 mod player;
 mod project;
 
+pub use cache::ResourceCache;
 pub use error::FfiError;
 pub use host::Commands;
 pub use player::PhonePlayer;

@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cutlass_decode::{
     BitDepth, CodecId, CodecParams, ColorType, DecodeFactory, Decoder, Packet, PhysicalPixel, Rgb8,
@@ -933,6 +933,12 @@ impl Samples for cutlass_decode::PictureOutput {
     }
 }
 
+fn scratch_dir(label: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("cutlass-png-{label}-{n}-{}", std::process::id()))
+}
+
 fn tool(name: &str) -> Option<PathBuf> {
     let path = Command::new("which")
         .arg(name)
@@ -962,7 +968,7 @@ fn ffmpeg_png(
     pix: &str,
     pred: Option<&str>,
 ) -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("cutlass-png-ff-{}", std::process::id()));
+    let dir = scratch_dir("ff");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.raw");
     let output = dir.join("out.png");
@@ -1010,18 +1016,8 @@ fn ffmpeg_raw(ffmpeg: &PathBuf, png: &[u8], pix: &str) -> Vec<u8> {
     output.stdout
 }
 
-fn magick_gray_depth(
-    magick: &PathBuf,
-    raw: &[u8],
-    width: u32,
-    height: u32,
-    depth: u8,
-) -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!(
-        "cutlass-png-depth-{}-{}",
-        std::process::id(),
-        depth
-    ));
+fn magick_gray_depth(magick: &PathBuf, raw: &[u8], width: u32, height: u32, depth: u8) -> Vec<u8> {
+    let dir = scratch_dir("depth");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.gray");
     let output = dir.join("out.png");
@@ -1045,7 +1041,7 @@ fn magick_gray_depth(
 }
 
 fn magick_png(magick: &PathBuf, raw: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("cutlass-png-magick-{}", std::process::id()));
+    let dir = scratch_dir("magick");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.gray");
     let output = dir.join("out.png");
@@ -1064,7 +1060,7 @@ fn magick_png(magick: &PathBuf, raw: &[u8], width: u32, height: u32) -> Vec<u8> 
 }
 
 fn magick_gray(magick: &PathBuf, png: &[u8]) -> Vec<u8> {
-    let dir = std::env::temp_dir().join(format!("cutlass-png-gray-{}", std::process::id()));
+    let dir = scratch_dir("gray");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.png");
     let output = dir.join("out.gray");

@@ -659,6 +659,295 @@ pub fn chroma_mc(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
     )
 }
 
+/// A rectangle whose motion vector is the same for every sample.
+#[derive(Clone, Copy)]
+pub struct BlockMc {
+    pub x: i32,
+    pub y: i32,
+    pub w: usize,
+    pub h: usize,
+    pub x_frac: i32,
+    pub y_frac: i32,
+}
+
+/// Luma motion compensation for one partition. Matches [`qpel`] sample for sample.
+pub fn put_luma_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) {
+    let BlockMc {
+        x,
+        y,
+        w,
+        h,
+        x_frac,
+        y_frac,
+    } = block;
+    if w == 0 || h == 0 || w > 16 || h > 16 || dst.len() < h * dst_stride {
+        return;
+    }
+    let (pic_w, pic_h) = pic;
+    if !luma_window_inside(x, y, w, h, pic_w, pic_h) {
+        put_luma_scalar(dst, dst_stride, src, src_stride, pic, block);
+        return;
+    }
+    let size = (w, h);
+    let at = |dx, dy| src_at(src, src_stride, x + dx, y + dy);
+    match (x_frac, y_frac) {
+        (0, 0) => copy_block(dst, dst_stride, at(0, 0), size),
+        (2, 0) => half_h_block(dst, dst_stride, at(0, 0), size),
+        (0, 2) => half_v_block(dst, dst_stride, at(0, 0), size),
+        (2, 2) => diag_block(dst, dst_stride, at(0, 0), size),
+        (1, 0) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            copy_block(a, w, at(0, 0), size);
+            half_h_block(b, w, at(0, 0), size);
+        }),
+        (3, 0) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_h_block(a, w, at(0, 0), size);
+            copy_block(b, w, at(1, 0), size);
+        }),
+        (0, 1) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            copy_block(a, w, at(0, 0), size);
+            half_v_block(b, w, at(0, 0), size);
+        }),
+        (0, 3) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_v_block(a, w, at(0, 0), size);
+            copy_block(b, w, at(0, 1), size);
+        }),
+        (2, 1) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_h_block(a, w, at(0, 0), size);
+            diag_block(b, w, at(0, 0), size);
+        }),
+        (1, 2) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_v_block(a, w, at(0, 0), size);
+            diag_block(b, w, at(0, 0), size);
+        }),
+        (2, 3) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            diag_block(a, w, at(0, 0), size);
+            half_h_block(b, w, at(0, 1), size);
+        }),
+        (3, 2) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            diag_block(a, w, at(0, 0), size);
+            half_v_block(b, w, at(1, 0), size);
+        }),
+        (1, 1) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_h_block(a, w, at(0, 0), size);
+            half_v_block(b, w, at(0, 0), size);
+        }),
+        (3, 1) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_h_block(a, w, at(0, 0), size);
+            half_v_block(b, w, at(1, 0), size);
+        }),
+        (1, 3) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_v_block(a, w, at(0, 0), size);
+            half_h_block(b, w, at(0, 1), size);
+        }),
+        (3, 3) => avg_blocks(dst, dst_stride, w, h, |a, b| {
+            half_v_block(a, w, at(1, 0), size);
+            half_h_block(b, w, at(0, 1), size);
+        }),
+        _ => put_luma_scalar(dst, dst_stride, src, src_stride, pic, block),
+    }
+}
+
+/// Chroma motion compensation for one partition. Matches [`chroma_mc`].
+pub fn put_chroma_block(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) {
+    let BlockMc {
+        x,
+        y,
+        w,
+        h,
+        x_frac,
+        y_frac,
+    } = block;
+    if w == 0 || h == 0 || dst.len() < h * dst_stride {
+        return;
+    }
+    let (pic_w, pic_h) = pic;
+    let xf = x_frac.clamp(0, 7);
+    let yf = y_frac.clamp(0, 7);
+    if x < 0
+        || y < 0
+        || x + i32::try_from(w).unwrap_or(i32::MAX) >= pic_w
+        || y + i32::try_from(h).unwrap_or(i32::MAX) >= pic_h
+    {
+        for row in 0..h {
+            for col in 0..w {
+                dst[row * dst_stride + col] = chroma_mc(
+                    src,
+                    src_stride,
+                    pic_w,
+                    pic_h,
+                    Pel {
+                        x: x + i32::try_from(col).unwrap_or(0),
+                        y: y + i32::try_from(row).unwrap_or(0),
+                        x_frac: xf,
+                        y_frac: yf,
+                    },
+                );
+            }
+        }
+        return;
+    }
+    let x0 = usize::try_from(x).unwrap_or(0);
+    let y0 = usize::try_from(y).unwrap_or(0);
+    let wa = (8 - xf) * (8 - yf);
+    let wb = xf * (8 - yf);
+    let wc = (8 - xf) * yf;
+    let wd = xf * yf;
+    for row in 0..h {
+        let sy = y0 + row;
+        let row0 = &src[sy * src_stride..];
+        let row1 = &src[(sy + 1) * src_stride..];
+        for col in 0..w {
+            let sx = x0 + col;
+            let value = wa * i32::from(row0[sx])
+                + wb * i32::from(row0[sx + 1])
+                + wc * i32::from(row1[sx])
+                + wd * i32::from(row1[sx + 1])
+                + 32;
+            dst[row * dst_stride + col] = clip_u8(value >> 6);
+        }
+    }
+}
+
+fn luma_window_inside(x: i32, y: i32, w: usize, h: usize, pic_w: i32, pic_h: i32) -> bool {
+    let bw = i32::try_from(w).unwrap_or(i32::MAX);
+    let bh = i32::try_from(h).unwrap_or(i32::MAX);
+    x >= 2 && y >= 2 && x + bw + 3 <= pic_w && y + bh + 3 <= pic_h
+}
+
+fn put_luma_scalar(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) {
+    let (pic_w, pic_h) = pic;
+    for row in 0..block.h {
+        for col in 0..block.w {
+            dst[row * dst_stride + col] = qpel(
+                src,
+                src_stride,
+                pic_w,
+                pic_h,
+                Pel {
+                    x: block.x + i32::try_from(col).unwrap_or(0),
+                    y: block.y + i32::try_from(row).unwrap_or(0),
+                    x_frac: block.x_frac,
+                    y_frac: block.y_frac,
+                },
+            );
+        }
+    }
+}
+
+fn avg_blocks(
+    dst: &mut [u8],
+    dst_stride: usize,
+    w: usize,
+    h: usize,
+    fill: impl FnOnce(&mut [u8], &mut [u8]),
+) {
+    let mut left = [0u8; 256];
+    let mut right = [0u8; 256];
+    fill(&mut left, &mut right);
+    for row in 0..h {
+        for col in 0..w {
+            dst[row * dst_stride + col] = avg(left[row * w + col], right[row * w + col]);
+        }
+    }
+}
+
+struct Src<'a> {
+    samples: &'a [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+}
+
+fn src_at(samples: &[u8], stride: usize, x: i32, y: i32) -> Src<'_> {
+    Src {
+        samples,
+        stride,
+        x: usize::try_from(x).unwrap_or(0),
+        y: usize::try_from(y).unwrap_or(0),
+    }
+}
+
+fn copy_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+    let (w, h) = size;
+    for row in 0..h {
+        let from = (src.y + row) * src.stride + src.x;
+        dst[row * dst_stride..row * dst_stride + w]
+            .copy_from_slice(&src.samples[from..from + w]);
+    }
+}
+
+fn half_h_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+    let (w, h) = size;
+    for row in 0..h {
+        let samples = &src.samples[(src.y + row) * src.stride..];
+        for col in 0..w {
+            dst[row * dst_stride + col] = clip_u8((fir6(samples, src.x + col) + 16) >> 5);
+        }
+    }
+}
+
+fn half_v_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+    let (w, h) = size;
+    for row in 0..h {
+        for col in 0..w {
+            let mut acc = 0i32;
+            for (k, coef) in [1, -5, 20, 20, -5, 1].into_iter().enumerate() {
+                let sy = src.y + row + k - 2;
+                acc += coef * i32::from(src.samples[sy * src.stride + src.x + col]);
+            }
+            dst[row * dst_stride + col] = clip_u8((acc + 16) >> 5);
+        }
+    }
+}
+
+fn diag_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+    let (w, h) = size;
+    let mut tmp = [0i32; 21 * 16];
+    for vy in 0..h + 5 {
+        let samples = &src.samples[(src.y + vy - 2) * src.stride..];
+        for col in 0..w {
+            tmp[vy * 16 + col] = fir6(samples, src.x + col);
+        }
+    }
+    for row in 0..h {
+        for col in 0..w {
+            let mut acc = 0i32;
+            for (k, coef) in [1, -5, 20, 20, -5, 1].into_iter().enumerate() {
+                acc += coef * tmp[(row + k) * 16 + col];
+            }
+            dst[row * dst_stride + col] = clip_u8((acc + 512) >> 10);
+        }
+    }
+}
+
+fn fir6(row: &[u8], x: usize) -> i32 {
+    let p = &row[x - 2..x + 4];
+    i32::from(p[0]) - 5 * i32::from(p[1]) + 20 * i32::from(p[2]) + 20 * i32::from(p[3])
+        - 5 * i32::from(p[4])
+        + i32::from(p[5])
+}
+
 pub fn weight_uni(sample: u8, w: i32, o: i32, denom: i32) -> u8 {
     let v = if denom >= 1 {
         ((i32::from(sample) * w + (1 << (denom - 1))) >> denom) + o
@@ -782,6 +1071,99 @@ pub fn filter_edge(plane: &mut [u8], stride: usize, x: usize, y: usize, edge: Ed
                 store(2, 2, (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3, plane);
             } else {
                 store(0, 0, (2 * q1 + q0 + p1 + 2) >> 2, plane);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockMc, Pel, chroma_mc, put_chroma_block, put_luma_block, qpel};
+
+    #[test]
+    fn block_motion_matches_the_sample_filter() {
+        let width = 48i32;
+        let height = 40i32;
+        let mut plane = vec![0u8; (width * height) as usize];
+        for (index, sample) in plane.iter_mut().enumerate() {
+            *sample = u8::try_from((index * 17 + index / 48) % 256).unwrap_or(0);
+        }
+        for frac_x in 0..4 {
+            for frac_y in 0..4 {
+                for (x, y, w, h) in [(0, 0, 8, 8), (2, 3, 4, 8), (8, 8, 16, 16), (30, 22, 8, 4)] {
+                    let mut got = vec![0u8; w * h];
+                    put_luma_block(
+                        &mut got,
+                        w,
+                        &plane,
+                        width as usize,
+                        (width, height),
+                        BlockMc {
+                            x,
+                            y,
+                            w,
+                            h,
+                            x_frac: frac_x,
+                            y_frac: frac_y,
+                        },
+                    );
+                    for row in 0..h {
+                        for col in 0..w {
+                            let want = qpel(
+                                &plane,
+                                width as usize,
+                                width,
+                                height,
+                                Pel {
+                                    x: x + i32::try_from(col).unwrap_or(0),
+                                    y: y + i32::try_from(row).unwrap_or(0),
+                                    x_frac: frac_x,
+                                    y_frac: frac_y,
+                                },
+                            );
+                            assert_eq!(got[row * w + col], want, "{frac_x},{frac_y} at {x},{y}");
+                        }
+                    }
+                }
+            }
+        }
+        let cw = width / 2;
+        let ch = height / 2;
+        for frac_x in 0..8 {
+            for frac_y in 0..8 {
+                let mut got = vec![0u8; 4 * 4];
+                put_chroma_block(
+                    &mut got,
+                    4,
+                    &plane,
+                    cw as usize,
+                    (cw, ch),
+                    BlockMc {
+                        x: 3,
+                        y: 2,
+                        w: 4,
+                        h: 4,
+                        x_frac: frac_x,
+                        y_frac: frac_y,
+                    },
+                );
+                for row in 0..4usize {
+                    for col in 0..4usize {
+                        let want = chroma_mc(
+                            &plane,
+                            cw as usize,
+                            cw,
+                            ch,
+                            Pel {
+                                x: 3 + i32::try_from(col).unwrap_or(0),
+                                y: 2 + i32::try_from(row).unwrap_or(0),
+                                x_frac: frac_x,
+                                y_frac: frac_y,
+                            },
+                        );
+                        assert_eq!(got[row * 4 + col], want);
+                    }
+                }
             }
         }
     }

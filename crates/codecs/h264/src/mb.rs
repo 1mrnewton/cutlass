@@ -3973,144 +3973,86 @@ fn mc_block(
 ) -> Result<(), CodecError> {
     let Block { x, y, w, h } = block;
     let McMotion { r0, r1, mv0, mv1 } = motion;
-    let sample = |list: usize,
-                  reference: i8,
-                  mv: [i16; 2],
-                  px: usize,
-                  py: usize|
-     -> Result<u8, CodecError> {
-        let refs = if list == 0 { &slice.ref0 } else { &slice.ref1 };
-        let index = usize::try_from(reference).map_err(|_| CodecError::Malformed {
-            at_bit: 0,
-            what: "ref idx",
-        })?;
-        let Some(&frame_index) = refs.get(index) else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "ref idx",
-            });
-        };
-        let Some(frame) = dpb.get(frame_index) else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "dpb",
-            });
-        };
-        if frame.nonexisting {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "non-existing reference",
-            });
-        }
-        let mvx = i32::from(mv[0]);
-        let mvy = i32::from(mv[1]);
-        Ok(recon::qpel(
-            &frame.y,
-            frame.w,
-            frame.w as i32,
-            frame.h as i32,
-            recon::Pel {
-                x: px as i32 + (mvx >> 2),
-                y: py as i32 + (mvy >> 2),
-                x_frac: mvx & 3,
-                y_frac: mvy & 3,
-            },
-        ))
-    };
+    let mut luma0 = [0u8; 256];
+    let mut luma1 = [0u8; 256];
+    if r0 >= 0 {
+        let frame = reference_frame(dpb, slice, 0, r0)?;
+        predict_luma(&mut luma0, frame, x, y, w, h, mv0);
+    }
+    if r1 >= 0 {
+        let frame = reference_frame(dpb, slice, 1, r1)?;
+        predict_luma(&mut luma1, frame, x, y, w, h, mv1);
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut u0 = [0u8; 64];
+    let mut v0 = [0u8; 64];
+    let mut u1 = [0u8; 64];
+    let mut v1 = [0u8; 64];
+    if r0 >= 0 && cw > 0 && ch > 0 {
+        let frame = reference_frame(dpb, slice, 0, r0)?;
+        predict_chroma((&mut u0, &mut v0), frame, (x, y), (cw, ch), mv0);
+    }
+    if r1 >= 0 && cw > 0 && ch > 0 {
+        let frame = reference_frame(dpb, slice, 1, r1)?;
+        predict_chroma((&mut u1, &mut v1), frame, (x, y), (cw, ch), mv1);
+    }
     for row in 0..h {
         for col in 0..w {
-            let px = x + col;
-            let py = y + row;
-            let y_s = if r0 >= 0 && r1 >= 0 {
-                let a = sample(0, r0, mv0, px, py)?;
-                let b = sample(1, r1, mv1, px, py)?;
-                blend(slice, r0, r1, a, b, -1)
+            let sample = if r0 >= 0 && r1 >= 0 {
+                blend(
+                    slice,
+                    r0,
+                    r1,
+                    luma0[row * w + col],
+                    luma1[row * w + col],
+                    -1,
+                )
             } else if r0 >= 0 {
-                let a = sample(0, r0, mv0, px, py)?;
-                if slice.weighted {
-                    recon::weight_uni(
-                        a,
-                        slice.yw[0][r0 as usize],
-                        slice.yo[0][r0 as usize],
-                        slice.luma_denom,
-                    )
-                } else {
-                    a
-                }
+                uni_luma(slice, luma0[row * w + col], 0, r0)
             } else if r1 >= 0 {
-                let b = sample(1, r1, mv1, px, py)?;
-                if slice.weighted {
-                    recon::weight_uni(
-                        b,
-                        slice.yw[1][r1 as usize],
-                        slice.yo[1][r1 as usize],
-                        slice.luma_denom,
-                    )
-                } else {
-                    b
-                }
+                uni_luma(slice, luma1[row * w + col], 1, r1)
             } else {
                 0
             };
-            pic.y[py * pic.w + px] = y_s;
-            if row % 2 == 0 && col % 2 == 0 {
-                for (cb, plane_is_u) in [(true, true), (false, false)] {
-                    let c = if r0 >= 0 && r1 >= 0 {
-                        let a = chroma_sample(dpb, slice, 0, r0, mv0, (px, py), plane_is_u)?;
-                        let b = chroma_sample(dpb, slice, 1, r1, mv1, (px, py), plane_is_u)?;
-                        blend(slice, r0, r1, a, b, if plane_is_u { 0 } else { 1 })
-                    } else if r0 >= 0 {
-                        let a = chroma_sample(dpb, slice, 0, r0, mv0, (px, py), plane_is_u)?;
-                        if slice.weighted {
-                            let list = if plane_is_u { 0 } else { 1 };
-                            recon::weight_uni(
-                                a,
-                                slice.cw[0][r0 as usize][list],
-                                slice.co[0][r0 as usize][list],
-                                slice.chroma_denom,
-                            )
-                        } else {
-                            a
-                        }
-                    } else if r1 >= 0 {
-                        let b = chroma_sample(dpb, slice, 1, r1, mv1, (px, py), plane_is_u)?;
-                        if slice.weighted {
-                            let list = if plane_is_u { 0 } else { 1 };
-                            recon::weight_uni(
-                                b,
-                                slice.cw[1][r1 as usize][list],
-                                slice.co[1][r1 as usize][list],
-                                slice.chroma_denom,
-                            )
-                        } else {
-                            b
-                        }
-                    } else {
-                        128
-                    };
-                    let plane = if cb { &mut pic.u } else { &mut pic.v };
-                    let stride = pic.w / 2;
-                    plane[(py / 2) * stride + px / 2] = c;
-                }
+            pic.y[(y + row) * pic.w + x + col] = sample;
+        }
+    }
+    for row in 0..ch {
+        for col in 0..cw {
+            for (plane_is_u, src0, src1) in [(true, &u0, &u1), (false, &v0, &v1)] {
+                let a = src0[row * cw + col];
+                let b = src1[row * cw + col];
+                let sample = if r0 >= 0 && r1 >= 0 {
+                    blend(slice, r0, r1, a, b, if plane_is_u { 0 } else { 1 })
+                } else if r0 >= 0 {
+                    uni_chroma(slice, a, 0, r0, plane_is_u)
+                } else if r1 >= 0 {
+                    uni_chroma(slice, b, 1, r1, plane_is_u)
+                } else {
+                    128
+                };
+                let plane = if plane_is_u { &mut pic.u } else { &mut pic.v };
+                let stride = pic.w / 2;
+                plane[(y / 2 + row) * stride + x / 2 + col] = sample;
             }
         }
     }
-    let _ = sample;
     Ok(())
 }
 
-fn chroma_sample(
-    dpb: &[Frame],
+fn reference_frame<'a>(
+    dpb: &'a [Frame],
     slice: &Slice<'_>,
     list: usize,
     reference: i8,
-    mv: [i16; 2],
-    at: (usize, usize),
-    cb: bool,
-) -> Result<u8, CodecError> {
-    let (px, py) = at;
+) -> Result<&'a Frame, CodecError> {
     let refs = if list == 0 { &slice.ref0 } else { &slice.ref1 };
-    let Some(&frame_index) = refs.get(reference as usize) else {
+    let index = usize::try_from(reference).map_err(|_| CodecError::Malformed {
+        at_bit: 0,
+        what: "ref idx",
+    })?;
+    let Some(&frame_index) = refs.get(index) else {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "ref idx",
@@ -4128,21 +4070,95 @@ fn chroma_sample(
             what: "non-existing reference",
         });
     }
-    let plane = if cb { &frame.u } else { &frame.v };
+    Ok(frame)
+}
+
+fn predict_luma(
+    dst: &mut [u8],
+    frame: &Frame,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    mv: [i16; 2],
+) {
     let mvx = i32::from(mv[0]);
     let mvy = i32::from(mv[1]);
-    Ok(recon::chroma_mc(
-        plane,
-        frame.w / 2,
-        (frame.w / 2) as i32,
-        (frame.h / 2) as i32,
-        recon::Pel {
-            x: (px / 2) as i32 + (mvx >> 3),
-            y: (py / 2) as i32 + (mvy >> 3),
-            x_frac: mvx & 7,
-            y_frac: mvy & 7,
+    recon::put_luma_block(
+        dst,
+        w,
+        &frame.y,
+        frame.w,
+        (
+            i32::try_from(frame.w).unwrap_or(0),
+            i32::try_from(frame.h).unwrap_or(0),
+        ),
+        recon::BlockMc {
+            x: i32::try_from(x).unwrap_or(0) + (mvx >> 2),
+            y: i32::try_from(y).unwrap_or(0) + (mvy >> 2),
+            w,
+            h,
+            x_frac: mvx & 3,
+            y_frac: mvy & 3,
         },
-    ))
+    );
+}
+
+fn predict_chroma(
+    planes: (&mut [u8], &mut [u8]),
+    frame: &Frame,
+    at: (usize, usize),
+    size: (usize, usize),
+    mv: [i16; 2],
+) {
+    let (u, v) = planes;
+    let (x, y) = at;
+    let (w, h) = size;
+    let mvx = i32::from(mv[0]);
+    let mvy = i32::from(mv[1]);
+    let block = recon::BlockMc {
+        x: i32::try_from(x / 2).unwrap_or(0) + (mvx >> 3),
+        y: i32::try_from(y / 2).unwrap_or(0) + (mvy >> 3),
+        w,
+        h,
+        x_frac: mvx & 7,
+        y_frac: mvy & 7,
+    };
+    let pic = (
+        i32::try_from(frame.w / 2).unwrap_or(0),
+        i32::try_from(frame.h / 2).unwrap_or(0),
+    );
+    recon::put_chroma_block(u, w, &frame.u, frame.w / 2, pic, block);
+    recon::put_chroma_block(v, w, &frame.v, frame.w / 2, pic, block);
+}
+
+fn uni_luma(slice: &Slice<'_>, sample: u8, list: usize, reference: i8) -> u8 {
+    if slice.weighted {
+        let index = usize::try_from(reference).unwrap_or(0);
+        recon::weight_uni(
+            sample,
+            slice.yw[list][index],
+            slice.yo[list][index],
+            slice.luma_denom,
+        )
+    } else {
+        sample
+    }
+}
+
+fn uni_chroma(slice: &Slice<'_>, sample: u8, list: usize, reference: i8, cb: bool) -> u8 {
+    if slice.weighted {
+        let index = usize::try_from(reference).unwrap_or(0);
+        let plane = usize::from(!cb);
+        recon::weight_uni(
+            sample,
+            slice.cw[list][index][plane],
+            slice.co[list][index][plane],
+            slice.chroma_denom,
+        )
+    } else {
+        sample
+    }
 }
 
 fn blend(slice: &Slice<'_>, r0: i8, r1: i8, a: u8, b: u8, plane: i8) -> u8 {

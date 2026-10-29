@@ -2,19 +2,19 @@
 
 Native safe Rust decoder and encoder in `cutlass-h264`. No `unsafe`. No bundled C, FFmpeg, or other H.264 library. FFmpeg is an independent test oracle only.
 
-About **60%** of the scope in `SCOPE.md` is done. The progressive decoder tools are in place. The encoder searches integer motion. The release gates are still open.
+About **62%** of the scope in `SCOPE.md` is done. The progressive decoder tools are in place. The encoder searches 16×16, 16×8, and 8×16 motion. The release gates are still open.
 
 | Part | Done | Where it stands |
 | --- | --- | --- |
 | Decoder | ~90% | Progressive 8-bit 4:2:0 Baseline, Main, and High. CABAC and CAVLC. I, P, and B, skip, spatial and temporal direct, 4×4 and 8×8 transform, deblock, and explicit and implicit weighted prediction. The tests that build those streams match ffmpeg inside the cropped rectangle. An IDR returns pictures that were still waiting, unless the slice says to drop them, and the IDR itself stays displayed. Picture order count types 0, 1, and 2 are all applied. Annex B and length prefixes of 1, 2, and 4 bytes are accepted. Adaptive reference marking is applied; without it, marking stays a sliding window. A frame_num gap is filled with non-existing references when the sequence allows it, and rejected when it does not. A redundant picture is discarded. Deblocking crosses a slice boundary unless that slice turns the boundary filter off. A picture that is not a multiple of 16 is returned at its visible size. Inter chroma uses the inter quantisation matrices. |
-| Encoder | ~45% | High CABAC intra 4×4. A P skip when the next picture equals the reconstruction. A P slice of 16×16 blocks. Motion is a diamond search at integer, half-pel, and quarter-pel, and the slice codes the difference from the predicted vector. FFmpeg accepts a shifted texture, a half-pixel shift, and a repeated ramp. |
+| Encoder | ~50% | High CABAC intra 4×4. A P skip when the next picture equals the reconstruction. A P slice chooses 16×16, 16×8, or 8×16. Motion is a diamond search at integer, half-pel, and quarter-pel, and the slice codes the difference from the predicted vector. FFmpeg accepts a shifted texture, a half-pixel shift, a repeated ramp, and pictures whose top and bottom or left and right halves move apart. |
 | Release evidence | ~20% | No readiness report. No 30-minute fuzz run. No 720p speed or memory measurement. The bitrate and PSNR gates have not been run. |
 
 The progressive decoder tools in the table are in place. Encoder work is the active path.
 
 ## Encoder, still required
 
-- Partitions below 16×16. Quarter-sample refinement of a 16×16 vector is in place.
+- 8×8 sub-partitions. 16×8 and 8×16 are in place, each refined to quarter-pel.
 - B slices and reorder.
 - An 8×8 transform. The encoder emits 4×4, and every intra block is DC.
 - Rate control. QP is fixed at 26, so the 0.75×–1.25× bitrate gate cannot pass yet.

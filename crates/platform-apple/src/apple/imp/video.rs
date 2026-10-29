@@ -1,21 +1,21 @@
 //! VideoToolbox decode and encode.
 //!
-//! Pictures that cross the crate boundary are tightly packed RGBA.
-//! VideoToolbox itself is asked for BGRA, and the conversion stays here.
-//! A session the hardware will not open is [`CodecError::Unsupported`], so
-//! the factory can try a software codec. VP8 has no framework format id.
+//! A decoded frame stays a retained pixel buffer, named by a platform token.
+//! [`to_cpu`] copies that buffer to tightly packed RGBA. VideoToolbox itself
+//! is asked for BGRA. A session the hardware will not open is
+//! [`CodecError::Unsupported`], so the factory can try a software codec.
+//! VP8 has no framework format id.
 
+use std::collections::HashMap;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo,
-    PictureOutput, PixelFormat, Transfer,
+    PictureOutput, PictureSamples, PixelFormat, Transfer,
 };
-use cutlass_encode::{
-    AudioInput, CpuFrame, Encoder, FrameInput, FrameTime, PictureInput, PlatformFrame,
-};
+use cutlass_encode::{AudioInput, CpuFrame, Encoder, FrameInput, FrameTime, PictureInput};
 
 use super::cf::{self, Cf};
 use super::sys::{self, CMSampleTimingInfo};
@@ -251,40 +251,21 @@ impl Encoder for VideoEncoder {
                 what: "videotoolbox",
             });
         }
-        let (width, height, bytes, time) = frame_rgba(input, self.width, self.height)?;
-        let mut meta = FrameMeta {
-            pts: time.pts(),
-            duration: time.duration(),
-            timescale: time.timescale(),
-        };
-        let buffer = bgra_buffer(width, height, bytes)?;
-        let force = {
-            let queue = lock_queue(&self.output);
-            !queue.attached && queue.packets.is_empty()
-        };
-        let properties = if force { Some(force_keyframe()?) } else { None };
-        let status = unsafe {
-            sys::VTCompressionSessionEncodeFrame(
-                self.session,
-                buffer.as_mut(),
-                cf::time(meta.pts, i32::try_from(meta.timescale).unwrap_or(30)),
-                cf::time(meta.duration, i32::try_from(meta.timescale).unwrap_or(30)),
-                properties.as_ref().map(Cf::as_ptr).unwrap_or(ptr::null()),
-                (&raw mut meta).cast(),
-                ptr::null_mut(),
-            )
-        };
-        if status != 0 {
-            clear_queue(&self.output);
-            return unit_status(status, "videotoolbox").map(|()| Vec::new());
+        match input {
+            FrameInput::Cpu(frame) => {
+                let (width, height, bytes, time) = cpu_rgba(frame, self.width, self.height)?;
+                let buffer = bgra_buffer(width, height, bytes)?;
+                self.encode_image(buffer.as_mut(), time)
+            }
+            FrameInput::Platform(frame) => {
+                if frame.width() != self.width || frame.height() != self.height {
+                    return Err(CodecError::Unsupported { what: "frame" });
+                }
+                let time = frame.time();
+                let token = frame.token();
+                self.encode_token(token, time)
+            }
         }
-        let flushed =
-            unsafe { sys::VTCompressionSessionCompleteFrames(self.session, cf::time_invalid()) };
-        if flushed != 0 {
-            clear_queue(&self.output);
-            return unit_status(flushed, "videotoolbox").map(|()| Vec::new());
-        }
-        Ok(take_packets(&self.output))
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -324,6 +305,57 @@ impl Encoder for VideoEncoder {
 }
 
 impl VideoEncoder {
+    fn encode_token(&mut self, token: u64, time: FrameTime) -> Result<Vec<Packet>, CodecError> {
+        with_pixel_buffer(token, |image| {
+            let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
+            if format != sys::BGRA {
+                return Err(CodecError::Unsupported {
+                    what: "pixel format",
+                });
+            }
+            self.encode_image(image, time)
+        })?
+    }
+
+    fn encode_image(
+        &mut self,
+        image: *mut std::ffi::c_void,
+        time: FrameTime,
+    ) -> Result<Vec<Packet>, CodecError> {
+        let mut meta = FrameMeta {
+            pts: time.pts(),
+            duration: time.duration(),
+            timescale: time.timescale(),
+        };
+        let force = {
+            let queue = lock_queue(&self.output);
+            !queue.attached && queue.packets.is_empty()
+        };
+        let properties = if force { Some(force_keyframe()?) } else { None };
+        let status = unsafe {
+            sys::VTCompressionSessionEncodeFrame(
+                self.session,
+                image,
+                cf::time(meta.pts, i32::try_from(meta.timescale).unwrap_or(30)),
+                cf::time(meta.duration, i32::try_from(meta.timescale).unwrap_or(30)),
+                properties.as_ref().map(Cf::as_ptr).unwrap_or(ptr::null()),
+                (&raw mut meta).cast(),
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            clear_queue(&self.output);
+            return unit_status(status, "videotoolbox").map(|()| Vec::new());
+        }
+        let flushed =
+            unsafe { sys::VTCompressionSessionCompleteFrames(self.session, cf::time_invalid()) };
+        if flushed != 0 {
+            clear_queue(&self.output);
+            return unit_status(flushed, "videotoolbox").map(|()| Vec::new());
+        }
+        Ok(take_packets(&self.output))
+    }
+
     fn release_session(&mut self) {
         if !self.session.is_null() {
             unsafe {
@@ -668,7 +700,149 @@ unsafe extern "C" fn decode_output(
             }));
             return;
         }
-        slot.picture = Some(rgba_picture(image, slot.pts, slot.timescale));
+        slot.picture = Some(gpu_picture(image, slot.pts, slot.timescale));
+    }
+}
+
+struct HeldBuffer {
+    buffer: *mut std::ffi::c_void,
+}
+
+// SAFETY: `buffer` is a retained `CVPixelBuffer`. The map is its owner, and
+// a lookup retains it again before dropping the lock.
+unsafe impl Send for HeldBuffer {}
+
+fn buffers() -> &'static Mutex<HashMap<u64, HeldBuffer>> {
+    static BUFFERS: std::sync::OnceLock<Mutex<HashMap<u64, HeldBuffer>>> =
+        std::sync::OnceLock::new();
+    BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_token(held: &HashMap<u64, HeldBuffer>) -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    loop {
+        let token = NEXT.fetch_add(1, Ordering::Relaxed);
+        if token != 0 && !held.contains_key(&token) {
+            return token;
+        }
+    }
+}
+
+fn lock_buffers() -> std::sync::MutexGuard<'static, HashMap<u64, HeldBuffer>> {
+    match buffers().lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
+/// Retain `image` and return the token that names it.
+fn publish_buffer(image: *mut std::ffi::c_void) -> Result<u64, CodecError> {
+    let retained = unsafe { sys::CFRetain(image) };
+    if retained.is_null() {
+        return Err(CodecError::Unsupported {
+            what: "pixel buffer",
+        });
+    }
+    let mut held = lock_buffers();
+    let token = next_token(&held);
+    held.insert(
+        token,
+        HeldBuffer {
+            buffer: retained.cast_mut(),
+        },
+    );
+    Ok(token)
+}
+
+/// Borrow the retained pixel buffer for `body`. The pointer is a BGRA
+/// `CVPixelBuffer` and is only valid for that call.
+pub fn with_pixel_buffer<T>(
+    token: u64,
+    body: impl FnOnce(*mut std::ffi::c_void) -> T,
+) -> Result<T, CodecError> {
+    let retained = {
+        let held = lock_buffers();
+        let Some(buffer) = held.get(&token) else {
+            return Err(CodecError::Unsupported {
+                what: "platform frame",
+            });
+        };
+        let retained = unsafe { sys::CFRetain(buffer.buffer) };
+        if retained.is_null() {
+            return Err(CodecError::Unsupported {
+                what: "pixel buffer",
+            });
+        }
+        retained.cast_mut()
+    };
+    let value = body(retained);
+    unsafe { sys::CFRelease(retained) }
+    Ok(value)
+}
+
+/// Drop one retained pixel buffer. A token this crate did not publish is
+/// [`CodecError::Unsupported`].
+pub fn release_buffer(token: u64) -> Result<(), CodecError> {
+    let Some(held) = lock_buffers().remove(&token) else {
+        return Err(CodecError::Unsupported {
+            what: "platform frame",
+        });
+    };
+    unsafe { sys::CFRelease(held.buffer) }
+    Ok(())
+}
+
+/// RGBA bytes for a picture. A CPU picture is cloned. A token this crate
+/// published is copied out of its BGRA buffer.
+pub fn to_cpu(picture: &PictureOutput) -> Result<PictureOutput, CodecError> {
+    match picture.samples() {
+        PictureSamples::Cpu(_) => Ok(picture.clone()),
+        PictureSamples::Platform { token } => with_pixel_buffer(token, |image| {
+            rgba_picture(image, picture.pts(), picture.timescale())
+        })?,
+    }
+}
+
+fn gpu_picture(
+    image: *mut std::ffi::c_void,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
+    if format != sys::BGRA {
+        return Err(CodecError::Unsupported {
+            what: "pixel format",
+        });
+    }
+    let width = u32::try_from(unsafe { sys::CVPixelBufferGetWidth(image) }).map_err(|_| {
+        CodecError::Limit {
+            what: "picture edge",
+        }
+    })?;
+    let height = u32::try_from(unsafe { sys::CVPixelBufferGetHeight(image) }).map_err(|_| {
+        CodecError::Limit {
+            what: "picture edge",
+        }
+    })?;
+    limits::picture_ok(width, height)?;
+    let token = publish_buffer(image)?;
+    match PictureOutput::platform(
+        PictureInfo {
+            width,
+            height,
+            pixel: PixelFormat::Rgba8,
+            primaries: ColorPrimaries::Bt709,
+            transfer: Transfer::Unspecified,
+        },
+        token,
+        pts,
+        timescale,
+    ) {
+        Ok(picture) => Ok(picture),
+        Err(err) => {
+            let _ = release_buffer(token);
+            Err(err)
+        }
     }
 }
 
@@ -934,19 +1108,6 @@ fn write_bgra(buffer: *mut std::ffi::c_void, rgba: &[u8]) -> Result<(), CodecErr
     Ok(())
 }
 
-fn frame_rgba(
-    input: &FrameInput,
-    width: u32,
-    height: u32,
-) -> Result<(u32, u32, &[u8], FrameTime), CodecError> {
-    match input {
-        FrameInput::Platform(PlatformFrame { .. }) => Err(CodecError::Unsupported {
-            what: "platform frame",
-        }),
-        FrameInput::Cpu(frame) => cpu_rgba(frame, width, height),
-    }
-}
-
 fn cpu_rgba(
     frame: &CpuFrame,
     width: u32,
@@ -1190,7 +1351,7 @@ mod tests {
     fn h264_round_trips_a_solid_color() {
         let mut encoder = open_encoder(&video_params(CodecId::H264, 64, 64)).expect("encode open");
         let platform =
-            PlatformFrame::new(64, 64, 1, FrameTime::new(0, 1, 30).expect("time")).expect("token");
+            PlatformFrame::new(64, 64, 0, FrameTime::new(0, 1, 30).expect("time")).expect("token");
         assert_eq!(
             encoder.push_frame(&FrameInput::Platform(platform)),
             Err(CodecError::Unsupported {
@@ -1245,7 +1406,11 @@ mod tests {
             "no pictures from {} packets",
             packets.len()
         );
-        let PictureSamples::Cpu(bytes) = pictures[0].samples() else {
+        let PictureSamples::Platform { token } = pictures[0].samples() else {
+            panic!("platform");
+        };
+        let copied = to_cpu(&pictures[0]).expect("cpu copy");
+        let PictureSamples::Cpu(bytes) = copied.samples() else {
             panic!("cpu");
         };
         let red = channel_sum(bytes, 0);
@@ -1255,6 +1420,100 @@ mod tests {
             red > green.saturating_mul(4) && red > blue.saturating_mul(4),
             "red {red} green {green} blue {blue}"
         );
+        release_buffer(token).expect("release");
+        assert_eq!(
+            release_buffer(token),
+            Err(CodecError::Unsupported {
+                what: "platform frame",
+            })
+        );
+        for picture in pictures.iter().skip(1) {
+            if let PictureSamples::Platform { token } = picture.samples() {
+                release_buffer(token).expect("release");
+            }
+        }
+    }
+
+    #[test]
+    fn a_retained_frame_encodes_without_a_cpu_copy() {
+        let mut encoder = open_encoder(&video_params(CodecId::H264, 64, 64)).expect("encode open");
+        let mut packets = encoder
+            .push_frame(&solid(64, 64, [220, 10, 10, 255], 0))
+            .expect("encode");
+        packets.extend(encoder.drain().expect("drain"));
+        let config = packets
+            .iter()
+            .find_map(|packet| {
+                packet.side.iter().find_map(|side| match side {
+                    SideData::Config(bytes) if !bytes.is_empty() => Some(bytes.clone()),
+                    _ => None,
+                })
+            })
+            .expect("avcC");
+        let mut decode_params = video_params(CodecId::H264, 64, 64);
+        decode_params.extra = config;
+        let mut decoder = open_decoder(&decode_params).expect("decode open");
+        let mut token = None;
+        for packet in &packets {
+            for output in decoder.push(packet).expect("decode") {
+                let Output::Picture(picture) = output else {
+                    panic!("picture");
+                };
+                if token.is_none() {
+                    let PictureSamples::Platform { token: published } = picture.samples() else {
+                        panic!("platform");
+                    };
+                    token = Some((published, picture.pts(), picture.timescale()));
+                } else if let PictureSamples::Platform { token } = picture.samples() {
+                    release_buffer(token).expect("release extra");
+                }
+            }
+        }
+        let (token, pts, timescale) = token.expect("retained frame");
+        let mut again = open_encoder(&video_params(CodecId::H264, 64, 64)).expect("second encode");
+        let frame = PlatformFrame::new(
+            64,
+            64,
+            token,
+            FrameTime::new(pts, 1, timescale).expect("time"),
+        )
+        .expect("platform frame");
+        let mut encoded = again
+            .push_frame(&FrameInput::Platform(frame))
+            .expect("encode token");
+        encoded.extend(again.drain().expect("drain"));
+        assert!(!encoded.is_empty(), "token produced no packets");
+        let second_config = encoded
+            .iter()
+            .find_map(|packet| {
+                packet.side.iter().find_map(|side| match side {
+                    SideData::Config(bytes) if !bytes.is_empty() => Some(bytes.clone()),
+                    _ => None,
+                })
+            })
+            .expect("second avcC");
+        let mut second_params = video_params(CodecId::H264, 64, 64);
+        second_params.extra = second_config;
+        let mut second = open_decoder(&second_params).expect("second decode");
+        let mut red = 0u64;
+        for packet in &encoded {
+            for output in second.push(packet).expect("decode token") {
+                let Output::Picture(picture) = output else {
+                    continue;
+                };
+                let PictureSamples::Platform { token: decoded } = picture.samples() else {
+                    panic!("platform");
+                };
+                let copied = to_cpu(&picture).expect("cpu");
+                release_buffer(decoded).expect("release decoded");
+                let PictureSamples::Cpu(bytes) = copied.samples() else {
+                    panic!("cpu");
+                };
+                red += channel_sum(bytes, 0);
+            }
+        }
+        release_buffer(token).expect("release source");
+        assert!(red > 0, "retained frame encoded to black");
     }
 
     #[test]
@@ -1309,8 +1568,21 @@ mod tests {
                 let Output::Picture(picture) = output else {
                     continue;
                 };
-                let PictureSamples::Cpu(bytes) = picture.samples() else {
-                    continue;
+                let PictureSamples::Platform { token } = picture.samples() else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "platform",
+                    });
+                };
+                let copied = to_cpu(&picture);
+                let released = release_buffer(token);
+                let copied = copied?;
+                released?;
+                let PictureSamples::Cpu(bytes) = copied.samples() else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "cpu",
+                    });
                 };
                 red += channel_sum(bytes, 0);
                 green += channel_sum(bytes, 1);

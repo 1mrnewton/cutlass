@@ -12,7 +12,7 @@ Stills go through ImageIO: JPEG, PNG, WebP, GIF, and the file helpers for HEIC (
 
 Audio goes through AudioConverter. PCM is little-endian interleaved and round-trips exactly. AAC attaches the magic cookie and any priming info on the first packet. Vorbis has no format id and declines. A bitrate the converter will not set is ignored and the converter's default stands. ALAC, FLAC, MP3, Opus, and AC-3 open only when `AudioConverterNew` accepts them.
 
-Video goes through VideoToolbox. Decoded pictures are tightly packed RGBA. The session is asked for BGRA when the codec is H.264 or HEVC; ProRes and the other sized formats use the decoder's own pixel format and are copied only when that format is BGRA. H.264 and HEVC need parameter sets, either in `CodecParams.extra` or in the first packet (`avcC`, the private `HVCC` envelope, or in-band Annex B). Other video codecs get a format description from the codec id and the frame size. VP8 declines immediately. A platform-buffer token is `Unsupported`. The software renderer cannot sample one, and this crate does not lease tokens.
+Video goes through VideoToolbox. A decoded frame is a retained BGRA pixel buffer named by a platform token. `to_cpu` copies that buffer to tightly packed RGBA, and `release_buffer` drops the retain. The session is asked for BGRA when the codec is H.264 or HEVC; ProRes and the other sized formats use the decoder's own pixel format and are kept only when that format is BGRA. An encoder accepts a token this crate still holds and passes that buffer to VideoToolbox. A token this crate did not publish is `Unsupported`. H.264 and HEVC need parameter sets, either in `CodecParams.extra` or in the first packet (`avcC`, the private `HVCC` envelope, or in-band Annex B). Other video codecs get a format description from the codec id and the frame size. VP8 declines immediately. The software renderer cannot sample the token, and the Metal renderer is not wired to it yet. `with_pixel_buffer` is the borrow a later renderer can use.
 
 Edges must be even and at most 8192, and a frame must be at most 16,777,216 pixels. A packet must be non-empty and at most 16 MiB. Audio is at most 8 channels and 192 kHz. When `bitrate` is 0, video uses `max(width * height * 8, 64_000)` bits per second. H.264 asks for Baseline and HEVC for Main, with reordering off and a keyframe interval of 30. A property the session does not support is ignored.
 
@@ -32,12 +32,12 @@ Edges must be even and at most 8192, and a frame must be at most 16,777,216 pixe
 | AAC-LC | AudioConverter | AudioConverter | `aac_round_trips_a_tone` | Verified. SNR above 20 dB after a lag search, not an ffmpeg oracle |
 | Empty, non-finite, out-of-range, cancelled, wrong rate | Reject, buffer unchanged | Same | audio tests of those names | Verified |
 | Vorbis, VP8 | Declined | Declined | `vorbis_is_declined`, `vp8_is_declined` | Unsupported |
-| H.264, even size, Baseline | VideoToolbox, RGBA | VideoToolbox | `h264_round_trips_a_solid_color` | Verified. A broken unit then a real packet still decodes |
+| H.264, even size, Baseline | VideoToolbox, retained buffer | VideoToolbox | `h264_round_trips_a_solid_color` | Verified. A broken unit then a real packet still decodes. RGBA comes from `to_cpu` |
 | HEVC | VideoToolbox | VideoToolbox | `hevc_round_trips_a_solid_color_when_the_hardware_can` | Verified on this machine |
 | ProRes 422, MJPEG | VideoToolbox | VideoToolbox | the matching round-trip tests | Verified on this machine |
 | AV1, VP9, MPEG-4, MPEG-2 | Open or decline | Same | `later_video_codecs_decline_or_open` | Capability query. A wrong picture fails the test. A decline is `Unsupported` |
 | Odd size, oversize | Declined | Declined | `an_odd_h264_size_is_declined` | Unsupported, so a later opener can run |
-| Platform frame token | — | Declined | inside `h264_round_trips_a_solid_color` | Unsupported |
+| Platform frame token | Retained BGRA buffer | Encoded when this crate published it | `h264_round_trips_a_solid_color`, `a_retained_frame_encodes_without_a_cpu_copy` | Verified. A token this crate did not publish stays `Unsupported`. The renderer does not sample the buffer |
 | ffmpeg 8.1.1 oracle | Not run | Not run | — | Not run |
 | Short random H.264 packets | Fail closed | — | `random_packets_fail_closed` | Verified. 32 packets, not a 30-minute run |
 | 30-minute fuzz | Not run | Not run | — | Not run |
@@ -52,4 +52,4 @@ Edges must be even and at most 8192, and a frame must be at most 16,777,216 pixe
 - Release timings for one decode and one encode on this machine.
 - A pass on an iOS device. The frameworks are the same entry points; the device was not here.
 - AVIF covered the same way HEIC is.
-- A way to hand a VideoToolbox buffer to the Metal renderer without copying to RGBA. Tokens are declined until that lease exists.
+- The Metal renderer sampling a retained token through `with_pixel_buffer`. The token and the encode path exist. Playback still copies if a caller asks for RGBA, and nothing in the renderer reads the buffer yet.

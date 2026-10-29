@@ -10,3 +10,6 @@ mod error;
 
 pub use device::WindowsDevice;
 pub use error::WindowsError;
+
+#[cfg(test)]
+mod pixels;

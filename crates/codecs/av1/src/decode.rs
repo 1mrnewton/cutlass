@@ -1,9 +1,8 @@
 //! Public AV1 decoder. One access unit is one temporal unit.
 
-use cutlass_decode::{
-    CodecError, CodecId, CodecParams, Decoded, Decoder, Packet, PixelFormat, Plane, VideoOutput,
-    Yuv420,
-};
+use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Output, Packet, PixelFormat};
+
+use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_unit};
 use crate::inter::RefView;
@@ -49,7 +48,7 @@ impl Decoder for Av1Decoder {
         CodecId::Av1
     }
 
-    fn push(&mut self, packet: &Packet) -> Result<Vec<Decoded>, CodecError> {
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         if packet.data.is_empty() {
             return Err(CodecError::InvalidApi {
                 what: "empty packet",
@@ -71,16 +70,14 @@ impl Decoder for Av1Decoder {
             return Ok(Vec::new());
         }
         let picture = shown(&picture, &frame)?;
-        Ok(vec![Decoded::Video(VideoOutput {
-            picture,
-            pts: packet.pts,
-            duration: packet.duration,
-            timescale: packet.timescale,
-            keyframe: frame.intra && !frame.show_existing,
-        })])
+        Ok(vec![Output::Picture(picture_output(
+            &picture,
+            packet.pts,
+            packet.timescale,
+        )?)])
     }
 
-    fn drain(&mut self) -> Result<Vec<Decoded>, CodecError> {
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
         Ok(Vec::new())
     }
 
@@ -97,7 +94,7 @@ impl Av1Decoder {
         frame: &FrameInfo,
     ) -> Result<DecodedPicture, CodecError> {
         let views = self.ref_views();
-        if views.iter().all(Option::is_none) {
+        if frame.intra || views.iter().all(Option::is_none) {
             decode_tile(sequence, frame)
         } else {
             decode_with_refs(sequence, frame, &views)
@@ -210,7 +207,8 @@ mod tests {
     use crate::encode::Av1Encoder;
     use crate::register_decoders;
     use cutlass_decode::{CodecId, CodecParams, DecodeFactory, Decoder};
-    use cutlass_encode::{Encoder, Plane, VideoInput, Yuv420};
+
+    use crate::yuv::{AsView, Plane, VideoInput, Yuv420};
 
     fn solid(width: u32, height: u32, sample: u8) -> Yuv420 {
         let y = vec![sample; (width * height) as usize];

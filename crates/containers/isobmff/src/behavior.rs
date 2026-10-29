@@ -42,9 +42,12 @@ fn packet(dts: i64, pts: i64, duration: u32, payload: &[u8], keyframe: bool, sca
 
 fn write_movie(options: MuxOptions, tracks: Vec<(StreamParams, Vec<Packet>)>) -> Vec<u8> {
     let mut mux = IsoBmffMux::new(Cursor::new(Vec::new()), options);
+    let mut queued = Vec::new();
     for (params, packets) in tracks {
         let id = mux.add_stream(&params).expect("stream");
-        let scale = params.timescale;
+        queued.push((id, params.timescale, packets));
+    }
+    for (id, scale, packets) in queued {
         for mut packet in packets {
             packet.track_id = id;
             packet.timescale = scale;
@@ -233,6 +236,103 @@ fn an_edit_list_is_exposed_and_not_applied_to_packet_time() {
     assert_eq!(edit.media_time, Some(30));
     assert_eq!(edit.segment_duration, 30);
     assert_eq!(read_all(&bytes)[0].dts, 0);
+}
+
+#[test]
+fn a_caller_movie_timescale_keeps_edit_durations() {
+    let mut video = video();
+    video.timescale = Timescale(30_000);
+    let mut audio = audio();
+    audio.timescale = Timescale(44_100);
+    let mut mux = IsoBmffMux::new(
+        Cursor::new(Vec::new()),
+        MuxOptions {
+            movie_timescale: Some(1_000),
+            ..MuxOptions::default()
+        },
+    );
+    let video_id = mux.add_stream(&video).unwrap();
+    let audio_id = mux.add_stream(&audio).unwrap();
+    mux.set_edits(
+        video_id,
+        vec![Edit {
+            segment_duration: 1_000,
+            media_time: Some(0),
+            media_rate: 0x0001_0000,
+        }],
+    )
+    .unwrap();
+    let mut picture = packet(0, 0, 3_000, b"v", true, 30_000);
+    picture.track_id = video_id;
+    mux.write_packet(&picture).unwrap();
+    let mut sound = packet(0, 0, 1_024, b"a", true, 44_100);
+    sound.track_id = audio_id;
+    mux.write_packet(&sound).unwrap();
+    let bytes = mux.finish_into().unwrap().into_inner();
+    let movie = open(&bytes);
+    assert_eq!(movie.movie_timescale().get(), 1_000);
+    assert_eq!(movie.streams()[0].edits[0].segment_duration, 1_000);
+    assert_eq!(movie.streams()[0].edits[0].media_time, Some(0));
+    assert!(movie.streams()[1].edits.is_empty());
+    let lcm = write_movie(
+        MuxOptions::default(),
+        vec![
+            (video, vec![packet(0, 0, 3_000, b"v", true, 30_000)]),
+            (audio, vec![packet(0, 0, 1_024, b"a", true, 44_100)]),
+        ],
+    );
+    assert_ne!(open(&lcm).movie_timescale().get(), 1_000);
+}
+
+#[test]
+fn an_unknown_edit_duration_uses_the_media_length() {
+    let mut mux = IsoBmffMux::new(
+        Cursor::new(Vec::new()),
+        MuxOptions {
+            movie_timescale: Some(1_000),
+            ..MuxOptions::default()
+        },
+    );
+    let mut params = video();
+    params.timescale = Timescale(1_000);
+    let id = mux.add_stream(&params).unwrap();
+    mux.set_edits(
+        id,
+        vec![Edit {
+            segment_duration: 0,
+            media_time: Some(40),
+            media_rate: 0x0001_0000,
+        }],
+    )
+    .unwrap();
+    let mut sample = packet(0, 0, 1_000, b"pic", true, 1_000);
+    sample.track_id = id;
+    mux.write_packet(&sample).unwrap();
+    let bytes = mux.finish_into().unwrap().into_inner();
+    let edit = open(&bytes).streams()[0].edits[0];
+    assert_eq!(edit.segment_duration, 1_000);
+    assert_eq!(edit.media_time, Some(40));
+}
+
+#[test]
+fn a_zero_movie_timescale_is_rejected() {
+    let mut mux = IsoBmffMux::new(
+        Cursor::new(Vec::new()),
+        MuxOptions {
+            movie_timescale: Some(0),
+            ..MuxOptions::default()
+        },
+    );
+    let id = mux.add_stream(&video()).unwrap();
+    let mut sample = packet(0, 0, 30, b"v", true, 30);
+    sample.track_id = id;
+    mux.write_packet(&sample).unwrap();
+    assert_eq!(
+        mux.finish().unwrap_err(),
+        Error::Unsupported {
+            what: "movie timescale 0",
+        }
+    );
 }
 
 #[test]
@@ -533,6 +633,7 @@ fn a_hand_built_stco_file_keeps_chunk_samples_edits_and_sync() {
         compact_sizes: false,
         sync: SyncTable::FirstOnly,
         negative_cts: true,
+        version0_cts: false,
         edit: true,
         external: false,
         outside: false,
@@ -559,12 +660,41 @@ fn a_hand_built_stco_file_keeps_chunk_samples_edits_and_sync() {
 }
 
 #[test]
+fn a_version_0_composition_table_keeps_a_negative_offset() {
+    let bytes = hand_built(HandBuilt {
+        wide_offsets: false,
+        compact_sizes: false,
+        sync: SyncTable::FirstOnly,
+        negative_cts: true,
+        version0_cts: true,
+        edit: false,
+        external: false,
+        outside: false,
+    });
+    let packets = read_all(&bytes);
+    assert_eq!(packets[0].pts - packets[0].dts, 1000);
+    assert_eq!(packets[1].pts - packets[1].dts, -1000);
+    let mut mux = IsoBmffMux::new(Cursor::new(Vec::new()), MuxOptions::default());
+    let params = open(&bytes).streams()[0].params.clone();
+    let id = mux.add_stream(&params).unwrap();
+    for packet in &packets {
+        let mut packet = packet.clone();
+        packet.track_id = id;
+        mux.write_packet(&packet).unwrap();
+    }
+    let written = mux.finish_into().unwrap().into_inner();
+    let again = read_all(&written);
+    assert_eq!(again[1].pts - again[1].dts, -1000);
+}
+
+#[test]
 fn compact_sizes_and_wide_offsets_read_the_same_samples() {
     let bytes = hand_built(HandBuilt {
         wide_offsets: true,
         compact_sizes: true,
         sync: SyncTable::Absent,
         negative_cts: false,
+        version0_cts: false,
         edit: false,
         external: false,
         outside: false,
@@ -583,6 +713,7 @@ fn an_empty_sync_table_can_be_read_and_cannot_be_seeked() {
         compact_sizes: false,
         sync: SyncTable::Empty,
         negative_cts: false,
+        version0_cts: false,
         edit: false,
         external: false,
         outside: false,
@@ -605,6 +736,7 @@ fn a_sample_outside_mdat_and_an_external_url_fail_closed() {
         compact_sizes: false,
         sync: SyncTable::Absent,
         negative_cts: false,
+        version0_cts: false,
         edit: false,
         external: false,
         outside: true,
@@ -620,6 +752,7 @@ fn a_sample_outside_mdat_and_an_external_url_fail_closed() {
         compact_sizes: false,
         sync: SyncTable::Absent,
         negative_cts: false,
+        version0_cts: false,
         edit: false,
         external: true,
         outside: false,
@@ -742,6 +875,7 @@ struct HandBuilt {
     compact_sizes: bool,
     sync: SyncTable,
     negative_cts: bool,
+    version0_cts: bool,
     edit: bool,
     external: bool,
     outside: bool,
@@ -780,7 +914,7 @@ fn hand_built(spec: HandBuilt) -> Vec<u8> {
     stts.extend(u32_bytes(1000));
     stbl.extend(box_of(b"stts", &fullbox(&stts)));
     if spec.negative_cts {
-        let mut ctts = vec![1, 0, 0, 0];
+        let mut ctts = vec![u8::from(!spec.version0_cts), 0, 0, 0];
         ctts.extend(u32_bytes(2));
         ctts.extend(u32_bytes(1));
         ctts.extend(1_000i32.to_be_bytes());

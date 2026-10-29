@@ -11,6 +11,27 @@ cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }
 cutlass-container = { path = "../container", version = "0.1.0" }
 cutlass-decode = { path = "../decode", version = "0.1.0" }
+# Published candle-core 0.11.0 enables tokenizers/onig, which compiles C.
+# This revision selects fancy-regex instead. Default features stay on the CPU.
+candle-core = { version = "0.11.0", git = "https://github.com/huggingface/candle", rev = "12bb5d1f6350f4ea9827d9086f213feec1f0af6a" }
+candle-nn = { version = "0.11.0", git = "https://github.com/huggingface/candle", rev = "12bb5d1f6350f4ea9827d9086f213feec1f0af6a" }
+rustfft = "6.4.1"
+safetensors = "0.8.0"
+serde_json = "1.0.154"
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "aac",
+    "aiff",
+    "alac",
+    "caf",
+    "flac",
+    "isomp4",
+    "mkv",
+    "mp3",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
 
 [lints]
 workspace = true

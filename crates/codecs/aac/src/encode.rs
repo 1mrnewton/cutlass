@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, SideData};
-use cutlass_encode::{AudioInput, Encoder};
+use cutlass_encode::{AudioInput, Encoder, FrameInput};
 
 use crate::bits::{BitCounter, BitSink, BitWriter};
 use crate::config::{
@@ -478,6 +478,10 @@ impl Encoder for AacEncoder {
 
     fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
         self.push_samples(input)
+    }
+
+    fn push_frame(&mut self, _input: &FrameInput) -> Result<Vec<Packet>, CodecError> {
+        Err(CodecError::Unsupported { what: "picture" })
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -1388,8 +1392,15 @@ mod tests {
     use crate::decode::AacDecoder;
     use crate::encode::AacEncoder;
     use crate::filterbank::Sequence;
-    use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Decoder, SideData};
-    use cutlass_encode::{AudioInput, Encoder};
+    use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Decoder, Output, SideData};
+    use cutlass_encode::{AudioInput, CpuFrame, Encoder, FrameInput, FrameTime, PixelFormat};
+
+    fn decoded_samples(output: &Output) -> &[f32] {
+        match output {
+            Output::Audio(audio) => audio.pcm.as_f32().expect("f32"),
+            Output::Picture(_) => panic!("aac frame is audio"),
+        }
+    }
 
     fn params(rate: u32, layout: ChannelLayout, bitrate: u32) -> CodecParams {
         CodecParams {
@@ -1422,7 +1433,7 @@ mod tests {
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                decoded.extend_from_slice(output.as_audio().unwrap().pcm.as_f32().unwrap());
+                decoded.extend_from_slice(decoded_samples(&output));
             }
         }
         let (delay, padding) = gapless(packets.last().unwrap());
@@ -1531,6 +1542,26 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_is_refused_and_audio_still_encodes() {
+        let mut encoder = AacEncoder::open(&params(48_000, ChannelLayout::mono(), 64_000)).unwrap();
+        let frame = CpuFrame::new(
+            1,
+            1,
+            PixelFormat::Rgba8,
+            vec![1, 2, 3, 4],
+            FrameTime::new(0, 1, 30).unwrap(),
+        )
+        .unwrap();
+        let err = encoder.push_frame(&FrameInput::Cpu(frame)).unwrap_err();
+        assert_eq!(
+            err,
+            cutlass_decode::CodecError::Unsupported { what: "picture" }
+        );
+        let (decoded, _, _) = round_trip(&mut encoder, vec![0.0; 1024]);
+        assert_eq!(decoded.len(), 1024);
+    }
+
+    #[test]
     fn illegal_samples_leave_the_encoder_empty() {
         let mut encoder = AacEncoder::open(&params(48_000, ChannelLayout::mono(), 64_000)).unwrap();
         let nan = cutlass_decode::Pcm::from_f32(48_000, ChannelLayout::mono(), vec![f32::NAN; 64])
@@ -1607,11 +1638,11 @@ mod tests {
         let mut ours = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                ours.extend_from_slice(output.as_audio().unwrap().pcm.as_f32().unwrap());
+                ours.extend_from_slice(decoded_samples(&output));
             }
         }
         if let Some(tail) = decoder.drain().unwrap().pop() {
-            ours.extend_from_slice(tail.as_audio().unwrap().pcm.as_f32().unwrap());
+            ours.extend_from_slice(decoded_samples(&tail));
         }
         let (score, lag, ratio) = aligned_snr(&ours, &foreign);
         assert!(
@@ -1955,11 +1986,11 @@ mod tests {
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                decoded.extend_from_slice(output.as_audio().unwrap().pcm.as_f32().unwrap());
+                decoded.extend_from_slice(decoded_samples(&output));
             }
         }
         if let Some(tail) = decoder.drain().unwrap().pop() {
-            decoded.extend_from_slice(tail.as_audio().unwrap().pcm.as_f32().unwrap());
+            decoded.extend_from_slice(decoded_samples(&tail));
         }
         let (delay, padding) = gapless(packets.last().unwrap());
         let start = delay as usize;

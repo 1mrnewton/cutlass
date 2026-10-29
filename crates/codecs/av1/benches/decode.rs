@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use cutlass_av1::Av1Decoder;
+use cutlass_av1::{AsView, Av1Decoder};
 use cutlass_decode::{CodecId, CodecParams, Decoder, Packet};
 
 const FFMPEG_LOOPS: u32 = 20;

@@ -27,9 +27,11 @@ mod superres;
 mod symbol;
 mod tables;
 mod tile;
+mod yuv;
 
 pub use decode::Av1Decoder;
 pub use encode::Av1Encoder;
+pub use yuv::{AsView, View};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
 use cutlass_encode::{EncodeFactory, Encoder};

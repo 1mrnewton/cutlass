@@ -1,12 +1,13 @@
 [package]
-name = "cutlass-encode-platform"
+name = "cutlass-platform-apple"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Platform encoders."
+description = "VideoToolbox, AudioToolbox, and ImageIO."
 
 [dependencies]
+cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
 
 [lints]

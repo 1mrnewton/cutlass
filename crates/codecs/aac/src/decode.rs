@@ -5,9 +5,7 @@
 //! Prediction in LC, coupling, gain control, and spectral band replication are
 //! errors rather than something the decoder skips.
 
-use cutlass_decode::{
-    AudioOutput, CodecError, CodecId, CodecParams, Decoded, Decoder, Packet, Pcm,
-};
+use cutlass_decode::{AudioOutput, CodecError, CodecId, CodecParams, Decoder, Output, Packet, Pcm};
 
 use crate::bits::BitReader;
 use crate::config::{AudioConfig, ElementKind};
@@ -1069,18 +1067,18 @@ impl Decoder for AacDecoder {
         CodecId::Aac
     }
 
-    fn push(&mut self, packet: &Packet) -> Result<Vec<Decoded>, CodecError> {
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         let samples = self.push_packet(packet)?;
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![Decoded::Audio(self.output(samples, index)?)])
+        Ok(vec![Output::Audio(self.output(samples, index)?)])
     }
 
-    fn drain(&mut self) -> Result<Vec<Decoded>, CodecError> {
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
         let Some(samples) = self.drain_pcm()? else {
             return Ok(Vec::new());
         };
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![Decoded::Audio(self.output(samples, index)?)])
+        Ok(vec![Output::Audio(self.output(samples, index)?)])
     }
 
     fn reset(&mut self) {
@@ -1093,7 +1091,10 @@ mod tests {
     use super::group_lengths;
     use crate::bits::{BitSink, BitWriter};
     use crate::decode::AacDecoder;
-    use cutlass_decode::{ChannelLayout, CodecError, CodecId, CodecParams, Packet, SideData};
+    use cutlass_decode::{
+        ChannelLayout, CodecError, CodecId, CodecParams, DecodeFactory, Decoder, Output, Packet,
+        SideData,
+    };
 
     #[test]
     fn grouping_bits_follow_transmission_order() {
@@ -1117,6 +1118,31 @@ mod tests {
         writer.write_bits(0, 1).unwrap();
         writer.write_bits(7, 3).unwrap();
         writer.finish()
+    }
+
+    fn refuse_platform(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+        Err(CodecError::Unsupported {
+            what: "platform aac",
+        })
+    }
+
+    #[test]
+    fn factory_decodes_aac_after_a_platform_refusal() {
+        let mut factory = DecodeFactory::new();
+        factory.register(CodecId::Aac, refuse_platform);
+        crate::register_decoders(&mut factory);
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = factory.open(&params).expect("aac");
+        let packet = Packet::audio(silent_frame(), 0, 1024, 48_000);
+        let out = decoder.push(&packet).expect("push");
+        let Output::Audio(audio) = &out[0] else {
+            panic!("pcm");
+        };
+        assert_eq!(out.len(), 1);
+        assert_eq!(audio.pcm.samples, 1024);
+        let samples = audio.pcm.as_f32().expect("f32");
+        assert!(samples.iter().all(|sample| sample.abs() < 1.0e-6));
+        assert!(decoder.drain().expect("drain").is_empty());
     }
 
     #[test]

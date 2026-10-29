@@ -9,8 +9,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::{
-    AudioInput, CodecError, CodecId, CodecParams, Encoder, Packet, PixelFormat, VideoInput,
+    AudioInput, CodecError, CodecId, CodecParams, Encoder, FrameInput, Packet, PixelFormat,
 };
+
+use crate::yuv::VideoInput;
 
 use crate::bits::{BitWriter, floor_log2, write_leb128};
 use crate::dims::{
@@ -86,18 +88,9 @@ impl Av1Encoder {
         self.start_q = q;
         self.q = q;
     }
-}
 
-impl Encoder for Av1Encoder {
-    fn codec(&self) -> CodecId {
-        CodecId::Av1
-    }
-
-    fn push(&mut self, _input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
-        Err(CodecError::Unsupported { what: "audio" })
-    }
-
-    fn push_picture(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
+    /// Encode one 4:2:0 picture. Odd luma edges stay inside this type.
+    pub fn push_picture(&mut self, input: &VideoInput) -> Result<Vec<Packet>, CodecError> {
         if self.cancel.load(Ordering::Relaxed) {
             return Err(CodecError::Cancelled);
         }
@@ -123,6 +116,37 @@ impl Encoder for Av1Encoder {
         };
         self.note_rate(data.len(), input.duration, input.timescale);
         Ok(vec![packet(data, input, repeat)])
+    }
+}
+
+impl Encoder for Av1Encoder {
+    fn codec(&self) -> CodecId {
+        CodecId::Av1
+    }
+
+    fn push(&mut self, _input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
+        Err(CodecError::Unsupported { what: "audio" })
+    }
+
+    fn push_frame(&mut self, input: &FrameInput) -> Result<Vec<Packet>, CodecError> {
+        let FrameInput::Cpu(frame) = input else {
+            return Err(CodecError::Unsupported {
+                what: "platform frame",
+            });
+        };
+        if frame.pixel() != PixelFormat::Yuv420p {
+            return Err(CodecError::Unsupported {
+                what: "pixel format",
+            });
+        }
+        let picture = yuv_from_packed(frame.width(), frame.height(), frame.bytes())?;
+        let time = frame.time();
+        self.push_picture(&VideoInput {
+            picture,
+            pts: time.pts(),
+            duration: time.duration(),
+            timescale: time.timescale(),
+        })
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -160,6 +184,48 @@ impl Av1Encoder {
             self.q = self.q.saturating_sub(6).max(1);
         }
     }
+}
+
+fn yuv_from_packed(
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> Result<crate::yuv::Yuv420, CodecError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(CodecError::InvalidApi { what: "4:2:0 size" });
+    }
+    let y_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(CodecError::Limit { what: "frame size" })?;
+    let chroma_w = width / 2;
+    let chroma_h = height / 2;
+    let chroma_len = usize::try_from(chroma_w)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(chroma_h)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(CodecError::Limit { what: "frame size" })?;
+    if bytes.len() != y_len + chroma_len + chroma_len {
+        return Err(CodecError::InvalidApi {
+            what: "picture length",
+        });
+    }
+    crate::yuv::Yuv420::new(
+        crate::yuv::Plane::new(width, height, bytes[..y_len].to_vec())?,
+        crate::yuv::Plane::new(
+            chroma_w,
+            chroma_h,
+            bytes[y_len..y_len + chroma_len].to_vec(),
+        )?,
+        crate::yuv::Plane::new(chroma_w, chroma_h, bytes[y_len + chroma_len..].to_vec())?,
+    )
 }
 
 fn packet(data: Vec<u8>, input: &VideoInput, repeat: bool) -> Packet {
@@ -1295,7 +1361,8 @@ mod tests {
     use crate::header::parse_unit;
     use crate::tile::decode_tile;
     use cutlass_decode::{CodecId, CodecParams, Decoder};
-    use cutlass_encode::{Encoder, Plane, VideoInput, Yuv420};
+
+    use crate::yuv::{AsView, Plane, VideoInput, Yuv420};
 
     fn picture(width: u32, height: u32, fill: impl Fn(u32, u32) -> u8) -> Yuv420 {
         let mut y = vec![0u8; (width * height) as usize];

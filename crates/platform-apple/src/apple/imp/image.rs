@@ -693,6 +693,106 @@ mod tests {
         );
     }
 
+    fn lossy_red(codec: CodecId) {
+        let image = rgba(16, 16, [220, 10, 10, 255]);
+        let mut encoder = match open_encoder(&params(codec)) {
+            Ok(encoder) => encoder,
+            Err(CodecError::Unsupported { .. }) => return,
+            Err(err) => panic!("{err}"),
+        };
+        let packets = match encoder.push_picture(&PictureInput { image }) {
+            Ok(packets) => packets,
+            Err(CodecError::Unsupported { .. }) => return,
+            Err(err) => panic!("{err}"),
+        };
+        assert_eq!(packets.len(), 1);
+        let mut decoder = open_decoder(&params(codec)).expect("decode open");
+        let decoded = decoder
+            .decode_picture(&Packet {
+                stream: 0,
+                data: packets[0].data.clone(),
+                pts: 0,
+                duration: 1,
+                timescale: 1,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].image.width, 16);
+        assert_eq!(decoded[0].image.height, 16);
+        let mut red = 0u64;
+        let mut green = 0u64;
+        for sample in decoded[0].image.samples.as_chunks::<4>().0 {
+            red += u64::from(sample[0]);
+            green += u64::from(sample[1]);
+        }
+        assert!(red > green.saturating_mul(4), "red {red} green {green}");
+    }
+
+    #[test]
+    fn jpeg_keeps_the_frame_size_and_the_red_channel() {
+        lossy_red(CodecId::Jpeg);
+    }
+
+    #[test]
+    fn webp_keeps_the_frame_size_and_the_red_channel_when_imageio_can() {
+        lossy_red(CodecId::Webp);
+    }
+
+    #[test]
+    fn gif_frames_leave_on_drain() {
+        let mut encoder = open_encoder(&params(CodecId::Gif)).expect("open");
+        let first = encoder
+            .push_picture(&PictureInput {
+                image: rgba(8, 8, [255, 0, 0, 255]),
+            })
+            .expect("first");
+        assert!(first.is_empty());
+        let second = encoder
+            .push_picture(&PictureInput {
+                image: rgba(8, 8, [0, 0, 255, 255]),
+            })
+            .expect("second");
+        assert!(second.is_empty());
+        let packets = encoder.drain().expect("drain");
+        assert_eq!(packets.len(), 1);
+        assert!(encoder.drain().expect("again").is_empty());
+        let mut decoder = open_decoder(&params(CodecId::Gif)).expect("decode");
+        let decoded = decoder
+            .decode_picture(&Packet {
+                stream: 0,
+                data: packets[0].data.clone(),
+                pts: 4,
+                duration: 2,
+                timescale: 1,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("decode");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].image.width, 8);
+        assert_eq!(decoded[0].pts, 4);
+    }
+
+    #[test]
+    fn a_sixteen_bit_still_is_declined() {
+        let samples = vec![0u16; 4];
+        let image = StillImage::from_samples(1, 1, ColorType::Rgba, BitDepth::Sixteen, samples)
+            .checked()
+            .expect("still");
+        let mut encoder = open_encoder(&params(CodecId::Png)).expect("open");
+        let err = encoder
+            .push_picture(&PictureInput { image })
+            .expect_err("depth");
+        assert_eq!(
+            err,
+            CodecError::Unsupported {
+                what: "still depth"
+            }
+        );
+    }
+
     #[test]
     fn the_factory_uses_imageio_before_a_later_opener() {
         let mut decode = DecodeFactory::new();

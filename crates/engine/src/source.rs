@@ -7,8 +7,11 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
-use cutlass_codec::access::{BitDepth, ColorType, PixelFormat};
-use cutlass_color::ConvertError;
+use cutlass_codec::access::{
+    BitDepth, ColorPrimaries, ColorRange, ColorType, MatrixCoefficients, PixelFormat, Transfer,
+    Yuv420p,
+};
+use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
 use cutlass_model::{Draft, Micros, SegmentId};
@@ -158,46 +161,87 @@ fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
             },
             token: *token,
         })),
-        DecodedFrame::Still(image) => cpu_bytes(
-            still_layout(image),
-            image.width,
-            image.height,
-            &still_bytes(image),
-        ),
+        DecodedFrame::Still(image) => Err(EngineError::ColorMiss {
+            layout: still_layout(image).to_owned(),
+        }),
         DecodedFrame::Coded {
             width,
             height,
             pixel,
+            primaries,
+            transfer,
             bytes,
-        } => cpu_bytes(pixel_layout(*pixel), *width, *height, bytes),
+        } => coded_bytes(*pixel, *width, *height, *primaries, *transfer, bytes),
     }
 }
 
-fn cpu_bytes(
-    layout: &'static str,
+fn coded_bytes(
+    pixel: PixelFormat,
     width: u32,
     height: u32,
+    primaries: ColorPrimaries,
+    transfer: Transfer,
     bytes: &[u8],
 ) -> Result<Picture, EngineError> {
-    match cutlass_color::to_rgba(layout, width, height, bytes) {
-        Ok(rgba) => {
-            let cpu = CpuBytes::new(width, height, rgba).map_err(|_| EngineError::ColorMiss {
-                layout: layout.to_owned(),
-            })?;
-            Ok(Picture::Cpu(cpu))
-        }
-        Err(ConvertError::Unsupported { layout }) => Err(EngineError::ColorMiss {
+    let layout = pixel_layout(pixel);
+    if pixel != PixelFormat::Yuv420p {
+        return Err(EngineError::ColorMiss {
             layout: layout.to_owned(),
-        }),
+        });
     }
+    let Some(yuv) = yuv420(width, height, bytes) else {
+        return Err(EngineError::ColorMiss {
+            layout: layout.to_owned(),
+        });
+    };
+    let Ok(matrix) = Matrix::from_coefficients(MatrixCoefficients::Bt709) else {
+        return Err(EngineError::ColorMiss {
+            layout: layout.to_owned(),
+        });
+    };
+    let picture = ColorPicture::from_yuv420p(
+        &yuv,
+        ColorRange::Limited,
+        matrix,
+        primaries,
+        cutlass_color::curve_from_codec(transfer),
+    );
+    let working = match cutlass_color::convert(Input::Cpu(picture), &Request::draft(0)) {
+        Ok(Outcome::Working(working)) => working,
+        Ok(Outcome::Platform { .. }) | Err(_) => {
+            return Err(EngineError::ColorMiss {
+                layout: layout.to_owned(),
+            });
+        }
+    };
+    let cpu = CpuBytes::new(width, height, working.rgba).map_err(|_| EngineError::ColorMiss {
+        layout: layout.to_owned(),
+    })?;
+    Ok(Picture::Cpu(cpu))
 }
 
-fn still_bytes(image: &StillImage) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(image.samples.len().saturating_mul(2));
-    for sample in &image.samples {
-        bytes.extend(sample.to_le_bytes());
+/// Packed 4:2:0 is Y, then U, then V, with no stride. That is the byte order
+/// `PictureOutput` stores for [`PixelFormat::Yuv420p`].
+fn yuv420(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
+    let y_len = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let chroma_width = usize::try_from(width / 2).ok()?;
+    let chroma_height = usize::try_from(height / 2).ok()?;
+    let chroma_len = chroma_width.checked_mul(chroma_height)?;
+    let u_end = y_len.checked_add(chroma_len)?;
+    let v_end = u_end.checked_add(chroma_len)?;
+    if bytes.len() != v_end {
+        return None;
     }
-    bytes
+    Yuv420p::try_new(
+        width,
+        height,
+        bytes[..y_len].to_vec(),
+        bytes[y_len..u_end].to_vec(),
+        bytes[u_end..v_end].to_vec(),
+    )
+    .ok()
 }
 
 fn still_layout(image: &StillImage) -> &'static str {

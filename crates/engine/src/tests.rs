@@ -113,6 +113,48 @@ fn open_token(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
     Ok(Box::new(Token))
 }
 
+struct Planar;
+
+impl Decoder for Planar {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        let mut bytes = vec![16; 4];
+        bytes.push(128);
+        bytes.push(128);
+        let picture = PictureOutput::cpu(
+            PictureInfo {
+                width: 2,
+                height: 2,
+                pixel: PixelFormat::Yuv420p,
+                primaries: ColorPrimaries::Bt709,
+                transfer: Transfer::Bt709,
+            },
+            bytes,
+            packet.pts,
+            packet.timescale,
+        )?;
+        Ok(vec![Output::Picture(picture)])
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+
+    fn decode_picture(
+        &mut self,
+        _packet: &Packet,
+    ) -> Result<Vec<cutlass_decode::StillOutput>, CodecError> {
+        Err(CodecError::Unsupported {
+            what: "picture output",
+        })
+    }
+}
+
 struct Token;
 
 impl Decoder for Token {
@@ -323,6 +365,28 @@ fn export_decodes_a_fixture_and_names_the_color_miss_playback_does_not_decode() 
     let filled = export.fill(Micros(0));
     assert!(matches!(filled, Err(EngineError::ColorMiss { .. })));
     assert!(export.cached() >= 1);
+}
+
+#[test]
+fn a_planar_420_frame_uses_the_color_converter() {
+    let mut factory = ReaderFactory::new();
+    factory.register_container(probe_still, open_still);
+    factory
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Planar)));
+    let path = fixture("pattern.jpg");
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("source");
+    let picture = source.picture_at(Micros(0)).expect("rgba");
+    let Picture::Cpu(bytes) = picture else {
+        panic!("cpu picture");
+    };
+    assert_eq!(bytes.width(), 2);
+    assert_eq!(bytes.height(), 2);
+    assert_eq!(
+        bytes.rgba(),
+        &[0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use cutlass_codec::access::{ChannelLayout, CodecParams, PixelFormat};
+use cutlass_codec::access::{ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, Transfer};
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
@@ -59,6 +59,8 @@ pub enum DecodedFrame {
         width: u32,
         height: u32,
         pixel: PixelFormat,
+        primaries: ColorPrimaries,
+        transfer: Transfer,
         bytes: Vec<u8>,
     },
 }
@@ -363,6 +365,8 @@ fn frame_from_picture(picture: PictureOutput) -> DecodedFrame {
             width: info.width,
             height: info.height,
             pixel: info.pixel,
+            primaries: info.primaries,
+            transfer: info.transfer,
             bytes: bytes.to_vec(),
         },
     }

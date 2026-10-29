@@ -67,6 +67,14 @@ fn adam7_places_each_pass_back_on_the_full_grid() {
 }
 
 #[test]
+fn adam7_places_one_bit_pixels_from_each_pass() {
+    // 8×1 passes: x=0, x=4, then x=2 and x=6 together, then x=1, 3, 5, 7.
+    let raw = [0, 0b1000_0000, 0, 0b1000_0000, 0, 0b1100_0000, 0, 0];
+    let image = decode_bytes(&png_of(ihdr(8, 1, 1, 0, 1), &raw, &[])).expect("bit adam7");
+    assert_eq!(image.samples, vec![1, 0, 1, 0, 1, 0, 1, 0]);
+}
+
+#[test]
 fn truecolor_alpha_and_a_grey_key_keep_their_domains() {
     let rgba = decode_bytes(&png_of(ihdr(1, 1, 8, 6, 0), &[0, 9, 8, 7, 6], &[])).expect("rgba");
     assert_eq!(rgba.samples, vec![9, 8, 7, 6]);

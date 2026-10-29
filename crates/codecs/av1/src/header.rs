@@ -333,11 +333,6 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
             what: "loop restoration",
         });
     }
-    if enable_superres {
-        return Err(CodecError::Unsupported {
-            what: "super resolution",
-        });
-    }
     let high = bits.read_bool()?;
     if high {
         return Err(CodecError::Unsupported { what: "bit depth" });
@@ -378,7 +373,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         enable_dual_filter: enable_dual,
         enable_jnt,
         enable_ref_mvs,
-        enable_superres: false,
+        enable_superres,
         enable_cdef,
         screen_select,
         force_integer_select,
@@ -534,7 +529,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     let mut interpolation = 0u8;
     let mut motion_switchable = false;
     let mut use_ref_mvs = false;
-    let (width, height) = if intra {
+    let (width, upscaled_width, height) = if intra {
         let size = frame_size(bits, sequence, size_override)?;
         let _render_diff = bits.read_bool()?;
         if _render_diff {
@@ -734,7 +729,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         intra,
         width,
         height,
-        upscaled_width: width,
+        upscaled_width,
         order_hint,
         refresh_flags: refresh,
         primary_ref,
@@ -776,22 +771,40 @@ fn frame_size(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
     size_override: bool,
-) -> Result<(u32, u32), CodecError> {
-    if size_override {
+) -> Result<(u32, u32, u32), CodecError> {
+    let (upscaled, height) = if size_override {
         let width_bits = floor_bits(sequence.width_bits);
         let height_bits = floor_bits(sequence.height_bits);
-        let width = bits.read(width_bits)? + 1;
-        let height = bits.read(height_bits)? + 1;
-        Ok((width, height))
+        (bits.read(width_bits)? + 1, bits.read(height_bits)? + 1)
     } else {
-        Ok((sequence.width, sequence.height))
+        (sequence.width, sequence.height)
+    };
+    let coded = coded_size(bits, sequence, upscaled)?;
+    Ok((coded, upscaled, height))
+}
+
+fn coded_size(
+    bits: &mut BitReader<'_>,
+    sequence: &Sequence,
+    upscaled: u32,
+) -> Result<u32, CodecError> {
+    let use_superres = if sequence.enable_superres {
+        bits.read_bool()?
+    } else {
+        false
+    };
+    let denom = if use_superres { bits.read(3)? + 9 } else { 8 };
+    let coded = crate::superres::coded_width(upscaled, denom);
+    if use_superres && coded >= upscaled {
+        return Err(malformed(bits, "super resolution"));
     }
+    Ok(coded)
 }
 
 fn frame_size_with_refs(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
-) -> Result<(u32, u32), CodecError> {
+) -> Result<(u32, u32, u32), CodecError> {
     for _ in 0..7 {
         if bits.read_bool()? {
             return Err(CodecError::Unsupported {

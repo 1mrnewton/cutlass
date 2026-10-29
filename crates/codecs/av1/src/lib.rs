@@ -1,8 +1,8 @@
 //! AV1 encoder and decoder.
 //!
-//! The support record is `STATUS.md` next to this crate. Film grain, super
-//! resolution, loop restoration, lossless, and bit depths other than 8 are
-//! rejected. Compound, warped, and overlapped motion are rejected.
+//! The support record is `STATUS.md` next to this crate. Film grain, loop
+//! restoration, lossless, and bit depths other than 8 are rejected. Compound,
+//! warped, and overlapped motion are rejected.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +16,7 @@ mod header;
 mod idct;
 mod inter;
 mod predict;
+mod superres;
 mod symbol;
 mod tables;
 mod tile;

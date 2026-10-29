@@ -24,6 +24,7 @@ use crate::inter::{
     inter_tx_type, predict,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, chroma_from_luma, predict_intra};
+use crate::superres;
 use crate::symbol::SymbolDecoder;
 use crate::tables::{
     AC_QLOOKUP, DC_QLOOKUP, DEFAULT_ANGLE_DELTA_CDF, DEFAULT_CFL_ALPHA_CDF, DEFAULT_CFL_SIGN_CDF,
@@ -157,11 +158,49 @@ pub fn decode_with_refs(
     tile.symbols.finish()?;
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
+    let up_w = frame.upscaled_width as usize;
+    let (y, u, v, out_w) = if up_w > visible_w {
+        let up_chroma = up_w.div_ceil(2);
+        (
+            superres::upscale(
+                &tile.y,
+                buf_w,
+                visible_w,
+                up_w,
+                visible_h,
+                buf_w.saturating_sub(1),
+            ),
+            superres::upscale(
+                &tile.u,
+                tile.chroma_w,
+                chroma_w,
+                up_chroma,
+                chroma_h,
+                tile.chroma_w.saturating_sub(1),
+            ),
+            superres::upscale(
+                &tile.v,
+                tile.chroma_w,
+                chroma_w,
+                up_chroma,
+                chroma_h,
+                tile.chroma_w.saturating_sub(1),
+            ),
+            up_w,
+        )
+    } else {
+        (
+            crop(&tile.y, buf_w, visible_w, visible_h),
+            crop(&tile.u, tile.chroma_w, chroma_w, chroma_h),
+            crop(&tile.v, tile.chroma_w, chroma_w, chroma_h),
+            visible_w,
+        )
+    };
     Ok(DecodedPicture {
-        y: crop(&tile.y, buf_w, visible_w, visible_h),
-        u: crop(&tile.u, tile.chroma_w, chroma_w, chroma_h),
-        v: crop(&tile.v, tile.chroma_w, chroma_w, chroma_h),
-        width: visible_w,
+        y,
+        u,
+        v,
+        width: out_w,
         height: visible_h,
     })
 }

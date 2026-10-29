@@ -37,8 +37,8 @@ pub(crate) enum ZlibError {
 
 pub(crate) fn inflate(src: &[u8], limit: usize) -> Result<Vec<u8>, ZlibError> {
     let mut out = Vec::new();
-    inflate_with(src, limit, |byte| {
-        out.push(byte);
+    inflate_with(src, limit, |chunk| {
+        out.extend_from_slice(chunk);
         Ok(())
     })?;
     Ok(out)
@@ -47,7 +47,7 @@ pub(crate) fn inflate(src: &[u8], limit: usize) -> Result<Vec<u8>, ZlibError> {
 pub(crate) fn inflate_with(
     src: &[u8],
     limit: usize,
-    emit: impl FnMut(u8) -> Result<(), ZlibError>,
+    emit: impl FnMut(&[u8]) -> Result<(), ZlibError>,
 ) -> Result<(), ZlibError> {
     if src.len() < 6 {
         return Err(ZlibError::Truncated);
@@ -133,7 +133,7 @@ struct Sink<F> {
 
 impl<F> Sink<F>
 where
-    F: FnMut(u8) -> Result<(), ZlibError>,
+    F: FnMut(&[u8]) -> Result<(), ZlibError>,
 {
     fn push(&mut self, byte: u8) -> Result<(), ZlibError> {
         if self.count >= self.limit {
@@ -154,19 +154,56 @@ where
             self.s2 %= ADLER_BASE;
             self.block = 0;
         }
-        (self.emit)(byte)
+        let one = [byte];
+        (self.emit)(&one)
     }
 
-    fn past(&self, distance: usize) -> Result<u8, ZlibError> {
-        if distance == 0
-            || distance > self.written
-            || distance > self.window
-            || distance > MAX_WINDOW
-        {
+    /// Record output bytes and hand them to the caller as one slice.
+    ///
+    /// `bytes` must fit in the ring before it wraps. A match copies at most
+    /// one such run, so a repeated byte is a fill instead of one call per byte.
+    fn commit(&mut self, bytes: &[u8]) -> Result<(), ZlibError> {
+        let room = self.limit.saturating_sub(self.count);
+        if bytes.len() > room {
+            if room > 0 {
+                self.write_all(&bytes[..room])?;
+            }
+            return Err(ZlibError::Limit);
+        }
+        self.write_all(bytes)
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), ZlibError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let n = bytes.len();
+        let end = self.pos.saturating_add(n);
+        if end > self.window {
             return Err(ZlibError::Malformed("distance"));
         }
-        let index = (self.pos + self.window - distance) % self.window;
-        Ok(self.history[index])
+        self.history[self.pos..end].copy_from_slice(bytes);
+        self.pos = end;
+        if self.pos == self.window {
+            self.pos = 0;
+        }
+        self.written += n;
+        self.count += n;
+        self.absorb(bytes);
+        (self.emit)(bytes)
+    }
+
+    fn absorb(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.s1 += u32::from(byte);
+            self.s2 += self.s1;
+            self.block += 1;
+            if self.block == 5552 {
+                self.s1 %= ADLER_BASE;
+                self.s2 %= ADLER_BASE;
+                self.block = 0;
+            }
+        }
     }
 
     fn adler(&mut self) -> u32 {
@@ -380,7 +417,7 @@ fn reverse_bits(code: u16, len: u8) -> u16 {
 
 fn stored<F>(bits: &mut Bits<'_>, sink: &mut Sink<F>) -> Result<(), ZlibError>
 where
-    F: FnMut(u8) -> Result<(), ZlibError>,
+    F: FnMut(&[u8]) -> Result<(), ZlibError>,
 {
     bits.align();
     let len = bits.get(16).ok_or(ZlibError::Truncated)? as usize;
@@ -402,7 +439,7 @@ fn huffman<F>(
     dist: &Huff,
 ) -> Result<(), ZlibError>
 where
-    F: FnMut(u8) -> Result<(), ZlibError>,
+    F: FnMut(&[u8]) -> Result<(), ZlibError>,
 {
     loop {
         let symbol = lit.symbol(bits)?;
@@ -433,13 +470,39 @@ fn distance(bits: &mut Bits<'_>, dist: &Huff) -> Result<usize, ZlibError> {
     Ok(usize::from(DIST_BASE[index]) + add)
 }
 
-fn copy_match<F>(sink: &mut Sink<F>, distance: usize, len: usize) -> Result<(), ZlibError>
+fn copy_match<F>(sink: &mut Sink<F>, distance: usize, mut len: usize) -> Result<(), ZlibError>
 where
-    F: FnMut(u8) -> Result<(), ZlibError>,
+    F: FnMut(&[u8]) -> Result<(), ZlibError>,
 {
-    for _ in 0..len {
-        let byte = sink.past(distance)?;
-        sink.push(byte)?;
+    if distance == 0 || distance > sink.written || distance > sink.window || distance > MAX_WINDOW {
+        return Err(ZlibError::Malformed("distance"));
+    }
+    let mut tmp = [0u8; 258];
+    while len > 0 {
+        let until_wrap = sink.window - sink.pos;
+        if until_wrap == 0 {
+            return Err(ZlibError::Malformed("distance"));
+        }
+        let start = (sink.pos + sink.window - distance) % sink.window;
+        let n = if distance == 1 {
+            len.min(until_wrap).min(tmp.len())
+        } else {
+            let until_source = sink.window - start;
+            len.min(distance)
+                .min(until_wrap)
+                .min(until_source)
+                .min(tmp.len())
+        };
+        if n == 0 {
+            return Err(ZlibError::Malformed("distance"));
+        }
+        if distance == 1 {
+            tmp[..n].fill(sink.history[start]);
+        } else {
+            tmp[..n].copy_from_slice(&sink.history[start..start + n]);
+        }
+        sink.commit(&tmp[..n])?;
+        len -= n;
     }
     Ok(())
 }
@@ -683,6 +746,17 @@ mod tests {
                 assert_eq!(inflate(&ours, len).expect("length"), *sample);
             }
         }
+        let repeated = vec![9u8; 40_000];
+        let foreign = python_zlib(&repeated, true).expect("python long run");
+        assert_eq!(
+            inflate(&foreign, repeated.len()).expect("long run"),
+            repeated
+        );
+        let mixed: Vec<u8> = (0..40_000)
+            .map(|index| (index as u8).wrapping_mul(17))
+            .collect();
+        let foreign = python_zlib(&mixed, true).expect("python long mix");
+        assert_eq!(inflate(&foreign, mixed.len()).expect("long mix"), mixed);
     }
 
     #[test]

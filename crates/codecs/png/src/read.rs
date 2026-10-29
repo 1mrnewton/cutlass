@@ -544,7 +544,7 @@ fn before_palette(at: usize, flags: &Flags) -> Result<(), CodecError> {
 
 fn reconstruct(parsed: &Parsed, idat: &[u8], expect: usize) -> Result<Vec<u16>, CodecError> {
     let mut scan = Scan::prepare(parsed)?;
-    inflate_with(idat, expect, |byte| scan.push(byte)).map_err(zlib_err)?;
+    inflate_with(idat, expect, |chunk| scan.push_bytes(chunk)).map_err(zlib_err)?;
     if scan.got != expect || scan.pass_at != scan.passes.len() {
         return Err(malformed(scan.got, "idat length"));
     }
@@ -563,6 +563,7 @@ struct Scan<'a> {
     need: usize,
     buf: Vec<u8>,
     prev: Vec<u8>,
+    row: Vec<u8>,
     row_samples: Vec<u16>,
     got: usize,
 }
@@ -597,6 +598,7 @@ impl<'a> Scan<'a> {
             need: 0,
             buf: Vec::new(),
             prev: Vec::new(),
+            row: Vec::new(),
             row_samples: Vec::new(),
             got: 0,
         };
@@ -612,15 +614,40 @@ impl<'a> Scan<'a> {
             row_bytes(pass.cols, self.bits).ok_or(CodecError::Limit { what: "png image" })?;
         let cols = usize::try_from(pass.cols).unwrap_or(0);
         self.need = row_len + 1;
-        self.buf = Vec::with_capacity(self.need);
-        self.prev = vec![0; row_len];
-        self.row_samples = vec![0; cols * self.channels];
+        self.buf.clear();
+        self.buf.reserve(self.need);
+        self.prev.resize(row_len, 0);
+        self.prev.fill(0);
+        self.row.resize(row_len, 0);
+        self.row_samples
+            .resize(cols.saturating_mul(self.channels), 0);
         self.row_index = 0;
         Ok(())
     }
 
-    fn push(&mut self, byte: u8) -> Result<(), ZlibError> {
-        if self.need == 0 {
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), ZlibError> {
+        if let [byte] = bytes {
+            return self.push_one(*byte);
+        }
+        let mut bytes = bytes;
+        while !bytes.is_empty() {
+            if self.need == 0 {
+                return Err(ZlibError::Malformed("scanline"));
+            }
+            let room = self.need - self.buf.len();
+            let n = room.min(bytes.len());
+            self.buf.extend_from_slice(&bytes[..n]);
+            self.got += n;
+            bytes = &bytes[n..];
+            if self.buf.len() == self.need {
+                self.finish_row()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn push_one(&mut self, byte: u8) -> Result<(), ZlibError> {
+        if self.need == 0 || self.buf.len() >= self.need {
             return Err(ZlibError::Malformed("scanline"));
         }
         self.buf.push(byte);
@@ -633,14 +660,52 @@ impl<'a> Scan<'a> {
 
     fn finish_row(&mut self) -> Result<(), ZlibError> {
         let filter = self.buf[0];
-        let mut row = self.buf.split_off(1);
+        let payload = self.buf.len() - 1;
+        if self.row.len() != payload {
+            self.row.resize(payload, 0);
+        }
+        self.row.copy_from_slice(&self.buf[1..]);
         self.buf.clear();
-        if unfilter(filter, &mut row, &self.prev, self.bpp).is_err() {
+        if unfilter(filter, &mut self.row, &self.prev, self.bpp).is_err() {
             return Err(ZlibError::Malformed("filter"));
         }
-        unpack(&row, self.parsed.depth, &mut self.row_samples);
-        let pass = self.passes[self.pass_at];
+        self.place_row()?;
+        std::mem::swap(&mut self.prev, &mut self.row);
+        self.row_index += 1;
+        let Some(rows) = self.passes.get(self.pass_at).map(|pass| pass.rows) else {
+            return Err(ZlibError::Malformed("scanline"));
+        };
+        if self.row_index == rows {
+            self.pass_at += 1;
+            if self.pass_at == self.passes.len() {
+                self.need = 0;
+            } else {
+                self.start_pass()
+                    .map_err(|_| ZlibError::Malformed("scanline"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn place_row(&mut self) -> Result<(), ZlibError> {
+        let Some(pass) = self.passes.get(self.pass_at).copied() else {
+            return Err(ZlibError::Malformed("scanline"));
+        };
         let y = pass.y0 + self.row_index * pass.dy;
+        let cols = usize::try_from(pass.cols).unwrap_or(0);
+        let count = cols.saturating_mul(self.channels);
+        if pass.dx == 1 {
+            let to = pixel_offset(self.parsed.width, pass.x0, y, self.channels)
+                .ok_or(ZlibError::Limit)?;
+            let end = to.saturating_add(count);
+            let depth = self.parsed.depth;
+            let Some(dest) = self.samples.get_mut(to..end) else {
+                return Err(ZlibError::Malformed("scanline"));
+            };
+            unpack(&self.row, depth, dest);
+            return Ok(());
+        }
+        unpack(&self.row, self.parsed.depth, &mut self.row_samples);
         for col in 0..pass.cols {
             let x = pass.x0 + col * pass.dx;
             let from = usize::try_from(col).unwrap_or(0) * self.channels;
@@ -655,17 +720,6 @@ impl<'a> Scan<'a> {
                 return Err(ZlibError::Malformed("scanline"));
             };
             dest.copy_from_slice(source);
-        }
-        self.prev = row;
-        self.row_index += 1;
-        if self.row_index == pass.rows {
-            self.pass_at += 1;
-            if self.pass_at == self.passes.len() {
-                self.need = 0;
-            } else {
-                self.start_pass()
-                    .map_err(|_| ZlibError::Malformed("scanline"))?;
-            }
         }
         Ok(())
     }

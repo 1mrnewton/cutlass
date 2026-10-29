@@ -16,6 +16,7 @@ mod model;
 mod sandbox;
 mod settings_tool;
 mod skill;
+mod subagent;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
 pub use draft::{
@@ -34,3 +35,4 @@ pub use sandbox::{
 };
 pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
+pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};

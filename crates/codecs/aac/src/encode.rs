@@ -1388,8 +1388,15 @@ mod tests {
     use crate::decode::AacDecoder;
     use crate::encode::AacEncoder;
     use crate::filterbank::Sequence;
-    use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Decoder, SideData};
+    use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Decoder, Output, SideData};
     use cutlass_encode::{AudioInput, Encoder};
+
+    fn decoded_samples(output: &Output) -> &[f32] {
+        match output {
+            Output::Audio(audio) => audio.pcm.as_f32().expect("f32"),
+            Output::Picture(_) => panic!("aac frame is audio"),
+        }
+    }
 
     fn params(rate: u32, layout: ChannelLayout, bitrate: u32) -> CodecParams {
         CodecParams {
@@ -1422,7 +1429,7 @@ mod tests {
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                decoded.extend_from_slice(output.pcm.as_f32().unwrap());
+                decoded.extend_from_slice(decoded_samples(&output));
             }
         }
         let (delay, padding) = gapless(packets.last().unwrap());
@@ -1607,11 +1614,11 @@ mod tests {
         let mut ours = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                ours.extend_from_slice(output.pcm.as_f32().unwrap());
+                ours.extend_from_slice(decoded_samples(&output));
             }
         }
         if let Some(tail) = decoder.drain().unwrap().pop() {
-            ours.extend_from_slice(tail.pcm.as_f32().unwrap());
+            ours.extend_from_slice(decoded_samples(&tail));
         }
         let (score, lag, ratio) = aligned_snr(&ours, &foreign);
         assert!(
@@ -1955,11 +1962,11 @@ mod tests {
         let mut decoded = Vec::new();
         for packet in &packets {
             for output in decoder.push(packet).unwrap() {
-                decoded.extend_from_slice(output.pcm.as_f32().unwrap());
+                decoded.extend_from_slice(decoded_samples(&output));
             }
         }
         if let Some(tail) = decoder.drain().unwrap().pop() {
-            decoded.extend_from_slice(tail.pcm.as_f32().unwrap());
+            decoded.extend_from_slice(decoded_samples(&tail));
         }
         let (delay, padding) = gapless(packets.last().unwrap());
         let start = delay as usize;

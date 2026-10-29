@@ -132,7 +132,7 @@ mod tests {
     fn factory_opens_the_first_video_decoder() {
         let mut factory = VideoDecodeFactory::new();
         factory.register(CodecId::Vp9, open_blank);
-        let params = CodecParams::video(CodecId::Vp9, 2, 2, PixelFormat::Yuv420p);
+        let params = CodecParams::with_format(CodecId::Vp9, 2, 2, PixelFormat::Yuv420p);
         let mut decoder = factory.open(&params).expect("open");
         let packet = Packet::video(vec![1], 0, 1, 30, true);
         let out = decoder.push(&packet).expect("push");

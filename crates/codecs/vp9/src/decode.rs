@@ -7,9 +7,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_decode::{
-    CodecError, CodecId, CodecParams, Packet, Plane, VideoDecoder, VideoFrame, VideoOutput,
-};
+use cutlass_decode::video::{VideoDecoder, VideoOutput};
+use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, Plane, VideoFrame};
 use cutlass_encode::PixelFormat;
 
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
@@ -353,7 +352,7 @@ fn check_open_size(width: u32, height: u32) -> Result<(), CodecError> {
 #[cfg(test)]
 mod tests {
     use super::Decoder;
-    use cutlass_encode::VideoEncoder;
+    use cutlass_encode::video::VideoEncoder;
 
     #[test]
     fn normal_inter_matches_ffvp9() {
@@ -507,7 +506,7 @@ mod tests {
         frames
     }
 
-    fn fuzz_picture(index: u32) -> cutlass_encode::VideoInput {
+    fn fuzz_picture(index: u32) -> cutlass_encode::video::VideoInput {
         let width = 32u32;
         let height = 16u32;
         let mut y = Vec::new();
@@ -536,7 +535,7 @@ mod tests {
             cutlass_encode::Plane::tight(width / 2, height / 2, v).expect("v"),
         )
         .expect("frame");
-        cutlass_encode::VideoInput {
+        cutlass_encode::video::VideoInput {
             frame,
             pts: i64::from(index),
             duration: 1,

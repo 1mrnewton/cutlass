@@ -22,8 +22,10 @@ mod txfm;
 pub use decode::{Decoder, Vp9Decoder};
 pub use encode::Vp9Encoder;
 
-use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory, VideoDecoder};
-use cutlass_encode::{VideoEncodeFactory, VideoEncoder};
+use cutlass_decode::video::VideoDecoder;
+use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};
+use cutlass_encode::VideoEncodeFactory;
+use cutlass_encode::video::VideoEncoder;
 
 /// Registers the profile-0 decoder on a video decode factory.
 pub fn register_decoders(factory: &mut VideoDecodeFactory) {

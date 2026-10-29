@@ -12,9 +12,8 @@ mod frame;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cutlass_encode::{
-    CodecError, CodecId, CodecParams, Packet, PixelFormat, VideoEncoder, VideoFrame, VideoInput,
-};
+use cutlass_encode::video::{VideoEncoder, VideoInput};
+use cutlass_encode::{CodecError, CodecId, CodecParams, Packet, PixelFormat, VideoFrame};
 
 use self::frame::{Source, code_frame};
 use crate::bits::{BitWriter, BoolWriter};
@@ -367,10 +366,12 @@ mod tests {
     use crate::decode::{Decoder, Vp9Decoder};
     use crate::register_decoders;
     use crate::register_encoders;
-    use cutlass_decode::{CodecError, VideoDecodeFactory, VideoDecoder};
+    use cutlass_decode::video::VideoDecoder;
+    use cutlass_decode::{CodecError, VideoDecodeFactory};
+    use cutlass_encode::video::{VideoEncoder, VideoInput};
     use cutlass_encode::{
-        CodecId, CodecParams, Packet, PixelFormat, Plane, VideoEncodeFactory, VideoEncoder,
-        VideoFrame, VideoInput, request_video_cancel,
+        CodecId, CodecParams, Packet, PixelFormat, Plane, VideoEncodeFactory, VideoFrame,
+        request_video_cancel,
     };
 
     fn solid(width: u32, height: u32, y: u8, u: u8, v: u8) -> VideoFrame {
@@ -625,7 +626,7 @@ mod tests {
 
     #[test]
     fn thirty_frames_stay_near_500_kbps() {
-        let mut params = CodecParams::video(CodecId::Vp9, 160, 96, PixelFormat::Yuv420p);
+        let mut params = CodecParams::with_format(CodecId::Vp9, 160, 96, PixelFormat::Yuv420p);
         params.bitrate = 500_000;
         let mut encoder = Vp9Encoder::open(&params).expect("encoder");
         let mut total = 0usize;
@@ -651,7 +652,7 @@ mod tests {
 
     #[test]
     fn factory_bitrate_zero_is_quantizer_32() {
-        let params = CodecParams::video(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
+        let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
         let encoder = Vp9Encoder::open(&params).expect("open");
         assert_eq!(encoder.qindex(), 32);
     }
@@ -702,17 +703,17 @@ mod tests {
             Vp9Encoder::with_quantizer(4097, 8, 0),
             Err(CodecError::Limit { .. })
         ));
-        let rgba = CodecParams::video(CodecId::Vp9, 16, 16, PixelFormat::Rgba8);
+        let rgba = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Rgba8);
         assert!(matches!(
             Vp9Encoder::open(&rgba),
             Err(CodecError::Unsupported { .. })
         ));
-        let huge = CodecParams::video(CodecId::Vp9, 4097, 8, PixelFormat::Yuv420p);
+        let huge = CodecParams::with_format(CodecId::Vp9, 4097, 8, PixelFormat::Yuv420p);
         assert!(matches!(
             Vp9Decoder::open(&huge),
             Err(CodecError::Limit { .. })
         ));
-        let params = CodecParams::video(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
+        let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
         let mut decoder = Vp9Decoder::open(&params).expect("decoder");
         let empty = decoder.push(&Packet::video(Vec::new(), 0, 1, 30, true));
         assert!(matches!(empty, Err(CodecError::InvalidApi { .. })));
@@ -733,7 +734,7 @@ mod tests {
 
     #[test]
     fn show_existing_and_a_superframe_round_trip() {
-        let params = CodecParams::video(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
+        let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
         let mut encoder = Vp9Encoder::with_quantizer(16, 16, 0).expect("encoder");
         let key = encoder
             .push(&input(solid(16, 16, 40, 90, 140)))
@@ -822,7 +823,7 @@ mod tests {
 
     #[test]
     fn factories_open_the_profile_0_codec() {
-        let params = CodecParams::video(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
+        let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
         let mut encoders = VideoEncodeFactory::new();
         register_encoders(&mut encoders);
         let mut encoder = encoders.open(&params).expect("encoder");

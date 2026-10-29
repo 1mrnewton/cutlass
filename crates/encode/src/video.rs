@@ -140,7 +140,7 @@ mod tests {
     fn a_picture_becomes_one_packet() {
         let mut factory = VideoEncodeFactory::new();
         factory.register(CodecId::Vp9, open_copy);
-        let params = CodecParams::video(CodecId::Vp9, 2, 2, PixelFormat::Yuv420p);
+        let params = CodecParams::with_format(CodecId::Vp9, 2, 2, PixelFormat::Yuv420p);
         let mut encoder = factory.open(&params).expect("open");
         let frame = VideoFrame::blank_yuv420p(2, 2).expect("frame");
         let packets = encoder

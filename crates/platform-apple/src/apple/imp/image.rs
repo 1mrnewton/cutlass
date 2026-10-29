@@ -795,7 +795,9 @@ mod tests {
 
     #[test]
     fn heic_round_trips_when_imageio_can_write_it() {
-        let pixels = [200u8, 10, 10, 255, 200, 10, 10, 255, 200, 10, 10, 255, 200, 10, 10, 255];
+        let pixels = [
+            200u8, 10, 10, 255, 200, 10, 10, 255, 200, 10, 10, 255, 200, 10, 10, 255,
+        ];
         let bytes = match encode_file("public.heic", 2, 2, &pixels) {
             Ok(bytes) => bytes,
             Err(CodecError::Unsupported { .. }) => return,

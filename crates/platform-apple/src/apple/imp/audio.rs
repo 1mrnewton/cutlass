@@ -826,9 +826,7 @@ mod tests {
     #[test]
     fn a_cancelled_encoder_accepts_nothing() {
         let mut encoder = open_encoder(&audio_params(CodecId::Pcm, 48_000)).expect("open");
-        encoder
-            .cancel_flag()
-            .store(true, Ordering::Relaxed);
+        encoder.cancel_flag().store(true, Ordering::Relaxed);
         let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.25]).expect("pcm");
         assert_eq!(
             encoder.push(&AudioInput { pcm }),
@@ -856,7 +854,12 @@ mod tests {
     fn reset_drops_a_partial_aac_frame() {
         let mut encoder = open_encoder(&audio_params(CodecId::Aac, 48_000)).expect("open");
         let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.2; 100]).expect("pcm");
-        assert!(encoder.push(&AudioInput { pcm }).expect("partial").is_empty());
+        assert!(
+            encoder
+                .push(&AudioInput { pcm })
+                .expect("partial")
+                .is_empty()
+        );
         encoder.reset();
         let pcm = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.2; 100]).expect("pcm");
         assert!(encoder.push(&AudioInput { pcm }).expect("again").is_empty());

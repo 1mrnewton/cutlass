@@ -2085,15 +2085,31 @@ mod tests {
                 raw[at] ^= 1u8 << bit;
                 raw
             };
-            if decoder.push(&Packet::video(data, 0, 1, 30, false)).is_err() {
-                failures += 1;
+            match decoder.push(&Packet::video(data, 0, 1, 30, false)) {
+                Err(_) => failures += 1,
+                Ok(frames) => {
+                    for frame in &frames {
+                        let w = u64::from(frame.picture.width());
+                        let h = u64::from(frame.picture.height());
+                        let pixels = w.saturating_mul(h);
+                        assert!(w <= 4096 && h <= 4096 && pixels <= 8_388_608);
+                        assert_eq!(
+                            frame.picture.y().len(),
+                            usize::try_from(pixels).unwrap_or(0)
+                        );
+                        let chroma = usize::try_from((w / 2).saturating_mul(h / 2)).unwrap_or(0);
+                        assert_eq!(frame.picture.u().len(), chroma);
+                        assert_eq!(frame.picture.v().len(), chroma);
+                    }
+                }
             }
             packets += 1;
             if packets.is_multiple_of(2_000) {
+                decoder.reset();
                 assert_eq!(luma_of(&mut decoder, &good), want);
-                decoder = H264Decoder::open(&params).unwrap();
             }
         }
+        decoder.reset();
         assert_eq!(luma_of(&mut decoder, &good), want);
         eprintln!("h264 decoder campaign packets={packets} failures={failures}");
         assert!(packets > 1_000, "{packets}");

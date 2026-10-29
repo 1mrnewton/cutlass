@@ -1494,7 +1494,7 @@ fn add_scaled(
 mod tests {
     use super::H264Decoder;
     use crate::H264Encoder;
-    use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
+    use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
     use cutlass_encode::{VideoEncoder, VideoInput};
     use std::process::Command;
 
@@ -1963,5 +1963,383 @@ mod tests {
             units.push(current);
         }
         units
+    }
+
+    #[test]
+    fn hostile_framing_is_rejected_and_the_decoder_stays_usable() {
+        let good = idr_bytes();
+        let mut huge = vec![0x00, 0x80, 0x00, 0x01];
+        huge.push(0x67);
+        let mut cut = good.clone();
+        cut.truncate(cut.len() / 2);
+        let cases = [
+            (4u8, Vec::new()),
+            (4, vec![0, 0, 1, 0x80]),
+            (4, vec![0, 0, 1, 0x02]),
+            (4, vec![0, 0, 1, 0x0d]),
+            (4, huge),
+            (4, vec![0, 0, 0, 10, 0x67]),
+            (0, cut),
+            (0, vec![1]),
+        ];
+        for (length_size, data) in cases {
+            rejects_then_decodes(length_size, data, &good);
+        }
+        let mut broken = CodecParams::video(CodecId::H264, 16, 16);
+        broken.extra = vec![1, 0, 0, 0, 0];
+        assert!(matches!(
+            H264Decoder::open(&broken),
+            Err(CodecError::Malformed { what: "avcC", .. })
+        ));
+    }
+
+    #[test]
+    fn hostile_parameter_sets_are_rejected() {
+        let good = idr_bytes();
+        let cases = [
+            (
+                sps_packet(66, SpsTail::Interlaced),
+                CodecError::Unsupported {
+                    what: "interlaced picture",
+                },
+            ),
+            (
+                sps_packet(100, SpsTail::Deep),
+                CodecError::Unsupported { what: "bit depth" },
+            ),
+            (
+                sps_packet(66, SpsTail::Wide),
+                CodecError::Limit {
+                    what: "picture size",
+                },
+            ),
+            (
+                sps_packet(66, SpsTail::Refs),
+                CodecError::Limit {
+                    what: "reference frames",
+                },
+            ),
+        ];
+        for (data, want) in cases {
+            let mut params = CodecParams::video(CodecId::H264, 16, 16);
+            params.nal_length_size = 0;
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let err = decoder
+                .push(&Packet::video(data, 0, 1, 30, false))
+                .unwrap_err();
+            assert_eq!(err, want);
+            assert_eq!(luma_of(&mut decoder, &good), reference_luma(&good));
+        }
+    }
+
+    #[test]
+    fn random_packets_fail_closed() {
+        let good = idr_bytes();
+        let want = reference_luma(&good);
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut state = 0xA5A5_1357u32;
+        let mut failures = 0u32;
+        for _ in 0..64 {
+            let mut decoder = H264Decoder::open(&params).unwrap();
+            let len = usize::try_from(next_u32(&mut state) % 48).unwrap_or(1) + 1;
+            let mut data = Vec::with_capacity(len);
+            for _ in 0..len {
+                data.push(u8::try_from(next_u32(&mut state) & 0xFF).unwrap_or(0));
+            }
+            if decoder.push(&Packet::video(data, 0, 1, 30, false)).is_err() {
+                failures += 1;
+            }
+            assert_eq!(luma_of(&mut decoder, &good), want);
+        }
+        assert!(failures > 50, "{failures}");
+    }
+
+    /// Thirty minutes of deterministic garbage and one-bit flips of a real
+    /// access unit. `cargo test -p cutlass-h264 --release --lib -- --ignored
+    /// thirty_minute_decoder_campaign --nocapture` records the run.
+    #[test]
+    #[ignore]
+    fn thirty_minute_decoder_campaign() {
+        let good = idr_bytes();
+        let want = reference_luma(&good);
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let started = std::time::Instant::now();
+        let mut state = 0xC0FF_EE01u32;
+        let mut packets = 0u64;
+        let mut failures = 0u64;
+        while started.elapsed() < std::time::Duration::from_secs(30 * 60) {
+            let data = if packets.is_multiple_of(2) {
+                let len = usize::try_from(next_u32(&mut state) % 256).unwrap_or(1) + 1;
+                let mut raw = Vec::with_capacity(len);
+                for _ in 0..len {
+                    raw.push(u8::try_from(next_u32(&mut state) & 0xFF).unwrap_or(0));
+                }
+                raw
+            } else {
+                let mut raw = good.clone();
+                let at = usize::try_from(next_u32(&mut state)).unwrap_or(0) % raw.len();
+                let bit = u8::try_from(next_u32(&mut state) % 8).unwrap_or(0);
+                raw[at] ^= 1u8 << bit;
+                raw
+            };
+            if decoder.push(&Packet::video(data, 0, 1, 30, false)).is_err() {
+                failures += 1;
+            }
+            packets += 1;
+            if packets.is_multiple_of(2_000) {
+                assert_eq!(luma_of(&mut decoder, &good), want);
+                decoder = H264Decoder::open(&params).unwrap();
+            }
+        }
+        assert_eq!(luma_of(&mut decoder, &good), want);
+        eprintln!("h264 decoder campaign packets={packets} failures={failures}");
+        assert!(packets > 1_000, "{packets}");
+    }
+
+    /// Release High decode of 1280×720. `cargo test -p cutlass-h264 --release
+    /// --lib -- --ignored high_720p_decode_meets_the_release_gates --nocapture`
+    /// records frames per second and the resident growth.
+    #[test]
+    #[ignore]
+    fn high_720p_decode_meets_the_release_gates() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("720p gate not run: ffmpeg is absent");
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-720p");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("high.h264");
+        let made = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=30",
+                "-frames:v",
+                "30",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "high",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "cabac=1:bframes=2",
+                "-f",
+                "h264",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "ffmpeg did not make the 720p stream");
+        let bytes = std::fs::read(&path).unwrap();
+        let units = access_units(&bytes);
+        assert!(units.len() >= 30, "access units {}", units.len());
+        let mut params = CodecParams::video(CodecId::H264, 1280, 720);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let baseline = resident_kib();
+        let started = std::time::Instant::now();
+        let mut pictures = 0usize;
+        let mut peak = baseline;
+        for (index, unit) in units.iter().enumerate() {
+            let out = decoder
+                .push(&Packet::video(
+                    unit.clone(),
+                    i64::try_from(index).unwrap_or(0),
+                    1,
+                    30,
+                    false,
+                ))
+                .unwrap();
+            pictures += out.len();
+            peak = peak.max(resident_kib());
+        }
+        pictures += decoder.drain().unwrap().len();
+        peak = peak.max(resident_kib());
+        let elapsed = started.elapsed().as_secs_f64();
+        let extra_kib = peak.saturating_sub(baseline);
+        eprintln!("720p pictures={pictures} seconds={elapsed:.2} extra_kib={extra_kib}");
+        assert_eq!(pictures, 30, "{pictures}");
+        assert!(
+            elapsed <= 1.0,
+            "720p decode {pictures} pictures in {elapsed:.2}s"
+        );
+        assert!(extra_kib <= 64 * 1024, "720p decode grew {extra_kib} KiB");
+    }
+
+    fn rejects_then_decodes(length_size: u8, data: Vec<u8>, good: &[u8]) {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = length_size;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        assert!(decoder.push(&Packet::video(data, 0, 1, 30, false)).is_err());
+        assert_eq!(luma_of(&mut decoder, good), reference_luma(good));
+    }
+
+    fn reference_luma(good: &[u8]) -> Vec<u8> {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        luma_of(&mut decoder, good)
+    }
+
+    fn luma_of(decoder: &mut H264Decoder, data: &[u8]) -> Vec<u8> {
+        let mut frames = decoder
+            .push(&Packet::video(data.to_vec(), 0, 1, 30, true))
+            .unwrap();
+        frames.extend(decoder.drain().unwrap());
+        frames
+            .iter()
+            .find(|frame| frame.picture.width() == 16)
+            .expect("idr")
+            .picture
+            .y()
+            .to_vec()
+    }
+
+    fn idr_bytes() -> Vec<u8> {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        encoder
+            .push(&VideoInput {
+                picture: Yuv420p::solid(16, 16, 40, 80, 160).unwrap(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: true,
+            })
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("idr")
+            .data
+    }
+
+    enum SpsTail {
+        Interlaced,
+        Deep,
+        Wide,
+        Refs,
+    }
+
+    fn sps_packet(profile: u32, tail: SpsTail) -> Vec<u8> {
+        let mut bits = Pack::new();
+        bits.u(8, profile);
+        bits.u(8, 0);
+        bits.u(8, 30);
+        bits.ue(0);
+        if profile == 100 {
+            bits.ue(1);
+            bits.ue(2);
+            bits.ue(0);
+        } else {
+            bits.ue(0);
+            bits.ue(0);
+            bits.ue(0);
+            match tail {
+                SpsTail::Refs => bits.ue(17),
+                SpsTail::Wide => {
+                    bits.ue(1);
+                    bits.bit(false);
+                    bits.ue(256);
+                    bits.ue(0);
+                }
+                SpsTail::Interlaced | SpsTail::Deep => {
+                    bits.ue(1);
+                    bits.bit(false);
+                    bits.ue(0);
+                    bits.ue(0);
+                    bits.bit(false);
+                }
+            }
+        }
+        crate::nal::annex_b_nal(3, 7, &bits.finish())
+    }
+
+    struct Pack {
+        bytes: Vec<u8>,
+        acc: u32,
+        n: u32,
+    }
+
+    impl Pack {
+        fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                acc: 0,
+                n: 0,
+            }
+        }
+
+        fn bit(&mut self, one: bool) {
+            self.acc = (self.acc << 1) | u32::from(one);
+            self.n += 1;
+            if self.n == 8 {
+                self.bytes.push(u8::try_from(self.acc).unwrap_or(0));
+                self.acc = 0;
+                self.n = 0;
+            }
+        }
+
+        fn u(&mut self, n: u32, value: u32) {
+            for shift in (0..n).rev() {
+                self.bit(((value >> shift) & 1) == 1);
+            }
+        }
+
+        fn ue(&mut self, value: u32) {
+            let code = value.saturating_add(1);
+            let width = 31 - code.leading_zeros();
+            for _ in 0..width {
+                self.bit(false);
+            }
+            self.u(width + 1, code);
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.n > 0 {
+                self.acc <<= 8 - self.n;
+                self.bytes.push(u8::try_from(self.acc).unwrap_or(0));
+            }
+            self.bytes
+        }
+    }
+
+    fn next_u32(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
+
+    fn ffmpeg_bin() -> Option<String> {
+        [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "ffmpeg",
+        ]
+        .into_iter()
+        .find(|path| Command::new(path).arg("-version").output().is_ok())
+        .map(str::to_string)
+    }
+
+    fn resident_kib() -> u64 {
+        let out = Command::new("ps")
+            .args(["-o", "rss=", "-p"])
+            .arg(std::process::id().to_string())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ps did not report rss");
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.split_whitespace()
+            .next()
+            .and_then(|token| token.parse().ok())
+            .expect("rss")
     }
 }

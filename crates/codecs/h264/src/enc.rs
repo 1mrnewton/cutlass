@@ -4572,6 +4572,105 @@ mod tests {
         })
     }
 
+    #[test]
+    fn encoder_rejects_a_bad_configuration() {
+        for params in [
+            CodecParams::video(CodecId::H264, 0, 16),
+            CodecParams::video(CodecId::H264, 4097, 16),
+            CodecParams::video(CodecId::H264, 3000, 3000),
+            CodecParams::video(CodecId::H264, 15, 16),
+            CodecParams::video(CodecId::Aac, 16, 16),
+        ] {
+            assert!(H264Encoder::open(&params).is_err());
+        }
+        let mut sized = CodecParams::video(CodecId::H264, 16, 16);
+        sized.nal_length_size = 1;
+        assert!(H264Encoder::open(&sized).is_err());
+
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let wrong_size = VideoInput {
+            picture: Yuv420p::solid(32, 16, 1, 2, 3).unwrap(),
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        assert!(encoder.push(&wrong_size).is_err());
+        let bad_time = VideoInput {
+            picture: Yuv420p::solid(16, 16, 1, 2, 3).unwrap(),
+            pts: 0,
+            duration: 1,
+            timescale: 0,
+            force_keyframe: true,
+        };
+        assert!(encoder.push(&bad_time).is_err());
+        let ok = VideoInput {
+            timescale: 30,
+            ..bad_time
+        };
+        assert!(!encoder.push(&ok).unwrap().is_empty());
+    }
+
+    /// Two minutes of small encodes and rejected configurations.
+    /// `cargo test -p cutlass-h264 --release --lib -- --ignored
+    /// bounded_encoder_campaign --nocapture` records the run.
+    #[test]
+    #[ignore]
+    fn bounded_encoder_campaign() {
+        let started = std::time::Instant::now();
+        let mut state = 0xBEEF_4201u32;
+        let mut encoded = 0u64;
+        let mut rejected = 0u64;
+        let mut decoded = 0u64;
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        while started.elapsed() < std::time::Duration::from_secs(120) {
+            let roll = next_u32(&mut state) % 5;
+            if roll == 0 {
+                let mut trial = CodecParams::video(
+                    CodecId::H264,
+                    next_u32(&mut state) % 5_000,
+                    next_u32(&mut state) % 5_000,
+                );
+                trial.nal_length_size = u8::try_from(next_u32(&mut state) % 5).unwrap_or(0);
+                if H264Encoder::open(&trial).is_err() {
+                    rejected += 1;
+                }
+                continue;
+            }
+            let n = next_u32(&mut state);
+            let y = u8::try_from(n & 0xFF).unwrap_or(0);
+            let u = u8::try_from((n >> 8) & 0xFF).unwrap_or(0);
+            let v = u8::try_from((n >> 16) & 0xFF).unwrap_or(0);
+            let input = VideoInput {
+                picture: Yuv420p::solid(16, 16, y, u, v).unwrap(),
+                pts: i64::try_from(encoded).unwrap_or(0),
+                duration: 1,
+                timescale: 30,
+                force_keyframe: encoded == 0,
+            };
+            let packets = encoder.push(&input).unwrap();
+            for packet in packets {
+                decoder.push(&packet).unwrap();
+                decoded += 1;
+            }
+            encoded += 1;
+        }
+        let _ = encoder.drain().unwrap();
+        eprintln!("h264 encoder campaign encoded={encoded} rejected={rejected} decoded={decoded}");
+        assert!(encoded > 10, "{encoded}");
+        assert!(rejected > 0, "{rejected}");
+    }
+
+    fn next_u32(state: &mut u32) -> u32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *state
+    }
+
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         (vec![128; 64 * 64], vec![128; 32 * 32], vec![128; 32 * 32])
     }

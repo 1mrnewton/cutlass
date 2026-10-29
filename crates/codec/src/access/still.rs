@@ -357,7 +357,21 @@ fn legal_icc_name(name: &[u8]) -> bool {
 }
 
 fn legal_keyword(keyword: &[u8]) -> bool {
-    (1..=79).contains(&keyword.len()) && !keyword.contains(&0)
+    if !(1..=79).contains(&keyword.len())
+        || keyword[0] == b' '
+        || keyword[keyword.len() - 1] == b' '
+    {
+        return false;
+    }
+    let mut previous_space = false;
+    for &byte in keyword {
+        let latin1 = (0x20..=0x7e).contains(&byte) || (0xa1..=0xff).contains(&byte);
+        if !latin1 || (byte == b' ' && previous_space) {
+            return false;
+        }
+        previous_space = byte == b' ';
+    }
+    true
 }
 
 fn validate_significant_bits(
@@ -474,6 +488,25 @@ mod tests {
             StillImage::from_samples(1, 1, ColorType::Rgba, BitDepth::Eight, vec![1, 2, 3, 4]);
         image.transparency = Transparency::ColorKey(vec![1, 2, 3]);
         assert_eq!(image.validate(), Err(ImageError::Transparency));
+    }
+
+    #[test]
+    fn a_text_keyword_is_latin1_without_a_broken_space() {
+        let mut image = StillImage::from_samples(1, 1, ColorType::Gray, BitDepth::Eight, vec![1]);
+        image.texts.push(super::TextItem {
+            keyword: b"Comment".to_vec(),
+            language: Vec::new(),
+            translated: Vec::new(),
+            text: b"ok".to_vec(),
+            compressed: false,
+        });
+        assert!(image.validate().is_ok());
+        image.texts[0].keyword = b" Title".to_vec();
+        assert_eq!(image.validate(), Err(ImageError::Metadata));
+        image.texts[0].keyword = b"A  B".to_vec();
+        assert_eq!(image.validate(), Err(ImageError::Metadata));
+        image.texts[0].keyword = vec![0x7f];
+        assert_eq!(image.validate(), Err(ImageError::Metadata));
     }
 
     #[test]

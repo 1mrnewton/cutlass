@@ -75,6 +75,14 @@ fn adam7_places_one_bit_pixels_from_each_pass() {
 }
 
 #[test]
+fn adam7_places_two_bit_pixels_from_each_pass() {
+    // 4×1 passes: x=0 is 3, x=2 is 1, then x=1 and x=3 are 2 and 0.
+    let raw = [0, 0b1100_0000, 0, 0b0100_0000, 0, 0b1000_0000];
+    let image = decode_bytes(&png_of(ihdr(4, 1, 2, 0, 1), &raw, &[])).expect("two bit");
+    assert_eq!(image.samples, vec![3, 2, 1, 0]);
+}
+
+#[test]
 fn truecolor_alpha_and_a_grey_key_keep_their_domains() {
     let rgba = decode_bytes(&png_of(ihdr(1, 1, 8, 6, 0), &[0, 9, 8, 7, 6], &[])).expect("rgba");
     assert_eq!(rgba.samples, vec![9, 8, 7, 6]);

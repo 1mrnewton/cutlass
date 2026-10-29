@@ -2,6 +2,7 @@
 
 pub mod icons;
 pub mod probe;
+pub mod shell;
 pub mod tokens;
 pub mod widgets;
 

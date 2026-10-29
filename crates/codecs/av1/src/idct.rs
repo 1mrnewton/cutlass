@@ -17,12 +17,11 @@ fn round2(x: i64, n: u32) -> i64 {
 }
 
 fn brev(bits: u32, x: usize) -> usize {
-    let mut reversed = 0usize;
-    for i in 0..bits {
-        let bit = (x >> i) & 1;
-        reversed += bit << (bits as usize - 1 - i as usize);
+    if bits == 0 || bits >= usize::BITS {
+        return 0;
     }
-    reversed
+    let width = usize::BITS - bits;
+    (x & ((1usize << bits) - 1)).reverse_bits() >> width
 }
 
 fn cos128(angle: i32) -> i32 {
@@ -61,6 +60,17 @@ fn hadamard(values: &mut [i64], a: usize, b: usize, flip: bool, range: i32) {
 
 fn permute_dct(values: &mut [i64], n: u32) {
     let len = 1usize << n;
+    if len > values.len() {
+        return;
+    }
+    if len <= 64 {
+        let mut copy = [0i64; 64];
+        copy[..len].copy_from_slice(&values[..len]);
+        for (i, slot) in values.iter_mut().enumerate().take(len) {
+            *slot = copy[brev(n, i)];
+        }
+        return;
+    }
     let copy = values[..len].to_vec();
     for (i, slot) in values.iter_mut().enumerate().take(len) {
         *slot = copy[brev(n, i)];
@@ -439,6 +449,13 @@ fn apply_1d(values: &mut [i64], n: u32, kind: u8, range: i32) {
     }
 }
 
+/// Working storage for one inverse transform.
+pub struct InverseScratch<'a> {
+    pub residual: &'a mut [i64],
+    pub row: &'a mut [i64],
+    pub out: &'a mut [i32],
+}
+
 /// Inverse 2D transform. `coeff` is row-major and `width` by `height`.
 pub fn inverse_2d(
     coeff: &[i32],
@@ -447,43 +464,76 @@ pub fn inverse_2d(
     tx_type: u8,
     row_shift: u32,
 ) -> Vec<i32> {
+    let n = width.saturating_mul(height);
+    let mut residual = vec![0i64; n];
+    let mut row = vec![0i64; width.max(height)];
+    let mut out = vec![0i32; n];
+    inverse_2d_into(
+        coeff,
+        &mut InverseScratch {
+            residual: &mut residual,
+            row: &mut row,
+            out: &mut out,
+        },
+        width,
+        height,
+        tx_type,
+        row_shift,
+    );
+    out
+}
+
+/// Same transform as [`inverse_2d`], writing into caller storage.
+pub fn inverse_2d_into(
+    coeff: &[i32],
+    scratch: &mut InverseScratch<'_>,
+    width: usize,
+    height: usize,
+    tx_type: u8,
+    row_shift: u32,
+) {
+    let n = width.saturating_mul(height);
+    let row_n = width.max(height);
+    if n == 0 || scratch.residual.len() < n || scratch.row.len() < row_n || scratch.out.len() < n {
+        for slot in scratch.out.iter_mut().take(n) {
+            *slot = 0;
+        }
+        return;
+    }
     let log_w = width.trailing_zeros();
     let log_h = height.trailing_zeros();
     let rect = log_w.abs_diff(log_h) == 1;
-    let mut residual = vec![0i64; width * height];
-    let mut row = vec![0i64; width.max(height)];
     for i in 0..height {
-        for j in 0..width {
+        for (j, slot) in scratch.row.iter_mut().enumerate().take(width) {
             let sample = if i < 32 && j < 32 {
-                i64::from(coeff[i * width + j])
+                coeff.get(i * width + j).copied().unwrap_or(0)
             } else {
                 0
             };
-            row[j] = if rect {
-                round2(sample * 2896, 12)
+            *slot = if rect {
+                round2(i64::from(sample) * 2896, 12)
             } else {
-                sample
+                i64::from(sample)
             };
         }
-        apply_1d(&mut row, log_w, row_kind(tx_type), 16);
+        apply_1d(&mut scratch.row[..row_n], log_w, row_kind(tx_type), 16);
         for j in 0..width {
-            residual[i * width + j] = round2(row[j], row_shift);
+            scratch.residual[i * width + j] = round2(scratch.row[j], row_shift);
         }
     }
-    for sample in &mut residual {
+    for sample in &mut scratch.residual[..n] {
         *sample = (*sample).clamp(-(1 << 15), (1 << 15) - 1);
     }
     for j in 0..width {
         for i in 0..height {
-            row[i] = residual[i * width + j];
+            scratch.row[i] = scratch.residual[i * width + j];
         }
-        apply_1d(&mut row, log_h, col_kind(tx_type), 16);
+        apply_1d(&mut scratch.row[..row_n], log_h, col_kind(tx_type), 16);
         for i in 0..height {
-            residual[i * width + j] = round2(row[i], 4);
+            scratch.residual[i * width + j] = round2(scratch.row[i], 4);
         }
     }
-    residual
-        .iter()
-        .map(|sample| i32::try_from(*sample).unwrap_or(0))
-        .collect()
+    for (slot, sample) in scratch.out.iter_mut().zip(scratch.residual.iter()).take(n) {
+        *slot = i32::try_from(*sample).unwrap_or(0);
+    }
 }

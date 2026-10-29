@@ -46,8 +46,41 @@ pub struct ChromaFromLuma<'a> {
     pub max_luma_h: usize,
 }
 
+/// Buffers reused across intra blocks. A fresh buffer per block dominated decode time.
+pub struct PredictScratch {
+    pred: Vec<u8>,
+    above: Vec<i32>,
+    left: Vec<i32>,
+    ac: Vec<i32>,
+    dup: Vec<i32>,
+    edge: Vec<i32>,
+}
+
+impl PredictScratch {
+    pub fn new() -> Self {
+        Self {
+            pred: Vec::new(),
+            above: Vec::new(),
+            left: Vec::new(),
+            ac: Vec::new(),
+            dup: Vec::new(),
+            edge: Vec::new(),
+        }
+    }
+
+    pub fn ac(&mut self) -> &mut Vec<i32> {
+        &mut self.ac
+    }
+}
+
+impl Default for PredictScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Add the luma high-frequency residual to a DC chroma prediction.
-pub fn chroma_from_luma(job: ChromaFromLuma<'_>) -> Result<(), CodecError> {
+pub fn chroma_from_luma(job: ChromaFromLuma<'_>, ac: &mut Vec<i32>) -> Result<(), CodecError> {
     let ChromaFromLuma {
         luma,
         luma_stride,
@@ -67,7 +100,11 @@ pub fn chroma_from_luma(job: ChromaFromLuma<'_>) -> Result<(), CodecError> {
     let sy = usize::from(sub_y);
     let shift = 3 - sx - sy;
     let mut average = 0i32;
-    let mut ac = vec![0i32; w * h];
+    let n = w.saturating_mul(h);
+    if ac.len() < n {
+        ac.resize(n, 0);
+    }
+    let ac = &mut ac[..n];
     for i in 0..h {
         let luma_y = ((start_y + i) << sy).min(max_luma_h.saturating_sub(1 << sy));
         for j in 0..w {
@@ -114,19 +151,73 @@ pub fn chroma_from_luma(job: ChromaFromLuma<'_>) -> Result<(), CodecError> {
     Ok(())
 }
 
-pub fn predict_intra(plane: &mut [u8], stride: usize, block: &IntraPred) -> Result<(), CodecError> {
-    let (mut above, mut left) = edges(plane, stride, block);
-    let mut pred = vec![0u8; block.w * block.h];
+pub fn predict_intra(
+    plane: &mut [u8],
+    stride: usize,
+    block: &IntraPred,
+    scratch: &mut PredictScratch,
+) -> Result<(), CodecError> {
+    let span = 4 * (block.w + block.h) + 8;
+    let edge_len = span + OFFSET as usize;
+    let pred_len = block.w.saturating_mul(block.h);
+    grow_i32(&mut scratch.above, edge_len);
+    grow_i32(&mut scratch.left, edge_len);
+    grow_u8(&mut scratch.pred, pred_len);
+    scratch.above[..edge_len].fill(0);
+    scratch.left[..edge_len].fill(0);
+    let PredictScratch {
+        pred,
+        above,
+        left,
+        dup,
+        edge,
+        ac: _,
+    } = scratch;
+    fill_edges(
+        plane,
+        stride,
+        block,
+        &mut above[..edge_len],
+        &mut left[..edge_len],
+    );
     if let Some(mode) = block.filter {
-        filter_intra_pred(&above, &left, block, mode, &mut pred)?;
+        filter_intra_pred(
+            &above[..edge_len],
+            &left[..edge_len],
+            block,
+            mode,
+            &mut pred[..pred_len],
+        )?;
     } else if directional(block.mode) {
-        directional_pred(&mut above, &mut left, block, &mut pred)?;
+        directional_pred(
+            &mut above[..edge_len],
+            &mut left[..edge_len],
+            block,
+            &mut pred[..pred_len],
+            dup,
+            edge,
+        )?;
     } else if block.mode >= SMOOTH_PRED && block.mode < PAETH_PRED {
-        smooth_pred(&above, &left, block, &mut pred);
+        smooth_pred(
+            &above[..edge_len],
+            &left[..edge_len],
+            block,
+            &mut pred[..pred_len],
+        );
     } else if block.mode == DC_PRED {
-        dc_pred(&above, &left, block, &mut pred);
+        dc_pred(
+            &above[..edge_len],
+            &left[..edge_len],
+            block,
+            &mut pred[..pred_len],
+        );
     } else {
-        paeth_pred(&above, &left, block, &mut pred);
+        paeth_pred(
+            &above[..edge_len],
+            &left[..edge_len],
+            block,
+            &mut pred[..pred_len],
+        );
     }
     for row in 0..block.h {
         for col in 0..block.w {
@@ -140,6 +231,18 @@ pub fn predict_intra(plane: &mut [u8], stride: usize, block: &IntraPred) -> Resu
         }
     }
     Ok(())
+}
+
+fn grow_i32(buf: &mut Vec<i32>, n: usize) {
+    if buf.len() < n {
+        buf.resize(n, 0);
+    }
+}
+
+fn grow_u8(buf: &mut Vec<u8>, n: usize) {
+    if buf.len() < n {
+        buf.resize(n, 0);
+    }
 }
 
 /// `Intra_Filter_Taps` from the specification. Five modes, eight outputs, seven taps.
@@ -249,17 +352,14 @@ fn directional(mode: u8) -> bool {
     (V_PRED..=D67_PRED).contains(&mode)
 }
 
-fn edges(plane: &[u8], stride: usize, block: &IntraPred) -> (Vec<i32>, Vec<i32>) {
-    let span = 4 * (block.w + block.h) + 8;
-    let mut above = vec![0i32; span + OFFSET as usize];
-    let mut left = vec![0i32; span + OFFSET as usize];
+fn fill_edges(plane: &[u8], stride: usize, block: &IntraPred, above: &mut [i32], left: &mut [i32]) {
     let x = block.x as i32;
     let y = block.y as i32;
     if !block.have_above && block.have_left {
         let sample = i32::from(at(plane, stride, x - 1, y));
-        fill(&mut above, 0, block.w + block.h, sample);
+        fill(above, 0, block.w + block.h, sample);
     } else if !block.have_above {
-        fill(&mut above, 0, block.w + block.h, 127);
+        fill(above, 0, block.w + block.h, 127);
     } else {
         let limit = block.max_x.min(
             block.x
@@ -277,9 +377,9 @@ fn edges(plane: &[u8], stride: usize, block: &IntraPred) -> (Vec<i32>, Vec<i32>)
     }
     if !block.have_left && block.have_above {
         let sample = i32::from(at(plane, stride, x, y - 1));
-        fill(&mut left, 0, block.w + block.h, sample);
+        fill(left, 0, block.w + block.h, sample);
     } else if !block.have_left {
-        fill(&mut left, 0, block.w + block.h, 129);
+        fill(left, 0, block.w + block.h, 129);
     } else {
         let limit = block.max_y.min(
             block.y
@@ -306,7 +406,6 @@ fn edges(plane: &[u8], stride: usize, block: &IntraPred) -> (Vec<i32>, Vec<i32>)
     };
     above[index(-1)] = corner;
     left[index(-1)] = corner;
-    (above, left)
 }
 
 fn at(plane: &[u8], stride: usize, x: i32, y: i32) -> u8 {
@@ -420,14 +519,16 @@ fn directional_pred(
     left: &mut [i32],
     block: &IntraPred,
     pred: &mut [u8],
+    dup: &mut Vec<i32>,
+    edge: &mut Vec<i32>,
 ) -> Result<(), CodecError> {
     let angle = i32::from(MODE_TO_ANGLE[block.mode as usize]) + block.angle_delta * 3;
     let mut upsample_above = 0i32;
     let mut upsample_left = 0i32;
     if block.edge_filter && angle != 90 && angle != 180 {
-        filter_edges(above, left, block, angle);
-        upsample_above = upsample_edge(above, block, angle - 90, 0);
-        upsample_left = upsample_edge(left, block, angle - 180, 1);
+        filter_edges(above, left, block, angle, edge);
+        upsample_above = upsample_edge(above, block, angle - 90, 0, dup);
+        upsample_left = upsample_edge(left, block, angle - 180, 1, dup);
     }
     let dx = derivative(angle, true)?;
     let dy = derivative(angle, false)?;
@@ -547,7 +648,13 @@ fn directional_sample(sample: DirSample<'_>) -> u8 {
     }
 }
 
-fn filter_edges(above: &mut [i32], left: &mut [i32], block: &IntraPred, angle: i32) {
+fn filter_edges(
+    above: &mut [i32],
+    left: &mut [i32],
+    block: &IntraPred,
+    angle: i32,
+    edge: &mut Vec<i32>,
+) {
     if (91..180).contains(&angle) && block.w + block.h >= 24 {
         let filtered = round2_i32(
             left[index(0)] * 5 + above[index(-1)] * 6 + above[index(0)] * 5,
@@ -559,17 +666,23 @@ fn filter_edges(above: &mut [i32], left: &mut [i32], block: &IntraPred, angle: i
     if block.have_above {
         let strength = edge_strength(block.w, block.h, block.filter_type, (angle - 90).abs());
         let num = block.w.min(block.max_x - block.x + 1) + if angle < 90 { block.h } else { 0 } + 1;
-        filter_edge(above, num, strength);
+        filter_edge(above, num, strength, edge);
     }
     if block.have_left {
         let strength = edge_strength(block.w, block.h, block.filter_type, (angle - 180).abs());
         let num =
             block.h.min(block.max_y - block.y + 1) + if angle > 180 { block.w } else { 0 } + 1;
-        filter_edge(left, num, strength);
+        filter_edge(left, num, strength, edge);
     }
 }
 
-fn upsample_edge(buf: &mut [i32], block: &IntraPred, delta: i32, dir: i32) -> i32 {
+fn upsample_edge(
+    buf: &mut [i32],
+    block: &IntraPred,
+    delta: i32,
+    dir: i32,
+    dup: &mut Vec<i32>,
+) -> i32 {
     let use_upsample = edge_upsample(block.w, block.h, block.filter_type, delta.abs());
     if use_upsample == 0 {
         return 0;
@@ -579,7 +692,9 @@ fn upsample_edge(buf: &mut [i32], block: &IntraPred, delta: i32, dir: i32) -> i3
     } else {
         block.h + if delta > 0 { block.w } else { 0 }
     };
-    let mut dup = vec![0i32; num + 3];
+    let need = num + 3;
+    grow_i32(dup, need);
+    let dup = &mut dup[..need];
     dup[0] = buf[index(-1)];
     for i in -1..num as i32 {
         dup[(i + 2) as usize] = buf[index(i)];
@@ -594,11 +709,12 @@ fn upsample_edge(buf: &mut [i32], block: &IntraPred, delta: i32, dir: i32) -> i3
     1
 }
 
-fn filter_edge(buf: &mut [i32], size: usize, strength: usize) {
+fn filter_edge(buf: &mut [i32], size: usize, strength: usize, edge: &mut Vec<i32>) {
     if strength == 0 || size == 0 {
         return;
     }
-    let mut edge = vec![0i32; size];
+    grow_i32(edge, size);
+    let edge = &mut edge[..size];
     for (i, slot) in edge.iter_mut().enumerate() {
         *slot = buf[index(i as i32 - 1)];
     }

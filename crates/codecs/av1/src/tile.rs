@@ -18,13 +18,13 @@ use crate::dims::{
 };
 use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
-use crate::idct::inverse_2d;
+use crate::idct::{InverseScratch, inverse_2d_into};
 use crate::inter::{
     BlockPlace, Candidates, GLOBALMV, InterSample, LAST_FRAME, Motion, MotionGrid, NEARESTMV,
     NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP, find_stack, inter_set_allows, inter_tx_set,
     inter_tx_type, predict,
 };
-use crate::predict::{ChromaFromLuma, IntraPred, chroma_from_luma, predict_intra};
+use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
 use crate::superres;
 use crate::symbol::SymbolDecoder;
@@ -388,6 +388,11 @@ struct Tile<'a, 'r> {
     cdef: CdefParams,
     cdef_idx: Vec<i8>,
     cdfs: Cdfs,
+    coeff_buf: Vec<i32>,
+    residual_buf: Vec<i64>,
+    idct_row: Vec<i64>,
+    idct_out: Vec<i32>,
+    predict: PredictScratch,
 }
 
 struct Cdfs {
@@ -564,6 +569,11 @@ impl<'a, 'r> Tile<'a, 'r> {
             cdef: frame.cdef,
             cdef_idx: vec![-1; cells],
             cdfs: Cdfs::load(q_ctx),
+            coeff_buf: Vec::new(),
+            residual_buf: Vec::new(),
+            idct_row: Vec::new(),
+            idct_out: Vec::new(),
+            predict: PredictScratch::new(),
         })
     }
 
@@ -2048,46 +2058,52 @@ impl<'a, 'r> Tile<'a, 'r> {
             },
         };
         if block.plane == 0 {
-            predict_intra(&mut self.y, stride, &pred)?;
+            predict_intra(&mut self.y, stride, &pred, &mut self.predict)?;
             self.max_luma_w = start_x + pred.w;
             self.max_luma_h = start_y + pred.h;
         } else if block.plane == 1 {
-            predict_intra(&mut self.u, stride, &pred)?;
+            predict_intra(&mut self.u, stride, &pred, &mut self.predict)?;
             if block.uv_mode == UV_CFL_PRED {
-                chroma_from_luma(ChromaFromLuma {
-                    luma: &self.y,
-                    luma_stride: self.width,
-                    chroma: &mut self.u,
-                    chroma_stride: stride,
-                    x: start_x,
-                    y: start_y,
-                    w: pred.w,
-                    h: pred.h,
-                    sub_x: self.sub_x,
-                    sub_y: self.sub_y,
-                    alpha: self.cfl_u,
-                    max_luma_w: self.max_luma_w,
-                    max_luma_h: self.max_luma_h,
-                })?;
+                chroma_from_luma(
+                    ChromaFromLuma {
+                        luma: &self.y,
+                        luma_stride: self.width,
+                        chroma: &mut self.u,
+                        chroma_stride: stride,
+                        x: start_x,
+                        y: start_y,
+                        w: pred.w,
+                        h: pred.h,
+                        sub_x: self.sub_x,
+                        sub_y: self.sub_y,
+                        alpha: self.cfl_u,
+                        max_luma_w: self.max_luma_w,
+                        max_luma_h: self.max_luma_h,
+                    },
+                    self.predict.ac(),
+                )?;
             }
         } else {
-            predict_intra(&mut self.v, stride, &pred)?;
+            predict_intra(&mut self.v, stride, &pred, &mut self.predict)?;
             if block.uv_mode == UV_CFL_PRED {
-                chroma_from_luma(ChromaFromLuma {
-                    luma: &self.y,
-                    luma_stride: self.width,
-                    chroma: &mut self.v,
-                    chroma_stride: stride,
-                    x: start_x,
-                    y: start_y,
-                    w: pred.w,
-                    h: pred.h,
-                    sub_x: self.sub_x,
-                    sub_y: self.sub_y,
-                    alpha: self.cfl_v,
-                    max_luma_w: self.max_luma_w,
-                    max_luma_h: self.max_luma_h,
-                })?;
+                chroma_from_luma(
+                    ChromaFromLuma {
+                        luma: &self.y,
+                        luma_stride: self.width,
+                        chroma: &mut self.v,
+                        chroma_stride: stride,
+                        x: start_x,
+                        y: start_y,
+                        w: pred.w,
+                        h: pred.h,
+                        sub_x: self.sub_x,
+                        sub_y: self.sub_y,
+                        alpha: self.cfl_v,
+                        max_luma_w: self.max_luma_w,
+                        max_luma_h: self.max_luma_h,
+                    },
+                    self.predict.ac(),
+                )?;
             }
         }
         Ok(())
@@ -2557,7 +2573,21 @@ impl<'a, 'r> Tile<'a, 'r> {
         let dc = self.quantizer(plane, true);
         let ac = self.quantizer(plane, false);
         let qm_level = if tx_type < IDTX { self.qm[plane] } else { 15 };
-        let mut coeff = vec![0i32; w * h];
+        let n = w.saturating_mul(h);
+        let row_n = w.max(h);
+        if self.coeff_buf.len() < n {
+            self.coeff_buf.resize(n, 0);
+        }
+        self.coeff_buf[..n].fill(0);
+        if self.residual_buf.len() < n {
+            self.residual_buf.resize(n, 0);
+        }
+        if self.idct_row.len() < row_n {
+            self.idct_row.resize(row_n, 0);
+        }
+        if self.idct_out.len() < n {
+            self.idct_out.resize(n, 0);
+        }
         for row in 0..th {
             for col in 0..tw {
                 let q = if row == 0 && col == 0 { dc } else { ac };
@@ -2566,10 +2596,22 @@ impl<'a, 'r> Tile<'a, 'r> {
                 let dq = level * i64::from(q);
                 let signed = if dq < 0 { -1 } else { 1 };
                 let value = signed * ((dq.abs() & 0x00ff_ffff) / i64::from(denom));
-                coeff[row * w + col] = i32::try_from(value.clamp(-32768, 32767)).unwrap_or(0);
+                self.coeff_buf[row * w + col] =
+                    i32::try_from(value.clamp(-32768, 32767)).unwrap_or(0);
             }
         }
-        let residual = inverse_2d(&coeff, w, h, tx_type, TRANSFORM_ROW_SHIFT[tx]);
+        inverse_2d_into(
+            &self.coeff_buf,
+            &mut InverseScratch {
+                residual: &mut self.residual_buf,
+                row: &mut self.idct_row,
+                out: &mut self.idct_out,
+            },
+            w,
+            h,
+            tx_type,
+            TRANSFORM_ROW_SHIFT[tx],
+        );
         let flip_ud = matches!(
             tx_type,
             FLIPADST_DCT | FLIPADST_ADST | V_FLIPADST | FLIPADST_FLIPADST
@@ -2583,6 +2625,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.chroma_w
         };
+        let residual = &self.idct_out;
         let samples = if plane == 0 {
             &mut self.y
         } else if plane == 1 {

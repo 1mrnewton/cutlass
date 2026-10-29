@@ -899,7 +899,8 @@ fn predict_dc(plane: &mut [u8], stride: usize, rows: usize, at: DcAt) -> Result<
         max_x: stride.saturating_sub(1),
         max_y: rows.saturating_sub(1),
     };
-    predict_intra(plane, stride, &block)
+    let mut scratch = crate::predict::PredictScratch::new();
+    predict_intra(plane, stride, &block, &mut scratch)
 }
 
 fn dc_context(above: &[u8], left: &[u8], geom: &Neighbor) -> usize {

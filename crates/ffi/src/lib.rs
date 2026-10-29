@@ -9,9 +9,11 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod host;
 mod project;
 
 pub use error::FfiError;
+pub use host::Commands;
 pub use project::Project;
 
 #[cfg(test)]

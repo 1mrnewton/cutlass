@@ -4239,10 +4239,12 @@ fn store_block(
         Mix::Weighted(weight) => {
             for row in 0..h {
                 let at = (y + row) * stride + x;
-                for col in 0..w {
-                    dst[at + col] =
-                        recon::weight_bi(left[row * w + col], right[row * w + col], weight);
-                }
+                recon::weight_row(
+                    &mut dst[at..at + w],
+                    &left[row * w..row * w + w],
+                    &right[row * w..row * w + w],
+                    weight,
+                );
             }
         }
     }
@@ -4546,12 +4548,59 @@ pub(crate) fn deblock(pic: &mut Frame) {
 }
 
 fn edge_strength(pic: &Frame, mx: usize, my: usize, edge: usize, vertical: bool) -> [u8; 4] {
-    [
-        strength(pic, mx, my, edge, 0, vertical),
-        strength(pic, mx, my, edge, 1, vertical),
-        strength(pic, mx, my, edge, 2, vertical),
-        strength(pic, mx, my, edge, 3, vertical),
-    ]
+    let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
+        return [0; 4];
+    };
+    let neighbor = if edge == 0 {
+        let (nx, ny) = if vertical {
+            (mx as i32 - 1, my as i32)
+        } else {
+            (mx as i32, my as i32 - 1)
+        };
+        coded_mb(pic, nx, ny)
+    } else {
+        None
+    };
+    // Intra covers the whole macroblock, so every sample of the edge agrees.
+    if edge == 0 {
+        if current.intra || neighbor.is_some_and(|mb| mb.intra) {
+            return [4; 4];
+        }
+    } else if current.intra {
+        return [3; 4];
+    }
+    let mut out = [0u8; 4];
+    for (line, sample) in out.iter_mut().enumerate() {
+        *sample = inter_strength(current, neighbor, edge, line, vertical);
+    }
+    out
+}
+
+fn inter_strength(q: &Mb, neighbor: Option<&Mb>, edge: usize, line: usize, vertical: bool) -> u8 {
+    let (qx, qy) = if vertical { (edge, line) } else { (line, edge) };
+    let q_nnz = q.nnz_y[qy * 4 + qx];
+    let q_pred = preds_at(q, qx, qy);
+    let (p_nnz, p_pred) = if edge == 0 {
+        let (ox, oy) = if vertical { (3, line) } else { (line, 3) };
+        match neighbor {
+            Some(p) => {
+                let nnz = if p.pcm { 16 } else { p.nnz_y[oy * 4 + ox] };
+                (nnz, preds_at(p, ox, oy))
+            }
+            None => (0, [(-1, [0, 0]), (-1, [0, 0])]),
+        }
+    } else {
+        let (ox, oy) = if vertical {
+            (edge - 1, line)
+        } else {
+            (line, edge - 1)
+        };
+        (q.nnz_y[oy * 4 + ox], preds_at(q, ox, oy))
+    };
+    if p_nnz > 0 || q_nnz > 0 {
+        return 2;
+    }
+    motion_strength(p_pred, q_pred)
 }
 
 fn filter_groups(
@@ -4651,36 +4700,10 @@ fn edge_qp(pic: &Frame, mx: usize, my: usize, luma: bool, vertical: bool, bounda
     (current + side + 1) >> 1
 }
 
-fn strength(pic: &Frame, mx: usize, my: usize, edge: usize, line: usize, vertical: bool) -> u8 {
-    let index = my * pic.mb_w + mx;
-    let Some(mb) = pic.mb.get(index) else {
-        return 0;
-    };
-    let (px, py) = if vertical {
-        (edge as i32 - 1, line as i32)
-    } else {
-        (line as i32, edge as i32 - 1)
-    };
-    let (qx, qy) = if vertical { (edge, line) } else { (line, edge) };
-    let p_intra = block_intra(pic, mx, my, px, py, mb);
-    let q_intra = block_intra(pic, mx, my, qx as i32, qy as i32, mb);
-    if p_intra || q_intra {
-        return if edge == 0 { 4 } else { 3 };
-    }
-    let p_nnz = block_nnz(pic, mx, my, px, py, mb);
-    let q_nnz = block_nnz(pic, mx, my, qx as i32, qy as i32, mb);
-    if p_nnz > 0 || q_nnz > 0 {
-        return 2;
-    }
-    let p = block_preds(pic, mx, my, px, py, mb);
-    let q = block_preds(pic, mx, my, qx as i32, qy as i32, mb);
-    motion_strength(p, q)
-}
-
 /// Clause 8.7.2.1. Compares the pictures actually referenced, on either list.
 fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
-    let p_used = p.into_iter().filter(|pred| pred.0 >= 0).count();
-    let q_used = q.into_iter().filter(|pred| pred.0 >= 0).count();
+    let p_used = u8::from(p[0].0 >= 0) + u8::from(p[1].0 >= 0);
+    let q_used = u8::from(q[0].0 >= 0) + u8::from(q[1].0 >= 0);
     if p_used != q_used {
         return 1;
     }
@@ -4688,12 +4711,8 @@ fn motion_strength(p: [(i8, [i16; 2]); 2], q: [(i8, [i16; 2]); 2]) -> u8 {
         return 0;
     }
     if p_used == 1 {
-        let Some(p) = p.into_iter().find(|pred| pred.0 >= 0) else {
-            return 0;
-        };
-        let Some(q) = q.into_iter().find(|pred| pred.0 >= 0) else {
-            return 0;
-        };
+        let p = if p[0].0 >= 0 { p[0] } else { p[1] };
+        let q = if q[0].0 >= 0 { q[0] } else { q[1] };
         return u8::from(p.0 != q.0 || mv_apart(p.1, q.1));
     }
     if !same_pictures(p[0].0, p[1].0, q[0].0, q[1].0) {
@@ -4716,24 +4735,6 @@ fn same_pictures(a: i8, b: i8, c: i8, d: i8) -> bool {
 
 fn mv_apart(a: [i16; 2], b: [i16; 2]) -> bool {
     (a[0] - b[0]).abs() >= 4 || (a[1] - b[1]).abs() >= 4
-}
-
-fn block_preds(
-    pic: &Frame,
-    mx: usize,
-    my: usize,
-    bx: i32,
-    by: i32,
-    current: &Mb,
-) -> [(i8, [i16; 2]); 2] {
-    let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift(my, by, 4);
-    if mbx == mx as i32 && mby == my as i32 {
-        return preds_at(current, ox, oy);
-    }
-    coded_mb(pic, mbx, mby)
-        .map(|mb| preds_at(mb, ox, oy))
-        .unwrap_or([(-1, [0, 0]), (-1, [0, 0])])
 }
 
 fn preds_at(mb: &Mb, bx: usize, by: usize) -> [(i8, [i16; 2]); 2] {
@@ -4771,15 +4772,6 @@ fn ref_slot(list: &[usize], index: i8) -> i8 {
     i8::try_from(*slot).unwrap_or(-1)
 }
 
-fn block_intra(pic: &Frame, mx: usize, my: usize, bx: i32, by: i32, current: &Mb) -> bool {
-    let (mbx, _) = shift(mx, bx, 4);
-    let (mby, _) = shift(my, by, 4);
-    if mbx == mx as i32 && mby == my as i32 {
-        return current.intra;
-    }
-    coded_mb(pic, mbx, mby).is_some_and(|mb| mb.intra)
-}
-
 /// A macroblock edge is filtered across slices unless this slice asked not to.
 fn filter_boundary(pic: &Frame, mx: usize, my: usize, vertical: bool) -> bool {
     let Some(mb) = coded_mb(pic, mx as i32, my as i32) else {
@@ -4802,16 +4794,4 @@ fn coded_mb(pic: &Frame, mx: i32, my: i32) -> Option<&Mb> {
     }
     let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
     if mb.slice == u16::MAX { None } else { Some(mb) }
-}
-
-fn block_nnz(pic: &Frame, mx: usize, my: usize, bx: i32, by: i32, current: &Mb) -> u8 {
-    let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift(my, by, 4);
-    let index = oy * 4 + ox;
-    if mbx == mx as i32 && mby == my as i32 {
-        return current.nnz_y[index];
-    }
-    coded_mb(pic, mbx, mby)
-        .map(|mb| if mb.pcm { 16 } else { mb.nnz_y[index] })
-        .unwrap_or(0)
 }

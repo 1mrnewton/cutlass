@@ -794,11 +794,12 @@ pub fn put_chroma_block(
     if yf == 0 {
         let wa = 8 - xf;
         for row in 0..h {
-            let samples = &src[(y0 + row) * src_stride..];
-            for col in 0..w {
-                let sx = x0 + col;
-                let value = wa * i32::from(samples[sx]) + xf * i32::from(samples[sx + 1]);
-                dst[row * dst_stride + col] = clip_u8((value + 4) >> 3);
+            let start = (y0 + row) * src_stride + x0;
+            let span = &src[start..start + w + 1];
+            let out = &mut dst[row * dst_stride..row * dst_stride + w];
+            for (sample, pair) in out.iter_mut().zip(span.windows(2)) {
+                let value = wa * i32::from(pair[0]) + xf * i32::from(pair[1]);
+                *sample = clip_u8((value + 4) >> 3);
             }
         }
         return;
@@ -806,12 +807,13 @@ pub fn put_chroma_block(
     if xf == 0 {
         let wa = 8 - yf;
         for row in 0..h {
-            let row0 = &src[(y0 + row) * src_stride..];
-            let row1 = &src[(y0 + row + 1) * src_stride..];
-            for col in 0..w {
-                let sx = x0 + col;
-                let value = wa * i32::from(row0[sx]) + yf * i32::from(row1[sx]);
-                dst[row * dst_stride + col] = clip_u8((value + 4) >> 3);
+            let start = (y0 + row) * src_stride + x0;
+            let row0 = &src[start..start + w];
+            let row1 = &src[start + src_stride..start + src_stride + w];
+            let out = &mut dst[row * dst_stride..row * dst_stride + w];
+            for (sample, (&left, &right)) in out.iter_mut().zip(row0.iter().zip(row1)) {
+                let value = wa * i32::from(left) + yf * i32::from(right);
+                *sample = clip_u8((value + 4) >> 3);
             }
         }
         return;
@@ -821,17 +823,17 @@ pub fn put_chroma_block(
     let wc = (8 - xf) * yf;
     let wd = xf * yf;
     for row in 0..h {
-        let sy = y0 + row;
-        let row0 = &src[sy * src_stride..];
-        let row1 = &src[(sy + 1) * src_stride..];
-        for col in 0..w {
-            let sx = x0 + col;
-            let value = wa * i32::from(row0[sx])
-                + wb * i32::from(row0[sx + 1])
-                + wc * i32::from(row1[sx])
-                + wd * i32::from(row1[sx + 1])
+        let start = (y0 + row) * src_stride + x0;
+        let row0 = &src[start..start + w + 1];
+        let row1 = &src[start + src_stride..start + src_stride + w + 1];
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        for (sample, (left, right)) in out.iter_mut().zip(row0.windows(2).zip(row1.windows(2))) {
+            let value = wa * i32::from(left[0])
+                + wb * i32::from(left[1])
+                + wc * i32::from(right[0])
+                + wd * i32::from(right[1])
                 + 32;
-            dst[row * dst_stride + col] = clip_u8(value >> 6);
+            *sample = clip_u8(value >> 6);
         }
     }
 }
@@ -956,8 +958,11 @@ fn avg_blocks(
     let mut right = [0u8; 256];
     fill(&mut left, &mut right);
     for row in 0..h {
-        for col in 0..w {
-            dst[row * dst_stride + col] = avg(left[row * w + col], right[row * w + col]);
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        let a = &left[row * w..row * w + w];
+        let b = &right[row * w..row * w + w];
+        for (sample, (&left_px, &right_px)) in out.iter_mut().zip(a.iter().zip(b)) {
+            *sample = avg(left_px, right_px);
         }
     }
 }
@@ -989,9 +994,11 @@ fn copy_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usi
 fn half_h_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
     let (w, h) = size;
     for row in 0..h {
-        let samples = &src.samples[(src.y + row) * src.stride..];
-        for col in 0..w {
-            dst[row * dst_stride + col] = clip_u8((fir6(samples, src.x + col) + 16) >> 5);
+        let start = (src.y + row) * src.stride + src.x - 2;
+        let taps = &src.samples[start..start + w + 5];
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        for (col, sample) in out.iter_mut().enumerate() {
+            *sample = clip_u8((fir6_at(taps, col) + 16) >> 5);
         }
     }
 }
@@ -999,13 +1006,20 @@ fn half_h_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, u
 fn half_v_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
     let (w, h) = size;
     for row in 0..h {
-        for col in 0..w {
-            let mut acc = 0i32;
-            for (k, coef) in [1, -5, 20, 20, -5, 1].into_iter().enumerate() {
-                let sy = src.y + row + k - 2;
-                acc += coef * i32::from(src.samples[sy * src.stride + src.x + col]);
-            }
-            dst[row * dst_stride + col] = clip_u8((acc + 16) >> 5);
+        let mut rows = [&[][..]; 6];
+        for (k, samples) in rows.iter_mut().enumerate() {
+            let sy = src.y + row + k - 2;
+            let start = sy * src.stride + src.x;
+            *samples = &src.samples[start..start + w];
+        }
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        for (col, sample) in out.iter_mut().enumerate() {
+            let acc = i32::from(rows[0][col]) - 5 * i32::from(rows[1][col])
+                + 20 * i32::from(rows[2][col])
+                + 20 * i32::from(rows[3][col])
+                - 5 * i32::from(rows[4][col])
+                + i32::from(rows[5][col]);
+            *sample = clip_u8((acc + 16) >> 5);
         }
     }
 }
@@ -1014,27 +1028,31 @@ fn diag_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usi
     let (w, h) = size;
     let mut tmp = [0i32; 21 * 16];
     for vy in 0..h + 5 {
-        let samples = &src.samples[(src.y + vy - 2) * src.stride..];
+        let start = (src.y + vy - 2) * src.stride + src.x - 2;
+        let taps = &src.samples[start..start + w + 5];
         for col in 0..w {
-            tmp[vy * 16 + col] = fir6(samples, src.x + col);
+            tmp[vy * 16 + col] = fir6_at(taps, col);
         }
     }
     for row in 0..h {
-        for col in 0..w {
-            let mut acc = 0i32;
-            for (k, coef) in [1, -5, 20, 20, -5, 1].into_iter().enumerate() {
-                acc += coef * tmp[(row + k) * 16 + col];
-            }
-            dst[row * dst_stride + col] = clip_u8((acc + 512) >> 10);
+        let out = &mut dst[row * dst_stride..row * dst_stride + w];
+        for (col, sample) in out.iter_mut().enumerate() {
+            let acc = tmp[row * 16 + col] - 5 * tmp[(row + 1) * 16 + col]
+                + 20 * tmp[(row + 2) * 16 + col]
+                + 20 * tmp[(row + 3) * 16 + col]
+                - 5 * tmp[(row + 4) * 16 + col]
+                + tmp[(row + 5) * 16 + col];
+            *sample = clip_u8((acc + 512) >> 10);
         }
     }
 }
 
-fn fir6(row: &[u8], x: usize) -> i32 {
-    let p = &row[x - 2..x + 4];
-    i32::from(p[0]) - 5 * i32::from(p[1]) + 20 * i32::from(p[2]) + 20 * i32::from(p[3])
-        - 5 * i32::from(p[4])
-        + i32::from(p[5])
+fn fir6_at(taps: &[u8], col: usize) -> i32 {
+    i32::from(taps[col]) - 5 * i32::from(taps[col + 1])
+        + 20 * i32::from(taps[col + 2])
+        + 20 * i32::from(taps[col + 3])
+        - 5 * i32::from(taps[col + 4])
+        + i32::from(taps[col + 5])
 }
 
 pub fn weight_uni(sample: u8, w: i32, o: i32, denom: i32) -> u8 {
@@ -1070,6 +1088,32 @@ pub fn weight_bi(a: u8, b: u8, weight: BiWeight) -> u8 {
     clip_u8(value)
 }
 
+/// One row of bipred weights. The weights stay outside the pixel loop so the
+/// compiler can widen and multiply several samples at once.
+pub fn weight_row(dst: &mut [u8], a: &[u8], b: &[u8], weight: BiWeight) {
+    let n = dst.len();
+    if a.len() < n || b.len() < n {
+        return;
+    }
+    let a = &a[..n];
+    let b = &b[..n];
+    let shift = weight.denom + 1;
+    if !(1..31).contains(&shift) {
+        for i in 0..n {
+            dst[i] = weight_bi(a[i], b[i], weight);
+        }
+        return;
+    }
+    let round = 1i32 << (shift - 1);
+    let off = (weight.o0 + weight.o1 + 1) >> 1;
+    let w0 = weight.w0;
+    let w1 = weight.w1;
+    for (sample, (&left, &right)) in dst.iter_mut().zip(a.iter().zip(b)) {
+        let value = ((i32::from(left) * w0 + i32::from(right) * w1 + round) >> shift) + off;
+        *sample = clip_u8(value);
+    }
+}
+
 #[inline(always)]
 pub fn avg(a: u8, b: u8) -> u8 {
     clip_u8((i32::from(a) + i32::from(b) + 1) >> 1)
@@ -1101,31 +1145,59 @@ pub fn filter_edge(plane: &mut [u8], stride: usize, x: usize, y: usize, edge: Ed
     }
     let index_a = (qpav + offset_a).clamp(0, 51) as usize;
     let index_b = (qpav + offset_b).clamp(0, 51) as usize;
-    let alpha = i32::from(ALPHA[index_a]);
-    let beta = i32::from(BETA[index_b]);
-    for i in 0..len {
-        let (px, py) = if vertical { (x, y + i) } else { (x + i, y) };
-        let load = |dx: i32, dy: i32| -> i32 {
-            let sx = px as i32 + if vertical { dx } else { 0 };
-            let sy = py as i32 + if vertical { 0 } else { dy };
-            i32::from(plane[(sy as usize) * stride + sx as usize])
-        };
-        let store = |dx: i32, dy: i32, value: i32, plane: &mut [u8]| {
-            let sx = px as i32 + if vertical { dx } else { 0 };
-            let sy = py as i32 + if vertical { 0 } else { dy };
-            plane[(sy as usize) * stride + sx as usize] = clip_u8(value);
-        };
-        let p0 = load(-1, -1);
-        let q0 = load(0, 0);
-        let p1 = load(-2, -2);
-        let q1 = load(1, 1);
+    let run = FilterRun {
+        len,
+        bs,
+        alpha: i32::from(ALPHA[index_a]),
+        beta: i32::from(BETA[index_b]),
+        index_a,
+        chroma,
+    };
+    if vertical {
+        filter_span::<true>(plane, stride, y * stride + x, run);
+    } else {
+        filter_span::<false>(plane, stride, y * stride + x, run);
+    }
+}
+
+struct FilterRun {
+    len: usize,
+    bs: u8,
+    alpha: i32,
+    beta: i32,
+    index_a: usize,
+    chroma: bool,
+}
+
+fn filter_span<const VERTICAL: bool>(
+    plane: &mut [u8],
+    stride: usize,
+    mut at: usize,
+    run: FilterRun,
+) {
+    let FilterRun {
+        len,
+        bs,
+        alpha,
+        beta,
+        index_a,
+        chroma,
+    } = run;
+    let across = if VERTICAL { 1 } else { stride };
+    let along = if VERTICAL { stride } else { 1 };
+    for _ in 0..len {
+        let p0 = i32::from(plane[at - across]);
+        let q0 = i32::from(plane[at]);
+        let p1 = i32::from(plane[at - 2 * across]);
+        let q1 = i32::from(plane[at + across]);
         if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
+            at += along;
             continue;
         }
-        let p2 = load(-3, -3);
-        let q2 = load(2, 2);
-        let p3 = load(-4, -4);
-        let q3 = load(3, 3);
+        let p2 = i32::from(plane[at - 3 * across]);
+        let q2 = i32::from(plane[at + 2 * across]);
+        let p3 = i32::from(plane[at - 4 * across]);
+        let q3 = i32::from(plane[at + 3 * across]);
         if bs < 4 {
             let tc0 = i32::from(TC0[bs as usize - 1][index_a]);
             let ap = (p2 - p0).abs();
@@ -1136,15 +1208,15 @@ pub fn filter_edge(plane: &mut [u8], stride: usize, x: usize, y: usize, edge: Ed
                 tc0 + i32::from(ap < beta) + i32::from(aq < beta)
             };
             let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
-            store(-1, -1, p0 + delta, plane);
-            store(0, 0, q0 - delta, plane);
+            plane[at - across] = clip_u8(p0 + delta);
+            plane[at] = clip_u8(q0 - delta);
             if !chroma && ap < beta {
                 let d = ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
-                store(-2, -2, p1 + d, plane);
+                plane[at - 2 * across] = clip_u8(p1 + d);
             }
             if !chroma && aq < beta {
                 let d = ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
-                store(1, 1, q1 + d, plane);
+                plane[at + across] = clip_u8(q1 + d);
             }
         } else {
             let strong_p =
@@ -1152,20 +1224,21 @@ pub fn filter_edge(plane: &mut [u8], stride: usize, x: usize, y: usize, edge: Ed
             let strong_q =
                 !chroma && (q2 - q0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
             if strong_p {
-                store(-1, -1, (p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3, plane);
-                store(-2, -2, (p2 + p1 + p0 + q0 + 2) >> 2, plane);
-                store(-3, -3, (2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3, plane);
+                plane[at - across] = clip_u8((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
+                plane[at - 2 * across] = clip_u8((p2 + p1 + p0 + q0 + 2) >> 2);
+                plane[at - 3 * across] = clip_u8((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
             } else {
-                store(-1, -1, (2 * p1 + p0 + q1 + 2) >> 2, plane);
+                plane[at - across] = clip_u8((2 * p1 + p0 + q1 + 2) >> 2);
             }
             if strong_q {
-                store(0, 0, (p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3, plane);
-                store(1, 1, (p0 + q0 + q1 + q2 + 2) >> 2, plane);
-                store(2, 2, (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3, plane);
+                plane[at] = clip_u8((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
+                plane[at + across] = clip_u8((p0 + q0 + q1 + q2 + 2) >> 2);
+                plane[at + 2 * across] = clip_u8((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
             } else {
-                store(0, 0, (2 * q1 + q0 + p1 + 2) >> 2, plane);
+                plane[at] = clip_u8((2 * q1 + q0 + p1 + 2) >> 2);
             }
         }
+        at += along;
     }
 }
 

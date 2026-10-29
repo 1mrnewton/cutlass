@@ -18,6 +18,8 @@ fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFa
     cutlass_aac::register_encoders(&mut encoders);
     cutlass_av1::register_decoders(&mut decoders);
     cutlass_av1::register_encoders(&mut encoders);
+    cutlass_pcm::register_decoders(&mut decoders);
+    cutlass_pcm::register_encoders(&mut encoders);
     (decoders, encoders)
 }
 
@@ -74,5 +76,37 @@ mod tests {
             cutlass_encode::Encoder::codec(encoder.as_ref()),
             CodecId::Av1
         );
+    }
+
+    #[test]
+    fn pcm_falls_through_when_the_platform_declines_the_layout() {
+        use cutlass_decode::{ChannelLayout, Decoder, Output, Packet, SampleFormat};
+        use cutlass_encode::{AudioInput, Encoder};
+
+        let (decoders, encoders) = super::register_codecs();
+        let mut wide = CodecParams::audio(CodecId::Pcm, 48_000, ChannelLayout::mono());
+        wide.extra = vec![5, 0, 0];
+        wide.sample_format = Some(SampleFormat::F32);
+        let mut decoder = decoders.open(&wide).expect("pcm decoder");
+        let outputs = decoder
+            .push(&Packet::audio(0.5f64.to_le_bytes().to_vec(), 0, 1, 48_000))
+            .expect("f64 packet");
+        let Output::Audio(audio) = &outputs[0] else {
+            panic!("audio");
+        };
+        assert_eq!(Decoder::codec(decoder.as_ref()), CodecId::Pcm);
+        assert_eq!(audio.pcm.samples, 1);
+        assert_eq!(audio.pcm.as_f32(), Some(&[0.5][..]));
+
+        let mut spec = CodecParams::audio(CodecId::Pcm, 48_000, ChannelLayout::mono());
+        spec.extra = vec![1, 0, 0];
+        spec.sample_format = Some(SampleFormat::I16);
+        let mut encoder = encoders.open(&spec).expect("pcm encoder");
+        assert_eq!(Encoder::codec(encoder.as_ref()), CodecId::Pcm);
+        let pcm =
+            cutlass_decode::Pcm::from_i16(48_000, ChannelLayout::mono(), vec![7]).expect("pcm");
+        let packets = encoder.push(&AudioInput { pcm }).expect("encode");
+        assert_eq!(packets.len(), 1);
+        assert!(!packets[0].data.is_empty());
     }
 }

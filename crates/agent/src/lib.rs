@@ -9,9 +9,11 @@
 #![forbid(unsafe_code)]
 
 mod approval;
+mod r#loop;
 mod model;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
+pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,

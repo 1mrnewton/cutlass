@@ -3,7 +3,7 @@
 use cutlass_decode::CodecError;
 
 use crate::cdef::{self, CdefInput};
-use crate::deblock::{Edges, deblock_plane};
+use crate::deblock::{Edges, Picture, deblock_picture};
 use crate::dims::{
     ADJUSTED_TX_SIZE, ADST_FLIPADST, BLOCK_8X8, BLOCK_128X128, COEFF_BASE_CTX_OFFSET, DC_PRED,
     DCT_DCT, DCT_FLIPADST, FLIPADST_ADST, FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT,
@@ -143,9 +143,18 @@ pub fn decode_with_refs(
         sub_y: tile.sub_y,
         frame,
     };
-    deblock_plane(&mut tile.y, buf_w, buf_h, 0, &edges);
-    deblock_plane(&mut tile.u, tile.chroma_w, tile.chroma_h, 1, &edges);
-    deblock_plane(&mut tile.v, tile.chroma_w, tile.chroma_h, 2, &edges);
+    deblock_picture(
+        Picture {
+            y: &mut tile.y,
+            y_w: buf_w,
+            y_h: buf_h,
+            u: &mut tile.u,
+            v: &mut tile.v,
+            c_w: tile.chroma_w,
+            c_h: tile.chroma_h,
+        },
+        &edges,
+    );
     let before = if lr.active() {
         Some((tile.y.clone(), tile.u.clone(), tile.v.clone()))
     } else {
@@ -276,7 +285,7 @@ fn restore_plane(
     }
 }
 
-/// Tiles reconstruct independently. The loop filter and CDEF run after the merge.
+/// Tiles reconstruct independently. Loop-filter rows then share the remaining cores.
 fn decode_tiles<'a, 'r>(
     sequence: &Sequence,
     frame: &FrameInfo,
@@ -492,6 +501,7 @@ struct Tile<'a, 'r> {
     cdef_idx: Vec<i8>,
     cdfs: Cdfs,
     coeff_buf: Vec<i32>,
+    quant_buf: Vec<i32>,
     residual_buf: Vec<i64>,
     idct_row: Vec<i64>,
     idct_out: Vec<i32>,
@@ -673,6 +683,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             cdef_idx: vec![-1; cells],
             cdfs: Cdfs::load(q_ctx),
             coeff_buf: Vec::new(),
+            quant_buf: Vec::new(),
             residual_buf: Vec::new(),
             idct_row: Vec::new(),
             idct_out: Vec::new(),
@@ -2116,7 +2127,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             )?;
         }
         if !block.skip {
-            let (quant, tx_type) = self.coeffs(CoeffPlace {
+            let tx_type = self.coeffs(CoeffPlace {
                 plane: block.plane,
                 start_x,
                 start_y,
@@ -2125,8 +2136,15 @@ impl<'a, 'r> Tile<'a, 'r> {
                 y_mode: block.y_mode,
                 uv_mode: block.uv_mode,
             })?;
-            if quant.iter().any(|level| *level != 0) {
-                self.reconstruct(block.plane, start_x, start_y, block.tx, tx_type, &quant)?;
+            if let Some(tx_type) = tx_type {
+                let quant = std::mem::take(&mut self.quant_buf);
+                let decoded = if quant.iter().any(|level| *level != 0) {
+                    self.reconstruct(block.plane, start_x, start_y, block.tx, tx_type, &quant)
+                } else {
+                    Ok(())
+                };
+                self.quant_buf = quant;
+                decoded?;
             }
         }
         for y in 0..block.step_y {
@@ -2266,7 +2284,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         above || left
     }
 
-    fn coeffs(&mut self, place: CoeffPlace) -> Result<(Vec<i32>, u8), CodecError> {
+    fn coeffs(&mut self, place: CoeffPlace) -> Result<Option<u8>, CodecError> {
         let CoeffPlace {
             plane,
             start_x,
@@ -2302,9 +2320,45 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             (TX_WIDTH[tx] * TX_HEIGHT[tx]).min(1024)
         };
-        let mut quant = vec![0i32; seg];
-        if all_zero {
-            self.write_levels(
+        let mut quant = std::mem::take(&mut self.quant_buf);
+        if quant.len() < seg {
+            quant.resize(seg, 0);
+        }
+        quant.truncate(seg);
+        quant.fill(0);
+        let decoded = (|| -> Result<Option<u8>, CodecError> {
+            if all_zero {
+                self.write_levels(
+                    DcSpan {
+                        plane,
+                        x4,
+                        y4,
+                        w4,
+                        h4,
+                    },
+                    0,
+                    0,
+                );
+                return Ok(None);
+            }
+            let tx_type = self.tx_type(plane, tx, y_mode, uv_mode)?;
+            let scan = scan_for(tx, tx_type);
+            let eob = self.read_eob(tx, tx_ctx, plane, tx_type)?;
+            self.read_levels(
+                &mut quant,
+                LevelScan {
+                    scan,
+                    eob,
+                    tx,
+                    tx_ctx,
+                    plane,
+                    tx_type,
+                },
+            )?;
+            self.apply_signs_and_golomb(
+                &mut quant,
+                scan,
+                eob,
                 DcSpan {
                     plane,
                     x4,
@@ -2312,38 +2366,11 @@ impl<'a, 'r> Tile<'a, 'r> {
                     w4,
                     h4,
                 },
-                0,
-                0,
-            );
-            return Ok((quant, DCT_DCT));
-        }
-        let tx_type = self.tx_type(plane, tx, y_mode, uv_mode)?;
-        let scan = scan_for(tx, tx_type);
-        let eob = self.read_eob(tx, tx_ctx, plane, tx_type)?;
-        self.read_levels(
-            &mut quant,
-            LevelScan {
-                scan,
-                eob,
-                tx,
-                tx_ctx,
-                plane,
-                tx_type,
-            },
-        )?;
-        self.apply_signs_and_golomb(
-            &mut quant,
-            scan,
-            eob,
-            DcSpan {
-                plane,
-                x4,
-                y4,
-                w4,
-                h4,
-            },
-        )?;
-        Ok((quant, tx_type))
+            )?;
+            Ok(Some(tx_type))
+        })();
+        self.quant_buf = quant;
+        decoded
     }
 
     fn skip_coeff_ctx(&self, at: SkipAt) -> usize {

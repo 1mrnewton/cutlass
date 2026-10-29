@@ -503,22 +503,35 @@ pub fn inverse_2d_into(
     let log_w = width.trailing_zeros();
     let log_h = height.trailing_zeros();
     let rect = log_w.abs_diff(log_h) == 1;
+    let kind_row = row_kind(tx_type);
     for i in 0..height {
+        let mut live = false;
         for (j, slot) in scratch.row.iter_mut().enumerate().take(width) {
             let sample = if i < 32 && j < 32 {
                 coeff.get(i * width + j).copied().unwrap_or(0)
             } else {
                 0
             };
+            if sample != 0 {
+                live = true;
+            }
             *slot = if rect {
                 round2(i64::from(sample) * 2896, 12)
             } else {
                 i64::from(sample)
             };
         }
-        apply_1d(&mut scratch.row[..row_n], log_w, row_kind(tx_type), 16);
+        let dest = i * width;
+        if !live {
+            // A zero row stays zero, and the buffer is reused by the next block.
+            for slot in scratch.residual[dest..dest + width].iter_mut() {
+                *slot = 0;
+            }
+            continue;
+        }
+        apply_1d(&mut scratch.row[..row_n], log_w, kind_row, 16);
         for j in 0..width {
-            scratch.residual[i * width + j] = round2(scratch.row[j], row_shift);
+            scratch.residual[dest + j] = round2(scratch.row[j], row_shift);
         }
     }
     for sample in &mut scratch.residual[..n] {

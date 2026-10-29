@@ -19,15 +19,52 @@ pub struct Edges<'a> {
     pub frame: &'a FrameInfo,
 }
 
-pub fn deblock_plane(
+pub struct Picture<'a> {
+    pub y: &'a mut [u8],
+    pub y_w: usize,
+    pub y_h: usize,
+    pub u: &'a mut [u8],
+    pub v: &'a mut [u8],
+    pub c_w: usize,
+    pub c_h: usize,
+}
+
+/// Loop-filter every plane on a shared set of workers.
+///
+/// Vertical edges finish before horizontal edges inside each plane. Row bands
+/// of one plane run together, and the chroma planes run beside luma, so the
+/// cores that finished a tile pick up filter rows instead of waiting.
+pub fn deblock_picture(picture: Picture<'_>, edges: &Edges<'_>) {
+    if edges.frame.lf_level[0] == 0 && edges.frame.lf_level[1] == 0 {
+        return;
+    }
+    let Picture {
+        y,
+        y_w,
+        y_h,
+        u,
+        v,
+        c_w,
+        c_h,
+    } = picture;
+    let cores = parallelism(edges.mi_rows);
+    let luma_workers = (cores * 2 / 3).max(1);
+    let chroma_workers = ((cores - luma_workers) / 2).max(1);
+    std::thread::scope(|scope| {
+        scope.spawn(|| filter_plane(y, y_w, y_h, 0, edges, luma_workers));
+        scope.spawn(|| filter_plane(u, c_w, c_h, 1, edges, chroma_workers));
+        scope.spawn(|| filter_plane(v, c_w, c_h, 2, edges, chroma_workers));
+    });
+}
+
+fn filter_plane(
     samples: &mut [u8],
     width: usize,
     height: usize,
     plane: usize,
     edges: &Edges<'_>,
+    workers: usize,
 ) {
-    // A frame with both luma levels at zero is left unchanged. A reference
-    // delta is not applied on top of that pair of zeros.
     if edges.frame.lf_level[0] == 0 && edges.frame.lf_level[1] == 0 {
         return;
     }
@@ -36,32 +73,254 @@ pub fn deblock_plane(
     if plane > 0 && edges.frame.lf_level[plane + 1] == 0 {
         return;
     }
+    if width == 0 || height == 0 || edges.mi_cols == 0 || edges.mi_rows == 0 {
+        return;
+    }
     let row_step = 1usize << sub_y;
     let col_step = 1usize << sub_x;
     for pass in 0..2 {
-        let mut row = 0;
-        while row < edges.mi_rows {
-            let mut col = 0;
-            while col < edges.mi_cols {
-                filter_edge(
+        let lvl = level(edges.frame, plane, pass);
+        if lvl == 0 {
+            continue;
+        }
+        let job = Job {
+            width,
+            plane_h: height,
+            plane,
+            pass,
+            edges,
+            sub_x,
+            sub_y,
+            col_step,
+            lvl,
+        };
+        if pass == 0 {
+            run_bands(
+                samples,
+                &vertical_bands(edges, sub_y, height, row_step, workers),
+                &job,
+            );
+        } else {
+            // Horizontal taps overlap adjacent rows. Edges 16 pixels apart do not.
+            for phase in [0usize, 4, 8, 12] {
+                run_bands(
                     samples,
-                    width,
-                    height,
-                    plane,
-                    pass,
-                    Mi {
-                        row,
-                        col,
-                        sub_x,
-                        sub_y,
-                    },
-                    edges,
+                    &horizontal_bands(edges, sub_y, height, row_step, phase, workers),
+                    &job,
                 );
-                col += col_step;
             }
-            row += row_step;
         }
     }
+}
+
+struct Job<'a> {
+    width: usize,
+    plane_h: usize,
+    plane: usize,
+    pass: usize,
+    edges: &'a Edges<'a>,
+    sub_x: usize,
+    sub_y: usize,
+    col_step: usize,
+    lvl: i32,
+}
+
+#[derive(Clone, Copy)]
+struct Band {
+    y0: usize,
+    y1: usize,
+    row0: usize,
+    row1: usize,
+    row_step: usize,
+}
+
+fn parallelism(rows: usize) -> usize {
+    if rows < 16 {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    cores.max(1)
+}
+
+fn pixel_row(mi_row: usize, sub_y: usize) -> usize {
+    (mi_row.saturating_mul(4)) >> sub_y
+}
+
+fn vertical_bands(
+    edges: &Edges<'_>,
+    sub_y: usize,
+    plane_h: usize,
+    row_step: usize,
+    workers: usize,
+) -> Vec<Band> {
+    let workers = workers.max(1).min(edges.mi_rows.max(1));
+    let rows_per = edges.mi_rows.div_ceil(workers);
+    let rows_per = rows_per.div_ceil(row_step).max(1).saturating_mul(row_step);
+    let mut bands = Vec::new();
+    let mut row = 0;
+    while row < edges.mi_rows {
+        let row1 = (row + rows_per).min(edges.mi_rows);
+        let y0 = pixel_row(row, sub_y).min(plane_h);
+        let y1 = pixel_row(row1, sub_y).min(plane_h);
+        if y1 > y0 {
+            bands.push(Band {
+                y0,
+                y1,
+                row0: row,
+                row1,
+                row_step,
+            });
+        }
+        row = row1;
+    }
+    bands
+}
+
+fn horizontal_bands(
+    edges: &Edges<'_>,
+    sub_y: usize,
+    plane_h: usize,
+    row_step: usize,
+    phase: usize,
+    workers: usize,
+) -> Vec<Band> {
+    let wave_step = 4usize << sub_y;
+    let mut rows = Vec::new();
+    let mut row = 0;
+    while row < edges.mi_rows {
+        let y = pixel_row(row, sub_y);
+        if y < plane_h && y % 16 == phase {
+            rows.push(row);
+        }
+        row += row_step;
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let workers = workers.max(1).min(rows.len());
+    let per = rows.len().div_ceil(workers);
+    let mut bands = Vec::new();
+    let mut start = 0;
+    while start < rows.len() {
+        let end = (start + per).min(rows.len());
+        let first = rows[start];
+        let last = rows[end - 1];
+        let y_first = pixel_row(first, sub_y);
+        let y_last = pixel_row(last, sub_y);
+        let y0 = y_first.saturating_sub(7);
+        let y1 = (y_last + 7).min(plane_h);
+        if y1 > y0 {
+            bands.push(Band {
+                y0,
+                y1,
+                row0: first,
+                row1: last.saturating_add(1),
+                row_step: wave_step,
+            });
+        }
+        start = end;
+    }
+    bands
+}
+
+fn run_bands(samples: &mut [u8], bands: &[Band], job: &Job<'_>) {
+    if bands.is_empty() {
+        return;
+    }
+    // One band, or windows that share pixels, filters against the whole plane.
+    // Coordinates stay absolute. A parallel band later subtracts its origin.
+    if bands.len() == 1 || !sliceable(bands, job.width, samples.len()) {
+        for band in bands {
+            filter_rows(samples, 0, job.plane_h, band, job);
+        }
+        return;
+    }
+    let width = job.width;
+    std::thread::scope(|scope| {
+        let mut rest = &mut *samples;
+        let mut cursor = 0usize;
+        for band in bands {
+            let start = band.y0 * width;
+            let end = band.y1 * width;
+            let skip = start - cursor;
+            let (_, tail) = rest.split_at_mut(skip);
+            let (chunk, tail) = tail.split_at_mut(end - start);
+            let band = *band;
+            scope.spawn(move || filter_rows(chunk, band.y0, band.y1 - band.y0, &band, job));
+            rest = tail;
+            cursor = end;
+        }
+    });
+}
+
+fn sliceable(bands: &[Band], width: usize, len: usize) -> bool {
+    if !disjoint(bands) {
+        return false;
+    }
+    let mut cursor = 0usize;
+    for band in bands {
+        let Some(start) = band.y0.checked_mul(width) else {
+            return false;
+        };
+        let Some(end) = band.y1.checked_mul(width) else {
+            return false;
+        };
+        if start < cursor || end < start || end > len {
+            return false;
+        }
+        cursor = end;
+    }
+    true
+}
+
+fn disjoint(bands: &[Band]) -> bool {
+    let mut cursor = 0usize;
+    for band in bands {
+        if band.y0 < cursor || band.y1 <= band.y0 {
+            return false;
+        }
+        cursor = band.y1;
+    }
+    true
+}
+
+fn filter_rows(samples: &mut [u8], band_y: usize, band_h: usize, band: &Band, job: &Job<'_>) {
+    let mut row = band.row0;
+    while row < band.row1 && row < job.edges.mi_rows {
+        let mut col = 0;
+        while col < job.edges.mi_cols {
+            filter_edge(
+                samples,
+                job,
+                band_y,
+                band_h,
+                Mi {
+                    row,
+                    col,
+                    sub_x: job.sub_x,
+                    sub_y: job.sub_y,
+                },
+            );
+            col += column_advance(job, row, col);
+        }
+        row += band.row_step;
+    }
+}
+
+/// Vertical edges exist on transform boundaries. Interior columns of a wide
+/// transform have nothing to filter, so the scan jumps to the next boundary.
+fn column_advance(job: &Job<'_>, row: usize, col: usize) -> usize {
+    if job.pass != 0 || row >= job.edges.mi_rows || col >= job.edges.mi_cols {
+        return job.col_step;
+    }
+    let tx = tx_at(job.edges, job.plane, row, col);
+    let span = TX_WIDTH.get(tx).copied().unwrap_or(4).max(4);
+    let x_p = (col.saturating_mul(4)) >> job.sub_x;
+    let phase = x_p % span;
+    let remaining = span - phase;
+    ((remaining << job.sub_x) / 4).max(job.col_step)
 }
 
 struct Mi {
@@ -86,42 +345,34 @@ struct Strength {
     thresh: i32,
 }
 
-fn filter_edge(
-    samples: &mut [u8],
-    width: usize,
-    height: usize,
-    plane: usize,
-    pass: usize,
-    mi: Mi,
-    edges: &Edges<'_>,
-) {
+fn filter_edge(samples: &mut [u8], job: &Job<'_>, band_y: usize, band_h: usize, mi: Mi) {
     let Mi {
         mut row,
         mut col,
         sub_x,
         sub_y,
     } = mi;
-    let (dx, dy) = if pass == 0 { (1i32, 0i32) } else { (0, 1) };
+    let (dx, dy) = if job.pass == 0 { (1i32, 0i32) } else { (0, 1) };
     let x = col * 4;
     let y = row * 4;
     row |= sub_y;
     col |= sub_x;
-    if !on_screen(x, y, width << sub_x, height << sub_y, pass) {
+    if !on_screen(x, y, job.width << sub_x, job.plane_h << sub_y, job.pass) {
         return;
     }
-    if row >= edges.mi_rows || col >= edges.mi_cols {
+    if row >= job.edges.mi_rows || col >= job.edges.mi_cols {
         return;
     }
     let x_p = x >> sub_x;
     let y_p = y >> sub_y;
     let prev_row = row.wrapping_sub((dy as usize) << sub_y);
     let prev_col = col.wrapping_sub((dx as usize) << sub_x);
-    if prev_row >= edges.mi_rows || prev_col >= edges.mi_cols {
+    if prev_row >= job.edges.mi_rows || prev_col >= job.edges.mi_cols {
         return;
     }
-    let tx = tx_at(edges, plane, row, col);
-    let prev_tx = tx_at(edges, plane, prev_row, prev_col);
-    let tx_edge = if pass == 0 {
+    let tx = tx_at(job.edges, job.plane, row, col);
+    let prev_tx = tx_at(job.edges, job.plane, prev_row, prev_col);
+    let tx_edge = if job.pass == 0 {
         x_p.is_multiple_of(TX_WIDTH[tx])
     } else {
         y_p.is_multiple_of(TX_HEIGHT[tx])
@@ -130,25 +381,30 @@ fn filter_edge(
     if !tx_edge {
         return;
     }
-    let filter_size = filter_size(pass, plane, tx, prev_tx);
-    let lvl = level(edges.frame, plane, pass);
-    if lvl == 0 {
-        return;
-    }
-    let (limit, blimit, thresh) = limits(lvl, edges.frame.lf_sharpness);
+    let filter_size = filter_size(job.pass, job.plane, tx, prev_tx);
+    let (limit, blimit, thresh) = limits(job.lvl, job.edges.frame.lf_sharpness);
     let strength = Strength {
         limit,
         blimit,
         thresh,
     };
+    let y_base = band_y as i32;
     for i in 0..4 {
         let axis = Axis {
             x: x_p as i32 + dy * i,
-            y: y_p as i32 + dx * i,
+            y: y_p as i32 + dx * i - y_base,
             dx,
             dy,
         };
-        filter_sample(samples, width, height, axis, strength, filter_size, plane);
+        filter_sample(
+            samples,
+            job.width,
+            band_h,
+            axis,
+            strength,
+            filter_size,
+            job.plane,
+        );
     }
 }
 
@@ -282,8 +538,20 @@ struct Mask {
 }
 
 fn load_line(samples: &[u8], width: usize, height: usize, axis: Axis, radius: i32) -> Option<Line> {
-    let mut values = [0i32; 16];
     let origin = radius;
+    let count = (radius * 2) as usize;
+    if count > 16 || radius <= 0 {
+        return None;
+    }
+    if let Some(values) = load_window(samples, width, height, axis, radius, count) {
+        return Some(Line {
+            values,
+            origin,
+            from: -radius,
+            to: radius,
+        });
+    }
+    let mut values = [0i32; 16];
     let mut p = -radius;
     while p < radius {
         values[(origin + p) as usize] = sample(
@@ -303,7 +571,51 @@ fn load_line(samples: &[u8], width: usize, height: usize, axis: Axis, radius: i3
     })
 }
 
+/// Copy a window that sits fully inside the plane. The edge filter is the hot
+/// path, and the per-sample bounds check is the same answer for every tap.
+fn load_window(
+    samples: &[u8],
+    width: usize,
+    height: usize,
+    axis: Axis,
+    radius: i32,
+    count: usize,
+) -> Option<[i32; 16]> {
+    if axis.dx == 1 && axis.dy == 0 {
+        let y = usize::try_from(axis.y).ok()?;
+        let x0 = usize::try_from(axis.x - radius).ok()?;
+        if y >= height || x0.saturating_add(count) > width {
+            return None;
+        }
+        let start = y.saturating_mul(width).saturating_add(x0);
+        let row = samples.get(start..start + count)?;
+        let mut values = [0i32; 16];
+        for (slot, sample) in values.iter_mut().zip(row) {
+            *slot = i32::from(*sample);
+        }
+        return Some(values);
+    }
+    if axis.dx == 0 && axis.dy == 1 {
+        let x = usize::try_from(axis.x).ok()?;
+        let y0 = usize::try_from(axis.y - radius).ok()?;
+        if x >= width || y0.saturating_add(count) > height {
+            return None;
+        }
+        let mut values = [0i32; 16];
+        for (i, slot) in values.iter_mut().take(count).enumerate() {
+            let at = (y0 + i).saturating_mul(width).saturating_add(x);
+            *slot = i32::from(*samples.get(at)?);
+        }
+        return Some(values);
+    }
+    None
+}
+
 fn store_line(samples: &mut [u8], width: usize, axis: Axis, line: &Line) {
+    let count = (line.to - line.from) as usize;
+    if store_window(samples, width, axis, line, count) {
+        return;
+    }
     let mut p = line.from;
     while p < line.to {
         store(
@@ -315,6 +627,50 @@ fn store_line(samples: &mut [u8], width: usize, axis: Axis, line: &Line) {
         );
         p += 1;
     }
+}
+
+fn store_window(samples: &mut [u8], width: usize, axis: Axis, line: &Line, count: usize) -> bool {
+    if count > 16 {
+        return false;
+    }
+    if axis.dx == 1 && axis.dy == 0 {
+        let Ok(y) = usize::try_from(axis.y) else {
+            return false;
+        };
+        let Ok(x0) = usize::try_from(axis.x + line.from * axis.dx) else {
+            return false;
+        };
+        let start = y.saturating_mul(width).saturating_add(x0);
+        let Some(row) = samples.get_mut(start..start + count) else {
+            return false;
+        };
+        for (slot, p) in row.iter_mut().zip(line.from..line.to) {
+            let value = line.values[(line.origin + p) as usize];
+            *slot = value.clamp(0, 255) as u8;
+        }
+        return true;
+    }
+    if axis.dx == 0 && axis.dy == 1 {
+        let Ok(x) = usize::try_from(axis.x) else {
+            return false;
+        };
+        let Ok(y0) = usize::try_from(axis.y + line.from) else {
+            return false;
+        };
+        if x >= width || count == 0 {
+            return false;
+        }
+        for (i, p) in (line.from..line.to).enumerate() {
+            let at = (y0 + i).saturating_mul(width).saturating_add(x);
+            let Some(slot) = samples.get_mut(at) else {
+                return false;
+            };
+            let value = line.values[(line.origin + p) as usize];
+            *slot = value.clamp(0, 255) as u8;
+        }
+        return true;
+    }
+    false
 }
 
 fn at(line: &Line, p: i32) -> i32 {

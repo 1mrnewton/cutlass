@@ -2236,6 +2236,98 @@ mod oracle {
     }
 
     #[test]
+    fn cropped_picture_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-crop");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("crop.h264");
+        let yuv = dir.join("crop.yuv");
+        let encoded = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=70x50:rate=30",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "high",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "cabac=1:bframes=0:keyint=1:scenecut=0:threads=1",
+                "-f",
+                "h264",
+            ])
+            .arg(&coded)
+            .status()
+            .unwrap();
+        assert!(encoded.success(), "ffmpeg encode failed");
+        let decoded = Command::new(&ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg decode failed");
+        let bytes = std::fs::read(&coded).unwrap();
+        let expected = std::fs::read(&yuv).unwrap();
+        let params = CodecParams::video(CodecId::H264, 70, 50);
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut got = Vec::new();
+        let mut size = (0u32, 0u32);
+        for (unit_index, unit) in access_units(&bytes).into_iter().enumerate() {
+            let packet = Packet::video(unit, 0, 1, 30, false);
+            match decoder.push(&packet) {
+                Ok(frames) => {
+                    if let Some(frame) = frames.first() {
+                        size = (frame.picture.width(), frame.picture.height());
+                    }
+                    got.extend(pictures(&frames));
+                }
+                Err(error) => panic!("push {unit_index} failed: {error:?}"),
+            }
+        }
+        match decoder.drain() {
+            Ok(frames) => {
+                if let Some(frame) = frames.first() {
+                    size = (frame.picture.width(), frame.picture.height());
+                }
+                got.extend(pictures(&frames));
+            }
+            Err(error) => panic!("drain failed: {error:?}"),
+        }
+        assert_eq!(size, (70, 50), "visible size");
+        assert_eq!(got.len(), expected.len(), "picture bytes");
+        let mut count = 0usize;
+        let mut max = 0u8;
+        let mut first = None;
+        for (index, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            if a == b {
+                continue;
+            }
+            count += 1;
+            if a.abs_diff(*b) >= max {
+                max = a.abs_diff(*b);
+            }
+            if first.is_none() {
+                first = Some((index, *a, *b));
+            }
+        }
+        if count != 0 {
+            panic!("crop mismatches {count} max {max} first {first:?}");
+        }
+    }
+
+    #[test]
     fn high_cabac_8x8_matches_ffmpeg() {
         let Some(ffmpeg) = ffmpeg() else {
             eprintln!("skip: ffmpeg is not installed");

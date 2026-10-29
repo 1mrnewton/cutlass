@@ -9,5 +9,6 @@
 #![forbid(unsafe_code)]
 
 mod limits;
+mod nal;
 mod orient;
 mod status;

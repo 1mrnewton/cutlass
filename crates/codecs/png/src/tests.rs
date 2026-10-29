@@ -346,6 +346,18 @@ fn an_international_text_chunk_round_trips() {
 }
 
 #[test]
+fn an_animation_control_chunk_does_not_hide_the_samples() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&SIGNATURE);
+    bytes.extend(chunk(b"IHDR", &ihdr(1, 1, 8, 0, 0)));
+    bytes.extend(chunk(b"fcTL", &[0; 26]));
+    bytes.extend(chunk(b"IDAT", &stored_zlib(&[0, 6])));
+    bytes.extend(chunk(b"IEND", &[]));
+    let image = decode_bytes(&bytes).expect("fctl");
+    assert_eq!(image.samples, vec![6]);
+}
+
+#[test]
 fn a_failed_picture_does_not_block_the_next_one() {
     let mut decoder = PngDecoder::open(&png_params(false)).expect("open");
     let bad = Packet::audio(b"nope".to_vec(), 0, 0, 0);

@@ -3,7 +3,8 @@
 //! Each picture is one slice. A new picture is an intra slice. A later picture
 //! is a P slice: skipped when it matches the previous reconstruction, and
 //! 16×16 motion otherwise. The search is a radius-1 diamond, the same shape
-//! x264 uses, then a half-pel diamond and a quarter-pel diamond.
+//! x264 uses, then a half-pel diamond and a quarter-pel diamond. A macroblock
+//! stays 16×16 unless a 16×8 or 8×16 split predicts it more cheaply.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -439,25 +440,26 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
     let mut luma_nnz = vec![0u8; count * 16];
     let mut cb_nnz = vec![0u8; count * 4];
     let mut cr_nnz = vec![0u8; count * 4];
-    let mut motion = vec![[0i16; 2]; count];
-    let mut diffs = vec![[0i16; 2]; count];
+    let mut motion = vec![[0i16; 2]; count * 16];
+    let mut diffs = vec![[0i16; 2]; count * 16];
     let total = mb_w.saturating_mul(mb_h);
     for addr in 0..total {
         let mx = addr % mb_w;
         let my = addr / mb_w;
         let index = addr as usize;
-        let predicted = predict_mv(&motion, mb_w, mx, my);
+        let none = [None; 16];
+        let predicted = predict_part(&motion, &none, mb_w, (mx, my), (0, 0, 16, 16));
         let skipped_mv = derived_skip(&motion, mb_w, mx, my, predicted);
         if inter_empty(src, reference, mx, my, skipped_mv) {
             let ctx = skip_context(&skipped, mb_w, mx, my);
             cab.decision(11 + ctx, 1);
             skipped[index] = true;
-            motion[index] = skipped_mv;
+            fill_blocks(&mut motion, mb_w, mx, my, (0, 0, 16, 16), skipped_mv);
             cab.terminate(addr + 1 == total);
             continue;
         }
-        let mv = search_16(src, reference, mx, my, predicted);
-        let luma_blocks = inter4(&reference.y, src.y, src.width, src.height, mx, my, mv);
+        let (kind, blocks) = choose_partition(src, reference, &motion, mb_w, mx, my);
+        let luma_blocks = inter4(&reference.y, src.y, src.width, src.height, mx, my, &blocks);
         let (cb_levels, cb_ac) = chroma_inter(
             &reference.u,
             src.u,
@@ -465,7 +467,7 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
             src.height / 2,
             mx,
             my,
-            mv,
+            &blocks,
         );
         let (cr_levels, cr_ac) = chroma_inter(
             &reference.v,
@@ -474,7 +476,7 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
             src.height / 2,
             mx,
             my,
-            mv,
+            &blocks,
         );
         let residual = Residual {
             luma: luma_blocks,
@@ -486,19 +488,41 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
         let luma = luma_pattern(&residual.luma);
         let chroma = chroma_pattern(&residual);
         let ctx = skip_context(&skipped, mb_w, mx, my);
-        let dx = i32::from(mv[0]) - i32::from(predicted[0]);
-        let dy = i32::from(mv[1]) - i32::from(predicted[1]);
         cab.decision(11 + ctx, 0);
-        cab.decision(14, 0);
-        cab.decision(15, 0);
-        cab.decision(16, 0);
-        write_mvd(cab, dx, mvd_sum(&diffs, mb_w, mx, my, 0), 40);
-        write_mvd(cab, dy, mvd_sum(&diffs, mb_w, mx, my, 1), 47);
-        motion[index] = [
-            clip_mv(i32::from(predicted[0]) + dx),
-            clip_mv(i32::from(predicted[1]) + dy),
-        ];
-        diffs[index] = [clip_mv(dx), clip_mv(dy)];
+        write_p_type(cab, kind);
+        let mut here = [None; 16];
+        let mut here_diff = [None; 16];
+        for (x, y, w, h) in pieces(kind) {
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let pred = predict_part(&motion, &here, mb_w, (mx, my), (x, y, w, h));
+            let mv = blocks[(y / 4 * 4 + x / 4) as usize];
+            let dx = i32::from(mv[0]) - i32::from(pred[0]);
+            let dy = i32::from(mv[1]) - i32::from(pred[1]);
+            let bx = (x / 4) as i32;
+            let by = (y / 4) as i32;
+            write_mvd(
+                cab,
+                dx,
+                mvd_sum(&diffs, &here_diff, mb_w, (mx, my), (bx, by), 0),
+                40,
+            );
+            write_mvd(
+                cab,
+                dy,
+                mvd_sum(&diffs, &here_diff, mb_w, (mx, my), (bx, by), 1),
+                47,
+            );
+            let written = [clip_mv(dx), clip_mv(dy)];
+            fill_local(&mut here, (x, y, w, h), mv);
+            fill_local(&mut here_diff, (x, y, w, h), written);
+        }
+        for slot in 0..16 {
+            let base = index * 16 + slot;
+            motion[base] = here[slot].unwrap_or([0, 0]);
+            diffs[base] = here_diff[slot].unwrap_or([0, 0]);
+        }
         write_luma_cbp(cab, luma, &luma_cbp, mb_w, mx, my);
         write_chroma_cbp(cab, chroma, &chroma_cbp, mb_w, mx, my);
         if luma != 0 {
@@ -527,7 +551,8 @@ fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, refer
 const SEARCH: i32 = 16;
 
 fn inter_empty(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, mv: [i16; 2]) -> bool {
-    let luma = inter4(&reference.y, src.y, src.width, src.height, mx, my, mv);
+    let blocks = [mv; 16];
+    let luma = inter4(&reference.y, src.y, src.width, src.height, mx, my, &blocks);
     let (cb, cb_ac) = chroma_inter(
         &reference.u,
         src.u,
@@ -535,7 +560,7 @@ fn inter_empty(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, mv: [i16;
         src.height / 2,
         mx,
         my,
-        mv,
+        &blocks,
     );
     let (cr, cr_ac) = chroma_inter(
         &reference.v,
@@ -544,7 +569,7 @@ fn inter_empty(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, mv: [i16;
         src.height / 2,
         mx,
         my,
-        mv,
+        &blocks,
     );
     luma_pattern(&luma) == 0
         && chroma_pattern(&Residual {
@@ -556,17 +581,38 @@ fn inter_empty(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, mv: [i16;
         }) == 0
 }
 
-/// Clause 8.4.1.3 for a 16×16 partition. Above-right is used when that macroblock
-/// is already coded; otherwise the above-left stands in.
-fn predict_mv(motion: &[[i16; 2]], mb_w: u32, mx: u32, my: u32) -> [i16; 2] {
-    let a = coded_mv(motion, mb_w, mx as i32 - 1, my as i32);
-    let mut b = coded_mv(motion, mb_w, mx as i32, my as i32 - 1);
-    let above_right = coded_mv(motion, mb_w, mx as i32 + 1, my as i32 - 1);
+/// Clause 8.4.1.3. `piece` is x, y, width, height inside the macroblock.
+/// A 16×8 or 8×16 partition uses the neighbour the specification names for it.
+fn predict_part(
+    grid: &[[i16; 2]],
+    here: &[Option<[i16; 2]>; 16],
+    mb_w: u32,
+    at: (u32, u32),
+    piece: (u32, u32, u32, u32),
+) -> [i16; 2] {
+    let (x, y, w, h) = piece;
+    let bx = (x / 4) as i32;
+    let by = (y / 4) as i32;
+    let a = block_mv(grid, here, mb_w, at, (bx - 1, by));
+    let mut b = block_mv(grid, here, mb_w, at, (bx, by - 1));
+    let above_right = block_mv(grid, here, mb_w, at, (bx + (w / 4) as i32, by - 1));
     let mut c = if above_right.0 {
         above_right
     } else {
-        coded_mv(motion, mb_w, mx as i32 - 1, my as i32 - 1)
+        block_mv(grid, here, mb_w, at, (bx - 1, by - 1))
     };
+    if w == 16 && h == 8 && by == 0 && b.0 {
+        return b.1;
+    }
+    if w == 16 && h == 8 && by == 2 && a.0 {
+        return a.1;
+    }
+    if w == 8 && h == 16 && bx == 0 && a.0 {
+        return a.1;
+    }
+    if w == 8 && h == 16 && bx == 2 && c.0 {
+        return c.1;
+    }
     if !b.0 && !c.0 && a.0 {
         b = a;
         c = a;
@@ -576,7 +622,7 @@ fn predict_mv(motion: &[[i16; 2]], mb_w: u32, mx: u32, my: u32) -> [i16; 2] {
         return [a, b, c]
             .into_iter()
             .find(|neighbor| neighbor.0)
-            .map_or([0, 0], |n| n.1);
+            .map_or([0, 0], |neighbor| neighbor.1);
     }
     [
         median(a.1[0], b.1[0], c.1[0]),
@@ -584,10 +630,11 @@ fn predict_mv(motion: &[[i16; 2]], mb_w: u32, mx: u32, my: u32) -> [i16; 2] {
     ]
 }
 
-/// Clause 8.4.1.1. A skip copies zero when either neighbor is missing or still.
-fn derived_skip(motion: &[[i16; 2]], mb_w: u32, mx: u32, my: u32, predicted: [i16; 2]) -> [i16; 2] {
-    let left = coded_mv(motion, mb_w, mx as i32 - 1, my as i32);
-    let above = coded_mv(motion, mb_w, mx as i32, my as i32 - 1);
+/// Clause 8.4.1.1. A skip copies zero when either touching neighbour is missing or still.
+fn derived_skip(grid: &[[i16; 2]], mb_w: u32, mx: u32, my: u32, predicted: [i16; 2]) -> [i16; 2] {
+    let none = [None; 16];
+    let left = block_mv(grid, &none, mb_w, (mx, my), (-1, 0));
+    let above = block_mv(grid, &none, mb_w, (mx, my), (0, -1));
     let still = |neighbor: (bool, [i16; 2])| neighbor.0 && neighbor.1 == [0, 0];
     if !left.0 || !above.0 || still(left) || still(above) {
         [0, 0]
@@ -596,12 +643,47 @@ fn derived_skip(motion: &[[i16; 2]], mb_w: u32, mx: u32, my: u32, predicted: [i1
     }
 }
 
-fn coded_mv(motion: &[[i16; 2]], mb_w: u32, mx: i32, my: i32) -> (bool, [i16; 2]) {
-    if mx < 0 || my < 0 || mx as u32 >= mb_w {
+fn block_mv(
+    grid: &[[i16; 2]],
+    here: &[Option<[i16; 2]>; 16],
+    mb_w: u32,
+    at: (u32, u32),
+    cell: (i32, i32),
+) -> (bool, [i16; 2]) {
+    let (cur_mx, cur_my) = at;
+    let (mut bx, mut by) = cell;
+    let mut mx = cur_mx as i32;
+    let mut my = cur_my as i32;
+    if bx < 0 {
+        mx -= 1;
+        bx += 4;
+    } else if bx >= 4 {
+        mx += 1;
+        bx -= 4;
+    }
+    if by < 0 {
+        my -= 1;
+        by += 4;
+    } else if by >= 4 {
+        my += 1;
+        by -= 4;
+    }
+    if mx < 0 || my < 0 || mx as u32 >= mb_w || !(0..4).contains(&bx) || !(0..4).contains(&by) {
         return (false, [0, 0]);
     }
-    motion
-        .get((my as u32 * mb_w + mx as u32) as usize)
+    let slot = (by * 4 + bx) as usize;
+    if mx as u32 == cur_mx && my as u32 == cur_my {
+        return match here[slot] {
+            Some(mv) => (true, mv),
+            None => (false, [0, 0]),
+        };
+    }
+    let earlier = my < cur_my as i32 || (my == cur_my as i32 && mx < cur_mx as i32);
+    if !earlier {
+        return (false, [0, 0]);
+    }
+    let index = ((my as u32 * mb_w + mx as u32) * 16 + slot as u32) as usize;
+    grid.get(index)
         .map(|mv| (true, *mv))
         .unwrap_or((false, [0, 0]))
 }
@@ -610,18 +692,20 @@ fn median(a: i16, b: i16, c: i16) -> i16 {
     a.max(b).min(a.max(c)).min(b.max(c))
 }
 
-/// Integer diamond of radius 1, for up to 16 steps. Cost is the luma SAD.
-fn search_16(
-    src: &Source<'_>,
-    reference: &Planes,
-    mx: u32,
-    my: u32,
-    predicted: [i16; 2],
-) -> [i16; 2] {
+#[derive(Clone, Copy)]
+struct Area {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// Integer diamond of radius 1, for up to 16 steps, then half-pel and quarter-pel.
+fn search_area(src: &Source<'_>, reference: &Planes, area: Area, predicted: [i16; 2]) -> [i16; 2] {
     let mut bx = (i32::from(predicted[0]) >> 2).clamp(-SEARCH, SEARCH);
     let mut by = (i32::from(predicted[1]) >> 2).clamp(-SEARCH, SEARCH);
-    let mut best = sad16(src, reference, mx, my, bx, by);
-    let zero = sad16(src, reference, mx, my, 0, 0);
+    let mut best = sad_qpel(src, reference, area, bx * 4, by * 4);
+    let zero = sad_qpel(src, reference, area, 0, 0);
     if zero < best {
         best = zero;
         bx = 0;
@@ -635,7 +719,7 @@ fn search_16(
             if x.abs() > SEARCH || y.abs() > SEARCH {
                 continue;
             }
-            let cost = sad16(src, reference, mx, my, x, y);
+            let cost = sad_qpel(src, reference, area, x * 4, y * 4);
             if cost < best {
                 best = cost;
                 step = Some((x, y));
@@ -647,8 +731,8 @@ fn search_16(
         bx = x;
         by = y;
     }
-    let (qx, qy) = refine_subpel(src, reference, mx, my, (bx * 4, by * 4), (2, 2));
-    let (qx, qy) = refine_subpel(src, reference, mx, my, (qx, qy), (1, 2));
+    let (qx, qy) = refine_subpel(src, reference, area, (bx * 4, by * 4), (2, 2));
+    let (qx, qy) = refine_subpel(src, reference, area, (qx, qy), (1, 2));
     [
         i16::try_from(qx).unwrap_or(0),
         i16::try_from(qy).unwrap_or(0),
@@ -659,14 +743,13 @@ fn search_16(
 fn refine_subpel(
     src: &Source<'_>,
     reference: &Planes,
-    mx: u32,
-    my: u32,
+    area: Area,
     origin: (i32, i32),
     step_iters: (i32, i32),
 ) -> (i32, i32) {
     let (mut qx, mut qy) = origin;
     let (step, iters) = step_iters;
-    let mut best = sad_qpel(src, reference, mx, my, qx, qy);
+    let mut best = sad_qpel(src, reference, area, qx, qy);
     for _ in 0..iters {
         let mut step_to = None;
         for (dx, dy) in [(0, -step), (0, step), (-step, 0), (step, 0)] {
@@ -675,7 +758,7 @@ fn refine_subpel(
             if x.abs() > SEARCH * 4 || y.abs() > SEARCH * 4 {
                 continue;
             }
-            let cost = sad_qpel(src, reference, mx, my, x, y);
+            let cost = sad_qpel(src, reference, area, x, y);
             if cost < best {
                 best = cost;
                 step_to = Some((x, y));
@@ -690,27 +773,21 @@ fn refine_subpel(
     (qx, qy)
 }
 
-fn sad16(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, dx: i32, dy: i32) -> i32 {
-    sad_qpel(src, reference, mx, my, dx * 4, dy * 4)
-}
-
-fn sad_qpel(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, qx: i32, qy: i32) -> i32 {
+fn sad_qpel(src: &Source<'_>, reference: &Planes, area: Area, qx: i32, qy: i32) -> i32 {
     let mv = [
         i16::try_from(qx).unwrap_or(0),
         i16::try_from(qy).unwrap_or(0),
     ];
-    let x0 = mx * 16;
-    let y0 = my * 16;
     let mut cost = 0i32;
-    for row in 0..16u32 {
-        for col in 0..16u32 {
-            let sample = i32::from(at(src.y, src.width, src.height, x0 + col, y0 + row));
+    for row in 0..area.h {
+        for col in 0..area.w {
+            let sample = i32::from(at(src.y, src.width, src.height, area.x + col, area.y + row));
             let predicted = i32::from(moved_pel(
                 &reference.y,
                 src.width,
                 src.height,
-                x0 + col,
-                y0 + row,
+                area.x + col,
+                area.y + row,
                 mv,
             ));
             cost += (sample - predicted).abs();
@@ -719,22 +796,126 @@ fn sad_qpel(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, qx: i32, qy:
     cost
 }
 
-fn mvd_sum(diffs: &[[i16; 2]], mb_w: u32, mx: u32, my: u32, component: usize) -> i32 {
-    let left = if mx > 0 {
-        diffs
-            .get((my * mb_w + mx - 1) as usize)
-            .map(|mv| i32::from(mv[component]).abs())
-    } else {
-        None
+fn choose_partition(
+    src: &Source<'_>,
+    reference: &Planes,
+    grid: &[[i16; 2]],
+    mb_w: u32,
+    mx: u32,
+    my: u32,
+) -> (u8, [[i16; 2]; 16]) {
+    let none = [None; 16];
+    let whole = Area {
+        x: mx * 16,
+        y: my * 16,
+        w: 16,
+        h: 16,
     };
-    let above = if my > 0 {
-        diffs
-            .get(((my - 1) * mb_w + mx) as usize)
-            .map(|mv| i32::from(mv[component]).abs())
+    let pred = predict_part(grid, &none, mb_w, (mx, my), (0, 0, 16, 16));
+    let mv = search_area(src, reference, whole, pred);
+    let mut best_cost = sad_mv(src, reference, whole, mv);
+    let mut best_kind = 0u8;
+    let mut best = [mv; 16];
+    for kind in [1u8, 2] {
+        let mut here = [None; 16];
+        let mut blocks = [[0i16; 2]; 16];
+        let mut cost = 0i32;
+        for (x, y, w, h) in pieces(kind) {
+            let pred = predict_part(grid, &here, mb_w, (mx, my), (x, y, w, h));
+            let area = Area {
+                x: mx * 16 + x,
+                y: my * 16 + y,
+                w,
+                h,
+            };
+            let mv = search_area(src, reference, area, pred);
+            cost += sad_mv(src, reference, area, mv);
+            fill_local(&mut here, (x, y, w, h), mv);
+            fill_array(&mut blocks, (x, y, w, h), mv);
+        }
+        if cost + 64 < best_cost {
+            best_cost = cost;
+            best_kind = kind;
+            best = blocks;
+        }
+    }
+    (best_kind, best)
+}
+
+fn sad_mv(src: &Source<'_>, reference: &Planes, area: Area, mv: [i16; 2]) -> i32 {
+    sad_qpel(src, reference, area, i32::from(mv[0]), i32::from(mv[1]))
+}
+
+fn pieces(kind: u8) -> [(u32, u32, u32, u32); 2] {
+    if kind == 1 {
+        [(0, 0, 16, 8), (0, 8, 16, 8)]
+    } else if kind == 2 {
+        [(0, 0, 8, 16), (8, 0, 8, 16)]
     } else {
-        None
-    };
-    left.unwrap_or(0) + above.unwrap_or(0)
+        [(0, 0, 16, 16), (0, 0, 0, 0)]
+    }
+}
+
+fn write_p_type(cab: &mut CabacEnc<'_>, kind: u8) {
+    cab.decision(14, 0);
+    if kind == 0 {
+        cab.decision(15, 0);
+        cab.decision(16, 0);
+        return;
+    }
+    cab.decision(15, 1);
+    cab.decision(17, u8::from(kind == 1));
+}
+
+fn fill_blocks(
+    grid: &mut [[i16; 2]],
+    mb_w: u32,
+    mx: u32,
+    my: u32,
+    piece: (u32, u32, u32, u32),
+    mv: [i16; 2],
+) {
+    let (x, y, w, h) = piece;
+    for by in (y / 4)..((y + h) / 4) {
+        for bx in (x / 4)..((x + w) / 4) {
+            let index = ((my * mb_w + mx) * 16 + by * 4 + bx) as usize;
+            if let Some(slot) = grid.get_mut(index) {
+                *slot = mv;
+            }
+        }
+    }
+}
+
+fn fill_local(here: &mut [Option<[i16; 2]>; 16], piece: (u32, u32, u32, u32), mv: [i16; 2]) {
+    let (x, y, w, h) = piece;
+    for by in (y / 4)..((y + h) / 4) {
+        for bx in (x / 4)..((x + w) / 4) {
+            here[(by * 4 + bx) as usize] = Some(mv);
+        }
+    }
+}
+
+fn fill_array(blocks: &mut [[i16; 2]; 16], piece: (u32, u32, u32, u32), mv: [i16; 2]) {
+    let (x, y, w, h) = piece;
+    for by in (y / 4)..((y + h) / 4) {
+        for bx in (x / 4)..((x + w) / 4) {
+            blocks[(by * 4 + bx) as usize] = mv;
+        }
+    }
+}
+
+fn mvd_sum(
+    grid: &[[i16; 2]],
+    here: &[Option<[i16; 2]>; 16],
+    mb_w: u32,
+    at: (u32, u32),
+    cell: (i32, i32),
+    component: usize,
+) -> i32 {
+    let (bx, by) = cell;
+    let left = block_mv(grid, here, mb_w, at, (bx - 1, by));
+    let above = block_mv(grid, here, mb_w, at, (bx, by - 1));
+    i32::from(left.1[component]).abs() + i32::from(above.1[component]).abs()
 }
 
 fn write_mvd(cab: &mut CabacEnc<'_>, value: i32, sum: i32, base: usize) {
@@ -1134,15 +1315,17 @@ fn inter4(
     height: u32,
     mx: u32,
     my: u32,
-    mv: [i16; 2],
+    mv: &[[i16; 2]; 16],
 ) -> [[i32; 16]; 16] {
     let mut blocks = [[0i32; 16]; 16];
     let x0 = mx * 16;
     let y0 = my * 16;
     for (i, levels) in blocks.iter_mut().enumerate() {
-        let x = x0 + blk_x(i) as u32 * 4;
-        let y = y0 + blk_y(i) as u32 * 4;
-        let pred = moved_luma(reference, width, height, x, y, mv);
+        let bx = blk_x(i);
+        let by = blk_y(i);
+        let x = x0 + bx as u32 * 4;
+        let y = y0 + by as u32 * 4;
+        let pred = moved_luma(reference, width, height, x, y, mv[by * 4 + bx]);
         *levels = quant4(&pred, src, width, height, x, y);
     }
     blocks
@@ -1175,12 +1358,22 @@ fn moved_pel(plane: &[u8], width: u32, height: u32, x: u32, y: u32, mv: [i16; 2]
     )
 }
 
-fn moved_chroma(plane: &[u8], width: u32, height: u32, mx: u32, my: u32, mv: [i16; 2]) -> [u8; 64] {
-    let mvx = i32::from(mv[0]);
-    let mvy = i32::from(mv[1]);
+fn moved_chroma(
+    plane: &[u8],
+    width: u32,
+    height: u32,
+    mx: u32,
+    my: u32,
+    mv: &[[i16; 2]; 16],
+) -> [u8; 64] {
     let mut pred = [128u8; 64];
     for row in 0..8i32 {
         for col in 0..8i32 {
+            let bx = (col * 2 / 4) as usize;
+            let by = (row * 2 / 4) as usize;
+            let vector = mv[by * 4 + bx];
+            let mvx = i32::from(vector[0]);
+            let mvy = i32::from(vector[1]);
             pred[(row * 8 + col) as usize] = crate::recon::chroma_mc(
                 plane,
                 width as usize,
@@ -1205,7 +1398,7 @@ fn chroma_inter(
     height: u32,
     mx: u32,
     my: u32,
-    mv: [i16; 2],
+    mv: &[[i16; 2]; 16],
 ) -> ([i32; 4], [[i32; 15]; 4]) {
     let pred = moved_chroma(reference, width, height, mx, my, mv);
     let qp = crate::recon::chroma_qp(QP, 0);
@@ -2570,6 +2763,193 @@ mod tests {
         let frame = 64 * 64 * 3 / 2;
         let second_raw = &raw[frame..frame * 2];
         assert_eq!(&second_raw[..got.len()], got);
+    }
+
+    #[test]
+    fn split_partition_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut y = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                y[row * 64 + col] =
+                    u8::try_from((row * 13 + col * 7).wrapping_mul(17) & 255).unwrap_or(0);
+            }
+        }
+        let picture =
+            Yuv420p::try_new(64, 64, y.clone(), vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        let mut shifted = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            let band = row % 16;
+            for col in 0..64usize {
+                let from = if band < 8 {
+                    col.saturating_sub(8)
+                } else {
+                    (col + 8).min(63)
+                };
+                shifted[row * 64 + col] = y[row * 64 + from];
+            }
+        }
+        input.picture =
+            Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let opened = decoder.push(&first[0]).unwrap();
+        let frames = decoder.push(&second[0]).unwrap();
+        let recon = opened[0].picture.y();
+        let got = frames[0].picture.y();
+        let mut split = 0i32;
+        let mut still = 0i32;
+        for row in 0..64usize {
+            let band = row % 16;
+            for col in 0..64usize {
+                let from = if band < 8 {
+                    col.saturating_sub(8)
+                } else {
+                    (col + 8).min(63)
+                };
+                split += i32::from(got[row * 64 + col].abs_diff(recon[row * 64 + from]));
+                still += i32::from(got[row * 64 + col].abs_diff(recon[row * 64 + col]));
+            }
+        }
+        assert!(
+            split + 64 * 16 < still,
+            "split motion did not win, split {split} still {still}"
+        );
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-split");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("split.h264");
+        let yuv = dir.join("split.yuv");
+        let mut bytes = first[0].data.clone();
+        bytes.extend_from_slice(&second[0].data);
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the split picture");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 64 * 64 * 3 / 2;
+        let second_raw = &raw[frame..frame * 2];
+        assert_eq!(&second_raw[..got.len()], got);
+        let u_at = got.len();
+        let u_len = frames[0].picture.u().len();
+        assert_eq!(&second_raw[u_at..u_at + u_len], frames[0].picture.u());
+        assert_eq!(&second_raw[u_at + u_len..], frames[0].picture.v());
+    }
+
+    #[test]
+    fn vertical_split_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut y = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                y[row * 64 + col] =
+                    u8::try_from((row * 13 + col * 7).wrapping_mul(17) & 255).unwrap_or(0);
+            }
+        }
+        let picture =
+            Yuv420p::try_new(64, 64, y.clone(), vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        let mut shifted = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                let band = col % 16;
+                let from_col = if band < 8 {
+                    col.saturating_sub(8)
+                } else {
+                    (col + 8).min(63)
+                };
+                let from_row = if band < 8 {
+                    row.saturating_sub(4)
+                } else {
+                    (row + 4).min(63)
+                };
+                shifted[row * 64 + col] = y[from_row * 64 + from_col];
+            }
+        }
+        input.picture =
+            Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let opened = decoder.push(&first[0]).unwrap();
+        let frames = decoder.push(&second[0]).unwrap();
+        let recon = opened[0].picture.y();
+        let got = frames[0].picture.y();
+        let mut split = 0i32;
+        let mut still = 0i32;
+        for row in 0..64usize {
+            for col in 0..64usize {
+                let band = col % 16;
+                let from_col = if band < 8 {
+                    col.saturating_sub(8)
+                } else {
+                    (col + 8).min(63)
+                };
+                let from_row = if band < 8 {
+                    row.saturating_sub(4)
+                } else {
+                    (row + 4).min(63)
+                };
+                split += i32::from(got[row * 64 + col].abs_diff(recon[from_row * 64 + from_col]));
+                still += i32::from(got[row * 64 + col].abs_diff(recon[row * 64 + col]));
+            }
+        }
+        assert!(
+            split + 64 * 16 < still,
+            "vertical split did not win, split {split} still {still}"
+        );
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-vsplit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("vsplit.h264");
+        let yuv = dir.join("vsplit.yuv");
+        let mut bytes = first[0].data.clone();
+        bytes.extend_from_slice(&second[0].data);
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the vertical split");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 64 * 64 * 3 / 2;
+        assert_eq!(&raw[frame..frame + got.len()], got);
     }
 
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {

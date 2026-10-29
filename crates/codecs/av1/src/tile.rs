@@ -2,6 +2,7 @@
 
 use cutlass_decode::CodecError;
 
+use crate::cdef::{self, CdefInput};
 use crate::deblock::{Edges, deblock_plane};
 use crate::dims::{
     ADJUSTED_TX_SIZE, ADST_FLIPADST, BLOCK_8X8, BLOCK_128X128, COEFF_BASE_CTX_OFFSET, DC_PRED,
@@ -15,7 +16,7 @@ use crate::dims::{
     V_DCT, V_FLIPADST, block_height, block_width, intra_tx_type, partition_subsize,
     subsampled_size,
 };
-use crate::header::{FrameInfo, INTER_FRAME, Sequence};
+use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
 use crate::idct::inverse_2d;
 use crate::inter::{
     BlockPlace, Candidates, GLOBALMV, InterSample, LAST_FRAME, Motion, MotionGrid, NEARESTMV,
@@ -139,6 +140,20 @@ pub fn decode_with_refs(
     deblock_plane(&mut tile.y, buf_w, buf_h, 0, &edges);
     deblock_plane(&mut tile.u, tile.chroma_w, tile.chroma_h, 1, &edges);
     deblock_plane(&mut tile.v, tile.chroma_w, tile.chroma_h, 2, &edges);
+    if tile.cdef_on {
+        cdef::apply(&mut CdefInput {
+            y: &mut tile.y,
+            u: &mut tile.u,
+            v: &mut tile.v,
+            y_stride: buf_w,
+            c_stride: tile.chroma_w,
+            mi_cols: tile.mi_cols,
+            mi_rows: tile.mi_rows,
+            skips: &tile.skips,
+            index: &tile.cdef_idx,
+            params: tile.cdef,
+        });
+    }
     tile.symbols.finish()?;
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
@@ -226,6 +241,9 @@ struct Tile<'a, 'r> {
     coding_inter: bool,
     cur_luma_row: usize,
     cur_luma_col: usize,
+    cdef_on: bool,
+    cdef: CdefParams,
+    cdef_idx: Vec<i8>,
     cdfs: Cdfs,
 }
 
@@ -385,6 +403,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             coding_inter: false,
             cur_luma_row: 0,
             cur_luma_col: 0,
+            cdef_on: sequence.enable_cdef,
+            cdef: frame.cdef,
+            cdef_idx: vec![-1; cells],
             cdfs: Cdfs::load(q_ctx),
         })
     }
@@ -590,6 +611,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let avail_l = col > 0;
         let skip_ctx = self.neighbor_sum(row, col);
         let skip = self.read_skip(skip_ctx)?;
+        self.read_cdef(row, col, skip)?;
         let y_mode = self.read_y_mode(row, col, avail_u, avail_l)?;
         let angle_y = self.read_angle(y_mode, bsize, true)?;
         let (uv_mode, angle_uv) = if has_chroma {
@@ -652,6 +674,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let avail_u = row > 0;
         let avail_l = col > 0;
         let skip = self.read_skip(self.neighbor_sum(row, col))?;
+        self.read_cdef(row, col, skip)?;
         let inter = self.read_is_inter(row, col)?;
         let chosen = if inter {
             self.read_inter_block(row, col, bsize, bw4, bh4)?
@@ -1298,6 +1321,23 @@ impl<'a, 'r> Tile<'a, 'r> {
             }
         }
         Ok(kind)
+    }
+
+    fn read_cdef(&mut self, row: usize, col: usize, skip: bool) -> Result<(), CodecError> {
+        if skip || self.lossless || !self.cdef_on {
+            return Ok(());
+        }
+        let aligned_row = row & !15;
+        let aligned_col = col & !15;
+        let at = aligned_row * self.mi_cols + aligned_col;
+        if self.cdef_idx.get(at).copied().unwrap_or(0) >= 0 {
+            return Ok(());
+        }
+        let index = self.symbols.read_literal(u32::from(self.cdef.bits))? as i8;
+        if let Some(slot) = self.cdef_idx.get_mut(at) {
+            *slot = index;
+        }
+        Ok(())
     }
 
     fn read_skip(&mut self, ctx: usize) -> Result<bool, CodecError> {

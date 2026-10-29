@@ -9,6 +9,30 @@ pub const SWITCH_FRAME: u8 = 3;
 const SELECT_TOOLS: u8 = 2;
 const PRIMARY_REF_NONE: u8 = 7;
 
+/// Strength sets for the constrained directional enhancement filter.
+#[derive(Clone, Copy, Debug)]
+pub struct CdefParams {
+    pub damping: u8,
+    pub bits: u8,
+    pub y_pri: [u8; 8],
+    pub y_sec: [u8; 8],
+    pub uv_pri: [u8; 8],
+    pub uv_sec: [u8; 8],
+}
+
+impl CdefParams {
+    const fn off() -> Self {
+        Self {
+            damping: 3,
+            bits: 0,
+            y_pri: [0; 8],
+            y_sec: [0; 8],
+            uv_pri: [0; 8],
+            uv_sec: [0; 8],
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Sequence {
     pub profile: u8,
@@ -29,6 +53,7 @@ pub struct Sequence {
     pub enable_jnt: bool,
     pub enable_ref_mvs: bool,
     pub enable_superres: bool,
+    pub enable_cdef: bool,
     pub screen_select: bool,
     pub force_integer_select: bool,
     pub force_screen: u8,
@@ -88,6 +113,7 @@ pub struct FrameInfo {
     pub lf_delta_enabled: bool,
     pub lf_ref_deltas: [i8; 8],
     pub lf_mode_deltas: [i8; 2],
+    pub cdef: CdefParams,
     pub segmentation: bool,
     pub lossless: bool,
     pub all_lossless: bool,
@@ -302,9 +328,6 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let enable_superres = bits.read_bool()?;
     let enable_cdef = bits.read_bool()?;
     let enable_restoration = bits.read_bool()?;
-    if enable_cdef {
-        return Err(CodecError::Unsupported { what: "cdef" });
-    }
     if enable_restoration {
         return Err(CodecError::Unsupported {
             what: "loop restoration",
@@ -356,6 +379,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         enable_jnt,
         enable_ref_mvs,
         enable_superres: false,
+        enable_cdef,
         screen_select,
         force_integer_select,
         force_screen,
@@ -665,7 +689,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
             });
         }
     }
-    // cdef and restoration are absent because the sequence flags are off
+    let cdef = read_cdef_params(bits, sequence)?;
     let tx_select = if lossless { false } else { bits.read_bool()? };
     let reference_select = if intra { false } else { bits.read_bool()? };
     if reference_select {
@@ -737,6 +761,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         lf_delta_enabled: lf_delta,
         lf_ref_deltas: ref_deltas,
         lf_mode_deltas: mode_deltas,
+        cdef,
         segmentation: false,
         lossless,
         all_lossless: lossless,
@@ -785,6 +810,33 @@ fn frame_size_with_refs(
 
 fn floor_bits(stored: u32) -> u32 {
     stored
+}
+
+fn read_cdef_params(
+    bits: &mut BitReader<'_>,
+    sequence: &Sequence,
+) -> Result<CdefParams, CodecError> {
+    if !sequence.enable_cdef {
+        return Ok(CdefParams::off());
+    }
+    let damping = bits.read(2)? as u8 + 3;
+    let nbits = bits.read(2)? as u8;
+    let count = 1usize << nbits;
+    let mut params = CdefParams::off();
+    params.damping = damping;
+    params.bits = nbits;
+    for index in 0..count {
+        params.y_pri[index] = bits.read(4)? as u8;
+        params.y_sec[index] = read_cdef_sec(bits)?;
+        params.uv_pri[index] = bits.read(4)? as u8;
+        params.uv_sec[index] = read_cdef_sec(bits)?;
+    }
+    Ok(params)
+}
+
+fn read_cdef_sec(bits: &mut BitReader<'_>) -> Result<u8, CodecError> {
+    let strength = bits.read(2)? as u8;
+    Ok(if strength == 3 { 4 } else { strength })
 }
 
 fn read_delta_q(bits: &mut BitReader<'_>) -> Result<i32, CodecError> {
@@ -880,6 +932,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         lf_delta_enabled: false,
         lf_ref_deltas: [1, 0, 0, 0, 0, -1, -1, -1],
         lf_mode_deltas: [0; 2],
+        cdef: CdefParams::off(),
         segmentation: false,
         lossless: false,
         all_lossless: false,

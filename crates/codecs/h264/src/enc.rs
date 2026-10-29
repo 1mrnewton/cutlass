@@ -4375,6 +4375,203 @@ mod tests {
         }
     }
 
+    #[test]
+    fn testsrc2_meets_the_luma_and_rate_gates() {
+        let Some(report) = encode_source(synthetic_testsrc2(), 320, 240, 500_000, 60) else {
+            return;
+        };
+        assert!(
+            report.psnr >= 30.0,
+            "testsrc2 luma PSNR {:.2} dB",
+            report.psnr
+        );
+        let target = 500_000usize * 2;
+        assert!(
+            report.bits >= target * 3 / 4 && report.bits <= target * 5 / 4,
+            "testsrc2 payload {} bits, wanted {}..={}",
+            report.bits,
+            target * 3 / 4,
+            target * 5 / 4
+        );
+    }
+
+    #[test]
+    fn natural_clip_meets_the_luma_gate() {
+        let Some(source) = natural_clip() else {
+            return;
+        };
+        let Some(report) = encode_source(Some(source), 640, 360, 800_000, 30) else {
+            return;
+        };
+        assert!(
+            report.psnr >= 28.0,
+            "natural luma PSNR {:.2} dB",
+            report.psnr
+        );
+        let target = 800_000usize;
+        assert!(
+            report.bits >= target * 3 / 4 && report.bits <= target * 5 / 4,
+            "natural payload {} bits, wanted {}..={}",
+            report.bits,
+            target * 3 / 4,
+            target * 5 / 4
+        );
+    }
+
+    struct RateReport {
+        bits: usize,
+        psnr: f64,
+    }
+
+    fn synthetic_testsrc2() -> Option<Vec<u8>> {
+        let ffmpeg = ffmpeg()?;
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-psnr-src");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let yuv = dir.join("testsrc2.yuv");
+        let made = std::process::Command::new(ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x240:rate=30",
+                "-frames:v",
+                "60",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&yuv)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "ffmpeg did not make testsrc2");
+        Some(std::fs::read(yuv).unwrap())
+    }
+
+    fn natural_clip() -> Option<Vec<u8>> {
+        let ffmpeg = ffmpeg()?;
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
+        let preferred = root.join("IMG_8146.MP4");
+        let source = if preferred.is_file() {
+            preferred
+        } else {
+            let alt = root.join("7150172-hd_720_1280_50fps.mp4");
+            if alt.is_file() {
+                alt
+            } else {
+                return None;
+            }
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-psnr-natural");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let yuv = dir.join("natural.yuv");
+        let made = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&source)
+            .args([
+                "-vf",
+                "scale=640:360",
+                "-frames:v",
+                "30",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&yuv)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "ffmpeg did not scale the natural clip"
+        );
+        Some(std::fs::read(yuv).unwrap())
+    }
+
+    fn encode_source(
+        raw: Option<Vec<u8>>,
+        width: u32,
+        height: u32,
+        bitrate: u32,
+        frames: usize,
+    ) -> Option<RateReport> {
+        let raw = raw?;
+        let ffmpeg = ffmpeg()?;
+        let y_size = (width as usize).saturating_mul(height as usize);
+        let c_size = y_size / 4;
+        let frame = y_size + c_size * 2;
+        assert!(raw.len() >= frame * frames, "source {}", raw.len());
+        let mut params = CodecParams::video(CodecId::H264, width, height);
+        params.nal_length_size = 0;
+        params.bitrate = bitrate;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut packets = Vec::new();
+        for n in 0..frames {
+            let start = n * frame;
+            let plane = &raw[start..start + frame];
+            let picture = Yuv420p::try_new(
+                width,
+                height,
+                plane[..y_size].to_vec(),
+                plane[y_size..y_size + c_size].to_vec(),
+                plane[y_size + c_size..].to_vec(),
+            )
+            .unwrap();
+            let input = VideoInput {
+                picture,
+                pts: i64::try_from(n).unwrap_or(0),
+                duration: 1,
+                timescale: 30,
+                force_keyframe: n == 0,
+            };
+            packets.extend(encoder.push(&input).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        let mut coded = Vec::new();
+        for packet in &packets {
+            coded.extend_from_slice(&packet.data);
+        }
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-enc-psnr-{width}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("coded.h264");
+        let yuv = dir.join("decoded.yuv");
+        std::fs::write(&path, &coded).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&path)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .output()
+            .unwrap();
+        assert!(decoded.status.success(), "ffmpeg rejected the encoded clip");
+        let got = std::fs::read(yuv).unwrap();
+        assert_eq!(got.len(), frame * frames, "decoded {}", got.len());
+        let mut err = 0f64;
+        for n in 0..frames {
+            let src = &raw[n * frame..n * frame + y_size];
+            let dec = &got[n * frame..n * frame + y_size];
+            for (a, b) in src.iter().zip(dec.iter()) {
+                let delta = f64::from(*a) - f64::from(*b);
+                err += delta * delta;
+            }
+        }
+        let samples = (y_size * frames) as f64;
+        let psnr = if err == 0.0 {
+            100.0
+        } else {
+            10.0 * (255.0 * 255.0 * samples / err).log10()
+        };
+        Some(RateReport {
+            bits: coded.len().saturating_mul(8),
+            psnr,
+        })
+    }
+
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         (vec![128; 64 * 64], vec![128; 32 * 32], vec![128; 32 * 32])
     }

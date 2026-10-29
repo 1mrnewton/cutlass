@@ -308,6 +308,12 @@ fn the_factory_uses_this_codec_and_audio_calls_are_refused() {
 }
 
 #[test]
+fn a_text_keyword_with_a_leading_space_is_refused() {
+    let text = chunk(b"tEXt", b" Title\0plain");
+    assert!(decode_bytes(&png_of(ihdr(1, 1, 8, 0, 0), &[0, 1], &text)).is_err());
+}
+
+#[test]
 fn a_failed_picture_does_not_block_the_next_one() {
     let mut decoder = PngDecoder::open(&png_params(false)).expect("open");
     let bad = Packet::audio(b"nope".to_vec(), 0, 0, 0);

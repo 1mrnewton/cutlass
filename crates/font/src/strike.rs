@@ -343,12 +343,7 @@ fn locate<'a>(
     }))
 }
 
-fn offset_pair(
-    body: &[u8],
-    slot: usize,
-    width: usize,
-    wide: bool,
-) -> Result<Located, FontError> {
+fn offset_pair(body: &[u8], slot: usize, width: usize, wide: bool) -> Result<Located, FontError> {
     let at = slot.checked_mul(width).ok_or(FontError::BadTable)?;
     let pair = bytes_at(body, at, width * 2)?;
     let (start, end) = if wide {
@@ -363,11 +358,7 @@ fn offset_pair(
     }
 }
 
-fn constant_image(
-    body: &[u8],
-    slot: usize,
-    with_metrics: bool,
-) -> Result<Located, FontError> {
+fn constant_image(body: &[u8], slot: usize, with_metrics: bool) -> Result<Located, FontError> {
     let image_size = u32_at(body, 0)?;
     let metrics = if with_metrics {
         Some(metrics_at(body, 4, true)?.0)
@@ -384,10 +375,7 @@ fn constant_image(
     Ok((Some(start), Some(end), metrics))
 }
 
-fn sparse_constant(
-    body: &[u8],
-    glyph_id: u16,
-) -> Result<Located, FontError> {
+fn sparse_constant(body: &[u8], glyph_id: u16) -> Result<Located, FontError> {
     let image_size = u32_at(body, 0)?;
     let (metrics, next) = metrics_at(body, 4, true)?;
     let count = usize::try_from(u32_at(body, next)?).map_err(|_| FontError::BadTable)?;
@@ -417,10 +405,7 @@ fn sparse_constant(
     Ok((None, None, None))
 }
 
-fn sparse_offset(
-    body: &[u8],
-    glyph_id: u16,
-) -> Result<Located, FontError> {
+fn sparse_offset(body: &[u8], glyph_id: u16) -> Result<Located, FontError> {
     let count = usize::try_from(u32_at(body, 0)?).map_err(|_| FontError::BadTable)?;
     let bytes = count
         .checked_add(1)

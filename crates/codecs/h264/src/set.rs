@@ -21,6 +21,7 @@ pub struct Sps {
     pub offset_top_bottom: i32,
     pub offset_for_ref: Vec<i32>,
     pub max_num_ref_frames: u8,
+    pub gaps_allowed: bool,
     pub width: u32,
     pub height: u32,
     pub crop_left: u32,
@@ -174,7 +175,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
             what: "reference frames",
         });
     }
-    let _gaps_allowed = bits.bit()?;
+    let gaps_allowed = bits.bit()?;
     let width_mbs = bits.ue()?.saturating_add(1);
     let height_map = bits.ue()?.saturating_add(1);
     if width_mbs > 256 || height_map > 256 {
@@ -220,6 +221,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         offset_top_bottom,
         offset_for_ref,
         max_num_ref_frames: max_num_ref_frames as u8,
+        gaps_allowed,
         width,
         height,
         crop_left,

@@ -404,14 +404,13 @@ fn mark_ref(dpb: &mut [Frame], pic: &Frame, max_ref: usize) {
     let long = dpb.iter().filter(|f| f.referenced && f.long_term).count();
     short += 1;
     while short + long > max_ref && short > 0 {
-        if let Some(pos) = oldest_short(dpb) {
+        if let Some(pos) = oldest_short(dpb, pic.frame_num, pic.max_fn) {
             dpb[pos].referenced = false;
             short -= 1;
         } else {
             break;
         }
     }
-    let _ = pic;
 }
 
 /// Clause 8.2.5. Adaptive marking replaces the sliding window for this picture.
@@ -423,7 +422,8 @@ fn apply_mmco(dpb: &mut [Frame], pic: &mut Frame, poc: &mut Poc) -> Result<(), C
                 let target = i32::try_from(pic.frame_num).unwrap_or(0)
                     - i32::try_from(mark.arg).unwrap_or(0)
                     - 1;
-                let Some(pos) = short_at(dpb, target, pic.frame_num, pic.max_fn) else {
+                let Some(pos) = short_at(dpb, target, pic.frame_num, pic.max_fn, mark.op == 3)
+                else {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
                         what: "mmco",
@@ -517,11 +517,17 @@ fn apply_mmco(dpb: &mut [Frame], pic: &mut Frame, poc: &mut Poc) -> Result<(), C
     Ok(())
 }
 
-fn short_at(dpb: &[Frame], pic_num: i32, current: u32, max_fn: u32) -> Option<usize> {
+fn short_at(
+    dpb: &[Frame],
+    pic_num: i32,
+    current: u32,
+    max_fn: u32,
+    coded_only: bool,
+) -> Option<usize> {
     dpb.iter().enumerate().find_map(|(index, frame)| {
         if frame.referenced
             && !frame.long_term
-            && !frame.nonexisting
+            && !(coded_only && frame.nonexisting)
             && wrapped(frame, current, max_fn) == pic_num
         {
             Some(index)
@@ -562,12 +568,113 @@ fn assign_long(
     Ok(())
 }
 
-fn oldest_short(dpb: &[Frame]) -> Option<usize> {
+fn oldest_short(dpb: &[Frame], current: u32, max_fn: u32) -> Option<usize> {
     dpb.iter()
         .enumerate()
-        .filter(|(_, f)| f.referenced && !f.long_term && !f.nonexisting)
-        .min_by_key(|(_, f)| f.frame_num)
-        .map(|(i, _)| i)
+        .filter(|(_, frame)| frame.referenced && !frame.long_term)
+        .min_by_key(|(_, frame)| wrapped(frame, current, max_fn))
+        .map(|(index, _)| index)
+}
+
+/// Clause 8.2.5.2. Each missing frame_num becomes a non-existing short-term reference
+/// and can slide an older reference out. Those pictures are not displayed and are not
+/// eligible as inter references.
+fn fill_frame_num_gap(
+    sps: &Sps,
+    state: &mut Poc,
+    dpb: &mut Vec<Frame>,
+    frame_num: u32,
+) -> Result<(), CodecError> {
+    if !state.have_ref {
+        return Ok(());
+    }
+    let max_fn = 1u32 << sps.log2_max_frame_num;
+    if max_fn == 0 {
+        return Ok(());
+    }
+    let mut unused = state.prev_frame_num.wrapping_add(1) % max_fn;
+    if frame_num == state.prev_frame_num || frame_num == unused {
+        return Ok(());
+    }
+    if !sps.gaps_allowed {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "frame_num gap",
+        });
+    }
+    let mut steps = 0u32;
+    while unused != frame_num {
+        if steps >= max_fn {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "frame_num gap",
+            });
+        }
+        steps += 1;
+        let (poc, offset) = ghost_order(sps, state, unused)?;
+        let ghost = absent_frame(sps, unused, poc);
+        mark_ref(dpb, &ghost, ghost.max_ref);
+        state.prev_frame_num = unused;
+        state.prev_frame_num_offset = offset;
+        dpb.push(ghost);
+        dpb.retain(|frame| frame.referenced || frame.output);
+        unused = unused.wrapping_add(1) % max_fn;
+    }
+    Ok(())
+}
+
+fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), CodecError> {
+    let max_fn = 1u32 << sps.log2_max_frame_num;
+    let offset = if frame_num < state.prev_frame_num {
+        state.prev_frame_num_offset.wrapping_add(max_fn)
+    } else {
+        state.prev_frame_num_offset
+    };
+    let poc = if sps.poc_type == 1 {
+        poc_type1(sps, offset, frame_num, true, [0, 0])?
+    } else if sps.poc_type == 2 {
+        let abs = i32::try_from(offset.saturating_add(frame_num)).unwrap_or(0);
+        2 * abs
+    } else {
+        0
+    };
+    Ok((poc, offset))
+}
+
+fn absent_frame(sps: &Sps, frame_num: u32, poc: i32) -> Frame {
+    Frame {
+        y: Vec::new(),
+        u: Vec::new(),
+        v: Vec::new(),
+        mb: Vec::new(),
+        w: sps.width as usize,
+        h: sps.height as usize,
+        mb_w: sps.mb_width,
+        poc,
+        frame_num,
+        referenced: true,
+        long_term: false,
+        long_idx: -1,
+        output: false,
+        key: false,
+        pts: 0,
+        duration: 0,
+        timescale: 0,
+        crop_x: 0,
+        crop_y: 0,
+        vis_w: 0,
+        vis_h: 0,
+        range: sps.range,
+        primaries: sps.primaries,
+        transfer: sps.transfer,
+        matrix: sps.matrix,
+        nonexisting: true,
+        max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
+        reorder: 0,
+        adaptive: false,
+        mmco: Vec::new(),
+        max_fn: 1u32 << sps.log2_max_frame_num,
+    }
 }
 
 fn take_output(dpb: &mut Vec<Frame>, keep: usize) -> Vec<VideoOutput> {
@@ -683,6 +790,9 @@ fn decode_slice(
     let Some(sps) = sets.sps[sps_id].clone() else {
         return Err(bits.malformed("missing sps"));
     };
+    if picture.is_none() && !idr {
+        fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
+    }
     let (poc, frame_num_offset) = picture_order(&header, &sps, poc_state, idr)?;
     let _ = frame_num_offset;
     if picture.is_none() {
@@ -1380,6 +1490,30 @@ mod tests {
     }
 
     #[test]
+    fn frame_num_gap_slides_real_references_out() {
+        let mut sps = type1_sps(&[], 0, 0);
+        sps.poc_type = 2;
+        sps.gaps_allowed = true;
+        sps.max_num_ref_frames = 2;
+        sps.log2_max_frame_num = 4;
+        let mut dpb = vec![held(0), held(1)];
+        let mut poc = super::Poc::new();
+        poc.prev_frame_num = 1;
+        poc.have_ref = true;
+        super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).unwrap();
+        let live: Vec<_> = dpb
+            .iter()
+            .filter(|frame| frame.referenced)
+            .map(|frame| (frame.frame_num, frame.nonexisting, frame.output))
+            .collect();
+        assert_eq!(live, vec![(2, true, false), (3, true, false)]);
+        assert_eq!(poc.prev_frame_num, 3);
+        sps.gaps_allowed = false;
+        poc.prev_frame_num = 1;
+        assert!(super::fill_frame_num_gap(&sps, &mut poc, &mut dpb, 4).is_err());
+    }
+
+    #[test]
     fn memory_management_commands_change_which_pictures_stay_referenced() {
         let mut dpb = vec![held(0), held(1)];
         let mut current = held(2);
@@ -1488,6 +1622,7 @@ mod tests {
             offset_top_bottom: top_bottom,
             offset_for_ref: offsets.to_vec(),
             max_num_ref_frames: 1,
+            gaps_allowed: false,
             width: 16,
             height: 16,
             crop_left: 0,

@@ -3741,6 +3741,12 @@ fn mc_block(
                 what: "dpb",
             });
         };
+        if frame.nonexisting {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "non-existing reference",
+            });
+        }
         let mvx = i32::from(mv[0]);
         let mvy = i32::from(mv[1]);
         Ok(recon::qpel(
@@ -3861,6 +3867,12 @@ fn chroma_sample(
             what: "dpb",
         });
     };
+    if frame.nonexisting {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "non-existing reference",
+        });
+    }
     let plane = if cb { &frame.u } else { &frame.v };
     let mvx = i32::from(mv[0]);
     let mvy = i32::from(mv[1]);

@@ -689,6 +689,8 @@ name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
  "cutlass-eval",
+ "cutlass-model",
+ "cutlass-renderer-software",
  "cutlass-session",
 ]
 

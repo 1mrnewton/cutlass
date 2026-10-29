@@ -4,7 +4,7 @@
 //! is a P slice: skipped when it matches the previous reconstruction, and
 //! 16×16 motion otherwise. The search is a radius-1 diamond, the same shape
 //! x264 uses, then a half-pel diamond and a quarter-pel diamond. A macroblock
-//! stays 16×16 unless a 16×8 or 8×16 split predicts it more cheaply.
+//! stays 16×16 unless a 16×8, 8×16, or four 8×8 blocks predict it more cheaply.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -816,11 +816,14 @@ fn choose_partition(
     let mut best_cost = sad_mv(src, reference, whole, mv);
     let mut best_kind = 0u8;
     let mut best = [mv; 16];
-    for kind in [1u8, 2] {
+    for kind in [1u8, 2, 3] {
         let mut here = [None; 16];
         let mut blocks = [[0i16; 2]; 16];
         let mut cost = 0i32;
         for (x, y, w, h) in pieces(kind) {
+            if w == 0 || h == 0 {
+                continue;
+            }
             let pred = predict_part(grid, &here, mb_w, (mx, my), (x, y, w, h));
             let area = Area {
                 x: mx * 16 + x,
@@ -846,13 +849,12 @@ fn sad_mv(src: &Source<'_>, reference: &Planes, area: Area, mv: [i16; 2]) -> i32
     sad_qpel(src, reference, area, i32::from(mv[0]), i32::from(mv[1]))
 }
 
-fn pieces(kind: u8) -> [(u32, u32, u32, u32); 2] {
-    if kind == 1 {
-        [(0, 0, 16, 8), (0, 8, 16, 8)]
-    } else if kind == 2 {
-        [(0, 0, 8, 16), (8, 0, 8, 16)]
-    } else {
-        [(0, 0, 16, 16), (0, 0, 0, 0)]
+fn pieces(kind: u8) -> [(u32, u32, u32, u32); 4] {
+    match kind {
+        1 => [(0, 0, 16, 8), (0, 8, 16, 8), (0, 0, 0, 0), (0, 0, 0, 0)],
+        2 => [(0, 0, 8, 16), (8, 0, 8, 16), (0, 0, 0, 0), (0, 0, 0, 0)],
+        3 => [(0, 0, 8, 8), (8, 0, 8, 8), (0, 8, 8, 8), (8, 8, 8, 8)],
+        _ => [(0, 0, 16, 16), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)],
     }
 }
 
@@ -861,6 +863,14 @@ fn write_p_type(cab: &mut CabacEnc<'_>, kind: u8) {
     if kind == 0 {
         cab.decision(15, 0);
         cab.decision(16, 0);
+        return;
+    }
+    if kind == 3 {
+        cab.decision(15, 0);
+        cab.decision(16, 1);
+        for _ in 0..4 {
+            cab.decision(21, 1);
+        }
         return;
     }
     cab.decision(15, 1);
@@ -2950,6 +2960,96 @@ mod tests {
         let raw = std::fs::read(&yuv).unwrap();
         let frame = 64 * 64 * 3 / 2;
         assert_eq!(&raw[frame..frame + got.len()], got);
+    }
+
+    #[test]
+    fn quadrant_blocks_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut y = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                y[row * 64 + col] =
+                    u8::try_from((row * 13 + col * 7).wrapping_mul(17) & 255).unwrap_or(0);
+            }
+        }
+        let picture =
+            Yuv420p::try_new(64, 64, y.clone(), vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        let mut shifted = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                let (from_row, from_col) = quadrant_source(row, col);
+                shifted[row * 64 + col] = y[from_row * 64 + from_col];
+            }
+        }
+        input.picture =
+            Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let opened = decoder.push(&first[0]).unwrap();
+        let frames = decoder.push(&second[0]).unwrap();
+        let recon = opened[0].picture.y();
+        let got = frames[0].picture.y();
+        let mut split = 0i32;
+        let mut still = 0i32;
+        for row in 0..64usize {
+            for col in 0..64usize {
+                let (from_row, from_col) = quadrant_source(row, col);
+                split += i32::from(got[row * 64 + col].abs_diff(recon[from_row * 64 + from_col]));
+                still += i32::from(got[row * 64 + col].abs_diff(recon[row * 64 + col]));
+            }
+        }
+        assert!(
+            split + 64 * 16 < still,
+            "8x8 blocks did not win, split {split} still {still}"
+        );
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-quad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("quad.h264");
+        let yuv = dir.join("quad.yuv");
+        let mut bytes = first[0].data.clone();
+        bytes.extend_from_slice(&second[0].data);
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the 8x8 picture");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 64 * 64 * 3 / 2;
+        assert_eq!(&raw[frame..frame + got.len()], got);
+    }
+
+    fn quadrant_source(row: usize, col: usize) -> (usize, usize) {
+        let top = row % 16 < 8;
+        let left = col % 16 < 8;
+        if top && left {
+            (row, col.saturating_sub(6))
+        } else if top {
+            (row, (col + 6).min(63))
+        } else if left {
+            (row.saturating_sub(6), col)
+        } else {
+            ((row + 6).min(63), col)
+        }
     }
 
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {

@@ -2,8 +2,8 @@
 //!
 //! Each picture is one slice. A new picture is an intra slice. A later picture
 //! is a P slice: skipped when it matches the previous reconstruction, and
-//! 16×16 motion otherwise. The integer search is a radius-1 diamond, the same
-//! shape x264 uses for its diamond method, starting at the predicted vector.
+//! 16×16 motion otherwise. The search is a radius-1 diamond, the same shape
+//! x264 uses, then a half-pel diamond and a quarter-pel diamond.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -647,16 +647,57 @@ fn search_16(
         bx = x;
         by = y;
     }
+    let (qx, qy) = refine_subpel(src, reference, mx, my, (bx * 4, by * 4), (2, 2));
+    let (qx, qy) = refine_subpel(src, reference, mx, my, (qx, qy), (1, 2));
     [
-        i16::try_from(bx * 4).unwrap_or(0),
-        i16::try_from(by * 4).unwrap_or(0),
+        i16::try_from(qx).unwrap_or(0),
+        i16::try_from(qy).unwrap_or(0),
     ]
 }
 
+/// Half-pel steps are 2 quarter-units. Quarter-pel steps are 1. Same four-point diamond.
+fn refine_subpel(
+    src: &Source<'_>,
+    reference: &Planes,
+    mx: u32,
+    my: u32,
+    origin: (i32, i32),
+    step_iters: (i32, i32),
+) -> (i32, i32) {
+    let (mut qx, mut qy) = origin;
+    let (step, iters) = step_iters;
+    let mut best = sad_qpel(src, reference, mx, my, qx, qy);
+    for _ in 0..iters {
+        let mut step_to = None;
+        for (dx, dy) in [(0, -step), (0, step), (-step, 0), (step, 0)] {
+            let x = qx + dx;
+            let y = qy + dy;
+            if x.abs() > SEARCH * 4 || y.abs() > SEARCH * 4 {
+                continue;
+            }
+            let cost = sad_qpel(src, reference, mx, my, x, y);
+            if cost < best {
+                best = cost;
+                step_to = Some((x, y));
+            }
+        }
+        let Some((x, y)) = step_to else {
+            break;
+        };
+        qx = x;
+        qy = y;
+    }
+    (qx, qy)
+}
+
 fn sad16(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, dx: i32, dy: i32) -> i32 {
+    sad_qpel(src, reference, mx, my, dx * 4, dy * 4)
+}
+
+fn sad_qpel(src: &Source<'_>, reference: &Planes, mx: u32, my: u32, qx: i32, qy: i32) -> i32 {
     let mv = [
-        i16::try_from(dx * 4).unwrap_or(0),
-        i16::try_from(dy * 4).unwrap_or(0),
+        i16::try_from(qx).unwrap_or(0),
+        i16::try_from(qy).unwrap_or(0),
     ];
     let x0 = mx * 16;
     let y0 = my * 16;
@@ -2447,6 +2488,88 @@ mod tests {
         let u_len = frames[0].picture.u().len();
         assert_eq!(&second_raw[u_at..u_at + u_len], frames[0].picture.u());
         assert_eq!(&second_raw[u_at + u_len..], frames[0].picture.v());
+    }
+
+    #[test]
+    fn half_pixel_shift_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut y = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                y[row * 64 + col] =
+                    u8::try_from((row * 13 + col * 7).wrapping_mul(17) & 255).unwrap_or(0);
+            }
+        }
+        let picture =
+            Yuv420p::try_new(64, 64, y.clone(), vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        let mut shifted = vec![0u8; 64 * 64];
+        for row in 0..64usize {
+            for col in 0..64usize {
+                let left = y[row * 64 + col.saturating_sub(1)];
+                shifted[row * 64 + col] =
+                    u8::try_from((u16::from(y[row * 64 + col]) + u16::from(left)).div_ceil(2))
+                        .unwrap_or(0);
+            }
+        }
+        input.picture =
+            Yuv420p::try_new(64, 64, shifted, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let opened = decoder.push(&first[0]).unwrap();
+        let frames = decoder.push(&second[0]).unwrap();
+        let recon = opened[0].picture.y();
+        let got = frames[0].picture.y();
+        let mut half = 0i32;
+        let mut still = 0i32;
+        for row in 0..64usize {
+            for col in 0..64usize {
+                let left = recon[row * 64 + col.saturating_sub(1)];
+                let between =
+                    u8::try_from((u16::from(recon[row * 64 + col]) + u16::from(left)).div_ceil(2))
+                        .unwrap_or(0);
+                half += i32::from(got[row * 64 + col].abs_diff(between));
+                still += i32::from(got[row * 64 + col].abs_diff(recon[row * 64 + col]));
+            }
+        }
+        assert!(
+            half + 64 * 4 < still,
+            "half-pixel motion did not win, half {half} still {still}"
+        );
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-half");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("half.h264");
+        let yuv = dir.join("half.yuv");
+        let mut bytes = first[0].data.clone();
+        bytes.extend_from_slice(&second[0].data);
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the half-pixel picture");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 64 * 64 * 3 / 2;
+        let second_raw = &raw[frame..frame * 2];
+        assert_eq!(&second_raw[..got.len()], got);
     }
 
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {

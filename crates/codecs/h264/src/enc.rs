@@ -1,8 +1,8 @@
 //! High-profile CABAC encoder.
 //!
-//! Each picture is one slice. This step emits Intra_16x16 DC with a zero
-//! residual, which reconstructs mid-gray. Inter prediction and a real
-//! residual follow the same slice and CABAC writer.
+//! Each picture is one slice. A new picture is an intra slice. A later picture
+//! that is the same constant colour is a P slice of skipped macroblocks, because
+//! deblocking leaves a constant field unchanged and the skip copies that reference.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +23,9 @@ pub struct H264Encoder {
     cancel: Arc<AtomicBool>,
     drained: bool,
     idr_pic_id: u32,
+    next_fn: u32,
+    next_poc: u32,
+    anchor: Option<[u8; 3]>,
     sps: Vec<u8>,
     pps: Vec<u8>,
 }
@@ -76,12 +79,26 @@ impl H264Encoder {
             cancel: Arc::new(AtomicBool::new(false)),
             drained: false,
             idr_pic_id: 0,
+            next_fn: 1,
+            next_poc: 2,
+            anchor: None,
             sps,
             pps,
         })
     }
 
-    fn access_unit(&mut self, y: &[u8], u: &[u8], v: &[u8]) -> Vec<u8> {
+    fn access_unit(&mut self, y: &[u8], u: &[u8], v: &[u8], key: bool) -> Vec<u8> {
+        let color = constant_color(y, u, v);
+        if !key && color.is_some() && color == self.anchor {
+            let slice = p_skip_slice(self.mb_w, self.mb_h, self.next_fn, self.next_poc);
+            self.next_fn = (self.next_fn + 1) & 15;
+            self.next_poc = (self.next_poc + 2) & 15;
+            let mut unit = Vec::new();
+            unit.extend(self.wrap(7, &self.sps));
+            unit.extend(self.wrap(8, &self.pps));
+            unit.extend(self.wrap(1, &slice));
+            return unit;
+        }
         let slice = intra_slice(
             self.mb_w,
             self.mb_h,
@@ -95,6 +112,9 @@ impl H264Encoder {
             },
         );
         self.idr_pic_id = self.idr_pic_id.wrapping_add(1);
+        self.next_fn = 1;
+        self.next_poc = 2;
+        self.anchor = color;
         let mut unit = Vec::new();
         unit.extend(self.wrap(7, &self.sps));
         unit.extend(self.wrap(8, &self.pps));
@@ -135,7 +155,12 @@ impl VideoEncoder for H264Encoder {
             input.duration
         };
         Ok(vec![cutlass_encode::Packet::video(
-            self.access_unit(input.picture.y(), input.picture.u(), input.picture.v()),
+            self.access_unit(
+                input.picture.y(),
+                input.picture.u(),
+                input.picture.v(),
+                input.force_keyframe,
+            ),
             input.pts,
             duration,
             input.timescale,
@@ -154,6 +179,9 @@ impl VideoEncoder for H264Encoder {
     fn reset(&mut self) {
         self.drained = false;
         self.idr_pic_id = 0;
+        self.next_fn = 1;
+        self.next_poc = 2;
+        self.anchor = None;
         self.cancel.store(false, Ordering::Relaxed);
     }
 
@@ -277,6 +305,49 @@ struct Flags<'a> {
     cr: &'a [bool],
     luma_cbp: &'a [u8],
     chroma_cbp: &'a [u8],
+}
+
+fn constant_color(y: &[u8], u: &[u8], v: &[u8]) -> Option<[u8; 3]> {
+    let (y0, u0, v0) = (*y.first()?, *u.first()?, *v.first()?);
+    if y.iter().all(|sample| *sample == y0)
+        && u.iter().all(|sample| *sample == u0)
+        && v.iter().all(|sample| *sample == v0)
+    {
+        Some([y0, u0, v0])
+    } else {
+        None
+    }
+}
+
+/// P slice, cabac_init_idc 0. Every macroblock is skipped, so the decoder copies
+/// the previous reference. FFmpeg's skip context is 11 when both neighbours are
+/// skipped or absent, which is this whole picture.
+fn p_skip_slice(mb_w: u32, mb_h: u32, frame_num: u32, poc: u32) -> Vec<u8> {
+    let mut bits = Writer::new();
+    bits.ue(0);
+    bits.ue(0);
+    bits.ue(0);
+    bits.u(4, frame_num & 15);
+    bits.u(4, poc & 15);
+    bits.bit(false);
+    bits.bit(false);
+    bits.bit(false);
+    bits.ue(0);
+    bits.se(0);
+    bits.ue(0);
+    bits.se(0);
+    bits.se(0);
+    bits.ones_to_byte();
+    {
+        let mut cab = CabacEnc::start(&mut bits, QP, 1);
+        let total = mb_w.saturating_mul(mb_h);
+        for addr in 0..total {
+            cab.decision(11, 1);
+            cab.terminate(addr + 1 == total);
+        }
+    }
+    bits.pad_byte();
+    bits.bytes
 }
 
 fn intra_slice(mb_w: u32, mb_h: u32, idr_pic_id: u32, src: &Source<'_>) -> Vec<u8> {
@@ -1511,6 +1582,78 @@ mod tests {
             assert_eq!(&raw[..y_len], frames[0].picture.y());
             assert_eq!(&raw[y_len..y_len + u_len], got);
             assert_eq!(&raw[y_len + u_len..], frames[0].picture.v());
+        }
+    }
+
+    #[test]
+    fn repeated_constant_picture_is_a_p_skip() {
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let picture = Yuv420p::solid(64, 64, 128, 128, 128).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let second_nals = crate::nal::access_unit(&second[0].data, 0).unwrap();
+        assert!(
+            second_nals.iter().any(|nal| nal.kind == 1),
+            "a repeated constant picture stays intra"
+        );
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let a = decoder.push(&first[0]).unwrap();
+        let b = decoder.push(&second[0]).unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert!(b[0].picture.y().iter().all(|sample| *sample == 128));
+        assert!(b[0].picture.u().iter().all(|sample| *sample == 128));
+        assert!(b[0].picture.v().iter().all(|sample| *sample == 128));
+        let mut ramp = vec![0u8; 64 * 64];
+        for row in 0..64 {
+            for col in 0..64 {
+                ramp[row * 64 + col] = u8::try_from(col * 3).unwrap_or(0);
+            }
+        }
+        let ramp_pic =
+            Yuv420p::try_new(64, 64, ramp, vec![128; 32 * 32], vec![128; 32 * 32]).unwrap();
+        input.picture = ramp_pic.clone();
+        input.force_keyframe = false;
+        input.pts = 2;
+        let _ = encoder.push(&input).unwrap();
+        input.pts = 3;
+        let again = encoder.push(&input).unwrap();
+        let again_nals = crate::nal::access_unit(&again[0].data, 0).unwrap();
+        assert!(
+            again_nals.iter().any(|nal| nal.kind == 5),
+            "a repeated ramp is not a skip; deblock changes the reference"
+        );
+        if let Some(ffmpeg) = ffmpeg() {
+            let dir = std::env::temp_dir().join("cutlass-h264-enc-pskip");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let coded = dir.join("skip.h264");
+            let yuv = dir.join("skip.yuv");
+            let mut bytes = first[0].data.clone();
+            bytes.extend_from_slice(&second[0].data);
+            std::fs::write(&coded, &bytes).unwrap();
+            let decoded = std::process::Command::new(ffmpeg)
+                .args(["-y", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success(), "ffmpeg rejected the P skip");
+            let raw = std::fs::read(&yuv).unwrap();
+            assert_eq!(raw.len(), 64 * 64 * 3 / 2 * 2);
+            assert!(raw.iter().all(|sample| *sample == 128));
         }
     }
 

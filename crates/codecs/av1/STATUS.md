@@ -83,6 +83,6 @@ The encoder does not emit inter frames, film grain, super resolution, restoratio
 ### Gates still open
 
 - Fuzz: not run. The 30-minute packet campaign did not run. The stand-in is 200 random packets, which leave the stored reference usable and return an error. A LEB128 value that does not fit in `u32` returns `Limit` instead of panicking.
-- Speed: miss. One release thread encoded and decoded one 720×480 4:2:0 frame in 0.19s. That is about five round trips a second, short of 30 fps playback.
+- Speed: miss. One release thread encoded and decoded one 720×480 4:2:0 frame in 0.19s. That is about five round trips a second, short of 30 fps playback. `cargo bench -p cutlass-av1 --bench decode` later decoded one 3840×2160 keyframe from `../local-files` on an Apple M5 Pro. Two runs of five samples had medians 0.329 s and 0.331 s; one sample reached 0.351 s. FFmpeg's libdav1d decoded that same frame in 0.0063–0.0064 s on one thread and 0.0018–0.0019 s with its default threads. The pixels matched.
 - Memory: the decoder keeps eight reference pictures plus the frame being decoded. Planes are cropped to the visible size, and a frame edge above 4096 is `Limit`. Peak resident memory was not measured.
 - Containers: not this crate. AV1 inside MP4, WebM, and AVIF stays with the container crates.

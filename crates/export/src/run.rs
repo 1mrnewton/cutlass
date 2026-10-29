@@ -734,13 +734,14 @@ mod tests {
         AudioInput, ChannelLayout, CodecParams, EncodeFactory, Encoder, FrameInput, Packet, Pcm,
         PixelFormat,
     };
-    use cutlass_eval::{ClipPcm, Snapshot};
+    use cutlass_eval::{ClipPcm, Snapshot, frame};
     use cutlass_model::{
         Draft, FrameRate, HdrSettings, MaterialAudioFade, MaterialColorConfig, MaterialId,
         MaterialText, Micros, Segment, TimeRange, Track, TrackAttribute, TrackType, WordColumns,
     };
-    use cutlass_playback::present;
+    use cutlass_playback::Player;
     use cutlass_renderer_software::SoftwareDevice;
+    use cutlass_session::Session;
 
     use super::{ExportRun, export, frame_indexes, same_software_pixels};
     use crate::config::{AudioExport, ExportError, ExportRequest, SidecarKind, SidecarRequest};
@@ -885,6 +886,15 @@ mod tests {
         factory
     }
 
+    /// Pixels from the playback clock and from `eval::frame` at `time`.
+    fn played_rgba(draft: &Draft, time: Micros, device: &mut SoftwareDevice) -> Vec<u8> {
+        let session = Session::open(draft.clone());
+        let scrubbed = Player::new().scrub(&session, device, time).expect("scrub");
+        let evaluated = frame(&Snapshot::new(draft), time, device).expect("eval");
+        assert_eq!(scrubbed.rgba, evaluated.rgba);
+        scrubbed.rgba
+    }
+
     fn gif_request(range: TimeRange) -> ExportRequest {
         ExportRequest {
             range,
@@ -986,6 +996,16 @@ mod tests {
     }
 
     #[test]
+    fn a_scrubbed_frame_matches_eval_and_keeps_the_top_layer() {
+        let draft = color_draft(1, 1, 1_000);
+        let before = draft.clone();
+        let mut device = SoftwareDevice::new();
+        let rgba = played_rgba(&draft, Micros(0), &mut device);
+        assert_eq!(rgba, [255, 0, 0, 255]);
+        assert_eq!(draft, before);
+    }
+
+    #[test]
     fn export_encodes_each_eval_frame_and_muxes_it_in_the_file_timescale() {
         let draft = color_draft(240, 135, 33_334);
         let before = draft.clone();
@@ -1029,12 +1049,11 @@ mod tests {
         assert_eq!(mux.status(), MuxStatus::Finished);
 
         let mut playback = SoftwareDevice::new();
-        let snapshot = Snapshot::new(&draft);
-        let first = present(&snapshot, Micros(0), &mut playback).expect("play");
-        let second = present(&snapshot, Micros(33_334), &mut playback).expect("play");
-        same_software_pixels(&draft, 240, 135, &first.rgba, &result.frames[0].rgba).expect("lock");
-        same_software_pixels(&draft, 240, 135, &second.rgba, &result.frames[1].rgba).expect("lock");
-        assert_eq!(first.rgba, red(240, 135));
+        let first = played_rgba(&draft, Micros(0), &mut playback);
+        let second = played_rgba(&draft, Micros(33_334), &mut playback);
+        same_software_pixels(&draft, 240, 135, &first, &result.frames[0].rgba).expect("lock");
+        same_software_pixels(&draft, 240, 135, &second, &result.frames[1].rgba).expect("lock");
+        assert_eq!(first, red(240, 135));
     }
 
     #[test]
@@ -1486,8 +1505,8 @@ mod tests {
         assert_eq!(result.frames[0].rgba, red(480, 240));
         assert_eq!(result.finished.packets()[0].bytes(), red(240, 120));
         let mut playback = SoftwareDevice::new();
-        let played = present(&Snapshot::new(&draft), Micros(0), &mut playback).expect("play");
-        assert_eq!(played.rgba, result.frames[0].rgba);
+        let played = played_rgba(&draft, Micros(0), &mut playback);
+        assert_eq!(played, result.frames[0].rgba);
     }
 
     #[test]

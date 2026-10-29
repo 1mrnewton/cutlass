@@ -106,6 +106,25 @@ pub type VTCompressionOutputCallback = unsafe extern "C" fn(
     sample: *mut c_void,
 );
 
+pub type AudioQueueRef = *mut c_void;
+
+pub type AudioQueueBufferRef = *mut AudioQueueBuffer;
+
+/// One Core Audio queue buffer. Field order matches `AudioQueueBuffer`.
+#[repr(C)]
+pub struct AudioQueueBuffer {
+    pub audio_data_bytes_capacity: u32,
+    pub audio_data: *mut c_void,
+    pub audio_data_byte_size: u32,
+    pub user_data: *mut c_void,
+    pub packet_description_capacity: u32,
+    pub packet_descriptions: *mut AudioStreamPacketDescription,
+    pub packet_description_count: u32,
+}
+
+pub type AudioQueueOutputCallback =
+    unsafe extern "C" fn(user: *mut c_void, queue: AudioQueueRef, buffer: AudioQueueBufferRef);
+
 pub type AudioInputProc = unsafe extern "C" fn(
     converter: *mut c_void,
     packets: *mut u32,
@@ -447,6 +466,35 @@ unsafe extern "C" {
         output: *mut AudioBufferList,
         descriptions: *mut AudioStreamPacketDescription,
     ) -> OSStatus;
+
+    pub fn AudioQueueNewOutput(
+        format: *const AudioStreamBasicDescription,
+        callback: AudioQueueOutputCallback,
+        user: *mut c_void,
+        run_loop: *mut c_void,
+        mode: *const c_void,
+        flags: u32,
+        out: *mut AudioQueueRef,
+    ) -> OSStatus;
+
+    pub fn AudioQueueAllocateBuffer(
+        queue: AudioQueueRef,
+        size: u32,
+        out: *mut AudioQueueBufferRef,
+    ) -> OSStatus;
+
+    pub fn AudioQueueEnqueueBuffer(
+        queue: AudioQueueRef,
+        buffer: AudioQueueBufferRef,
+        packets: u32,
+        descriptions: *const AudioStreamPacketDescription,
+    ) -> OSStatus;
+
+    pub fn AudioQueueStart(queue: AudioQueueRef, start: *const c_void) -> OSStatus;
+
+    pub fn AudioQueueStop(queue: AudioQueueRef, immediate: u8) -> OSStatus;
+
+    pub fn AudioQueueDispose(queue: AudioQueueRef, immediate: u8) -> OSStatus;
 
 }
 #[link(name = "CoreGraphics", kind = "framework")]

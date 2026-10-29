@@ -3,6 +3,7 @@
 mod audio;
 mod cf;
 mod image;
+mod queue;
 mod sys;
 mod video;
 
@@ -10,6 +11,7 @@ use cutlass_decode::{CodecId, DecodeFactory};
 use cutlass_encode::EncodeFactory;
 
 pub use image::{decode_file, encode_file};
+pub use queue::{OutputQueue, QueueError};
 pub use video::{release_buffer, to_cpu, with_pixel_buffer};
 
 pub fn register_decoders(factory: &mut DecodeFactory) {

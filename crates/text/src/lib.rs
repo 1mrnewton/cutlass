@@ -6,10 +6,12 @@
 
 #![forbid(unsafe_code)]
 
+mod atlas;
 mod layout;
 mod richtext;
 mod shape;
 
+pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
 pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
 
@@ -31,8 +33,10 @@ pub enum TextError {
     Alignment,
     /// Size, spacing, or width is not a usable number.
     Measure,
-    /// The string, the pen, or the picture is past a limit.
+    /// The string, the pen, the atlas cell, or the picture is past a limit.
     Limit,
+    /// The face has no outlines. The bitmap atlas is not built in this pass.
+    BitmapAtlas,
 }
 
 impl fmt::Display for TextError {
@@ -44,6 +48,9 @@ impl fmt::Display for TextError {
             Self::Alignment => formatter.write_str("text alignment is not left, center, or right"),
             Self::Measure => formatter.write_str("text size, spacing, or width is not usable"),
             Self::Limit => formatter.write_str("text is past the limit"),
+            Self::BitmapAtlas => {
+                formatter.write_str("a font without outlines needs a bitmap atlas")
+            }
         }
     }
 }
@@ -56,7 +63,8 @@ impl Error for TextError {
             | Self::Typesetting
             | Self::Alignment
             | Self::Measure
-            | Self::Limit => None,
+            | Self::Limit
+            | Self::BitmapAtlas => None,
         }
     }
 }

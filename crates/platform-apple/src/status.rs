@@ -48,6 +48,7 @@ pub fn unit_status(code: i32, what: &'static str) -> Result<(), CodecError> {
         OK => Ok(()),
         NO_VIDEO_DECODER | NO_VIDEO_ENCODER | BAD_VIDEO_FORMAT | AUDIO_FORMAT | PARAM
         | PROPERTY_UNSUPPORTED => Err(CodecError::Unsupported { what }),
+        BAD_VIDEO_DATA => Err(CodecError::Malformed { at_bit: 0, what }),
         _ => Err(CodecError::Malformed { at_bit: 0, what }),
     }
 }

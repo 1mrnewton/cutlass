@@ -10,5 +10,30 @@ description = "VideoToolbox, AudioToolbox, and ImageIO."
 cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
 
-[lints]
-workspace = true
+# Cargo rejects mixing `workspace = true` with an override, and `forbid` cannot
+# be allowed in a module. These are the workspace lints with `unsafe_code`
+# lowered to `deny` so the framework module can allow it.
+[lints.rust]
+unsafe_code = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+wildcard_imports = "deny"
+exit = "deny"
+mem_forget = "deny"
+get_unwrap = "deny"

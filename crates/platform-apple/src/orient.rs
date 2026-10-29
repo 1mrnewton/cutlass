@@ -38,7 +38,7 @@ impl Orientation {
     /// The displayed picture swaps width and height.
     #[must_use]
     pub const fn swaps_edges(self) -> bool {
-        matches!(self.0, 5 | 6 | 7 | 8)
+        matches!(self.0, 5..=8)
     }
 
     /// Where the stored sample `(x, y)` is drawn.

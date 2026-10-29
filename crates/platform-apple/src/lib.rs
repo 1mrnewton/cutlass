@@ -3,12 +3,15 @@
 //!
 //! The desktop registers these openers first. An opener that this framework
 //! cannot run returns [`cutlass_decode::CodecError::Unsupported`], and the
-//! factory asks the next opener. Linux builds this crate as that decline:
-//! the frameworks are linked only on Apple.
+//! factory asks the next opener.
 
-#![forbid(unsafe_code)]
-
+mod apple;
 mod limits;
 mod nal;
 mod orient;
 mod status;
+
+pub use apple::{register_decoders, register_encoders};
+
+#[cfg(target_vendor = "apple")]
+pub use apple::{decode_file, encode_file};

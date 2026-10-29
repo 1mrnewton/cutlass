@@ -26,7 +26,7 @@ Main profile allows 10-bit 4:2:0 and monochrome. This crate rejects both. It is 
 
 Film grain, super-resolution, and loop restoration are legal in profile 0 and are not required to be switched on. A stream that turns one of them on is rejected. The picture is not published with that stage skipped. Consequence: a production encode that leaves restoration or film grain on will not open.
 
-Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond operating point 0, large-scale tile lists, warped motion, OBMC, palette, intra block copy, filter intra, masked and distance-weighted compound, 128×128 superblocks, quantization matrices, screen-content tools, lossless (`base_q_idx` 0, which forces 4×4 Walsh-Hadamard), and CDEF. The encoder does not emit them. Chroma-from-luma is implemented for profile 0 and matched on an `aomenc` stream that uses it.
+Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond operating point 0, large-scale tile lists, warped motion, OBMC, palette, intra block copy, filter intra, masked and distance-weighted compound, 128×128 superblocks, quantization matrices, screen-content tools, and lossless (`base_q_idx` 0, which forces 4×4 Walsh-Hadamard). The encoder does not emit them. Chroma-from-luma is implemented for profile 0 and matched on an `aomenc` stream that uses it. CDEF is applied after the loop filter for 8-bit 4:2:0. The encoder still leaves it off.
 
 ## Gates declared before tuning
 
@@ -54,11 +54,12 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 
 - The embedded 64×64 constrained keyframe in the crate.
 - An embedded 64×64 three-frame `aomenc` stream: one keyframe and two single-reference inter frames. That stream is error resilient, keeps the largest transform, uses identity global motion, turns CDF updates off, and leaves compound, warped, overlapped, reference-motion, order-hint, CDEF, restoration, and film grain off. The second frame's luma is the first frame shifted by 8 samples.
+- Two embedded `aomenc` keyframes with CDEF on and the loop filter off: a 64×64 step, and a 64×128 ramp that crosses a 64-sample stripe. Both match dav1d with the filter applied.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 
 Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d. Within-frame CDF adaptation is implemented and was not the path this inter stream used.
 
-Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, CDEF, loop restoration, super resolution, film grain, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
+Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, loop restoration, super resolution, film grain, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
 
 ### Encoder
 

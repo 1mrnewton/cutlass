@@ -16,6 +16,7 @@ use crate::dims::{
     V_DCT, V_FLIPADST, block_height, block_width, intra_tx_type, partition_subsize,
     subsampled_size,
 };
+use crate::header::RESTORE_SGRPROJ;
 use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
 use crate::idct::inverse_2d;
 use crate::inter::{
@@ -24,6 +25,7 @@ use crate::inter::{
     inter_tx_type, predict,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, chroma_from_luma, predict_intra};
+use crate::restore;
 use crate::superres;
 use crate::symbol::SymbolDecoder;
 use crate::tables::{
@@ -114,6 +116,7 @@ pub fn decode_with_refs(
     let buf_h = (frame.mi_rows as usize).saturating_mul(4);
     let bytes = frame.tile.clone();
     let mut tile = Tile::new(sequence, frame, &bytes, buf_w, buf_h, refs)?;
+    let mut lr = restore::Grid::new(frame)?;
     let sb = if sequence.use_128 { 32 } else { SB4 };
     let mut row = 0;
     while row < tile.mi_rows {
@@ -121,6 +124,7 @@ pub fn decode_with_refs(
         let mut col = 0;
         while col < tile.mi_cols {
             tile.clear_decoded(row, col);
+            restore::read_superblock(&mut tile.symbols, tile.update, frame, &mut lr, row, col, sb)?;
             let root = if sb == 32 { BLOCK_128X128 } else { 12 };
             tile.decode_partition(row, col, root)?;
             col += sb;
@@ -141,6 +145,11 @@ pub fn decode_with_refs(
     deblock_plane(&mut tile.y, buf_w, buf_h, 0, &edges);
     deblock_plane(&mut tile.u, tile.chroma_w, tile.chroma_h, 1, &edges);
     deblock_plane(&mut tile.v, tile.chroma_w, tile.chroma_h, 2, &edges);
+    let before = if lr.active() {
+        Some((tile.y.clone(), tile.u.clone(), tile.v.clone()))
+    } else {
+        None
+    };
     if tile.cdef_on {
         cdef::apply(&mut CdefInput {
             y: &mut tile.y,
@@ -196,6 +205,50 @@ pub fn decode_with_refs(
             visible_w,
         )
     };
+    let (y, u, v) = if let Some((pre_y, pre_u, pre_v)) = before {
+        let (before_y, before_u, before_v) = if up_w > visible_w {
+            let up_chroma = up_w.div_ceil(2);
+            (
+                superres::upscale(
+                    &pre_y,
+                    buf_w,
+                    visible_w,
+                    up_w,
+                    visible_h,
+                    buf_w.saturating_sub(1),
+                ),
+                superres::upscale(
+                    &pre_u,
+                    tile.chroma_w,
+                    chroma_w,
+                    up_chroma,
+                    chroma_h,
+                    tile.chroma_w.saturating_sub(1),
+                ),
+                superres::upscale(
+                    &pre_v,
+                    tile.chroma_w,
+                    chroma_w,
+                    up_chroma,
+                    chroma_h,
+                    tile.chroma_w.saturating_sub(1),
+                ),
+            )
+        } else {
+            (
+                crop(&pre_y, buf_w, visible_w, visible_h),
+                crop(&pre_u, tile.chroma_w, chroma_w, chroma_h),
+                crop(&pre_v, tile.chroma_w, chroma_w, chroma_h),
+            )
+        };
+        (
+            restore_plane(&y, &before_y, out_w, visible_h, &lr, 0, frame),
+            restore_plane(&u, &before_u, out_w.div_ceil(2), chroma_h, &lr, 1, frame),
+            restore_plane(&v, &before_v, out_w.div_ceil(2), chroma_h, &lr, 2, frame),
+        )
+    } else {
+        (y, u, v)
+    };
     Ok(DecodedPicture {
         y,
         u,
@@ -203,6 +256,22 @@ pub fn decode_with_refs(
         width: out_w,
         height: visible_h,
     })
+}
+
+fn restore_plane(
+    cdef: &[u8],
+    before: &[u8],
+    width: usize,
+    height: usize,
+    lr: &restore::Grid,
+    plane: usize,
+    frame: &FrameInfo,
+) -> Vec<u8> {
+    if frame.restoration.plane.get(plane).copied() == Some(RESTORE_SGRPROJ) {
+        restore::apply_sgr(cdef, before, width, height, lr, plane)
+    } else {
+        cdef.to_vec()
+    }
 }
 
 fn crop(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {

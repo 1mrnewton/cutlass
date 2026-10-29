@@ -513,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_that_uses_restoration_is_refused() {
+    fn self_guided_restoration_matches_dav1d() {
         let payload = [
             0x12, 0x00, 0x0a, 0x06, 0x18, 0x15, 0x7f, 0xfc, 0xb0, 0x08, 0x32, 0xb1, 0x07, 0x97,
             0x80, 0x00, 0x74, 0x00, 0x04, 0x9e, 0x01, 0x87, 0x00, 0xc9, 0xb9, 0xad, 0x13, 0xc8,
@@ -587,22 +587,10 @@ mod tests {
         ];
         let params = CodecParams::video(CodecId::Av1, 64, 64);
         let mut decoder = Av1Decoder::open(&params).expect("open");
-        let error = decoder
-            .push(&cutlass_decode::Packet {
-                stream: 0,
-                data: payload.to_vec(),
-                pts: 0,
-                duration: 1,
-                timescale: 30,
-                keyframe: true,
-                side: Vec::new(),
-            })
-            .expect_err("restoration");
-        assert_eq!(
-            error,
-            cutlass_decode::CodecError::Unsupported {
-                what: "loop restoration",
-            }
-        );
+        let packed = push_frame(&mut decoder, &payload, 0);
+        assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+        assert_eq!(packed[0], 6);
+        assert_eq!(packed[32], 20);
+        assert_eq!(frame_digest(&packed), 0x1cc8_07a0_f463_5138);
     }
 }

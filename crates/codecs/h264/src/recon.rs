@@ -692,7 +692,7 @@ pub fn put_luma_block(
     }
     let (pic_w, pic_h) = pic;
     if !luma_window_inside(x, y, w, h, pic_w, pic_h) {
-        put_luma_scalar(dst, dst_stride, src, src_stride, pic, block);
+        put_luma_extended(dst, dst_stride, src, src_stride, pic, block);
         return;
     }
     let size = (w, h);
@@ -782,22 +782,7 @@ pub fn put_chroma_block(
         || x + i32::try_from(w).unwrap_or(i32::MAX) >= pic_w
         || y + i32::try_from(h).unwrap_or(i32::MAX) >= pic_h
     {
-        for row in 0..h {
-            for col in 0..w {
-                dst[row * dst_stride + col] = chroma_mc(
-                    src,
-                    src_stride,
-                    pic_w,
-                    pic_h,
-                    Pel {
-                        x: x + i32::try_from(col).unwrap_or(0),
-                        y: y + i32::try_from(row).unwrap_or(0),
-                        x_frac: xf,
-                        y_frac: yf,
-                    },
-                );
-            }
-        }
+        put_chroma_extended(dst, dst_stride, src, src_stride, pic, block);
         return;
     }
     let x0 = usize::try_from(x).unwrap_or(0);
@@ -855,6 +840,82 @@ fn luma_window_inside(x: i32, y: i32, w: usize, h: usize, pic_w: i32, pic_h: i32
     let bw = i32::try_from(w).unwrap_or(i32::MAX);
     let bh = i32::try_from(h).unwrap_or(i32::MAX);
     x >= 2 && y >= 2 && x + bw + 3 <= pic_w && y + bh + 3 <= pic_h
+}
+
+fn put_chroma_extended(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) {
+    let (pic_w, pic_h) = pic;
+    let width = block.w + 1;
+    let height = block.h + 1;
+    let mut window = [0u8; 17 * 17];
+    for row in 0..height {
+        for col in 0..width {
+            let sx = block.x + i32::try_from(col).unwrap_or(0);
+            let sy = block.y + i32::try_from(row).unwrap_or(0);
+            window[row * width + col] = clip_u8(sample(src, src_stride, pic_w, pic_h, sx, sy));
+        }
+    }
+    let wide = i32::try_from(width).unwrap_or(0);
+    let high = i32::try_from(height).unwrap_or(0);
+    put_chroma_block(
+        dst,
+        dst_stride,
+        &window,
+        width,
+        (wide, high),
+        BlockMc {
+            x: 0,
+            y: 0,
+            w: block.w,
+            h: block.h,
+            x_frac: block.x_frac,
+            y_frac: block.y_frac,
+        },
+    );
+}
+
+fn put_luma_extended(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    src_stride: usize,
+    pic: (i32, i32),
+    block: BlockMc,
+) {
+    let (pic_w, pic_h) = pic;
+    let width = block.w + 5;
+    let height = block.h + 5;
+    let mut window = [0u8; 21 * 21];
+    for row in 0..height {
+        for col in 0..width {
+            let sx = block.x - 2 + i32::try_from(col).unwrap_or(0);
+            let sy = block.y - 2 + i32::try_from(row).unwrap_or(0);
+            window[row * width + col] = clip_u8(sample(src, src_stride, pic_w, pic_h, sx, sy));
+        }
+    }
+    let wide = i32::try_from(width).unwrap_or(0);
+    let high = i32::try_from(height).unwrap_or(0);
+    put_luma_block(
+        dst,
+        dst_stride,
+        &window,
+        width,
+        (wide, high),
+        BlockMc {
+            x: 2,
+            y: 2,
+            w: block.w,
+            h: block.h,
+            x_frac: block.x_frac,
+            y_frac: block.y_frac,
+        },
+    );
 }
 
 fn put_luma_scalar(
@@ -994,6 +1055,7 @@ pub struct BiWeight {
     pub denom: i32,
 }
 
+#[inline(always)]
 pub fn weight_bi(a: u8, b: u8, weight: BiWeight) -> u8 {
     let BiWeight {
         w0,
@@ -1008,6 +1070,7 @@ pub fn weight_bi(a: u8, b: u8, weight: BiWeight) -> u8 {
     clip_u8(value)
 }
 
+#[inline(always)]
 pub fn avg(a: u8, b: u8) -> u8 {
     clip_u8((i32::from(a) + i32::from(b) + 1) >> 1)
 }

@@ -72,6 +72,27 @@ pub struct FinishedMux {
 }
 
 impl FinishedMux {
+    /// A family muxer returns this only after the bytes, the index, and the
+    /// durations are all done. [`FailedMux`] is the other outcome.
+    #[must_use]
+    pub fn complete(
+        durations: Vec<TrackDuration>,
+        index: IndexPlace,
+        mode: MuxMode,
+        interleaved: bool,
+        packets: Vec<Packet>,
+        payload_bytes: u64,
+    ) -> Self {
+        Self {
+            durations,
+            index,
+            mode,
+            interleaved,
+            packets,
+            payload_bytes,
+        }
+    }
+
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         true
@@ -118,6 +139,16 @@ pub struct FailedMux {
 }
 
 impl FailedMux {
+    /// A family muxer returns this when finish does not produce a file.
+    /// There is still no duration list.
+    #[must_use]
+    pub const fn incomplete(payload_bytes: u64, reason: MuxError) -> Self {
+        Self {
+            payload_bytes,
+            reason,
+        }
+    }
+
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         false
@@ -475,4 +506,43 @@ pub trait Mux {
     fn cancel(&mut self);
     fn finish(&mut self, durations: &[TrackDuration]) -> Result<FinishedMux, FailedMux>;
     fn status(&self) -> MuxStatus;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FailedMux, FinishedMux, IndexPlace, MuxError, MuxMode, TrackDuration};
+    use crate::stream::TrackId;
+    use cutlass_codec::{Packet, Timescale, Timestamp};
+
+    #[test]
+    fn a_family_can_finish_or_fail_without_a_draft() {
+        let packet = Packet::try_new(
+            0,
+            b"jpeg".to_vec(),
+            Timestamp::missing(),
+            Timescale::new(0),
+            true,
+        )
+        .expect("packet");
+        let done = FinishedMux::complete(
+            vec![TrackDuration {
+                track: TrackId::new(0),
+                timescale: Timescale::new(0),
+                ticks: 0,
+            }],
+            IndexPlace::Absent,
+            MuxMode::Progressive,
+            true,
+            vec![packet],
+            4,
+        );
+        assert!(done.is_complete());
+        assert_eq!(done.payload_bytes(), 4);
+        assert_eq!(done.durations()[0].ticks, 0);
+        assert!(done.durations()[0].timescale.ticks_per_second() == 0);
+
+        let failed = FailedMux::incomplete(0, MuxError::Incomplete);
+        assert!(!failed.is_complete());
+        assert!(failed.durations().is_none());
+    }
 }

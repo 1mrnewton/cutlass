@@ -85,9 +85,7 @@ mod tests {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
-        session
-            .apply(0, &[video_request("main", "clip")])
-            .unwrap();
+        session.apply(0, &[video_request("main", "clip")]).unwrap();
         assert_eq!(session.draft().materials.videos[0].path, "clip.mp4");
         assert_eq!(session.draft().tracks[0].segments.len(), 1);
         assert_eq!(session.draft().duration, Micros(1_000_000));
@@ -101,11 +99,13 @@ mod tests {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
-        let mut material = MaterialAudio::default();
-        material.id = "tone".into();
-        material.kind = "music".to_owned();
-        material.path = "tone.wav".to_owned();
-        material.duration = Micros(500_000);
+        let material = MaterialAudio {
+            id: "tone".into(),
+            kind: "music".to_owned(),
+            path: "tone.wav".to_owned(),
+            duration: Micros(500_000),
+            ..MaterialAudio::default()
+        };
         session
             .apply(
                 0,
@@ -145,9 +145,7 @@ mod tests {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
-        session
-            .apply(0, &[video_request("main", "clip")])
-            .unwrap();
+        session.apply(0, &[video_request("main", "clip")]).unwrap();
         let before = session.draft().clone();
         let error = session
             .apply(1, &[video_request("main", "clip")])

@@ -12,9 +12,9 @@
 
 #![forbid(unsafe_code)]
 
-mod catalog;
-mod package;
-mod source;
+pub mod catalog;
+pub mod package;
+pub mod source;
 
 pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,

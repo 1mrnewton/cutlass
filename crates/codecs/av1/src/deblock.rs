@@ -26,6 +26,11 @@ pub fn deblock_plane(
     plane: usize,
     edges: &Edges<'_>,
 ) {
+    // A frame with both luma levels at zero is left unchanged. A reference
+    // delta is not applied on top of that pair of zeros.
+    if edges.frame.lf_level[0] == 0 && edges.frame.lf_level[1] == 0 {
+        return;
+    }
     let sub_x = usize::from(plane > 0 && edges.sub_x);
     let sub_y = usize::from(plane > 0 && edges.sub_y);
     if plane > 0 && edges.frame.lf_level[plane + 1] == 0 {

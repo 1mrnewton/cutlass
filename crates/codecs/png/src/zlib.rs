@@ -761,7 +761,8 @@ fn best_match(
             break;
         }
         let len = match_at(src, index, earlier);
-        if better_match(len, index - earlier, matched, distance) {
+        let back = index - earlier;
+        if worth_encoding(len, back) && better_match(len, back, matched, distance) {
             matched = len;
             distance = (index - earlier) as u16;
         }
@@ -796,7 +797,7 @@ fn probe_rows(
             break;
         }
         let len = match_at(src, index, index - back);
-        if better_match(len, back, *matched, *distance) {
+        if worth_encoding(len, back) && better_match(len, back, *matched, *distance) {
             *matched = len;
             *distance = u16::try_from(back).unwrap_or(0);
         }
@@ -808,6 +809,11 @@ fn probe_rows(
 
 fn better_match(len: usize, back: usize, matched: usize, distance: u16) -> bool {
     len > matched || (len == matched && len >= 3 && back < usize::from(distance))
+}
+
+/// A length-3 match far from here costs more bits than three literals.
+fn worth_encoding(len: usize, back: usize) -> bool {
+    len > 3 || (len == 3 && back <= 4_096)
 }
 
 fn insert_hash(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) {
@@ -1303,6 +1309,31 @@ mod tests {
             .any(|token| token & super::LIT_FLAG == 0 && (token & 0x1ff) >= 15);
         assert!(long, "{tokens:?}");
         let ours = deflate(sample);
+        assert_eq!(inflate(&ours, sample.len()).expect("inflate"), sample);
+        let back = python_zlib(&ours, false).expect("python");
+        assert_eq!(back, sample);
+    }
+
+    #[test]
+    fn a_far_three_byte_match_is_left_as_literals() {
+        let mut sample: Vec<u8> = (0..5_000)
+            .map(|index| (index as u8).wrapping_mul(3).wrapping_add(11))
+            .collect();
+        sample[10] = 9;
+        sample[11] = 8;
+        sample[12] = 7;
+        sample[4_500] = 9;
+        sample[4_501] = 8;
+        sample[4_502] = 7;
+        let tokens = super::tokenize(&sample, &[]);
+        for token in &tokens {
+            if token & super::LIT_FLAG == 0 {
+                let len = token & 0x1ff;
+                let distance = token >> 9;
+                assert!(len > 3 || distance <= 4_096, "{token:#x}");
+            }
+        }
+        let ours = deflate(&sample);
         assert_eq!(inflate(&ours, sample.len()).expect("inflate"), sample);
         let back = python_zlib(&ours, false).expect("python");
         assert_eq!(back, sample);

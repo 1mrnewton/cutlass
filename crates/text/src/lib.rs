@@ -8,11 +8,13 @@
 
 mod atlas;
 mod layout;
+mod mesh;
 mod richtext;
 mod shape;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
+pub use mesh::{GlyphRecord, TextMesh, build, build_text};
 pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
 
 use std::error::Error;

@@ -13,5 +13,10 @@ cutlass-container = { path = "../container", version = "0.1.0" }
 cutlass-codec = { path = "../codec", version = "0.1.0" }
 cutlass-model = { path = "../model", version = "0.1.0" }
 
+[dev-dependencies]
+cutlass-playback = { path = "../playback", version = "0.1.0" }
+cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
+cutlass-session = { path = "../session", version = "0.1.0" }
+
 [lints]
 workspace = true

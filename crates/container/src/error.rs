@@ -300,6 +300,8 @@ pub enum MuxError {
     AlreadyFinished,
     /// A track is missing from the duration list.
     Incomplete,
+    /// The family recognized the stream and will not store it.
+    Rejected { message: String },
 }
 
 impl fmt::Display for MuxError {
@@ -335,6 +337,7 @@ impl fmt::Display for MuxError {
             Self::NotBuilding => formatter.write_str("mux is not accepting writes"),
             Self::AlreadyFinished => formatter.write_str("mux already finished"),
             Self::Incomplete => formatter.write_str("mux duration list does not cover the streams"),
+            Self::Rejected { message } => write!(formatter, "mux rejected the stream: {message}"),
         }
     }
 }
@@ -451,5 +454,13 @@ mod tests {
             assert!(!error.packet_returned());
             assert!(error.streams_remain());
         }
+    }
+
+    #[test]
+    fn a_rejected_mux_names_the_reason() {
+        let error = super::MuxError::Rejected {
+            message: "wav cannot store this codec".to_owned(),
+        };
+        assert!(error.to_string().contains("wav cannot store this codec"));
     }
 }

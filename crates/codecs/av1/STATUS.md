@@ -8,7 +8,7 @@ This record is the scope written before the implementation. The readiness sectio
 
 - AOMedia AV1 Bitstream & Decoding Process Specification, version 1.0.0 with Errata 1 (8 January 2019). Tag `v1.0.0-errata1`. This supersedes 1.0.0. The syntax, decoding process, parsing process, and the default CDF, scan, quantizer, and block-size tables in that document are normative.
 - Annex A of that specification for Main profile and levels. Annex B is the length-delimited temporal-unit format. This crate reads low-overhead OBUs (`obu_has_size_field = 1`), which is what an IVF frame and an ISOBMFF sample carry after the container strips its own length.
-- There is no later AV1 bitstream amendment that changes the 1.0.0-errata1 decoding process. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska are container bindings. They are out of this crate. Film grain synthesis is section 7.17 of the same specification. It is applied to output pictures and is not stored in reference frames.
+- There is no later AV1 bitstream amendment that changes the 1.0.0-errata1 decoding process. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska are container bindings. They are out of this crate. Film grain synthesis is part of the output process in that specification. It is applied to output pictures and is not stored in reference frames.
 
 ## Sources read before the Cutlass code
 
@@ -24,7 +24,7 @@ Progressive 8-bit 4:2:0, `seq_profile` 0, one operating point, dimensions up to 
 
 Main profile allows 10-bit 4:2:0 and monochrome. This crate rejects both. It is not a Main-profile-compliant decoder. The rejection is a typed error before the frame is published.
 
-Film grain is legal in profile 0 and is not required to be switched on. A stream that turns it on is rejected. The picture is not published with that stage skipped. Consequence: a production encode that leaves film grain on will not open. Wiener, self-guided, and switchable restoration are applied for 8-bit 4:2:0 after CDEF. Super resolution is applied for 8-bit 4:2:0: the frame is reconstructed at the coded width and the shown picture is the upscaled width. The encoder leaves both off. A frame whose two luma loop-filter levels are zero is left unfiltered, including when a reference delta is present.
+Film grain is legal in profile 0 and is not required to be switched on. When a frame sends its own parameters, the noise is added to the shown picture and the reference keeps the picture from before that step. A frame that copies grain parameters from another frame is rejected, and a show-existing frame does not re-apply the reference's grain. Wiener, self-guided, and switchable restoration are applied for 8-bit 4:2:0 after CDEF. Super resolution is applied for 8-bit 4:2:0: the frame is reconstructed at the coded width and the shown picture is the upscaled width. The encoder leaves both off. A frame whose two luma loop-filter levels are zero is left unfiltered, including when a reference delta is present.
 
 Also rejected, with the same rule: 4:2:2, 4:4:4, 12-bit, scalability beyond operating point 0, large-scale tile lists, warped motion, OBMC, palette, intra block copy, filter intra, masked and distance-weighted compound, 128×128 superblocks, quantization matrices, screen-content tools, and lossless (`base_q_idx` 0, which forces 4×4 Walsh-Hadamard). The encoder does not emit them. Chroma-from-luma is implemented for profile 0 and matched on an `aomenc` stream that uses it. CDEF is applied after the loop filter for 8-bit 4:2:0. The encoder still leaves it off.
 
@@ -59,17 +59,18 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` keyframe whose luma uses the self-guided restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
 - One embedded `aomenc` keyframe whose luma uses the Wiener restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
 - One embedded `aomenc` keyframe whose luma chooses the restoration filter per unit. Chroma selects no restoration. The shown picture matches dav1d.
+- Film grain on embedded `aomenc` 64×64 frames: luma-only grain, lag-1 chroma grain with overlap, chroma grain scaled from luma at lag 2, and a second frame that predicts the first. The shown pictures match dav1d. The second frame matches only if the reference was stored before grain.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 
 Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d. Within-frame CDF adaptation is implemented and was not the path this inter stream used.
 
-Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, film grain, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
+Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
 
 ### Encoder
 
 Partial. It emits a temporal delimiter, a sequence header, and a keyframe of DC-predicted 4×4 and 8×8 blocks with the 2D DCT, loop filter off, and CDF update off. A repeated picture is a frame that shows reference slot 0. dav1d 1.5.3 accepted one 64×64 step bitstream and its pixels matched this decoder. A constant-128 picture is exact. The same step at quality index 40 has luma PSNR at least 28 dB against the source. Thirty 320×180 frames at 500 kbit/s landed inside 0.60×–1.40× of the target. One scaled 64×64 frame from `../local-files` round-tripped through this encoder and this decoder.
 
-The encoder does not emit inter frames, film grain, super resolution, restoration, or CDEF.
+The encoder does not emit inter frames, film grain, super resolution, restoration, or CDEF. The decoder applies film grain; the encoder still leaves it off.
 
 ### Gates still open
 

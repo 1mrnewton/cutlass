@@ -786,6 +786,10 @@ fn decode_slice(
     } = cursor;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0)?;
+    // A redundant picture repeats one that was already decoded. It is not displayed.
+    if header.redundant > 0 {
+        return Ok(false);
+    }
     let sps_id = usize::from(header.sps_id);
     let Some(sps) = sets.sps[sps_id].clone() else {
         return Err(bits.malformed("missing sps"));
@@ -876,6 +880,7 @@ struct Header {
     num_ref_l0: usize,
     num_ref_l1: usize,
     nal_ref: bool,
+    redundant: u32,
     no_output_prior: bool,
     long_term_ref: bool,
     adaptive: bool,
@@ -939,8 +944,12 @@ fn read_header(
             delta_poc[1] = bits.se()?;
         }
     }
+    let mut redundant = 0u32;
     if pps.redundant_pic_cnt_present {
-        let _ = bits.ue()?;
+        redundant = bits.ue()?;
+        if redundant > 127 {
+            return Err(bits.malformed("redundant_pic_cnt"));
+        }
     }
     let mut spatial_direct = true;
     if kind == 1 {
@@ -1099,6 +1108,7 @@ fn read_header(
         num_ref_l0,
         num_ref_l1,
         nal_ref,
+        redundant,
         no_output_prior,
         long_term_ref,
         adaptive,

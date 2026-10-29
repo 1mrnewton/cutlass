@@ -1453,10 +1453,56 @@ impl<'a> CabacEnc<'a> {
 #[cfg(test)]
 mod tests {
     use super::H264Encoder;
-    use cutlass_decode::{CodecId, CodecParams, VideoDecoder, Yuv420p};
+    use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
     use cutlass_encode::{VideoEncoder, VideoInput};
 
     use crate::dec::H264Decoder;
+
+    #[test]
+    fn redundant_picture_is_discarded() {
+        let sps = super::sequence(1, 1, 16, 16);
+        let mut pps = super::Writer::new();
+        pps.ue(0);
+        pps.ue(0);
+        pps.bit(true);
+        pps.bit(false);
+        pps.ue(0);
+        pps.ue(0);
+        pps.ue(0);
+        pps.bit(false);
+        pps.u(2, 0);
+        pps.se(0);
+        pps.se(0);
+        pps.se(0);
+        pps.bit(true);
+        pps.bit(false);
+        pps.bit(true);
+        pps.bit(true);
+        pps.bit(false);
+        pps.se(0);
+        pps.trailing();
+        let mut slice = super::Writer::new();
+        slice.ue(0);
+        slice.ue(2);
+        slice.ue(0);
+        slice.u(4, 0);
+        slice.ue(0);
+        slice.u(4, 0);
+        slice.ue(1);
+        slice.bit(false);
+        slice.bit(false);
+        slice.se(0);
+        slice.ue(1);
+        slice.trailing();
+        let mut au = crate::nal::annex_b_nal(3, 7, &sps);
+        au.extend(crate::nal::annex_b_nal(3, 8, &pps.bytes));
+        au.extend(crate::nal::annex_b_nal(3, 5, &slice.bytes));
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let pictures = decoder.push(&Packet::video(au, 0, 1, 30, true)).unwrap();
+        assert!(pictures.is_empty());
+    }
 
     #[test]
     fn cabac_decision_round_trips() {

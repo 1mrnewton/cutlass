@@ -6,7 +6,7 @@ About **55%** of the scope in `SCOPE.md` is done. The decoder is most of that. T
 
 | Part | Done | Where it stands |
 | --- | --- | --- |
-| Decoder | ~80% | Progressive 8-bit 4:2:0 Baseline, Main, and High. CABAC and CAVLC. I, P, and B, skip, spatial direct, 4×4 and 8×8 transform, deblock, and explicit and implicit weighted prediction. The tests that build those streams match ffmpeg inside the cropped rectangle. An IDR returns pictures that were still waiting, unless the slice says to drop them, and the IDR itself stays displayed. Picture order count types 0, 1, and 2 are all applied. |
+| Decoder | ~80% | Progressive 8-bit 4:2:0 Baseline, Main, and High. CABAC and CAVLC. I, P, and B, skip, spatial direct, 4×4 and 8×8 transform, deblock, and explicit and implicit weighted prediction. The tests that build those streams match ffmpeg inside the cropped rectangle. An IDR returns pictures that were still waiting, unless the slice says to drop them, and the IDR itself stays displayed. Picture order count types 0, 1, and 2 are all applied. Annex B and length prefixes of 1, 2, and 4 bytes are accepted. |
 | Encoder | ~35% | High CABAC intra 4×4. A P skip when the next picture equals the reconstruction. A P slice of 16×16 blocks with a zero motion vector and a residual. FFmpeg accepts that residual, including a repeated ramp. |
 | Release evidence | ~20% | No readiness report. No 30-minute fuzz run. No 720p speed or memory measurement. The bitrate and PSNR gates have not been run. |
 
@@ -16,7 +16,6 @@ Current work is the decoder. The encoder stays where it is until these decoder g
 
 - Temporal direct. Spatial direct is what the tests use.
 - Memory-management control operations. The syntax is consumed. Marking is sliding-window only.
-- A checked pass for 1-byte and 2-byte length prefixes. Annex B and 4-byte lengths work.
 
 ## Encoder, still required
 

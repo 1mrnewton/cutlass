@@ -1166,7 +1166,9 @@ fn add_scaled(
 #[cfg(test)]
 mod tests {
     use super::H264Decoder;
-    use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder};
+    use crate::H264Encoder;
+    use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
+    use cutlass_encode::{VideoEncoder, VideoInput};
     use std::process::Command;
 
     #[test]
@@ -1399,6 +1401,82 @@ mod tests {
                 &reference[start + y_len + c_len..start + frame],
             );
         }
+    }
+
+    #[test]
+    fn one_and_two_byte_lengths_match_annex_b() {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let packets = encoder
+            .push(&VideoInput {
+                picture: Yuv420p::solid(16, 16, 40, 80, 160).unwrap(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                force_keyframe: true,
+            })
+            .unwrap();
+        let annex = &packets[0].data;
+        let mut annex_decoder = H264Decoder::open(&params).unwrap();
+        let want = annex_decoder
+            .push(&Packet::video(annex.clone(), 0, 1, 30, true))
+            .unwrap();
+        assert_eq!(want.len(), 1);
+        for size in [1u8, 2] {
+            let prefixed = length_prefix(annex, size);
+            let mut sized = params.clone();
+            sized.nal_length_size = size;
+            let mut decoder = H264Decoder::open(&sized).unwrap();
+            let got = decoder
+                .push(&Packet::video(prefixed, 0, 1, 30, true))
+                .unwrap();
+            assert_eq!(got.len(), 1, "length size {size}");
+            assert_eq!(got[0].picture.y(), want[0].picture.y());
+            assert_eq!(got[0].picture.u(), want[0].picture.u());
+            assert_eq!(got[0].picture.v(), want[0].picture.v());
+        }
+    }
+
+    fn length_prefix(annex_b: &[u8], length_size: u8) -> Vec<u8> {
+        let mut payloads = Vec::new();
+        let mut i = 0;
+        while i + 3 < annex_b.len() {
+            if annex_b[i] == 0 && annex_b[i + 1] == 0 && annex_b[i + 2] == 1 {
+                let start = i + 3;
+                let mut j = start;
+                while j + 3 < annex_b.len()
+                    && !(annex_b[j] == 0 && annex_b[j + 1] == 0 && annex_b[j + 2] == 1)
+                {
+                    j += 1;
+                }
+                let end = if j + 3 < annex_b.len() {
+                    if j > start && annex_b[j - 1] == 0 {
+                        j - 1
+                    } else {
+                        j
+                    }
+                } else {
+                    annex_b.len()
+                };
+                payloads.push(&annex_b[start..end]);
+                i = start;
+            } else {
+                i += 1;
+            }
+        }
+        let mut out = Vec::new();
+        for payload in payloads {
+            assert!(
+                payload.len() < 1usize << (8 * usize::from(length_size)),
+                "nal does not fit in a {length_size}-byte length"
+            );
+            for shift in (0..length_size).rev() {
+                out.push((payload.len() >> (8 * usize::from(shift))) as u8);
+            }
+            out.extend_from_slice(payload);
+        }
+        out
     }
 
     fn access_units(data: &[u8]) -> Vec<Vec<u8>> {

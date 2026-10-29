@@ -1892,7 +1892,6 @@ impl<'a, 'r> Tile<'a, 'r> {
             local_row,
             local_col,
         } = at;
-        let (sub_x, sub_y) = (block.sub_x, block.sub_y);
         let mode = if block.plane == 0 {
             block.y_mode
         } else if block.uv_mode == UV_CFL_PRED {
@@ -1907,16 +1906,11 @@ impl<'a, 'r> Tile<'a, 'r> {
         };
         let have_left = block.avail_l || block.x4 > 0;
         let have_above = block.avail_u || block.y4 > 0;
-        let above_right = self.decoded_at(
-            block.plane,
-            (local_row >> sub_y) - 1,
-            (local_col >> sub_x) + block.step_x as i32,
-        );
-        let below_left = self.decoded_at(
-            block.plane,
-            (local_row >> sub_y) + block.step_y as i32,
-            (local_col >> sub_x) - 1,
-        );
+        // local_row and local_col are already in this plane's 4×4 units.
+        let above_right =
+            self.decoded_at(block.plane, local_row - 1, local_col + block.step_x as i32);
+        let below_left =
+            self.decoded_at(block.plane, local_row + block.step_y as i32, local_col - 1);
         let filter_type = self.smooth_neighbor(block.plane, block.row, block.col);
         let log_w = TX_WIDTH_LOG2[block.tx] as usize;
         let log_h = TX_HEIGHT_LOG2[block.tx] as usize;

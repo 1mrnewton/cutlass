@@ -7,7 +7,7 @@ use crate::deblock::{Edges, deblock_plane};
 use crate::dims::{
     ADJUSTED_TX_SIZE, ADST_FLIPADST, BLOCK_8X8, BLOCK_128X128, COEFF_BASE_CTX_OFFSET, DC_PRED,
     DCT_DCT, DCT_FLIPADST, FLIPADST_ADST, FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT,
-    H_FLIPADST, MAX_TX_DEPTH, MAX_TX_SIZE_RECT, MI_HEIGHT_LOG2, MI_WIDTH_LOG2, MODE_TO_TXFM,
+    H_FLIPADST, IDTX, MAX_TX_DEPTH, MAX_TX_SIZE_RECT, MI_HEIGHT_LOG2, MI_WIDTH_LOG2, MODE_TO_TXFM,
     NUM_4X4_HIGH, NUM_4X4_WIDE, PARTITION_HORZ, PARTITION_HORZ_4, PARTITION_HORZ_A,
     PARTITION_HORZ_B, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, PARTITION_VERT_4,
     PARTITION_VERT_A, PARTITION_VERT_B, SPLIT_TX_SIZE, TRANSFORM_ROW_SHIFT, TX_4X4, TX_16X16,
@@ -337,6 +337,7 @@ struct Tile<'a, 'r> {
     left_dc: [Vec<u8>; 3],
     decoded: [Vec<u8>; 3],
     base_q: u8,
+    qm: [u8; 3],
     deltas: [i32; 5],
     tx_select: bool,
     reduced_tx: bool,
@@ -496,6 +497,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             decoded: [vec![0; 40 * 40], vec![0; 40 * 40], vec![0; 40 * 40]],
             base_q: frame.base_q,
+            qm: frame.qm,
             deltas: [
                 frame.delta_y_dc,
                 frame.delta_u_dc,
@@ -2438,10 +2440,12 @@ impl<'a, 'r> Tile<'a, 'r> {
         };
         let dc = self.quantizer(plane, true);
         let ac = self.quantizer(plane, false);
+        let qm_level = if tx_type < IDTX { self.qm[plane] } else { 15 };
         let mut coeff = vec![0i32; w * h];
         for row in 0..th {
             for col in 0..tw {
                 let q = if row == 0 && col == 0 { dc } else { ac };
+                let q = crate::qm::scale(q, qm_level, plane > 0, tx, row, col, tw);
                 let level = i64::from(quant[row * tw + col]);
                 let dq = level * i64::from(q);
                 let signed = if dq < 0 { -1 } else { 1 };

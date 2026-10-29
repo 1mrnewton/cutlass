@@ -124,6 +124,8 @@ pub struct FrameInfo {
     pub delta_v_dc: i32,
     pub delta_v_ac: i32,
     pub using_qmatrix: bool,
+    /// Quantizer-matrix level per plane. 15 means the matrix is not applied.
+    pub qm: [u8; 3],
     pub tx_select: bool,
     pub reduced_tx: bool,
     pub reference_select: bool,
@@ -700,11 +702,14 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         (delta_u_dc, delta_u_ac)
     };
     let using_qmatrix = bits.read_bool()?;
-    if using_qmatrix {
-        return Err(CodecError::Unsupported {
-            what: "quantizer matrix",
-        });
-    }
+    let qm = if using_qmatrix {
+        let y = bits.read(4)? as u8;
+        let u = bits.read(4)? as u8;
+        let v = if diff_uv { bits.read(4)? as u8 } else { u };
+        [y, u, v]
+    } else {
+        [15, 15, 15]
+    };
     let segmentation = bits.read_bool()?;
     if segmentation {
         return Err(CodecError::Unsupported {
@@ -811,7 +816,8 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         delta_u_ac,
         delta_v_dc,
         delta_v_ac,
-        using_qmatrix: false,
+        using_qmatrix,
+        qm,
         tx_select,
         reduced_tx,
         reference_select: false,
@@ -1184,6 +1190,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         delta_v_dc: 0,
         delta_v_ac: 0,
         using_qmatrix: false,
+        qm: [15, 15, 15],
         tx_select: false,
         reduced_tx: false,
         reference_select: false,
@@ -1260,6 +1267,7 @@ pub(crate) fn header_is_addressable(
         .wrapping_add(frame.tile_cols)
         .wrapping_add(frame.tile_size_bytes)
         .wrapping_add(u32::from(frame.using_qmatrix))
+        .wrapping_add(u32::from(frame.qm[0]))
         .wrapping_add(u32::from(frame.reference_select))
         .wrapping_add(u32::from(frame.skip_mode))
         .wrapping_add(u32::from(frame.allow_intrabc))

@@ -103,7 +103,7 @@ In-process campaign, not libFuzzer. Target: `probe`, `StillDemux::open`, `read_p
 
 A 3 second smoke exercised 2,232,259 seeds with no panic.
 
-The recorded campaign:
+The recorded campaign ran 1800 seconds on the same machine and exercised 1,326,603,765 seeds. Exit status 0. No panic, no finding, and no minimized regression.
 
 ```text
 STILL_FUZZ_SECS=1800 cargo test --release -p cutlass-still --offline --test external -- --ignored --nocapture
@@ -111,4 +111,15 @@ STILL_FUZZ_SECS=1800 cargo test --release -p cutlass-still --offline --test exte
 
 ## Builds
 
-Commands from this checkout. Results are filled in after they run.
+Commands from this checkout, exit status 0:
+
+```text
+cargo fmt --all -- --check
+cargo lint
+cargo test --workspace --offline
+cargo deny check
+```
+
+`cargo deny check` reported existing duplicate-crate warnings and then `advisories ok, bans ok, licenses ok, sources ok`. `cargo test --workspace` does not pass `--all-targets`, so examples and benches were not a separate run. The ignored fuzz test is not part of that command. It was run on its own, above.
+
+Engine playback, export, and ImageIO were not run. The JPEG, WebP, and GIF codec crates were not edited.

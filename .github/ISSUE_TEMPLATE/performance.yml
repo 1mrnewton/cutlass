@@ -1,0 +1,46 @@
+name: Performance
+description: A hot path whose cost has to stay bounded
+title: "[performance] "
+labels: ["performance", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Name the workload and the bound. A guess about speed is not this issue.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - timeline
+        - playback
+        - export
+        - engine
+        - compositor
+        - codec
+        - container
+        - text
+        - audio
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload
+      description: The frame, sample count, or draft size this has to handle.
+    validations:
+      required: true
+  - type: textarea
+    id: bound
+    attributes:
+      label: Bound
+      description: The scan, allocation, or timing limit. A timing assert must stay coarse.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: How the bound is measured, and the test or benchmark that fails when the cost jumps.
+    validations:
+      required: true

@@ -1,0 +1,62 @@
+name: Codec
+description: A decoder, an encoder, or a gap in a codec already started
+title: "[codec] "
+labels: ["feature", "area:codec", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One profile, tool, or gate. The implementation stays native Rust in that codec's crate. A platform framework is a separate issue.
+  - type: dropdown
+    id: codec
+    attributes:
+      label: Codec
+      options:
+        - H.264
+        - HEVC
+        - AV1
+        - VP8
+        - VP9
+        - MPEG-4 Part 2
+        - MPEG-2 video
+        - Motion JPEG
+        - ProRes
+        - AAC
+        - Opus
+        - MP3
+        - FLAC
+        - PCM
+        - Vorbis
+        - ALAC
+        - AC-3
+        - JPEG
+        - PNG
+        - WebP
+        - GIF
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction
+      options:
+        - decode
+        - encode
+        - both
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: The profile or tool, the pixel or sample format, and what an independent stream must prove.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: Support-matrix row, independent comparison, hostile input, factory registration, and the test command.
+    validations:
+      required: true

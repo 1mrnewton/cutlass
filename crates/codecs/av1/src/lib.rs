@@ -1,8 +1,8 @@
 //! AV1 encoder and decoder.
 //!
 //! The support record is `STATUS.md` next to this crate. Film grain, super
-//! resolution, loop restoration, CDEF, and bit depths other than 8 are
-//! rejected. Inter frames are rejected by the tile decoder.
+//! resolution, loop restoration, CDEF, lossless, and bit depths other than 8
+//! are rejected. Compound, warped, and overlapped motion are rejected.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +13,7 @@ mod dims;
 mod encode;
 mod header;
 mod idct;
+mod inter;
 mod predict;
 mod symbol;
 mod tables;

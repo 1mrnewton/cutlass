@@ -17,25 +17,35 @@ use crate::dims::{
 };
 use crate::header::{FrameInfo, INTER_FRAME, Sequence};
 use crate::idct::inverse_2d;
+use crate::inter::{
+    BlockPlace, Candidates, GLOBALMV, InterSample, LAST_FRAME, Motion, MotionGrid, NEARESTMV,
+    NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP, find_stack, inter_set_allows, inter_tx_set,
+    inter_tx_type, predict,
+};
 use crate::predict::{ChromaFromLuma, IntraPred, chroma_from_luma, predict_intra};
 use crate::symbol::SymbolDecoder;
 use crate::tables::{
     AC_QLOOKUP, DC_QLOOKUP, DEFAULT_ANGLE_DELTA_CDF, DEFAULT_CFL_ALPHA_CDF, DEFAULT_CFL_SIGN_CDF,
     DEFAULT_COEFF_BASE_CDF, DEFAULT_COEFF_BASE_EOB_CDF, DEFAULT_COEFF_BR_CDF, DEFAULT_DC_SIGN_CDF,
-    DEFAULT_EOB_EXTRA_CDF, DEFAULT_EOB_PT_16_CDF, DEFAULT_EOB_PT_32_CDF, DEFAULT_EOB_PT_64_CDF,
-    DEFAULT_EOB_PT_128_CDF, DEFAULT_EOB_PT_256_CDF, DEFAULT_EOB_PT_512_CDF,
-    DEFAULT_EOB_PT_1024_CDF, DEFAULT_INTRA_FRAME_Y_MODE_CDF, DEFAULT_INTRA_TX_TYPE_SET1_CDF,
-    DEFAULT_INTRA_TX_TYPE_SET2_CDF, DEFAULT_PARTITION_W8_CDF, DEFAULT_PARTITION_W16_CDF,
+    DEFAULT_DRL_MODE_CDF, DEFAULT_EOB_EXTRA_CDF, DEFAULT_EOB_PT_16_CDF, DEFAULT_EOB_PT_32_CDF,
+    DEFAULT_EOB_PT_64_CDF, DEFAULT_EOB_PT_128_CDF, DEFAULT_EOB_PT_256_CDF, DEFAULT_EOB_PT_512_CDF,
+    DEFAULT_EOB_PT_1024_CDF, DEFAULT_INTER_TX_TYPE_SET1_CDF, DEFAULT_INTER_TX_TYPE_SET2_CDF,
+    DEFAULT_INTER_TX_TYPE_SET3_CDF, DEFAULT_INTERP_FILTER_CDF, DEFAULT_INTRA_FRAME_Y_MODE_CDF,
+    DEFAULT_INTRA_TX_TYPE_SET1_CDF, DEFAULT_INTRA_TX_TYPE_SET2_CDF, DEFAULT_IS_INTER_CDF,
+    DEFAULT_MV_BIT_CDF, DEFAULT_MV_CLASS_CDF, DEFAULT_MV_CLASS0_BIT_CDF, DEFAULT_MV_CLASS0_FR_CDF,
+    DEFAULT_MV_CLASS0_HP_CDF, DEFAULT_MV_FR_CDF, DEFAULT_MV_HP_CDF, DEFAULT_MV_JOINT_CDF,
+    DEFAULT_MV_SIGN_CDF, DEFAULT_NEW_MV_CDF, DEFAULT_PARTITION_W8_CDF, DEFAULT_PARTITION_W16_CDF,
     DEFAULT_PARTITION_W32_CDF, DEFAULT_PARTITION_W64_CDF, DEFAULT_PARTITION_W128_CDF,
-    DEFAULT_SCAN_4X4, DEFAULT_SCAN_4X8, DEFAULT_SCAN_4X16, DEFAULT_SCAN_8X4, DEFAULT_SCAN_8X8,
-    DEFAULT_SCAN_8X16, DEFAULT_SCAN_8X32, DEFAULT_SCAN_16X4, DEFAULT_SCAN_16X8, DEFAULT_SCAN_16X16,
-    DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16, DEFAULT_SCAN_32X32,
-    DEFAULT_SKIP_CDF, DEFAULT_TX_8X8_CDF, DEFAULT_TX_16X16_CDF, DEFAULT_TX_32X32_CDF,
-    DEFAULT_TX_64X64_CDF, DEFAULT_TXB_SKIP_CDF, DEFAULT_UV_MODE_CFL_ALLOWED_CDF,
-    DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF, MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16,
-    MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16,
-    MROW_SCAN_4X4, MROW_SCAN_4X8, MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16,
-    MROW_SCAN_16X4, MROW_SCAN_16X8, MROW_SCAN_16X16, SIG_REF_DIFF_OFFSET,
+    DEFAULT_REF_MV_CDF, DEFAULT_SCAN_4X4, DEFAULT_SCAN_4X8, DEFAULT_SCAN_4X16, DEFAULT_SCAN_8X4,
+    DEFAULT_SCAN_8X8, DEFAULT_SCAN_8X16, DEFAULT_SCAN_8X32, DEFAULT_SCAN_16X4, DEFAULT_SCAN_16X8,
+    DEFAULT_SCAN_16X16, DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16,
+    DEFAULT_SCAN_32X32, DEFAULT_SINGLE_REF_CDF, DEFAULT_SKIP_CDF, DEFAULT_TX_8X8_CDF,
+    DEFAULT_TX_16X16_CDF, DEFAULT_TX_32X32_CDF, DEFAULT_TX_64X64_CDF, DEFAULT_TXB_SKIP_CDF,
+    DEFAULT_UV_MODE_CFL_ALLOWED_CDF, DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF, DEFAULT_Y_MODE_CDF,
+    DEFAULT_ZERO_MV_CDF, MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16, MCOL_SCAN_8X4,
+    MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16, MROW_SCAN_4X4,
+    MROW_SCAN_4X8, MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16, MROW_SCAN_16X4,
+    MROW_SCAN_16X8, MROW_SCAN_16X16, SIG_REF_DIFF_OFFSET,
 };
 
 pub(crate) const MODE_CTX: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
@@ -50,10 +60,37 @@ pub struct DecodedPicture {
 }
 
 pub fn decode_tile(sequence: &Sequence, frame: &FrameInfo) -> Result<DecodedPicture, CodecError> {
-    if frame.frame_type == INTER_FRAME || !frame.intra {
-        return Err(CodecError::Unsupported {
-            what: "inter frame",
-        });
+    decode_with_refs(sequence, frame, &[])
+}
+
+pub fn decode_with_refs(
+    sequence: &Sequence,
+    frame: &FrameInfo,
+    refs: &[Option<RefView<'_>>],
+) -> Result<DecodedPicture, CodecError> {
+    if frame.frame_type == INTER_FRAME {
+        if sequence.enable_order_hint {
+            return Err(CodecError::Unsupported { what: "order hint" });
+        }
+        if sequence.enable_interintra {
+            return Err(CodecError::Unsupported { what: "interintra" });
+        }
+        if !frame.error_resilient {
+            return Err(CodecError::Unsupported { what: "cdf carry" });
+        }
+        if frame.tx_select {
+            return Err(CodecError::Unsupported {
+                what: "variable transform size",
+            });
+        }
+        if frame.motion_mode_switchable {
+            return Err(CodecError::Unsupported {
+                what: "overlapped motion",
+            });
+        }
+    }
+    if frame.lossless {
+        return Err(CodecError::Unsupported { what: "lossless" });
     }
     if frame.allow_screen {
         return Err(CodecError::Unsupported {
@@ -74,7 +111,7 @@ pub fn decode_tile(sequence: &Sequence, frame: &FrameInfo) -> Result<DecodedPict
     let buf_w = (frame.mi_cols as usize).saturating_mul(4);
     let buf_h = (frame.mi_rows as usize).saturating_mul(4);
     let bytes = frame.tile.clone();
-    let mut tile = Tile::new(sequence, frame, &bytes, buf_w, buf_h)?;
+    let mut tile = Tile::new(sequence, frame, &bytes, buf_w, buf_h, refs)?;
     let sb = if sequence.use_128 { 32 } else { SB4 };
     let mut row = 0;
     while row < tile.mi_rows {
@@ -130,7 +167,7 @@ fn crop(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
     out
 }
 
-struct Tile<'a> {
+struct Tile<'a, 'r> {
     symbols: SymbolDecoder<'a>,
     update: bool,
     y: Vec<u8>,
@@ -165,6 +202,30 @@ struct Tile<'a> {
     max_luma_h: usize,
     sub_x: bool,
     sub_y: bool,
+    inter_frame: bool,
+    force_integer: bool,
+    allow_hp: bool,
+    filter_switchable: bool,
+    interpolation: u8,
+    dual_filter: bool,
+    frame_refs: [u8; 7],
+    visible_w: usize,
+    visible_h: usize,
+    ref_y: [&'r [u8]; 8],
+    ref_u: [&'r [u8]; 8],
+    ref_v: [&'r [u8]; 8],
+    ref_w: [usize; 8],
+    ref_h: [usize; 8],
+    ref_ok: [bool; 8],
+    mvs: Vec<Motion>,
+    block_ref: Vec<i8>,
+    block_ref1: Vec<i8>,
+    inter_flag: Vec<u8>,
+    interp: Vec<[u8; 2]>,
+    tx_kind: Vec<u8>,
+    coding_inter: bool,
+    cur_luma_row: usize,
+    cur_luma_col: usize,
     cdfs: Cdfs,
 }
 
@@ -187,15 +248,36 @@ struct Cdfs {
     coeff_br: Vec<u16>,
     cfl_sign: Vec<u16>,
     cfl_alpha: Vec<u16>,
+    is_inter: Vec<u16>,
+    single_ref: Vec<u16>,
+    new_mv: Vec<u16>,
+    zero_mv: Vec<u16>,
+    ref_mv: Vec<u16>,
+    drl: Vec<u16>,
+    mv_joint: Vec<u16>,
+    mv_sign: Vec<u16>,
+    mv_class: Vec<u16>,
+    mv_class0_bit: Vec<u16>,
+    mv_class0_fr: Vec<u16>,
+    mv_class0_hp: Vec<u16>,
+    mv_bit: Vec<u16>,
+    mv_fr: Vec<u16>,
+    mv_hp: Vec<u16>,
+    interp_filter: Vec<u16>,
+    inter_tx1: Vec<u16>,
+    inter_tx2: Vec<u16>,
+    inter_tx3: Vec<u16>,
+    intra_y: Vec<u16>,
 }
 
-impl<'a> Tile<'a> {
+impl<'a, 'r> Tile<'a, 'r> {
     fn new(
         sequence: &Sequence,
         frame: &FrameInfo,
         bytes: &'a [u8],
         width: usize,
         height: usize,
+        refs: &[Option<RefView<'r>>],
     ) -> Result<Self, CodecError> {
         let mi_cols = frame.mi_cols as usize;
         let mi_rows = frame.mi_rows as usize;
@@ -222,6 +304,22 @@ impl<'a> Tile<'a> {
             61..=120 => 2,
             _ => 3,
         };
+        let mut ref_y: [&'r [u8]; 8] = [&[]; 8];
+        let mut ref_u: [&'r [u8]; 8] = [&[]; 8];
+        let mut ref_v: [&'r [u8]; 8] = [&[]; 8];
+        let mut ref_w = [0usize; 8];
+        let mut ref_h = [0usize; 8];
+        let mut ref_ok = [false; 8];
+        for (slot, view) in refs.iter().enumerate().take(8) {
+            if let Some(view) = view {
+                ref_y[slot] = view.y;
+                ref_u[slot] = view.u;
+                ref_v[slot] = view.v;
+                ref_w[slot] = view.width;
+                ref_h[slot] = view.height;
+                ref_ok[slot] = true;
+            }
+        }
         Ok(Self {
             symbols: SymbolDecoder::new(bytes)?,
             update: !frame.disable_cdf_update,
@@ -263,6 +361,30 @@ impl<'a> Tile<'a> {
             max_luma_h: 0,
             sub_x: sequence.subsampling_x,
             sub_y: sequence.subsampling_y,
+            inter_frame: frame.frame_type == INTER_FRAME,
+            force_integer: frame.force_integer_mv,
+            allow_hp: frame.allow_high_precision_mv,
+            filter_switchable: frame.filter_switchable,
+            interpolation: frame.interpolation,
+            dual_filter: sequence.enable_dual_filter,
+            frame_refs: frame.ref_frames,
+            visible_w: frame.width as usize,
+            visible_h: frame.height as usize,
+            ref_y,
+            ref_u,
+            ref_v,
+            ref_w,
+            ref_h,
+            ref_ok,
+            mvs: vec![Motion::default(); cells],
+            block_ref: vec![0; cells],
+            block_ref1: vec![NONE_FRAME; cells],
+            inter_flag: vec![0; cells],
+            interp: vec![[0, 0]; cells],
+            tx_kind: vec![DCT_DCT; cells],
+            coding_inter: false,
+            cur_luma_row: 0,
+            cur_luma_col: 0,
             cdfs: Cdfs::load(q_ctx),
         })
     }
@@ -448,6 +570,19 @@ impl<'a> Tile<'a> {
     }
 
     fn decode_block(&mut self, row: usize, col: usize, bsize: usize) -> Result<(), CodecError> {
+        if self.inter_frame {
+            self.decode_inter_frame_block(row, col, bsize)
+        } else {
+            self.decode_intra_frame_block(row, col, bsize)
+        }
+    }
+
+    fn decode_intra_frame_block(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+    ) -> Result<(), CodecError> {
         let bw4 = NUM_4X4_WIDE[bsize];
         let bh4 = NUM_4X4_HIGH[bsize];
         let has_chroma = self.has_chroma(row, col, bw4, bh4);
@@ -475,7 +610,7 @@ impl<'a> Tile<'a> {
                 what: "filter intra",
             });
         }
-        let tx = self.read_tx_size(row, col, bsize, skip)?;
+        let tx = self.read_tx_size(row, col, bsize, skip, false)?;
         if skip {
             self.reset_context(row, col, bw4, bh4, has_chroma);
         }
@@ -494,10 +629,675 @@ impl<'a> Tile<'a> {
             has_chroma,
             avail_u,
             avail_l,
+            inter: false,
+            mv: Motion::default(),
+            ref0: 0,
+            ref1: NONE_FRAME,
+            interp: [0, 0],
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)?;
         Ok(())
+    }
+
+    fn decode_inter_frame_block(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+    ) -> Result<(), CodecError> {
+        let bw4 = NUM_4X4_WIDE[bsize];
+        let bh4 = NUM_4X4_HIGH[bsize];
+        let has_chroma = self.has_chroma(row, col, bw4, bh4);
+        let avail_u = row > 0;
+        let avail_l = col > 0;
+        let skip = self.read_skip(self.neighbor_sum(row, col))?;
+        let inter = self.read_is_inter(row, col)?;
+        let chosen = if inter {
+            self.read_inter_block(row, col, bsize, bw4, bh4)?
+        } else {
+            self.read_intra_in_inter(bsize, has_chroma)?
+        };
+        let tx = self.read_tx_size(row, col, bsize, skip, inter)?;
+        if skip {
+            self.reset_context(row, col, bw4, bh4, has_chroma);
+        }
+        let coded = CodedBlock {
+            row,
+            col,
+            bw4,
+            bh4,
+            bsize,
+            y_mode: chosen.y_mode,
+            uv_mode: chosen.uv_mode,
+            angle_y: chosen.angle_y,
+            angle_uv: chosen.angle_uv,
+            tx,
+            skip,
+            has_chroma,
+            avail_u,
+            avail_l,
+            inter,
+            mv: chosen.mv,
+            ref0: chosen.ref0,
+            ref1: chosen.ref1,
+            interp: chosen.interp,
+        };
+        self.fill_grid(&coded);
+        self.predict_and_residual(&coded)
+    }
+
+    fn read_is_inter(&mut self, row: usize, col: usize) -> Result<bool, CodecError> {
+        let ctx = self.is_inter_ctx(row, col);
+        Ok(read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.is_inter,
+            &[4, 3],
+            &[ctx],
+        )? == 1)
+    }
+
+    fn is_inter_ctx(&self, row: usize, col: usize) -> usize {
+        let above = row > 0;
+        let left = col > 0;
+        let above_intra = above && self.inter_flag[(row - 1) * self.mi_cols + col] == 0;
+        let left_intra = left && self.inter_flag[row * self.mi_cols + col - 1] == 0;
+        if above && left {
+            if left_intra && above_intra {
+                3
+            } else {
+                usize::from(left_intra || above_intra)
+            }
+        } else if above || left {
+            2 * usize::from(if above { above_intra } else { left_intra })
+        } else {
+            0
+        }
+    }
+
+    fn read_intra_in_inter(
+        &mut self,
+        bsize: usize,
+        has_chroma: bool,
+    ) -> Result<Chosen, CodecError> {
+        let ctx = SIZE_GROUP.get(bsize).copied().unwrap_or(0);
+        let y_mode = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.intra_y,
+            &[4, 14],
+            &[ctx],
+        )? as u8;
+        let angle_y = self.read_angle(y_mode, bsize, true)?;
+        let (uv_mode, angle_uv) = if has_chroma {
+            let mode = self.read_uv_mode(bsize, y_mode)?;
+            if mode == UV_CFL_PRED {
+                (self.cfl_u, self.cfl_v) = self.read_cfl_alphas()?;
+            }
+            (mode, self.read_angle(mode, bsize, false)?)
+        } else {
+            (DC_PRED, 0)
+        };
+        Ok(Chosen {
+            y_mode,
+            uv_mode,
+            angle_y,
+            angle_uv,
+            mv: Motion::default(),
+            ref0: 0,
+            ref1: NONE_FRAME,
+            interp: [0, 0],
+        })
+    }
+
+    fn read_inter_block(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        bw4: usize,
+        bh4: usize,
+    ) -> Result<Chosen, CodecError> {
+        let reference = self.read_single_ref(row, col)?;
+        let stack = find_stack(
+            &MotionGrid {
+                cols: self.mi_cols,
+                rows: self.mi_rows,
+                inter: &self.inter_flag,
+                refs: &self.block_ref,
+                refs1: &self.block_ref1,
+                mvs: &self.mvs,
+                modes: &self.y_mode,
+                sizes: &self.sizes,
+            },
+            &BlockPlace {
+                row,
+                col,
+                bw4,
+                bh4,
+                bsize,
+                reference,
+            },
+            self.allow_hp,
+            self.force_integer,
+        );
+        let y_mode = self.read_inter_mode(&stack)?;
+        let mv_index = self.read_drl(y_mode, stack.found, &stack)?;
+        let mv = self.assign_mv(y_mode, mv_index, &stack)?;
+        let interp = self.read_interp(row, col, bsize, y_mode, reference)?;
+        Ok(Chosen {
+            y_mode,
+            uv_mode: DC_PRED,
+            angle_y: 0,
+            angle_uv: 0,
+            mv,
+            ref0: reference,
+            ref1: NONE_FRAME,
+            interp,
+        })
+    }
+
+    fn read_single_ref(&mut self, row: usize, col: usize) -> Result<i8, CodecError> {
+        let p1 = self.ref_bit(row, col, 0)?;
+        if p1 {
+            let p2 = self.ref_bit(row, col, 1)?;
+            if !p2 {
+                let p6 = self.ref_bit(row, col, 5)?;
+                Ok(if p6 { 6 } else { 5 })
+            } else {
+                Ok(7)
+            }
+        } else {
+            let p3 = self.ref_bit(row, col, 2)?;
+            if p3 {
+                let p5 = self.ref_bit(row, col, 4)?;
+                Ok(if p5 { 4 } else { 3 })
+            } else {
+                let p4 = self.ref_bit(row, col, 3)?;
+                Ok(if p4 { 2 } else { LAST_FRAME })
+            }
+        }
+    }
+
+    fn ref_bit(&mut self, row: usize, col: usize, which: usize) -> Result<bool, CodecError> {
+        let ctx = self.single_ref_ctx(row, col, which);
+        Ok(read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.single_ref,
+            &[3, 6, 3],
+            &[ctx, which],
+        )? == 1)
+    }
+
+    fn single_ref_ctx(&self, row: usize, col: usize, which: usize) -> usize {
+        let count = |frame: i8| self.count_refs(row, col, frame);
+        let (left, right) = match which {
+            0 => (
+                count(1) + count(2) + count(3) + count(4),
+                count(5) + count(6) + count(7),
+            ),
+            1 => (count(5) + count(6), count(7)),
+            2 => (count(1) + count(2), count(3) + count(4)),
+            3 => (count(1), count(2)),
+            4 => (count(3), count(4)),
+            _ => (count(5), count(6)),
+        };
+        if left < right {
+            0
+        } else if left == right {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn count_refs(&self, row: usize, col: usize, frame: i8) -> usize {
+        let mut count = 0;
+        if row > 0 {
+            let at = (row - 1) * self.mi_cols + col;
+            count += usize::from(self.block_ref[at] == frame);
+            count += usize::from(self.block_ref1[at] == frame);
+        }
+        if col > 0 {
+            let at = row * self.mi_cols + col - 1;
+            count += usize::from(self.block_ref[at] == frame);
+            count += usize::from(self.block_ref1[at] == frame);
+        }
+        count
+    }
+
+    fn read_inter_mode(&mut self, stack: &Candidates) -> Result<u8, CodecError> {
+        let new_mv = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.new_mv,
+            &[6, 3],
+            &[stack.new_ctx],
+        )?;
+        if new_mv == 0 {
+            return Ok(NEWMV);
+        }
+        let zero_mv = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.zero_mv,
+            &[2, 3],
+            &[0],
+        )?;
+        if zero_mv == 0 {
+            return Ok(GLOBALMV);
+        }
+        let ref_mv = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.ref_mv,
+            &[6, 3],
+            &[stack.ref_ctx],
+        )?;
+        Ok(if ref_mv == 0 { NEARESTMV } else { NEARMV })
+    }
+
+    fn read_drl(
+        &mut self,
+        mode: u8,
+        found: usize,
+        stack: &Candidates,
+    ) -> Result<usize, CodecError> {
+        if mode == NEWMV {
+            let mut index = 0usize;
+            for idx in 0..2 {
+                if found > idx + 1 {
+                    let bit = self.drl_bit(stack.drl[idx])?;
+                    if bit == 0 {
+                        index = idx;
+                        break;
+                    }
+                    index = idx + 1;
+                }
+            }
+            return Ok(index);
+        }
+        if mode != NEARMV {
+            return Ok(0);
+        }
+        let mut index = 1usize;
+        for idx in 1..3 {
+            if found > idx + 1 {
+                let bit = self.drl_bit(stack.drl[idx])?;
+                if bit == 0 {
+                    index = idx;
+                    break;
+                }
+                index = idx + 1;
+            }
+        }
+        Ok(index)
+    }
+
+    fn drl_bit(&mut self, ctx: usize) -> Result<u32, CodecError> {
+        read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.drl,
+            &[3, 3],
+            &[ctx],
+        )
+    }
+
+    fn assign_mv(
+        &mut self,
+        mode: u8,
+        index: usize,
+        stack: &Candidates,
+    ) -> Result<Motion, CodecError> {
+        let mut pos = if mode == NEARESTMV { 0 } else { index };
+        if mode == NEWMV && stack.found <= 1 {
+            pos = 0;
+        }
+        let pred = if mode == GLOBALMV {
+            Motion::default()
+        } else {
+            stack.mv[pos.min(7)]
+        };
+        if mode != NEWMV {
+            return Ok(pred);
+        }
+        let diff = self.read_mv_delta()?;
+        let mv = Motion {
+            row: pred.row + diff.row,
+            col: pred.col + diff.col,
+        };
+        if mv.row.abs() >= (1 << 14) || mv.col.abs() >= (1 << 14) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "motion vector",
+            });
+        }
+        Ok(mv)
+    }
+
+    fn read_mv_delta(&mut self) -> Result<Motion, CodecError> {
+        let joint = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.mv_joint,
+            &[5],
+            &[],
+        )?;
+        let row = if joint == 2 || joint == 3 {
+            self.read_mv_component(0)?
+        } else {
+            0
+        };
+        let col = if joint == 1 || joint == 3 {
+            self.read_mv_component(1)?
+        } else {
+            0
+        };
+        Ok(Motion { row, col })
+    }
+
+    fn read_mv_component(&mut self, comp: usize) -> Result<i32, CodecError> {
+        let sign = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.mv_sign,
+            &[3],
+            &[],
+        )? == 1;
+        let class = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.mv_class,
+            &[2, 12],
+            &[comp],
+        )? as i32;
+        let mag = if class == 0 {
+            self.class0_mag(comp)?
+        } else {
+            self.class_mag(comp, class)?
+        };
+        Ok(if sign { -mag } else { mag })
+    }
+
+    fn class0_mag(&mut self, comp: usize) -> Result<i32, CodecError> {
+        let bit = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.mv_class0_bit,
+            &[3],
+            &[],
+        )?;
+        let fr = if self.force_integer {
+            3
+        } else {
+            read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.mv_class0_fr,
+                &[2, 2, 5],
+                &[comp, bit as usize],
+            )?
+        };
+        let hp = if self.allow_hp {
+            read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.mv_class0_hp,
+                &[3],
+                &[],
+            )?
+        } else {
+            1
+        };
+        Ok((((bit << 3) | (fr << 1) | hp) + 1) as i32)
+    }
+
+    fn class_mag(&mut self, comp: usize, class: i32) -> Result<i32, CodecError> {
+        let mut bits = 0i32;
+        for i in 0..class {
+            let bit = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.mv_bit,
+                &[10, 3],
+                &[i as usize],
+            )?;
+            bits |= (bit as i32) << i;
+        }
+        let fr = if self.force_integer {
+            3
+        } else {
+            read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.mv_fr,
+                &[2, 5],
+                &[comp],
+            )?
+        };
+        let hp = if self.allow_hp {
+            read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.mv_hp,
+                &[3],
+                &[],
+            )?
+        } else {
+            1
+        };
+        Ok((1 << (class + 3)) + (((bits << 3) | ((fr as i32) << 1) | hp as i32) + 1))
+    }
+
+    fn read_interp(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        mode: u8,
+        reference: i8,
+    ) -> Result<[u8; 2], CodecError> {
+        if !self.filter_switchable {
+            return Ok([self.interpolation, self.interpolation]);
+        }
+        let dirs = if self.dual_filter { 2 } else { 1 };
+        let mut filter = [0u8; 2];
+        for (dir, slot) in filter.iter_mut().enumerate().take(dirs) {
+            if self.needs_interp(bsize, mode) {
+                let ctx = self.interp_ctx(row, col, dir, reference);
+                *slot = read_sym(
+                    &mut self.symbols,
+                    self.update,
+                    &mut self.cdfs.interp_filter,
+                    &[16, 4],
+                    &[ctx],
+                )? as u8;
+            }
+        }
+        if !self.dual_filter {
+            filter[1] = filter[0];
+        }
+        Ok(filter)
+    }
+
+    fn needs_interp(&self, bsize: usize, mode: u8) -> bool {
+        let large = block_width(bsize).min(block_height(bsize)) >= 8;
+        !(large && mode == GLOBALMV)
+    }
+
+    fn interp_ctx(&self, row: usize, col: usize, dir: usize, reference: i8) -> usize {
+        let mut ctx = (dir & 1) * 8;
+        let mut left = 3usize;
+        let mut above = 3usize;
+        if col > 0 {
+            let at = row * self.mi_cols + col - 1;
+            if self.block_ref[at] == reference || self.block_ref1[at] == reference {
+                left = usize::from(self.interp[at][dir]);
+            }
+        }
+        if row > 0 {
+            let at = (row - 1) * self.mi_cols + col;
+            if self.block_ref[at] == reference || self.block_ref1[at] == reference {
+                above = usize::from(self.interp[at][dir]);
+            }
+        }
+        if left == above {
+            ctx += left;
+        } else if left == 3 {
+            ctx += above;
+        } else if above == 3 {
+            ctx += left;
+        } else {
+            ctx += 3;
+        }
+        ctx
+    }
+
+    fn predict_inter_plane(&mut self, block: &Block) -> Result<(), CodecError> {
+        let at = block.row * self.mi_cols + block.col;
+        let frame_ref = self.block_ref[at];
+        if frame_ref < LAST_FRAME {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        }
+        let slot = usize::from(self.frame_refs[frame_ref as usize - 1]);
+        if slot >= 8 || !self.ref_ok[slot] {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        }
+        let mv = self.mvs[at];
+        let filter = self.interp[at];
+        let ref_w = self.ref_w[slot];
+        let ref_h = self.ref_h[slot];
+        let frame_w = self.visible_w;
+        let frame_h = self.visible_h;
+        let reference: &[u8] = match block.plane {
+            0 => self.ref_y[slot],
+            1 => self.ref_u[slot],
+            _ => self.ref_v[slot],
+        };
+        let (sub_x, sub_y) = (block.sub_x != 0, block.sub_y != 0);
+        let x = (block.col >> block.sub_x) * 4;
+        let y = (block.row >> block.sub_y) * 4;
+        let w = block_width(block.bsize) >> block.sub_x;
+        let h = block_height(block.bsize) >> block.sub_y;
+        let plane_w = if block.plane == 0 {
+            ref_w
+        } else {
+            ref_w.div_ceil(2)
+        };
+        let plane_h = if block.plane == 0 {
+            ref_h
+        } else {
+            ref_h.div_ceil(2)
+        };
+        let stride = if block.plane == 0 {
+            self.width
+        } else {
+            self.chroma_w
+        };
+        let dst: &mut [u8] = if block.plane == 0 {
+            &mut self.y
+        } else if block.plane == 1 {
+            &mut self.u
+        } else {
+            &mut self.v
+        };
+        predict(&mut InterSample {
+            dst,
+            stride,
+            x,
+            y,
+            w,
+            h,
+            sub_x,
+            sub_y,
+            mv,
+            filter,
+            reference,
+            ref_stride: plane_w,
+            plane_w,
+            plane_h,
+            frame_w,
+            frame_h,
+            ref_w,
+            ref_h,
+        })
+    }
+
+    fn inter_tx(&mut self, plane: usize, tx: usize) -> Result<u8, CodecError> {
+        let set = inter_tx_set(tx, self.reduced_tx);
+        if set == 0 || self.base_q == 0 {
+            return self.remember_tx(plane, tx, DCT_DCT);
+        }
+        if plane > 0 {
+            let stored = self.luma_tx_kind();
+            let kind = if inter_set_allows(set, stored) {
+                stored
+            } else {
+                DCT_DCT
+            };
+            return Ok(kind);
+        }
+        let symbol = match set {
+            1 => read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.inter_tx1,
+                &[2, 17],
+                &[TX_SIZE_SQR[tx]],
+            )?,
+            2 => read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.inter_tx2,
+                &[13],
+                &[],
+            )?,
+            _ => read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.inter_tx3,
+                &[4, 3],
+                &[TX_SIZE_SQR[tx]],
+            )?,
+        };
+        let kind = inter_tx_type(set, symbol).ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "tx type",
+        })?;
+        self.remember_tx(plane, tx, kind)
+    }
+
+    fn luma_tx_kind(&self) -> u8 {
+        if self.cur_luma_row >= self.mi_rows || self.cur_luma_col >= self.mi_cols {
+            return DCT_DCT;
+        }
+        self.tx_kind[self.cur_luma_row * self.mi_cols + self.cur_luma_col]
+    }
+
+    fn remember_tx(&mut self, plane: usize, tx: usize, kind: u8) -> Result<u8, CodecError> {
+        if plane == 0 {
+            let w4 = TX_WIDTH[tx] >> 2;
+            let h4 = TX_HEIGHT[tx] >> 2;
+            for y in 0..h4 {
+                for x in 0..w4 {
+                    let r = self.cur_luma_row + y;
+                    let c = self.cur_luma_col + x;
+                    if r < self.mi_rows && c < self.mi_cols {
+                        self.tx_kind[r * self.mi_cols + c] = kind;
+                    }
+                }
+            }
+        }
+        Ok(kind)
     }
 
     fn read_skip(&mut self, ctx: usize) -> Result<bool, CodecError> {
@@ -634,12 +1434,14 @@ impl<'a> Tile<'a> {
         col: usize,
         bsize: usize,
         skip: bool,
+        is_inter: bool,
     ) -> Result<usize, CodecError> {
         if self.lossless {
             return Ok(TX_4X4);
         }
         let max_rect = MAX_TX_SIZE_RECT[bsize];
-        if bsize > 0 && self.tx_select {
+        let allow = !skip || !is_inter;
+        if bsize > 0 && self.tx_select && allow {
             let depth_max = MAX_TX_DEPTH[bsize];
             let which = match depth_max {
                 4 => 3,
@@ -660,7 +1462,6 @@ impl<'a> Tile<'a> {
             for _ in 0..depth {
                 tx = SPLIT_TX_SIZE[tx];
             }
-            let _ = skip;
             return Ok(tx);
         }
         Ok(max_rect)
@@ -734,6 +1535,11 @@ impl<'a> Tile<'a> {
                 self.skips[at] = u8::from(skip);
                 self.sizes[at] = bsize as u8;
                 self.tx_sizes[at] = tx as u8;
+                self.inter_flag[at] = u8::from(coded.inter);
+                self.mvs[at] = coded.mv;
+                self.block_ref[at] = coded.ref0;
+                self.block_ref1[at] = coded.ref1;
+                self.interp[at] = coded.interp;
             }
         }
     }
@@ -790,6 +1596,7 @@ impl<'a> Tile<'a> {
                         sub_y,
                         step_x,
                         step_y,
+                        inter: coded.inter,
                     })?;
                     x4 += step_x;
                 }
@@ -825,9 +1632,64 @@ impl<'a> Tile<'a> {
         } else {
             (self.chroma_w, self.chroma_h, self.chroma_w)
         };
+        if block.inter && block.x4 == 0 && block.y4 == 0 {
+            self.predict_inter_plane(&block)?;
+        }
         if start_x >= plane_w || start_y >= plane_h {
             return Ok(());
         }
+        self.coding_inter = block.inter;
+        self.cur_luma_row = block.row + (block.y4 << block.sub_y);
+        self.cur_luma_col = block.col + (block.x4 << block.sub_x);
+        let local_row = ((start_y >> 2) & (SB4 - 1)) as i32;
+        let local_col = ((start_x >> 2) & (SB4 - 1)) as i32;
+        if !block.inter {
+            self.predict_intra_block(
+                &block,
+                IntraAt {
+                    start_x,
+                    start_y,
+                    stride,
+                    plane_w,
+                    plane_h,
+                    local_row,
+                    local_col,
+                },
+            )?;
+        }
+        if !block.skip {
+            let (quant, tx_type) = self.coeffs(CoeffPlace {
+                plane: block.plane,
+                start_x,
+                start_y,
+                tx: block.tx,
+                bsize: block.bsize,
+                y_mode: block.y_mode,
+                uv_mode: block.uv_mode,
+            })?;
+            if quant.iter().any(|level| *level != 0) {
+                self.reconstruct(block.plane, start_x, start_y, block.tx, tx_type, &quant)?;
+            }
+        }
+        for y in 0..block.step_y {
+            for x in 0..block.step_x {
+                self.set_decoded(block.plane, local_row + y as i32, local_col + x as i32, 1);
+            }
+        }
+        Ok(())
+    }
+
+    fn predict_intra_block(&mut self, block: &Block, at: IntraAt) -> Result<(), CodecError> {
+        let IntraAt {
+            start_x,
+            start_y,
+            stride,
+            plane_w,
+            plane_h,
+            local_row,
+            local_col,
+        } = at;
+        let (sub_x, sub_y) = (block.sub_x, block.sub_y);
         let mode = if block.plane == 0 {
             block.y_mode
         } else if block.uv_mode == UV_CFL_PRED {
@@ -842,8 +1704,6 @@ impl<'a> Tile<'a> {
         };
         let have_left = block.avail_l || block.x4 > 0;
         let have_above = block.avail_u || block.y4 > 0;
-        let local_row = ((start_y >> 2) & (SB4 - 1)) as i32;
-        let local_col = ((start_x >> 2) & (SB4 - 1)) as i32;
         let above_right = self.decoded_at(
             block.plane,
             (local_row >> sub_y) - 1,
@@ -914,25 +1774,6 @@ impl<'a> Tile<'a> {
                     max_luma_w: self.max_luma_w,
                     max_luma_h: self.max_luma_h,
                 })?;
-            }
-        }
-        if !block.skip {
-            let (quant, tx_type) = self.coeffs(CoeffPlace {
-                plane: block.plane,
-                start_x,
-                start_y,
-                tx: block.tx,
-                bsize: block.bsize,
-                y_mode: block.y_mode,
-                uv_mode: block.uv_mode,
-            })?;
-            if quant.iter().any(|level| *level != 0) {
-                self.reconstruct(block.plane, start_x, start_y, block.tx, tx_type, &quant)?;
-            }
-        }
-        for y in 0..block.step_y {
-            for x in 0..block.step_x {
-                self.set_decoded(block.plane, local_row + y as i32, local_col + x as i32, 1);
             }
         }
         Ok(())
@@ -1097,7 +1938,10 @@ impl<'a> Tile<'a> {
         uv_mode: u8,
     ) -> Result<u8, CodecError> {
         if self.lossless || TX_SIZE_SQR_UP[tx] > TX_32X32 {
-            return Ok(DCT_DCT);
+            return self.remember_tx(plane, tx, DCT_DCT);
+        }
+        if self.coding_inter {
+            return self.inter_tx(plane, tx);
         }
         let set = tx_set(tx, self.reduced_tx);
         if set == 0 {
@@ -1460,6 +2304,17 @@ impl<'a> Tile<'a> {
     }
 }
 
+struct Chosen {
+    y_mode: u8,
+    uv_mode: u8,
+    angle_y: i32,
+    angle_uv: i32,
+    mv: Motion,
+    ref0: i8,
+    ref1: i8,
+    interp: [u8; 2],
+}
+
 struct CodedBlock {
     row: usize,
     col: usize,
@@ -1475,6 +2330,11 @@ struct CodedBlock {
     has_chroma: bool,
     avail_u: bool,
     avail_l: bool,
+    inter: bool,
+    mv: Motion,
+    ref0: i8,
+    ref1: i8,
+    interp: [u8; 2],
 }
 
 struct CoeffPlace {
@@ -1515,6 +2375,16 @@ struct DcSpan {
     h4: usize,
 }
 
+struct IntraAt {
+    start_x: usize,
+    start_y: usize,
+    stride: usize,
+    plane_w: usize,
+    plane_h: usize,
+    local_row: i32,
+    local_col: i32,
+}
+
 struct Block {
     plane: usize,
     row: usize,
@@ -1534,6 +2404,7 @@ struct Block {
     sub_y: usize,
     step_x: usize,
     step_y: usize,
+    inter: bool,
 }
 
 pub(crate) struct Neighbor {
@@ -1899,6 +2770,26 @@ impl Cdfs {
             coeff_br: slice_q(&DEFAULT_COEFF_BR_CDF, 4, q),
             cfl_sign: DEFAULT_CFL_SIGN_CDF.to_vec(),
             cfl_alpha: DEFAULT_CFL_ALPHA_CDF.to_vec(),
+            is_inter: DEFAULT_IS_INTER_CDF.to_vec(),
+            single_ref: DEFAULT_SINGLE_REF_CDF.to_vec(),
+            new_mv: DEFAULT_NEW_MV_CDF.to_vec(),
+            zero_mv: DEFAULT_ZERO_MV_CDF.to_vec(),
+            ref_mv: DEFAULT_REF_MV_CDF.to_vec(),
+            drl: DEFAULT_DRL_MODE_CDF.to_vec(),
+            mv_joint: DEFAULT_MV_JOINT_CDF.to_vec(),
+            mv_sign: DEFAULT_MV_SIGN_CDF.to_vec(),
+            mv_class: DEFAULT_MV_CLASS_CDF.to_vec(),
+            mv_class0_bit: DEFAULT_MV_CLASS0_BIT_CDF.to_vec(),
+            mv_class0_fr: DEFAULT_MV_CLASS0_FR_CDF.to_vec(),
+            mv_class0_hp: DEFAULT_MV_CLASS0_HP_CDF.to_vec(),
+            mv_bit: DEFAULT_MV_BIT_CDF.to_vec(),
+            mv_fr: DEFAULT_MV_FR_CDF.to_vec(),
+            mv_hp: DEFAULT_MV_HP_CDF.to_vec(),
+            interp_filter: DEFAULT_INTERP_FILTER_CDF.to_vec(),
+            inter_tx1: DEFAULT_INTER_TX_TYPE_SET1_CDF.to_vec(),
+            inter_tx2: DEFAULT_INTER_TX_TYPE_SET2_CDF.to_vec(),
+            inter_tx3: DEFAULT_INTER_TX_TYPE_SET3_CDF.to_vec(),
+            intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
         }
     }
 }

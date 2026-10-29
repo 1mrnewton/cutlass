@@ -509,6 +509,10 @@ pub static DEFAULT_MV_FR_CDF: [u16; 10] =
     [8192, 17408, 21248, 32768, 0, 8192, 17408, 21248, 32768, 0];
 pub const DEFAULT_MV_FR_CDF_SHAPE: [usize; 2] = [2, 5];
 
+/// Default `drl_mode` CDF from the specification. Three contexts, one binary symbol.
+pub static DEFAULT_DRL_MODE_CDF: [u16; 9] = [13104, 32768, 0, 24560, 32768, 0, 18945, 32768, 0];
+pub const DEFAULT_DRL_MODE_CDF_SHAPE: [usize; 2] = [3, 3];
+
 pub static DEFAULT_INTRA_TX_TYPE_SET1_CDF: [u16; 208] = [
     1535, 8035, 9461, 12751, 23467, 27825, 32768, 0, 564, 3335, 9709, 10870, 18143, 28094, 32768,
     0, 672, 3247, 3676, 11982, 19415, 23127, 32768, 0, 5279, 13885, 15487, 18044, 23527, 30252,
@@ -2075,6 +2079,11 @@ pub(crate) fn default_tables_match_their_shapes() -> bool {
             .copied()
             .product::<usize>();
     ok &= DEFAULT_MV_FR_CDF.len() == DEFAULT_MV_FR_CDF_SHAPE.iter().copied().product::<usize>();
+    ok &= DEFAULT_DRL_MODE_CDF.len()
+        == DEFAULT_DRL_MODE_CDF_SHAPE
+            .iter()
+            .copied()
+            .product::<usize>();
     ok &= DEFAULT_INTRA_TX_TYPE_SET1_CDF.len()
         == DEFAULT_INTRA_TX_TYPE_SET1_CDF_SHAPE
             .iter()

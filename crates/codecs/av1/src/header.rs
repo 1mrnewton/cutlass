@@ -534,6 +534,10 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         }
         for slot in &mut ref_frames {
             *slot = bits.read(3)? as u8;
+            if sequence.frame_id_present {
+                let n = u32::from(sequence.delta_frame_id_len) + 2;
+                let _ = bits.read(n)?;
+            }
         }
         let size = if size_override && !error_resilient {
             frame_size_with_refs(bits, sequence)?
@@ -569,38 +573,38 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     } else {
         bits.read_bool()?
     };
-    // tile info, single tile expected for the sizes we accept; still parse the flags
-    if bits.read(1)? != 1 {
-        return Err(CodecError::Unsupported {
-            what: "non-uniform tiles",
-        });
-    }
-    // increment flags until a zero, but a 64-wide picture has max log2 cols 0, so no bits
-    // We still have to honor the loop when the picture is wider.
+    // One superblock each way can use non-uniform spacing: ns(1) reads no bits.
     let sb_cols = width.div_ceil(64);
     let sb_rows = height.div_ceil(64);
-    let max_tile_cols_log = tile_log2(1, sb_cols.min(64));
-    let min_tile_cols_log = tile_log2(4096 / 64, sb_cols);
-    let mut cols_log = min_tile_cols_log;
-    while cols_log < max_tile_cols_log {
-        if !bits.read_bool()? {
-            break;
+    let uniform = bits.read_bool()?;
+    if uniform {
+        let max_tile_cols_log = tile_log2(1, sb_cols.min(64));
+        let min_tile_cols_log = tile_log2(4096 / 64, sb_cols);
+        let mut cols_log = min_tile_cols_log;
+        while cols_log < max_tile_cols_log {
+            if !bits.read_bool()? {
+                break;
+            }
+            cols_log += 1;
         }
-        cols_log += 1;
-    }
-    let min_tiles_log =
-        tile_log2(4096 * 2304 / (64 * 64), sb_rows * sb_cols).max(min_tile_cols_log);
-    let mut rows_log = min_tiles_log.saturating_sub(cols_log);
-    let max_tile_rows_log = tile_log2(1, sb_rows.min(64));
-    while rows_log < max_tile_rows_log {
-        if !bits.read_bool()? {
-            break;
+        let min_tiles_log =
+            tile_log2(4096 * 2304 / (64 * 64), sb_rows * sb_cols).max(min_tile_cols_log);
+        let mut rows_log = min_tiles_log.saturating_sub(cols_log);
+        let max_tile_rows_log = tile_log2(1, sb_rows.min(64));
+        while rows_log < max_tile_rows_log {
+            if !bits.read_bool()? {
+                break;
+            }
+            rows_log += 1;
         }
-        rows_log += 1;
-    }
-    if cols_log > 0 || rows_log > 0 {
+        if cols_log > 0 || rows_log > 0 {
+            return Err(CodecError::Unsupported {
+                what: "multiple tiles",
+            });
+        }
+    } else if sb_cols != 1 || sb_rows != 1 {
         return Err(CodecError::Unsupported {
-            what: "multiple tiles",
+            what: "non-uniform tiles",
         });
     }
     let base_q = bits.read(8)? as u8;

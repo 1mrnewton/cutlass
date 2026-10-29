@@ -31,7 +31,11 @@ const CL_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 const LIT_FLAG: u32 = 0x8000_0000;
-const CHAIN_LIMIT: usize = 16;
+const CHAIN_FLOOR: usize = 16;
+const CHAIN_CEILING: usize = 128;
+const LAZY_LIMIT: usize = 16;
+const STRONG_MATCH: usize = 8;
+const WEAK_RUN: usize = 48;
 const NICE_LEN: usize = 258;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -641,24 +645,82 @@ fn tokenize(src: &[u8], spans: &[(usize, usize)]) -> Vec<u32> {
     let mut prev = vec![-1i32; src.len()];
     let mut index = 0usize;
     let mut span_at = 0usize;
+    let mut chain_limit = CHAIN_CEILING;
+    let mut weak = 0usize;
+    let mut held: Option<(usize, u16)> = None;
     while index < src.len() {
         while span_at < spans.len() && index >= spans[span_at].0 {
             span_at += 1;
         }
         let (span_start, stride) = span_at_index(spans, span_at, src.len());
-        let (matched, distance) = best_match(src, index, &mut head, &mut prev, stride, span_start);
+        let (matched, distance) = best_match(
+            src,
+            index,
+            &mut head,
+            &mut prev,
+            stride,
+            span_start,
+            chain_limit,
+        );
+        if let Some((prev_len, prev_dist)) = held {
+            if matched > prev_len {
+                tokens.push(LIT_FLAG | u32::from(src[index - 1]));
+                held = Some((matched, distance));
+                index += 1;
+                continue;
+            }
+            note_strength(prev_len, &mut chain_limit, &mut weak);
+            push_match(&mut tokens, prev_len, prev_dist);
+            let start = index - 1;
+            for step in 2..prev_len {
+                insert_hash(src, start + step, &mut head, &mut prev);
+            }
+            index = start + prev_len;
+            held = None;
+            continue;
+        }
+        if (3..LAZY_LIMIT).contains(&matched) && index + 1 < src.len() {
+            held = Some((matched, distance));
+            index += 1;
+            continue;
+        }
         if matched >= 3 {
+            note_strength(matched, &mut chain_limit, &mut weak);
+            push_match(&mut tokens, matched, distance);
             for step in 1..matched {
                 insert_hash(src, index + step, &mut head, &mut prev);
             }
-            tokens.push((u32::from(distance) << 9) | matched as u32);
             index += matched;
         } else {
+            note_strength(0, &mut chain_limit, &mut weak);
             tokens.push(LIT_FLAG | u32::from(src[index]));
             index += 1;
         }
     }
+    if let Some((prev_len, prev_dist)) = held {
+        push_match(&mut tokens, prev_len, prev_dist);
+        let start = index - 1;
+        for step in 1..prev_len {
+            insert_hash(src, start + step, &mut head, &mut prev);
+        }
+    }
     tokens
+}
+
+fn push_match(tokens: &mut Vec<u32>, len: usize, distance: u16) {
+    tokens.push((u32::from(distance) << 9) | u32::try_from(len).unwrap_or(0));
+}
+
+fn note_strength(matched: usize, chain_limit: &mut usize, weak: &mut usize) {
+    if matched >= STRONG_MATCH {
+        *chain_limit = CHAIN_CEILING;
+        *weak = 0;
+        return;
+    }
+    *weak = weak.saturating_add(1);
+    if *weak >= WEAK_RUN {
+        *chain_limit = CHAIN_FLOOR;
+    }
 }
 
 fn span_at_index(spans: &[(usize, usize)], span_at: usize, len: usize) -> (usize, usize) {
@@ -683,6 +745,7 @@ fn best_match(
     prev: &mut [i32],
     stride: usize,
     span_start: usize,
+    chain_limit: usize,
 ) -> (usize, u16) {
     let mut matched = 0usize;
     let mut distance = 0u16;
@@ -692,7 +755,7 @@ fn best_match(
     let hash = hash3(src, index);
     let mut pos = head[hash];
     let mut steps = 0;
-    while pos >= 0 && steps < CHAIN_LIMIT {
+    while pos >= 0 && steps < chain_limit {
         let earlier = pos as usize;
         if earlier >= index || index - earlier > MAX_WINDOW {
             break;
@@ -1200,14 +1263,14 @@ mod tests {
 
     #[test]
     fn a_previous_scanline_is_found_past_the_hash_chain() {
-        let mut row = vec![9u8; 240];
+        let mut row = vec![9u8; 760];
         for (index, byte) in row.iter_mut().enumerate().take(80) {
-            *byte = u8::try_from((index * 3) % 251).unwrap_or(0);
+            *byte = 40u8.wrapping_add(u8::try_from(index).unwrap_or(0));
         }
         row[0] = 1;
         row[1] = 2;
         row[2] = 3;
-        for decoy in 0..16 {
+        for decoy in 0..160 {
             let at = 80 + decoy * 4;
             row[at] = 1;
             row[at + 1] = 2;
@@ -1229,6 +1292,20 @@ mod tests {
         assert_eq!(inflate(&spanned, image.len()).expect("inflate"), image);
         let back = python_zlib(&spanned, false).expect("python");
         assert_eq!(back, image);
+    }
+
+    #[test]
+    fn a_short_match_does_not_hide_a_longer_one() {
+        let sample = b"ABC_BCDEFGHIJKLMNOP_ABCDEFGHIJKLMNOP";
+        let tokens = super::tokenize(sample, &[]);
+        let long = tokens
+            .iter()
+            .any(|token| token & super::LIT_FLAG == 0 && (token & 0x1ff) >= 15);
+        assert!(long, "{tokens:?}");
+        let ours = deflate(sample);
+        assert_eq!(inflate(&ours, sample.len()).expect("inflate"), sample);
+        let back = python_zlib(&ours, false).expect("python");
+        assert_eq!(back, sample);
     }
 
     #[test]

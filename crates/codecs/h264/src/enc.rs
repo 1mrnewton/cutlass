@@ -31,6 +31,7 @@ pub struct H264Encoder {
     pps: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct Planes {
     y: Vec<u8>,
     u: Vec<u8>,
@@ -96,8 +97,26 @@ impl H264Encoder {
     }
 
     fn access_unit(&mut self, y: &[u8], u: &[u8], v: &[u8], key: bool) -> Vec<u8> {
-        if !key && self.same_as_reference(y, u, v) {
-            let slice = p_skip_slice(self.mb_w, self.mb_h, self.next_fn, self.next_poc);
+        if !key && let Some(reference) = self.reference.clone() {
+            let src = Source {
+                y,
+                u,
+                v,
+                width: self.width,
+                height: self.height,
+            };
+            let slice = if self.same_as_reference(y, u, v) {
+                p_skip_slice(self.mb_w, self.mb_h, self.next_fn, self.next_poc)
+            } else {
+                p_slice(
+                    self.mb_w,
+                    self.mb_h,
+                    self.next_fn,
+                    self.next_poc,
+                    &src,
+                    &reference,
+                )
+            };
             self.next_fn = (self.next_fn + 1) & 15;
             self.next_poc = (self.next_poc + 2) & 15;
             let mut unit = Vec::new();
@@ -372,6 +391,117 @@ fn p_skip_slice(mb_w: u32, mb_h: u32, frame_num: u32, poc: u32) -> Vec<u8> {
     bits.bytes
 }
 
+/// P slice of 16×16 blocks. Motion is zero, so each macroblock is a skip when the
+/// residual vanishes and a `P_L0_16x16` with a zero motion-vector difference otherwise.
+/// FFmpeg reads that type as decision 14 = 0, 15 = 0, 16 = 0, then contexts 40 and 47.
+fn p_slice(
+    mb_w: u32,
+    mb_h: u32,
+    frame_num: u32,
+    poc: u32,
+    src: &Source<'_>,
+    reference: &Planes,
+) -> Vec<u8> {
+    let mut bits = Writer::new();
+    bits.ue(0);
+    bits.ue(0);
+    bits.ue(0);
+    bits.u(4, frame_num & 15);
+    bits.u(4, poc & 15);
+    bits.bit(false);
+    bits.bit(false);
+    bits.bit(false);
+    bits.ue(0);
+    bits.se(0);
+    bits.ue(0);
+    bits.se(0);
+    bits.se(0);
+    bits.ones_to_byte();
+    {
+        let mut cab = CabacEnc::start(&mut bits, QP, 1);
+        write_p(&mut cab, mb_w, mb_h, src, reference);
+    }
+    bits.pad_byte();
+    bits.bytes
+}
+
+fn write_p(cab: &mut CabacEnc<'_>, mb_w: u32, mb_h: u32, src: &Source<'_>, reference: &Planes) {
+    let count = mb_w as usize * mb_h as usize;
+    let mut skipped = vec![false; count];
+    let mut cb_dc = vec![false; count];
+    let mut cr_dc = vec![false; count];
+    let mut luma_cbp = vec![0u8; count];
+    let mut chroma_cbp = vec![0u8; count];
+    let mut luma_nnz = vec![0u8; count * 16];
+    let mut cb_nnz = vec![0u8; count * 4];
+    let mut cr_nnz = vec![0u8; count * 4];
+    let total = mb_w.saturating_mul(mb_h);
+    for addr in 0..total {
+        let mx = addr % mb_w;
+        let my = addr / mb_w;
+        let index = addr as usize;
+        let luma_blocks = inter4(&reference.y, src.y, src.width, src.height, mx, my);
+        let (cb_levels, cb_ac) =
+            chroma_inter(&reference.u, src.u, src.width / 2, src.height / 2, mx, my);
+        let (cr_levels, cr_ac) =
+            chroma_inter(&reference.v, src.v, src.width / 2, src.height / 2, mx, my);
+        let residual = Residual {
+            luma: luma_blocks,
+            cb: cb_levels,
+            cr: cr_levels,
+            cb_ac,
+            cr_ac,
+        };
+        let luma = luma_pattern(&residual.luma);
+        let chroma = chroma_pattern(&residual);
+        let ctx = skip_context(&skipped, mb_w, mx, my);
+        if luma == 0 && chroma == 0 {
+            cab.decision(11 + ctx, 1);
+            skipped[index] = true;
+        } else {
+            cab.decision(11 + ctx, 0);
+            cab.decision(14, 0);
+            cab.decision(15, 0);
+            cab.decision(16, 0);
+            cab.decision(40, 0);
+            cab.decision(47, 0);
+            write_luma_cbp(cab, luma, &luma_cbp, mb_w, mx, my);
+            write_chroma_cbp(cab, chroma, &chroma_cbp, mb_w, mx, my);
+            if luma != 0 {
+                cab.decision(399, 0);
+            }
+            if luma != 0 || chroma != 0 {
+                cab.decision(60, 0);
+            }
+            write_luma4(cab, &residual.luma, luma, &mut luma_nnz, (mb_w, mx, my, 0));
+            if chroma != 0 {
+                write_dc4(cab, &residual.cb, dc_inc(mx, my, &cb_dc, mb_w, 0));
+                write_dc4(cab, &residual.cr, dc_inc(mx, my, &cr_dc, mb_w, 0));
+            }
+            if chroma == 2 {
+                write_chroma_ac(cab, &residual.cb_ac, &mut cb_nnz, (mb_w, mx, my, 0));
+                write_chroma_ac(cab, &residual.cr_ac, &mut cr_nnz, (mb_w, mx, my, 0));
+            }
+            luma_cbp[index] = luma;
+            chroma_cbp[index] = chroma;
+            cb_dc[index] = residual.cb.iter().any(|level| *level != 0);
+            cr_dc[index] = residual.cr.iter().any(|level| *level != 0);
+        }
+        cab.terminate(addr + 1 == total);
+    }
+}
+
+fn skip_context(skipped: &[bool], mb_w: u32, mx: u32, my: u32) -> usize {
+    let mut ctx = 0usize;
+    if mx > 0 && skipped.get((my * mb_w + mx - 1) as usize) == Some(&false) {
+        ctx += 1;
+    }
+    if my > 0 && skipped.get(((my - 1) * mb_w + mx) as usize) == Some(&false) {
+        ctx += 1;
+    }
+    ctx
+}
+
 fn intra_slice(mb_w: u32, mb_h: u32, idr_pic_id: u32, src: &Source<'_>) -> Vec<u8> {
     let mut bits = Writer::new();
     bits.ue(0);
@@ -477,14 +607,14 @@ fn write_intra4(
     if luma != 0 || chroma != 0 {
         cab.decision(60, 0);
     }
-    write_luma4(cab, &residual.luma, luma, nnz.luma, mb_w, mx, my);
+    write_luma4(cab, &residual.luma, luma, nnz.luma, (mb_w, mx, my, 1));
     if chroma != 0 {
-        write_dc4(cab, &residual.cb, dc_inc(mx, my, flags.cb, mb_w));
-        write_dc4(cab, &residual.cr, dc_inc(mx, my, flags.cr, mb_w));
+        write_dc4(cab, &residual.cb, dc_inc(mx, my, flags.cb, mb_w, 1));
+        write_dc4(cab, &residual.cr, dc_inc(mx, my, flags.cr, mb_w, 1));
     }
     if chroma == 2 {
-        write_chroma_ac(cab, &residual.cb_ac, nnz.cb, mb_w, mx, my);
-        write_chroma_ac(cab, &residual.cr_ac, nnz.cr, mb_w, mx, my);
+        write_chroma_ac(cab, &residual.cb_ac, nnz.cb, (mb_w, mx, my, 1));
+        write_chroma_ac(cab, &residual.cr_ac, nnz.cr, (mb_w, mx, my, 1));
     }
 }
 
@@ -573,10 +703,9 @@ fn write_luma4(
     blocks: &[[i32; 16]; 16],
     cbp: u8,
     nnz: &mut [u8],
-    mb_w: u32,
-    mx: u32,
-    my: u32,
+    at: (u32, u32, u32, usize),
 ) {
+    let (mb_w, mx, my, missing) = at;
     let stride = mb_w as usize * 4;
     for (i, block) in blocks.iter().enumerate() {
         let bx = blk_x(i);
@@ -585,8 +714,8 @@ fn write_luma4(
         if cbp & (1 << group) == 0 {
             continue;
         }
-        let inc = coded_nnz(nnz, mb_w, mx, my, bx as i32 - 1, by as i32, 4)
-            + 2 * coded_nnz(nnz, mb_w, mx, my, bx as i32, by as i32 - 1, 4);
+        let inc = coded_nnz(nnz, mb_w, (mx, bx as i32 - 1, my, by as i32), 4, missing)
+            + 2 * coded_nnz(nnz, mb_w, (mx, bx as i32, my, by as i32 - 1), 4, missing);
         let coded = block.iter().any(|level| *level != 0);
         cab.decision(93 + inc, u8::from(coded));
         if coded {
@@ -603,16 +732,15 @@ fn write_chroma_ac(
     cab: &mut CabacEnc<'_>,
     ac: &[[i32; 15]; 4],
     nnz: &mut [u8],
-    mb_w: u32,
-    mx: u32,
-    my: u32,
+    at: (u32, u32, u32, usize),
 ) {
+    let (mb_w, mx, my, missing) = at;
     let stride = mb_w as usize * 2;
     for (i, block) in ac.iter().enumerate() {
         let bx = i & 1;
         let by = i >> 1;
-        let inc = coded_nnz(nnz, mb_w, mx, my, bx as i32 - 1, by as i32, 2)
-            + 2 * coded_nnz(nnz, mb_w, mx, my, bx as i32, by as i32 - 1, 2);
+        let inc = coded_nnz(nnz, mb_w, (mx, bx as i32 - 1, my, by as i32), 2, missing)
+            + 2 * coded_nnz(nnz, mb_w, (mx, bx as i32, my, by as i32 - 1), 2, missing);
         let coded = block.iter().any(|level| *level != 0);
         cab.decision(101 + inc, u8::from(coded));
         if coded {
@@ -625,7 +753,14 @@ fn write_chroma_ac(
     }
 }
 
-fn coded_nnz(nnz: &[u8], mb_w: u32, mx: u32, my: u32, bx: i32, by: i32, grid: usize) -> usize {
+fn coded_nnz(
+    nnz: &[u8],
+    mb_w: u32,
+    at: (u32, i32, u32, i32),
+    grid: usize,
+    missing: usize,
+) -> usize {
+    let (mx, bx, my, by) = at;
     let (mx, bx) = if bx < 0 {
         (mx as i32 - 1, grid - 1)
     } else {
@@ -637,7 +772,7 @@ fn coded_nnz(nnz: &[u8], mb_w: u32, mx: u32, my: u32, bx: i32, by: i32, grid: us
         (my as i32, by as usize)
     };
     if mx < 0 || my < 0 {
-        return 1;
+        return missing;
     }
     let stride = mb_w as usize * grid;
     let x = mx as usize * grid + bx;
@@ -700,6 +835,83 @@ fn predict4(recon: &[u8], stride: u32, x: u32, y: u32) -> [u8; 16] {
         }
     }
     crate::recon::pred4(2, &above, &left, 128, above_ok, left_ok)
+}
+
+fn inter4(
+    reference: &[u8],
+    src: &[u8],
+    width: u32,
+    height: u32,
+    mx: u32,
+    my: u32,
+) -> [[i32; 16]; 16] {
+    let mut blocks = [[0i32; 16]; 16];
+    let x0 = mx * 16;
+    let y0 = my * 16;
+    for (i, levels) in blocks.iter_mut().enumerate() {
+        let x = x0 + blk_x(i) as u32 * 4;
+        let y = y0 + blk_y(i) as u32 * 4;
+        let pred = sample_block(reference, width, x, y);
+        *levels = quant4(&pred, src, width, height, x, y);
+    }
+    blocks
+}
+
+fn sample_block(plane: &[u8], stride: u32, x: u32, y: u32) -> [u8; 16] {
+    let mut pred = [128u8; 16];
+    let step = stride as usize;
+    for row in 0..4usize {
+        let start = (y as usize + row) * step + x as usize;
+        if let Some(samples) = plane.get(start..start + 4) {
+            pred[row * 4..row * 4 + 4].copy_from_slice(samples);
+        }
+    }
+    pred
+}
+
+fn chroma_inter(
+    reference: &[u8],
+    src: &[u8],
+    width: u32,
+    height: u32,
+    mx: u32,
+    my: u32,
+) -> ([i32; 4], [[i32; 15]; 4]) {
+    let pred = sample_chroma(reference, width, mx, my);
+    let qp = crate::recon::chroma_qp(QP, 0);
+    let mut dc = [0i32; 4];
+    let mut ac = [[0i32; 15]; 4];
+    let x0 = mx * 8;
+    let y0 = my * 8;
+    for (i, block) in ac.iter_mut().enumerate() {
+        let bx = i & 1;
+        let by = i >> 1;
+        let pix = chroma_forward(&pred, src, width, height, (x0, y0), (bx, by));
+        dc[i] = pix[0];
+        for (n, &pos) in crate::set::ZIGZAG4.iter().enumerate().skip(1) {
+            block[n - 1] = quant_coeff(pix[pos], qp, 15, qclass(pos % 4, pos / 4));
+        }
+    }
+    let mixed = hadamard2(dc);
+    let mut levels = [0i32; 4];
+    for (index, coeff) in mixed.iter().enumerate() {
+        levels[index] = quant_coeff(*coeff, qp, 16, 0);
+    }
+    (levels, ac)
+}
+
+fn sample_chroma(plane: &[u8], stride: u32, mx: u32, my: u32) -> [u8; 64] {
+    let mut pred = [128u8; 64];
+    let x0 = mx * 8;
+    let y0 = my * 8;
+    let step = stride as usize;
+    for row in 0..8usize {
+        let start = (y0 as usize + row) * step + x0 as usize;
+        if let Some(samples) = plane.get(start..start + 8) {
+            pred[row * 8..row * 8 + 8].copy_from_slice(samples);
+        }
+    }
+    pred
 }
 
 fn quant4(pred: &[u8; 16], src: &[u8], width: u32, height: u32, x: u32, y: u32) -> [i32; 16] {
@@ -1009,14 +1221,14 @@ fn write_suffix(cab: &mut CabacEnc<'_>, abs: u32) {
     }
 }
 
-fn dc_inc(mx: u32, my: u32, dc_coded: &[bool], mb_w: u32) -> usize {
+fn dc_inc(mx: u32, my: u32, dc_coded: &[bool], mb_w: u32, missing: usize) -> usize {
     let left = if mx == 0 {
-        1
+        missing
     } else {
         usize::from(dc_coded[(my * mb_w + mx - 1) as usize])
     };
     let above = if my == 0 {
-        1
+        missing
     } else {
         usize::from(dc_coded[((my - 1) * mb_w + mx) as usize])
     };
@@ -1653,8 +1865,8 @@ mod tests {
         let again = encoder.push(&input).unwrap();
         let again_nals = crate::nal::access_unit(&again[0].data, 0).unwrap();
         assert!(
-            again_nals.iter().any(|nal| nal.kind == 5),
-            "a repeated ramp is not a skip; deblock changes the reference"
+            again_nals.iter().any(|nal| nal.kind == 1),
+            "a repeated ramp stays an intra picture"
         );
         if let Some(ffmpeg) = ffmpeg() {
             let dir = std::env::temp_dir().join("cutlass-h264-enc-pskip");
@@ -1722,6 +1934,116 @@ mod tests {
         assert_eq!(frames[0].picture.y(), decoded[0].picture.y());
         assert_eq!(frames[0].picture.u(), decoded[0].picture.u());
         assert_eq!(frames[0].picture.v(), decoded[0].picture.v());
+    }
+
+    #[test]
+    fn changed_picture_is_a_p_residual() {
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut input = VideoInput {
+            picture: Yuv420p::solid(64, 64, 128, 128, 128).unwrap(),
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        input.picture = Yuv420p::solid(64, 64, 180, 128, 128).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let nals = crate::nal::access_unit(&second[0].data, 0).unwrap();
+        assert!(
+            nals.iter().any(|nal| nal.kind == 1),
+            "a changed picture stays intra"
+        );
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let _ = decoder.push(&first[0]).unwrap();
+        let frames = decoder.push(&second[0]).unwrap();
+        assert_eq!(frames.len(), 1);
+        let y = frames[0].picture.y();
+        let mean = y.iter().map(|sample| u32::from(*sample)).sum::<u32>() / y.len() as u32;
+        assert!(
+            mean > 150,
+            "the residual stayed near the reference, mean {mean}"
+        );
+        if let Some(ffmpeg) = ffmpeg() {
+            let dir = std::env::temp_dir().join("cutlass-h264-enc-pres");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let coded = dir.join("pres.h264");
+            let yuv = dir.join("pres.yuv");
+            let mut bytes = first[0].data.clone();
+            bytes.extend_from_slice(&second[0].data);
+            std::fs::write(&coded, &bytes).unwrap();
+            let decoded = std::process::Command::new(ffmpeg)
+                .args(["-y", "-i"])
+                .arg(&coded)
+                .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+                .arg(&yuv)
+                .status()
+                .unwrap();
+            assert!(decoded.success(), "ffmpeg rejected the P residual");
+            let raw = std::fs::read(&yuv).unwrap();
+            let frame = 64 * 64 * 3 / 2;
+            assert_eq!(&raw[frame..frame + y.len()], y);
+        }
+    }
+
+    #[test]
+    fn repeated_ramp_residual_matches_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            return;
+        };
+        let mut params = CodecParams::video(CodecId::H264, 64, 64);
+        params.nal_length_size = 0;
+        let mut encoder = H264Encoder::open(&params).unwrap();
+        let mut y = vec![0u8; 64 * 64];
+        for row in 0..64 {
+            for col in 0..64 {
+                y[row * 64 + col] = u8::try_from(col * 3).unwrap_or(0);
+            }
+        }
+        let picture = Yuv420p::try_new(64, 64, y, vec![40; 32 * 32], vec![200; 32 * 32]).unwrap();
+        let mut input = VideoInput {
+            picture,
+            pts: 0,
+            duration: 1,
+            timescale: 30,
+            force_keyframe: true,
+        };
+        let first = encoder.push(&input).unwrap();
+        input.force_keyframe = false;
+        input.pts = 1;
+        let second = encoder.push(&input).unwrap();
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let _ = decoder.push(&first[0]).unwrap();
+        let frames = decoder.push(&second[0]).unwrap();
+        let dir = std::env::temp_dir().join("cutlass-h264-enc-pramp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("pramp.h264");
+        let yuv = dir.join("pramp.yuv");
+        let mut bytes = first[0].data.clone();
+        bytes.extend_from_slice(&second[0].data);
+        std::fs::write(&coded, &bytes).unwrap();
+        let decoded = std::process::Command::new(ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg rejected the ramp residual");
+        let raw = std::fs::read(&yuv).unwrap();
+        let frame = 64 * 64 * 3 / 2;
+        let got = &raw[frame..frame * 2];
+        assert_eq!(&got[..frames[0].picture.y().len()], frames[0].picture.y());
+        let u_at = frames[0].picture.y().len();
+        let u_len = frames[0].picture.u().len();
+        assert_eq!(&got[u_at..u_at + u_len], frames[0].picture.u());
+        assert_eq!(&got[u_at + u_len..], frames[0].picture.v());
     }
 
     fn gray_planes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {

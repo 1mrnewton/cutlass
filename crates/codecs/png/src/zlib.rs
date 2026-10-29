@@ -32,10 +32,12 @@ const CL_ORDER: [usize; 19] = [
 ];
 const LIT_FLAG: u32 = 0x8000_0000;
 const CHAIN_FLOOR: usize = 16;
-const CHAIN_CEILING: usize = 128;
+const CHAIN_CEILING: usize = 32;
 const LAZY_LIMIT: usize = 16;
 const STRONG_MATCH: usize = 8;
 const WEAK_RUN: usize = 48;
+const GOOD_LEN: usize = 32;
+const GOOD_EXTRA: usize = 8;
 const NICE_LEN: usize = 258;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -754,30 +756,73 @@ fn best_match(
     }
     let hash = hash3(src, index);
     let mut pos = head[hash];
-    let mut steps = 0;
-    while pos >= 0 && steps < chain_limit {
-        let earlier = pos as usize;
-        if earlier >= index || index - earlier > MAX_WINDOW {
-            break;
-        }
-        let len = match_at(src, index, earlier);
-        let back = index - earlier;
-        if worth_encoding(len, back) && better_match(len, back, matched, distance) {
-            matched = len;
-            distance = (index - earlier) as u16;
-        }
-        if len >= NICE_LEN {
-            break;
-        }
+    let mut steps = 0usize;
+    // The newest copy is usually the run. One comparison catches it before the
+    // previous scanline, so a repeated byte keeps the short distance.
+    if let Some(earlier) = chain_earlier(index, pos) {
+        let len = record_match(src, index, earlier, &mut matched, &mut distance);
         pos = prev[earlier];
-        steps += 1;
+        steps = 1;
+        if len >= NICE_LEN {
+            prev[index] = head[hash];
+            head[hash] = index as i32;
+            return (matched, distance);
+        }
     }
     if matched < NICE_LEN {
         probe_rows(src, index, stride, span_start, &mut matched, &mut distance);
     }
+    let mut limit = chain_limit;
+    if matched >= NICE_LEN {
+        limit = steps;
+    } else if matched >= GOOD_LEN {
+        limit = steps + GOOD_EXTRA;
+    }
+    while pos >= 0 && steps < limit {
+        let Some(earlier) = chain_earlier(index, pos) else {
+            break;
+        };
+        let len = record_match(src, index, earlier, &mut matched, &mut distance);
+        if len >= NICE_LEN {
+            break;
+        }
+        if matched >= GOOD_LEN && limit > steps + GOOD_EXTRA {
+            limit = steps + GOOD_EXTRA;
+        }
+        pos = prev[earlier];
+        steps += 1;
+    }
     prev[index] = head[hash];
     head[hash] = index as i32;
     (matched, distance)
+}
+
+fn chain_earlier(index: usize, pos: i32) -> Option<usize> {
+    if pos < 0 {
+        return None;
+    }
+    let earlier = pos as usize;
+    if earlier >= index || index - earlier > MAX_WINDOW {
+        None
+    } else {
+        Some(earlier)
+    }
+}
+
+fn record_match(
+    src: &[u8],
+    index: usize,
+    earlier: usize,
+    matched: &mut usize,
+    distance: &mut u16,
+) -> usize {
+    let len = match_at(src, index, earlier);
+    let back = index - earlier;
+    if worth_encoding(len, back) && better_match(len, back, *matched, *distance) {
+        *matched = len;
+        *distance = u16::try_from(back).unwrap_or(0);
+    }
+    len
 }
 
 fn probe_rows(

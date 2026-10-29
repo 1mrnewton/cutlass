@@ -720,6 +720,19 @@ fn imagemagick_two_bit_grey_matches_exact_samples() {
 }
 
 #[test]
+fn imagemagick_four_bit_grey_matches_exact_samples() {
+    let Some(magick) = tool("magick") else {
+        require_or_skip("magick");
+        return;
+    };
+    let png = magick_gray_depth(&magick, &[0b1111_0111], 2, 1, 4);
+    let image = decode_bytes(&png).expect("four bit");
+    assert_eq!(image.color, ColorType::Gray);
+    assert_eq!(image.depth, BitDepth::Four);
+    assert_eq!(image.samples, vec![15, 7]);
+}
+
+#[test]
 fn a_local_png_matches_ffmpeg_when_the_file_is_present() {
     let Some(path) = local_png() else {
         return;

@@ -707,6 +707,19 @@ fn ffmpeg_one_bit_grey_matches_exact_samples() {
 }
 
 #[test]
+fn imagemagick_two_bit_grey_matches_exact_samples() {
+    let Some(magick) = tool("magick") else {
+        require_or_skip("magick");
+        return;
+    };
+    let png = magick_gray_depth(&magick, &[0b1110_0100], 4, 1, 2);
+    let image = decode_bytes(&png).expect("two bit");
+    assert_eq!(image.color, ColorType::Gray);
+    assert_eq!(image.depth, BitDepth::Two);
+    assert_eq!(image.samples, vec![3, 2, 1, 0]);
+}
+
+#[test]
 fn a_local_png_matches_ffmpeg_when_the_file_is_present() {
     let Some(path) = local_png() else {
         return;
@@ -982,6 +995,40 @@ fn ffmpeg_raw(ffmpeg: &PathBuf, png: &[u8], pix: &str) -> Vec<u8> {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
     output.stdout
+}
+
+fn magick_gray_depth(
+    magick: &PathBuf,
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    depth: u8,
+) -> Vec<u8> {
+    let dir = std::env::temp_dir().join(format!(
+        "cutlass-png-depth-{}-{}",
+        std::process::id(),
+        depth
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("in.gray");
+    let output = dir.join("out.png");
+    std::fs::write(&input, raw).unwrap();
+    let status = Command::new(magick)
+        .args([
+            "-size",
+            &format!("{width}x{height}"),
+            "-depth",
+            &depth.to_string(),
+        ])
+        .arg(format!("gray:{}", input.display()))
+        .args(["-define", &format!("png:bit-depth={depth}")])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let bytes = std::fs::read(&output).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
 }
 
 fn magick_png(magick: &PathBuf, raw: &[u8], width: u32, height: u32) -> Vec<u8> {

@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    Channel, ChannelLayout, CodecError, CodecParams, Packet, Pcm, PixelFormat, SampleFormat,
-    SideData,
+    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorType, ImageError, Packet, Pcm,
+    PhysicalPixel, PixelFormat, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transparency,
 };
 
 /// PCM presented to an encoder, contiguous with the samples already accepted.
@@ -29,6 +29,14 @@ pub use cutlass_codec::access::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioInput {
     pub pcm: Pcm,
+}
+
+/// One still presented to an encoder.
+///
+/// The samples are the coded domain. The encoder does not convert them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PictureInput {
+    pub image: StillImage,
 }
 
 /// Presentation time for one picture, in ticks of `timescale`.
@@ -226,6 +234,14 @@ pub trait Encoder: Send {
 
     fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError>;
 
+    /// Encode one still. Audio codecs refuse this.
+    fn push_picture(&mut self, input: &PictureInput) -> Result<Vec<Packet>, CodecError> {
+        let _ = (self, input);
+        Err(CodecError::Unsupported {
+            what: "picture input",
+        })
+    }
+
     fn push_frame(&mut self, input: &FrameInput) -> Result<Vec<Packet>, CodecError>;
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError>;
@@ -373,6 +389,24 @@ mod tests {
         let packets = encoder.push(&AudioInput { pcm }).expect("push");
         assert!(packets.is_empty());
         assert!(encoder.drain().expect("drain").is_empty());
+        let image = cutlass_codec::access::StillImage::from_samples(
+            1,
+            1,
+            cutlass_codec::access::ColorType::Gray,
+            cutlass_codec::access::BitDepth::Eight,
+            vec![0],
+        )
+        .checked()
+        .expect("still");
+        let err = encoder
+            .push_picture(&super::PictureInput { image })
+            .expect_err("audio");
+        assert_eq!(
+            err,
+            CodecError::Unsupported {
+                what: "picture input",
+            }
+        );
     }
 
     fn refuse_params(_params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {

@@ -1,8 +1,8 @@
 //! Text runs: glyph positions, line layout, and a picture sampled from a
-//! signed-distance atlas.
+//! glyph atlas.
 //!
-//! Rich-text commands, bitmap atlases, stroke, shadow, background, and
-//! caption curves are not implemented here.
+//! Rich-text commands, stroke, shadow, background, and caption curves are
+//! not implemented here.
 
 #![forbid(unsafe_code)]
 

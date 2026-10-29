@@ -42,8 +42,10 @@ Encoder fuzz, release, seed `0xBEEF4201`, 120.00 seconds:
 
 | | Cutlass | FFmpeg | FFmpeg / Cutlass |
 | --- | --- | --- | --- |
-| Decode | 1.52 s, 79.1 fps | 0.15 s, 812.8 fps | 10.3× |
-| Encode | 7.69 s, 3.9 fps | 0.07 s, 414.0 fps | 106.1× |
+| Decode | 0.53 s, 227.5 fps | 0.13 s, 893.5 fps | 3.9× |
+| Encode | 7.22 s, 4.2 fps | 0.07 s, 445.1 fps | 107.1× |
+
+An earlier decode run, before whole-partition motion compensation, was 1.52 s (79.1 fps) against 0.15 s (812.8 fps), 10.3×. FFmpeg's own time moves between runs because the measurement includes process startup.
 
 Encode quality, from the default tests on this machine: `testsrc2` 320×240, 60 frames, 500 kbps, luma 39.94 dB and 1,016,856 bits (target 1,000,000). One natural clip scaled to 640×360, 30 frames, 800 kbps, luma 35.09 dB and 812,424 bits (target 800,000). Gates are 30 dB, 28 dB, and 0.75×–1.25× of `bitrate * duration`.
 
@@ -59,7 +61,7 @@ Encode quality, from the default tests on this machine: `testsrc2` 320×240, 60 
 | 30-minute decoder fuzz | Run | n/a | `thirty_minute_decoder_campaign` | Verified, this machine, 1800.00 s, seed `0xC0FFEE01` |
 | Bounded encoder fuzz | n/a | Run | `bounded_encoder_campaign` | Verified, this machine, 120.00 s, seed `0xBEEF4201` |
 | 1280×720 High decode | At least 30 fps, under 64 MiB extra | n/a | `high_720p_decode_meets_the_release_gates` | Passed. About 73 fps, 29,008 KiB |
-| Throughput vs ffmpeg, one thread | Same High stream | Same pictures, libx264 ultrafast | `against_ffmpeg` | Decode 10.3× behind ffmpeg. Encode 106.1× behind libx264 ultrafast. Not a quality match |
+| Throughput vs ffmpeg, one thread | Same High stream | Same pictures, libx264 ultrafast | `against_ffmpeg` | Decode 3.9× behind ffmpeg. Encode 107.1× behind libx264 ultrafast. Not a quality match |
 | ITU conformance bitstreams | Not run | Not run | Streams not obtained | Not available |
 | Desktop registration | Not wired | Not wired | `apps/desktop` prints and returns | Not done |
 | Linux and Windows | Not run | Not run | This file was written on macOS | Not run |

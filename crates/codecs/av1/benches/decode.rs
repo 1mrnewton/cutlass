@@ -54,7 +54,7 @@ fn compare(input: &Path, ivf: &Path, yuv: &Path) -> Result<(), String> {
     ));
     say(&machine());
     say(
-        "ffmpeg is dav1d through libavcodec. cutlass is one thread, bench profile, no link-time optimization.",
+        "ffmpeg is dav1d through libavcodec. cutlass decodes tiles in parallel, bench profile, no link-time optimization.",
     );
 
     let ours = decode_once(packet)?;

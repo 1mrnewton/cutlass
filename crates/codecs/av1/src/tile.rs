@@ -112,48 +112,26 @@ pub fn decode_with_refs(
     let buf_w = (frame.mi_cols as usize).saturating_mul(4);
     let buf_h = (frame.mi_rows as usize).saturating_mul(4);
     let parts = crate::header::tile_parts(frame)?;
-    let Some(first) = parts.first() else {
+    if parts.is_empty() {
         return Err(CodecError::Truncated {
             at_bit: 0,
             what: "tile",
         });
-    };
-    let mut tile = Tile::new(sequence, frame, &first.data, buf_w, buf_h, refs)?;
-    let mut lr = restore::Grid::new(frame)?;
-    let sb = if sequence.use_128 { 32 } else { SB4 };
-    for (index, part) in parts.iter().enumerate() {
-        if index > 0 {
-            tile.restart(&part.data)?;
-        }
-        tile.tile_row = part.row;
-        tile.tile_col = part.col;
-        tile.tile_row_end = part.row_end;
-        tile.tile_col_end = part.col_end;
-        tile.clear_above(part.col, part.col_end);
-        let mut row = part.row;
-        while row < part.row_end {
-            tile.clear_left();
-            let mut col = part.col;
-            while col < part.col_end {
-                tile.clear_decoded(row, col);
-                tile.read_deltas = frame.delta_q_present;
-                restore::read_superblock(
-                    &mut tile.symbols,
-                    tile.update,
-                    frame,
-                    &mut lr,
-                    row,
-                    col,
-                    sb,
-                )?;
-                let root = if sb == 32 { BLOCK_128X128 } else { 12 };
-                tile.decode_partition(row, col, root)?;
-                col += sb;
-            }
-            row += sb;
-        }
-        tile.symbols.finish()?;
     }
+    let sb = if sequence.use_128 { 32 } else { SB4 };
+    let mut lr = restore::Grid::new(frame)?;
+    let mut tile = if parts.len() > 1 && !lr.active() {
+        decode_tiles(sequence, frame, &parts, buf_w, buf_h, refs, sb)?
+    } else {
+        let mut tile = Tile::new(sequence, frame, &parts[0].data, buf_w, buf_h, refs)?;
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                tile.restart(&part.data)?;
+            }
+            tile.decode_part(frame, part, sb, &mut lr)?;
+        }
+        tile
+    };
     let sizes = tile.sizes.clone();
     let tx_sizes = tile.tx_sizes.clone();
     let edges = Edges {
@@ -296,6 +274,131 @@ fn restore_plane(
         }
         _ => cdef.to_vec(),
     }
+}
+
+/// Tiles reconstruct independently. The loop filter and CDEF run after the merge.
+fn decode_tiles<'a, 'r>(
+    sequence: &Sequence,
+    frame: &FrameInfo,
+    parts: &'a [crate::header::TilePart],
+    buf_w: usize,
+    buf_h: usize,
+    refs: &[Option<RefView<'r>>],
+    sb: usize,
+) -> Result<Tile<'a, 'r>, CodecError> {
+    let decoded = std::thread::scope(|scope| {
+        let mut joins = Vec::with_capacity(parts.len());
+        for part in parts {
+            joins.push(scope.spawn(|| {
+                let mut tile = Tile::new(sequence, frame, &part.data, buf_w, buf_h, refs)?;
+                let mut grid = restore::Grid::new(frame)?;
+                tile.decode_part(frame, part, sb, &mut grid)?;
+                Ok(tile)
+            }));
+        }
+        let mut tiles = Vec::with_capacity(joins.len());
+        let mut error = None;
+        for join in joins {
+            match join.join() {
+                Ok(Ok(tile)) => tiles.push(tile),
+                Ok(Err(err)) => error = error.or(Some(err)),
+                Err(_) => {
+                    error = error.or(Some(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "tile",
+                    }));
+                }
+            }
+        }
+        if let Some(err) = error {
+            return Err(err);
+        }
+        Ok(tiles)
+    })?;
+    let mut tiles = decoded;
+    let Some(mut base) = tiles.pop() else {
+        return Err(CodecError::Truncated {
+            at_bit: 0,
+            what: "tile",
+        });
+    };
+    // `pop` took the last tile. Copy the earlier rectangles into it.
+    for extra in tiles {
+        copy_tile_region(&mut base, &extra);
+    }
+    Ok(base)
+}
+
+fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
+    let y0 = src.tile_row.saturating_mul(4);
+    let y1 = src.tile_row_end.saturating_mul(4);
+    let x0 = src.tile_col.saturating_mul(4);
+    let x1 = src.tile_col_end.saturating_mul(4);
+    copy_plane(&mut dst.y, &src.y, dst.width, x0, x1, y0, y1);
+    let shift_x = usize::from(src.sub_x);
+    let shift_y = usize::from(src.sub_y);
+    copy_plane(
+        &mut dst.u,
+        &src.u,
+        dst.chroma_w,
+        x0 >> shift_x,
+        x1 >> shift_x,
+        y0 >> shift_y,
+        y1 >> shift_y,
+    );
+    copy_plane(
+        &mut dst.v,
+        &src.v,
+        dst.chroma_w,
+        x0 >> shift_x,
+        x1 >> shift_x,
+        y0 >> shift_y,
+        y1 >> shift_y,
+    );
+    let cols = dst.mi_cols;
+    for row in src.tile_row..src.tile_row_end {
+        let start = row.saturating_mul(cols).saturating_add(src.tile_col);
+        let n = src.tile_col_end.saturating_sub(src.tile_col);
+        copy_cells(&mut dst.sizes, &src.sizes, start, n);
+        copy_cells(&mut dst.tx_sizes, &src.tx_sizes, start, n);
+        copy_cells(&mut dst.skips, &src.skips, start, n);
+        copy_cells(&mut dst.cdef_idx, &src.cdef_idx, start, n);
+    }
+}
+
+fn copy_plane(
+    dst: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+) {
+    let n = x1.saturating_sub(x0);
+    if n == 0 || stride == 0 {
+        return;
+    }
+    for y in y0..y1 {
+        let start = y.saturating_mul(stride).saturating_add(x0);
+        let Some(from) = src.get(start..start.saturating_add(n)) else {
+            continue;
+        };
+        let Some(into) = dst.get_mut(start..start.saturating_add(n)) else {
+            continue;
+        };
+        into.copy_from_slice(from);
+    }
+}
+
+fn copy_cells<T: Copy>(dst: &mut [T], src: &[T], start: usize, n: usize) {
+    let Some(from) = src.get(start..start.saturating_add(n)) else {
+        return;
+    };
+    let Some(into) = dst.get_mut(start..start.saturating_add(n)) else {
+        return;
+    };
+    into.copy_from_slice(from);
 }
 
 fn crop(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
@@ -583,6 +686,36 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.current_q = self.base_q;
         self.read_deltas = false;
         self.filter_mode = None;
+        Ok(())
+    }
+
+    fn decode_part(
+        &mut self,
+        frame: &FrameInfo,
+        part: &crate::header::TilePart,
+        sb: usize,
+        lr: &mut restore::Grid,
+    ) -> Result<(), CodecError> {
+        self.tile_row = part.row;
+        self.tile_col = part.col;
+        self.tile_row_end = part.row_end;
+        self.tile_col_end = part.col_end;
+        self.clear_above(part.col, part.col_end);
+        let mut row = part.row;
+        while row < part.row_end {
+            self.clear_left();
+            let mut col = part.col;
+            while col < part.col_end {
+                self.clear_decoded(row, col);
+                self.read_deltas = frame.delta_q_present;
+                restore::read_superblock(&mut self.symbols, self.update, frame, lr, row, col, sb)?;
+                let root = if sb == 32 { BLOCK_128X128 } else { 12 };
+                self.decode_partition(row, col, root)?;
+                col += sb;
+            }
+            row += sb;
+        }
+        self.symbols.finish()?;
         Ok(())
     }
 

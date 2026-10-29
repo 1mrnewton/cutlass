@@ -2156,6 +2156,86 @@ mod oracle {
     }
 
     #[test]
+    fn two_slices_match_ffmpeg_across_the_boundary() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-slices");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("slices.h264");
+        let yuv = dir.join("slices.yuv");
+        let encoded = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=30",
+                "-frames:v",
+                "3",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "cabac=1:bframes=0:slices=2:keyint=30:scenecut=0:weightp=0:8x8dct=0:threads=1",
+                "-f",
+                "h264",
+            ])
+            .arg(&coded)
+            .status()
+            .unwrap();
+        assert!(encoded.success(), "ffmpeg encode failed");
+        let decoded = Command::new(&ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg decode failed");
+        let bytes = std::fs::read(&coded).unwrap();
+        let expected = std::fs::read(&yuv).unwrap();
+        let params = CodecParams::video(CodecId::H264, 64, 64);
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut got = Vec::new();
+        for (unit_index, unit) in access_units(&bytes).into_iter().enumerate() {
+            let packet = Packet::video(unit, 0, 1, 30, false);
+            match decoder.push(&packet) {
+                Ok(frames) => got.extend(pictures(&frames)),
+                Err(error) => panic!("push {unit_index} failed: {error:?}"),
+            }
+        }
+        match decoder.drain() {
+            Ok(frames) => got.extend(pictures(&frames)),
+            Err(error) => panic!("drain failed: {error:?}"),
+        }
+        assert_eq!(got.len(), expected.len(), "picture bytes");
+        let mut count = 0usize;
+        let mut max = 0u8;
+        let mut first = None;
+        for (index, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            if a == b {
+                continue;
+            }
+            count += 1;
+            if a.abs_diff(*b) >= max {
+                max = a.abs_diff(*b);
+            }
+            if first.is_none() {
+                first = Some((index, *a, *b));
+            }
+        }
+        if count != 0 {
+            panic!("slice boundary mismatches {count} max {max} first {first:?}");
+        }
+    }
+
+    #[test]
     fn high_cabac_8x8_matches_ffmpeg() {
         let Some(ffmpeg) = ffmpeg() else {
             eprintln!("skip: ffmpeg is not installed");
@@ -2429,7 +2509,8 @@ mod oracle {
                 .unwrap_or(data.len());
             let kind = data[body] & 31;
             let vcl = kind == 1 || kind == 5;
-            if (kind == 9 || (vcl && saw_vcl)) && !current.is_empty() {
+            let starts_picture = vcl && data.get(body + 1).is_some_and(|byte| byte & 0x80 != 0);
+            if (kind == 9 || (starts_picture && saw_vcl)) && !current.is_empty() {
                 units.push(std::mem::take(&mut current));
                 saw_vcl = false;
             }
@@ -4051,7 +4132,7 @@ pub(crate) fn deblock(pic: &mut Frame) {
             }
             let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
             for edge in 0..4 {
-                if edge == 0 && mx == 0 {
+                if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
                     continue;
                 }
                 let x = mx * 16 + edge * 4;
@@ -4123,7 +4204,7 @@ pub(crate) fn deblock(pic: &mut Frame) {
                 }
             }
             for edge in 0..4 {
-                if edge == 0 && my == 0 {
+                if edge == 0 && (my == 0 || !filter_boundary(pic, mx, my, false)) {
                     continue;
                 }
                 let y = my * 16 + edge * 4;
@@ -4225,10 +4306,7 @@ fn edge_qp(pic: &Frame, mx: usize, my: usize, luma: bool, vertical: bool, bounda
     } else {
         (mx as i32, my as i32 - 1)
     };
-    let Some(slice) = pic.mb.get(index).map(|mb| mb.slice) else {
-        return current;
-    };
-    let Some(other) = neighbor(pic, nx, ny, slice) else {
+    let Some(other) = coded_mb(pic, nx, ny) else {
         return current;
     };
     let side = if luma {
@@ -4319,7 +4397,7 @@ fn block_preds(
     if mbx == mx as i32 && mby == my as i32 {
         return preds_at(current, ox, oy);
     }
-    neighbor(pic, mbx, mby, current.slice)
+    coded_mb(pic, mbx, mby)
         .map(|mb| preds_at(mb, ox, oy))
         .unwrap_or([(-1, [0, 0]), (-1, [0, 0])])
 }
@@ -4365,9 +4443,41 @@ fn block_intra(pic: &Frame, mx: usize, my: usize, bx: i32, by: i32, current: &Mb
     if mbx == mx as i32 && mby == my as i32 {
         return current.intra;
     }
-    neighbor(pic, mbx, mby, current.slice).is_some_and(|mb| mb.intra)
+    coded_mb(pic, mbx, mby).is_some_and(|mb| mb.intra)
+}
+
+/// A macroblock edge is filtered across slices unless this slice asked not to.
+fn filter_boundary(pic: &Frame, mx: usize, my: usize, vertical: bool) -> bool {
+    let Some(mb) = coded_mb(pic, mx as i32, my as i32) else {
+        return false;
+    };
+    if mb.deblock != 2 {
+        return true;
+    }
+    let (nx, ny) = if vertical {
+        (mx as i32 - 1, my as i32)
+    } else {
+        (mx as i32, my as i32 - 1)
+    };
+    coded_mb(pic, nx, ny).is_some_and(|other| other.slice == mb.slice)
+}
+
+fn coded_mb(pic: &Frame, mx: i32, my: i32) -> Option<&Mb> {
+    if mx < 0 || my < 0 || mx as usize >= pic.mb_w || my as usize >= pic.h / 16 {
+        return None;
+    }
+    let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
+    if mb.slice == u16::MAX { None } else { Some(mb) }
 }
 
 fn block_nnz(pic: &Frame, mx: usize, my: usize, bx: i32, by: i32, current: &Mb) -> u8 {
-    nnz_at(pic, mx, my, bx, by, current, 0).unwrap_or(0)
+    let (mbx, ox) = shift(mx, bx, 4);
+    let (mby, oy) = shift(my, by, 4);
+    let index = oy * 4 + ox;
+    if mbx == mx as i32 && mby == my as i32 {
+        return current.nnz_y[index];
+    }
+    coded_mb(pic, mbx, mby)
+        .map(|mb| if mb.pcm { 16 } else { mb.nnz_y[index] })
+        .unwrap_or(0)
 }

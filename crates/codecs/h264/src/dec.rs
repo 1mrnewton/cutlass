@@ -644,20 +644,17 @@ fn read_header(
         let _ = bits.ue()?;
     }
     let mut poc_lsb = 0i32;
+    let mut delta_poc = [0i32; 2];
     if sps.poc_type == 0 {
         poc_lsb = bits.u(u32::from(sps.log2_max_poc_lsb))? as i32;
         if pps.bottom_field_pic_order {
             let _ = bits.se()?;
         }
     } else if sps.poc_type == 1 && !sps.delta_pic_order_always_zero {
-        let d0 = bits.se()?;
-        let d1 = if pps.bottom_field_pic_order {
-            bits.se()?
-        } else {
-            0
-        };
-        let _ = (d0, d1);
-        poc_lsb = d0;
+        delta_poc[0] = bits.se()?;
+        if pps.bottom_field_pic_order {
+            delta_poc[1] = bits.se()?;
+        }
     }
     if pps.redundant_pic_cnt_present {
         let _ = bits.ue()?;
@@ -795,7 +792,7 @@ fn read_header(
         kind: kind as u8,
         frame_num,
         poc_lsb,
-        delta_poc: [poc_lsb, 0],
+        delta_poc,
         qp,
         deblock,
         off_a,
@@ -892,14 +889,24 @@ fn picture_order(
     } else {
         state.prev_frame_num_offset
     };
-    let poc = if idr {
-        let lsb = if sps.poc_type == 0 { header.poc_lsb } else { 0 };
-        if header.nal_ref {
-            state.prev_poc_msb = 0;
-            state.prev_poc_lsb = lsb;
-        }
-        lsb
-    } else if sps.poc_type == 0 {
+    if idr && header.nal_ref {
+        state.prev_poc_msb = 0;
+        state.prev_poc_lsb = if sps.poc_type == 0 { header.poc_lsb } else { 0 };
+    }
+    let poc = if sps.poc_type == 1 {
+        poc_type1(
+            sps,
+            offset,
+            header.frame_num,
+            header.nal_ref,
+            header.delta_poc,
+        )?
+    } else if sps.poc_type == 2 {
+        let abs = i32::try_from(offset.saturating_add(header.frame_num)).unwrap_or(0);
+        if header.nal_ref { 2 * abs } else { 2 * abs - 1 }
+    } else if idr {
+        header.poc_lsb
+    } else {
         let max_lsb = 1i32 << sps.log2_max_poc_lsb;
         let prev_msb = if state.have_ref {
             state.prev_poc_msb
@@ -923,13 +930,50 @@ fn picture_order(
             state.prev_poc_lsb = header.poc_lsb;
         }
         msb + header.poc_lsb
-    } else if sps.poc_type == 2 {
-        let abs = i32::try_from(offset.saturating_add(header.frame_num)).unwrap_or(0);
-        if header.nal_ref { 2 * abs } else { 2 * abs - 1 }
-    } else {
-        header.delta_poc[0]
     };
     Ok((poc, offset))
+}
+
+/// Clause 8.2.1.2. A frame's order count is the smaller of the two fields.
+fn poc_type1(
+    sps: &Sps,
+    frame_num_offset: u32,
+    frame_num: u32,
+    nal_ref: bool,
+    delta: [i32; 2],
+) -> Result<i32, CodecError> {
+    let mut abs_frame_num = if sps.offset_for_ref.is_empty() {
+        0
+    } else {
+        i64::from(frame_num_offset) + i64::from(frame_num)
+    };
+    if !nal_ref && abs_frame_num > 0 {
+        abs_frame_num -= 1;
+    }
+    let mut expected = 0i64;
+    if abs_frame_num > 0 {
+        let cycle = sps.offset_for_ref.len() as i64;
+        let per_cycle: i64 = sps
+            .offset_for_ref
+            .iter()
+            .map(|offset| i64::from(*offset))
+            .sum();
+        let cycle_count = (abs_frame_num - 1) / cycle;
+        let in_cycle = usize::try_from((abs_frame_num - 1) % cycle).unwrap_or(0);
+        expected = cycle_count * per_cycle;
+        for offset in sps.offset_for_ref.iter().take(in_cycle + 1) {
+            expected += i64::from(*offset);
+        }
+    }
+    if !nal_ref {
+        expected += i64::from(sps.offset_non_ref);
+    }
+    let top = expected + i64::from(delta[0]);
+    let bottom = top + i64::from(sps.offset_top_bottom) + i64::from(delta[1]);
+    i32::try_from(top.min(bottom)).map_err(|_| CodecError::Malformed {
+        at_bit: 0,
+        what: "picture order count",
+    })
 }
 
 fn new_frame(
@@ -1124,6 +1168,53 @@ mod tests {
     use super::H264Decoder;
     use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder};
     use std::process::Command;
+
+    #[test]
+    fn picture_order_type1_follows_the_reference_cycle() {
+        let sps = type1_sps(&[2, 4], -1, 1);
+        let order = |frame_num, nal_ref, delta| {
+            super::poc_type1(&sps, 0, frame_num, nal_ref, delta).expect("poc")
+        };
+        assert_eq!(order(0, true, [0, 0]), 0);
+        assert_eq!(order(1, true, [0, 0]), 2);
+        assert_eq!(order(2, true, [0, 0]), 6);
+        assert_eq!(order(3, true, [0, 0]), 8);
+        assert_eq!(order(1, false, [0, 0]), -1);
+        assert_eq!(order(2, false, [3, -8]), -3);
+        let wide = type1_sps(&[2_000_000_000], 0, 0);
+        assert!(super::poc_type1(&wide, 0, 2, true, [0, 0]).is_err());
+    }
+
+    fn type1_sps(offsets: &[i32], non_ref: i32, top_bottom: i32) -> super::Sps {
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        super::Sps {
+            id: 0,
+            log2_max_frame_num: 4,
+            poc_type: 1,
+            log2_max_poc_lsb: 0,
+            delta_pic_order_always_zero: false,
+            offset_non_ref: non_ref,
+            offset_top_bottom: top_bottom,
+            offset_for_ref: offsets.to_vec(),
+            max_num_ref_frames: 1,
+            width: 16,
+            height: 16,
+            crop_left: 0,
+            crop_right: 0,
+            crop_top: 0,
+            crop_bottom: 0,
+            direct_8x8_inference: true,
+            mb_width: 1,
+            mb_height: 1,
+            weight4: [[16; 16]; 6],
+            weight8: [[16; 64]; 6],
+            range: ColorRange::Limited,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+            matrix: ColorMatrix::Unspecified,
+            max_reorder: 0,
+        }
+    }
 
     fn same(name: &str, got: &[u8], want: &[u8]) {
         assert_eq!(got.len(), want.len(), "{name} length");

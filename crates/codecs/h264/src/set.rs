@@ -17,6 +17,9 @@ pub struct Sps {
     pub poc_type: u8,
     pub log2_max_poc_lsb: u8,
     pub delta_pic_order_always_zero: bool,
+    pub offset_non_ref: i32,
+    pub offset_top_bottom: i32,
+    pub offset_for_ref: Vec<i32>,
     pub max_num_ref_frames: u8,
     pub width: u32,
     pub height: u32,
@@ -142,6 +145,9 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     }
     let mut log2_max_poc_lsb = 0u8;
     let mut delta_pic_order_always_zero = false;
+    let mut offset_non_ref = 0i32;
+    let mut offset_top_bottom = 0i32;
+    let mut offset_for_ref = Vec::new();
     if poc_type == 0 {
         log2_max_poc_lsb = (bits.ue()? + 4) as u8;
         if !(4..=16).contains(&log2_max_poc_lsb) {
@@ -149,16 +155,17 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         }
     } else if poc_type == 1 {
         delta_pic_order_always_zero = bits.bit()?;
-        let _offset_for_non_ref = bits.se()?;
-        let _offset_for_top_to_bottom = bits.se()?;
+        offset_non_ref = bits.se()?;
+        offset_top_bottom = bits.se()?;
         let cycles = bits.ue()?;
         if cycles > 256 {
             return Err(CodecError::Limit {
                 what: "pic_order_cnt cycle",
             });
         }
+        offset_for_ref.reserve(cycles as usize);
         for _ in 0..cycles {
-            let _offset = bits.se()?;
+            offset_for_ref.push(bits.se()?);
         }
     }
     let max_num_ref_frames = bits.ue()?;
@@ -209,6 +216,9 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         poc_type,
         log2_max_poc_lsb,
         delta_pic_order_always_zero,
+        offset_non_ref,
+        offset_top_bottom,
+        offset_for_ref,
         max_num_ref_frames: max_num_ref_frames as u8,
         width,
         height,

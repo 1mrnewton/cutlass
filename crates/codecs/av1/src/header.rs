@@ -148,8 +148,24 @@ pub struct FrameInfo {
     pub all_lossless: bool,
     pub ref_frames: [u8; 7],
     pub tile: Vec<u8>,
+    pub tile_cols: u32,
+    pub tile_rows: u32,
+    pub tile_cols_log: u32,
+    pub tile_rows_log: u32,
+    pub tile_size_bytes: u32,
+    pub mi_col_starts: Vec<u32>,
+    pub mi_row_starts: Vec<u32>,
     pub mi_cols: u32,
     pub mi_rows: u32,
+}
+
+/// One tile's bytes and the MI rectangle it reconstructs.
+pub struct TilePart {
+    pub row: usize,
+    pub row_end: usize,
+    pub col: usize,
+    pub col_end: usize,
+    pub data: Vec<u8>,
 }
 
 pub fn parse_unit(
@@ -629,6 +645,11 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     let sb_cols = width.div_ceil(64);
     let sb_rows = height.div_ceil(64);
     let uniform = bits.read_bool()?;
+    let mut tile_cols_log = 0u32;
+    let mut tile_rows_log = 0u32;
+    let mut tile_size_bytes = 0u32;
+    let mut mi_col_starts = vec![0, 2 * ((width + 7) >> 3)];
+    let mut mi_row_starts = vec![0, 2 * ((height + 7) >> 3)];
     if uniform {
         let max_tile_cols_log = tile_log2(1, sb_cols.min(64));
         let min_tile_cols_log = tile_log2(4096 / 64, sb_cols);
@@ -649,10 +670,15 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
             }
             rows_log += 1;
         }
+        tile_cols_log = cols_log;
+        tile_rows_log = rows_log;
+        let mi_cols_now = 2 * ((width + 7) >> 3);
+        let mi_rows_now = 2 * ((height + 7) >> 3);
+        mi_col_starts = mi_starts(sb_cols, cols_log, mi_cols_now);
+        mi_row_starts = mi_starts(sb_rows, rows_log, mi_rows_now);
         if cols_log > 0 || rows_log > 0 {
-            return Err(CodecError::Unsupported {
-                what: "multiple tiles",
-            });
+            let _context_update = bits.read(rows_log + cols_log)?;
+            tile_size_bytes = bits.read(2)? + 1;
         }
     } else if sb_cols != 1 || sb_rows != 1 {
         return Err(CodecError::Unsupported {
@@ -810,6 +836,13 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         all_lossless: lossless,
         ref_frames,
         tile: Vec::new(),
+        tile_cols: mi_col_starts.len().saturating_sub(1) as u32,
+        tile_rows: mi_row_starts.len().saturating_sub(1) as u32,
+        tile_cols_log,
+        tile_rows_log,
+        tile_size_bytes,
+        mi_col_starts,
+        mi_row_starts,
         mi_cols,
         mi_rows,
     })
@@ -963,6 +996,124 @@ fn read_delta_q(bits: &mut BitReader<'_>) -> Result<i32, CodecError> {
     }
 }
 
+fn mi_starts(sb_count: u32, log: u32, mi_total: u32) -> Vec<u32> {
+    let tile_sb = ((sb_count + (1 << log) - 1) >> log).max(1);
+    let mut starts = Vec::new();
+    let mut sb = 0u32;
+    while sb < sb_count {
+        starts.push(sb << 4);
+        sb += tile_sb;
+    }
+    if starts.is_empty() {
+        starts.push(0);
+    }
+    starts.push(mi_total);
+    starts
+}
+
+/// Split a frame OBU's tile group into one byte range per tile.
+pub fn tile_parts(frame: &FrameInfo) -> Result<Vec<TilePart>, CodecError> {
+    let cols = frame.mi_col_starts.len().saturating_sub(1);
+    let rows = frame.mi_row_starts.len().saturating_sub(1);
+    if cols == 0
+        || rows == 0
+        || cols != frame.tile_cols as usize
+        || rows != frame.tile_rows as usize
+    {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "tile grid",
+        });
+    }
+    let num = cols * rows;
+    if num == 1 {
+        return Ok(vec![TilePart {
+            row: 0,
+            row_end: frame.mi_rows as usize,
+            col: 0,
+            col_end: frame.mi_cols as usize,
+            data: frame.tile.clone(),
+        }]);
+    }
+    let mut bits = BitReader::new(&frame.tile);
+    let present = bits.read_bool()?;
+    let (group_start, group_end) = if present {
+        let width = frame.tile_cols_log + frame.tile_rows_log;
+        let start = bits.read(width)? as usize;
+        let end = bits.read(width)? as usize;
+        (start, end)
+    } else {
+        (0, num - 1)
+    };
+    if group_end < group_start || group_end >= num {
+        return Err(CodecError::Malformed {
+            at_bit: bits.position() as u64,
+            what: "tile group",
+        });
+    }
+    bits.byte_align();
+    let mut parts = Vec::new();
+    for tile_num in group_start..=group_end {
+        let row = tile_num / cols;
+        let col = tile_num % cols;
+        let last = tile_num == group_end;
+        let size = if last {
+            bits.bits_left() / 8
+        } else {
+            let minus = bits.read_le(frame.tile_size_bytes)?;
+            usize::try_from(minus)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1)
+        };
+        if bits.bits_left() < size.saturating_mul(8) {
+            return Err(CodecError::Truncated {
+                at_bit: bits.position() as u64,
+                what: "tile",
+            });
+        }
+        let data = bits.rest()?.get(..size).unwrap_or(&[]).to_vec();
+        if data.len() != size {
+            return Err(CodecError::Truncated {
+                at_bit: bits.position() as u64,
+                what: "tile",
+            });
+        }
+        bits.skip(size * 8)?;
+        let Some(&row_start) = frame.mi_row_starts.get(row) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "tile grid",
+            });
+        };
+        let Some(&row_end) = frame.mi_row_starts.get(row + 1) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "tile grid",
+            });
+        };
+        let Some(&col_start) = frame.mi_col_starts.get(col) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "tile grid",
+            });
+        };
+        let Some(&col_end) = frame.mi_col_starts.get(col + 1) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "tile grid",
+            });
+        };
+        parts.push(TilePart {
+            row: row_start as usize,
+            row_end: row_end as usize,
+            col: col_start as usize,
+            col_end: col_end as usize,
+            data,
+        });
+    }
+    Ok(parts)
+}
+
 fn tile_log2(block: u32, target: u32) -> u32 {
     let mut k = 0u32;
     let mut size = block.max(1);
@@ -1057,6 +1208,13 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         all_lossless: false,
         ref_frames: [0; 7],
         tile: Vec::new(),
+        tile_cols: 1,
+        tile_rows: 1,
+        tile_cols_log: 0,
+        tile_rows_log: 0,
+        tile_size_bytes: 0,
+        mi_col_starts: vec![0],
+        mi_row_starts: vec![0],
         mi_cols: 0,
         mi_rows: 0,
     }
@@ -1099,6 +1257,8 @@ pub(crate) fn header_is_addressable(
                 .unwrap_or(0),
         )
         .wrapping_add(u32::from(frame.primary_ref))
+        .wrapping_add(frame.tile_cols)
+        .wrapping_add(frame.tile_size_bytes)
         .wrapping_add(u32::from(frame.using_qmatrix))
         .wrapping_add(u32::from(frame.reference_select))
         .wrapping_add(u32::from(frame.skip_mode))

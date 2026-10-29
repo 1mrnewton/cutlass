@@ -111,22 +111,45 @@ pub fn decode_with_refs(
     }
     let buf_w = (frame.mi_cols as usize).saturating_mul(4);
     let buf_h = (frame.mi_rows as usize).saturating_mul(4);
-    let bytes = frame.tile.clone();
-    let mut tile = Tile::new(sequence, frame, &bytes, buf_w, buf_h, refs)?;
+    let parts = crate::header::tile_parts(frame)?;
+    let Some(first) = parts.first() else {
+        return Err(CodecError::Truncated {
+            at_bit: 0,
+            what: "tile",
+        });
+    };
+    let mut tile = Tile::new(sequence, frame, &first.data, buf_w, buf_h, refs)?;
     let mut lr = restore::Grid::new(frame)?;
     let sb = if sequence.use_128 { 32 } else { SB4 };
-    let mut row = 0;
-    while row < tile.mi_rows {
-        tile.clear_left();
-        let mut col = 0;
-        while col < tile.mi_cols {
-            tile.clear_decoded(row, col);
-            restore::read_superblock(&mut tile.symbols, tile.update, frame, &mut lr, row, col, sb)?;
-            let root = if sb == 32 { BLOCK_128X128 } else { 12 };
-            tile.decode_partition(row, col, root)?;
-            col += sb;
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            tile.restart(&part.data)?;
         }
-        row += sb;
+        tile.tile_row = part.row;
+        tile.tile_col = part.col;
+        tile.clear_above(part.col, part.col_end);
+        let mut row = part.row;
+        while row < part.row_end {
+            tile.clear_left();
+            let mut col = part.col;
+            while col < part.col_end {
+                tile.clear_decoded(row, col);
+                restore::read_superblock(
+                    &mut tile.symbols,
+                    tile.update,
+                    frame,
+                    &mut lr,
+                    row,
+                    col,
+                    sb,
+                )?;
+                let root = if sb == 32 { BLOCK_128X128 } else { 12 };
+                tile.decode_partition(row, col, root)?;
+                col += sb;
+            }
+            row += sb;
+        }
+        tile.symbols.finish()?;
     }
     let sizes = tile.sizes.clone();
     let tx_sizes = tile.tx_sizes.clone();
@@ -161,7 +184,6 @@ pub fn decode_with_refs(
             params: tile.cdef,
         });
     }
-    tile.symbols.finish()?;
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
     let up_w = frame.upscaled_width as usize;
@@ -301,6 +323,9 @@ struct Tile<'a, 'r> {
     chroma_h: usize,
     mi_cols: usize,
     mi_rows: usize,
+    tile_row: usize,
+    tile_col: usize,
+    q_index: usize,
     y_mode: Vec<u8>,
     uv_mode: Vec<u8>,
     skips: Vec<u8>,
@@ -457,6 +482,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             chroma_h,
             mi_cols,
             mi_rows,
+            tile_row: 0,
+            tile_col: 0,
+            q_index: q_ctx,
             y_mode: vec![DC_PRED; cells],
             uv_mode: vec![DC_PRED; cells],
             skips: vec![0; cells],
@@ -517,6 +545,30 @@ impl<'a, 'r> Tile<'a, 'r> {
         })
     }
 
+    fn restart(&mut self, bytes: &'a [u8]) -> Result<(), CodecError> {
+        self.symbols = SymbolDecoder::new(bytes)?;
+        self.cdfs = Cdfs::load(self.q_index);
+        Ok(())
+    }
+
+    fn above_mi(&self, row: usize) -> bool {
+        row > self.tile_row
+    }
+
+    fn left_mi(&self, col: usize) -> bool {
+        col > self.tile_col
+    }
+
+    fn clear_above(&mut self, col: usize, col_end: usize) {
+        for plane in 0..3 {
+            let end = col_end.min(self.above_level[plane].len());
+            for x in col..end {
+                self.above_level[plane][x] = 0;
+                self.above_dc[plane][x] = 0;
+            }
+        }
+    }
+
     fn clear_left(&mut self) {
         for plane in 0..3 {
             self.left_level[plane].fill(0);
@@ -533,7 +585,11 @@ impl<'a, 'r> Tile<'a, 'r> {
             let sb_y = SB4 >> sub_y;
             for y in -1..=sb_y as i32 {
                 for x in -1..=sb_x as i32 {
-                    let flag = if (y < 0 && x < sb_w as i32) || (x < 0 && y < sb_h as i32) {
+                    let above_ok = mi_row > self.tile_row;
+                    let left_ok = mi_col > self.tile_col;
+                    let flag = if (y < 0 && x < sb_w as i32 && above_ok)
+                        || (x < 0 && y < sb_h as i32 && left_ok)
+                    {
                         1
                     } else {
                         0
@@ -657,10 +713,10 @@ impl<'a, 'r> Tile<'a, 'r> {
             return Ok(PARTITION_NONE);
         }
         let bsl = MI_WIDTH_LOG2[bsize];
-        let above =
-            row > 0 && MI_WIDTH_LOG2[self.sizes[(row - 1) * self.mi_cols + col] as usize] < bsl;
-        let left =
-            col > 0 && MI_HEIGHT_LOG2[self.sizes[row * self.mi_cols + col - 1] as usize] < bsl;
+        let above = self.above_mi(row)
+            && MI_WIDTH_LOG2[self.sizes[(row - 1) * self.mi_cols + col] as usize] < bsl;
+        let left = self.left_mi(col)
+            && MI_HEIGHT_LOG2[self.sizes[row * self.mi_cols + col - 1] as usize] < bsl;
         let ctx = usize::from(left) * 2 + usize::from(above);
         let shape = partition_shape(bsl);
         let slot = bsl.saturating_sub(1).min(4);
@@ -714,8 +770,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         let bw4 = NUM_4X4_WIDE[bsize];
         let bh4 = NUM_4X4_HIGH[bsize];
         let has_chroma = self.has_chroma(row, col, bw4, bh4);
-        let avail_u = row > 0;
-        let avail_l = col > 0;
+        let avail_u = self.above_mi(row);
+        let avail_l = self.left_mi(col);
         let skip_ctx = self.neighbor_sum(row, col);
         let skip = self.read_skip(skip_ctx)?;
         self.read_cdef(row, col, skip)?;
@@ -778,8 +834,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         let bw4 = NUM_4X4_WIDE[bsize];
         let bh4 = NUM_4X4_HIGH[bsize];
         let has_chroma = self.has_chroma(row, col, bw4, bh4);
-        let avail_u = row > 0;
-        let avail_l = col > 0;
+        let avail_u = self.above_mi(row);
+        let avail_l = self.left_mi(col);
         let skip = self.read_skip(self.neighbor_sum(row, col))?;
         self.read_cdef(row, col, skip)?;
         let inter = self.read_is_inter(row, col)?;
@@ -829,8 +885,8 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 
     fn is_inter_ctx(&self, row: usize, col: usize) -> usize {
-        let above = row > 0;
-        let left = col > 0;
+        let above = self.above_mi(row);
+        let left = self.left_mi(col);
         let above_intra = above && self.inter_flag[(row - 1) * self.mi_cols + col] == 0;
         let left_intra = left && self.inter_flag[row * self.mi_cols + col - 1] == 0;
         if above && left {
@@ -985,12 +1041,12 @@ impl<'a, 'r> Tile<'a, 'r> {
 
     fn count_refs(&self, row: usize, col: usize, frame: i8) -> usize {
         let mut count = 0;
-        if row > 0 {
+        if self.above_mi(row) {
             let at = (row - 1) * self.mi_cols + col;
             count += usize::from(self.block_ref[at] == frame);
             count += usize::from(self.block_ref1[at] == frame);
         }
-        if col > 0 {
+        if self.left_mi(col) {
             let at = row * self.mi_cols + col - 1;
             count += usize::from(self.block_ref[at] == frame);
             count += usize::from(self.block_ref1[at] == frame);
@@ -1262,13 +1318,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         let mut ctx = (dir & 1) * 8;
         let mut left = 3usize;
         let mut above = 3usize;
-        if col > 0 {
+        if self.left_mi(col) {
             let at = row * self.mi_cols + col - 1;
             if self.block_ref[at] == reference || self.block_ref1[at] == reference {
                 left = usize::from(self.interp[at][dir]);
             }
         }
-        if row > 0 {
+        if self.above_mi(row) {
             let at = (row - 1) * self.mi_cols + col;
             if self.block_ref[at] == reference || self.block_ref1[at] == reference {
                 above = usize::from(self.interp[at][dir]);
@@ -1459,10 +1515,10 @@ impl<'a, 'r> Tile<'a, 'r> {
 
     fn neighbor_sum(&self, row: usize, col: usize) -> usize {
         let mut ctx = 0;
-        if row > 0 {
+        if self.above_mi(row) {
             ctx += usize::from(self.skips[(row - 1) * self.mi_cols + col]);
         }
-        if col > 0 {
+        if self.left_mi(col) {
             ctx += usize::from(self.skips[row * self.mi_cols + col - 1]);
         }
         ctx
@@ -1616,12 +1672,12 @@ impl<'a, 'r> Tile<'a, 'r> {
 
     fn tx_depth_ctx(&self, row: usize, col: usize, max_rect: usize) -> usize {
         // An unavailable neighbor contributes width 0. A coded neighbor contributes its transform size.
-        let above = if row == 0 {
+        let above = if !self.above_mi(row) {
             0
         } else {
             TX_WIDTH[self.tx_sizes[(row - 1) * self.mi_cols + col] as usize]
         };
-        let left = if col == 0 {
+        let left = if !self.left_mi(col) {
             0
         } else {
             TX_HEIGHT[self.tx_sizes[row * self.mi_cols + col - 1] as usize]
@@ -1927,7 +1983,7 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 
     fn smooth_neighbor(&self, plane: usize, row: usize, col: usize) -> bool {
-        let above = if row > 0 {
+        let above = if self.above_mi(row) {
             let mode = if plane == 0 {
                 self.y_mode[(row - 1) * self.mi_cols + col]
             } else {
@@ -1937,7 +1993,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             false
         };
-        let left = if col > 0 {
+        let left = if self.left_mi(col) {
             let mode = if plane == 0 {
                 self.y_mode[row * self.mi_cols + col - 1]
             } else {

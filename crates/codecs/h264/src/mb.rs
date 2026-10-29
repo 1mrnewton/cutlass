@@ -4220,6 +4220,22 @@ fn store_block(
                 }
             }
         }
+        Mix::Weighted(weight)
+            if weight.w0 == 32
+                && weight.w1 == 32
+                && weight.o0 == 0
+                && weight.o1 == 0
+                && weight.denom == 5 =>
+        {
+            for row in 0..h {
+                let at = (y + row) * stride + x;
+                let a = &left[row * w..row * w + w];
+                let b = &right[row * w..row * w + w];
+                for col in 0..w {
+                    dst[at + col] = recon::avg(a[col], b[col]);
+                }
+            }
+        }
         Mix::Weighted(weight) => {
             for row in 0..h {
                 let at = (y + row) * stride + x;

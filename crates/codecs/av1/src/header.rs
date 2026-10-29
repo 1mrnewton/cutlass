@@ -140,6 +140,7 @@ pub struct FrameInfo {
     pub lf_mode_deltas: [i8; 2],
     pub cdef: CdefParams,
     pub restoration: Restoration,
+    pub grain: crate::grain::Grain,
     pub segmentation: bool,
     pub lossless: bool,
     pub all_lossless: bool,
@@ -373,9 +374,6 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let _ = chroma_pos;
     let separate_uv_delta_q = bits.read_bool()?;
     let film_grain = bits.read_bool()?;
-    if film_grain {
-        return Err(CodecError::Unsupported { what: "film grain" });
-    }
     Ok(Sequence {
         profile,
         still,
@@ -407,7 +405,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         subsampling_y: true,
         color_range_full,
         separate_uv_delta_q,
-        film_grain: false,
+        film_grain,
         frame_id_present,
         id_len,
         delta_frame_id_len: delta_id,
@@ -746,6 +744,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
             }
         }
     }
+    let grain = crate::grain::read(bits, sequence, frame_type, show_frame, showable)?;
     let mi_cols = 2 * ((width + 7) >> 3);
     let mi_rows = 2 * ((height + 7) >> 3);
     Ok(FrameInfo {
@@ -791,6 +790,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         lf_mode_deltas: mode_deltas,
         cdef,
         restoration,
+        grain,
         segmentation: false,
         lossless,
         all_lossless: lossless,
@@ -1036,6 +1036,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         lf_mode_deltas: [0; 2],
         cdef: CdefParams::off(),
         restoration: Restoration::off(),
+        grain: crate::grain::Grain::off(),
         segmentation: false,
         lossless: false,
         all_lossless: false,
@@ -1067,6 +1068,8 @@ pub(crate) fn header_is_addressable(
         .wrapping_add(u32::from(sequence.monochrome))
         .wrapping_add(u32::from(sequence.color_range_full))
         .wrapping_add(u32::from(sequence.film_grain))
+        .wrapping_add(u32::from(frame.grain.apply))
+        .wrapping_add(u32::from(frame.grain.seed))
         .wrapping_add(u32::from(sequence.delta_frame_id_len))
         .wrapping_add(u32::from(frame.showable))
         .wrapping_add(u32::from(frame.error_resilient))

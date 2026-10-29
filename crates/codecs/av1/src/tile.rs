@@ -73,9 +73,6 @@ pub fn decode_with_refs(
     refs: &[Option<RefView<'_>>],
 ) -> Result<DecodedPicture, CodecError> {
     if frame.frame_type == INTER_FRAME {
-        if sequence.enable_order_hint {
-            return Err(CodecError::Unsupported { what: "order hint" });
-        }
         if sequence.enable_interintra {
             return Err(CodecError::Unsupported { what: "interintra" });
         }

@@ -113,6 +113,8 @@ pub struct FrameInfo {
     pub height: u32,
     pub upscaled_width: u32,
     pub order_hint: u32,
+    /// Reference order hints carried by an error-resilient frame.
+    pub signaled_order_hints: Option<[u32; 8]>,
     pub refresh_flags: u8,
     pub primary_ref: u8,
     pub base_q: u8,
@@ -543,6 +545,17 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     } else {
         bits.read(8)? as u8
     };
+    let signaled_order_hints =
+        if (!intra || refresh != 0xff) && error_resilient && sequence.enable_order_hint {
+            let mut hints = [0u32; 8];
+            let width = u32::from(sequence.order_hint_bits);
+            for hint in &mut hints {
+                *hint = bits.read(width)?;
+            }
+            Some(hints)
+        } else {
+            None
+        };
     let mut ref_frames = [0u8; 7];
     let mut allow_high_precision = false;
     let mut filter_switchable = false;
@@ -763,6 +776,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         height,
         upscaled_width,
         order_hint,
+        signaled_order_hints,
         refresh_flags: refresh,
         primary_ref,
         base_q,
@@ -1009,6 +1023,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         height: sequence.height,
         upscaled_width: sequence.width,
         order_hint: 0,
+        signaled_order_hints: None,
         refresh_flags: 0,
         primary_ref: PRIMARY_REF_NONE,
         base_q: 0,
@@ -1077,6 +1092,12 @@ pub(crate) fn header_is_addressable(
         .wrapping_add(u32::from(frame.force_integer_mv))
         .wrapping_add(frame.upscaled_width)
         .wrapping_add(frame.order_hint)
+        .wrapping_add(
+            frame
+                .signaled_order_hints
+                .map(|hints| hints[0])
+                .unwrap_or(0),
+        )
         .wrapping_add(u32::from(frame.primary_ref))
         .wrapping_add(u32::from(frame.using_qmatrix))
         .wrapping_add(u32::from(frame.reference_select))

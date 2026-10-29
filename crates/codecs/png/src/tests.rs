@@ -370,6 +370,19 @@ fn a_frame_data_chunk_before_idat_is_ignored() {
 }
 
 #[test]
+fn a_frame_data_chunk_between_idat_chunks_is_an_error() {
+    let zlib = stored_zlib(&[0, 5]);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&SIGNATURE);
+    bytes.extend(chunk(b"IHDR", &ihdr(1, 1, 8, 0, 0)));
+    bytes.extend(chunk(b"IDAT", &zlib[..1]));
+    bytes.extend(chunk(b"fdAT", &[0, 0, 0, 2]));
+    bytes.extend(chunk(b"IDAT", &zlib[1..]));
+    bytes.extend(chunk(b"IEND", &[]));
+    assert!(decode_bytes(&bytes).is_err());
+}
+
+#[test]
 fn a_failed_picture_does_not_block_the_next_one() {
     let mut decoder = PngDecoder::open(&png_params(false)).expect("open");
     let bad = Packet::audio(b"nope".to_vec(), 0, 0, 0);

@@ -31,6 +31,8 @@ pub enum EvalError<E> {
     Canvas,
     /// The compositor or the device refused the frame.
     Compose(cutlass_compositor::ComposeError<E>),
+    /// The export clock did not accept the picture.
+    Wait,
 }
 
 impl<E: fmt::Display> fmt::Display for EvalError<E> {
@@ -38,6 +40,7 @@ impl<E: fmt::Display> fmt::Display for EvalError<E> {
         match self {
             Self::Canvas => formatter.write_str("the canvas size is not a frame"),
             Self::Compose(error) => write!(formatter, "{error}"),
+            Self::Wait => formatter.write_str("export did not accept the frame"),
         }
     }
 }
@@ -66,6 +69,22 @@ pub fn frame<D: Device>(
         sources.push(solid);
     }
     submit(device, extent, time, &sources).map_err(EvalError::Compose)
+}
+
+/// Keeps `frame` for export. A late arrival is still the picture.
+///
+/// This calls the engine export clock. Playback's late drop is a different clock.
+pub fn wait_export_frame<E>(
+    requested: Micros,
+    ready_at: Micros,
+    frame: Frame,
+) -> Result<Frame, EvalError<E>> {
+    let clock = cutlass_engine::MediaClock::new(cutlass_engine::ClockKind::Export);
+    let extent = frame.extent;
+    let rgba = clock
+        .export_rgba(requested, ready_at, extent.width, extent.height, frame.rgba)
+        .map_err(|_| EvalError::Wait)?;
+    Ok(Frame { extent, rgba })
 }
 
 #[cfg(test)]
@@ -198,5 +217,21 @@ mod tests {
         let error = frame(&Snapshot::new(&draft), Micros(0), &mut device).unwrap_err();
         assert_eq!(error, EvalError::Canvas);
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn export_keeps_a_frame_that_arrives_after_its_request() {
+        use cutlass_compositor::Extent;
+
+        let frame = Frame {
+            extent: Extent {
+                width: 1,
+                height: 1,
+            },
+            rgba: vec![4, 5, 6, 7],
+        };
+        let kept = wait_export_frame::<()>(Micros(10), Micros(80), frame).expect("wait");
+        assert_eq!(kept.rgba, vec![4, 5, 6, 7]);
+        assert_eq!(kept.extent.width, 1);
     }
 }

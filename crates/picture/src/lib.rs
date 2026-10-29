@@ -75,6 +75,11 @@ impl CpuBytes {
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
     }
+
+    #[must_use]
+    pub fn into_rgba(self) -> Vec<u8> {
+        self.rgba
+    }
 }
 
 /// A buffer owned by a platform device.

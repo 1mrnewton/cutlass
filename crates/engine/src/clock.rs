@@ -5,7 +5,7 @@
 //! passed the request. Export waits: a late picture is still the frame.
 
 use cutlass_model::Micros;
-use cutlass_picture::{Picture, Sample};
+use cutlass_picture::{CpuBytes, Picture, Sample};
 
 use crate::error::EngineError;
 
@@ -78,6 +78,40 @@ impl MediaClock {
             ClockKind::Export => decode().map(Sample::Ready),
         }
     }
+
+    /// Keeps a decoded RGBA picture for export, including one that arrived late.
+    ///
+    /// A playback clock does not use this path. A cache miss still runs the
+    /// decode that produced `rgba`. The bytes are returned only when the
+    /// export clock accepts the picture.
+    pub fn export_rgba(
+        &self,
+        requested: Micros,
+        ready_at: Micros,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<Vec<u8>, EngineError> {
+        if self.kind != ClockKind::Export {
+            return Err(EngineError::NotReady);
+        }
+        let picture = Picture::Cpu(CpuBytes::new(width, height, rgba).map_err(|_| {
+            EngineError::ColorMiss {
+                layout: "rgba".to_owned(),
+            }
+        })?);
+        let produced = self.take(None, || Ok(picture))?;
+        let Sample::Ready(picture) = produced else {
+            return Err(EngineError::NotReady);
+        };
+        match self.accept_picture(requested, ready_at, picture) {
+            Sample::Ready(Picture::Cpu(cpu)) => Ok(cpu.into_rgba()),
+            Sample::Ready(Picture::Platform(_)) => Err(EngineError::ColorMiss {
+                layout: "platform".to_owned(),
+            }),
+            Sample::Miss => Err(EngineError::NotReady),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +165,26 @@ mod tests {
             width: 1,
             height: 1,
         };
+    }
+
+    #[test]
+    fn export_keeps_a_late_rgba_picture_and_playback_does_not_take_it() {
+        let export = MediaClock::new(ClockKind::Export);
+        let kept = export
+            .export_rgba(Micros(0), Micros(50), 1, 1, vec![9, 8, 7, 6])
+            .expect("late");
+        assert_eq!(kept, vec![9, 8, 7, 6]);
+
+        let playback = MediaClock::new(ClockKind::Playback);
+        assert_eq!(
+            playback.export_rgba(Micros(0), Micros(0), 1, 1, vec![9, 8, 7, 6]),
+            Err(EngineError::NotReady)
+        );
+        assert_eq!(
+            export.export_rgba(Micros(0), Micros(0), 1, 1, vec![1, 2, 3]),
+            Err(EngineError::ColorMiss {
+                layout: "rgba".to_owned(),
+            })
+        );
     }
 }

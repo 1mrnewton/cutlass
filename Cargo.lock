@@ -465,6 +465,7 @@ name = "cutlass-eval"
 version = "0.1.0"
 dependencies = [
  "cutlass-captions",
+ "cutlass-codec",
  "cutlass-compositor",
  "cutlass-effects",
  "cutlass-engine",
@@ -483,6 +484,9 @@ dependencies = [
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-model",
+ "cutlass-playback",
+ "cutlass-renderer-software",
+ "cutlass-session",
 ]
 
 [[package]]
@@ -688,6 +692,10 @@ name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
  "cutlass-eval",
+ "cutlass-gpu",
+ "cutlass-model",
+ "cutlass-platform-apple",
+ "cutlass-renderer-software",
  "cutlass-session",
 ]
 

@@ -1364,6 +1364,31 @@ mod tests {
     }
 
     #[test]
+    fn random_packets_fail_closed() {
+        let mut decoder = open_decoder(&video_params(CodecId::H264, 64, 64)).expect("open");
+        let mut state = 0x1234_5678u32;
+        for _ in 0..32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = usize::try_from(state % 48).unwrap_or(0);
+            let mut data = Vec::with_capacity(len);
+            for index in 0..len {
+                let byte = state.wrapping_add(u32::try_from(index).unwrap_or(0)) % 256;
+                data.push(u8::try_from(byte).unwrap_or(0));
+            }
+            let result = decoder.push(&Packet {
+                stream: 0,
+                data,
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: false,
+                side: Vec::new(),
+            });
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
     fn an_empty_h264_packet_is_an_invalid_call() {
         let mut decoder = open_decoder(&video_params(CodecId::H264, 64, 64)).expect("open");
         let err = decoder.push(&Packet {

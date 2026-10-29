@@ -1,6 +1,6 @@
 //! PNG datastream writer.
 //!
-//! The zlib stream is one fixed-Huffman deflate block. Each scanline uses
+//! The zlib stream is one final deflate block. Each scanline uses
 //! the filter type with the smallest sum of absolute byte values. Adam7 is
 //! emitted only when the caller asks for it.
 

@@ -1,9 +1,12 @@
 //! zlib wrapper and deflate, for the IDAT stream and compressed metadata.
 //!
 //! The bit packing follows RFC 1951. The two-byte header and Adler-32 follow
-//! RFC 1950. The encoder writes one final fixed-Huffman block. The decoder
-//! accepts stored, fixed, and dynamic blocks, and rejects a preset dictionary
-//! or a window above 32 KiB.
+//! RFC 1950. The encoder writes one final block, fixed or dynamic Huffman,
+//! whichever is smaller. The decoder accepts stored, fixed, and dynamic
+//! blocks, and rejects a preset dictionary or a window above 32 KiB.
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 const ADLER_BASE: u32 = 65_521;
 const MAX_WINDOW: usize = 32_768;
@@ -27,6 +30,9 @@ const DIST_EXTRA: [u8; 30] = [
 const CL_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
+const LIT_FLAG: u32 = 0x8000_0000;
+const CHAIN_LIMIT: usize = 16;
+const NICE_LEN: usize = 258;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ZlibError {
@@ -215,16 +221,16 @@ where
 }
 
 pub(crate) fn deflate(src: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len() / 2 + 64);
+    let tokens = tokenize(src);
+    let fixed = encode_fixed(&tokens);
+    let body = match encode_dynamic(&tokens) {
+        Some(dynamic) if dynamic.len() < fixed.len() => dynamic,
+        _ => fixed,
+    };
+    let mut out = Vec::with_capacity(body.len() + 6);
     out.push(0x78);
     out.push(0x01);
-    let mut writer = BitWriter::default();
-    writer.put(1, 1);
-    writer.put(1, 2);
-    write_fixed(&mut writer, src);
-    let (end_code, end_len) = fixed_lit_code(256);
-    writer.put_code(end_code, end_len);
-    writer.finish(&mut out);
+    out.extend_from_slice(&body);
     out.extend_from_slice(&adler32(src).to_be_bytes());
     out
 }
@@ -623,54 +629,420 @@ impl BitWriter {
     }
 }
 
-fn write_fixed(writer: &mut BitWriter, src: &[u8]) {
+fn tokenize(src: &[u8]) -> Vec<u32> {
+    let mut tokens = Vec::new();
     let mut head = vec![-1i32; 32_768];
     let mut prev = vec![-1i32; src.len()];
     let mut index = 0usize;
     while index < src.len() {
-        let mut matched = 0usize;
-        let mut distance = 0u16;
-        if index + 3 <= src.len() {
-            let hash = hash3(src, index);
-            let mut pos = head[hash];
-            let mut steps = 0;
-            while pos >= 0 && steps < 16 {
-                let earlier = pos as usize;
-                if earlier >= index || index - earlier > MAX_WINDOW {
-                    break;
-                }
-                let len = match_at(src, index, earlier);
-                if len > matched {
-                    matched = len;
-                    distance = (index - earlier) as u16;
-                }
-                if len >= 64 {
-                    break;
-                }
-                pos = prev[earlier];
-                steps += 1;
-            }
-            prev[index] = head[hash];
-            head[hash] = index as i32;
-        }
+        let (matched, distance) = best_match(src, index, &mut head, &mut prev);
         if matched >= 3 {
             for step in 1..matched {
-                let at = index + step;
-                if at + 3 <= src.len() {
-                    let hash = hash3(src, at);
-                    prev[at] = head[hash];
-                    head[hash] = at as i32;
-                }
+                insert_hash(src, index + step, &mut head, &mut prev);
             }
-            put_length(writer, matched as u16);
-            put_distance(writer, distance);
+            tokens.push((u32::from(distance) << 9) | matched as u32);
             index += matched;
         } else {
-            let (code, len) = fixed_lit_code(usize::from(src[index]));
-            writer.put_code(code, len);
+            tokens.push(LIT_FLAG | u32::from(src[index]));
             index += 1;
         }
     }
+    tokens
+}
+
+fn best_match(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) -> (usize, u16) {
+    let mut matched = 0usize;
+    let mut distance = 0u16;
+    if index + 3 > src.len() {
+        return (0, 0);
+    }
+    let hash = hash3(src, index);
+    let mut pos = head[hash];
+    let mut steps = 0;
+    while pos >= 0 && steps < CHAIN_LIMIT {
+        let earlier = pos as usize;
+        if earlier >= index || index - earlier > MAX_WINDOW {
+            break;
+        }
+        let len = match_at(src, index, earlier);
+        if len > matched {
+            matched = len;
+            distance = (index - earlier) as u16;
+        }
+        if len >= NICE_LEN {
+            break;
+        }
+        pos = prev[earlier];
+        steps += 1;
+    }
+    prev[index] = head[hash];
+    head[hash] = index as i32;
+    (matched, distance)
+}
+
+fn insert_hash(src: &[u8], index: usize, head: &mut [i32], prev: &mut [i32]) {
+    if index + 3 > src.len() {
+        return;
+    }
+    let hash = hash3(src, index);
+    prev[index] = head[hash];
+    head[hash] = index as i32;
+}
+
+fn encode_fixed(tokens: &[u32]) -> Vec<u8> {
+    let mut writer = BitWriter::default();
+    writer.put(1, 1);
+    writer.put(1, 2);
+    for &token in tokens {
+        write_fixed_token(&mut writer, token);
+    }
+    let (code, len) = fixed_lit_code(256);
+    writer.put_code(code, len);
+    let mut out = Vec::new();
+    writer.finish(&mut out);
+    out
+}
+
+fn write_fixed_token(writer: &mut BitWriter, token: u32) {
+    if token & LIT_FLAG != 0 {
+        let (code, len) = fixed_lit_code((token & 0xff) as usize);
+        writer.put_code(code, len);
+        return;
+    }
+    let (symbol, extra, bits) = length_code((token & 0x1ff) as u16);
+    let (code, len) = fixed_lit_code(symbol);
+    writer.put_code(code, len);
+    writer.put(extra, bits);
+    let (symbol, extra, bits) = distance_code((token >> 9) as u16);
+    writer.put_code(symbol as u16, 5);
+    writer.put(extra, bits);
+}
+
+fn encode_dynamic(tokens: &[u32]) -> Option<Vec<u8>> {
+    let (lit_freq, dist_freq) = frequencies(tokens);
+    let lit_len = huffman_lengths(&lit_freq, MAX_BITS);
+    let dist_len = huffman_lengths(&dist_freq, MAX_BITS);
+    if !covers(&lit_freq, &lit_len) || !covers(&dist_freq, &dist_len) {
+        return None;
+    }
+    let hlit = used_count(&lit_len, 257);
+    let hdist = used_count(&dist_len, 1);
+    let mut combined = lit_len[..hlit].to_vec();
+    combined.extend_from_slice(&dist_len[..hdist]);
+    let runs = encode_runs(&combined);
+    let mut code_freq = vec![0u32; 19];
+    for &(symbol, _) in &runs {
+        code_freq[usize::from(symbol)] += 1;
+    }
+    let code_len = huffman_lengths(&code_freq, 7);
+    if !covers(&code_freq, &code_len) || !tokens_fit(tokens, &lit_len, &dist_len) {
+        return None;
+    }
+    let lit_huff = build(&lit_len).ok()?;
+    let dist_huff = build(&dist_len).ok()?;
+    let code_huff = build(&code_len).ok()?;
+    let mut send = 4usize;
+    for (index, &ord) in CL_ORDER.iter().enumerate() {
+        if code_len[ord] != 0 {
+            send = send.max(index + 1);
+        }
+    }
+    let mut writer = BitWriter::default();
+    writer.put(1, 1);
+    writer.put(2, 2);
+    writer.put(u32::try_from(hlit - 257).unwrap_or(0), 5);
+    writer.put(u32::try_from(hdist - 1).unwrap_or(0), 5);
+    writer.put(u32::try_from(send - 4).unwrap_or(0), 4);
+    for &ord in CL_ORDER.iter().take(send) {
+        writer.put(u32::from(code_len[ord]), 3);
+    }
+    for &(symbol, extra) in &runs {
+        let index = usize::from(symbol);
+        let len = code_huff.lengths.get(index).copied().unwrap_or(0);
+        let code = code_huff.codes.get(index).copied().unwrap_or(0);
+        if len == 0 {
+            return None;
+        }
+        writer.put_code(code, len);
+        writer.put(u32::from(extra), run_extra_bits(symbol));
+    }
+    for &token in tokens {
+        write_dynamic_token(&mut writer, token, &lit_huff, &dist_huff)?;
+    }
+    let eob_len = lit_huff.lengths.get(256).copied().unwrap_or(0);
+    let eob_code = lit_huff.codes.get(256).copied().unwrap_or(0);
+    if eob_len == 0 {
+        return None;
+    }
+    writer.put_code(eob_code, eob_len);
+    let mut out = Vec::new();
+    writer.finish(&mut out);
+    Some(out)
+}
+
+fn write_dynamic_token(writer: &mut BitWriter, token: u32, lit: &Huff, dist: &Huff) -> Option<()> {
+    if token & LIT_FLAG != 0 {
+        put_huff(writer, lit, (token & 0xff) as usize)?;
+        return Some(());
+    }
+    let (symbol, extra, bits) = length_code((token & 0x1ff) as u16);
+    put_huff(writer, lit, symbol)?;
+    writer.put(extra, bits);
+    let (symbol, extra, bits) = distance_code((token >> 9) as u16);
+    put_huff(writer, dist, symbol)?;
+    writer.put(extra, bits);
+    Some(())
+}
+
+fn put_huff(writer: &mut BitWriter, huff: &Huff, symbol: usize) -> Option<()> {
+    let len = huff.lengths.get(symbol).copied().unwrap_or(0);
+    let code = huff.codes.get(symbol).copied().unwrap_or(0);
+    if len == 0 {
+        return None;
+    }
+    writer.put_code(code, len);
+    Some(())
+}
+
+fn frequencies(tokens: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let mut lit = vec![0u32; 286];
+    let mut dist = vec![0u32; 30];
+    lit[256] = 1;
+    for &token in tokens {
+        if token & LIT_FLAG != 0 {
+            lit[(token & 0xff) as usize] += 1;
+            continue;
+        }
+        let (symbol, _, _) = length_code((token & 0x1ff) as u16);
+        let (distance, _, _) = distance_code((token >> 9) as u16);
+        lit[symbol] += 1;
+        dist[distance] += 1;
+    }
+    (lit, dist)
+}
+
+fn covers(freq: &[u32], lengths: &[u8]) -> bool {
+    freq.iter()
+        .zip(lengths)
+        .all(|(&weight, &len)| weight == 0 || len > 0)
+}
+
+fn tokens_fit(tokens: &[u32], lit: &[u8], dist: &[u8]) -> bool {
+    if lit.get(256).copied().unwrap_or(0) == 0 {
+        return false;
+    }
+    for &token in tokens {
+        if token & LIT_FLAG != 0 {
+            if lit[(token & 0xff) as usize] == 0 {
+                return false;
+            }
+            continue;
+        }
+        let (symbol, _, _) = length_code((token & 0x1ff) as u16);
+        let (distance, _, _) = distance_code((token >> 9) as u16);
+        if lit[symbol] == 0 || dist[distance] == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn used_count(lengths: &[u8], min: usize) -> usize {
+    let mut count = lengths.len();
+    while count > min && lengths[count - 1] == 0 {
+        count -= 1;
+    }
+    count.max(min)
+}
+
+fn huffman_lengths(freq: &[u32], max_bits: usize) -> Vec<u8> {
+    let count = freq.len();
+    let mut lengths = vec![0u8; count];
+    let mut heap = BinaryHeap::new();
+    for (symbol, &weight) in freq.iter().enumerate() {
+        if weight > 0 {
+            heap.push(Reverse((weight, symbol)));
+        }
+    }
+    if heap.len() <= 1 {
+        if let Some(Reverse((_, symbol))) = heap.pop() {
+            lengths[symbol] = 1;
+        }
+        return lengths;
+    }
+    let mut children = Vec::new();
+    let mut next = count;
+    while heap.len() >= 2 {
+        let Some(Reverse((left_freq, left))) = heap.pop() else {
+            break;
+        };
+        let Some(Reverse((right_freq, right))) = heap.pop() else {
+            break;
+        };
+        children.push((left, right));
+        let parent = next;
+        next += 1;
+        heap.push(Reverse((left_freq.saturating_add(right_freq), parent)));
+    }
+    let Some(Reverse((_, root))) = heap.pop() else {
+        return lengths;
+    };
+    let mut stack = vec![(root, 0u32)];
+    while let Some((node, depth)) = stack.pop() {
+        if node < count {
+            lengths[node] = u8::try_from(depth.min(255)).unwrap_or(255);
+            continue;
+        }
+        let Some(&(left, right)) = children.get(node - count) else {
+            continue;
+        };
+        stack.push((left, depth.saturating_add(1)));
+        stack.push((right, depth.saturating_add(1)));
+    }
+    if lengths.iter().any(|len| usize::from(*len) > max_bits) {
+        cap_lengths(&mut lengths, max_bits);
+    }
+    lengths
+}
+
+/// Keep a prefix code inside the deflate length limit.
+///
+/// Shortening an over-long code spends more of the code space. The counts are
+/// then repaired until they satisfy the Kraft inequality.
+fn cap_lengths(lengths: &mut [u8], max_bits: usize) {
+    let mut count = vec![0u32; lengths.len() + 1];
+    for &len in lengths.iter() {
+        if len > 0 {
+            let at = usize::from(len).min(count.len() - 1);
+            count[at] += 1;
+        }
+    }
+    let mut overflow = 0u32;
+    for extra in count.iter_mut().skip(max_bits + 1) {
+        overflow += *extra;
+        *extra = 0;
+    }
+    count[max_bits] += overflow;
+    let mut total = 0u32;
+    for (bits, tally) in count.iter().enumerate().take(max_bits + 1).skip(1) {
+        total += tally << (max_bits - bits);
+    }
+    let target = 1u32 << max_bits;
+    while total > target && count[max_bits] > 0 {
+        count[max_bits] -= 1;
+        let mut bits = max_bits - 1;
+        while bits > 0 && count[bits] == 0 {
+            bits -= 1;
+        }
+        if bits == 0 {
+            break;
+        }
+        count[bits] -= 1;
+        count[bits + 1] += 2;
+        total -= 1;
+    }
+    let mut symbols: Vec<usize> = (0..lengths.len()).filter(|&sym| lengths[sym] > 0).collect();
+    symbols.sort_by(|&left, &right| {
+        lengths[left]
+            .cmp(&lengths[right])
+            .then_with(|| left.cmp(&right))
+    });
+    let mut assigned = Vec::new();
+    for (bits, &tally) in count.iter().enumerate().take(max_bits + 1).skip(1) {
+        for _ in 0..tally {
+            assigned.push(u8::try_from(bits).unwrap_or(u8::MAX));
+        }
+    }
+    for (symbol, len) in symbols.iter().zip(&assigned) {
+        lengths[*symbol] = *len;
+    }
+    let cap = u8::try_from(max_bits).unwrap_or(u8::MAX);
+    for symbol in symbols.iter().skip(assigned.len()) {
+        lengths[*symbol] = cap;
+    }
+}
+
+fn encode_runs(lengths: &[u8]) -> Vec<(u8, u16)> {
+    let mut runs = Vec::new();
+    let mut index = 0;
+    while index < lengths.len() {
+        let value = lengths[index];
+        let mut run = 1usize;
+        while index + run < lengths.len() && lengths[index + run] == value && run < 138 {
+            run += 1;
+        }
+        if value == 0 {
+            push_zero_run(&mut runs, run);
+        } else {
+            push_repeat(&mut runs, value, run);
+        }
+        index += run;
+    }
+    runs
+}
+
+fn push_zero_run(runs: &mut Vec<(u8, u16)>, mut left: usize) {
+    while left > 0 {
+        if left < 3 {
+            runs.push((0, 0));
+            left -= 1;
+        } else if left < 11 {
+            let take = left.min(10);
+            runs.push((17, u16::try_from(take - 3).unwrap_or(0)));
+            left -= take;
+        } else {
+            let take = left.min(138);
+            runs.push((18, u16::try_from(take - 11).unwrap_or(0)));
+            left -= take;
+        }
+    }
+}
+
+fn push_repeat(runs: &mut Vec<(u8, u16)>, value: u8, run: usize) {
+    runs.push((value, 0));
+    let mut left = run - 1;
+    while left >= 3 {
+        let take = left.min(6);
+        runs.push((16, u16::try_from(take - 3).unwrap_or(0)));
+        left -= take;
+    }
+    while left > 0 {
+        runs.push((value, 0));
+        left -= 1;
+    }
+}
+
+fn run_extra_bits(symbol: u8) -> u8 {
+    match symbol {
+        16 => 2,
+        17 => 3,
+        18 => 7,
+        _ => 0,
+    }
+}
+
+fn length_code(len: u16) -> (usize, u32, u8) {
+    let mut index = 0;
+    while index + 1 < LEN_BASE.len() && LEN_BASE[index + 1] <= len {
+        index += 1;
+    }
+    (
+        257 + index,
+        u32::from(len - LEN_BASE[index]),
+        LEN_EXTRA[index],
+    )
+}
+
+fn distance_code(distance: u16) -> (usize, u32, u8) {
+    let mut index = 0;
+    while index + 1 < DIST_BASE.len() && DIST_BASE[index + 1] <= distance {
+        index += 1;
+    }
+    (
+        index,
+        u32::from(distance - DIST_BASE[index]),
+        DIST_EXTRA[index],
+    )
 }
 
 fn hash3(src: &[u8], index: usize) -> usize {
@@ -687,25 +1059,6 @@ fn match_at(src: &[u8], index: usize, earlier: usize) -> usize {
         len += 1;
     }
     len
-}
-
-fn put_length(writer: &mut BitWriter, len: u16) {
-    let mut index = 0;
-    while index + 1 < LEN_BASE.len() && LEN_BASE[index + 1] <= len {
-        index += 1;
-    }
-    let (code, bits) = fixed_lit_code(257 + index);
-    writer.put_code(code, bits);
-    writer.put(u32::from(len - LEN_BASE[index]), LEN_EXTRA[index]);
-}
-
-fn put_distance(writer: &mut BitWriter, distance: u16) {
-    let mut index = 0;
-    while index + 1 < DIST_BASE.len() && DIST_BASE[index + 1] <= distance {
-        index += 1;
-    }
-    writer.put_code(index as u16, 5);
-    writer.put(u32::from(distance - DIST_BASE[index]), DIST_EXTRA[index]);
 }
 
 #[cfg(test)]
@@ -757,6 +1110,25 @@ mod tests {
             .collect();
         let foreign = python_zlib(&mixed, true).expect("python long mix");
         assert_eq!(inflate(&foreign, mixed.len()).expect("long mix"), mixed);
+    }
+
+    #[test]
+    fn dynamic_codes_beat_fixed_codes_on_a_small_alphabet() {
+        let sample: Vec<u8> = (0..8_000).map(|index| (index % 7) as u8).collect();
+        let tokens = super::tokenize(&sample);
+        let fixed = super::encode_fixed(&tokens);
+        let dynamic = super::encode_dynamic(&tokens).expect("dynamic block");
+        assert!(
+            dynamic.len() < fixed.len(),
+            "dynamic {} fixed {}",
+            dynamic.len(),
+            fixed.len()
+        );
+        let ours = deflate(&sample);
+        assert_eq!(ours.len(), dynamic.len() + 6);
+        assert_eq!(inflate(&ours, sample.len()).expect("inflate"), sample);
+        let back = python_zlib(&ours, false).expect("python");
+        assert_eq!(back, sample);
     }
 
     #[test]

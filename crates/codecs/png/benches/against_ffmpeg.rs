@@ -7,8 +7,8 @@
 //!
 //! Encode compared here is RGBA8. ffmpeg's default prediction is Paeth and
 //! its deflate level is zlib's default. A second ffmpeg row uses `-pred mixed`,
-//! which searches filters the way this encoder does. This encoder still uses
-//! its own fixed-Huffman deflate. Decode rows share one PNG file.
+//! which searches filters the way this encoder does. This encoder picks the
+//! smaller of a fixed and a dynamic Huffman block. Decode rows share one PNG file.
 
 #![allow(clippy::print_stdout)]
 
@@ -245,7 +245,7 @@ fn cutlass_encode(
         side: "cutlass".to_string(),
         op: "encode",
         sample,
-        note: "filter search, fixed Huffman".to_string(),
+        note: "filter search, dynamic or fixed Huffman".to_string(),
     })
 }
 

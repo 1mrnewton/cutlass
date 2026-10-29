@@ -36,6 +36,19 @@ pub(crate) enum ZlibError {
 }
 
 pub(crate) fn inflate(src: &[u8], limit: usize) -> Result<Vec<u8>, ZlibError> {
+    let mut out = Vec::new();
+    inflate_with(src, limit, |byte| {
+        out.push(byte);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+pub(crate) fn inflate_with(
+    src: &[u8],
+    limit: usize,
+    emit: impl FnMut(u8) -> Result<(), ZlibError>,
+) -> Result<(), ZlibError> {
     if src.len() < 6 {
         return Err(ZlibError::Truncated);
     }
@@ -59,20 +72,31 @@ pub(crate) fn inflate(src: &[u8], limit: usize) -> Result<Vec<u8>, ZlibError> {
         acc: 0,
         bits: 0,
     };
-    let mut out = Vec::new();
+    let mut sink = Sink {
+        history: vec![0; window],
+        pos: 0,
+        written: 0,
+        window,
+        count: 0,
+        limit,
+        s1: 1,
+        s2: 0,
+        block: 0,
+        emit,
+    };
     loop {
         let final_block = bits.get(1).ok_or(ZlibError::Truncated)?;
         let kind = bits.get(2).ok_or(ZlibError::Truncated)?;
         match kind {
-            0 => stored(&mut bits, &mut out, limit)?,
+            0 => stored(&mut bits, &mut sink)?,
             1 => {
                 let lit = fixed_lit()?;
                 let dist = fixed_dist()?;
-                huffman(&mut bits, &mut out, limit, window, &lit, &dist)?;
+                huffman(&mut bits, &mut sink, &lit, &dist)?;
             }
             2 => {
                 let (lit, dist) = dynamic(&mut bits)?;
-                huffman(&mut bits, &mut out, limit, window, &lit, &dist)?;
+                huffman(&mut bits, &mut sink, &lit, &dist)?;
             }
             _ => return Err(ZlibError::Malformed("deflate block")),
         }
@@ -87,11 +111,70 @@ pub(crate) fn inflate(src: &[u8], limit: usize) -> Result<Vec<u8>, ZlibError> {
     if rest.len() != 4 {
         return Err(ZlibError::Malformed("zlib trailer"));
     }
-    let stored = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
-    if stored != adler32(&out) {
+    let stored_sum = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]);
+    if stored_sum != sink.adler() {
         return Err(ZlibError::Malformed("adler32"));
     }
-    Ok(out)
+    Ok(())
+}
+
+struct Sink<F> {
+    history: Vec<u8>,
+    pos: usize,
+    written: usize,
+    window: usize,
+    count: usize,
+    limit: usize,
+    s1: u32,
+    s2: u32,
+    block: u32,
+    emit: F,
+}
+
+impl<F> Sink<F>
+where
+    F: FnMut(u8) -> Result<(), ZlibError>,
+{
+    fn push(&mut self, byte: u8) -> Result<(), ZlibError> {
+        if self.count >= self.limit {
+            return Err(ZlibError::Limit);
+        }
+        self.history[self.pos] = byte;
+        self.pos += 1;
+        if self.pos == self.window {
+            self.pos = 0;
+        }
+        self.written += 1;
+        self.count += 1;
+        self.s1 += u32::from(byte);
+        self.s2 += self.s1;
+        self.block += 1;
+        if self.block == 5552 {
+            self.s1 %= ADLER_BASE;
+            self.s2 %= ADLER_BASE;
+            self.block = 0;
+        }
+        (self.emit)(byte)
+    }
+
+    fn past(&self, distance: usize) -> Result<u8, ZlibError> {
+        if distance == 0
+            || distance > self.written
+            || distance > self.window
+            || distance > MAX_WINDOW
+        {
+            return Err(ZlibError::Malformed("distance"));
+        }
+        let index = (self.pos + self.window - distance) % self.window;
+        Ok(self.history[index])
+    }
+
+    fn adler(&mut self) -> u32 {
+        self.s1 %= ADLER_BASE;
+        self.s2 %= ADLER_BASE;
+        self.block = 0;
+        (self.s2 << 16) | self.s1
+    }
 }
 
 pub(crate) fn deflate(src: &[u8]) -> Vec<u8> {
@@ -295,40 +378,36 @@ fn reverse_bits(code: u16, len: u8) -> u16 {
     reversed
 }
 
-fn stored(bits: &mut Bits<'_>, out: &mut Vec<u8>, limit: usize) -> Result<(), ZlibError> {
+fn stored<F>(bits: &mut Bits<'_>, sink: &mut Sink<F>) -> Result<(), ZlibError>
+where
+    F: FnMut(u8) -> Result<(), ZlibError>,
+{
     bits.align();
     let len = bits.get(16).ok_or(ZlibError::Truncated)? as usize;
     let nlen = bits.get(16).ok_or(ZlibError::Truncated)? as u16;
     if nlen != !(len as u16) {
         return Err(ZlibError::Malformed("stored length"));
     }
-    if out.len().saturating_add(len) > limit {
-        return Err(ZlibError::Limit);
-    }
     for _ in 0..len {
         let byte = bits.get(8).ok_or(ZlibError::Truncated)?;
-        out.push(byte as u8);
+        sink.push(byte as u8)?;
     }
     Ok(())
 }
 
-fn huffman(
+fn huffman<F>(
     bits: &mut Bits<'_>,
-    out: &mut Vec<u8>,
-    limit: usize,
-    window: usize,
+    sink: &mut Sink<F>,
     lit: &Huff,
     dist: &Huff,
-) -> Result<(), ZlibError> {
+) -> Result<(), ZlibError>
+where
+    F: FnMut(u8) -> Result<(), ZlibError>,
+{
     loop {
         let symbol = lit.symbol(bits)?;
         match symbol {
-            0..=255 => {
-                if out.len() >= limit {
-                    return Err(ZlibError::Limit);
-                }
-                out.push(symbol as u8);
-            }
+            0..=255 => sink.push(symbol as u8)?,
             256 => return Ok(()),
             257..=285 => {
                 let index = usize::from(symbol - 257);
@@ -336,7 +415,7 @@ fn huffman(
                 let add = bits.get(extra).ok_or(ZlibError::Truncated)? as usize;
                 let len = usize::from(LEN_BASE[index]) + add;
                 let distance = distance(bits, dist)?;
-                copy_match(out, distance, len, limit, window)?;
+                copy_match(sink, distance, len)?;
             }
             _ => return Err(ZlibError::Malformed("literal")),
         }
@@ -354,22 +433,13 @@ fn distance(bits: &mut Bits<'_>, dist: &Huff) -> Result<usize, ZlibError> {
     Ok(usize::from(DIST_BASE[index]) + add)
 }
 
-fn copy_match(
-    out: &mut Vec<u8>,
-    distance: usize,
-    len: usize,
-    limit: usize,
-    window: usize,
-) -> Result<(), ZlibError> {
-    if distance == 0 || distance > out.len() || distance > window || distance > MAX_WINDOW {
-        return Err(ZlibError::Malformed("distance"));
-    }
-    if out.len().saturating_add(len) > limit {
-        return Err(ZlibError::Limit);
-    }
+fn copy_match<F>(sink: &mut Sink<F>, distance: usize, len: usize) -> Result<(), ZlibError>
+where
+    F: FnMut(u8) -> Result<(), ZlibError>,
+{
     for _ in 0..len {
-        let byte = out[out.len() - distance];
-        out.push(byte);
+        let byte = sink.past(distance)?;
+        sink.push(byte)?;
     }
     Ok(())
 }

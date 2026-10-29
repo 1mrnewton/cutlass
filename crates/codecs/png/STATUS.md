@@ -1,6 +1,6 @@
 # PNG support record
 
-Checkout: branch `png` at `eb60bbf` when this scope was written. Native safe Rust in `cutlass-png`. No `unsafe`. No libpng, no `png` crate, no ImageIO, and no subprocess in the library.
+Checkout: branch `png`. Scope recorded at `eb60bbf`. The decoder and encoder landed in `4a82563`. Native safe Rust in `cutlass-png`. No `unsafe`. No libpng, no `png` crate, no ImageIO, and no subprocess in the library.
 
 This file is the scope record. The readiness section at the bottom is filled after the gates run. A row stays planned until a test named here has been executed.
 
@@ -68,19 +68,19 @@ Hardware for the timing gates: the machine that runs them, named in the readines
 
 | Capability | Required | Decode | Encode | Evidence | Status |
 | --- | --- | --- | --- | --- | --- |
-| Signature, IHDR, IDAT, IEND, CRC | Yes | Accept a legal datastream. Bad CRC, bad signature, truncation, and trailing bytes are errors | Emit this order | Planned tests in this crate | Planned |
-| Greyscale 1, 2, 4, 8, 16 | Yes | Exact samples in range | Emit | Analytic plus ffmpeg | Planned |
-| Truecolor 8 and 16 | Yes | Exact R, G, B | Emit | Analytic plus ffmpeg | Planned |
-| Greyscale and truecolor with alpha, 8 and 16 | Yes | Exact straight alpha | Emit | Analytic plus ffmpeg | Planned |
-| Indexed 1, 2, 4, 8, with PLTE | Yes | Exact indices. Palette kept | Emit | Analytic plus an independent decoder | Planned |
-| `tRNS` key and palette alpha | Yes | Kept, not expanded | Emit | Metadata compared apart from samples | Planned |
-| Filter method 0, types 0–4, including Paeth | Yes | Reconstruct per the spec | Choose per scanline by minimum sum of absolute byte values | Hand-computed rows plus independent files | Planned |
-| Interlace 0 and Adam7 | Yes | Full image | Both. `CodecParams.extra` empty or `[0]` is method 0. `[1]` is Adam7 | Independent Adam7 file | Planned |
-| Multiple IDAT, including empty IDAT | Yes | Concatenate. Non-consecutive IDAT is an error | Split the zlib stream | Planned | Planned |
-| gAMA, cHRM, sRGB, iCCP, sBIT, pHYs, bKGD, tEXt, zTXt, iTXt | Yes to preserve, no to apply | Record. Do not convert | Emit when set. Do not invent an sRGB gAMA | Metadata tests | Planned |
-| Unknown ancillary chunk | Yes | Ignore, including APNG `acTL`, `fcTL`, and `fdAT` | Do not emit | Default image still decodes | Planned |
-| Unknown critical chunk | Yes | Error | Do not emit | Planned | Planned |
-| Filter method other than 0 | Yes | Error. FFmpeg accepts MNG method 64 (LOCO). Those files do not decode here | Method 0 only | Planned | Planned |
+| Signature, IHDR, IDAT, IEND, CRC | Yes | Accept a legal datastream. Bad CRC, bad signature, truncation, and trailing bytes are errors | Emit this order | `tests.rs` hand-built streams and malformed cases | Verified |
+| Greyscale 1, 2, 4, 8, 16 | Yes | Exact samples in range | Emit | 1-bit analytic. 1/2/4/8/16 self round trip. 8-bit ImageMagick both ways. 16-bit ffmpeg both ways | Verified. Independent 1/2/4 not run |
+| Truecolor 8 and 16 | Yes | Exact R, G, B | Emit | ffmpeg 8.1.1 both ways for 8-bit, including `-pred mixed`. 16-bit checked as this encoder's `rgb48be` output | Verified. Foreign 16-bit truecolor file not run |
+| Greyscale and truecolor with alpha, 8 and 16 | Yes | Exact straight alpha | Emit | Analytic RGBA8. ffmpeg `ya8` and `rgba` accept this encoder. 16-bit alpha is a self round trip | Partial. Foreign alpha files and 16-bit alpha oracles not run |
+| Indexed 1, 2, 4, 8, with PLTE | Yes | Exact indices. Palette kept | Emit | Analytic 8-bit indices. ffmpeg `pal8` both ways for 8-bit. 1/2/4 self round trip | Verified for 8-bit. Independent 1/2/4 not run |
+| `tRNS` key and palette alpha | Yes | Kept, not expanded | Emit | Hand-built key and short palette table. Self round trip. Not applied to samples | Verified in this crate. No independent metadata oracle |
+| Filter method 0, types 0–4, including Paeth | Yes | Reconstruct per the spec | Choose per scanline by minimum sum of absolute byte values | Hand-computed None, Sub, Up, Average, and Paeth. ffmpeg `-pred mixed` | Verified |
+| Interlace 0 and Adam7 | Yes | Full image | Both. `CodecParams.extra` empty or `[0]` is method 0. `[1]` is Adam7 | Hand-built 2×2 Adam7. ImageMagick `-interlace PNG` both ways. Self round trip of every required depth | Verified |
+| Multiple IDAT, including empty IDAT | Yes | Concatenate. Non-consecutive IDAT is an error | Split the zlib stream at 8192 bytes | One-byte IDAT chunks plus an empty IDAT. A `tEXt` between IDAT chunks is an error | Verified |
+| gAMA, cHRM, sRGB, iCCP, sBIT, pHYs, bKGD, tEXt, zTXt, iTXt | Yes to preserve, no to apply | Record. Do not convert | Emit when set. Do not invent an sRGB gAMA | Samples unchanged beside the metadata. Round trip keeps gamma, sRGB, cHRM, pHYs, text, ICC, sBIT, and bKGD | Verified in this crate. iTXt covered by the writer; the round-trip fixture is zTXt |
+| Unknown ancillary chunk | Yes | Ignore, including APNG `acTL` | Do not emit | `orNG` and `acTL` leave the samples intact | Verified. `fcTL` and `fdAT` use the same ancillary path and were not separate fixtures |
+| Unknown critical chunk | Yes | Error | Do not emit | `ORNG` is rejected | Verified |
+| Filter method other than 0 | Yes | Error. FFmpeg accepts MNG method 64 (LOCO). Those files do not decode here | Method 0 only | Method 64 returns `Unsupported` | Verified |
 | APNG animation | No | The static IDAT image only | Not emitted | Outside the still | Unsupported |
 | `cICP`, `mDCV`, `cLLI`, `eXIf`, `hIST`, `sPLT`, `tIME` | No | Ignored ancillary | Not emitted | Not preserved | Unsupported |
 | Color conversion, premultiplied alpha, sample scaling | No | Not done | Not done | Color crate | Unsupported |
@@ -102,4 +102,66 @@ One push is one complete datastream. A short buffer is `Truncated`, not `NeedMor
 
 ## Readiness
 
-Not run. The matrix rows above are planned. No implementation is claimed in this revision of the file.
+Partial. Decode and encode of a static PNG datastream are in `cutlass-png` and the required sample domains round-trip. The rows marked partial above are the gaps. This is not a release.
+
+### Implementation
+
+`PngDecoder::decode_picture` and `PngEncoder::push_picture` take one PNG datastream per packet. zlib and the filters live in this crate. `register_decoders` and `register_encoders` register `CodecId::Png`. The `still` container is still an empty stub, so file tests pass the file bytes as the packet. `apps/desktop` does not build a factory, so it does not call those register functions.
+
+### Rules
+
+Followed `.cursor/skills/ship-codec/SKILL.md` and `references/video-image.md`, `implementation.md`, `verification.md`, and `deliverables.md`, plus the rules under `.cursor/rules`. Product boundaries follow `cutlass-docs/rust-workspace.md` and `cutlass-components.md`. No missing skill file.
+
+### Correctness
+
+Lossless comparison is exact samples in the declared domain. Metadata is compared on its own and is not applied.
+
+- Analytic stored-zlib streams, not produced by this encoder: grey, Sub, Up, Average, Paeth, 1-bit, 16-bit, indexed plus `tRNS`, and a 2×2 Adam7 image.
+- ffmpeg 8.1.1 (`/opt/homebrew/bin/ffmpeg`) decodes this encoder for `rgb24`, `rgba`, `ya8`, `gray16be`, `rgb48be`, and `pal8` indices. This decoder matches ffmpeg output for `rgb24` (`-pred mixed` included), `gray16be`, and `pal8`.
+- ImageMagick 7.1.2-21 decodes this encoder's Adam7 grey file and writes an Adam7 grey file this decoder matches. Installed libpng headers are 1.6.58. The magick binary's linked libpng soname was not printed by `otool`.
+- python3 3.9.6 zlib: inflate of level-9 streams, and decompress of this encoder's fixed-Huffman streams, for lengths 0 through 95 plus the earlier samples.
+- Local file `/Users/mrnewton/dev/cutlass/local-files/04-motion-graphics.png` (2946×1603, 8-bit RGBA, no interlace, 836790 bytes) matches ffmpeg `rgba`. Re-encoding it and decoding with ffmpeg matches those same bytes. The file was not modified.
+- ISO/IEC 15948 official conformance suite: not available. Not run.
+- GStreamer 1.28.3 is a libpng wrapper that expands the picture. Not used as a coded-sample oracle.
+
+### Encoding quality
+
+Lossless. The release timing test encodes a frame and decodes it back to the same samples. No lossy ladder.
+
+### Lifecycle
+
+Covered in `tests.rs`: empty packet is `InvalidApi`, audio `push` is `InvalidApi`, `drain` twice is empty, a failed picture does not block the next one, cancel then `reset` allows another encode, and the first factory registration wins. Playback and export are not wired. Not run.
+
+### Robustness
+
+Fast property loop: 24 random stills, seed `0x1234_5678_9abc_def0`, both interlace modes, exact samples. 48 random buffers up to 80 bytes return errors. Malformed fixtures cover CRC, truncation, signature, filter type 5, filter method 64, a zero edge, trailing bytes, non-consecutive IDAT, a critical unknown chunk, missing PLTE, PLTE on grey, `tRNS` on RGBA, `gAMA` after PLTE, and an edge of 20000.
+
+Fuzz campaign, release, one thread, `decoder_fuzz_campaign`: seed `0x504e47f00d0a1a0a`, 1800 seconds, 2 760 000 674 inputs, exit 0, no panic. Two thirds of the inputs are random buffers of 0 to 2047 bytes. One third flips one byte in a stored-zlib 2×2 truecolor PNG. This is not a coverage-guided fuzzer and it did not minimize a crash, because there was no crash. A structured hostile corpus beyond that mutation is the malformed tests above.
+
+### Build
+
+On this machine, after `4a82563`:
+
+- `cargo fmt --all -- --check` exit 0
+- `cargo lint` exit 0
+- `cargo test --workspace --all-targets --offline` exit 0. PNG: 25 passed, 2 ignored
+- `cargo deny check` exit 0. Advisories, bans, licenses, and sources ok. The unmatched license allowances in `deny.toml` were already there. No new dependency.
+
+`#![forbid(unsafe_code)]` stays. Library code has no `unwrap` or `expect`.
+
+### Performance
+
+Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full_hd_rgba_stays_inside_the_time_budget`:
+
+| Frame | Encode | Decode | Output |
+| --- | --- | --- | --- |
+| 1920×1080 RGBA8 gradient | 51 ms | 12 ms | 54958 bytes |
+| 1920×1080 RGBA8 high-bit noise | 160 ms | 59 ms | 8760375 bytes |
+
+Both are inside 500 ms encode and 250 ms decode. Linux and Windows were not run.
+
+Memory: the decoder retains nothing between pictures. Peak during one picture is the inflated scanlines plus the `u16` sample buffer plus one previous scanline. That is two image-sized buffers, not the single image buffer named in the gate. Distance lookback uses the output itself, capped at 32 KiB. No heap profile. The single-buffer wording of the gate is not met.
+
+### Conclusion
+
+Partial. Static PNG decode and encode work for the domains covered above, with the independent evidence named there. The 30 minute decoder campaign finished with no panic. Still open: foreign alpha and 16-bit truecolor inputs, independent 1/2/4-bit files, a heap measurement that matches the one-buffer gate, the still-container open path, desktop registration, the ISO conformance suite, and Linux/Windows. APNG animation and the ignored metadata chunks stay unsupported. Do not publish this.

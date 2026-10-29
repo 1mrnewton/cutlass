@@ -5,6 +5,8 @@
 //! height are the buffer that was decoded. Orientations 5 through 8 swap
 //! those edges.
 
+#![cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+
 use cutlass_decode::CodecError;
 
 /// Tag value 1 through 8. Anything else is stored as upright.

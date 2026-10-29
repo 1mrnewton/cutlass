@@ -4,6 +4,8 @@
 //! A file or an encoder may hand either those or start codes. This module
 //! is the conversion. It does not decode the slice.
 
+#![cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+
 use cutlass_decode::CodecError;
 
 /// One NAL unit without its start code or length prefix.
@@ -29,6 +31,13 @@ pub struct HevcConfig {
     pub length_size: u8,
     pub nals: Vec<Vec<u8>>,
 }
+
+/// Private envelope for HEVC parameter sets this crate writes.
+///
+/// A real `hvcC` still parses through [`hevc_config`]. This envelope is what
+/// the Apple encoder attaches when it has the NAL units and not the profile
+/// fields a full configuration record needs.
+pub const HEVC_ENVELOPE: &[u8; 4] = b"HVCC";
 
 /// Split a buffer on 3-byte and 4-byte start codes.
 pub fn annex_b(data: &[u8]) -> Result<Vec<Nal>, CodecError> {
@@ -100,7 +109,8 @@ pub fn split_lengths(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecErro
         }
         let mut raw = [0u8; 4];
         raw[4 - width..].copy_from_slice(&data[at..at + width]);
-        let len = u32::from_be_bytes(raw) as usize;
+        let len = usize::try_from(u32::from_be_bytes(raw))
+            .map_err(|_| CodecError::Limit { what: "nal length" })?;
         at += width;
         if len == 0 || data.len() - at < len {
             return Err(CodecError::Truncated {
@@ -137,11 +147,13 @@ pub fn length_prefixed(nals: &[Nal], length_size: u8) -> Result<Vec<u8>, CodecEr
     };
     let mut out = Vec::new();
     for nal in nals {
-        let len = nal.bytes.len() as u64;
+        let len =
+            u64::try_from(nal.bytes.len()).map_err(|_| CodecError::Limit { what: "nal length" })?;
         if len == 0 || len > max {
             return Err(CodecError::Limit { what: "nal length" });
         }
-        let bytes = (len as u32).to_be_bytes();
+        let narrow = u32::try_from(len).map_err(|_| CodecError::Limit { what: "nal length" })?;
+        let bytes = narrow.to_be_bytes();
         out.extend_from_slice(&bytes[4 - width..]);
         out.extend_from_slice(&nal.bytes);
     }
@@ -217,13 +229,15 @@ pub fn write_avc_config(config: &AvcConfig) -> Result<Vec<u8>, CodecError> {
             what: "nal length size",
         });
     }
+    let sps_count =
+        u8::try_from(config.sps.len()).map_err(|_| CodecError::Limit { what: "avcC sps" })?;
     let mut out = vec![
         1,
         config.profile,
         config.compatibility,
         config.level,
         0xfc | (config.length_size - 1),
-        0xe0 | u8::try_from(config.sps.len()).unwrap_or(0),
+        0xe0 | sps_count,
     ];
     write_sets(&mut out, &config.sps)?;
     out.push(u8::try_from(config.pps.len()).map_err(|_| CodecError::Limit { what: "avcC pps" })?);
@@ -265,7 +279,7 @@ pub fn hevc_config(data: &[u8]) -> Result<HevcConfig, CodecError> {
                 what: "hvcC count",
             });
         }
-        let count = u16::from_be_bytes([data[at], data[at + 1]]) as usize;
+        let count = usize::from(u16::from_be_bytes([data[at], data[at + 1]]));
         at += 2;
         nals.extend(read_sets(data, &mut at, count, "hvcC nal")?);
     }
@@ -276,6 +290,53 @@ pub fn hevc_config(data: &[u8]) -> Result<HevcConfig, CodecError> {
         });
     }
     Ok(HevcConfig { length_size, nals })
+}
+
+/// Write the private HEVC envelope.
+pub fn write_hevc_envelope(nals: &[Vec<u8>]) -> Result<Vec<u8>, CodecError> {
+    if nals.is_empty() || nals.len() > usize::from(u16::MAX) {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "hvcC sets",
+        });
+    }
+    let mut out = Vec::from(*HEVC_ENVELOPE);
+    out.push(1);
+    out.push(4);
+    let count = u16::try_from(nals.len()).map_err(|_| CodecError::Limit { what: "hvcC sets" })?;
+    out.extend_from_slice(&count.to_be_bytes());
+    write_sets(&mut out, nals)?;
+    Ok(out)
+}
+
+/// Parse either a private HEVC envelope or an `hvcC`.
+pub fn read_hevc_sets(data: &[u8]) -> Result<HevcConfig, CodecError> {
+    if data.starts_with(HEVC_ENVELOPE) {
+        if data.len() < 8 {
+            return Err(CodecError::Truncated {
+                at_bit: 0,
+                what: "hvcC",
+            });
+        }
+        let length_size = data[5];
+        if !matches!(length_size, 1 | 2 | 4) {
+            return Err(CodecError::Malformed {
+                at_bit: 5 * 8,
+                what: "hvcC",
+            });
+        }
+        let count = usize::from(u16::from_be_bytes([data[6], data[7]]));
+        let mut at = 8usize;
+        let nals = read_sets(data, &mut at, count, "hvcC nal")?;
+        if nals.is_empty() {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "hvcC sets",
+            });
+        }
+        return Ok(HevcConfig { length_size, nals });
+    }
+    hevc_config(data)
 }
 
 fn read_sets(
@@ -292,7 +353,7 @@ fn read_sets(
                 what,
             });
         }
-        let len = u16::from_be_bytes([data[*at], data[*at + 1]]) as usize;
+        let len = usize::from(u16::from_be_bytes([data[*at], data[*at + 1]]));
         *at += 2;
         if len == 0 || data.len() - *at < len {
             return Err(CodecError::Truncated {
@@ -486,5 +547,14 @@ mod tests {
             hevc_config(&[1, 2, 3]),
             Err(CodecError::Malformed { what: "hvcC", .. })
         ));
+    }
+
+    #[test]
+    fn a_hevc_envelope_round_trips_the_parameter_sets() {
+        let nals = vec![vec![0x40, 0x01], vec![0x42, 0x01], vec![0x44, 0x01]];
+        let bytes = write_hevc_envelope(&nals).expect("write");
+        let config = read_hevc_sets(&bytes).expect("read");
+        assert_eq!(config.length_size, 4);
+        assert_eq!(config.nals, nals);
     }
 }

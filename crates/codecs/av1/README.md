@@ -43,7 +43,7 @@ Current decoder work stays on this table. The encoder is left as it is until the
 | dav1d pixel match on the supported tools | ~80% |
 | Hostile input returns an error | ~80% |
 | 30-minute fuzz | 0%. 200 random packets is the stand-in. |
-| 720×480 real time on one thread | 0%. About five encode-and-decode round trips a second. One 2160p keyframe decodes in about 0.33 s; FFmpeg's libdav1d does that frame in 0.0064 s on one thread. |
+| 720×480 real time on one thread | 0%. About five encode-and-decode round trips a second. One 2160p keyframe decodes in 0.063 s with its four tiles in parallel; FFmpeg's libdav1d does that frame in 0.0063 s on one thread. |
 | A production 2160p file plays | One keyframe matches dav1d. Later frames are not proven. |
 
 The 2160p keyframe matches dav1d, including its four uniform tiles, quantizer matrix, superblock quantizer delta, and selectable transform sizes. Chroma neighbor flags stay inside the chroma superblock, and an extended intra edge does not cross into the next tile. Compound prediction and carrying CDF state from another frame are still refused. An inter frame that selects its transform size is still refused.

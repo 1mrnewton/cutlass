@@ -8,7 +8,7 @@ type CoefCtx = [[u8; 3]; 6];
 type CoefBand = [CoefCtx; 6];
 type CoefRef = [CoefBand; 2];
 type CoefPlane = [CoefRef; 2];
-type CoefProbs = [CoefPlane; 4];
+pub type CoefProbs = [CoefPlane; 4];
 
 pub static COEF_PROBS: CoefProbs = [
     [

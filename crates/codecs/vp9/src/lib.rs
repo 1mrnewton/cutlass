@@ -6,6 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod geom;
+mod header;
+mod prob;
 mod tables;
 mod txfm;
 

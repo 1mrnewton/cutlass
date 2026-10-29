@@ -10,10 +10,12 @@
 
 mod error;
 mod host;
+mod player;
 mod project;
 
 pub use error::FfiError;
 pub use host::Commands;
+pub use player::PhonePlayer;
 pub use project::Project;
 
 #[cfg(test)]

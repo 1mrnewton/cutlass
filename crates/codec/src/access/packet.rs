@@ -50,7 +50,8 @@ impl Packet {
         }
     }
 
-    /// One video access unit. `keyframe` is the random-access flag.
+    /// One video access unit. `keyframe` is the random-access flag: the unit
+    /// can be decoded without an earlier picture.
     #[must_use]
     pub fn video(data: Vec<u8>, pts: i64, duration: i64, timescale: u32, keyframe: bool) -> Self {
         Self {

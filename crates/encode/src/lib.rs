@@ -19,15 +19,18 @@
 
 #![forbid(unsafe_code)]
 
+pub mod video;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorType, FrameError, ImageError,
-    Packet, Pcm, PhysicalPixel, PixelFormat, Rgb8, SampleFormat, SideData, StillImage, TextItem,
-    Transparency, Yuv420p,
+    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorPrimaries, ColorRange,
+    ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel, PixelFormat,
+    Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transparency, VideoFrame, Yuv420p,
 };
+pub use video::{VideoEncodeFactory, request_video_cancel};
 
 /// PCM presented to an encoder, contiguous with the samples already accepted.
 ///

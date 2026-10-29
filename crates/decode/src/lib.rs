@@ -28,12 +28,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod video;
+
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
-    ColorRange, ColorType, FrameError, ImageError, Packet, Pcm, PhysicalPixel, PixelFormat, Rgb8,
-    SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency, Yuv420p,
+    ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
+    PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
+    VideoFrame, Yuv420p,
 };
+pub use video::VideoDecodeFactory;
 
 /// One decoded still.
 ///
@@ -419,8 +423,7 @@ mod tests {
     }
 
     fn jpeg(width: u32, height: u32, pixel: PixelFormat) -> CodecParams {
-        let mut params = CodecParams::video(CodecId::Jpeg, width, height);
-        params.pixel = pixel;
+        let mut params = CodecParams::with_format(CodecId::Jpeg, width, height, pixel);
         params.primaries = ColorPrimaries::Bt709;
         params.transfer = Transfer::Bt709;
         params

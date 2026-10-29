@@ -1,4 +1,4 @@
-use super::pixel::{ColorMatrix, ColorPrimaries, ColorRange, PixelFormat, Transfer};
+use super::pixel::{ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer};
 use super::sample::{ChannelLayout, SampleFormat};
 use crate::CodecId;
 
@@ -24,7 +24,7 @@ pub struct CodecParams {
     pub pixel: PixelFormat,
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
-    pub matrix: ColorMatrix,
+    pub matrix: MatrixCoefficients,
     pub range: ColorRange,
     pub nal_length_size: u8,
 }
@@ -44,16 +44,23 @@ impl CodecParams {
             pixel: PixelFormat::None,
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
-            matrix: ColorMatrix::Unspecified,
+            matrix: MatrixCoefficients::Unspecified,
             range: ColorRange::Unspecified,
             nal_length_size: 0,
         }
     }
 
-    /// A progressive picture. `nal_length_size` 4 is the length prefix an
-    /// `avcC` sample uses. Pass 0 when the access units are Annex B.
+    /// A progressive 4:2:0 picture. `nal_length_size` 4 is the length prefix
+    /// an `avcC` sample uses. Pass 0 when the access units are Annex B.
     #[must_use]
     pub fn video(codec: CodecId, width: u32, height: u32) -> Self {
+        Self::with_format(codec, width, height, PixelFormat::Yuv420p)
+    }
+
+    /// A video stream. `bitrate` stays zero until the caller names a rate.
+    /// `nal_length_size` starts at 4.
+    #[must_use]
+    pub fn with_format(codec: CodecId, width: u32, height: u32, pixel: PixelFormat) -> Self {
         Self {
             codec,
             extra: Vec::new(),
@@ -63,10 +70,10 @@ impl CodecParams {
             bitrate: 0,
             width,
             height,
-            pixel: PixelFormat::Yuv420p,
+            pixel,
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
-            matrix: ColorMatrix::Unspecified,
+            matrix: MatrixCoefficients::Unspecified,
             range: ColorRange::Unspecified,
             nal_length_size: 4,
         }
@@ -100,5 +107,15 @@ mod tests {
         assert_eq!(params.sample_rate, 0);
         assert_eq!(params.layout, None);
         assert_eq!(params.nal_length_size, 4);
+    }
+
+    #[test]
+    fn video_params_leave_audio_absent() {
+        let params = CodecParams::with_format(CodecId::Vp9, 320, 240, PixelFormat::Yuv420p);
+        assert_eq!(params.width, 320);
+        assert_eq!(params.height, 240);
+        assert_eq!(params.pixel, PixelFormat::Yuv420p);
+        assert_eq!(params.sample_rate, 0);
+        assert!(params.layout.is_none());
     }
 }

@@ -48,6 +48,21 @@ pub enum ColorRange {
     Unspecified,
     /// Studio swing, luma 16–235.
     Limited,
+    /// The same studio swing. A VP9 header records this name.
+    Studio,
     /// Full swing, 0–255.
     Full,
+}
+
+/// Matrix used to relate Y′CbCr to RGB. The codec does not convert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum MatrixCoefficients {
+    #[default]
+    Unspecified,
+    /// ITU-R BT.709.
+    Bt709,
+    /// ITU-R BT.601.
+    Bt601,
+    /// Identity / RGB, stored only as a tag.
+    Rgb,
 }

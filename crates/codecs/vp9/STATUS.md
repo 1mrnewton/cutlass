@@ -56,7 +56,7 @@ Encoder throughput is measured and recorded. It is not required to be realtime.
 | Lossless round trip | Exact YUV | Emit | Not yet | In progress |
 | Lossy PSNR and rate gates | n/a | Named bounds above | Not yet | In progress |
 | libvpx-vp9 and native vp9 decode our bitstreams | n/a | Both decoders | Not yet | In progress |
-| We decode a libvpx-vp9 bitstream | Both oracles match our YUV | n/a | Not yet | In progress |
+| We decode a libvpx-vp9 bitstream | Both oracles match our YUV | n/a | `lossless_red_keyframe_matches_ffmpeg`, `lossy_keyframes_match_ffvp9` (keyframes only) | In progress |
 | Lifecycle, malformed input, cancel | Specified | Specified | Not yet | In progress |
 | 30-minute fuzz | Required | Bounded | Not yet | Not run |
 | Release speed and memory | Required | Measured | Not yet | Not run |

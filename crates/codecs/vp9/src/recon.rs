@@ -19,6 +19,7 @@ use crate::geom::{
 };
 use crate::header::{Header, Parsed};
 use crate::intra;
+use crate::lpf;
 use crate::prob::{self, Counts, FrameContext};
 use crate::tables::{
     KF_UV_MODE_PROB, KF_Y_MODE_PROB, NEIGHBORS_COL_4X4, NEIGHBORS_COL_8X8, NEIGHBORS_COL_16X16,
@@ -148,6 +149,9 @@ struct Scratch<'a> {
     left_u: [u8; 16],
     left_v: [u8; 16],
     coef: Vec<i32>,
+    levels: lpf::Levels,
+    masks: Vec<lpf::Mask>,
+    sb_cols: usize,
 }
 
 pub fn reconstruct(parsed: &Parsed<'_>) -> Result<Picture, CodecError> {
@@ -161,6 +165,7 @@ pub fn reconstruct(parsed: &Parsed<'_>) -> Result<Picture, CodecError> {
     }
     let mut frame = Scratch::new(&parsed.header, &parsed.fc)?;
     frame.decode_tiles(parsed.tiles)?;
+    frame.loop_filter()?;
     frame.picture()
 }
 
@@ -212,6 +217,16 @@ impl<'a> Scratch<'a> {
             left_u: [0; 16],
             left_v: [0; 16],
             coef: vec![0i32; 32 * 32],
+            levels: lpf::levels(header),
+            masks: vec![
+                lpf::Mask::default();
+                if header.filter_level > 0 {
+                    mi_cols.div_ceil(8) * mi_rows.div_ceil(8)
+                } else {
+                    0
+                }
+            ],
+            sb_cols: mi_cols.div_ceil(8),
         })
     }
 
@@ -431,6 +446,7 @@ impl<'a> Scratch<'a> {
             },
         )?;
         self.store_mi(mi, mi_row, mi_col, x_mis, y_mis);
+        self.note_filter(&mi, mi_row, mi_col, bw, bh);
         Ok(())
     }
 
@@ -913,6 +929,68 @@ impl<'a> Scratch<'a> {
         }
     }
 
+    fn note_filter(&mut self, mi: &Mi, mi_row: usize, mi_col: usize, bw: usize, bh: usize) {
+        if self.header.filter_level == 0 {
+            return;
+        }
+        let index = (mi_row / 8) * self.sb_cols + mi_col / 8;
+        let Some(mask) = self.masks.get_mut(index) else {
+            return;
+        };
+        lpf::build(
+            mask,
+            &self.levels,
+            &lpf::Block {
+                bsize: mi.bsize,
+                tx: mi.tx,
+                skip: mi.skip,
+                inter: mi.refs[0] != INTRA_FRAME,
+                seg: mi.seg,
+                mode: mi.mode,
+                reference: mi.refs[0],
+                bw,
+                bh,
+            },
+            mi_row,
+            mi_col,
+        );
+    }
+
+    fn loop_filter(&mut self) -> Result<(), CodecError> {
+        if self.header.filter_level == 0 {
+            return Ok(());
+        }
+        let levels = self.levels;
+        let sb_rows = self.mi_rows.div_ceil(8);
+        for sb_row in 0..sb_rows {
+            for sb_col in 0..self.sb_cols {
+                let index = sb_row * self.sb_cols + sb_col;
+                let Some(mask) = self.masks.get(index).copied() else {
+                    return Err(bad("loop filter mask"));
+                };
+                let mut mask = mask;
+                lpf::filter_sb(
+                    &mut mask,
+                    &levels,
+                    &mut lpf::Planes {
+                        y: &mut self.y,
+                        u: &mut self.u,
+                        v: &mut self.v,
+                        y_stride: self.y_stride,
+                        uv_stride: self.uv_stride,
+                    },
+                    lpf::Origin {
+                        mi_row: sb_row * 8,
+                        mi_col: sb_col * 8,
+                        mi_rows: self.mi_rows,
+                        mi_cols: self.mi_cols,
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn picture(&self) -> Result<Picture, CodecError> {
         Ok(Picture {
             y: crop_plane(&self.y, self.y_stride, self.crop_w, self.crop_h)?,
@@ -1120,5 +1198,42 @@ mod tests {
         assert_eq!(y, None, "Y {}", y.map(|i| pic.y[i]).unwrap_or(0));
         assert_eq!(u, None, "U {}", u.map(|i| pic.u[i]).unwrap_or(0));
         assert_eq!(v, None, "V {}", v.map(|i| pic.v[i]).unwrap_or(0));
+    }
+
+    #[test]
+    fn lossy_keyframes_match_ffvp9() {
+        let cases = [
+            (
+                "red32",
+                include_bytes!("../fixtures/vp9_red32_q_0.bin").as_slice(),
+                include_bytes!("../fixtures/vp9_red32_q.yuv").as_slice(),
+                32u32,
+                32u32,
+            ),
+            (
+                "src32",
+                include_bytes!("../fixtures/vp9_src32_0.bin").as_slice(),
+                include_bytes!("../fixtures/vp9_src32.yuv").as_slice(),
+                32,
+                32,
+            ),
+            (
+                "src64",
+                include_bytes!("../fixtures/vp9_src64_0.bin").as_slice(),
+                include_bytes!("../fixtures/vp9_src64_0.yuv").as_slice(),
+                64,
+                64,
+            ),
+        ];
+        for (name, payload, raw, w, h) in cases {
+            let parsed = parse(&Persist::new(), payload).expect("header");
+            let pic = reconstruct(&parsed).unwrap_or_else(|err| panic!("{name} recon {err}"));
+            assert_eq!((pic.width, pic.height), (w, h), "{name}");
+            let got = [&pic.y[..], &pic.u[..], &pic.v[..]].concat();
+            assert_eq!(got.len(), raw.len(), "{name}");
+            if let Some(i) = got.iter().zip(raw).position(|(a, b)| a != b) {
+                panic!("{name} mismatch at {i} got {} want {}", got[i], raw[i]);
+            }
+        }
     }
 }

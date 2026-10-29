@@ -10,6 +10,7 @@ mod coef;
 mod geom;
 mod header;
 mod intra;
+mod lpf;
 mod prob;
 mod recon;
 mod tables;

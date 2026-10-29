@@ -1760,9 +1760,11 @@ fn recon_chroma(
     let y0 = my * 8;
     let qp_cb = recon::chroma_qp(qp, slice.pps.chroma_qp_offset);
     let qp_cr = recon::chroma_qp(qp, slice.pps.second_chroma_qp_offset);
+    // Intra chroma uses lists 1 and 2. Inter chroma uses lists 4 and 5.
+    let base = if intra { 1 } else { 4 };
     for (cb, dc, ac, qp_c, list) in [
-        (true, cb_dc, cb_ac, qp_cb, 1usize),
-        (false, cr_dc, cr_ac, qp_cr, 2),
+        (true, cb_dc, cb_ac, qp_cb, base),
+        (false, cr_dc, cr_ac, qp_cr, base + 1),
     ] {
         let pred = if intra {
             let (above, left, above_ok, left_ok) =
@@ -2324,6 +2326,86 @@ mod oracle {
         }
         if count != 0 {
             panic!("crop mismatches {count} max {max} first {first:?}");
+        }
+    }
+
+    #[test]
+    fn jvt_quant_matrices_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        let dir = std::env::temp_dir().join("cutlass-h264-cqm");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("cqm.h264");
+        let yuv = dir.join("cqm.yuv");
+        let encoded = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=30",
+                "-frames:v",
+                "2",
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "high",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "cabac=1:bframes=0:8x8dct=1:keyint=30:scenecut=0:cqm=jvt:threads=1",
+                "-f",
+                "h264",
+            ])
+            .arg(&coded)
+            .status()
+            .unwrap();
+        assert!(encoded.success(), "ffmpeg encode failed");
+        let decoded = Command::new(&ffmpeg)
+            .args(["-y", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "ffmpeg decode failed");
+        let bytes = std::fs::read(&coded).unwrap();
+        let expected = std::fs::read(&yuv).unwrap();
+        let params = CodecParams::video(CodecId::H264, 64, 64);
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let mut got = Vec::new();
+        for (unit_index, unit) in access_units(&bytes).into_iter().enumerate() {
+            let packet = Packet::video(unit, 0, 1, 30, false);
+            match decoder.push(&packet) {
+                Ok(frames) => got.extend(pictures(&frames)),
+                Err(error) => panic!("push {unit_index} failed: {error:?}"),
+            }
+        }
+        match decoder.drain() {
+            Ok(frames) => got.extend(pictures(&frames)),
+            Err(error) => panic!("drain failed: {error:?}"),
+        }
+        assert_eq!(got.len(), expected.len(), "picture bytes");
+        let mut count = 0usize;
+        let mut max = 0u8;
+        let mut first = None;
+        for (index, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            if a == b {
+                continue;
+            }
+            count += 1;
+            if a.abs_diff(*b) >= max {
+                max = a.abs_diff(*b);
+            }
+            if first.is_none() {
+                first = Some((index, *a, *b));
+            }
+        }
+        if count != 0 {
+            panic!("quant matrix mismatches {count} max {max} first {first:?}");
         }
     }
 

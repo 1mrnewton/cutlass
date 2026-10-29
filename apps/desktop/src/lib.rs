@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod icons;
+pub mod probe;
 pub mod tokens;
 pub mod widgets;
 

@@ -12,6 +12,7 @@ mod approval;
 mod draft;
 mod r#loop;
 mod model;
+mod sandbox;
 mod settings_tool;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
@@ -23,5 +24,9 @@ pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run}
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,
+};
+pub use sandbox::{
+    LocalSandbox, OnlineSandbox, Sandbox, SandboxError, SandboxExecutor, SandboxPolicy,
+    SandboxRoute, route_for,
 };
 pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};

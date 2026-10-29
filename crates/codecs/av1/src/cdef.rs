@@ -38,6 +38,11 @@ pub struct CdefInput<'a> {
 }
 
 pub fn apply(frame: &mut CdefInput<'_>) {
+    // A strength pair of zero is the identity. The whole frame is left as the
+    // loop filter wrote it, including the copies this pass would otherwise make.
+    if idle(&frame.params) {
+        return;
+    }
     let src_y = frame.y.to_vec();
     let src_u = frame.u.to_vec();
     let src_v = frame.v.to_vec();
@@ -51,14 +56,35 @@ pub fn apply(frame: &mut CdefInput<'_>) {
             let idx = frame.index.get(slot).copied().unwrap_or(-1);
             if idx >= 0 && !skipped(frame.skips, frame.mi_cols, frame.mi_rows, row, col) {
                 let idx = idx as usize;
-                let (dir, var) = direction(&src_y, frame.y_stride, col * 4, row * 4);
-                filter_luma(frame, &src_y, row, col, idx, dir, var);
-                filter_chroma(frame, &src_u, &src_v, row, col, idx, dir);
+                let y_pri = i32::from(frame.params.y_pri.get(idx).copied().unwrap_or(0));
+                let y_sec = i32::from(frame.params.y_sec.get(idx).copied().unwrap_or(0));
+                let uv_pri = i32::from(frame.params.uv_pri.get(idx).copied().unwrap_or(0));
+                let uv_sec = i32::from(frame.params.uv_sec.get(idx).copied().unwrap_or(0));
+                if y_pri != 0 || y_sec != 0 || uv_pri != 0 || uv_sec != 0 {
+                    let (dir, var) = if y_pri == 0 && uv_pri == 0 {
+                        (0, 0)
+                    } else {
+                        direction(&src_y, frame.y_stride, col * 4, row * 4)
+                    };
+                    if y_pri != 0 || y_sec != 0 {
+                        filter_luma(frame, &src_y, row, col, idx, dir, var);
+                    }
+                    if uv_pri != 0 || uv_sec != 0 {
+                        filter_chroma(frame, &src_u, &src_v, row, col, idx, dir);
+                    }
+                }
             }
             col += 2;
         }
         row += 2;
     }
+}
+
+fn idle(params: &CdefParams) -> bool {
+    params.y_pri.iter().all(|strength| *strength == 0)
+        && params.y_sec.iter().all(|strength| *strength == 0)
+        && params.uv_pri.iter().all(|strength| *strength == 0)
+        && params.uv_sec.iter().all(|strength| *strength == 0)
 }
 
 fn skipped(skips: &[u8], mi_cols: usize, mi_rows: usize, row: usize, col: usize) -> bool {
@@ -369,5 +395,42 @@ fn at(src: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 fn put(dst: &mut [u8], stride: usize, x: usize, y: usize, value: i32) {
     if let Some(slot) = dst.get_mut(y * stride + x) {
         *slot = u8::try_from(value).unwrap_or(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_strength_leaves_the_picture() {
+        let mut y = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let mut u = vec![11, 22, 33, 44];
+        let mut v = vec![55, 66, 77, 88];
+        let before_y = y.clone();
+        let before_u = u.clone();
+        let before_v = v.clone();
+        apply(&mut CdefInput {
+            y: &mut y,
+            u: &mut u,
+            v: &mut v,
+            y_stride: 4,
+            c_stride: 2,
+            mi_cols: 2,
+            mi_rows: 2,
+            skips: &[0, 0, 0, 0],
+            index: &[0, -1, -1, -1],
+            params: CdefParams {
+                damping: 3,
+                bits: 0,
+                y_pri: [0; 8],
+                y_sec: [0; 8],
+                uv_pri: [0; 8],
+                uv_sec: [0; 8],
+            },
+        });
+        assert_eq!(y, before_y);
+        assert_eq!(u, before_u);
+        assert_eq!(v, before_v);
     }
 }

@@ -9,5 +9,10 @@
 #![forbid(unsafe_code)]
 
 mod approval;
+mod model;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
+pub use model::{
+    CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
+    ToolDefinition,
+};

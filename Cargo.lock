@@ -49,10 +49,8 @@ dependencies = [
  "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",
- "cutlass-decode-platform",
  "cutlass-editor",
  "cutlass-effects",
- "cutlass-encode-platform",
  "cutlass-eval",
  "cutlass-export",
  "cutlass-flac",
@@ -73,6 +71,8 @@ dependencies = [
  "cutlass-ogg",
  "cutlass-opus",
  "cutlass-pcm",
+ "cutlass-platform-apple",
+ "cutlass-platform-windows",
  "cutlass-playback",
  "cutlass-png",
  "cutlass-prores",
@@ -214,13 +214,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutlass-decode-platform"
-version = "0.1.0"
-dependencies = [
- "cutlass-decode",
-]
-
-[[package]]
 name = "cutlass-download"
 version = "0.1.0"
 dependencies = [
@@ -252,13 +245,6 @@ name = "cutlass-encode"
 version = "0.1.0"
 dependencies = [
  "cutlass-codec",
-]
-
-[[package]]
-name = "cutlass-encode-platform"
-version = "0.1.0"
-dependencies = [
- "cutlass-encode",
 ]
 
 [[package]]
@@ -472,6 +458,30 @@ version = "0.1.0"
 dependencies = [
  "cutlass-gpu",
  "cutlass-model",
+]
+
+[[package]]
+name = "cutlass-platform-android"
+version = "0.1.0"
+dependencies = [
+ "cutlass-decode",
+ "cutlass-encode",
+]
+
+[[package]]
+name = "cutlass-platform-apple"
+version = "0.1.0"
+dependencies = [
+ "cutlass-decode",
+ "cutlass-encode",
+]
+
+[[package]]
+name = "cutlass-platform-windows"
+version = "0.1.0"
+dependencies = [
+ "cutlass-decode",
+ "cutlass-encode",
 ]
 
 [[package]]

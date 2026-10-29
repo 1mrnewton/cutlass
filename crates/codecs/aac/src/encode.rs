@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, SideData};
-use cutlass_encode::{AudioInput, Encoder};
+use cutlass_encode::{AudioInput, Encoder, FrameInput};
 
 use crate::bits::{BitCounter, BitSink, BitWriter};
 use crate::config::{
@@ -478,6 +478,10 @@ impl Encoder for AacEncoder {
 
     fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
         self.push_samples(input)
+    }
+
+    fn push_frame(&mut self, _input: &FrameInput) -> Result<Vec<Packet>, CodecError> {
+        Err(CodecError::Unsupported { what: "picture" })
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -1389,7 +1393,7 @@ mod tests {
     use crate::encode::AacEncoder;
     use crate::filterbank::Sequence;
     use cutlass_decode::{ChannelLayout, CodecId, CodecParams, Decoder, SideData};
-    use cutlass_encode::{AudioInput, Encoder};
+    use cutlass_encode::{AudioInput, CpuFrame, Encoder, FrameInput, FrameTime, PixelFormat};
 
     fn params(rate: u32, layout: ChannelLayout, bitrate: u32) -> CodecParams {
         CodecParams {
@@ -1528,6 +1532,26 @@ mod tests {
             let score = snr(&reference, &coded);
             assert!(score >= 35.0, "channel {channel} snr {score}");
         }
+    }
+
+    #[test]
+    fn a_picture_is_refused_and_audio_still_encodes() {
+        let mut encoder = AacEncoder::open(&params(48_000, ChannelLayout::mono(), 64_000)).unwrap();
+        let frame = CpuFrame::new(
+            1,
+            1,
+            PixelFormat::Rgba8,
+            vec![1, 2, 3, 4],
+            FrameTime::new(0, 1, 30).unwrap(),
+        )
+        .unwrap();
+        let err = encoder.push_frame(&FrameInput::Cpu(frame)).unwrap_err();
+        assert_eq!(
+            err,
+            cutlass_decode::CodecError::Unsupported { what: "picture" }
+        );
+        let (decoded, _, _) = round_trip(&mut encoder, vec![0.0; 1024]);
+        assert_eq!(decoded.len(), 1024);
     }
 
     #[test]

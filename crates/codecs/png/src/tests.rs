@@ -327,6 +327,25 @@ fn text_after_idat_is_kept() {
 }
 
 #[test]
+fn an_international_text_chunk_round_trips() {
+    let mut image = still(1, 1, ColorType::Gray, BitDepth::Eight, vec![1]);
+    image.texts.push(TextItem {
+        keyword: b"Comment".to_vec(),
+        language: b"en".to_vec(),
+        translated: b"Note".to_vec(),
+        text: b"kept".to_vec(),
+        compressed: true,
+    });
+    let image = image.checked().expect("text");
+    let back = round_trip(&image, false);
+    assert_eq!(back.samples, vec![1]);
+    assert_eq!(back.texts[0].language, b"en");
+    assert_eq!(back.texts[0].translated, b"Note");
+    assert_eq!(back.texts[0].text, b"kept");
+    assert!(back.texts[0].compressed);
+}
+
+#[test]
 fn a_failed_picture_does_not_block_the_next_one() {
     let mut decoder = PngDecoder::open(&png_params(false)).expect("open");
     let bad = Packet::audio(b"nope".to_vec(), 0, 0, 0);

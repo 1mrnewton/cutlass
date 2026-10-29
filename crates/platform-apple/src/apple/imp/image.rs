@@ -794,6 +794,54 @@ mod tests {
     }
 
     #[test]
+    fn heic_round_trips_when_imageio_can_write_it() {
+        let pixels = [200u8, 10, 10, 255, 200, 10, 10, 255, 200, 10, 10, 255, 200, 10, 10, 255];
+        let bytes = match encode_file("public.heic", 2, 2, &pixels) {
+            Ok(bytes) => bytes,
+            Err(CodecError::Unsupported { .. }) => return,
+            Err(err) => panic!("{err}"),
+        };
+        let decoded = decode_file(&bytes).expect("heic");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].width, 2);
+        assert_eq!(decoded[0].height, 2);
+    }
+
+    #[test]
+    fn a_local_still_decodes_when_the_folder_is_present() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local-files");
+        if !root.is_dir() {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if !ext.eq_ignore_ascii_case("png")
+                && !ext.eq_ignore_ascii_case("jpg")
+                && !ext.eq_ignore_ascii_case("jpeg")
+            {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.len() == 0 || meta.len() > 32 * 1024 * 1024 {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("local still");
+            let images = decode_file(&bytes).expect("decode local still");
+            assert!(!images.is_empty());
+            assert!(images[0].width > 0 && images[0].height > 0);
+            return;
+        }
+    }
+
+    #[test]
     fn the_factory_uses_imageio_before_a_later_opener() {
         let mut decode = DecodeFactory::new();
         super::super::super::register_decoders(&mut decode);

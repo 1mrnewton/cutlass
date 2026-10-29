@@ -2,7 +2,8 @@
 //!
 //! The support record is `STATUS.md` next to this crate. Loop restoration and
 //! film grain are applied for 8-bit 4:2:0. A single-reference frame may carry
-//! an order hint. A frame may use a uniform tile grid and a quantizer matrix.
+//! an order hint. A frame may use a uniform tile grid, a quantizer matrix,
+//! and a superblock quantizer delta.
 //! Lossless and bit depths other than 8 are rejected. Compound, warped, and
 //! overlapped motion are rejected.
 

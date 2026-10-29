@@ -126,6 +126,9 @@ pub struct FrameInfo {
     pub using_qmatrix: bool,
     /// Quantizer-matrix level per plane. 15 means the matrix is not applied.
     pub qm: [u8; 3],
+    pub delta_q_present: bool,
+    /// Left shift applied to a superblock quantizer delta.
+    pub delta_q_res: u8,
     pub tx_select: bool,
     pub reduced_tx: bool,
     pub reference_select: bool,
@@ -717,9 +720,17 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         });
     }
     let delta_q_present = if base_q > 0 { bits.read_bool()? } else { false };
-    if delta_q_present {
+    let delta_q_res = if delta_q_present {
+        bits.read(2)? as u8
+    } else {
+        0
+    };
+    // Intra block copy was already rejected, so this frame does not use it.
+    if delta_q_present && bits.read_bool()? {
+        let _res = bits.read(2)?;
+        let _multi = bits.read_bool()?;
         return Err(CodecError::Unsupported {
-            what: "delta quantizer",
+            what: "loop filter delta",
         });
     }
     let lossless = base_q == 0
@@ -818,6 +829,8 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         delta_v_ac,
         using_qmatrix,
         qm,
+        delta_q_present,
+        delta_q_res,
         tx_select,
         reduced_tx,
         reference_select: false,
@@ -1191,6 +1204,8 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         delta_v_ac: 0,
         using_qmatrix: false,
         qm: [15, 15, 15],
+        delta_q_present: false,
+        delta_q_res: 0,
         tx_select: false,
         reduced_tx: false,
         reference_select: false,
@@ -1268,6 +1283,7 @@ pub(crate) fn header_is_addressable(
         .wrapping_add(frame.tile_size_bytes)
         .wrapping_add(u32::from(frame.using_qmatrix))
         .wrapping_add(u32::from(frame.qm[0]))
+        .wrapping_add(u32::from(frame.delta_q_res))
         .wrapping_add(u32::from(frame.reference_select))
         .wrapping_add(u32::from(frame.skip_mode))
         .wrapping_add(u32::from(frame.allow_intrabc))

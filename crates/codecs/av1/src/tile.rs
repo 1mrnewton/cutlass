@@ -134,6 +134,7 @@ pub fn decode_with_refs(
             let mut col = part.col;
             while col < part.col_end {
                 tile.clear_decoded(row, col);
+                tile.read_deltas = frame.delta_q_present;
                 restore::read_superblock(
                     &mut tile.symbols,
                     tile.update,
@@ -338,6 +339,9 @@ struct Tile<'a, 'r> {
     decoded: [Vec<u8>; 3],
     base_q: u8,
     qm: [u8; 3],
+    delta_q_res: u8,
+    current_q: u8,
+    read_deltas: bool,
     deltas: [i32; 5],
     tx_select: bool,
     reduced_tx: bool,
@@ -419,6 +423,7 @@ struct Cdfs {
     inter_tx2: Vec<u16>,
     inter_tx3: Vec<u16>,
     intra_y: Vec<u16>,
+    delta_q: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -498,6 +503,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             decoded: [vec![0; 40 * 40], vec![0; 40 * 40], vec![0; 40 * 40]],
             base_q: frame.base_q,
             qm: frame.qm,
+            delta_q_res: frame.delta_q_res,
+            current_q: frame.base_q,
+            read_deltas: false,
             deltas: [
                 frame.delta_y_dc,
                 frame.delta_u_dc,
@@ -550,6 +558,8 @@ impl<'a, 'r> Tile<'a, 'r> {
     fn restart(&mut self, bytes: &'a [u8]) -> Result<(), CodecError> {
         self.symbols = SymbolDecoder::new(bytes)?;
         self.cdfs = Cdfs::load(self.q_index);
+        self.current_q = self.base_q;
+        self.read_deltas = false;
         Ok(())
     }
 
@@ -777,6 +787,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let skip_ctx = self.neighbor_sum(row, col);
         let skip = self.read_skip(skip_ctx)?;
         self.read_cdef(row, col, skip)?;
+        self.read_quantizer_delta(bsize, skip)?;
         let y_mode = self.read_y_mode(row, col, avail_u, avail_l)?;
         let angle_y = self.read_angle(y_mode, bsize, true)?;
         let (uv_mode, angle_uv) = if has_chroma {
@@ -840,6 +851,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let avail_l = self.left_mi(col);
         let skip = self.read_skip(self.neighbor_sum(row, col))?;
         self.read_cdef(row, col, skip)?;
+        self.read_quantizer_delta(bsize, skip)?;
         let inter = self.read_is_inter(row, col)?;
         let chosen = if inter {
             self.read_inter_block(row, col, bsize, bw4, bh4)?
@@ -1502,6 +1514,38 @@ impl<'a, 'r> Tile<'a, 'r> {
         if let Some(slot) = self.cdef_idx.get_mut(at) {
             *slot = index;
         }
+        Ok(())
+    }
+
+    /// Superblock quantizer delta. The first coded block of the superblock
+    /// reads it. A skipped 64×64 block leaves the running index unchanged.
+    fn read_quantizer_delta(&mut self, bsize: usize, skip: bool) -> Result<(), CodecError> {
+        let full_superblock = bsize == 12 || bsize == BLOCK_128X128;
+        if self.read_deltas && !(full_superblock && skip) {
+            let mut magnitude = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.delta_q,
+                &[5],
+                &[0],
+            )?;
+            if magnitude == 3 {
+                let extra = self.symbols.read_literal(3)? + 1;
+                magnitude = self.symbols.read_literal(extra)? + (1 << extra) + 1;
+            }
+            if magnitude != 0 {
+                let sign = i32::from(self.symbols.read_bool()?);
+                let reduced = if sign == 1 {
+                    -i32::try_from(magnitude).unwrap_or(0)
+                } else {
+                    i32::try_from(magnitude).unwrap_or(0)
+                };
+                let shifted = reduced << self.delta_q_res;
+                let next = i32::from(self.current_q) + shifted;
+                self.current_q = next.clamp(1, 255) as u8;
+            }
+        }
+        self.read_deltas = false;
         Ok(())
     }
 
@@ -2500,7 +2544,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 _ => 0,
             }
         };
-        let q = (i32::from(self.base_q) + delta).clamp(0, 255) as usize;
+        let q = (i32::from(self.current_q) + delta).clamp(0, 255) as usize;
         i32::from(if dc { DC_QLOOKUP[q] } else { AC_QLOOKUP[q] })
     }
 }
@@ -2991,6 +3035,7 @@ impl Cdfs {
             inter_tx2: DEFAULT_INTER_TX_TYPE_SET2_CDF.to_vec(),
             inter_tx3: DEFAULT_INTER_TX_TYPE_SET3_CDF.to_vec(),
             intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
+            delta_q: vec![28160, 32120, 32677, 32768, 0],
         }
     }
 }

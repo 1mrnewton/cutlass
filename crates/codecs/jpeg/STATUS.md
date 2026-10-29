@@ -123,12 +123,11 @@ Release, one thread, rustc 1.99.1, Apple M5 Pro. Workload: 1920×1080 RGB encode
 
 ### Fuzz
 
-Not run yet. The ignored test is `decoder_fuzz_campaign`. Seed `0x4a504500ffd8ffd9`. Default duration 1800 seconds, override with `JPEG_FUZZ_SECS`. A crash or a hang fails the test.
+Release, one thread, rustc 1.99.1, Apple M5 Pro. `decoder_fuzz_campaign` ran for 1800 seconds and exited 0. Seed `0x4a504500ffd8ffd9`. 1 251 795 929 inputs: random buffers up to 4096 bytes, and bit flips of a valid 8×8 baseline image. No crash and no hang. The campaign is not coverage-guided. Findings: none. No regression was added because nothing failed.
 
 ### Not run
 
-- The 30-minute fuzz campaign, until the readiness section records a finished run.
-- Official JPEG conformance bitstreams, if they are not in the suite above.
+- Official JPEG conformance bitstreams beyond the analytic, cjpeg, and ffmpeg files above.
 - Linux and Windows.
-- `cargo deny` in this session, until the workspace check section says it ran.
-- A separate peak-RSS sample.
+- `cargo deny` in this session. CI runs it; this session ran `cargo fmt --all -- --check`, `cargo lint`, and `cargo test --workspace`.
+- A separate peak-RSS sample. The timing numbers are the test's own elapsed time, not a profiler.

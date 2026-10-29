@@ -2,17 +2,22 @@
 //!
 //! Each clip is resampled to the mix rate the caller chooses. Speed goes
 //! through [`stretch`]: keeping pitch uses overlap-add, and letting the
-//! pitch follow the speed is a resample. Fades are per clip. This crate
-//! does not open a file.
+//! pitch follow the speed is a resample. Fades are per clip. The limiter
+//! runs on the mixed buffer.
+//!
+//! Volume keyframes, mute, and the output device stay in the engine and
+//! the player. This crate does not open a file.
 
 #![forbid(unsafe_code)]
 
 mod buffer;
 mod fade;
+mod limit;
 mod resample;
 mod stretch;
 
 pub use fade::{FadeCurve, fade};
+pub use limit::limit;
 pub use resample::resample;
 pub use stretch::stretch;
 

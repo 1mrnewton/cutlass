@@ -6,9 +6,12 @@
 #![forbid(unsafe_code)]
 
 mod bits;
+mod coef;
 mod geom;
 mod header;
+mod intra;
 mod prob;
+mod recon;
 mod tables;
 mod txfm;
 

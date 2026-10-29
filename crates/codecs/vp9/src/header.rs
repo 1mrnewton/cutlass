@@ -980,8 +980,12 @@ fn bad(bits: &BitReader<'_>, what: &'static str) -> CodecError {
 }
 
 impl Header {
-    fn intra(&self) -> bool {
+    pub(crate) fn is_intra(&self) -> bool {
         self.key_frame || self.intra_only
+    }
+
+    fn intra(&self) -> bool {
+        self.is_intra()
     }
 }
 

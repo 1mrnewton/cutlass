@@ -54,6 +54,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 
 - The embedded 64×64 constrained keyframe in the crate.
 - An embedded 64×64 three-frame `aomenc` stream: one keyframe and two single-reference inter frames. That stream is error resilient, keeps the largest transform, uses identity global motion, turns CDF updates off, and leaves compound, warped, overlapped, reference-motion, order-hint, CDEF, restoration, and film grain off. The second frame's luma is the first frame shifted by 8 samples.
+- An embedded 64×64 three-frame `aomenc` stream with order hint on. Each error-resilient frame repeats the eight reference hints. The pictures match dav1d. Changing one signaled hint makes the frame fail, and the stored reference is still usable.
 - Two embedded `aomenc` keyframes with CDEF on and the loop filter off: a 64×64 step, and a 64×128 ramp that crosses a 64-sample stripe. Both match dav1d with the filter applied.
 - One embedded `aomenc` keyframe that codes a 64×64 horizontal ramp at width 43 and upscales it. The shown picture matches dav1d. Inter frames that use super resolution are not in that stream.
 - One embedded `aomenc` keyframe whose luma uses the self-guided restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
@@ -64,7 +65,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 
 Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d. Within-frame CDF adaptation is implemented and was not the path this inter stream used.
 
-Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, order hint, CDF state carried from another frame, variable transform size, scaled references, lossless, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
+Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, CDF state carried from another frame, variable transform size, scaled references, lossless, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
 
 ### Encoder
 

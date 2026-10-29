@@ -64,11 +64,12 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` 128×128 keyframe in a uniform 2×2 tile grid. Each tile is its own entropy stream. Prediction does not cross a tile edge. The shown picture matches dav1d. Non-uniform tile spacing is still refused.
 - One embedded `aomenc` 64×64 keyframe whose chroma is not flat. Chroma above-right availability is taken in the chroma 4×4 grid. The shown picture matches dav1d.
 - One embedded `aomenc` 64×64 keyframe that names a quantizer matrix. Luma and chroma both use level 3. The shown picture matches dav1d.
+- One embedded `aomenc` 128×128 keyframe whose header signals a superblock quantizer delta. The running index moves at the first coded block of a superblock. The shown picture matches dav1d. A per-superblock loop-filter delta is still refused.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 
 Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d. Within-frame CDF adaptation is implemented and was not the path this inter stream used.
 
-Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, CDF state carried from another frame, variable transform size, scaled references, lossless, a per-superblock delta quantizer, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
+Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, CDF state carried from another frame, variable transform size, scaled references, lossless, a per-superblock loop-filter delta, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. The push returned without a panic. That file uses tools this decoder refuses, so it does not play.
 
 ### Encoder
 

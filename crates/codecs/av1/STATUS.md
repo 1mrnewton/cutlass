@@ -61,6 +61,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` keyframe whose luma uses the Wiener restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
 - One embedded `aomenc` keyframe whose luma chooses the restoration filter per unit. Chroma selects no restoration. The shown picture matches dav1d.
 - Film grain on embedded `aomenc` 64×64 frames: luma-only grain, lag-1 chroma grain with overlap, chroma grain scaled from luma at lag 2, and a second frame that predicts the first. The shown pictures match dav1d. The second frame matches only if the reference was stored before grain.
+- One embedded `aomenc` 128×128 keyframe in a uniform 2×2 tile grid. Each tile is its own entropy stream. Prediction does not cross a tile edge. The shown picture matches dav1d. Non-uniform tile spacing is still refused.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 
 Not matched, so not claimed: identity and 1D transforms (horizontal and vertical DCT, ADST, and flip-ADST). The inverse exists. The coefficient order for that set was not proven against dav1d. Within-frame CDF adaptation is implemented and was not the path this inter stream used.

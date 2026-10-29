@@ -2,11 +2,11 @@
 
 Native AV1 decoder and encoder. The support record is `STATUS.md`. These percentages are a scope estimate of that record, not a line count and not a coverage report.
 
-About **50%** of the full decoder-and-encoder job is done. The constrained 8-bit 4:2:0 path is further along than a file a normal encoder writes.
+About **52%** of the full decoder-and-encoder job is done. The constrained 8-bit 4:2:0 path is further along than a file a normal encoder writes.
 
 | Slice | Done | What that covers |
 | --- | --- | --- |
-| Decoder | ~68% | Headers, references, intra, film grain, and single-reference frames that carry an order hint. A default encode still will not open. |
+| Decoder | ~72% | Headers, references, intra, film grain, order hint, and uniform tiles. A default encode still will not open. |
 | Encoder | ~25% | Keyframes only. The rate and quality gates for that path already pass. |
 | Proof | ~40% | Exact dav1d matches on the supported subset. Speed, the long fuzz run, and a real production file are still open. |
 
@@ -46,4 +46,4 @@ Current decoder work stays on this table. The encoder is left as it is until the
 | 720×480 real time on one thread | 0%. About five round trips a second. |
 | A production 2160p file plays | 0%. It fails closed. |
 
-Compound prediction is the largest tool still in front of that 2160p file. Order hint on a single-reference frame is no longer one of them.
+The 2160p file now gets past its tile grid and stops on a quantizer matrix. Compound prediction, CDF carry, and variable transform size are still refused.

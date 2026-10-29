@@ -25,6 +25,8 @@ pub struct IntraPred {
     pub filter_type: bool,
     pub max_x: usize,
     pub max_y: usize,
+    /// Recursive intra filter. `None` uses the ordinary intra mode.
+    pub filter: Option<u8>,
 }
 
 /// Luma samples and the chroma block they correct.
@@ -115,7 +117,9 @@ pub fn chroma_from_luma(job: ChromaFromLuma<'_>) -> Result<(), CodecError> {
 pub fn predict_intra(plane: &mut [u8], stride: usize, block: &IntraPred) -> Result<(), CodecError> {
     let (mut above, mut left) = edges(plane, stride, block);
     let mut pred = vec![0u8; block.w * block.h];
-    if directional(block.mode) {
+    if let Some(mode) = block.filter {
+        filter_intra_pred(&above, &left, block, mode, &mut pred)?;
+    } else if directional(block.mode) {
         directional_pred(&mut above, &mut left, block, &mut pred)?;
     } else if block.mode >= SMOOTH_PRED && block.mode < PAETH_PRED {
         smooth_pred(&above, &left, block, &mut pred);
@@ -127,7 +131,115 @@ pub fn predict_intra(plane: &mut [u8], stride: usize, block: &IntraPred) -> Resu
     for row in 0..block.h {
         for col in 0..block.w {
             let at = (block.y + row) * stride + block.x + col;
-            plane[at] = pred[row * block.w + col];
+            // A coded block may extend past the visible picture. Those samples
+            // are not stored.
+            let Some(slot) = plane.get_mut(at) else {
+                continue;
+            };
+            *slot = pred[row * block.w + col];
+        }
+    }
+    Ok(())
+}
+
+/// `Intra_Filter_Taps` from the specification. Five modes, eight outputs, seven taps.
+const FILTER_TAPS: [[[i8; 7]; 8]; 5] = [
+    [
+        [-6, 10, 0, 0, 0, 12, 0],
+        [-5, 2, 10, 0, 0, 9, 0],
+        [-3, 1, 1, 10, 0, 7, 0],
+        [-3, 1, 1, 2, 10, 5, 0],
+        [-4, 6, 0, 0, 0, 2, 12],
+        [-3, 2, 6, 0, 0, 2, 9],
+        [-3, 2, 2, 6, 0, 2, 7],
+        [-3, 1, 2, 2, 6, 3, 5],
+    ],
+    [
+        [-10, 16, 0, 0, 0, 10, 0],
+        [-6, 0, 16, 0, 0, 6, 0],
+        [-4, 0, 0, 16, 0, 4, 0],
+        [-2, 0, 0, 0, 16, 2, 0],
+        [-10, 16, 0, 0, 0, 0, 10],
+        [-6, 0, 16, 0, 0, 0, 6],
+        [-4, 0, 0, 16, 0, 0, 4],
+        [-2, 0, 0, 0, 16, 0, 2],
+    ],
+    [
+        [-8, 8, 0, 0, 0, 16, 0],
+        [-8, 0, 8, 0, 0, 16, 0],
+        [-8, 0, 0, 8, 0, 16, 0],
+        [-8, 0, 0, 0, 8, 16, 0],
+        [-4, 4, 0, 0, 0, 0, 16],
+        [-4, 0, 4, 0, 0, 0, 16],
+        [-4, 0, 0, 4, 0, 0, 16],
+        [-4, 0, 0, 0, 4, 0, 16],
+    ],
+    [
+        [-2, 8, 0, 0, 0, 10, 0],
+        [-1, 3, 8, 0, 0, 6, 0],
+        [-1, 2, 3, 8, 0, 4, 0],
+        [0, 1, 2, 3, 8, 2, 0],
+        [-1, 4, 0, 0, 0, 3, 10],
+        [-1, 3, 4, 0, 0, 4, 6],
+        [-1, 2, 3, 4, 0, 4, 4],
+        [-1, 2, 2, 3, 4, 3, 3],
+    ],
+    [
+        [-12, 14, 0, 0, 0, 14, 0],
+        [-10, 0, 14, 0, 0, 12, 0],
+        [-9, 0, 0, 14, 0, 11, 0],
+        [-8, 0, 0, 0, 14, 10, 0],
+        [-10, 12, 0, 0, 0, 0, 14],
+        [-9, 1, 12, 0, 0, 0, 12],
+        [-8, 0, 0, 12, 0, 1, 11],
+        [-7, 0, 0, 1, 12, 1, 9],
+    ],
+];
+
+fn filter_intra_pred(
+    above: &[i32],
+    left: &[i32],
+    block: &IntraPred,
+    mode: u8,
+    pred: &mut [u8],
+) -> Result<(), CodecError> {
+    let Some(taps) = FILTER_TAPS.get(usize::from(mode)) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "filter intra",
+        });
+    };
+    let w4 = block.w >> 2;
+    let h2 = block.h >> 1;
+    for i2 in 0..h2 {
+        for j4 in 0..w4 {
+            let mut samples = [0i32; 7];
+            for (i, sample) in samples.iter_mut().enumerate() {
+                *sample = if i < 5 {
+                    if i2 == 0 {
+                        above[index((j4 << 2) as i32 + i as i32 - 1)]
+                    } else if j4 == 0 && i == 0 {
+                        left[index((i2 << 1) as i32 - 1)]
+                    } else {
+                        i32::from(pred[((i2 << 1) - 1) * block.w + (j4 << 2) + i - 1])
+                    }
+                } else if j4 == 0 {
+                    left[index((i2 << 1) as i32 + i as i32 - 5)]
+                } else {
+                    i32::from(pred[((i2 << 1) + i - 5) * block.w + (j4 << 2) - 1])
+                };
+            }
+            for i1 in 0..2 {
+                for j1 in 0..4 {
+                    let mut sum = 0i32;
+                    let weights = taps[(i1 << 2) + j1];
+                    for (weight, sample) in weights.iter().zip(samples) {
+                        sum += i32::from(*weight) * sample;
+                    }
+                    pred[((i2 << 1) + i1) * block.w + (j4 << 2) + j1] =
+                        clip1(round2_signed(sum, 4));
+                }
+            }
         }
     }
     Ok(())

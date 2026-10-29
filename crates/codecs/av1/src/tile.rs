@@ -348,6 +348,8 @@ struct Tile<'a, 'r> {
     lossless: bool,
     edge_filter: bool,
     filter_intra: bool,
+    filter_mode: Option<u8>,
+    screen: bool,
     cfl_u: i32,
     cfl_v: i32,
     max_luma_w: usize,
@@ -424,6 +426,8 @@ struct Cdfs {
     inter_tx3: Vec<u16>,
     intra_y: Vec<u16>,
     delta_q: Vec<u16>,
+    use_filter_intra: Vec<u16>,
+    filter_intra: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -518,6 +522,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             lossless: frame.lossless,
             edge_filter: sequence.enable_intra_edge,
             filter_intra: sequence.enable_filter_intra,
+            filter_mode: None,
+            screen: frame.allow_screen,
             cfl_u: 0,
             cfl_v: 0,
             max_luma_w: 0,
@@ -560,6 +566,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.cdfs = Cdfs::load(self.q_index);
         self.current_q = self.base_q;
         self.read_deltas = false;
+        self.filter_mode = None;
         Ok(())
     }
 
@@ -800,14 +807,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             (DC_PRED, 0)
         };
-        if self.filter_intra
-            && y_mode == DC_PRED
-            && block_width(bsize).max(block_height(bsize)) <= 32
-        {
-            return Err(CodecError::Unsupported {
-                what: "filter intra",
-            });
-        }
+        self.read_palette_gate(bsize)?;
+        self.filter_mode = self.read_filter_intra(bsize, y_mode)?;
         let tx = self.read_tx_size(row, col, bsize, skip, false)?;
         if skip {
             self.reset_context(row, col, bw4, bh4, has_chroma);
@@ -852,6 +853,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let skip = self.read_skip(self.neighbor_sum(row, col))?;
         self.read_cdef(row, col, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
+        self.filter_mode = None;
         let inter = self.read_is_inter(row, col)?;
         let chosen = if inter {
             self.read_inter_block(row, col, bsize, bw4, bh4)?
@@ -939,6 +941,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             (DC_PRED, 0)
         };
+        self.read_palette_gate(bsize)?;
+        self.filter_mode = self.read_filter_intra(bsize, y_mode)?;
         Ok(Chosen {
             y_mode,
             uv_mode,
@@ -1549,6 +1553,50 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
+    /// Palette is signaled before filter intra when screen tools are on.
+    fn read_palette_gate(&self, bsize: usize) -> Result<(), CodecError> {
+        if self.screen
+            && bsize >= BLOCK_8X8
+            && block_width(bsize) <= 64
+            && block_height(bsize) <= 64
+        {
+            return Err(CodecError::Unsupported { what: "palette" });
+        }
+        Ok(())
+    }
+
+    fn read_filter_intra(&mut self, bsize: usize, y_mode: u8) -> Result<Option<u8>, CodecError> {
+        if !self.filter_intra
+            || y_mode != DC_PRED
+            || block_width(bsize).max(block_height(bsize)) > 32
+        {
+            return Ok(None);
+        }
+        let enabled = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.use_filter_intra,
+            &[22, 3],
+            &[bsize, 0],
+        )? == 1;
+        if !enabled {
+            return Ok(None);
+        }
+        let mode = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.filter_intra,
+            &[6],
+            &[0],
+        )?;
+        u8::try_from(mode)
+            .map(Some)
+            .map_err(|_| CodecError::Malformed {
+                at_bit: 0,
+                what: "filter intra",
+            })
+    }
+
     fn read_skip(&mut self, ctx: usize) -> Result<bool, CodecError> {
         Ok(read_sym(
             &mut self.symbols,
@@ -1975,6 +2023,11 @@ impl<'a, 'r> Tile<'a, 'r> {
             filter_type,
             max_x: plane_w - 1,
             max_y: plane_h - 1,
+            filter: if block.plane == 0 {
+                self.filter_mode
+            } else {
+                None
+            },
         };
         if block.plane == 0 {
             predict_intra(&mut self.y, stride, &pred)?;
@@ -2195,13 +2248,14 @@ impl<'a, 'r> Tile<'a, 'r> {
                 return Ok(DCT_DCT);
             }
             let sqr = TX_SIZE_SQR[tx];
+            let dir = self.filter_mode.map(filter_intra_dir).unwrap_or(y_mode);
             let symbol = if set == 1 {
                 read_sym(
                     &mut self.symbols,
                     self.update,
                     &mut self.cdfs.intra_tx1,
                     &[2, 13, 8],
-                    &[sqr, y_mode as usize],
+                    &[sqr, usize::from(dir)],
                 )?
             } else {
                 read_sym(
@@ -2209,7 +2263,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                     self.update,
                     &mut self.cdfs.intra_tx2,
                     &[3, 13, 6],
-                    &[sqr, y_mode as usize],
+                    &[sqr, usize::from(dir)],
                 )?
             };
             return intra_tx_type(set, symbol).ok_or(CodecError::Malformed {
@@ -2523,8 +2577,11 @@ impl<'a, 'r> Tile<'a, 'r> {
                 let xx = if flip_lr { w - col - 1 } else { col };
                 let yy = if flip_ud { h - row - 1 } else { row };
                 let at = (y + yy) * stride + x + xx;
-                let sum = i32::from(samples[at]) + residual[row * w + col];
-                samples[at] = sum.clamp(0, 255) as u8;
+                let Some(slot) = samples.get_mut(at) else {
+                    continue;
+                };
+                let sum = i32::from(*slot) + residual[row * w + col];
+                *slot = sum.clamp(0, 255) as u8;
             }
         }
         Ok(())
@@ -2925,6 +2982,20 @@ pub(crate) fn edge_partition_cdf(cdf: &[u16], bsize: usize, horizontal: bool) ->
     [(32768u32.saturating_sub(psum)) as u16, 32768, 0]
 }
 
+/// `Default_Filter_Intra_Cdf`. One binary row per block size.
+const FILTER_INTRA_CDF: [u16; 66] = [
+    4621, 32768, 0, 6743, 32768, 0, 5893, 32768, 0, 7866, 32768, 0, 12551, 32768, 0, 9394, 32768,
+    0, 12408, 32768, 0, 14301, 32768, 0, 12756, 32768, 0, 22343, 32768, 0, 16384, 32768, 0, 16384,
+    32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 12770, 32768, 0,
+    10368, 32768, 0, 20229, 32768, 0, 18101, 32768, 0, 16384, 32768, 0, 16384, 32768, 0,
+];
+
+/// `Filter_Intra_Mode_To_Intra_Dir`: DC, vertical, horizontal, D157, DC.
+fn filter_intra_dir(mode: u8) -> u8 {
+    const MAP: [u8; 5] = [0, 1, 2, 6, 0];
+    MAP.get(usize::from(mode)).copied().unwrap_or(0)
+}
+
 fn read_sym(
     symbols: &mut SymbolDecoder<'_>,
     update: bool,
@@ -3036,6 +3107,8 @@ impl Cdfs {
             inter_tx3: DEFAULT_INTER_TX_TYPE_SET3_CDF.to_vec(),
             intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
             delta_q: vec![28160, 32120, 32677, 32768, 0],
+            use_filter_intra: FILTER_INTRA_CDF.to_vec(),
+            filter_intra: vec![8949, 12776, 17211, 29558, 32768, 0],
         }
     }
 }

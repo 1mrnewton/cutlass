@@ -3,7 +3,8 @@
 //! The support record is `STATUS.md` next to this crate. Loop restoration and
 //! film grain are applied for 8-bit 4:2:0. A single-reference frame may carry
 //! an order hint. A frame may use a uniform tile grid, a quantizer matrix,
-//! and a superblock quantizer delta.
+//! and a superblock quantizer delta. DC luma may use the recursive intra
+//! filter.
 //! Lossless and bit depths other than 8 are rejected. Compound, warped, and
 //! overlapped motion are rejected.
 

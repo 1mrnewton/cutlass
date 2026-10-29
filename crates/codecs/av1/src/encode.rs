@@ -895,6 +895,7 @@ fn predict_dc(plane: &mut [u8], stride: usize, rows: usize, at: DcAt) -> Result<
         angle_delta: 0,
         edge_filter: true,
         filter_type: false,
+        filter: None,
         max_x: stride.saturating_sub(1),
         max_y: rows.saturating_sub(1),
     };

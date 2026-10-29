@@ -735,6 +735,7 @@ dependencies = [
 name = "cutlass-riff"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 

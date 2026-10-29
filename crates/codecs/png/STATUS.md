@@ -160,29 +160,29 @@ Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full
 
 Both are inside 500 ms encode and 250 ms decode. Linux and Windows were not run.
 
-`cargo bench -p cutlass-png` (`benches/against_ffmpeg.rs`) repeats each pass 5 times after one warmup and reports the median wall time. Same machine, release, one thread. ffmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg`. Pixels matched before the timed passes. An ffmpeg row includes process start. `ffmpeg -version` itself is 18.9 ms (18.8–20.6). Cutlass stays in-process. Encode `out` is the PNG size. Decode `out` is the raw sample count.
+`cargo bench -p cutlass-png` (`benches/against_ffmpeg.rs`) repeats each pass 5 times after one warmup and reports the median wall time. Same machine, release, one thread. ffmpeg 8.1.1 at `/opt/homebrew/bin/ffmpeg`. Pixels matched before the timed passes. An ffmpeg row includes process start. `ffmpeg -version` itself is 18.2 ms (17.9–19.9). Cutlass stays in-process. Encode `out` is the PNG size. Decode `out` is the raw sample count.
 
-Matches are copied in runs into one reused scanline. A contiguous row is widened straight into the sample buffer. Literals still land one byte at a time.
+Matches are copied in runs into one reused scanline. A contiguous row is widened straight into the sample buffer. Literals still land one byte at a time. Sub, Average, and Paeth reconstruct each byte of a pixel together, because those bytes do not depend on their neighbors.
 
 | Picture | Side | Op | Median | Out | Settings |
 | --- | --- | --- | --- | --- | --- |
-| 1920×1080 RGBA8 gradient | cutlass | encode | 35.5 ms | 54958 | filter search, fixed Huffman |
-| 1920×1080 RGBA8 gradient | ffmpeg | encode | 45.6 ms | 59164 | pred Paeth, zlib default |
-| 1920×1080 RGBA8 gradient | ffmpeg | encode | 53.9 ms | 10548 | pred mixed, zlib default |
-| 1920×1080 RGBA8 gradient | cutlass | decode | 19.2 ms | 8294400 | the cutlass PNG |
-| 1920×1080 RGBA8 gradient | ffmpeg | decode | 28.8 ms | 8294400 | the same PNG |
-| 1920×1080 RGBA8 noise | cutlass | encode | 157.7 ms | 8760375 | filter search, fixed Huffman |
-| 1920×1080 RGBA8 noise | ffmpeg | encode | 130.1 ms | 8322399 | pred Paeth, zlib default |
-| 1920×1080 RGBA8 noise | ffmpeg | encode | 154.4 ms | 8322399 | pred mixed, zlib default |
-| 1920×1080 RGBA8 noise | cutlass | decode | 55.8 ms | 8294400 | the cutlass PNG |
-| 1920×1080 RGBA8 noise | ffmpeg | decode | 59.0 ms | 8294400 | the same PNG |
-| motion-graphics.png | cutlass | decode | 41.9 ms | 18889752 | the file on disk |
-| motion-graphics.png | ffmpeg | decode | 59.3 ms | 18889752 | the same file |
-| motion-graphics.png | cutlass | encode | 106.4 ms | 882146 | filter search, fixed Huffman |
-| motion-graphics.png | ffmpeg | encode | 112.9 ms | 707538 | pred Paeth, zlib default |
-| motion-graphics.png | ffmpeg | encode | 144.6 ms | 702900 | pred mixed, zlib default |
+| 1920×1080 RGBA8 gradient | cutlass | encode | 37.1 ms | 54958 | filter search, fixed Huffman |
+| 1920×1080 RGBA8 gradient | ffmpeg | encode | 50.9 ms | 59164 | pred Paeth, zlib default |
+| 1920×1080 RGBA8 gradient | ffmpeg | encode | 54.6 ms | 10548 | pred mixed, zlib default |
+| 1920×1080 RGBA8 gradient | cutlass | decode | 19.7 ms | 8294400 | the cutlass PNG |
+| 1920×1080 RGBA8 gradient | ffmpeg | decode | 27.8 ms | 8294400 | the same PNG |
+| 1920×1080 RGBA8 noise | cutlass | encode | 157.9 ms | 8760375 | filter search, fixed Huffman |
+| 1920×1080 RGBA8 noise | ffmpeg | encode | 130.0 ms | 8322399 | pred Paeth, zlib default |
+| 1920×1080 RGBA8 noise | ffmpeg | encode | 144.0 ms | 8322399 | pred mixed, zlib default |
+| 1920×1080 RGBA8 noise | cutlass | decode | 52.2 ms | 8294400 | the cutlass PNG |
+| 1920×1080 RGBA8 noise | ffmpeg | decode | 56.5 ms | 8294400 | the same PNG |
+| motion-graphics.png | cutlass | decode | 34.0 ms | 18889752 | the file on disk |
+| motion-graphics.png | ffmpeg | decode | 60.8 ms | 18889752 | the same file |
+| motion-graphics.png | cutlass | encode | 96.1 ms | 882146 | filter search, fixed Huffman |
+| motion-graphics.png | ffmpeg | encode | 110.5 ms | 707538 | pred Paeth, zlib default |
+| motion-graphics.png | ffmpeg | encode | 137.3 ms | 702900 | pred mixed, zlib default |
 
-Decode wall time is ahead of ffmpeg on these three pictures. ffmpeg's rows still include about 19 ms of process start, so on the noise frame their inflater itself is faster. On the real file the two decoders are about even once that start is set aside, where this decoder was previously at 107 ms. Encode times are close. ffmpeg's mixed filter plus zlib writes a smaller gradient (10 KiB against 55 KiB) and a smaller copy of the real file (703 KiB against 882 KiB). Noise sizes are close. Ours is slightly larger.
+On the real file, 1110 of 1603 rows are Paeth and 433 are Up. Inflating that file is 19 ms and the whole decode is 34 ms. ffmpeg's wall time on it is 61 ms. Decode wall time is ahead of ffmpeg on these three pictures. On the noise frame their inflater itself is still faster, because that picture is almost all literals and ffmpeg's row still includes about 18 ms of process start. Encode times are close. ffmpeg's mixed filter plus zlib writes a smaller gradient (10 KiB against 55 KiB) and a smaller copy of the real file (703 KiB against 882 KiB). Noise sizes are close. Ours is slightly larger.
 
 Memory: the inflater keeps a distance window of the size named in the zlib header, at most 32 KiB. Reconstruction keeps one scanline and the previous scanline, and writes the sample buffer directly. The inflated image is not retained. No heap profile. The sample buffer is the one image the gate names. Linux and Windows were not run.
 

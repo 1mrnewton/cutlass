@@ -1,9 +1,11 @@
 //! Release timing of this PNG codec beside ffmpeg on the same pictures.
 //!
-//! `cargo bench -p cutlass-png` runs it. The numbers are wall time, median of
-//! several passes after one warmup. Cutlass stays in this process. ffmpeg is
-//! a new process each pass, so its rows include process start. A separate
-//! `ffmpeg -version` row is that start cost.
+//! `cargo bench -p cutlass-png` runs it. Pixels are compared before any timed
+//! pass. The numbers are wall time, median of several passes after one warmup.
+//! Cutlass stays in this process. ffmpeg is a new process each pass, so its
+//! rows include process start. A separate `ffmpeg -version` row is that start
+//! cost. When ffmpeg is missing this prints `skip: ffmpeg is not installed`
+//! and exits 0.
 //!
 //! Encode compared here is RGBA8. ffmpeg's default prediction is Paeth and
 //! its deflate level is zlib's default. A second ffmpeg row uses `-pred mixed`,
@@ -48,43 +50,37 @@ struct Row {
 }
 
 fn main() -> Result<(), String> {
+    let Some(ffmpeg) = find_ffmpeg() else {
+        println!("skip: ffmpeg is not installed");
+        return Ok(());
+    };
     let reps = reps();
     let dir = std::env::temp_dir().join(format!("cutlass-png-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-    let outcome = run(&dir, reps);
+    let outcome = run(&dir, reps, &ffmpeg);
     let _ = std::fs::remove_dir_all(&dir);
     outcome
 }
 
-fn run(dir: &Path, reps: usize) -> Result<(), String> {
-    let ffmpeg = find_ffmpeg();
+fn run(dir: &Path, reps: usize, ffmpeg: &Path) -> Result<(), String> {
     let mut rows = Vec::new();
-    if let Some(bin) = &ffmpeg {
-        rows.push(version_row(bin, reps)?);
-    }
+    rows.push(version_row(ffmpeg, reps)?);
 
     let gradient = gradient();
     measure_picture(
         dir,
         reps,
-        ffmpeg.as_deref(),
+        ffmpeg,
         "1920x1080 gradient",
         &gradient,
         &mut rows,
     )?;
 
     let noise = noise();
-    measure_picture(
-        dir,
-        reps,
-        ffmpeg.as_deref(),
-        "1920x1080 noise",
-        &noise,
-        &mut rows,
-    )?;
+    measure_picture(dir, reps, ffmpeg, "1920x1080 noise", &noise, &mut rows)?;
 
     if let Some(path) = local_png() {
-        measure_file(dir, reps, ffmpeg.as_deref(), &path, &mut rows)?;
+        measure_file(dir, reps, ffmpeg, &path, &mut rows)?;
     } else {
         rows.push(missing(
             "local png",
@@ -92,14 +88,14 @@ fn run(dir: &Path, reps: usize) -> Result<(), String> {
         ));
     }
 
-    print_report(reps, ffmpeg.as_deref(), &rows);
+    print_report(reps, ffmpeg, &rows);
     Ok(())
 }
 
 fn measure_picture(
     dir: &Path,
     reps: usize,
-    ffmpeg: Option<&Path>,
+    ffmpeg: &Path,
     name: &str,
     image: &StillImage,
     rows: &mut Vec<Row>,
@@ -112,7 +108,6 @@ fn measure_picture(
         image: image.clone(),
     };
     let mut encoder = PngEncoder::open(&png_params()).map_err(|err| format!("{err:?}"))?;
-    rows.push(cutlass_encode(name, &mut encoder, &input, reps)?);
     let packets = encoder
         .push_picture(&input)
         .map_err(|err| format!("{err:?}"))?;
@@ -124,6 +119,16 @@ fn measure_picture(
 
     let mut decoder = PngDecoder::open(&png_params()).map_err(|err| format!("{err:?}"))?;
     let packet = Packet::audio(encoded, 0, 0, 0);
+    let pictures = decoder
+        .decode_picture(&packet)
+        .map_err(|err| format!("{err:?}"))?;
+    let decoded = pictures
+        .first()
+        .ok_or_else(|| "decoder returned no picture".to_string())?;
+    confirm_decoded(name, image, &decoded.image)?;
+    confirm_same_pixels(ffmpeg, &png, &image.samples)?;
+
+    rows.push(cutlass_encode(name, &mut encoder, &input, reps)?);
     rows.push(cutlass_decode(
         name,
         &mut decoder,
@@ -131,14 +136,8 @@ fn measure_picture(
         reps,
         "png written by cutlass",
     )?);
-
-    let Some(bin) = ffmpeg else {
-        rows.push(missing(name, "ffmpeg was not found"));
-        return Ok(());
-    };
-    confirm_same_pixels(bin, &png, &image.samples)?;
     rows.push(ffmpeg_encode(
-        bin,
+        ffmpeg,
         name,
         &raw,
         image.width,
@@ -147,7 +146,7 @@ fn measure_picture(
         None,
     )?);
     rows.push(ffmpeg_encode(
-        bin,
+        ffmpeg,
         name,
         &raw,
         image.width,
@@ -156,7 +155,7 @@ fn measure_picture(
         Some("mixed"),
     )?);
     rows.push(ffmpeg_decode(
-        bin,
+        ffmpeg,
         name,
         &png,
         reps,
@@ -168,7 +167,7 @@ fn measure_picture(
 fn measure_file(
     dir: &Path,
     reps: usize,
-    ffmpeg: Option<&Path>,
+    ffmpeg: &Path,
     path: &Path,
     rows: &mut Vec<Row>,
 ) -> Result<(), String> {
@@ -176,13 +175,6 @@ fn measure_file(
     let bytes = std::fs::read(path).map_err(|err| err.to_string())?;
     let mut decoder = PngDecoder::open(&png_params()).map_err(|err| format!("{err:?}"))?;
     let packet = Packet::audio(bytes, 0, 0, 0);
-    rows.push(cutlass_decode(
-        name,
-        &mut decoder,
-        &packet,
-        reps,
-        "the file on disk",
-    )?);
     let pictures = decoder
         .decode_picture(&packet)
         .map_err(|err| format!("{err:?}"))?;
@@ -190,40 +182,57 @@ fn measure_file(
         .first()
         .map(|picture| picture.image.clone())
         .ok_or_else(|| "decoder returned no picture".to_string())?;
+    confirm_same_pixels(ffmpeg, path, &image.samples)?;
 
-    let Some(bin) = ffmpeg else {
-        rows.push(missing(name, "ffmpeg was not found"));
-        return Ok(());
+    let encoded = if image.color == ColorType::Rgba && image.depth == BitDepth::Eight {
+        let raw = dir.join("motion-graphics.raw");
+        std::fs::write(&raw, pack8(&image.samples)?).map_err(|err| err.to_string())?;
+        let input = PictureInput { image };
+        let mut encoder = PngEncoder::open(&png_params()).map_err(|err| format!("{err:?}"))?;
+        let packets = encoder
+            .push_picture(&input)
+            .map_err(|err| format!("{err:?}"))?;
+        let png_bytes = packets
+            .first()
+            .map(|packet| packet.data.clone())
+            .ok_or_else(|| "encoder returned no packet".to_string())?;
+        let png = dir.join("motion-graphics-cutlass.png");
+        std::fs::write(&png, &png_bytes).map_err(|err| err.to_string())?;
+        confirm_same_pixels(ffmpeg, &png, &input.image.samples)?;
+        Some((raw, input, encoder))
+    } else {
+        None
     };
-    confirm_same_pixels(bin, path, &image.samples)?;
-    rows.push(ffmpeg_decode(bin, name, path, reps, "the file on disk")?);
 
-    if image.color != ColorType::Rgba || image.depth != BitDepth::Eight {
-        return Ok(());
+    rows.push(cutlass_decode(
+        name,
+        &mut decoder,
+        &packet,
+        reps,
+        "the file on disk",
+    )?);
+    rows.push(ffmpeg_decode(ffmpeg, name, path, reps, "the file on disk")?);
+    if let Some((raw, input, mut encoder)) = encoded {
+        rows.push(cutlass_encode(name, &mut encoder, &input, reps)?);
+        rows.push(ffmpeg_encode(
+            ffmpeg,
+            name,
+            &raw,
+            input.image.width,
+            input.image.height,
+            reps,
+            None,
+        )?);
+        rows.push(ffmpeg_encode(
+            ffmpeg,
+            name,
+            &raw,
+            input.image.width,
+            input.image.height,
+            reps,
+            Some("mixed"),
+        )?);
     }
-    let raw = dir.join("motion-graphics.raw");
-    std::fs::write(&raw, pack8(&image.samples)?).map_err(|err| err.to_string())?;
-    let input = PictureInput { image };
-    let mut encoder = PngEncoder::open(&png_params()).map_err(|err| format!("{err:?}"))?;
-    rows.push(cutlass_encode(name, &mut encoder, &input, reps)?);
-    rows.push(ffmpeg_encode(
-        bin,
-        name,
-        &raw,
-        input.image.width,
-        input.image.height,
-        reps,
-        None,
-    )?);
-    rows.push(ffmpeg_encode(
-        bin,
-        name,
-        &raw,
-        input.image.width,
-        input.image.height,
-        reps,
-        Some("mixed"),
-    )?);
     Ok(())
 }
 
@@ -362,6 +371,20 @@ fn version_row(bin: &Path, reps: usize) -> Result<Row, String> {
     })
 }
 
+fn confirm_decoded(name: &str, source: &StillImage, decoded: &StillImage) -> Result<(), String> {
+    if decoded.width != source.width
+        || decoded.height != source.height
+        || decoded.color != source.color
+        || decoded.depth != source.depth
+        || decoded.samples != source.samples
+    {
+        return Err(format!(
+            "pixel mismatch on {name}: cutlass decode does not match the source"
+        ));
+    }
+    Ok(())
+}
+
 fn confirm_same_pixels(bin: &Path, png: &Path, samples: &[u16]) -> Result<(), String> {
     let mut command = Command::new(bin);
     command
@@ -420,7 +443,7 @@ fn median(times: &mut [Duration]) -> Duration {
     times.get(times.len() / 2).copied().unwrap_or_default()
 }
 
-fn print_report(reps: usize, ffmpeg: Option<&Path>, rows: &[Row]) {
+fn print_report(reps: usize, ffmpeg: &Path, rows: &[Row]) {
     println!("PNG wall time, release, one thread");
     println!("reps: {reps} after 1 warmup, median of the timed passes");
     println!(
@@ -429,10 +452,8 @@ fn print_report(reps: usize, ffmpeg: Option<&Path>, rows: &[Row]) {
     println!(
         "cutlass decode stores u16 samples. An ffmpeg row includes process start. That start is the version row."
     );
-    match ffmpeg {
-        Some(path) => println!("ffmpeg: {}", path.display()),
-        None => println!("ffmpeg: not found, cutlass rows only"),
-    }
+    println!("pixels were compared before the timed passes");
+    println!("ffmpeg: {}", ffmpeg.display());
     println!();
     let header = format!(
         "{:<24} {:<8} {:<8} {:>8} {:>8} {:>8} {:>12}  {}",

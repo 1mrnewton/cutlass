@@ -2,7 +2,8 @@
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, DecodeFactory,
-    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420p,
+    Decoder, Output, Packet, PictureInfo, PictureOutput, PixelFormat, Transfer, VideoDecoder,
+    VideoOutput, Yuv420p,
 };
 
 use crate::bits::Bits;
@@ -192,7 +193,19 @@ pub struct H264Decoder {
 }
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
+    factory.register(CodecId::H264, open_registered);
     factory.register_video(CodecId::H264, open_decoder);
+}
+
+fn open_registered(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(AccessDecoder {
+        inner: H264Decoder::open(params)?,
+    }))
+}
+
+/// The engine's decoder. It returns one packed picture per displayed frame.
+struct AccessDecoder {
+    inner: H264Decoder,
 }
 
 fn open_decoder(params: &CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError> {
@@ -264,6 +277,59 @@ impl H264Decoder {
             output.picture.v().to_vec(),
         ))
     }
+}
+
+impl Decoder for AccessDecoder {
+    fn codec(&self) -> CodecId {
+        CodecId::H264
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        self.inner
+            .push(packet)?
+            .into_iter()
+            .map(picture_output)
+            .collect()
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        self.inner
+            .drain()?
+            .into_iter()
+            .map(picture_output)
+            .collect()
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+fn picture_output(frame: VideoOutput) -> Result<Output, CodecError> {
+    let mut bytes = Vec::with_capacity(
+        frame
+            .picture
+            .y()
+            .len()
+            .saturating_add(frame.picture.u().len())
+            .saturating_add(frame.picture.v().len()),
+    );
+    bytes.extend_from_slice(frame.picture.y());
+    bytes.extend_from_slice(frame.picture.u());
+    bytes.extend_from_slice(frame.picture.v());
+    let picture = PictureOutput::cpu(
+        PictureInfo {
+            width: frame.picture.width(),
+            height: frame.picture.height(),
+            pixel: PixelFormat::Yuv420p,
+            primaries: frame.primaries,
+            transfer: frame.transfer,
+        },
+        bytes,
+        frame.pts,
+        frame.timescale,
+    )?;
+    Ok(Output::Picture(picture))
 }
 
 impl VideoDecoder for H264Decoder {
@@ -1492,11 +1558,45 @@ fn add_scaled(
 
 #[cfg(test)]
 mod tests {
-    use super::H264Decoder;
+    use super::{H264Decoder, register_decoders};
     use crate::H264Encoder;
-    use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
+    use cutlass_decode::{
+        CodecError, CodecId, CodecParams, DecodeFactory, Decoder, Output, Packet, PictureSamples,
+        PixelFormat, VideoDecoder, Yuv420p,
+    };
     use cutlass_encode::{VideoEncoder, VideoInput};
     use std::process::Command;
+
+    #[test]
+    fn the_factory_returns_the_same_picture_as_the_video_decoder() {
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        params.pixel = PixelFormat::Yuv420p;
+        let packet = Packet::video(idr_bytes(), 0, 1, 30, true);
+        let mut video = H264Decoder::open(&params).expect("video decoder");
+        let mut direct = VideoDecoder::push(&mut video, &packet).expect("direct");
+        direct.extend(VideoDecoder::drain(&mut video).expect("direct drain"));
+        let mut factory = DecodeFactory::new();
+        register_decoders(&mut factory);
+        let mut opened = factory.open(&params).expect("registered decoder");
+        let mut pictures = Decoder::push(opened.as_mut(), &packet).expect("factory");
+        pictures.extend(Decoder::drain(opened.as_mut()).expect("factory drain"));
+        let Output::Picture(picture) = pictures.first().expect("picture") else {
+            panic!("audio");
+        };
+        assert_eq!(picture.info().width, 16);
+        assert_eq!(picture.info().height, 16);
+        assert_eq!(picture.info().pixel, PixelFormat::Yuv420p);
+        let PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("platform buffer");
+        };
+        let frame = &direct[0];
+        let mut packed = Vec::new();
+        packed.extend_from_slice(frame.picture.y());
+        packed.extend_from_slice(frame.picture.u());
+        packed.extend_from_slice(frame.picture.v());
+        assert_eq!(bytes, packed.as_slice());
+    }
 
     #[test]
     fn picture_order_type1_follows_the_reference_cycle() {

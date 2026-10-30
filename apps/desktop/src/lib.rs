@@ -2,6 +2,9 @@
 
 pub mod icons;
 pub mod probe;
+
+#[cfg(test)]
+mod open_movie;
 pub mod shell;
 pub mod tokens;
 pub mod view;
@@ -28,6 +31,8 @@ pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::Enco
     cutlass_av1::register_encoders(&mut encoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_pcm::register_encoders(&mut encoders);
+    cutlass_h264::register_decoders(&mut decoders);
+    cutlass_h264::register_encoders(&mut encoders);
     (decoders, encoders)
 }
 

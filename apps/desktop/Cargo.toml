@@ -80,4 +80,6 @@ cutlass-platform-windows = { path = "../../crates/platform-windows", version = "
 workspace = true
 
 [dev-dependencies]
+cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
+cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
 serde_json = "1.0.154"

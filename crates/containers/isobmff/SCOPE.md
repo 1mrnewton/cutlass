@@ -6,7 +6,7 @@ Branch `isobmff`. Family `cutlass-isobmff`. Direction: demux and mux. This recor
 
 Unqualified ISO base media file format. File types: MP4, QuickTime (`mov`), `m4a`, `m4v`, `3gp`, and fragmented MP4. HEIC is this box layout plus an HEVC item. AVIF is this box layout plus an AV1 item. JPEG, PNG, WebP, and GIF stay in `cutlass-still`. ImageIO is not used by this crate.
 
-Rules and skills used: `.cursor/rules/container-shipping.mdc`, `codec-shipping.mdc` (boundary only; no bitstream codec was implemented), `commit-often.mdc`, `perf.mdc`, `source-of-truth.mdc`, `no-capcut-names.mdc`, `local-media.mdc`, `rust-standards.mdc`, `platforms.mdc`, `tests.mdc`, and `.cursor/skills/ship-container/` (`SKILL.md`, `references/implementation.md`, `references/verification.md`, `references/deliverables.md`, `references/movie.md`).
+Rules and skills used: `.cursor/rules/container-shipping.mdc`, `codec-shipping.mdc` (boundary only; no bitstream codec was implemented), `commit-often.mdc`, `perf.mdc`, `source-of-truth.mdc`, the naming rule, `local-media.mdc`, `rust-standards.mdc`, `platforms.mdc`, `tests.mdc`, and `.cursor/skills/ship-container/` (`SKILL.md`, `references/implementation.md`, `references/verification.md`, `references/deliverables.md`, `references/movie.md`).
 
 `cutlass-docs/rust-workspace.md` assigns this family to `crates/containers/isobmff`, depending only on `cutlass-container`. `engine` and `export` depend on the container traits and are empty files. The desktop binary already depends on this crate and its `main` only prints `cutlass`. No reader or export path was filled in.
 

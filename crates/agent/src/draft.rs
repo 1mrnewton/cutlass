@@ -439,6 +439,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetCrop { .. } => "set_crop",
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetKeyframes { .. } => "set_keyframes",
+        Request::Import { .. } => "import",
     }
 }
 
@@ -642,8 +643,11 @@ fn map_redo(error: EditError) -> DraftError {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, Track, TrackId};
-    use cutlass_session::{EditError, Request, Session};
+    use cutlass_model::{
+        Draft, MaterialId, MaterialVideo, Micros, Segment, SegmentId, TimeRange, Track, TrackId,
+        TrackType,
+    };
+    use cutlass_session::{EditError, ImportedMedium, Request, Session};
 
     use super::{
         ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, QueryView,
@@ -662,6 +666,17 @@ mod tests {
             track_id: track_id.clone(),
             segment: Box::new(Segment::new(id, "media", TimeRange::new(start, duration))),
         }
+    }
+
+    #[test]
+    fn import_is_named() {
+        let request = Request::Import {
+            track_id: TrackId::new("main"),
+            kind: TrackType::Video,
+            medium: ImportedMedium::Video(Box::new(MaterialVideo::new("clip"))),
+            segment: Box::new(Segment::new("s", "clip", TimeRange::new(0, 1))),
+        };
+        assert_eq!(request_name(&request), "import");
     }
 
     fn apply_input(

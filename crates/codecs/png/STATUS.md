@@ -151,7 +151,9 @@ On this machine, after `4a82563`:
 
 ### Performance
 
-Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full_hd_rgba_stays_inside_the_time_budget` below is the earlier fixed-Huffman run. The bench table is the current compressor.
+The numbers in this section are an earlier run. The current wall-time sample is the bench stdout in `README.md`.
+
+Apple M5 Pro, Darwin arm64, 48 GiB, rustc 1.99.1, `--release`, one thread. `full_hd_rgba_stays_inside_the_time_budget` below is an earlier fixed-Huffman run. The bench table is that earlier compressor measurement.
 
 | Frame | Encode | Decode | Output |
 | --- | --- | --- | --- |

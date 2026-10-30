@@ -56,7 +56,15 @@ jobs:
               rust = lint_lines(text, "[lints.rust]")
               clippy = lint_lines(text, "[lints.clippy]")
               if (
-                  member.startswith("crates/platform-")
+                  (
+                      member.startswith("crates/platform-")
+                      or member
+                      in {
+                          "crates/renderer-metal",
+                          "crates/renderer-windows",
+                          "crates/renderer-android",
+                      }
+                  )
                   and rust == denied_rust
                   and clippy == workspace_clippy
               ):

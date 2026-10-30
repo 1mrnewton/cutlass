@@ -87,16 +87,16 @@ ffmpeg version: `ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg develop
 
 `sysctl -n machdep.cpu.brand_string`: `Apple M5 Pro`
 
-Date: `Thu Oct 29 21:04:04 GMT 2026`
+Date: `Fri Oct 30 04:58:52 GMT 2026`
 
-Command: `cargo bench -p cutlass-isobmff`
+Command: `cargo test -p cutlass-isobmff --bench against_ffmpeg`
 
 Bench stdout:
 
 ```text
 ffmpeg_version: ffmpeg version 8.1.1 Copyright (c) 2000-2026 the FFmpeg developers
 cpu: Apple M5 Pro
-date: Thu Oct 29 21:04:04 GMT 2026
+date: Fri Oct 30 04:58:52 GMT 2026
 command: /opt/homebrew/bin/ffmpeg -y -hide_banner -loglevel error -f lavfi -i testsrc2=size=64x64:rate=10:duration=0.4 -f lavfi -i sine=frequency=1000:sample_rate=48000:duration=0.4 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 10 -bf 0 -c:a aac -b:a 64k -shortest -use_editlist 0 /var/folders/vq/1wh9t5d5487bq7cf3y400n4r0000gn/T/cutlass-isobmff-bench/sample.mp4
 streams: 2
 packets: 24
@@ -104,14 +104,14 @@ stream 0: H264 timescale 10240 packets 4
 stream 1: Aac timescale 48000 packets 20
 compare: packet count, sizes, and pts match ffprobe -show_packets
 sample: 1 file, median of 3 after 1 warmup
-cutlass_open_read_s: 0.000033 0.000033 0.000035 median 0.000033
-ffprobe_show_packets_s: 0.017368 0.017467 0.017906 median 0.017467
+cutlass_open_read_s: 0.000044 0.000041 0.000042 median 0.000042
+ffprobe_show_packets_s: 0.018018 0.018148 0.018430 median 0.018148
 ffmpeg time includes process startup
 mux_packets: 8
 mux_compare: packet count, sizes, and pts match ffprobe -show_packets
 ```
 
-The medians are 0.000033 s for open and read, and 0.017467 s for ffprobe.
+The medians are 0.000042 s for open and read, and 0.018148 s for ffprobe.
 
 ## Example
 

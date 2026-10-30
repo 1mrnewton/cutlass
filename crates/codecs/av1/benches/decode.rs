@@ -1,12 +1,13 @@
 //! Decode one real AV1 keyframe, then the same bytes through FFmpeg.
 //!
-//! FFmpeg 8 decodes AV1 by calling dav1d. This bench does not link either
-//! program. It times `Av1Decoder::push` in this process and FFmpeg's wall
-//! time on a loop of the same frame. The FFmpeg figure subtracts a one-frame
-//! run from a longer run so process startup is not counted as decode time.
+//! FFmpeg decodes AV1 by calling dav1d. This bench does not link either
+//! program. It compares pixels before it times anything. Cutlass time is one
+//! `Av1Decoder::push`. FFmpeg time is one process and includes startup.
 //!
 //! The frame comes from `../local-files` when that folder is present. Without
-//! it, the bench reports that the comparison was not run.
+//! ffmpeg the bench prints `skip: ffmpeg is not installed` and exits 0.
+
+#![allow(clippy::print_stdout)]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,31 +17,35 @@ use std::time::Instant;
 use cutlass_av1::{AsView, Av1Decoder};
 use cutlass_decode::{CodecId, CodecParams, Decoder, Packet};
 
-const FFMPEG_LOOPS: u32 = 20;
-const CUTLASS_SAMPLES: usize = 5;
-
-fn main() {
-    match run() {
-        Ok(()) => {}
-        Err(what) => {
-            let _ = writeln!(std::io::stdout(), "bench not run: {what}");
+fn main() -> Result<(), String> {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        println!("skip: ffmpeg is not installed");
+        return Ok(());
+    };
+    match run(&ffmpeg) {
+        Ok(()) => Ok(()),
+        Err(what) if what == "no AV1 file in ../local-files" => {
+            println!("bench not run: {what}");
+            Ok(())
         }
+        Err(what) => Err(what),
     }
 }
 
-fn run() -> Result<(), String> {
-    let input = production_file().ok_or("no AV1 file in ../local-files")?;
+fn run(ffmpeg: &Path) -> Result<(), String> {
+    let input = production_file().ok_or_else(|| "no AV1 file in ../local-files".to_string())?;
     let dir = std::env::temp_dir().join(format!("cutlass-av1-bench-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|_| "temp directory".to_string())?;
     let ivf = dir.join("frame.ivf");
     let yuv = dir.join("frame.yuv");
-    let outcome = compare(&input, &ivf, &yuv);
+    let outcome = compare(ffmpeg, &input, &ivf, &yuv);
     let _ = std::fs::remove_dir_all(&dir);
     outcome
 }
 
-fn compare(input: &Path, ivf: &Path, yuv: &Path) -> Result<(), String> {
-    extract_frame(input, ivf)?;
+fn compare(ffmpeg: &Path, input: &Path, ivf: &Path, yuv: &Path) -> Result<(), String> {
+    extract_frame(ffmpeg, input, ivf)?;
+    require_keyframe(ffmpeg, ivf)?;
     let file = std::fs::read(ivf).map_err(|_| "read ivf".to_string())?;
     let packet = ivf_payload(&file)?;
     let (width, height) = ivf_size(&file)?;
@@ -53,64 +58,32 @@ fn compare(input: &Path, ivf: &Path, yuv: &Path) -> Result<(), String> {
         packet.len()
     ));
     say(&machine());
+    say(&format!("ffmpeg: {}", ffmpeg_version(ffmpeg)?));
     say(
-        "ffmpeg is dav1d through libavcodec. cutlass decodes tiles in parallel and filters rows in parallel, bench profile, no link-time optimization.",
+        "one sample. cutlass times one Av1Decoder::push in this process. ffmpeg times one process and includes startup. bench profile, no link-time optimization. cutlass decodes tiles in parallel.",
     );
 
     let ours = decode_once(packet)?;
-    let reference = ffmpeg_raw(ivf, yuv)?;
-    if ours == reference {
-        say("pixels: match");
-    } else {
+    let reference = ffmpeg_raw(ffmpeg, ivf, yuv)?;
+    if ours != reference {
         let diffs = ours
             .iter()
             .zip(reference.iter())
             .filter(|(left, right)| left != right)
             .count();
-        say(&format!(
-            "pixels: differ ({} of ours {}, ffmpeg {})",
-            diffs,
+        return Err(format!(
+            "pixels differ ({diffs} of ours {}, ffmpeg {})",
             ours.len(),
             reference.len()
         ));
     }
+    say("pixels: match");
 
-    let mut cutlass = Vec::new();
-    let _ = decode_once(packet)?;
-    for _ in 0..CUTLASS_SAMPLES {
-        cutlass.push(time_cutlass(packet)?);
-    }
-    report("cutlass-av1", &mut cutlass);
-
-    let ffmpeg_one = time_ffmpeg(ivf, 1, Some(1))?;
-    let ffmpeg_many = time_ffmpeg(ivf, FFMPEG_LOOPS, Some(1))?;
-    report_ffmpeg("ffmpeg -threads 1", ffmpeg_one, ffmpeg_many)?;
-
-    let default_one = time_ffmpeg(ivf, 1, None)?;
-    let default_many = time_ffmpeg(ivf, FFMPEG_LOOPS, None)?;
-    report_ffmpeg("ffmpeg default threads", default_one, default_many)?;
-    Ok(())
-}
-
-fn report(name: &str, samples: &mut [f64]) {
-    let Some(mid) = median(samples) else {
-        return;
-    };
-    let min = samples.first().copied().unwrap_or(mid);
-    let max = samples.last().copied().unwrap_or(mid);
+    let cutlass = time_cutlass(packet)?;
+    say(&format!("cutlass-av1: {cutlass:.4} s  one push"));
+    let ffmpeg_seconds = time_ffmpeg(ffmpeg, ivf)?;
     say(&format!(
-        "{name}: {mid:.4} s/frame  min {min:.4}  max {max:.4}  n={}",
-        samples.len()
-    ));
-}
-
-fn report_ffmpeg(name: &str, once: f64, many: f64) -> Result<(), String> {
-    if many <= once {
-        return Err(format!("{name}: longer run was not slower than one frame"));
-    }
-    let per = (many - once) / f64::from(FFMPEG_LOOPS - 1);
-    say(&format!(
-        "{name}: {per:.4} s/frame  (one process {once:.4} s, {FFMPEG_LOOPS} frames {many:.4} s)"
+        "ffmpeg libdav1d -threads 1: {ffmpeg_seconds:.4} s  one process, includes startup"
     ));
     Ok(())
 }
@@ -118,15 +91,7 @@ fn report_ffmpeg(name: &str, once: f64, many: f64) -> Result<(), String> {
 fn time_cutlass(packet: &[u8]) -> Result<f64, String> {
     let params = CodecParams::video(CodecId::Av1, 64, 64);
     let mut decoder = Av1Decoder::open(&params).map_err(|error| format!("open {error:?}"))?;
-    let frame = Packet {
-        stream: 0,
-        data: packet.to_vec(),
-        pts: 0,
-        duration: 1,
-        timescale: 30,
-        keyframe: true,
-        side: Vec::new(),
-    };
+    let frame = Packet::video(packet.to_vec(), 0, 1, 30, true);
     let start = Instant::now();
     let decoded = decoder
         .push(&frame)
@@ -135,7 +100,7 @@ fn time_cutlass(packet: &[u8]) -> Result<f64, String> {
     let picture = decoded
         .first()
         .and_then(|frame| frame.as_video())
-        .ok_or("no picture")?;
+        .ok_or_else(|| "no picture".to_string())?;
     std::hint::black_box(picture.picture.y.samples().len());
     Ok(elapsed)
 }
@@ -144,52 +109,44 @@ fn decode_once(packet: &[u8]) -> Result<Vec<u8>, String> {
     let params = CodecParams::video(CodecId::Av1, 64, 64);
     let mut decoder = Av1Decoder::open(&params).map_err(|error| format!("open {error:?}"))?;
     let decoded = decoder
-        .push(&Packet {
-            stream: 0,
-            data: packet.to_vec(),
-            pts: 0,
-            duration: 1,
-            timescale: 30,
-            keyframe: true,
-            side: Vec::new(),
-        })
+        .push(&Packet::video(packet.to_vec(), 0, 1, 30, true))
         .map_err(|error| format!("push {error:?}"))?;
     let picture = decoded
         .first()
         .and_then(|frame| frame.as_video())
-        .ok_or("no picture")?;
+        .ok_or_else(|| "no picture".to_string())?;
     let mut packed = picture.picture.y.samples().to_vec();
     packed.extend_from_slice(picture.picture.u.samples());
     packed.extend_from_slice(picture.picture.v.samples());
     Ok(packed)
 }
 
-fn time_ffmpeg(ivf: &Path, frames: u32, threads: Option<u32>) -> Result<f64, String> {
-    let mut command = Command::new("ffmpeg");
-    command.arg("-hide_banner").arg("-nostats");
-    command.args(["-c:v", "libdav1d"]);
-    if let Some(threads) = threads {
-        command.arg("-threads").arg(threads.to_string());
-    }
-    if frames > 1 {
-        command.arg("-stream_loop").arg((frames - 1).to_string());
-    }
-    command
-        .arg("-i")
+fn time_ffmpeg(ffmpeg: &Path, ivf: &Path) -> Result<f64, String> {
+    let started = Instant::now();
+    let output = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "1",
+            "-c:v",
+            "libdav1d",
+            "-i",
+        ])
         .arg(ivf)
-        .args(["-an", "-benchmark", "-f", "null", "-"]);
-    let output = command
+        .args(["-an", "-f", "null", "-"])
         .output()
-        .map_err(|_| "ffmpeg is not runnable".to_string())?;
+        .map_err(|err| err.to_string())?;
+    let elapsed = started.elapsed().as_secs_f64();
     if !output.status.success() {
-        return Err("ffmpeg decode failed".to_string());
+        return Err(tail(&output.stderr));
     }
-    let text = String::from_utf8_lossy(&output.stderr);
-    rtime(&text).ok_or("ffmpeg did not report rtime".to_string())
+    Ok(elapsed)
 }
 
-fn ffmpeg_raw(ivf: &Path, yuv: &Path) -> Result<Vec<u8>, String> {
-    let output = Command::new("ffmpeg")
+fn ffmpeg_raw(ffmpeg: &Path, ivf: &Path, yuv: &Path) -> Result<Vec<u8>, String> {
+    let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
             "-loglevel",
@@ -213,21 +170,21 @@ fn ffmpeg_raw(ivf: &Path, yuv: &Path) -> Result<Vec<u8>, String> {
         ])
         .arg(yuv)
         .output()
-        .map_err(|_| "ffmpeg is not runnable".to_string())?;
+        .map_err(|err| err.to_string())?;
     if !output.status.success() {
-        return Err("ffmpeg raw decode failed".to_string());
+        return Err(tail(&output.stderr));
     }
     std::fs::read(yuv).map_err(|_| "read yuv".to_string())
 }
 
-fn extract_frame(input: &Path, ivf: &Path) -> Result<(), String> {
-    let output = Command::new("ffmpeg")
+fn extract_frame(ffmpeg: &Path, input: &Path, ivf: &Path) -> Result<(), String> {
+    let output = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(input)
         .args(["-frames:v", "1", "-c:v", "copy", "-f", "ivf"])
         .arg(ivf)
         .output()
-        .map_err(|_| "ffmpeg is not runnable".to_string())?;
+        .map_err(|err| err.to_string())?;
     if output.status.success() {
         Ok(())
     } else {
@@ -235,28 +192,67 @@ fn extract_frame(input: &Path, ivf: &Path) -> Result<(), String> {
     }
 }
 
-fn rtime(text: &str) -> Option<f64> {
-    for line in text.lines() {
-        let Some(rest) = line.split("rtime=").nth(1) else {
-            continue;
-        };
-        let number = rest.trim_end_matches('s').trim();
-        return number.parse().ok();
+fn require_keyframe(ffmpeg: &Path, ivf: &Path) -> Result<(), String> {
+    let output = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "info", "-i"])
+        .arg(ivf)
+        .args(["-frames:v", "1", "-vf", "showinfo", "-f", "null", "-"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err("ffmpeg could not inspect the frame".to_string());
     }
-    None
+    let text = String::from_utf8_lossy(&output.stderr);
+    let mut saw_key = false;
+    let mut saw_other = false;
+    for line in text.lines() {
+        if !line.contains("iskey:") {
+            continue;
+        }
+        if line.contains("iskey:1") && line.contains("type:I") {
+            saw_key = true;
+        } else {
+            saw_other = true;
+        }
+    }
+    if saw_key && !saw_other {
+        Ok(())
+    } else {
+        Err("the frame is not a keyframe".to_string())
+    }
 }
 
-fn median(values: &mut [f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
+fn ffmpeg_version(ffmpeg: &Path) -> Result<String, String> {
+    let output = Command::new(ffmpeg)
+        .arg("-version")
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err("ffmpeg -version failed".to_string());
     }
-    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        Some((values[mid - 1] + values[mid]) / 2.0)
-    } else {
-        values.get(mid).copied()
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text.lines().next().unwrap_or("ffmpeg").trim().to_string())
+}
+
+fn ivf_payload(file: &[u8]) -> Result<&[u8], String> {
+    if file.len() < 44 || &file[..4] != b"DKIF" {
+        return Err("not an ivf".to_string());
     }
+    let size = u32::from_le_bytes([file[32], file[33], file[34], file[35]]) as usize;
+    let end = 44usize
+        .checked_add(size)
+        .ok_or_else(|| "ivf size".to_string())?;
+    file.get(44..end).ok_or_else(|| "truncated ivf".to_string())
+}
+
+fn ivf_size(file: &[u8]) -> Result<(u16, u16), String> {
+    if file.len() < 16 {
+        return Err("short ivf".to_string());
+    }
+    Ok((
+        u16::from_le_bytes([file[12], file[13]]),
+        u16::from_le_bytes([file[14], file[15]]),
+    ))
 }
 
 fn production_file() -> Option<PathBuf> {
@@ -270,23 +266,20 @@ fn production_file() -> Option<PathBuf> {
     })
 }
 
-fn ivf_payload(file: &[u8]) -> Result<&[u8], String> {
-    if file.len() < 44 || &file[..4] != b"DKIF" {
-        return Err("not an ivf".to_string());
+fn ffmpeg_bin() -> Option<PathBuf> {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "ffmpeg",
+    ] {
+        let Ok(output) = Command::new(candidate).arg("-version").output() else {
+            continue;
+        };
+        if output.status.success() {
+            return Some(PathBuf::from(candidate));
+        }
     }
-    let size = u32::from_le_bytes([file[32], file[33], file[34], file[35]]) as usize;
-    let end = 44usize.checked_add(size).ok_or("ivf size")?;
-    file.get(44..end).ok_or("truncated ivf".to_string())
-}
-
-fn ivf_size(file: &[u8]) -> Result<(u16, u16), String> {
-    if file.len() < 16 {
-        return Err("short ivf".to_string());
-    }
-    Ok((
-        u16::from_le_bytes([file[12], file[13]]),
-        u16::from_le_bytes([file[14], file[15]]),
-    ))
+    None
 }
 
 fn machine() -> String {
@@ -309,4 +302,10 @@ fn machine() -> String {
 
 fn say(line: &str) {
     let _ = writeln!(std::io::stdout(), "{line}");
+}
+
+fn tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let start = text.len().saturating_sub(400);
+    text[start..].trim().to_string()
 }

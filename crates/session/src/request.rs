@@ -1,7 +1,16 @@
 use cutlass_model::{
-    CommonKeyframeGroup, Crop, FreezeInfo, MaterialId, MaterialTransition, Micros, Segment,
-    SegmentId, SpeedPoint, TrackId, WordColumns,
+    CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
+    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
 };
+
+/// A media record an import places beside its segment.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImportedMedium {
+    /// A picture, including a still stored as a video material.
+    Video(Box<MaterialVideo>),
+    /// A sound. Its track type is supplied by the import, not by lane category.
+    Audio(Box<MaterialAudio>),
+}
 
 /// Which edge of a segment a trim moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,5 +112,12 @@ pub enum Request {
     SetKeyframes {
         segment_id: SegmentId,
         keyframes: Vec<CommonKeyframeGroup>,
+    },
+    /// Add a material and place its segment. A missing track of `kind` is created.
+    Import {
+        track_id: TrackId,
+        kind: TrackType,
+        medium: ImportedMedium,
+        segment: Box<Segment>,
     },
 }

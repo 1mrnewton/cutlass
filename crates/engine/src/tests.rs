@@ -4,8 +4,14 @@ use std::cell::Cell;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use cutlass_codec::{CodecId, ContainerId};
-use cutlass_container::{Demux, Input, OpenError, Probe, ProbeResult};
+use cutlass_codec::{
+    CodecId, ContainerId, FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale,
+    Timestamp,
+};
+use cutlass_container::{
+    Demux, Gap, Input, Landing, OpenError, Probe, ProbeResult, ReadError, SeekLanding, SeekTo,
+    Stream, TrackId, Trim,
+};
 use cutlass_decode::{
     CodecError, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo, PictureOutput,
     PixelFormat, Transfer,
@@ -472,4 +478,220 @@ fn a_real_local_file_opens_when_the_folder_is_present() {
             .join("fixtures/04-motion-graphics.png")
             .exists()
     );
+}
+
+#[test]
+fn a_leading_chunk_does_not_spend_the_picture_budget() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_leading);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let frame = media
+        .decode_at(Micros(0), &TimeRange::new(0, 1))
+        .expect("picture");
+    assert_eq!(frame.frame.width(), 2);
+    assert_eq!(frame.frame.height(), 2);
+}
+
+#[test]
+fn sixty_four_silent_pictures_hit_the_decode_bound() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_silent);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_silent_decoder);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let error = media
+        .decode_at(Micros(0), &TimeRange::new(0, 1))
+        .expect_err("bound");
+    assert!(matches!(error, EngineError::DecodeLimit));
+}
+
+fn probe_script(header: &[u8]) -> ProbeResult {
+    if header.is_empty() {
+        return ProbeResult::NeedBytes { have: 0, need: 1 };
+    }
+    ProbeResult::Accept {
+        family: ContainerId::Isobmff,
+        examined: 1,
+    }
+}
+
+fn open_leading(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(80, 1)))
+}
+
+fn open_silent(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 64)))
+}
+
+fn open_one_picture(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(OnePicture))
+}
+
+fn open_silent_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(Silent))
+}
+
+struct OnePicture;
+
+impl Decoder for OnePicture {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        let mut bytes = vec![16; 4];
+        bytes.push(128);
+        bytes.push(128);
+        let picture = PictureOutput::cpu(
+            PictureInfo {
+                width: 2,
+                height: 2,
+                pixel: PixelFormat::Yuv420p,
+                primaries: ColorPrimaries::Bt709,
+                transfer: Transfer::Bt709,
+            },
+            bytes,
+            packet.pts,
+            packet.timescale,
+        )?;
+        Ok(vec![Output::Picture(picture)])
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+}
+
+struct Silent;
+
+impl Decoder for Silent {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, _packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+}
+
+struct Scripted {
+    streams: Vec<Stream>,
+    packets: Vec<FilePacket>,
+    cursor: usize,
+    cancelled: bool,
+}
+
+fn scripted(foreign: usize, pictures: usize) -> Scripted {
+    let scale = Timescale::new(30);
+    let size = FrameSize::try_new(2, 2).expect("size");
+    let picture = Stream::new(
+        TrackId::new(1),
+        StreamParams::video(StreamCodec::Known(CodecId::Jpeg), size, Vec::new()),
+        scale,
+        None,
+        Vec::new(),
+        Trim::default(),
+    );
+    let other = Stream::new(
+        TrackId::new(2),
+        StreamParams::opaque(StreamCodec::Known(CodecId::Pcm), Vec::new()),
+        scale,
+        None,
+        Vec::new(),
+        Trim::default(),
+    );
+    let mut packets = Vec::new();
+    for index in 0..foreign {
+        packets.push(file_packet(2, index));
+    }
+    for index in 0..pictures {
+        packets.push(file_packet(1, foreign.saturating_add(index)));
+    }
+    Scripted {
+        streams: vec![picture, other],
+        packets,
+        cursor: 0,
+        cancelled: false,
+    }
+}
+
+fn file_packet(stream: u32, index: usize) -> FilePacket {
+    let timestamp = Timestamp::try_new(
+        Some(i64::try_from(index).unwrap_or(i64::MAX)),
+        Some(i64::try_from(index).unwrap_or(i64::MAX)),
+        Some(1),
+    )
+    .expect("time");
+    FilePacket::try_new(
+        stream,
+        b"unit".to_vec(),
+        timestamp,
+        Timescale::new(30),
+        stream == 1,
+    )
+    .expect("packet")
+}
+
+impl Demux for Scripted {
+    fn family(&self) -> ContainerId {
+        ContainerId::Isobmff
+    }
+
+    fn streams(&self) -> &[Stream] {
+        &self.streams
+    }
+
+    fn gaps(&self) -> &[Gap] {
+        &[]
+    }
+
+    fn read_packet(&mut self) -> Result<Option<FilePacket>, ReadError> {
+        if self.cancelled {
+            return Err(ReadError::Cancelled);
+        }
+        let Some(packet) = self.packets.get(self.cursor) else {
+            return Ok(None);
+        };
+        self.cursor = self.cursor.saturating_add(1);
+        Ok(Some(packet.clone()))
+    }
+
+    fn seek(&mut self, _to: SeekTo) -> Result<SeekLanding, ReadError> {
+        if self.cancelled {
+            return Err(ReadError::Cancelled);
+        }
+        self.cursor = 0;
+        Ok(SeekLanding {
+            landing: Landing::Packet {
+                ordinal: 0,
+                time: 0,
+                keyframe: true,
+                preroll: 0,
+                byte_position: 0,
+            },
+            index_used: false,
+            payload_scans: 0,
+            entries_visited: 1,
+        })
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    fn consumed(&self) -> u64 {
+        0
+    }
 }

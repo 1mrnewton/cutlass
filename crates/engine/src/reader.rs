@@ -21,7 +21,11 @@ use crate::error::EngineError;
 use crate::map::{micros_to_ticks, ticks_to_micros};
 
 const HEADER_LIMIT: usize = 4096;
+/// Picture or audio packets one seek may decode before giving up.
 const DECODE_PACKETS: u32 = 64;
+/// Samples from another stream that may sit ahead of the wanted one.
+/// A movie can store an audio chunk before the next picture.
+const OTHER_STREAM_PACKETS: u32 = 4_096;
 
 /// One stream, still in the file's own parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,18 +214,23 @@ impl Media {
                 end: None,
             });
         }
-        let mut left = DECODE_PACKETS;
+        let mut pictures = 0_u32;
+        let mut others = 0_u32;
         loop {
-            if left == 0 {
+            if pictures == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
             }
-            left -= 1;
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
                 return Err(EngineError::NotReady);
             };
             if packet.stream() != track {
+                if others == OTHER_STREAM_PACKETS {
+                    return Err(EngineError::DecodeLimit);
+                }
+                others = others.saturating_add(1);
                 continue;
             }
+            pictures = pictures.saturating_add(1);
             let access = access_packet(&packet);
             let Some(pipe) = self.picture.as_mut() else {
                 return Err(EngineError::NoDecoder {
@@ -241,18 +250,23 @@ impl Media {
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
         };
-        let mut left = DECODE_PACKETS;
+        let mut taken = 0_u32;
+        let mut others = 0_u32;
         loop {
-            if left == 0 {
+            if taken == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
             }
-            left -= 1;
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
                 return Ok(None);
             };
             if packet.stream() != track {
+                if others == OTHER_STREAM_PACKETS {
+                    return Err(EngineError::DecodeLimit);
+                }
+                others = others.saturating_add(1);
                 continue;
             }
+            taken = taken.saturating_add(1);
             let access = access_packet(&packet);
             let Some(pipe) = self.audio.as_mut() else {
                 return Ok(None);

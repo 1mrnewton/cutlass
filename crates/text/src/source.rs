@@ -2,14 +2,15 @@
 //!
 //! A sample inside the segment reads the cached atlas through the mesh and
 //! returns an RGBA picture. A sample outside the segment is a miss. The draft
-//! is not written. Sampling does not paint the atlas again.
+//! is not written. Sampling does not paint the atlas again. A color strike
+//! keeps its color. A gray or mono strike is coverage under the text color.
 
 use cutlass_font::Font;
 use cutlass_model::{MaterialText, Micros, Segment, TimeRange};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
-use crate::atlas::{Atlas, AtlasRoute, route};
+use crate::atlas::{Atlas, GlyphKind};
 use crate::layout::layout;
 use crate::mesh::{GlyphRecord, TextMesh, build};
 
@@ -59,9 +60,6 @@ impl TextSource {
         material: &MaterialText,
         segment: &Segment,
     ) -> Result<Self, TextError> {
-        if route(font) != AtlasRoute::SignedDistance {
-            return Err(TextError::BitmapAtlas);
-        }
         let fill = fill_rgba(material)?;
         let laid = layout(font, material)?;
         let mut atlas = Atlas::new();
@@ -120,7 +118,7 @@ impl TextSource {
         let Some(image) = self.atlas.image(record.glyph_id) else {
             return;
         };
-        if image.width == 0 || image.height == 0 || image.sdf.is_empty() {
+        if image.width == 0 || image.height == 0 || !drawable(image) {
             return;
         }
         let left = record.x - self.origin_x;
@@ -138,24 +136,10 @@ impl TextSource {
                 if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
                     continue;
                 }
-                let Some(sdf) = texel(image, u, v) else {
+                let Some(ink) = ink_at(image, u, v, self.fill) else {
                     continue;
                 };
-                let coverage = coverage(sdf);
-                if coverage == 0 {
-                    continue;
-                }
-                let alpha = u16::from(coverage) * u16::from(self.fill[3]) / 255;
-                let Ok(alpha) = u8::try_from(alpha) else {
-                    continue;
-                };
-                blend_at(
-                    rgba,
-                    self.width,
-                    x,
-                    y,
-                    [self.fill[0], self.fill[1], self.fill[2], alpha],
-                );
+                blend_at(rgba, self.width, x, y, ink);
             }
         }
     }
@@ -252,7 +236,55 @@ fn pixel(value: u32) -> f32 {
     }
 }
 
-fn texel(image: &crate::GlyphImage, u: f32, v: f32) -> Option<u8> {
+fn drawable(image: &crate::GlyphImage) -> bool {
+    match image.kind {
+        GlyphKind::Color => !image.color.is_empty(),
+        GlyphKind::Distance | GlyphKind::Coverage => !image.sdf.is_empty(),
+    }
+}
+
+fn ink_at(image: &crate::GlyphImage, u: f32, v: f32, fill: [u8; 4]) -> Option<[u8; 4]> {
+    let (col, row) = image_texel(image, u, v)?;
+    match image.kind {
+        GlyphKind::Distance => {
+            let sdf = image.sdf.get(texel_offset(image, col, row)?)?;
+            let covered = coverage(*sdf);
+            if covered == 0 {
+                return None;
+            }
+            let alpha = u16::from(covered) * u16::from(fill[3]) / 255;
+            Some([fill[0], fill[1], fill[2], u8::try_from(alpha).ok()?])
+        }
+        GlyphKind::Coverage => {
+            let covered = *image.sdf.get(texel_offset(image, col, row)?)?;
+            if covered == 0 {
+                return None;
+            }
+            let alpha = u16::from(covered) * u16::from(fill[3]) / 255;
+            Some([fill[0], fill[1], fill[2], u8::try_from(alpha).ok()?])
+        }
+        GlyphKind::Color => {
+            let offset = texel_offset(image, col, row)?.checked_mul(4)?;
+            let pixel = image.color.get(offset..offset + 4)?;
+            let alpha = fill[3];
+            if alpha == 0 || pixel[3] == 0 {
+                return None;
+            }
+            Some([
+                scale(pixel[0], alpha),
+                scale(pixel[1], alpha),
+                scale(pixel[2], alpha),
+                scale(pixel[3], alpha),
+            ])
+        }
+    }
+}
+
+fn scale(channel: u8, alpha: u8) -> u8 {
+    u8::try_from(u16::from(channel) * u16::from(alpha) / 255).unwrap_or(0)
+}
+
+fn image_texel(image: &crate::GlyphImage, u: f32, v: f32) -> Option<(u32, u32)> {
     let col = (u * pixel(image.width)).floor();
     let row = (v * pixel(image.height)).floor();
     if col < 0.0 || row < 0.0 {
@@ -263,10 +295,15 @@ fn texel(image: &crate::GlyphImage, u: f32, v: f32) -> Option<u8> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let row = row as u32;
     if col >= image.width || row >= image.height {
-        return None;
+        None
+    } else {
+        Some((col, row))
     }
+}
+
+fn texel_offset(image: &crate::GlyphImage, col: u32, row: u32) -> Option<usize> {
     let offset = row.checked_mul(image.width)?.checked_add(col)?;
-    image.sdf.get(usize::try_from(offset).ok()?).copied()
+    usize::try_from(offset).ok()
 }
 
 fn coverage(sdf: u8) -> u8 {
@@ -360,6 +397,8 @@ mod tests {
     const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
     const TTC: &[u8] = include_bytes!("../../font/fixtures/sample.ttc");
     const NO_OUTLINE: &[u8] = include_bytes!("../../font/fixtures/no-outline.otf");
+    const COLOR: &[u8] = include_bytes!("../../font/fixtures/color-strike.otf");
+    const GRAY: &[u8] = include_bytes!("../../font/fixtures/gray-strike.otf");
 
     fn material(content: &str) -> MaterialText {
         let mut text = MaterialText::new("text-material");
@@ -446,6 +485,35 @@ mod tests {
     }
 
     #[test]
+    fn a_bitmap_strike_keeps_its_pixels_and_is_not_painted_again() {
+        let clip = segment();
+        let mut color = material("A");
+        color.text_color = "#00FF00".to_owned();
+        let mut source = TextSource::open(COLOR, None, &color, &clip).expect("color");
+        let paints = source.atlas_paints();
+        assert_eq!(paints, 1);
+        let ready = cpu(source.sample(Micros(1_000)));
+        assert!(ready.chunks(4).any(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(ready.chunks(4).any(|pixel| pixel == [0, 128, 0, 128]));
+        assert!(ready.chunks(4).any(|pixel| pixel == [0, 0, 255, 255]));
+        source.set_fill([0, 0, 255, 255]);
+        let again = cpu(source.sample(Micros(2_000)));
+        assert!(again.chunks(4).any(|pixel| pixel == [255, 0, 0, 255]));
+        assert_eq!(source.atlas_paints(), paints);
+
+        let mut gray = material("A");
+        gray.text_color = "#FF0000".to_owned();
+        let gray_source = TextSource::open(GRAY, None, &gray, &clip).expect("gray");
+        assert_eq!(gray_source.atlas_paints(), 1);
+        let covered = cpu(gray_source.sample(Micros(1_000)));
+        assert!(covered.chunks(4).any(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(covered.chunks(4).any(|pixel| pixel == [255, 0, 0, 128]));
+        assert!(covered.chunks(4).any(|pixel| pixel == [255, 0, 0, 64]));
+        assert!(covered.chunks(4).any(|pixel| pixel[3] == 0));
+        assert_eq!(gray_source.atlas_paints(), 1);
+    }
+
+    #[test]
     fn a_hostile_font_or_color_is_an_error() {
         let text = material("A");
         let clip = segment();
@@ -469,7 +537,7 @@ mod tests {
         assert!(matches!(face.sample(Micros(1_000)), Sample::Ready(_)));
         assert!(matches!(
             TextSource::open(NO_OUTLINE, None, &text, &clip),
-            Err(TextError::BitmapAtlas)
+            Err(TextError::MissingStrike)
         ));
         let mut bad = material("A");
         bad.text_color = "#gg0000".to_owned();

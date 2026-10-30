@@ -1,12 +1,12 @@
-//! A signed-distance atlas for a font that has outlines.
+//! A signed-distance atlas for a font that has outlines, and a bitmap atlas
+//! for a font that does not.
 //!
-//! The route picks this atlas when the face has outlines, and the bitmap atlas
-//! when it does not. The bitmap atlas is not built here. Each glyph is painted
-//! once. A later sample reads the cached texels.
+//! The route picks the atlas. Each glyph is painted once. A later sample reads
+//! the cached texels. A face with neither outlines nor a strike is an error.
 
 use std::collections::HashMap;
 
-use cutlass_font::{Contour, Font, Outline, Segment};
+use cutlass_font::{BitmapPixels, Contour, Font, Outline, Segment};
 
 use crate::TextError;
 
@@ -36,6 +36,17 @@ pub fn route(font: &Font<'_>) -> AtlasRoute {
     }
 }
 
+/// How the cached bytes cover a glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlyphKind {
+    /// Signed distance. `sdf` is one byte per texel.
+    Distance,
+    /// Gray or mono coverage. `sdf` is one byte per pixel, 0 outside and 255 covered.
+    Coverage,
+    /// Premultiplied color. `color` is RGBA, and `sdf` is empty.
+    Color,
+}
+
 /// One cached glyph. Row 0 is the top of the image. `left` and `top` are font units.
 #[derive(Clone, Debug)]
 pub struct GlyphImage {
@@ -45,7 +56,11 @@ pub struct GlyphImage {
     pub top: f32,
     /// Font units across one texel.
     pub unit: f32,
+    /// Pixels per em this image was built at. Outlines use [`ATLAS_EM`].
+    pub pixels_per_em: f32,
+    pub kind: GlyphKind,
     pub sdf: Vec<u8>,
+    pub color: Vec<u8>,
 }
 
 /// Glyph images for one face. A second request for a glyph does not paint it again.
@@ -81,7 +96,7 @@ impl Atlas {
         }
         let image = match route(font) {
             AtlasRoute::SignedDistance => paint(font, glyph_id)?,
-            AtlasRoute::Bitmap => return Err(TextError::BitmapAtlas),
+            AtlasRoute::Bitmap => paint_bitmap(font, glyph_id)?,
         };
         self.paints = self.paints.saturating_add(1);
         self.cells.insert(glyph_id, image);
@@ -97,7 +112,10 @@ pub fn paint_bytes(bytes: &[u8], glyph_id: u16) -> Result<usize, TextError> {
     let font = cutlass_font::read(bytes).map_err(TextError::Font)?;
     let mut atlas = Atlas::new();
     let image = atlas.glyph(&font, glyph_id)?;
-    Ok(image.sdf.len())
+    Ok(match image.kind {
+        GlyphKind::Color => image.color.len() / 4,
+        GlyphKind::Distance | GlyphKind::Coverage => image.sdf.len(),
+    })
 }
 
 fn paint(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
@@ -107,27 +125,13 @@ fn paint(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
         return Err(TextError::Limit);
     }
     if outline.contours.is_empty() {
-        return Ok(GlyphImage {
-            width: 0,
-            height: 0,
-            left: 0.0,
-            top: 0.0,
-            unit,
-            sdf: Vec::new(),
-        });
+        return Ok(blank(unit));
     }
     let bounds = bounds(&outline)?;
     let width = cell_span(bounds.min_x, bounds.max_x, unit)?;
     let height = cell_span(bounds.min_y, bounds.max_y, unit)?;
     if width == 0 || height == 0 {
-        return Ok(GlyphImage {
-            width: 0,
-            height: 0,
-            left: 0.0,
-            top: 0.0,
-            unit,
-            sdf: Vec::new(),
-        });
+        return Ok(blank(unit));
     }
     let pad = SPREAD * unit;
     let left = bounds.min_x - pad;
@@ -140,7 +144,73 @@ fn paint(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
         left,
         top,
         unit,
+        pixels_per_em: ATLAS_EM,
+        kind: GlyphKind::Distance,
         sdf,
+        color: Vec::new(),
+    })
+}
+
+fn blank(unit: f32) -> GlyphImage {
+    GlyphImage {
+        width: 0,
+        height: 0,
+        left: 0.0,
+        top: 0.0,
+        unit,
+        pixels_per_em: ATLAS_EM,
+        kind: GlyphKind::Distance,
+        sdf: Vec::new(),
+        color: Vec::new(),
+    }
+}
+
+fn paint_bitmap(font: &Font<'_>, glyph_id: u16) -> Result<GlyphImage, TextError> {
+    if !font.has_bitmap_strike() {
+        return Err(TextError::MissingStrike);
+    }
+    let Some(bitmap) = font.bitmap(glyph_id).map_err(TextError::Font)? else {
+        let unit = f32::from(font.units_per_em()) / ATLAS_EM;
+        return Ok(blank(unit));
+    };
+    let ppem = f32::from(bitmap.ppem);
+    let unit = f32::from(font.units_per_em()) / ppem;
+    if !(unit.is_finite() && unit > 0.0 && ppem.is_finite() && ppem > 0.0) {
+        return Err(TextError::Limit);
+    }
+    let pixels = bitmap
+        .width
+        .checked_mul(bitmap.height)
+        .ok_or(TextError::Limit)?;
+    let (kind, sdf, color) = match bitmap.pixels {
+        BitmapPixels::Coverage(bytes) => {
+            if bytes.len() != usize::try_from(pixels).map_err(|_| TextError::Limit)? {
+                return Err(TextError::Limit);
+            }
+            (GlyphKind::Coverage, bytes, Vec::new())
+        }
+        BitmapPixels::Color(bytes) => {
+            let rgba = pixels.checked_mul(4).ok_or(TextError::Limit)?;
+            if bytes.len() != usize::try_from(rgba).map_err(|_| TextError::Limit)? {
+                return Err(TextError::Limit);
+            }
+            (GlyphKind::Color, Vec::new(), bytes)
+        }
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let bearing_x = bitmap.bearing_x as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let bearing_y = bitmap.bearing_y as f32;
+    Ok(GlyphImage {
+        width: bitmap.width,
+        height: bitmap.height,
+        left: bearing_x * unit,
+        top: bearing_y * unit,
+        unit,
+        pixels_per_em: ppem,
+        kind,
+        sdf,
+        color,
     })
 }
 
@@ -494,6 +564,8 @@ mod tests {
     const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
     const OTF: &[u8] = include_bytes!("../../font/fixtures/sample.otf");
     const NO_OUTLINE: &[u8] = include_bytes!("../../font/fixtures/no-outline.otf");
+    const COLOR: &[u8] = include_bytes!("../../font/fixtures/color-strike.otf");
+    const GRAY: &[u8] = include_bytes!("../../font/fixtures/gray-strike.otf");
 
     fn texel(image: &super::GlyphImage, x: f32, y: f32) -> u8 {
         let col = ((x - image.left) / image.unit).floor();
@@ -562,10 +634,51 @@ mod tests {
     fn a_font_without_outlines_is_not_a_distance_field() {
         let font = read(NO_OUTLINE).expect("cff2");
         assert_eq!(route(&font), AtlasRoute::Bitmap);
-        let mut atlas = Atlas::new();
-        assert!(matches!(atlas.glyph(&font, 0), Err(TextError::BitmapAtlas)));
-        assert_eq!(atlas.paints(), 0);
-        assert!(atlas.image(0).is_none());
+        let mut missing = Atlas::new();
+        let error = missing.glyph(&font, 0).expect_err("strike");
+        assert!(matches!(error, TextError::MissingStrike));
+        assert_eq!(error.to_string(), "font has no bitmap strike");
+        assert_eq!(missing.paints(), 0);
+        assert!(missing.image(0).is_none());
+
+        let color_font = read(COLOR).expect("color");
+        let gray_font = read(GRAY).expect("gray");
+        let outline_font = read(TTF).expect("ttf");
+        assert_eq!(route(&color_font), AtlasRoute::Bitmap);
+        assert_eq!(route(&gray_font), AtlasRoute::Bitmap);
+        assert_eq!(route(&outline_font), AtlasRoute::SignedDistance);
+
+        let mut color = Atlas::new();
+        let mut gray = Atlas::new();
+        let mut outline = Atlas::new();
+        let cached = {
+            let image = color.glyph(&color_font, 1).expect("color");
+            assert_eq!(image.kind, super::GlyphKind::Color);
+            assert!(image.sdf.is_empty());
+            assert_eq!(&image.color[..4], &[255, 0, 0, 255]);
+            assert_eq!(&image.color[4..8], &[0, 128, 0, 128]);
+            image.color.clone()
+        };
+        let paints = color.paints();
+        assert_eq!(paints, 1);
+        let again = color.glyph(&color_font, 1).expect("cached").color.clone();
+        assert_eq!(color.paints(), paints);
+        assert_eq!(again, cached);
+
+        let coverage = gray.glyph(&gray_font, 1).expect("gray");
+        assert_eq!(coverage.kind, super::GlyphKind::Coverage);
+        assert!(coverage.color.is_empty());
+        assert_eq!(coverage.sdf, [255, 0, 128, 64]);
+        assert_eq!(gray.paints(), 1);
+        let _cached = gray.glyph(&gray_font, 1).expect("cached gray").sdf.clone();
+        assert_eq!(gray.paints(), 1);
+
+        let distance = outline.glyph(&outline_font, 2).expect("outline");
+        assert_eq!(distance.kind, super::GlyphKind::Distance);
+        assert!(!distance.sdf.is_empty());
+        assert_eq!(outline.paints(), 1);
+        assert_eq!(color.paints(), 1);
+        assert_eq!(gray.paints(), 1);
     }
 
     #[test]

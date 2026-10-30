@@ -1,6 +1,7 @@
 mod crop;
 mod fade;
 mod freeze;
+mod import;
 mod keyframe;
 mod linkage;
 mod move_segment;
@@ -62,6 +63,8 @@ pub enum EditError {
     TransitionWindow,
     /// The dependent already has an owner, or it is an owner itself.
     AlreadyLinked,
+    /// The track exists and its type is not the type the import named.
+    TrackKind,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -124,6 +127,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
+        Request::Import {
+            track_id,
+            kind,
+            medium,
+            segment,
+        } => import::import(draft, track_id, kind, medium.clone(), (**segment).clone()),
     }
 }
 

@@ -14,5 +14,5 @@ pub use cutlass_model::{
     Draft, LinkageSettings, Micros, SegmentId, TrackAttribute, TrackId, linkage_from_biz,
 };
 pub use edit::EditError;
-pub use request::{Request, TrimEdge};
+pub use request::{ImportedMedium, Request, TrimEdge};
 pub use session::Session;

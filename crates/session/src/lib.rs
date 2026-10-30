@@ -11,5 +11,5 @@ mod request;
 mod session;
 
 pub use edit::EditError;
-pub use request::{Request, TrimEdge};
+pub use request::{ImportedMedium, Request, TrimEdge};
 pub use session::Session;

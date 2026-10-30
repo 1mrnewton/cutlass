@@ -58,6 +58,17 @@ cutlass-jpeg = { path = "../../crates/codecs/jpeg", version = "0.1.0" }
 cutlass-png = { path = "../../crates/codecs/png", version = "0.1.0" }
 cutlass-webp = { path = "../../crates/codecs/webp", version = "0.1.0" }
 cutlass-gif = { path = "../../crates/codecs/gif", version = "0.1.0" }
+# Wayland and the portal dialog build with the banned `cc` crate.
+# Linux uses X11 for the window and GTK for the file dialog.
+eframe = { version = "0.37", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "x11",
+] }
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+cutlass-model = { version = "0.1.0", path = "../../crates/model" }
+egui = "0.37"
+cutlass-container = { version = "0.1.0", path = "../../crates/container" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cutlass-platform-apple = { path = "../../crates/platform-apple", version = "0.1.0" }
@@ -67,3 +78,6 @@ cutlass-platform-windows = { path = "../../crates/platform-windows", version = "
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.154"

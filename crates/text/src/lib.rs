@@ -1,8 +1,8 @@
 //! Text runs: glyph positions, line layout, and a picture sampled from a
-//! signed-distance atlas.
+//! glyph atlas.
 //!
-//! Rich-text commands, bitmap atlases, stroke, shadow, background, and
-//! caption curves are not implemented here.
+//! Rich-text commands, stroke, shadow, background, and caption curves are
+//! not implemented here.
 
 #![forbid(unsafe_code)]
 
@@ -39,8 +39,8 @@ pub enum TextError {
     Measure,
     /// The string, the pen, the atlas cell, or the picture is past a limit.
     Limit,
-    /// The face has no outlines. The bitmap atlas is not built in this pass.
-    BitmapAtlas,
+    /// The face has no outlines and no bitmap strike.
+    MissingStrike,
     /// `text_color` is not empty and not a 6- or 8-digit hex color.
     Color,
 }
@@ -54,9 +54,7 @@ impl fmt::Display for TextError {
             Self::Alignment => formatter.write_str("text alignment is not left, center, or right"),
             Self::Measure => formatter.write_str("text size, spacing, or width is not usable"),
             Self::Limit => formatter.write_str("text is past the limit"),
-            Self::BitmapAtlas => {
-                formatter.write_str("a font without outlines needs a bitmap atlas")
-            }
+            Self::MissingStrike => formatter.write_str("font has no bitmap strike"),
             Self::Color => formatter.write_str("text color is not a hex color"),
         }
     }
@@ -71,7 +69,7 @@ impl Error for TextError {
             | Self::Alignment
             | Self::Measure
             | Self::Limit
-            | Self::BitmapAtlas
+            | Self::MissingStrike
             | Self::Color => None,
         }
     }

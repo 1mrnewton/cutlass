@@ -8,7 +8,7 @@ use cutlass_font::Font;
 use cutlass_model::{MaterialId, MaterialText};
 
 use crate::TextError;
-use crate::atlas::{ATLAS_EM, Atlas, GlyphImage};
+use crate::atlas::{Atlas, GlyphImage};
 use crate::layout::{Layout, PlacedGlyph, layout};
 
 /// A glyph quad in pixel space. The picture origin is the top left.
@@ -79,7 +79,10 @@ fn record(
     let (x, y, width, height) = if image.width == 0 || image.height == 0 {
         (placed.x, baseline, 0.0, 0.0)
     } else {
-        let texel = layout.font_size / ATLAS_EM;
+        if !(image.pixels_per_em.is_finite() && image.pixels_per_em > 0.0) {
+            return Err(TextError::Limit);
+        }
+        let texel = layout.font_size / image.pixels_per_em;
         let width = pixel(image.width) * texel;
         let height = pixel(image.height) * texel;
         let x = placed.x + image.left * layout.scale;
@@ -118,6 +121,7 @@ mod tests {
     use cutlass_model::MaterialText;
 
     const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
+    const COLOR: &[u8] = include_bytes!("../../font/fixtures/color-strike.otf");
 
     fn material(content: &str) -> MaterialText {
         let mut text = MaterialText::new("text-material");
@@ -139,6 +143,16 @@ mod tests {
         assert_eq!(mesh.glyphs[1].glyph_id, 3);
         assert!(mesh.glyphs[0].width > 0.0);
         assert!(mesh.glyphs[1].height > 0.0);
+        let font = read(TTF).expect("ttf");
+        let laid = layout(&font, &text).expect("layout");
+        let mut atlas = Atlas::new();
+        let image = atlas.glyph(&font, 2).expect("glyph");
+        let outlined = super::pixel(image.width) * laid.font_size / image.pixels_per_em;
+        assert_eq!(mesh.glyphs[0].width.to_bits(), outlined.to_bits());
+
+        let strike = build_text(COLOR, &material("A")).expect("strike");
+        assert_eq!(strike.glyphs[0].width.to_bits(), 8.0_f32.to_bits());
+        assert_eq!(strike.glyphs[0].height.to_bits(), 8.0_f32.to_bits());
         assert_eq!(mesh.glyphs[0].line, 0);
         assert_eq!(mesh.glyphs[1].line, 0);
 

@@ -95,10 +95,24 @@ pub struct Panel {
     pub rest: Map<String, Value>,
 }
 
+/// What a seek does while playback is already running.
+///
+/// The two values are stored. A seek does not invent its own branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeekDuringPlayback {
+    /// The playhead moves and playback continues.
+    #[default]
+    KeepPlaying,
+    /// The playhead moves and playback stops.
+    Pause,
+}
+
 /// How the open player behaves. These are not draft fields.
 ///
 /// Preview can play audio while the playhead is dragged. That switch is
-/// separate from normal playback.
+/// separate from normal playback. A seek while playing follows
+/// [`Playback::seek_during_playback`].
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Playback {
     /// Start again at the beginning when playback reaches the end.
@@ -107,6 +121,9 @@ pub struct Playback {
     /// Play audio while the playhead is dragged.
     #[serde(default)]
     pub scrub_audio: bool,
+    /// Keep playing or pause when the playhead is seeked during playback.
+    #[serde(default)]
+    pub seek_during_playback: SeekDuringPlayback,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -223,7 +240,10 @@ pub struct SkillFolder {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_STEP_CAP, McpServer, ModelChoice, Playback, SandboxChoice, Settings};
+    use super::{
+        DEFAULT_STEP_CAP, McpServer, ModelChoice, Playback, SandboxChoice, SeekDuringPlayback,
+        Settings,
+    };
 
     #[test]
     fn defaults_match_an_empty_object() {
@@ -240,6 +260,10 @@ mod tests {
         assert_eq!(settings.playback, Playback::default());
         assert!(!settings.playback.loop_playback);
         assert!(!settings.playback.scrub_audio);
+        assert_eq!(
+            settings.playback.seek_during_playback,
+            SeekDuringPlayback::KeepPlaying
+        );
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
         let parsed: Settings = serde_json::from_str("{}").unwrap();
@@ -262,6 +286,37 @@ mod tests {
         assert_eq!(settings.step_cap, 0);
         assert!(settings.playback.loop_playback);
         assert!(settings.playback.scrub_audio);
+        assert_eq!(
+            settings.playback.seek_during_playback,
+            SeekDuringPlayback::KeepPlaying
+        );
+    }
+
+    #[test]
+    fn seek_during_playback_stores_both_choices() {
+        let keep: Settings =
+            serde_json::from_str(r#"{"playback":{"seek_during_playback":"keep_playing"}}"#)
+                .unwrap();
+        let pause: Settings =
+            serde_json::from_str(r#"{"playback":{"seek_during_playback":"pause"}}"#).unwrap();
+        assert_eq!(
+            keep.playback.seek_during_playback,
+            SeekDuringPlayback::KeepPlaying
+        );
+        assert_eq!(
+            pause.playback.seek_during_playback,
+            SeekDuringPlayback::Pause
+        );
+        let written = serde_json::to_value(&pause).unwrap();
+        assert_eq!(written["playback"]["seek_during_playback"], "pause");
+        assert!(!pause.playback.scrub_audio);
+        let omitted: Settings =
+            serde_json::from_str(r#"{"playback":{"scrub_audio":true}}"#).unwrap();
+        assert!(omitted.playback.scrub_audio);
+        assert_eq!(
+            omitted.playback.seek_during_playback,
+            SeekDuringPlayback::KeepPlaying
+        );
     }
 
     #[test]

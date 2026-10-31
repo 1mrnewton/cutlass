@@ -10,6 +10,7 @@
 
 mod backup;
 mod folder;
+mod hold;
 mod json;
 mod repair;
 mod upgrade;
@@ -18,10 +19,12 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use backup::copy_backup;
+pub use cutlass_model::Draft;
 pub use folder::{
     DockItem, DraftMeta, Folder, IdMap, IdPair, MaterialBin, Opened, ProjectIndex, TimelineEntry,
     TimelineLayout, open,
 };
+pub use hold::{Hold, hold};
 pub use json::{parse_draft, write_draft};
 pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};
@@ -49,6 +52,8 @@ pub enum StoreError {
     BackupRefused { path: PathBuf },
     /// The filesystem refused the read or the write.
     Io { path: PathBuf, message: String },
+    /// Another process already holds `.locked` in this folder.
+    Held { path: PathBuf },
 }
 
 impl fmt::Display for StoreError {
@@ -99,6 +104,9 @@ impl fmt::Display for StoreError {
             }
             Self::Io { path, message } => {
                 write!(formatter, "could not access {}: {message}", path.display())
+            }
+            Self::Held { path } => {
+                write!(formatter, "the folder {} is already held", path.display())
             }
         }
     }

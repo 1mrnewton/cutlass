@@ -26,6 +26,9 @@ allow = [
     "ISC",
     "MIT",
     "MPL-2.0",
+    # egui's built-in faces. The crate license is both of these.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
     "Unicode-3.0",
     "Zlib",
 ]

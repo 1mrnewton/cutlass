@@ -18,3 +18,6 @@ mod tables;
 
 pub use dec::{H264Decoder, register_decoders};
 pub use enc::{H264Encoder, register_encoders};
+
+#[cfg(test)]
+mod uhd420;

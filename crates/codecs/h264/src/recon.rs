@@ -383,7 +383,14 @@ fn dc4(above: &[u8; 8], left: &[u8; 4], above_ok: bool, left_ok: bool) -> i32 {
     }
 }
 
-pub fn pred16(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok: bool) -> [u8; 256] {
+pub fn pred16(
+    mode: u8,
+    above: &[u8],
+    left: &[u8],
+    above_ok: bool,
+    left_ok: bool,
+    corner: u8,
+) -> [u8; 256] {
     let mut out = [128u8; 256];
     match mode {
         0 if above_ok => {
@@ -412,27 +419,32 @@ pub fn pred16(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok: bool
             };
             out.fill(value);
         }
-        3 if above_ok && left_ok => plane16(&mut out, above, left),
+        3 if above_ok && left_ok => plane16(&mut out, above, left, corner),
         _ => {}
     }
     out
 }
 
-fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8]) {
-    let mut h = 0i32;
-    let mut v = 0i32;
-    for i in 1..=8 {
-        let above_r = i32::from(
-            *above
-                .get((8 + i) as usize)
-                .unwrap_or(&above[above.len() - 1]),
-        );
-        let above_l = i32::from(*above.get((8 - i) as usize).unwrap_or(&above[0]));
-        let left_b = i32::from(*left.get((8 + i) as usize).unwrap_or(&left[left.len() - 1]));
-        let left_t = i32::from(*left.get((8 - i) as usize).unwrap_or(&left[0]));
-        h += i * (above_r - above_l);
-        v += i * (left_b - left_t);
+/// Equations 8-128 and 8-129. The last term on each side is the corner sample p[−1, −1].
+fn plane_gradient(samples: &[u8], corner: u8, half: usize) -> i32 {
+    let mut sum = 0i32;
+    let last = half - 1;
+    for step in 0..half {
+        let weight = i32::try_from(step + 1).unwrap_or(0);
+        let right = i32::from(samples.get(half + step).copied().unwrap_or(0));
+        let left = if step == last {
+            i32::from(corner)
+        } else {
+            i32::from(samples.get(half - 2 - step).copied().unwrap_or(0))
+        };
+        sum += weight * (right - left);
     }
+    sum
+}
+
+fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8], corner: u8) {
+    let h = plane_gradient(above, corner, 8);
+    let v = plane_gradient(left, corner, 8);
     let a = 16 * (i32::from(above[15]) + i32::from(left[15]));
     let b = (5 * h + 32) >> 6;
     let c = (5 * v + 32) >> 6;
@@ -443,7 +455,14 @@ fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8]) {
     }
 }
 
-pub fn pred_chroma(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok: bool) -> [u8; 64] {
+pub fn pred_chroma(
+    mode: u8,
+    above: &[u8],
+    left: &[u8],
+    above_ok: bool,
+    left_ok: bool,
+    corner: u8,
+) -> [u8; 64] {
     let mut out = [128u8; 64];
     match mode {
         1 if left_ok => {
@@ -457,21 +476,8 @@ pub fn pred_chroma(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok:
             }
         }
         3 if above_ok && left_ok => {
-            let mut h = 0i32;
-            let mut v = 0i32;
-            for i in 1..=4 {
-                let above_r = i32::from(
-                    *above
-                        .get((4 + i) as usize)
-                        .unwrap_or(&above[above.len() - 1]),
-                );
-                let above_l = i32::from(*above.get((4 - i) as usize).unwrap_or(&above[0]));
-                let left_b =
-                    i32::from(*left.get((4 + i) as usize).unwrap_or(&left[left.len() - 1]));
-                let left_t = i32::from(*left.get((4 - i) as usize).unwrap_or(&left[0]));
-                h += i * (above_r - above_l);
-                v += i * (left_b - left_t);
-            }
+            let h = plane_gradient(above, corner, 4);
+            let v = plane_gradient(left, corner, 4);
             let a = 16 * (i32::from(above[7]) + i32::from(left[7]));
             let b = (17 * h + 16) >> 5;
             let c = (17 * v + 16) >> 5;
@@ -1244,7 +1250,23 @@ fn filter_span<const VERTICAL: bool>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockMc, Pel, chroma_mc, put_chroma_block, put_luma_block, qpel};
+    use super::{
+        BlockMc, Pel, chroma_mc, pred_chroma, pred16, put_chroma_block, put_luma_block, qpel,
+    };
+
+    /// Equations 8-124 through 8-129. The corner sample is p[−1, −1], not p[0, −1].
+    #[test]
+    fn intra16_plane_uses_the_corner_sample() {
+        let above: Vec<u8> = (0..16).collect();
+        let left = [0u8; 16];
+        let pred = pred16(3, &above, &left, true, true, 100);
+        assert_eq!(pred[0], 28);
+        assert_eq!(pred[7 * 16 + 7], 8);
+        let chroma_above: Vec<u8> = (0..8).collect();
+        let chroma_left = [0u8; 8];
+        let chroma = pred_chroma(3, &chroma_above, &chroma_left, true, true, 100);
+        assert_eq!(chroma[0], 41);
+    }
 
     #[test]
     fn block_motion_matches_the_sample_filter() {

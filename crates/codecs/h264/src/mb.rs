@@ -37,12 +37,15 @@ struct ChromaPaint<'a> {
     cr_ac: &'a [[i32; 16]; 4],
 }
 
+/// A list slot the initialisation process left as "no reference picture".
+const NO_PICTURE: usize = usize::MAX;
+
 pub(crate) fn reference_lists(
     dpb: &[Frame],
     header: &Header,
     poc: i32,
     max_fn: u32,
-) -> (Vec<usize>, Vec<usize>) {
+) -> Result<(Vec<usize>, Vec<usize>), CodecError> {
     let short = |frame: &&Frame| frame.referenced && !frame.long_term && !frame.nonexisting;
     let mut shorts: Vec<usize> = dpb
         .iter()
@@ -53,12 +56,12 @@ pub(crate) fn reference_lists(
     let mut longs: Vec<usize> = dpb
         .iter()
         .enumerate()
-        .filter(|(_, frame)| frame.referenced && frame.long_term)
+        .filter(|(_, frame)| frame.referenced && frame.long_term && !frame.nonexisting)
         .map(|(index, _)| index)
         .collect();
     longs.sort_by_key(|&index| dpb[index].long_idx);
     if header.kind == 2 {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     if header.kind == 0 {
         shorts.sort_by_key(|&index| {
@@ -66,9 +69,15 @@ pub(crate) fn reference_lists(
         });
         let mut list = shorts;
         list.extend(longs);
-        list.truncate(header.num_ref_l0);
-        modify(&mut list, dpb, &header.ref_mod_l0, header.frame_num, max_fn);
-        return (list, Vec::new());
+        let list = reorder(
+            list,
+            header.num_ref_l0,
+            dpb,
+            &header.ref_mod_l0,
+            header.frame_num,
+            max_fn,
+        )?;
+        return Ok((list, Vec::new()));
     }
     let mut past: Vec<usize> = shorts
         .iter()
@@ -88,26 +97,28 @@ pub(crate) fn reference_lists(
     let mut list1 = future;
     list1.extend(past);
     list1.extend(longs);
-    list0.truncate(header.num_ref_l0);
-    list1.truncate(header.num_ref_l1);
+    // Clause 8.2.4.2.3 switches the first two list 1 entries before the lists
+    // are cut to the active lengths.
     if list0 == list1 && list1.len() > 1 {
         list1.swap(0, 1);
     }
-    modify(
-        &mut list0,
+    let list0 = reorder(
+        list0,
+        header.num_ref_l0,
         dpb,
         &header.ref_mod_l0,
         header.frame_num,
         max_fn,
-    );
-    modify(
-        &mut list1,
+    )?;
+    let list1 = reorder(
+        list1,
+        header.num_ref_l1,
         dpb,
         &header.ref_mod_l1,
         header.frame_num,
         max_fn,
-    );
-    (list0, list1)
+    )?;
+    Ok((list0, list1))
 }
 
 fn pic_num(frame: &Frame, current: u32, max_fn: u32) -> i32 {
@@ -118,56 +129,218 @@ fn pic_num(frame: &Frame, current: u32, max_fn: u32) -> i32 {
     number
 }
 
-fn modify(list: &mut [usize], dpb: &[Frame], mods: &[Mod], current: u32, max_fn: u32) {
-    if mods.is_empty() || list.is_empty() {
-        return;
+/// Clause 8.2.4.2 pads a short initial list, then 8.2.4.3 may repeat a picture
+/// so the active length is filled. A slot left as "no reference picture" stays
+/// [`NO_PICTURE`] and is rejected when a macroblock uses it.
+fn reorder(
+    mut list: Vec<usize>,
+    active: usize,
+    dpb: &[Frame],
+    mods: &[Mod],
+    current: u32,
+    max_fn: u32,
+) -> Result<Vec<usize>, CodecError> {
+    if active > 32 {
+        return Err(CodecError::Limit { what: "ref idx" });
     }
-    let mut pred = i32::try_from(current).unwrap_or(0);
-    let mut written = 0usize;
+    if list.len() > active {
+        list.truncate(active);
+    }
+    list.resize(active, NO_PICTURE);
+    if mods.is_empty() {
+        return Ok(list);
+    }
+    let max_pic = i32::try_from(max_fn).map_err(|_| CodecError::Malformed {
+        at_bit: 0,
+        what: "ref list modification",
+    })?;
+    let curr = i32::try_from(current).map_err(|_| CodecError::Malformed {
+        at_bit: 0,
+        what: "ref list modification",
+    })?;
+    list.push(NO_PICTURE);
+    let mut pred = curr;
+    let mut ref_idx = 0usize;
     for modification in mods {
-        let found = match modification.idc {
-            0 => {
-                pred -= i32::try_from(modification.arg).unwrap_or(0) + 1;
-                find_short(dpb, list, pred, current, max_fn)
-            }
-            1 => {
-                pred += i32::try_from(modification.arg).unwrap_or(0) + 1;
-                find_short(dpb, list, pred, current, max_fn)
-            }
-            2 => dpb.iter().position(|frame| {
-                frame.referenced
-                    && frame.long_term
-                    && frame.long_idx == i32::try_from(modification.arg).unwrap_or(-1)
-            }),
-            _ => None,
-        };
-        let Some(picture) = found else {
-            continue;
-        };
-        if written >= list.len() {
-            break;
+        if ref_idx >= active {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "ref list modification",
+            });
         }
-        let mut cursor = picture;
-        for slot in list.iter_mut().skip(written) {
-            std::mem::swap(slot, &mut cursor);
-            if cursor == picture {
-                break;
+        match modification.idc {
+            0 | 1 => {
+                let pic_num = short_target(&mut pred, modification, curr, max_pic)?;
+                let Some(picture) = short_index(dpb, pic_num, current, max_fn) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "ref list modification",
+                    });
+                };
+                place_short(
+                    &mut list,
+                    ref_idx,
+                    active,
+                    picture,
+                    pic_num,
+                    dpb,
+                    ShortNums {
+                        current,
+                        max_fn,
+                        max_pic,
+                    },
+                );
+                ref_idx += 1;
+            }
+            2 => {
+                let Some(picture) = long_index(dpb, modification.arg) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "ref list modification",
+                    });
+                };
+                place_long(&mut list, ref_idx, active, picture, modification.arg, dpb);
+                ref_idx += 1;
+            }
+            _ => {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "ref list modification",
+                });
             }
         }
-        written += 1;
+    }
+    list.truncate(active);
+    Ok(list)
+}
+
+fn short_target(
+    pred: &mut i32,
+    modification: &Mod,
+    curr: i32,
+    max_pic: i32,
+) -> Result<i32, CodecError> {
+    let Some(sum) = modification.arg.checked_add(1) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "ref list modification",
+        });
+    };
+    let Ok(abs) = i32::try_from(sum) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "ref list modification",
+        });
+    };
+    if abs <= 0 || abs > max_pic || max_pic <= 0 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "ref list modification",
+        });
+    }
+    let no_wrap = if modification.idc == 0 {
+        if *pred < abs {
+            *pred - abs + max_pic
+        } else {
+            *pred - abs
+        }
+    } else if *pred > max_pic - abs {
+        *pred + abs - max_pic
+    } else {
+        *pred + abs
+    };
+    *pred = no_wrap;
+    Ok(if no_wrap > curr {
+        no_wrap - max_pic
+    } else {
+        no_wrap
+    })
+}
+
+struct ShortNums {
+    current: u32,
+    max_fn: u32,
+    max_pic: i32,
+}
+
+fn place_short(
+    list: &mut [usize],
+    ref_idx: usize,
+    active: usize,
+    picture: usize,
+    pic_num: i32,
+    dpb: &[Frame],
+    nums: ShortNums,
+) {
+    for c in (ref_idx + 1..=active).rev() {
+        list[c] = list[c - 1];
+    }
+    list[ref_idx] = picture;
+    let mut nidx = ref_idx + 1;
+    for c in (ref_idx + 1)..=active {
+        if pic_num_f(dpb, list[c], &nums) != pic_num {
+            list[nidx] = list[c];
+            nidx += 1;
+        }
     }
 }
 
-fn find_short(
+fn place_long(
+    list: &mut [usize],
+    ref_idx: usize,
+    active: usize,
+    picture: usize,
+    long_num: u32,
     dpb: &[Frame],
-    list: &[usize],
-    number: i32,
-    current: u32,
-    max_fn: u32,
-) -> Option<usize> {
-    list.iter()
-        .copied()
-        .find(|&index| !dpb[index].long_term && pic_num(&dpb[index], current, max_fn) == number)
+) {
+    for c in (ref_idx + 1..=active).rev() {
+        list[c] = list[c - 1];
+    }
+    list[ref_idx] = picture;
+    let mut nidx = ref_idx + 1;
+    for c in (ref_idx + 1)..=active {
+        if !same_long(dpb, list[c], long_num) {
+            list[nidx] = list[c];
+            nidx += 1;
+        }
+    }
+}
+
+fn short_index(dpb: &[Frame], number: i32, current: u32, max_fn: u32) -> Option<usize> {
+    dpb.iter().position(|frame| {
+        frame.referenced
+            && !frame.long_term
+            && !frame.nonexisting
+            && pic_num(frame, current, max_fn) == number
+    })
+}
+
+fn long_index(dpb: &[Frame], long_num: u32) -> Option<usize> {
+    let Ok(long_num) = i32::try_from(long_num) else {
+        return None;
+    };
+    dpb.iter().position(|frame| {
+        frame.referenced && frame.long_term && !frame.nonexisting && frame.long_idx == long_num
+    })
+}
+
+fn pic_num_f(dpb: &[Frame], slot: usize, nums: &ShortNums) -> i32 {
+    let Some(frame) = dpb.get(slot) else {
+        return nums.max_pic;
+    };
+    if !frame.referenced || frame.long_term {
+        return nums.max_pic;
+    }
+    pic_num(frame, nums.current, nums.max_fn)
+}
+
+fn same_long(dpb: &[Frame], slot: usize, long_num: u32) -> bool {
+    let Ok(long_num) = i32::try_from(long_num) else {
+        return false;
+    };
+    dpb.get(slot).is_some_and(|frame| {
+        frame.referenced && frame.long_term && !frame.nonexisting && frame.long_idx == long_num
+    })
 }
 
 pub(crate) fn decode_mbs(
@@ -1347,7 +1520,8 @@ fn recon_intra(
     if i16 {
         let (above, left, above_ok, left_ok) =
             edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra);
-        let pred = recon::pred16(mode16, &above, &left, above_ok, left_ok);
+        let corner = corner_sample(&pic.y, pic.w, pic.h, mx, my, 16, above_ok && left_ok);
+        let pred = recon::pred16(mode16, &above, &left, above_ok, left_ok, corner);
         put_block(&mut pic.y, pic.w, x0, y0, &pred, 16);
         let dc = recon::luma_dc(
             &luma_dc_raster(&luma_dc),
@@ -1522,8 +1696,18 @@ fn pred8_block(
         here,
     );
     if above_ok {
-        for (k, slot) in raw_above.iter_mut().enumerate() {
+        for (k, slot) in raw_above[..8].iter_mut().enumerate() {
             *slot = pix(&pic.y, pic.w, pic.h, x + k as i32, y - 1);
+        }
+        // Clause 8.3.2.2: p[8..15, -1] that are not yet constructed take p[7, -1].
+        let fill = raw_above[7];
+        let right = above8_right(pic, x, y, mb.slice, constrained);
+        for (k, slot) in raw_above[8..].iter_mut().enumerate() {
+            *slot = if right {
+                pix(&pic.y, pic.w, pic.h, x + 8 + k as i32, y - 1)
+            } else {
+                fill
+            };
         }
     }
     if left_ok {
@@ -1705,6 +1889,22 @@ fn avg2(a: u8, b: u8) -> u8 {
     u8::try_from((i32::from(a) + i32::from(b) + 1) >> 1).unwrap_or(0)
 }
 
+/// The eight samples to the right of an Intra_8x8 block's above row.
+///
+/// They belong to one macroblock. A later macroblock in this slice is not
+/// constructed yet, so it is not a neighbour.
+fn above8_right(pic: &Frame, x: i32, y: i32, slice: u16, constrained: bool) -> bool {
+    let sx = x + 8;
+    let sy = y - 1;
+    if sx < 0 || sy < 0 {
+        return false;
+    }
+    let Some(side) = neighbor(pic, sx / 16, sy / 16, slice) else {
+        return false;
+    };
+    !constrained || side.intra
+}
+
 fn filter_row(raw: &[u8; 16], corner: u8, above_ok: bool, left_ok: bool) -> [u8; 16] {
     let mut out = *raw;
     if !above_ok {
@@ -1782,7 +1982,11 @@ fn recon_chroma(
         let pred = if intra {
             let (above, left, above_ok, left_ok) =
                 edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra);
-            Some(recon::pred_chroma(mode, &above, &left, above_ok, left_ok))
+            let plane = if cb { &pic.u } else { &pic.v };
+            let corner = corner_sample(plane, pic.w / 2, pic.h / 2, mx, my, 8, above_ok && left_ok);
+            Some(recon::pred_chroma(
+                mode, &above, &left, above_ok, left_ok, corner,
+            ))
         } else {
             None
         };
@@ -1813,6 +2017,125 @@ fn recon_chroma(
             recon::idct4(&mut block);
             recon::add_block(plane, stride, x0 + bx * 4, y0 + by * 4, &block, 4);
         }
+    }
+}
+
+#[cfg(test)]
+mod intra8 {
+    use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+
+    use super::super::{Frame, Mb};
+
+    fn frame(width: usize, height: usize) -> Frame {
+        let mb_w = width / 16;
+        let mb_h = height / 16;
+        Frame {
+            y: vec![0; width * height],
+            u: vec![128; (width / 2) * (height / 2)],
+            v: vec![128; (width / 2) * (height / 2)],
+            mb: vec![Mb::new(u16::MAX); mb_w * mb_h],
+            w: width,
+            h: height,
+            mb_w,
+            poc: 0,
+            frame_num: 0,
+            referenced: true,
+            long_term: false,
+            long_idx: -1,
+            output: true,
+            key: true,
+            pts: 0,
+            duration: 0,
+            timescale: 1,
+            crop_x: 0,
+            crop_y: 0,
+            vis_w: width as u32,
+            vis_h: height as u32,
+            range: ColorRange::Limited,
+            primaries: ColorPrimaries::Bt709,
+            transfer: Transfer::Bt709,
+            matrix: ColorMatrix::Bt709,
+            nonexisting: false,
+            max_ref: 1,
+            reorder: 0,
+            adaptive: false,
+            mmco: Vec::new(),
+            max_fn: 16,
+        }
+    }
+
+    fn paint(pic: &mut Frame, x: usize, y: usize, sample: u8) {
+        pic.y[y * pic.w + x] = sample;
+    }
+
+    /// Clause 8.3.2.2. The bottom-right 8×8's above-right samples sit in the next
+    /// macroblock, which is not constructed yet. They repeat p[7, −1] before the
+    /// reference filter, so DC stays on that sample instead of the cleared plane.
+    #[test]
+    fn intra8_bottom_right_repeats_the_last_above_sample() {
+        let mut pic = frame(32, 16);
+        let mut mb = Mb::new(7);
+        mb.intra = true;
+        mb.mode4[2 * 4 + 2] = 2;
+        for col in 8..16 {
+            paint(&mut pic, col, 7, 200);
+        }
+        paint(&mut pic, 7, 7, 200);
+        for row in 8..16 {
+            paint(&mut pic, 7, row, 200);
+        }
+        let pred = super::pred8_block(&pic, 0, 0, 2, 2, &mb, false);
+        assert!(
+            pred.iter().all(|sample| *sample == 200),
+            "dc drifted to {}",
+            pred[0]
+        );
+
+        pic.mb[1].slice = 7;
+        pic.mb[1].intra = true;
+        let pred = super::pred8_block(&pic, 0, 0, 2, 2, &mb, false);
+        assert_eq!(pred[0], 197, "an available zero above-right must be read");
+    }
+
+    /// Clause 9.3.3.1.1.6. A direct partition keeps a reference for motion, and that
+    /// reference does not raise the CABAC context of the next ref_idx.
+    #[test]
+    fn direct_neighbour_does_not_raise_the_ref_idx_context() {
+        let mut pic = frame(32, 16);
+        let mut left = Mb::new(3);
+        left.direct16 = true;
+        left.ref0 = [2, 2, 2, 2];
+        pic.mb[0] = left;
+        let current = Mb::new(3);
+        assert_eq!(super::ref_ctx(&pic, 1, 0, 0, 0, 0, &current), 0);
+        pic.mb[0].uses0 = 0b1111;
+        assert_eq!(super::ref_ctx(&pic, 1, 0, 0, 0, 0, &current), 1);
+    }
+
+    /// Clause 8.4.1.3. A partition with predFlagL0 = 0 is still decoded, so C is
+    /// that partition and not the above-left substitute.
+    #[test]
+    fn an_unused_list_still_occupies_the_neighbour_slot() {
+        let mut pic = frame(32, 32);
+        let mut left = Mb::new(3);
+        left.ref0[1] = 0;
+        left.ref0[3] = 0;
+        left.mv0[7] = [0, 80];
+        left.mv0[11] = [0, 80];
+        pic.mb[2] = left;
+        let mut current = Mb::new(3);
+        current.ref0[0] = 0;
+        super::mark_decoded(&mut current, 0, 0, 16, 8);
+        let pred = super::mvp(
+            &pic,
+            super::Place { mx: 1, my: 1 },
+            super::Cell { bx: 0, by: 2 },
+            (8, 8),
+            0,
+            0,
+            &current,
+        );
+        assert_eq!(pred, [0, 0]);
     }
 }
 
@@ -2711,6 +3034,27 @@ mod oracle {
     }
 }
 
+fn corner_sample(
+    plane: &[u8],
+    stride: usize,
+    height: usize,
+    mx: usize,
+    my: usize,
+    size: i32,
+    present: bool,
+) -> u8 {
+    if !present || mx == 0 || my == 0 {
+        return 128;
+    }
+    pix(
+        plane,
+        stride,
+        height,
+        mx as i32 * size - 1,
+        my as i32 * size - 1,
+    )
+}
+
 fn edge16(
     pic: &Frame,
     mx: usize,
@@ -3042,9 +3386,9 @@ fn read_parts(
                 slice.num_ref_l0,
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 0, mb),
             )?;
-            fill_ref(&mut mb.ref0, part, r as i8);
+            fill_ref(&mut mb.ref0, &mut mb.uses0, part, r as i8);
         } else if part.l0 {
-            fill_ref(&mut mb.ref0, part, 0);
+            fill_ref(&mut mb.ref0, &mut mb.uses0, part, 0);
         }
     }
     for part in &parts {
@@ -3054,9 +3398,16 @@ fn read_parts(
                 slice.num_ref_l1,
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 1, mb),
             )?;
-            fill_ref(&mut mb.ref1, part, r as i8);
+            fill_ref(&mut mb.ref1, &mut mb.uses1, part, r as i8);
         } else if part.l1 {
-            fill_ref(&mut mb.ref1, part, 0);
+            fill_ref(&mut mb.ref1, &mut mb.uses1, part, 0);
+        }
+    }
+    // A partition that does not use list 0 is still decoded. Its blocks stay
+    // available so the next partition does not replace C with D.
+    for part in &parts {
+        if !part.l0 {
+            mark_decoded(mb, part.x, part.y, part.w, part.h);
         }
     }
     for part in &parts {
@@ -3158,10 +3509,12 @@ fn part(x: usize, y: usize, w: usize, h: usize, l0: bool, l1: bool) -> Part {
     Part { x, y, w, h, l0, l1 }
 }
 
-fn fill_ref(refs: &mut [i8; 4], part: &Part, value: i8) {
+fn fill_ref(refs: &mut [i8; 4], uses: &mut u8, part: &Part, value: i8) {
     for y in (part.y / 8)..((part.y + part.h) / 8) {
         for x in (part.x / 8)..((part.x + part.w) / 8) {
-            refs[y * 2 + x] = value;
+            let index = y * 2 + x;
+            refs[index] = value;
+            *uses |= 1 << index;
         }
     }
 }
@@ -3215,21 +3568,24 @@ fn ref_at(pic: &Frame, mx: usize, my: usize, bx: i32, by: i32, list: usize, curr
     };
     let index = oy * 2 + ox.min(1);
     if mbx == mx as i32 && mby == my as i32 {
-        return if list == 0 {
-            current.ref0[index]
-        } else {
-            current.ref1[index]
-        };
+        return listed_ref(current, index, list);
     }
     neighbor(pic, mbx, mby, current.slice)
-        .map(|mb| {
-            if list == 0 {
-                mb.ref0[index]
-            } else {
-                mb.ref1[index]
-            }
-        })
+        .map(|mb| listed_ref(mb, index, list))
         .unwrap_or(-1)
+}
+
+/// Clause 9.3.3.1.1.6. Direct, skip, intra, and the other list contribute no reference.
+fn listed_ref(mb: &Mb, index: usize, list: usize) -> i8 {
+    let uses = if list == 0 { mb.uses0 } else { mb.uses1 };
+    if uses & (1 << index) == 0 {
+        return -1;
+    }
+    if list == 0 {
+        mb.ref0[index]
+    } else {
+        mb.ref1[index]
+    }
 }
 
 fn read_mvd_part(
@@ -3449,6 +3805,20 @@ fn median(a: i16, b: i16, c: i16) -> i16 {
     a.max(b).min(a.max(c)).min(b.max(c))
 }
 
+/// The partition is decoded, so later motion-vector prediction may see it.
+fn mark_decoded(mb: &mut Mb, x: usize, y: usize, w: usize, h: usize) {
+    let mut py = y;
+    while py < y + h {
+        let mut px = x;
+        while px < x + w {
+            let index = (py / 4) * 4 + (px / 4);
+            mb.ready |= 1 << index;
+            px += 4;
+        }
+        py += 4;
+    }
+}
+
 fn part_motion(
     pic: &Frame,
     mx: usize,
@@ -3589,7 +3959,9 @@ fn read_sub(
         } else {
             read_te(entropy, slice.num_ref_l0, ref_ctx(pic, mx, my, x, y, 0, mb))? as i8
         };
-        mb.ref0[(y / 2) * 2 + (x / 2)] = r;
+        let part = (y / 2) * 2 + (x / 2);
+        mb.ref0[part] = r;
+        mb.uses0 |= 1 << part;
     }
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
@@ -3606,7 +3978,9 @@ fn read_sub(
         } else {
             read_te(entropy, slice.num_ref_l1, ref_ctx(pic, mx, my, x, y, 1, mb))? as i8
         };
-        mb.ref1[(y / 2) * 2 + (x / 2)] = r;
+        let part = (y / 2) * 2 + (x / 2);
+        mb.ref1[part] = r;
+        mb.uses1 |= 1 << part;
     }
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
@@ -3614,6 +3988,18 @@ fn read_sub(
             let y0 = (i >> 1) * 8;
             direct_8(pic, dpb, slice, Place { mx, my }, (x0, y0), mb);
         }
+    }
+    for (i, kind) in kinds.iter().copied().enumerate() {
+        if direct(kind) {
+            continue;
+        }
+        let (l0, _, _, _) = sub_shape(slice.kind, kind);
+        if l0 {
+            continue;
+        }
+        let x0 = (i & 1) * 8;
+        let y0 = (i >> 1) * 8;
+        mark_decoded(mb, x0, y0, 8, 8);
     }
     for list in 0..2 {
         for (i, kind) in kinds.iter().copied().enumerate() {
@@ -4262,6 +4648,12 @@ fn reference_frame<'a>(
         what: "ref idx",
     })?;
     let Some(&frame_index) = refs.get(index) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "ref idx",
+        });
+    };
+    if frame_index == NO_PICTURE {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "ref idx",

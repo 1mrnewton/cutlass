@@ -45,6 +45,11 @@ pub(crate) struct Mb {
     chroma_mode: u8,
     ref0: [i8; 4],
     ref1: [i8; 4],
+    /// 8×8 partitions whose prediction mode is Pred_L0 or BiPred. Direct and skip stay clear
+    /// so a reference index stored for motion does not enter the CABAC context.
+    uses0: u8,
+    /// 8×8 partitions whose prediction mode is Pred_L1 or BiPred.
+    uses1: u8,
     /// Decoded-picture-buffer index of each list, or −1 when that list is unused.
     slot0: [i8; 4],
     slot1: [i8; 4],
@@ -90,6 +95,8 @@ impl Mb {
             chroma_mode: 0,
             ref0: [-1; 4],
             ref1: [-1; 4],
+            uses0: 0,
+            uses1: 0,
             slot0: [-1; 4],
             slot1: [-1; 4],
             mv0: [[0; 2]; 16],
@@ -379,7 +386,6 @@ fn decode_au(
         });
     }
     let mut pic = pic;
-    let _ = mb::deblock;
     mb::deblock(&mut pic);
     let mut pictures = prior;
     pictures.extend(finish_picture(poc, dpb, pic)?);
@@ -1374,7 +1380,7 @@ fn make_slice<'a>(
         });
     };
     let max_fn = 1u32 << sps.log2_max_frame_num;
-    let (ref0, ref1) = mb::reference_lists(dpb, header, poc, max_fn);
+    let (ref0, ref1) = mb::reference_lists(dpb, header, poc, max_fn)?;
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
     Ok(Slice {
@@ -1596,6 +1602,66 @@ mod tests {
         assert_eq!(current.frame_num, 0);
         assert_eq!(poc.prev_frame_num, 0);
         assert!(poc.max_long.is_none());
+    }
+
+    #[test]
+    fn reordering_repeats_a_short_term_picture_to_fill_the_active_list() {
+        let dpb = vec![held(0), held(1)];
+        let header = p_header(
+            2,
+            3,
+            vec![
+                super::Mod { idc: 0, arg: 0 },
+                super::Mod { idc: 0, arg: 15 },
+                super::Mod { idc: 0, arg: 0 },
+            ],
+        );
+        let (list0, list1) = super::mb::reference_lists(&dpb, &header, 4, 16).unwrap();
+        assert!(list1.is_empty());
+        let frames: Vec<u32> = list0.iter().map(|&index| dpb[index].frame_num).collect();
+        assert_eq!(frames, vec![1, 1, 0]);
+    }
+
+    #[test]
+    fn a_reordered_picture_that_is_not_in_the_dpb_is_malformed() {
+        let dpb = vec![held(0)];
+        let header = p_header(1, 1, vec![super::Mod { idc: 0, arg: 5 }]);
+        assert!(super::mb::reference_lists(&dpb, &header, 0, 16).is_err());
+    }
+
+    fn p_header(frame_num: u32, num_ref_l0: usize, ref_mod_l0: Vec<super::Mod>) -> super::Header {
+        super::Header {
+            first_mb: 0,
+            pps_id: 0,
+            sps_id: 0,
+            kind: 0,
+            frame_num,
+            poc_lsb: 0,
+            delta_poc: [0, 0],
+            qp: 26,
+            deblock: 0,
+            off_a: 0,
+            off_b: 0,
+            cabac_init: 0,
+            spatial_direct: true,
+            num_ref_l0,
+            num_ref_l1: 0,
+            nal_ref: true,
+            redundant: 0,
+            no_output_prior: false,
+            long_term_ref: false,
+            adaptive: false,
+            mmco: Vec::new(),
+            ref_mod_l0,
+            ref_mod_l1: Vec::new(),
+            weights: false,
+            luma_denom: 0,
+            chroma_denom: 0,
+            yw: [[0; 32]; 2],
+            yo: [[0; 32]; 2],
+            cw: [[[0; 2]; 32]; 2],
+            co: [[[0; 2]; 32]; 2],
+        }
     }
 
     fn held(frame_num: u32) -> super::Frame {

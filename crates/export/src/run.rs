@@ -15,8 +15,8 @@ use cutlass_encode::{
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
 };
 use cutlass_eval::{
-    AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, ReaderFactory, Snapshot,
-    audio_slice, frame, wait_export_frame,
+    AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, OpenClips, ReaderFactory,
+    Snapshot, audio_slice, frame, wait_export_frame,
 };
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 
@@ -373,8 +373,11 @@ where
     M: Mux,
 {
     let mut frames = Vec::with_capacity(indexes.len());
+    let mut clips = OpenClips::new();
     for index in indexes {
-        frames.push(encode_picture(run, video, tracks, *index, output)?);
+        frames.push(encode_picture(
+            run, video, tracks, *index, output, &mut clips,
+        )?);
     }
     Ok(frames)
 }
@@ -385,6 +388,7 @@ fn encode_picture<D, M>(
     tracks: &mut TrackTicks,
     index: i64,
     output: (u32, u32),
+    clips: &mut OpenClips,
 ) -> Result<ExportedFrame, ExportError>
 where
     D: Device,
@@ -400,7 +404,7 @@ where
             .checked_add(run.request.late_by)
             .ok_or(ExportError::Range)?,
     );
-    let evaluated = evaluated_frame(run.draft, run.device, time, ready, run.readers)?;
+    let evaluated = evaluated_frame(run.draft, run.device, time, ready, run.readers, clips)?;
     let bytes = scale_rgba(
         evaluated.width,
         evaluated.height,
@@ -465,9 +469,10 @@ fn evaluated_frame<D: Device>(
     time: Micros,
     ready_at: Micros,
     media: &ReaderFactory,
+    clips: &mut OpenClips,
 ) -> Result<ExportedFrame, ExportError> {
     let snapshot = Snapshot::new(draft);
-    let picture = frame(&snapshot, time, device, media).map_err(map_eval)?;
+    let picture = frame(&snapshot, time, device, media, clips, 0).map_err(map_eval)?;
     let picture = wait_export_frame::<D::Error>(time, ready_at, picture).map_err(map_eval)?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| ExportError::Canvas)?;
@@ -737,7 +742,7 @@ mod tests {
         AudioInput, ChannelLayout, CodecParams, EncodeFactory, Encoder, FrameInput, Packet, Pcm,
         PixelFormat,
     };
-    use cutlass_eval::{ClipPcm, ReaderFactory, Snapshot, frame};
+    use cutlass_eval::{ClipPcm, OpenClips, ReaderFactory, Snapshot, frame};
     use cutlass_model::{
         Draft, FrameRate, HdrSettings, MaterialAudioFade, MaterialColorConfig, MaterialId,
         MaterialText, Micros, Segment, TimeRange, Track, TrackAttribute, TrackType, WordColumns,
@@ -900,7 +905,16 @@ mod tests {
         let mut player = Player::new();
         player.set_readers(ReaderFactory::new());
         let scrubbed = player.scrub(&session, device, time).expect("scrub");
-        let evaluated = frame(&Snapshot::new(draft), time, device, readers()).expect("eval");
+        let mut clips = OpenClips::new();
+        let evaluated = frame(
+            &Snapshot::new(draft),
+            time,
+            device,
+            readers(),
+            &mut clips,
+            0,
+        )
+        .expect("eval");
         assert_eq!(scrubbed.rgba, evaluated.rgba);
         scrubbed.rgba
     }

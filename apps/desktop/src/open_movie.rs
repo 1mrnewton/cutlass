@@ -12,7 +12,7 @@ use cutlass_codec::access::{
 };
 use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_engine::DecodedFrame;
-use cutlass_eval::{ReaderFactory, Snapshot, frame};
+use cutlass_eval::{OpenClips, ReaderFactory, Snapshot, frame};
 use cutlass_model::{
     Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute,
 };
@@ -365,8 +365,16 @@ fn movie_draft(path: &Path, width: u32, height: u32, under: bool) -> Result<Draf
 
 fn render(readers: &ReaderFactory, draft: &Draft, time: Micros) -> Result<Vec<u8>, String> {
     let mut device = SoftwareDevice::new();
-    let picture = frame(&Snapshot::new(draft), time, &mut device, readers)
-        .map_err(|error| error.to_string())?;
+    let mut clips = OpenClips::new();
+    let picture = frame(
+        &Snapshot::new(draft),
+        time,
+        &mut device,
+        readers,
+        &mut clips,
+        0,
+    )
+    .map_err(|error| error.to_string())?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| "width")?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| "height")?;
     if picture.extent.width != width || picture.extent.height != height {

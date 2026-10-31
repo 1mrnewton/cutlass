@@ -5,7 +5,7 @@ use cutlass_engine::ReaderFactory;
 use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
 
-use crate::media::{Placed, video_layers};
+use crate::media::{OpenClips, Placed, video_layers};
 use crate::sources::{SolidLayer, solid_layers};
 
 /// A draft borrowed for evaluation. The draft is not written.
@@ -60,18 +60,23 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 /// The composited frame at `time`. The snapshot's draft is not changed.
 ///
 /// Solids and video pictures share one paint order: `render_index`, then
-/// track, then segment. A video the factory cannot open is skipped.
+/// track, then segment. A video the factory cannot open is skipped. An open
+/// file in `clips` is seeked when `time` changes. `revision` drops those
+/// files when the draft changes.
 pub fn frame<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
     device: &mut D,
     media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
 ) -> Result<Frame, EvalError<D::Error>> {
     let draft = snapshot.draft();
     let extent = canvas_extent(draft).ok_or(EvalError::Canvas)?;
+    clips.prepare(draft, revision);
     let layers = ordered(
         solid_layers(draft, extent.width, extent.height),
-        video_layers(draft, media, extent.width, extent.height, time),
+        video_layers(draft, media, extent.width, extent.height, time, clips),
     );
     let mut sources: Vec<&dyn PictureSource> = Vec::with_capacity(layers.len());
     for layer in &layers {
@@ -80,26 +85,29 @@ pub fn frame<D: Device>(
     submit(device, extent, time, &sources).map_err(EvalError::Compose)
 }
 
-enum Paint {
+enum Paint<'a> {
     Solid(SolidColor),
-    Video(Box<Placed>),
+    Video(Placed<'a>),
 }
 
-struct Ordered {
+struct Ordered<'a> {
     key: (i32, usize, usize),
-    paint: Paint,
+    paint: Paint<'a>,
 }
 
-impl Ordered {
+impl Ordered<'_> {
     fn source(&self) -> &dyn PictureSource {
         match &self.paint {
             Paint::Solid(solid) => solid,
-            Paint::Video(video) => video.as_ref(),
+            Paint::Video(video) => video,
         }
     }
 }
 
-fn ordered(solids: Vec<SolidLayer>, videos: Vec<crate::media::VideoLayer>) -> Vec<Ordered> {
+fn ordered<'a>(
+    solids: Vec<SolidLayer>,
+    videos: Vec<crate::media::VideoLayer<'a>>,
+) -> Vec<Ordered<'a>> {
     let mut layers = Vec::with_capacity(solids.len() + videos.len());
     for solid in solids {
         layers.push(Ordered {
@@ -110,7 +118,7 @@ fn ordered(solids: Vec<SolidLayer>, videos: Vec<crate::media::VideoLayer>) -> Ve
     for video in videos {
         layers.push(Ordered {
             key: (video.render_index, video.track_index, video.segment_index),
-            paint: Paint::Video(Box::new(video.placed)),
+            paint: Paint::Video(video.placed),
         });
     }
     layers.sort_by_key(|layer| layer.key);
@@ -147,6 +155,21 @@ mod tests {
         ReaderFactory::new()
     }
 
+    fn draw(draft: &Draft, time: i64, device: &mut SoftwareDevice) -> Vec<u8> {
+        let media = media();
+        let mut clips = OpenClips::new();
+        frame(
+            &Snapshot::new(draft),
+            Micros(time),
+            device,
+            &media,
+            &mut clips,
+            0,
+        )
+        .unwrap()
+        .rgba
+    }
+
     fn color_clip(color: &str, gradient: bool) -> Draft {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;
@@ -168,10 +191,7 @@ mod tests {
 
     fn pixels(draft: &Draft, time: i64) -> Vec<u8> {
         let mut device = SoftwareDevice::new();
-        let media = media();
-        frame(&Snapshot::new(draft), Micros(time), &mut device, &media)
-            .unwrap()
-            .rgba
+        draw(draft, time, &mut device)
     }
 
     #[test]
@@ -180,9 +200,10 @@ mod tests {
         let before = draft.clone();
         let mut device = SoftwareDevice::new();
         let media = media();
+        let mut clips = OpenClips::new();
         let snapshot = Snapshot::new(&draft);
-        let first = frame(&snapshot, Micros(10), &mut device, &media).unwrap();
-        let second = frame(&snapshot, Micros(10), &mut device, &media).unwrap();
+        let first = frame(&snapshot, Micros(10), &mut device, &media, &mut clips, 0).unwrap();
+        let second = frame(&snapshot, Micros(10), &mut device, &media, &mut clips, 0).unwrap();
         assert_eq!(first.rgba, second.rgba);
         assert_eq!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(2));
         assert_eq!(draft, before);
@@ -288,7 +309,16 @@ mod tests {
         let before = draft.clone();
         let mut device = SoftwareDevice::new();
         let media = media();
-        let error = frame(&Snapshot::new(&draft), Micros(0), &mut device, &media).unwrap_err();
+        let mut clips = OpenClips::new();
+        let error = frame(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+        )
+        .unwrap_err();
         assert_eq!(error, EvalError::Canvas);
         assert_eq!(draft, before);
     }

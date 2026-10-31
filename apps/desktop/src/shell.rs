@@ -4,8 +4,8 @@
 //! [`Session::apply`]. Play, pause, and seek stay on the shell, so they do
 //! not push an undo step. The picture is `eval::frame` on the software
 //! device. Video segments open through the shell's reader factory. A repeated
-//! playhead reuses the stored picture. This shell does not composite, and it
-//! does not open an audio device.
+//! playhead reuses the stored picture. A new playhead seeks the open file.
+//! This shell does not composite, and it does not open an audio device.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -1023,9 +1023,18 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
 #[cfg(test)]
 mod tests {
     use super::{ExportRequest, LONG_SIDES, Shell, ShellError};
-    use cutlass_codec::ContainerId;
-    use cutlass_container::{Demux, OpenError, ProbeResult};
-    use cutlass_decode::CodecId;
+    use cutlass_codec::{
+        CodecId, ContainerId, FrameSize, Packet as FilePacket, StreamCodec, StreamParams,
+        Timescale, Timestamp,
+    };
+    use cutlass_container::{
+        Demux, Gap, Landing, OpenError, ProbeResult, ReadError, SeekLanding, SeekTo, Stream,
+        TrackId, Trim,
+    };
+    use cutlass_decode::{
+        CodecError, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo,
+        PictureOutput, PixelFormat, Transfer,
+    };
     use cutlass_eval::ReaderFactory;
     use cutlass_model::{
         Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, SegmentId, TimeRange,
@@ -1038,6 +1047,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     static MOVIE_OPENS: AtomicU32 = AtomicU32::new(0);
+    static KEPT_OPENS: AtomicU32 = AtomicU32::new(0);
 
     fn probe_counted(header: &[u8]) -> ProbeResult {
         if header.len() < 8 {
@@ -1057,6 +1067,128 @@ mod tests {
         Err(OpenError::Source {
             message: "counted".to_owned(),
         })
+    }
+
+    struct Kept {
+        streams: Vec<Stream>,
+        packet: FilePacket,
+        cursor: usize,
+        cancelled: bool,
+    }
+
+    fn kept_demux() -> Kept {
+        let scale = Timescale::new(30);
+        let size = FrameSize::try_new(2, 2).expect("size");
+        let timestamp = Timestamp::try_new(Some(0), Some(0), Some(1)).expect("time");
+        let packet =
+            FilePacket::try_new(1, b"unit".to_vec(), timestamp, scale, true).expect("packet");
+        Kept {
+            streams: vec![Stream::new(
+                TrackId::new(1),
+                StreamParams::video(StreamCodec::Known(CodecId::Jpeg), size, Vec::new()),
+                scale,
+                None,
+                Vec::new(),
+                Trim::default(),
+            )],
+            packet,
+            cursor: 0,
+            cancelled: false,
+        }
+    }
+
+    impl Demux for Kept {
+        fn family(&self) -> ContainerId {
+            ContainerId::Isobmff
+        }
+
+        fn streams(&self) -> &[Stream] {
+            &self.streams
+        }
+
+        fn gaps(&self) -> &[Gap] {
+            &[]
+        }
+
+        fn read_packet(&mut self) -> Result<Option<FilePacket>, ReadError> {
+            if self.cancelled {
+                return Err(ReadError::Cancelled);
+            }
+            if self.cursor > 0 {
+                return Ok(None);
+            }
+            self.cursor = 1;
+            Ok(Some(self.packet.clone()))
+        }
+
+        fn seek(&mut self, _to: SeekTo) -> Result<SeekLanding, ReadError> {
+            if self.cancelled {
+                return Err(ReadError::Cancelled);
+            }
+            self.cursor = 0;
+            Ok(SeekLanding {
+                landing: Landing::Packet {
+                    ordinal: 0,
+                    time: 0,
+                    keyframe: true,
+                    preroll: 0,
+                    byte_position: 0,
+                },
+                index_used: false,
+                payload_scans: 0,
+                entries_visited: 0,
+            })
+        }
+
+        fn cancel(&mut self) {
+            self.cancelled = true;
+        }
+
+        fn consumed(&self) -> u64 {
+            0
+        }
+    }
+
+    fn open_kept(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+        KEPT_OPENS.fetch_add(1, Ordering::Relaxed);
+        Ok(Box::new(kept_demux()))
+    }
+
+    struct Flat;
+
+    impl Decoder for Flat {
+        fn codec(&self) -> CodecId {
+            CodecId::Jpeg
+        }
+
+        fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+            let mut bytes = vec![16; 4];
+            bytes.push(128);
+            bytes.push(128);
+            let picture = PictureOutput::cpu(
+                PictureInfo {
+                    width: 2,
+                    height: 2,
+                    pixel: PixelFormat::Yuv420p,
+                    primaries: ColorPrimaries::Bt709,
+                    transfer: Transfer::Bt709,
+                },
+                bytes,
+                packet.pts,
+                packet.timescale,
+            )?;
+            Ok(vec![Output::Picture(picture)])
+        }
+
+        fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+            Ok(Vec::new())
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    fn open_flat(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+        Ok(Box::new(Flat))
     }
 
     fn shell() -> Shell {
@@ -1422,6 +1554,67 @@ mod tests {
         let hidden = desktop.preview_bytes().unwrap();
         assert_eq!(hidden.rgba, vec![0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
+    fn a_new_time_seeks_the_open_movie() {
+        KEPT_OPENS.store(0, Ordering::Relaxed);
+        let temp = Temp::new();
+        let movie = temp.path.join("clip.bin");
+        std::fs::write(&movie, b"12345678").unwrap();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 2;
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "color".into(),
+            is_color_clip: true,
+            solid_color: "0xFF336699".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("color", "color", TimeRange::new(0, 1_000_000)));
+        let mut video = MaterialVideo::new("movie");
+        video.path = movie.display().to_string();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("movie", "movie", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        segment.render_index = 1;
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let mut readers = ReaderFactory::new();
+        readers.register_container(probe_counted, open_kept);
+        readers.decoders_mut().register(CodecId::Jpeg, open_flat);
+        desktop.set_readers(readers);
+
+        let first = desktop.preview_bytes().unwrap();
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 2);
+        assert_ne!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(4));
+        assert!(first.rgba.iter().any(|byte| *byte != 0));
+
+        desktop.seek(Micros(10));
+        let later = desktop.preview_bytes().unwrap();
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 2);
+        assert_eq!(later.rgba, first.rgba);
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track.clone(), TrackAttribute::MUTE)
+            .unwrap();
+        desktop.seek(Micros(20));
+        let muted = desktop.preview_bytes().unwrap();
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(muted.rgba, first.rgba);
+
+        desktop
+            .toggle_attribute(track, TrackAttribute::HIDE)
+            .unwrap();
+        let hidden = desktop.preview_bytes().unwrap();
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(hidden.rgba, vec![0; 16]);
     }
 
     #[test]

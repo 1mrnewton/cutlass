@@ -4,33 +4,86 @@
 //! Identity keeps the decoded size when it fits, centered on the canvas. A
 //! larger picture is scaled down until it fits, then centered. Clip scale,
 //! rotation, flip, and position are not applied.
+//!
+//! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
+//! that file. A failed open is not kept, so the next time tries again.
+
+use std::collections::HashMap;
 
 use cutlass_engine::{ClockKind, ReaderFactory, VideoSource, open_segment};
-use cutlass_model::{Draft, MaterialRef, Micros, TrackAttribute};
+use cutlass_model::{Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
-pub(crate) struct VideoLayer {
+/// Open video files for one draft revision.
+pub struct OpenClips {
+    draft: Option<DraftId>,
+    revision: u64,
+    bound: bool,
+    sources: HashMap<SegmentId, VideoSource>,
+}
+
+impl OpenClips {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            draft: None,
+            revision: 0,
+            bound: false,
+            sources: HashMap::new(),
+        }
+    }
+
+    /// Drops every open file.
+    pub fn clear(&mut self) {
+        self.sources.clear();
+        self.draft = None;
+        self.revision = 0;
+        self.bound = false;
+    }
+
+    pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
+        if self.bound && self.draft.as_ref() == Some(&draft.id) && self.revision == revision {
+            return;
+        }
+        self.sources.clear();
+        self.draft = Some(draft.id.clone());
+        self.revision = revision;
+        self.bound = true;
+    }
+}
+
+impl Default for OpenClips {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct VideoLayer<'a> {
     pub(crate) render_index: i32,
     pub(crate) track_index: usize,
     pub(crate) segment_index: usize,
-    pub(crate) placed: Placed,
+    pub(crate) placed: Placed<'a>,
 }
 
-pub(crate) struct Placed {
-    source: VideoSource,
+pub(crate) struct Placed<'a> {
+    source: &'a VideoSource,
     width: u32,
     height: u32,
 }
 
 /// Visible video segments whose target covers `time`.
-pub(crate) fn video_layers(
+///
+/// A segment already in `clips` is sampled from that file. A failed open is
+/// left out of `clips`.
+pub(crate) fn video_layers<'a>(
     draft: &Draft,
     media: &ReaderFactory,
     width: u32,
     height: u32,
     time: Micros,
-) -> Vec<VideoLayer> {
-    let mut layers = Vec::new();
+    clips: &'a mut OpenClips,
+) -> Vec<VideoLayer<'a>> {
+    let mut chosen = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
         if track.attribute.contains(TrackAttribute::HIDE) {
             continue;
@@ -48,20 +101,36 @@ pub(crate) fn video_layers(
             ) {
                 continue;
             }
-            let Ok(source) = open_segment(media, draft, &segment.id, ClockKind::Export, 1) else {
-                continue;
-            };
-            layers.push(VideoLayer {
-                render_index: segment.render_index,
+            if !clips.sources.contains_key(&segment.id) {
+                let Ok(source) = open_segment(media, draft, &segment.id, ClockKind::Export, 1)
+                else {
+                    continue;
+                };
+                clips.sources.insert(segment.id.clone(), source);
+            }
+            chosen.push((
+                segment.render_index,
                 track_index,
                 segment_index,
-                placed: Placed {
-                    source,
-                    width,
-                    height,
-                },
-            });
+                segment.id.clone(),
+            ));
         }
+    }
+    let mut layers = Vec::with_capacity(chosen.len());
+    for (render_index, track_index, segment_index, id) in chosen {
+        let Some(source) = clips.sources.get(&id) else {
+            continue;
+        };
+        layers.push(VideoLayer {
+            render_index,
+            track_index,
+            segment_index,
+            placed: Placed {
+                source,
+                width,
+                height,
+            },
+        });
     }
     layers
 }
@@ -73,7 +142,7 @@ fn covers(start: i64, duration: i64, time: i64) -> bool {
     time >= start && time < end
 }
 
-impl PictureSource for Placed {
+impl PictureSource for Placed<'_> {
     fn sample(&self, time: Micros) -> Sample {
         let Sample::Ready(picture) = self.source.sample(time) else {
             return Sample::Miss;

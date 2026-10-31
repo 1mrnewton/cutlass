@@ -3,7 +3,8 @@
 //! The editor sends a playhead time. Seeking and scrubbing call
 //! [`cutlass_eval::frame`] for that time and keep the CPU readback. Playback
 //! does not register a container. [`Player`] holds the reader factory `frame`
-//! opens. The engine maps time and caches decoded pictures.
+//! opens and keeps those files open across seeks. The engine maps time and
+//! caches decoded pictures.
 //!
 //! Linux has no output device. Playback stays silent until one exists. That
 //! silence is not a missing build, and it is not a failed open. Pictures

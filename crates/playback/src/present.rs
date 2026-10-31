@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 
-use cutlass_eval::{ReaderFactory, Snapshot};
+use cutlass_eval::{OpenClips, ReaderFactory, Snapshot};
 use cutlass_gpu::Device;
 use cutlass_model::{DraftId, Micros};
 use cutlass_session::Session;
@@ -133,13 +133,14 @@ impl Cache {
     }
 }
 
-/// Composited pictures kept for the preview.
+/// Composited pictures and the open movies behind them.
 ///
-/// The key is the draft id, the revision, the timeline time, and the canvas
-/// size. Four pictures is enough for a short scrub. A new draft or revision
-/// drops what was stored.
+/// The picture key is the draft id, the revision, the timeline time, and the
+/// canvas size. Four pictures is enough for a short scrub. A new time seeks
+/// a movie that is already open. A new draft or revision drops both.
 pub struct FrameCache {
     inner: Cache,
+    clips: OpenClips,
 }
 
 impl FrameCache {
@@ -147,12 +148,14 @@ impl FrameCache {
     pub fn new() -> Self {
         Self {
             inner: Cache::new(),
+            clips: OpenClips::new(),
         }
     }
 
-    /// Drops every stored picture.
+    /// Drops every stored picture and every open file.
     pub fn clear(&mut self) {
         self.inner = Cache::new();
+        self.clips.clear();
     }
 
     /// The picture at `time`. A stored key is returned without evaluating again.
@@ -163,7 +166,14 @@ impl FrameCache {
         time: Micros,
         media: &ReaderFactory,
     ) -> Result<Readback, PresentError<D::Error>> {
-        evaluate(&mut self.inner, session, device, time, media)
+        evaluate(
+            &mut self.inner,
+            &mut self.clips,
+            session,
+            device,
+            time,
+            media,
+        )
     }
 }
 
@@ -175,6 +185,7 @@ impl Default for FrameCache {
 
 pub(crate) fn evaluate<D: Device>(
     cache: &mut Cache,
+    clips: &mut OpenClips,
     session: &Session,
     device: &mut D,
     time: Micros,
@@ -187,7 +198,7 @@ pub(crate) fn evaluate<D: Device>(
     if let Some(hit) = cache.lookup(&draft.id, revision, time, width, height) {
         return Ok(hit);
     }
-    let frame = cutlass_eval::frame(&Snapshot::new(draft), time, device, media)
+    let frame = cutlass_eval::frame(&Snapshot::new(draft), time, device, media, clips, revision)
         .map_err(PresentError::Picture)?;
     let readback = Readback {
         width: frame.extent.width,

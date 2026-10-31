@@ -101,6 +101,11 @@ fn norm8(i: usize, j: usize) -> usize {
     }
 }
 
+/// `LevelScale4x4(qp % 6, row, col) * weight`, equation 8-313 with a scaling list.
+pub(crate) fn level_scale4(qp: i32, row: usize, col: usize, weight: i32) -> i32 {
+    weight * NORM4[(qp.rem_euclid(6)) as usize][norm4(row, col)]
+}
+
 pub fn scale4(coeff: i32, qp: i32, i: usize, j: usize, weight: i32) -> i32 {
     let ls = weight * NORM4[(qp.rem_euclid(6)) as usize][norm4(i, j)];
     let q = qp / 6;

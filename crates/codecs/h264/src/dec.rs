@@ -81,6 +81,8 @@ pub(crate) struct Mb {
     dc16: [bool; 2],
     /// `mb_field_decoding_flag`. The macroblock's samples sit on every other line.
     field_mb: bool,
+    /// SI macroblock. Reconstruction is clause 8.6.2, not intra 8.5.
+    si: bool,
 }
 
 impl Mb {
@@ -123,6 +125,7 @@ impl Mb {
             dc_c: [false; 2],
             dc16: [false; 2],
             field_mb: false,
+            si: false,
         }
     }
 }
@@ -468,7 +471,7 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
                 let id = usize::from(pps.id);
                 sets.pps[id] = Some(pps);
             }
-            1 | 5 => {
+            1 | 2 | 5 => {
                 let mut bits = Bits::new(&nal.rbsp);
                 let header = read_header(&mut bits, &sets, nal.kind == 5, nal.ref_idc != 0)?;
                 let Some(sps) = sets.sps[usize::from(header.sps_id)].as_ref() else {
@@ -500,30 +503,44 @@ fn decode_au<S: Sample>(
     let mut next_mb = 0usize;
     let mut planes = ColourPlanes { active: 0, seen: 0 };
     let mut held_field: Option<Frame<S>> = None;
-    for nal in &nals {
-        match nal.kind {
+    let mut index = 0usize;
+    while index < nals.len() {
+        let kind = nals[index].kind;
+        match kind {
             7 | 8 => {
-                if nal.kind == 7 {
-                    let sps = set::parse_sps(&nal.rbsp)?;
+                if kind == 7 {
+                    let sps = set::parse_sps(&nals[index].rbsp)?;
                     let id = usize::from(sps.id);
                     sets.sps[id] = Some(sps);
                 } else {
-                    let pps = set::parse_pps(&nal.rbsp, &sets.sps)?;
+                    let pps = set::parse_pps(&nals[index].rbsp, &sets.sps)?;
                     let id = usize::from(pps.id);
                     sets.pps[id] = Some(pps);
                 }
+                index += 1;
             }
-            1 | 5 => {
-                let idr = nal.kind == 5;
+            1 | 5 | 2 => {
+                let attached = if kind == 2 {
+                    following_parts(&nals, index)?
+                } else {
+                    Attached {
+                        intra: None,
+                        inter: None,
+                        skip: 0,
+                    }
+                };
+                let idr = kind == 5;
                 let built = decode_slice(
                     sets,
                     poc,
                     dpb,
                     SliceCursor {
-                        nal,
+                        nal: &nals[index],
                         idr,
                         slice_id,
                         packet,
+                        intra: attached.intra,
+                        inter: attached.inter,
                     },
                     AuScratch {
                         picture: &mut picture,
@@ -536,8 +553,15 @@ fn decode_au<S: Sample>(
                 if built {
                     slice_id = slice_id.saturating_add(1);
                 }
+                index += 1 + attached.skip;
             }
-            6 | 9 | 10 | 11 | 12 => {}
+            3 | 4 => {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "partition",
+                });
+            }
+            6 | 9 | 10 | 11 | 12 => index += 1,
             _ => {
                 return Err(CodecError::Unsupported {
                     what: "nal unit type",
@@ -1346,6 +1370,10 @@ pub(crate) struct Slice<'a> {
     origin: usize,
     /// Next address in the same slice group. Empty means the next address is one higher.
     group_next: Vec<usize>,
+    /// `sp_for_switch_flag`. SI reconstruction always switches.
+    sp_switch: bool,
+    /// QSY. Zero when the slice is not SP or SI.
+    qs: i32,
 }
 
 struct SliceCursor<'a> {
@@ -1353,6 +1381,10 @@ struct SliceCursor<'a> {
     idr: bool,
     slice_id: u16,
     packet: &'a Packet,
+    /// Partition B, category 3, when this NAL is partition A.
+    intra: Option<&'a [u8]>,
+    /// Partition C, category 4.
+    inter: Option<&'a [u8]>,
 }
 
 struct AuScratch<'a, S: Sample> {
@@ -1375,6 +1407,8 @@ fn decode_slice<S: Sample>(
         idr,
         slice_id,
         packet,
+        intra,
+        inter,
     } = cursor;
     let AuScratch {
         picture,
@@ -1385,7 +1419,13 @@ fn decode_slice<S: Sample>(
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0)?;
+    let (part_intra, part_inter) = if nal.kind == 2 {
+        read_partitions(&mut bits, sets, &header, (intra, inter))?
+    } else {
+        (None, None)
+    };
     // A redundant picture repeats one that was already decoded. It is not displayed.
+    // Partition ids are checked first, so a mismatched partition is still an error.
     if header.redundant > 0 {
         return Ok(false);
     }
@@ -1468,6 +1508,7 @@ fn decode_slice<S: Sample>(
         return Err(bits.malformed("first macroblock"));
     }
     if slice.cabac {
+        let _ = (part_intra, part_inter);
         let mut cab = Cabac::start(&mut bits, slice.qp, cabac_init(&header))?;
         mb::decode_mbs(
             pic,
@@ -1478,21 +1519,105 @@ fn decode_slice<S: Sample>(
             Entropy::Cabac(&mut cab),
         )?;
     } else {
-        mb::decode_mbs(
-            pic,
-            dpb,
-            &slice,
-            slice_id,
-            next_mb,
-            Entropy::Cavlc(&mut bits),
-        )?;
+        let cavlc = if nal.kind == 2 {
+            Cavlc::parts(bits, part_intra, part_inter)
+        } else {
+            Cavlc::plain(bits)
+        };
+        mb::decode_mbs(pic, dpb, &slice, slice_id, next_mb, Entropy::Cavlc(cavlc))?;
     }
     Ok(true)
 }
 
 pub(crate) enum Entropy<'a, 'b> {
-    Cavlc(&'a mut Bits<'b>),
+    Cavlc(Cavlc<'b>),
     Cabac(&'a mut Cabac<'b>),
+}
+
+/// CAVLC slice bits. A data partition keeps category 2 on `header` and the
+/// residual on partition B or C.
+pub(crate) struct Cavlc<'a> {
+    header: Bits<'a>,
+    intra: Option<Bits<'a>>,
+    inter: Option<Bits<'a>>,
+    partitioned: bool,
+    used_intra: bool,
+    used_inter: bool,
+}
+
+impl<'a> Cavlc<'a> {
+    fn plain(header: Bits<'a>) -> Self {
+        Self {
+            header,
+            intra: None,
+            inter: None,
+            partitioned: false,
+            used_intra: false,
+            used_inter: false,
+        }
+    }
+
+    fn parts(header: Bits<'a>, intra: Option<Bits<'a>>, inter: Option<Bits<'a>>) -> Self {
+        Self {
+            header,
+            intra,
+            inter,
+            partitioned: true,
+            used_intra: false,
+            used_inter: false,
+        }
+    }
+
+    /// Category 3 when `intra`, otherwise category 4. One partition reads `header`.
+    pub(crate) fn residual(&mut self, intra: bool) -> Result<&mut Bits<'a>, CodecError> {
+        if !self.partitioned {
+            return Ok(&mut self.header);
+        }
+        let missing = CodecError::Malformed {
+            at_bit: 0,
+            what: "partition",
+        };
+        if intra {
+            let Some(bits) = self.intra.as_mut() else {
+                return Err(missing);
+            };
+            self.used_intra = true;
+            Ok(bits)
+        } else {
+            let Some(bits) = self.inter.as_mut() else {
+                return Err(missing);
+            };
+            self.used_inter = true;
+            Ok(bits)
+        }
+    }
+
+    pub(crate) fn close(&self) -> Result<(), CodecError> {
+        let unused = self.partitioned
+            && ((self.intra.is_some() && !self.used_intra)
+                || (self.inter.is_some() && !self.used_inter));
+        if unused {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "partition",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'a> std::ops::Deref for Cavlc<'a> {
+    type Target = Bits<'a>;
+
+    fn deref(&self) -> &Bits<'a> {
+        &self.header
+    }
+}
+
+impl<'a> std::ops::DerefMut for Cavlc<'a> {
+    fn deref_mut(&mut self) -> &mut Bits<'a> {
+        &mut self.header
+    }
 }
 
 #[derive(Clone)]
@@ -1541,6 +1666,10 @@ struct Header {
     co: [[[i32; 2]; 32]; 2],
     /// `slice_group_change_cycle` for map types 3, 4, and 5. Otherwise 0.
     group_cycle: u32,
+    /// `sp_for_switch_flag`.
+    sp_switch: bool,
+    /// QSY. Zero when the slice is not SP or SI.
+    qs: i32,
 }
 
 struct Mod {
@@ -1560,9 +1689,8 @@ fn read_header(
         0 => 0,
         1 => 1,
         2 => 2,
-        _ => {
-            return Err(CodecError::Unsupported { what: "slice type" });
-        }
+        3 => 3,
+        _ => 4,
     };
     let pps_id = bits.ue()?;
     if pps_id >= set::MAX_PPS as u32 {
@@ -1620,7 +1748,7 @@ fn read_header(
     }
     let mut num_ref_l0 = usize::from(pps.num_ref_idx_l0);
     let mut num_ref_l1 = usize::from(pps.num_ref_idx_l1);
-    if kind != 2 {
+    if !intra_slice(kind) {
         if bits.bit()? {
             num_ref_l0 = bits.ue()? as usize + 1;
             if kind == 1 {
@@ -1636,7 +1764,7 @@ fn read_header(
         num_ref_l0 = 0;
         num_ref_l1 = 0;
     }
-    let (ref_mod_l0, ref_mod_l1) = if kind != 2 {
+    let (ref_mod_l0, ref_mod_l1) = if !intra_slice(kind) {
         (
             read_list_mod(bits)?,
             if kind == 1 {
@@ -1655,7 +1783,7 @@ fn read_header(
     let mut yo = [[0i32; 32]; 2];
     let mut cw = [[[0i32; 2]; 32]; 2];
     let mut co = [[[0i32; 2]; 32]; 2];
-    if (pps.weighted_pred && kind == 0) || (pps.weighted_bipred == 1 && kind == 1) {
+    if (pps.weighted_pred && syntax_kind(kind) == 0) || (pps.weighted_bipred == 1 && kind == 1) {
         weights = true;
         luma_denom = bits.ue()? as i32;
         chroma_denom = bits.ue()? as i32;
@@ -1731,7 +1859,7 @@ fn read_header(
         }
     }
     let mut cabac_init = 0u8;
-    if pps.cabac && kind != 2 {
+    if pps.cabac && !intra_slice(kind) {
         cabac_init = bits.ue()? as u8;
         if cabac_init > 2 {
             return Err(bits.malformed("cabac_init_idc"));
@@ -1741,6 +1869,17 @@ fn read_header(
     let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
     if !(-qp_bd..=51).contains(&qp) {
         return Err(bits.malformed("slice qp"));
+    }
+    let mut sp_switch = false;
+    let mut qs = 0i32;
+    if matches!(kind, 3 | 4) {
+        if kind == 3 {
+            sp_switch = bits.bit()?;
+        }
+        qs = pps.init_qs + bits.se()?;
+        if !(0..=51).contains(&qs) {
+            return Err(bits.malformed("slice qs"));
+        }
     }
     let mut deblock = 0u8;
     let mut off_a = 0i32;
@@ -1768,7 +1907,7 @@ fn read_header(
         first_mb,
         pps_id: pps_id as u8,
         sps_id: pps.sps_id,
-        kind: kind as u8,
+        kind,
         colour_plane,
         field,
         bottom,
@@ -1799,6 +1938,8 @@ fn read_header(
         cw,
         co,
         group_cycle,
+        sp_switch,
+        qs,
     })
 }
 
@@ -2014,7 +2155,7 @@ fn new_frame<S: Sample>(
         long_term: header.long_term_ref,
         long_idx: if header.long_term_ref { 0 } else { -1 },
         output: true,
-        key: idr || header.kind == 2,
+        key: idr || intra_slice(header.kind),
         pts: packet.pts,
         duration: packet.duration,
         timescale: packet.timescale,
@@ -2109,6 +2250,8 @@ fn make_slice<'a, S: Sample>(
         spatial_direct: header.spatial_direct,
         origin,
         group_next,
+        sp_switch: header.sp_switch,
+        qs: header.qs,
     })
 }
 
@@ -2128,11 +2271,135 @@ fn ref_marks<S: Sample>(dpb: &[Frame<S>], list: &[usize]) -> (Vec<i32>, Vec<bool
 }
 
 fn cabac_init(header: &Header) -> usize {
-    if header.kind == 2 {
+    if intra_slice(header.kind) {
         0
     } else {
         usize::from(header.cabac_init) + 1
     }
+}
+
+/// SP uses P syntax. SI uses I syntax. The raw kind stays on the slice for clause 8.6.
+pub(crate) fn syntax_kind(kind: u8) -> u8 {
+    match kind {
+        3 => 0,
+        4 => 2,
+        other => other,
+    }
+}
+
+pub(crate) fn intra_slice(kind: u8) -> bool {
+    matches!(kind, 2 | 4)
+}
+
+fn partition_limit(sps: &Sps, field: bool) -> u32 {
+    let height = if field {
+        sps.mb_height / 2
+    } else {
+        sps.mb_height
+    };
+    let size = sps.mb_width.saturating_mul(height);
+    let size = if sps.mbaff && !field { size / 2 } else { size };
+    u32::try_from(size).unwrap_or(u32::MAX)
+}
+
+struct Attached<'a> {
+    intra: Option<&'a [u8]>,
+    inter: Option<&'a [u8]>,
+    skip: usize,
+}
+
+fn following_parts(nals: &[Nal], index: usize) -> Result<Attached<'_>, CodecError> {
+    let mut intra = None;
+    let mut inter = None;
+    let mut skip = 0usize;
+    let mut cursor = index + 1;
+    while cursor < nals.len() {
+        match nals[cursor].kind {
+            3 => {
+                if intra.is_some() || inter.is_some() {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "partition",
+                    });
+                }
+                intra = Some(nals[cursor].rbsp.as_slice());
+            }
+            4 => {
+                if inter.is_some() {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "partition",
+                    });
+                }
+                inter = Some(nals[cursor].rbsp.as_slice());
+            }
+            _ => break,
+        }
+        skip += 1;
+        cursor += 1;
+        if intra.is_some() && inter.is_some() {
+            break;
+        }
+    }
+    Ok(Attached { intra, inter, skip })
+}
+
+fn read_partitions<'a>(
+    bits: &mut Bits<'_>,
+    sets: &Sets,
+    header: &Header,
+    parts: (Option<&'a [u8]>, Option<&'a [u8]>),
+) -> Result<(Option<Bits<'a>>, Option<Bits<'a>>), CodecError> {
+    let (cabac, separate, redundant_present, limit) = {
+        let Some(pps) = sets.pps[usize::from(header.pps_id)].as_ref() else {
+            return Err(bits.malformed("missing pps"));
+        };
+        let Some(sps) = sets.sps[usize::from(header.sps_id)].as_ref() else {
+            return Err(bits.malformed("missing sps"));
+        };
+        (
+            pps.cabac,
+            sps.separate,
+            pps.redundant_pic_cnt_present,
+            partition_limit(sps, header.field),
+        )
+    };
+    if cabac {
+        return Err(bits.malformed("data partition"));
+    }
+    let slice_id = bits.ue()?;
+    if slice_id >= limit {
+        return Err(bits.malformed("partition"));
+    }
+    let intra = parts
+        .0
+        .map(|rbsp| open_part(rbsp, slice_id, separate, redundant_present, header))
+        .transpose()?;
+    let inter = parts
+        .1
+        .map(|rbsp| open_part(rbsp, slice_id, separate, redundant_present, header))
+        .transpose()?;
+    Ok((intra, inter))
+}
+
+fn open_part<'a>(
+    rbsp: &'a [u8],
+    slice_id: u32,
+    separate: bool,
+    redundant_present: bool,
+    header: &Header,
+) -> Result<Bits<'a>, CodecError> {
+    let mut bits = Bits::new(rbsp);
+    if bits.ue()? != slice_id {
+        return Err(bits.malformed("partition"));
+    }
+    if separate && bits.u(2)? as u8 != header.colour_plane {
+        return Err(bits.malformed("partition"));
+    }
+    if redundant_present && bits.ue()? != header.redundant {
+        return Err(bits.malformed("partition"));
+    }
+    Ok(bits)
 }
 
 fn clip_ref(value: i32) -> i16 {
@@ -2386,6 +2653,8 @@ mod tests {
             cw: [[[0; 2]; 32]; 2],
             co: [[[0; 2]; 32]; 2],
             group_cycle: 0,
+            sp_switch: false,
+            qs: 0,
         }
     }
 

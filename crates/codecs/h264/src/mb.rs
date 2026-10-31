@@ -78,10 +78,10 @@ pub(crate) fn reference_lists<S: Sample>(
         .map(|(index, _)| index)
         .collect();
     longs.sort_by_key(|&index| dpb[index].long_idx);
-    if header.kind == 2 {
+    if super::intra_slice(header.kind) {
         return Ok((Vec::new(), Vec::new()));
     }
-    if header.kind == 0 {
+    if super::syntax_kind(header.kind) == 0 {
         shorts.sort_by_key(|&index| {
             std::cmp::Reverse(pic_num(&dpb[index], header.frame_num, max_fn))
         });
@@ -391,7 +391,7 @@ pub(crate) fn decode_mbs<S: Sample>(
     let mut decoded = *next_mb;
     let mut qp = slice.qp;
     while addr < total {
-        if slice.kind != 2 {
+        if !super::intra_slice(slice.kind) {
             match &mut entropy {
                 Entropy::Cavlc(bits) => {
                     let run = bits.ue()? as usize;
@@ -409,7 +409,14 @@ pub(crate) fn decode_mbs<S: Sample>(
                     }
                 }
                 Entropy::Cabac(cab) => {
-                    let skipped = cabac_skip(pic, cab, slice.kind, slice_id, addr, mbaff)?;
+                    let skipped = cabac_skip(
+                        pic,
+                        cab,
+                        super::syntax_kind(slice.kind),
+                        slice_id,
+                        addr,
+                        mbaff,
+                    )?;
                     if skipped {
                         fresh(pic, addr, mbaff, !next.is_empty())?;
                         let flag = cabac_skip_field(pic, cab, slice_id, addr, mbaff)?;
@@ -448,6 +455,9 @@ pub(crate) fn decode_mbs<S: Sample>(
         if end {
             break;
         }
+    }
+    if let Entropy::Cavlc(bits) = &entropy {
+        bits.close()?;
     }
     *next_mb = decoded;
     Ok(())
@@ -541,7 +551,7 @@ fn skip_mb<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    if slice.kind == 0 {
+    if super::syntax_kind(slice.kind) == 0 {
         let mv = p_skip_mv(pic, mx, my, slice_id);
         for part in 0..4 {
             mb.ref0[part] = 0;
@@ -550,6 +560,27 @@ fn skip_mb<S: Sample>(
             mb.mv0[block] = mv;
         }
         predict_inter(pic, dpb, slice, mx, my, &mb)?;
+        if slice.kind == 3 {
+            let luma = [[0i32; 16]; 16];
+            let chroma = ChromaResidual {
+                cb_dc: [0; 8],
+                cr_dc: [0; 8],
+                cb_ac: [[0; 16]; 8],
+                cr_ac: [[0; 16]; 8],
+            };
+            write_sp(
+                pic,
+                slice,
+                Place { mx, my },
+                &mb,
+                SpSamples {
+                    luma: &luma,
+                    chroma: &chroma,
+                    intra: false,
+                    qp,
+                },
+            )?;
+        }
     } else {
         direct_16(pic, dpb, slice, mx, my, &mut mb)?;
         predict_inter(pic, dpb, slice, mx, my, &mb)?;
@@ -600,7 +631,11 @@ fn one_mb<S: Sample>(
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
     pic.mb[slot] = mb.clone();
-    let (intra, spec) = mb_type(pic, entropy, slice.kind, mx, my, slice_id)?;
+    let (intra, mut spec) = mb_type(pic, entropy, slice.kind, mx, my, slice_id)?;
+    if spec == SI_MB {
+        mb.si = true;
+        spec = 0;
+    }
     mb.intra = intra;
     mb.direct16 = !intra && slice.kind == 1 && spec == 0;
     if intra && spec == 25 {
@@ -796,6 +831,9 @@ fn above_my<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
     my as i32 - if field { 2 } else { 1 }
 }
 
+/// CAVLC `mb_type` 0 in an SI slice. It is not an intra spec.
+const SI_MB: u32 = 32;
+
 fn mb_type<S: Sample>(
     pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
@@ -807,10 +845,19 @@ fn mb_type<S: Sample>(
     match entropy {
         Entropy::Cavlc(bits) => {
             let value = bits.ue()?;
+            if kind == 4 {
+                if value == 0 {
+                    return Ok((true, SI_MB));
+                }
+                if value > 26 {
+                    return Err(bits.malformed("intra mb type"));
+                }
+                return Ok((true, value - 1));
+            }
             if kind == 2 {
                 return Ok((true, value));
             }
-            let intra_base = if kind == 0 { 5 } else { 23 };
+            let intra_base = if super::syntax_kind(kind) == 0 { 5 } else { 23 };
             if value >= intra_base {
                 Ok((true, value - intra_base))
             } else {
@@ -856,7 +903,7 @@ fn cabac_mb_type<S: Sample>(
         bits = (bits << 1) + u32::from(cab.decision(27 + 5)?);
         return Ok((false, bits - 4));
     }
-    if kind == 0 {
+    if super::syntax_kind(kind) == 0 {
         if cab.decision(14)? == 0 {
             if cab.decision(15)? == 0 {
                 return Ok((false, 3 * u32::from(cab.decision(16)?)));
@@ -864,6 +911,12 @@ fn cabac_mb_type<S: Sample>(
             return Ok((false, 2 - u32::from(cab.decision(17)?)));
         }
         return Ok((true, cabac_intra_type(pic, cab, 17, false, mx, my, slice)?));
+    }
+    if kind == 4 {
+        if cab.decision(0)? == 0 {
+            return Ok((true, SI_MB));
+        }
+        return Ok((true, cabac_intra_type(pic, cab, 3, true, mx, my, slice)?));
     }
     Ok((true, cabac_intra_type(pic, cab, 3, true, mx, my, slice)?))
 }
@@ -1045,6 +1098,10 @@ fn decode_intra<S: Sample>(
     } else {
         read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?
     };
+    if mb.si {
+        recon_si(pic, slice, Place { mx, my }, mb, &ac, &chroma_res, *qp)?;
+        return Ok(());
+    }
     recon_intra(
         pic,
         slice,
@@ -1491,8 +1548,8 @@ fn read_block<S: Sample>(
             } else {
                 nc_of(pic, Place { mx, my }, Cell { bx, by }, mb, plane)
             };
-            let coeffs = cavlc::residual(bits, nc, max)?;
-            for (index, value) in coeffs.iter().enumerate() {
+            let decoded = cavlc::residual(bits.residual(mb.intra)?, nc, max)?;
+            for (index, value) in decoded.iter().enumerate() {
                 out[index] = *value;
             }
             out
@@ -1561,7 +1618,7 @@ fn read8<S: Sample>(
                 let x = bx + (i4 & 1);
                 let y = by + (i4 >> 1);
                 let nc = nc_of(pic, Place { mx, my }, Cell { bx: x, by: y }, mb, plane);
-                let block = cavlc::residual(bits, nc, 16)?;
+                let block = cavlc::residual(bits.residual(mb.intra)?, nc, 16)?;
                 let count = block.iter().filter(|value| **value != 0).count() as u8;
                 store_nnz(pic, mb, plane, x, y, count);
                 for (index, value) in block.iter().enumerate() {
@@ -4391,6 +4448,309 @@ fn scan_of(bx: usize, by: usize) -> usize {
     }
 }
 
+struct SpSamples<'a> {
+    luma: &'a [[i32; 16]; 16],
+    chroma: &'a ChromaResidual,
+    intra: bool,
+    qp: i32,
+}
+
+struct SpCoded {
+    qp: i32,
+    luma_cbp: u8,
+    chroma_cbp: u8,
+}
+
+fn sp_ok<S: Sample>(transform8: bool, chroma: u8) -> Result<(), CodecError> {
+    if transform8 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "sp transform",
+        });
+    }
+    if chroma != 1 {
+        return Err(CodecError::Unsupported { what: "sp chroma" });
+    }
+    if S::BITS != 8 {
+        return Err(CodecError::Unsupported { what: "sp" });
+    }
+    Ok(())
+}
+
+fn sp_inter<S: Sample>(
+    pic: &mut Frame<S>,
+    entropy: &mut Entropy<'_, '_>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &mut Mb,
+    coded: SpCoded,
+) -> Result<(), CodecError> {
+    sp_ok::<S>(mb.transform8, slice.sps.chroma)?;
+    let Place { mx, my } = at;
+    let mut luma = [[0i32; 16]; 16];
+    for (i, slot) in luma.iter_mut().enumerate() {
+        let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
+        if coded.luma_cbp & bit != 0 {
+            *slot = read_block(
+                pic,
+                entropy,
+                (2, 16, false),
+                Place { mx, my },
+                Cell {
+                    bx: blk_x(i),
+                    by: blk_y(i),
+                },
+                mb,
+                0,
+            )?;
+        }
+    }
+    let chroma = read_chroma(pic, entropy, mx, my, coded.chroma_cbp, mb)?;
+    write_sp(
+        pic,
+        slice,
+        at,
+        mb,
+        SpSamples {
+            luma: &luma,
+            chroma: &chroma,
+            intra: false,
+            qp: coded.qp,
+        },
+    )
+}
+
+fn write_sp<S: Sample>(
+    pic: &mut Frame<S>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &Mb,
+    samples: SpSamples<'_>,
+) -> Result<(), CodecError> {
+    sp_ok::<S>(false, slice.sps.chroma)?;
+    let Place { mx, my } = at;
+    let span = luma_span(my, mb.field_mb);
+    let quant = crate::sp::SpQuant {
+        from: samples.qp,
+        to: slice.qs,
+        switching: samples.intra || slice.sp_switch,
+    };
+    let list = if samples.intra { 0 } else { 3 };
+    for (i, levels) in samples.luma.iter().enumerate() {
+        let bx = blk_x(i);
+        let by = blk_y(i);
+        let x = mx * 16 + bx * 4;
+        let y = span.at(by * 4);
+        let pred = gather4(&pic.y, pic.w, x, y, span.step);
+        let block = crate::sp::luma_block(&pred, levels, quant, &slice.pps.weight4[list]);
+        scatter4(&mut pic.y, pic.w, x, y, span.step, &block);
+    }
+    let planes = [
+        gather_chroma(pic, mx, my, mb.field_mb, true),
+        gather_chroma(pic, mx, my, mb.field_mb, false),
+    ];
+    paint_chroma(
+        pic,
+        slice,
+        at,
+        SpChroma {
+            planes: &planes,
+            residual: samples.chroma,
+            quant,
+            intra: samples.intra,
+            field: mb.field_mb,
+        },
+    );
+    Ok(())
+}
+
+fn recon_si<S: Sample>(
+    pic: &mut Frame<S>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &Mb,
+    ac: &[[i32; 16]; 16],
+    chroma: &ChromaResidual,
+    qp: i32,
+) -> Result<(), CodecError> {
+    sp_ok::<S>(mb.transform8 || mb.intra16, slice.sps.chroma)?;
+    let Place { mx, my } = at;
+    let span = luma_span(my, mb.field_mb);
+    let quant = crate::sp::SpQuant {
+        from: qp,
+        to: slice.qs,
+        switching: true,
+    };
+    for (i, levels) in ac.iter().enumerate() {
+        let cell = Cell {
+            bx: blk_x(i),
+            by: blk_y(i),
+        };
+        let predicted = pred4_block(pic, at, cell, mb, slice.pps.constrained_intra, 0);
+        let mut pred = [0i32; 16];
+        for (slot, sample) in pred.iter_mut().zip(predicted) {
+            *slot = sample.into();
+        }
+        let block = crate::sp::luma_block(&pred, levels, quant, &slice.pps.weight4[0]);
+        scatter4(
+            &mut pic.y,
+            pic.w,
+            mx * 16 + cell.bx * 4,
+            span.at(cell.by * 4),
+            span.step,
+            &block,
+        );
+    }
+    let planes = [
+        si_chroma_pred(pic, slice, at, mb, true),
+        si_chroma_pred(pic, slice, at, mb, false),
+    ];
+    paint_chroma(
+        pic,
+        slice,
+        at,
+        SpChroma {
+            planes: &planes,
+            residual: chroma,
+            quant,
+            intra: true,
+            field: mb.field_mb,
+        },
+    );
+    Ok(())
+}
+
+struct SpChroma<'a> {
+    planes: &'a [[i32; 64]; 2],
+    residual: &'a ChromaResidual,
+    quant: crate::sp::SpQuant,
+    intra: bool,
+    field: bool,
+}
+
+fn paint_chroma<S: Sample>(pic: &mut Frame<S>, slice: &Slice<'_>, at: Place, job: SpChroma<'_>) {
+    let Place { mx, my } = at;
+    let span = chroma_span(my, 8, job.field);
+    let stride = pic.chroma_stride();
+    let base = if job.intra { 1 } else { 4 };
+    let offsets = [
+        slice.pps.chroma_qp_offset,
+        slice.pps.second_chroma_qp_offset,
+    ];
+    let dc = [&job.residual.cb_dc, &job.residual.cr_dc];
+    let ac = [&job.residual.cb_ac, &job.residual.cr_ac];
+    for (index, plane) in [&mut pic.u, &mut pic.v].into_iter().enumerate() {
+        let (from, _) = recon::chroma_qps(job.quant.from, offsets[index], S::QP_BD);
+        let (to, _) = recon::chroma_qps(job.quant.to, offsets[index], S::QP_BD);
+        let mut levels = [0i32; 4];
+        levels.copy_from_slice(&dc[index][..4]);
+        let mut blocks = [[0i32; 16]; 4];
+        blocks.copy_from_slice(&ac[index][..4]);
+        let painted = crate::sp::chroma_plane(
+            &job.planes[index],
+            &blocks,
+            &levels,
+            crate::sp::SpQuant {
+                from,
+                to,
+                switching: job.quant.switching,
+            },
+            &slice.pps.weight4[base + index],
+        );
+        scatter8(plane, stride, mx * 8, span.y, span.step, &painted);
+    }
+}
+
+fn si_chroma_pred<S: Sample>(
+    pic: &Frame<S>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &Mb,
+    cb: bool,
+) -> [i32; 64] {
+    let Place { mx, my } = at;
+    let (above, left, above_ok, left_ok) =
+        edge_chroma(pic, mx, my, cb, mb.slice, slice.pps.constrained_intra, 8);
+    let span = chroma_span(my, 8, mb.field_mb);
+    let plane = if cb { &pic.u } else { &pic.v };
+    let corner = corner_sample(
+        plane,
+        pic.chroma_stride(),
+        pic.chroma_height(),
+        mx as i32 * 8 - 1,
+        span.y as i32 - span.step as i32,
+        above_ok && left_ok,
+    );
+    let pred = recon::pred_chroma(mb.chroma_mode, &above, &left, above_ok, left_ok, corner);
+    let mut out = [0i32; 64];
+    for (slot, sample) in out.iter_mut().zip(pred) {
+        *slot = sample.into();
+    }
+    out
+}
+
+fn gather_chroma<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    field: bool,
+    cb: bool,
+) -> [i32; 64] {
+    let span = chroma_span(my, 8, field);
+    let plane = if cb { &pic.u } else { &pic.v };
+    gather8(plane, pic.chroma_stride(), mx * 8, span.y, span.step)
+}
+
+fn gather4<S: Sample>(plane: &[S], stride: usize, x: usize, y: usize, step: usize) -> [i32; 16] {
+    let mut out = [0i32; 16];
+    for row in 0..4 {
+        for col in 0..4 {
+            out[row * 4 + col] = plane[(y + row * step) * stride + x + col].into();
+        }
+    }
+    out
+}
+
+fn gather8<S: Sample>(plane: &[S], stride: usize, x: usize, y: usize, step: usize) -> [i32; 64] {
+    let mut out = [0i32; 64];
+    for row in 0..8 {
+        for col in 0..8 {
+            out[row * 8 + col] = plane[(y + row * step) * stride + x + col].into();
+        }
+    }
+    out
+}
+
+fn scatter4<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x: usize,
+    y: usize,
+    step: usize,
+    src: &[i32; 16],
+) {
+    for row in 0..4 {
+        for col in 0..4 {
+            plane[(y + row * step) * stride + x + col] = S::clip(src[row * 4 + col]);
+        }
+    }
+}
+
+fn scatter8<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x: usize,
+    y: usize,
+    step: usize,
+    src: &[i32; 64],
+) {
+    for row in 0..8 {
+        for col in 0..8 {
+            plane[(y + row * step) * stride + x + col] = S::clip(src[row * 8 + col]);
+        }
+    }
+}
+
 fn pix<S: Sample>(plane: &[S], stride: usize, height: usize, x: i32, y: i32) -> S {
     if stride == 0 || height == 0 {
         return S::mid();
@@ -4441,6 +4801,20 @@ fn decode_inter<S: Sample>(
     }
     mb.qpd = delta as i8;
     predict_inter(pic, dpb, slice, mx, my, mb)?;
+    if slice.kind == 3 {
+        return sp_inter(
+            pic,
+            entropy,
+            slice,
+            Place { mx, my },
+            mb,
+            SpCoded {
+                qp: *qp,
+                luma_cbp,
+                chroma_cbp,
+            },
+        );
+    }
     if mb.transform8 {
         for i in 0..4 {
             if luma_cbp & (1 << i) != 0 {
@@ -4518,7 +4892,7 @@ fn read_parts<S: Sample>(
     spec: u32,
     mb: &mut Mb,
 ) -> Result<(), CodecError> {
-    let parts = partitions(slice.kind, spec);
+    let parts = partitions(super::syntax_kind(slice.kind), spec);
     // Clause 7.3.5.1: every list 0 value, then every list 1 value.
     for part in &parts {
         if part.l0 && slice.num_ref_l0 > 1 {
@@ -5068,7 +5442,7 @@ fn read_sub<S: Sample>(
         *slot = match entropy {
             Entropy::Cavlc(bits) => bits.ue()?,
             Entropy::Cabac(cab) => {
-                if slice.kind == 0 {
+                if super::syntax_kind(slice.kind) == 0 {
                     if cab.decision(21)? == 1 {
                         0
                     } else if cab.decision(22)? == 0 {
@@ -5105,7 +5479,7 @@ fn read_sub<S: Sample>(
             }
             continue;
         }
-        let (_, _, w, h) = sub_shape(slice.kind, kind);
+        let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
         if w < 8 || h < 8 {
             mb.partition8 = false;
         }
@@ -5117,7 +5491,7 @@ fn read_sub<S: Sample>(
         if direct(kind) {
             continue;
         }
-        let (l0, _) = sub_lists(slice.kind, kind);
+        let (l0, _) = sub_lists(super::syntax_kind(slice.kind), kind);
         if !l0 {
             continue;
         }
@@ -5136,7 +5510,7 @@ fn read_sub<S: Sample>(
         if direct(kind) {
             continue;
         }
-        let (_, l1) = sub_lists(slice.kind, kind);
+        let (_, l1) = sub_lists(super::syntax_kind(slice.kind), kind);
         if !l1 {
             continue;
         }
@@ -5162,7 +5536,7 @@ fn read_sub<S: Sample>(
         if direct(kind) {
             continue;
         }
-        let (l0, _, _, _) = sub_shape(slice.kind, kind);
+        let (l0, _, _, _) = sub_shape(super::syntax_kind(slice.kind), kind);
         if l0 {
             continue;
         }
@@ -5175,7 +5549,7 @@ fn read_sub<S: Sample>(
             if direct(kind) {
                 continue;
             }
-            let (l0, l1, w, h) = sub_shape(slice.kind, kind);
+            let (l0, l1, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
             if (list == 0 && !l0) || (list == 1 && !l1) {
                 continue;
             }
@@ -5994,6 +6368,7 @@ fn read_pcm<S: Sample>(
     let separate = pic.separate_plane;
     match entropy {
         Entropy::Cavlc(bits) => {
+            let bits = bits.residual(true)?;
             while bits.pos() % 8 != 0 {
                 if bits.bit()? {
                     return Err(bits.malformed("pcm align"));
@@ -6039,7 +6414,11 @@ fn read_pcm<S: Sample>(
                 at_bit: 0,
                 what: "pcm",
             })?;
-            **cab = Cabac::open(rest, slice.qp, if slice.kind == 2 { 0 } else { 1 })?;
+            **cab = Cabac::open(
+                rest,
+                slice.qp,
+                if super::intra_slice(slice.kind) { 0 } else { 1 },
+            )?;
         }
     }
     Ok(())

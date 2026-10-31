@@ -46,7 +46,7 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | --- | --- | --- | --- | --- |
 | Progressive 8-bit 4:2:0 | Clauses 7–8 | Yes | Yes | Done |
 | Baseline, Main, High (`profile_idc` 66, 77, 100) | Annex A | Yes | Yes | Done |
-| Extended (`88`) without data partitions | Annex A | Yes | The profile id is accepted. Partition NALs still fail. | Yet |
+| Extended (`88`) | Annex A | Yes | Profile 88, including a data-partitioned slice | Done |
 | 10-bit 4:2:0 | High 10. `bit_depth_luma_minus8` is 2 | Yes | Pictures match | Done |
 | Bit depths 9, 12, and 14 | `bit_depth_luma_minus8` 1, 4, and 6 | Yes, at 4:2:0, 4:2:2, and 4:4:4 | Pictures match | Done |
 | Bit depths 11 and 13 | `bit_depth_luma_minus8` 3 and 5 | Refused (`Unimplemented luma bit depth`) | PCM and DC prediction follow the recommendation | Done. The recommendation is the oracle. |
@@ -55,7 +55,7 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | QP-prime transform bypass (lossless) | Clause 8.5 | Yes | Pictures match. Clause 8.5.15 runs for every profile. | Done |
 | CAVLC and CABAC | Clause 9 | Yes | Yes | Done |
 | I, P, and B, skip, direct, partitions through 4×4 | Clause 7.3.5 / 7.4.5 | Yes | Yes | Done |
-| SP and SI | Clause 7.3.5 | Parsed | Refused (`slice type`) | Yet |
+| SP and SI | Clause 8.6 | I macroblocks. Clause 8.6 is not run. | Pictures match. SP P and the SI macroblock follow clause 8.6. | Done |
 | 4×4 and 8×8 transform, custom scaling lists | Clause 8.5 | Yes | Yes | Done |
 | Intra 4×4, 8×8, 16×16, I_PCM | Clause 8.3 | Yes | Yes | Done |
 | Inter: quarter-sample luma, eighth-sample chroma, weighted prediction | Clause 8.4 | Yes | Yes | Done |
@@ -68,7 +68,7 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | `frame_num` gaps | Clause 8.2.5.2 | Yes | Yes, when the SPS allows them | Done |
 | Redundant pictures | Clause 7.4.3 | Yes | Discarded | Done |
 | FMO / slice groups | Clause 8.2.2 | Compiled out (`FMO` is 0). The recommendation still has it. | Pictures match | Done |
-| Data partitions (NAL types 2, 3, 4) | Clause 7.3.2.9 | Yes | Refused | Yet |
+| Data partitions (NAL types 2, 3, and 4) | Clause 7.3.2.9 | 8.1.1 refuses | Pictures follow the recommendation | Done |
 | Interlaced, PAFF, MBAFF | Clauses 7–8, field pictures | Yes | Pictures match | Done |
 | SVC, MVC, 3D (NAL types 14, 15, 20, 21) | Annexes G, H, I | Separate decoders | Refused | Yet, after the single layer matches |
 | Annex B and length prefixes of 1, 2, and 4 bytes | Annex B and 14496-15 | Yes | Yes | Done |
@@ -87,10 +87,10 @@ The 720p numbers are the recorded `against_ffmpeg` run: median of 3 after one wa
 ## Implemented
 
 - One access unit in, pictures in output order out. Annex B, or a 1-, 2-, or 4-byte length prefix. `avcC` in `CodecParams.extra`.
-- NAL types 1 and 5 are slices. 7 and 8 are parameter sets. 6, 9, 10, 11, and 12 are skipped. Types 2, 3, 4, 14, 15, 20, and 21 fail at the NAL header. Any other type fails while the access unit is walked.
+- NAL types 1, 2, and 5 are slices. 3 and 4 complete a data-partitioned slice. 7 and 8 are parameter sets. 6, 9, 10, 11, and 12 are skipped. Types 14, 15, 20, and 21 fail at the NAL header. Any other type fails while the access unit is walked.
 - SPS and PPS, including High-profile fields, scaling lists, and frame crop. `level_idc` is not stored.
-- Slice header for I, P, and B, including list modification, weights, and decoded-reference marking.
-- Macroblocks: I 4×4, I 8×8, I 16×16, I_PCM, P partitions and P skip, B partitions, B skip, B direct 16×16 and 8×8, spatial and temporal direct.
+- Slice header for I, P, B, SP, and SI, including list modification, weights, decoded-reference marking, and `slice_qs_delta`.
+- Macroblocks: I 4×4, I 8×8, I 16×16, I_PCM, P partitions and P skip, B partitions, B skip, B direct 16×16 and 8×8, spatial and temporal direct. An SP P macroblock and an SI macroblock are reconstructed by clause 8.6.
 - Reconstruction: inverse 4×4 and 8×8, intra and inter prediction, weighted prediction, deblock, then crop to the visible size. 4:2:0, 4:2:2, and 4:4:4 samples are 8 through 14 bits. Field pictures weave into a frame. An MBAFF pair is two frame macroblocks or a top field and a bottom field. Slice groups use the map in clause 8.2.2. One group stays raster order.
 - DPB output order, POC 0, 1, and 2, gaps, long-term marks, redundant pictures dropped.
 - A bad packet returns an error and leaves a later good IDR decodable.
@@ -109,7 +109,7 @@ The oracle command is `ffmpeg -hwaccel none -threads 1`. That is one software th
 5. **Separate colour planes, then lossless bypass.** Done. A 16×16 High 4:4:4 Predictive picture with `separate_colour_plane_flag` is three monochrome slices. Plane 0 is a flat I_16×16. Planes 1 and 2 are I_PCM. A following P picture skips each plane and copies that plane of the reference. FFmpeg refuses the flag, so the recommendation is the oracle. A picture that omits a plane is an error. `colour_plane_id` 3 is an error. `chroma_format_idc` 0 stays refused. QP′Y-zero transform bypass matches `ffmpeg -hwaccel none -threads 1` on hand-built 4:2:0, 4:2:2, and 4:4:4 streams at QP′Y 0, including a profile 244 vertical 16×32 picture, and on a stream whose flag is set while QP′Y is 26. Clause 8.5.15 runs for every profile. A libx264 `-qp 0` 64×64 4:4:4 stream matches FFmpeg. The 4:2:0 pictures from steps 1–3 still match. No new 4K timing.
 6. **Interlaced.** Done. Complementary fields weave even lines from the top field and odd lines from the bottom. A PAFF frame picture stays progressive. An MBAFF pair is two frame macroblocks or a top field and a bottom field. A 16×32 hand-built CAVLC stream matches `ffmpeg -hwaccel none -threads 1`: two frame I_16×16 macroblocks, and a field pair whose top is I_16×16 and whose bottom is I_PCM. libx264 MBAFF 64×64 streams match FFmpeg for CAVLC and CABAC I pictures, a predicted picture, all-field stripe pairs, and a picture that mixes frame pairs and field pairs. Field macroblocks use the field coefficient contexts. `direct_8x8_inference_flag` is 1 when the picture is interlaced. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
 7. **FMO.** Done. Slice groups follow clause 8.2.2. The next macroblock is the next address in the same group. Hand-built 8-bit 4:2:0 CAVLC pictures match the recommendation: interleaved runs, a dispersed map, a foreground rectangle, box-out, reverse raster, a wipe, and an explicit map. An interlaced frame repeats each map unit on both rows. An adaptive pair shares one map unit. FFmpeg’s build leaves FMO out, so the recommendation is the oracle. A repeated macroblock is an error, and a later picture still decodes. A map type past 6, more than eight groups, and an explicit id past the group count are errors. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
-8. **Data partitions, SP, and SI.** NAL types 2, 3, and 4, and slice types SP and SI.
+8. **Data partitions, SP, and SI.** Done. NAL type 2 carries the slice header, `slice_id`, and the category-2 syntax. Type 3 carries intra residual and PCM. Type 4 carries inter residual. A 16×16 Extended CAVLC picture follows the recommendation: I_PCM, a flat I_16×16, a P skip of that picture, and a P macroblock whose only luma DC coefficient is +1. At QP 26 with deblock off, that 4×4 is 131 and the rest of the picture stays 128. FFmpeg 8.1.1 does not decode data partitions. The tree under `../pub-packages/ffmpeg` still has that decoder, and this machine has no built copy of it, so the recommendation is the oracle. An orphan partition, a partition out of order, a mismatched `slice_id`, an unused partition, CABAC with data partitioning, and a QS outside 0..=51 are errors. A later IDR still decodes. An SP P skip at QSY 0 stays 128. At QSY 26 the luma becomes 127 and the chroma stays 128. The same macroblock with a +1 luma DC coefficient is 131 when `sp_for_switch_flag` is 0 and 128 when it is 1. An SI macroblock with no residual is luma 127 and chroma 128. I_PCM inside SP and inside SI matches `ffmpeg -hwaccel none -threads 1`. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
 9. **Annex D and the V16 SEI that changes output.** Film grain and picture timing that change the displayed picture or the output time. Other SEI is parsed and leaves the samples alone.
 10. **Annex E.** Sample aspect and timing on the picture. The remaining colour, transfer, and matrix idc values.
 11. **Annex A.** A picture the declared level allows is decoded, including 4096×2160 at level 5.2 and the level 6 sizes. A picture past every defined level is refused.

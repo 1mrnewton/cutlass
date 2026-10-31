@@ -95,6 +95,8 @@ pub struct Pps {
     pub weighted_pred: bool,
     pub weighted_bipred: u8,
     pub init_qp: i32,
+    /// `26 + pic_init_qs_minus26`. QSY starts here.
+    pub init_qs: i32,
     pub chroma_qp_offset: i32,
     pub second_chroma_qp_offset: i32,
     pub deblocking_control: bool,
@@ -466,7 +468,11 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
         return Err(bits.malformed("init qp"));
     }
     let init_qp = init_minus + 26;
-    let _ = bits.se()?;
+    let qs_minus = bits.se()?;
+    if !(-26..=25).contains(&qs_minus) {
+        return Err(bits.malformed("init qs"));
+    }
+    let init_qs = qs_minus + 26;
     let chroma_qp_offset = bits.se()?;
     let deblocking_control = bits.bit()?;
     let constrained_intra = bits.bit()?;
@@ -495,6 +501,7 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
         weighted_pred,
         weighted_bipred,
         init_qp,
+        init_qs,
         chroma_qp_offset,
         second_chroma_qp_offset: second,
         deblocking_control,

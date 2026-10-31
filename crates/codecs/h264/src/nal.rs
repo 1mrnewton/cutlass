@@ -49,7 +49,7 @@ fn nal_from_ebsp(ebsp: &[u8]) -> Result<Nal, CodecError> {
         });
     }
     let kind = header & 0x1f;
-    if matches!(kind, 2 | 3 | 4 | 14 | 15 | 20 | 21) {
+    if matches!(kind, 14 | 15 | 20 | 21) {
         return Err(CodecError::Unsupported {
             what: "nal unit type",
         });

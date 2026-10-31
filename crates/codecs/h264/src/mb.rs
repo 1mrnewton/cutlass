@@ -835,7 +835,7 @@ fn decode_intra<S: Sample>(
         },
         *qp,
     );
-    if slice.sps.chroma == 3 {
+    if slice.sps.chroma == 3 && !slice.sps.separate {
         recon_444(
             pic,
             entropy,
@@ -1331,10 +1331,11 @@ fn read8<S: Sample>(
             }
         }
         Entropy::Cabac(cab) => {
-            let cat = block_cat(5, plane, pic.chroma() == 3);
+            let cat = block_cat(5, plane, pic.chroma() == 3 && !pic.separate_plane);
             // 4:2:0 and 4:2:2 omit the luma 8×8 coded-block flag; the CBP bit
             // is that flag. 4:4:4 reads it for luma and for both chroma planes.
-            if plane != 0 || pic.chroma() == 3 {
+            // Separate colour planes are monochrome, so that flag stays absent.
+            if plane != 0 || (pic.chroma() == 3 && !pic.separate_plane) {
                 let inc = cbf_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane, false);
                 let Some(base) = CBF_BASE.get(cat).copied() else {
                     return Err(CodecError::Malformed {
@@ -2837,6 +2838,7 @@ mod intra8 {
             transfer: Transfer::Bt709,
             matrix: ColorMatrix::Bt709,
             nonexisting: false,
+            separate_plane: false,
             max_ref: 1,
             reorder: 0,
             adaptive: false,
@@ -4126,7 +4128,7 @@ fn decode_inter<S: Sample>(
             }
         }
     }
-    if slice.sps.chroma == 3 {
+    if slice.sps.chroma == 3 && !slice.sps.separate {
         recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
     } else {
         let chroma_res = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
@@ -5230,6 +5232,7 @@ fn mc_block<S: Sample>(
         predict_luma(&mut luma1, frame, x, y, w, h, mv1);
     }
     let chroma = pic.chroma();
+    let separate = pic.separate_plane;
     let (cw, ch) = match chroma {
         3 => (w, h),
         2 => (w / 2, h),
@@ -5239,11 +5242,11 @@ fn mc_block<S: Sample>(
     let mut v0 = [S::default(); 256];
     let mut u1 = [S::default(); 256];
     let mut v1 = [S::default(); 256];
-    if r0 >= 0 && cw > 0 && ch > 0 {
+    if !separate && r0 >= 0 && cw > 0 && ch > 0 {
         let frame = reference_frame(dpb, slice, 0, r0)?;
         predict_chroma((&mut u0, &mut v0), frame, (x, y), (cw, ch), mv0);
     }
-    if r1 >= 0 && cw > 0 && ch > 0 {
+    if !separate && r1 >= 0 && cw > 0 && ch > 0 {
         let frame = reference_frame(dpb, slice, 1, r1)?;
         predict_chroma((&mut u1, &mut v1), frame, (x, y), (cw, ch), mv1);
     }
@@ -5256,7 +5259,7 @@ fn mc_block<S: Sample>(
         mix(slice, r0, r1, -1),
         S::default(),
     );
-    if cw > 0 && ch > 0 {
+    if !separate && cw > 0 && ch > 0 {
         let stride = if chroma == 3 { pic.w } else { pic.w / 2 };
         let origin = match chroma {
             3 => (x, y),
@@ -5625,6 +5628,7 @@ fn read_pcm<S: Sample>(
 ) -> Result<(), CodecError> {
     let x0 = mx * 16;
     let y0 = my * 16;
+    let separate = pic.separate_plane;
     match entropy {
         Entropy::Cavlc(bits) => {
             while bits.pos() % 8 != 0 {
@@ -5637,11 +5641,13 @@ fn read_pcm<S: Sample>(
                     pic.y[(y0 + row) * pic.w + x0 + col] = S::from_code(bits.u(S::BITS)?);
                 }
             }
-            let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
-            for plane in [&mut pic.u, &mut pic.v] {
-                for row in 0..ch {
-                    for col in 0..cw {
-                        plane[(oy + row) * stride + ox + col] = S::from_code(bits.u(S::BITS)?);
+            if !separate {
+                let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
+                for plane in [&mut pic.u, &mut pic.v] {
+                    for row in 0..ch {
+                        for col in 0..cw {
+                            plane[(oy + row) * stride + ox + col] = S::from_code(bits.u(S::BITS)?);
+                        }
                     }
                 }
             }
@@ -5654,11 +5660,13 @@ fn read_pcm<S: Sample>(
                     pic.y[(y0 + row) * pic.w + x0 + col] = pcm_code::<S>(bytes, &mut bit)?;
                 }
             }
-            let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
-            for plane in [&mut pic.u, &mut pic.v] {
-                for row in 0..ch {
-                    for col in 0..cw {
-                        plane[(oy + row) * stride + ox + col] = pcm_code::<S>(bytes, &mut bit)?;
+            if !separate {
+                let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
+                for plane in [&mut pic.u, &mut pic.v] {
+                    for row in 0..ch {
+                        for col in 0..cw {
+                            plane[(oy + row) * stride + ox + col] = pcm_code::<S>(bytes, &mut bit)?;
+                        }
                     }
                 }
             }
@@ -5733,7 +5741,9 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                         off,
                     );
                 }
-                filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
+                if !pic.separate_plane {
+                    filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
+                }
             }
             for edge in 0..4 {
                 if edge == 0 && (my == 0 || !filter_boundary(pic, mx, my, false)) {
@@ -5753,7 +5763,9 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                         off,
                     );
                 }
-                filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
+                if !pic.separate_plane {
+                    filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
+                }
             }
         }
     }

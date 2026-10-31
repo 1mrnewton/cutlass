@@ -1,7 +1,7 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
-//! Interlaced pictures, monochrome, and separate colour planes are refused.
-//! 4:2:0, 4:2:2, and 4:4:4 are accepted, including QP′Y-zero transform bypass.
+//! Interlaced pictures and monochrome are refused. 4:2:0, 4:2:2, and 4:4:4 are
+//! accepted, including separate colour planes and QP′Y-zero transform bypass.
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
 //! is refused.
 
@@ -46,6 +46,8 @@ pub struct Sps {
     pub chroma: u8,
     /// `qpprime_y_zero_transform_bypass_flag`.
     pub bypass: bool,
+    /// `separate_colour_plane_flag`. Each plane is coded with monochrome syntax.
+    pub separate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +123,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     }
     let mut chroma_format = 1u8;
     let mut bit_depth = 8u8;
+    let mut separate = false;
     let mut bypass = false;
     let mut weight4 = flat4();
     let mut weight8 = flat8();
@@ -130,9 +133,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     ) {
         chroma_format = bits.ue()? as u8;
         if chroma_format == 3 && bits.bit()? {
-            return Err(CodecError::Unsupported {
-                what: "separate colour plane",
-            });
+            separate = true;
         }
         let bit_depth_luma = bits.ue()?;
         let bit_depth_chroma = bits.ue()?;
@@ -258,6 +259,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         bit_depth,
         chroma: chroma_format,
         bypass,
+        separate,
     };
     sps.visible()?;
     Ok(sps)

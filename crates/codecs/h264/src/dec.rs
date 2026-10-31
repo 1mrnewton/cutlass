@@ -152,6 +152,9 @@ pub(crate) struct Frame<S: Sample = u8> {
     transfer: Transfer,
     matrix: ColorMatrix,
     nonexisting: bool,
+    /// The picture is three monochrome colour planes. Reconstruction swaps one
+    /// plane into `y` and the same plane of every reference.
+    separate_plane: bool,
     max_ref: usize,
     reorder: usize,
     adaptive: bool,
@@ -486,6 +489,7 @@ fn decode_au<S: Sample>(
     let mut prior = Vec::new();
     let mut slice_id = 0u16;
     let mut next_mb = 0usize;
+    let mut planes = ColourPlanes { active: 0, seen: 0 };
     for nal in &nals {
         match nal.kind {
             7 | 8 => {
@@ -511,9 +515,12 @@ fn decode_au<S: Sample>(
                         slice_id,
                         packet,
                     },
-                    &mut picture,
-                    &mut next_mb,
-                    &mut prior,
+                    AuScratch {
+                        picture: &mut picture,
+                        next_mb: &mut next_mb,
+                        prior: &mut prior,
+                        planes: &mut planes,
+                    },
                 )?;
                 if built {
                     slice_id = slice_id.saturating_add(1);
@@ -537,10 +544,74 @@ fn decode_au<S: Sample>(
         });
     }
     let mut pic = pic;
-    mb::deblock(&mut pic);
+    if pic.separate_plane {
+        mb::deblock(&mut pic);
+        exchange_refs(&mut pic, dpb, planes.active);
+        if planes.seen != 0b111 {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "incomplete picture",
+            });
+        }
+    } else {
+        mb::deblock(&mut pic);
+    }
     let mut pictures = prior;
     pictures.extend(finish_picture(poc, dpb, pic)?);
     Ok(pictures)
+}
+
+struct ColourPlanes {
+    active: u8,
+    seen: u8,
+}
+
+fn exchange_plane<S: Sample>(frame: &mut Frame<S>, plane: u8) {
+    match plane {
+        1 => std::mem::swap(&mut frame.y, &mut frame.u),
+        2 => std::mem::swap(&mut frame.y, &mut frame.v),
+        _ => {}
+    }
+}
+
+fn exchange_refs<S: Sample>(picture: &mut Frame<S>, dpb: &mut [Frame<S>], plane: u8) {
+    exchange_plane(picture, plane);
+    for frame in dpb {
+        exchange_plane(frame, plane);
+    }
+}
+
+fn begin_plane<S: Sample>(
+    sps: &Sps,
+    header: &Header,
+    picture: &mut Frame<S>,
+    dpb: &mut [Frame<S>],
+    next_mb: &mut usize,
+    active: &mut u8,
+    fresh: bool,
+) -> Result<(), CodecError> {
+    if !sps.separate {
+        return Ok(());
+    }
+    let plane = header.colour_plane;
+    if !fresh && plane != *active {
+        let total = picture.mb_w.saturating_mul(picture.h / 16);
+        if *next_mb != total || header.first_mb != 0 {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "colour plane",
+            });
+        }
+        mb::deblock(picture);
+        exchange_refs(picture, dpb, *active);
+        picture.mb.fill(Mb::new(u16::MAX));
+        *next_mb = 0;
+    }
+    if fresh || plane != *active {
+        exchange_refs(picture, dpb, plane);
+        *active = plane;
+    }
+    Ok(())
 }
 
 fn finish_picture<S: Sample>(
@@ -845,6 +916,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         transfer: sps.transfer,
         matrix: sps.matrix,
         nonexisting: true,
+        separate_plane: sps.separate,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder: 0,
         adaptive: false,
@@ -1182,14 +1254,19 @@ struct SliceCursor<'a> {
     packet: &'a Packet,
 }
 
+struct AuScratch<'a, S: Sample> {
+    picture: &'a mut Option<Frame<S>>,
+    next_mb: &'a mut usize,
+    prior: &'a mut Vec<VideoOutput>,
+    planes: &'a mut ColourPlanes,
+}
+
 fn decode_slice<S: Sample>(
     sets: &mut Sets,
     poc_state: &mut Poc,
     dpb: &mut Vec<Frame<S>>,
     cursor: SliceCursor<'_>,
-    picture: &mut Option<Frame<S>>,
-    next_mb: &mut usize,
-    prior: &mut Vec<VideoOutput>,
+    scratch: AuScratch<'_, S>,
 ) -> Result<bool, CodecError> {
     let SliceCursor {
         nal,
@@ -1197,6 +1274,12 @@ fn decode_slice<S: Sample>(
         slice_id,
         packet,
     } = cursor;
+    let AuScratch {
+        picture,
+        next_mb,
+        prior,
+        planes,
+    } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0)?;
     // A redundant picture repeats one that was already decoded. It is not displayed.
@@ -1215,7 +1298,8 @@ fn decode_slice<S: Sample>(
     }
     let (poc, frame_num_offset) = picture_order(&header, &sps, poc_state, idr)?;
     let _ = frame_num_offset;
-    if picture.is_none() {
+    let fresh = picture.is_none();
+    if fresh {
         // An IDR marks every earlier picture unused for reference. The flag
         // drops pictures that were still waiting; otherwise they are returned
         // before this picture. The flag does not hide the IDR itself.
@@ -1235,6 +1319,20 @@ fn decode_slice<S: Sample>(
             poc_state.prev_frame_num = header.frame_num;
             poc_state.prev_frame_num_offset = frame_num_offset;
             poc_state.have_ref = true;
+        }
+    }
+    {
+        let Some(pic) = picture.as_mut() else {
+            return Err(bits.malformed("picture"));
+        };
+        begin_plane(&sps, &header, pic, dpb, next_mb, &mut planes.active, fresh)?;
+    }
+    if sps.separate {
+        let bit = 1u8 << header.colour_plane;
+        if fresh {
+            planes.seen = bit;
+        } else {
+            planes.seen |= bit;
         }
     }
     if header.first_mb != *next_mb {
@@ -1284,6 +1382,8 @@ struct Header {
     pps_id: u8,
     sps_id: u8,
     kind: u8,
+    /// `colour_plane_id` when the SPS sets separate colour planes. Otherwise 0.
+    colour_plane: u8,
     frame_num: u32,
     poc_lsb: i32,
     delta_poc: [i32; 2],
@@ -1343,6 +1443,14 @@ fn read_header(
     let Some(sps) = sets.sps[usize::from(pps.sps_id)].as_ref() else {
         return Err(bits.malformed("missing sps"));
     };
+    let mut colour_plane = 0u8;
+    if sps.separate {
+        let id = bits.u(2)?;
+        if id > 2 {
+            return Err(bits.malformed("colour plane"));
+        }
+        colour_plane = id as u8;
+    }
     let frame_num = bits.u(u32::from(sps.log2_max_frame_num))?;
     if idr {
         let _ = bits.ue()?;
@@ -1516,6 +1624,7 @@ fn read_header(
         pps_id: pps_id as u8,
         sps_id: pps.sps_id,
         kind: kind as u8,
+        colour_plane,
         frame_num,
         poc_lsb,
         delta_poc,
@@ -1758,6 +1867,7 @@ fn new_frame<S: Sample>(
         transfer: sps.transfer,
         matrix: sps.matrix,
         nonexisting: false,
+        separate_plane: sps.separate,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder,
         adaptive: header.adaptive,
@@ -2053,6 +2163,7 @@ mod tests {
             pps_id: 0,
             sps_id: 0,
             kind: 0,
+            colour_plane: 0,
             frame_num,
             poc_lsb: 0,
             delta_poc: [0, 0],
@@ -2111,6 +2222,7 @@ mod tests {
             transfer: Transfer::Unspecified,
             matrix: ColorMatrix::Unspecified,
             nonexisting: false,
+            separate_plane: false,
             max_ref: 4,
             reorder: 0,
             adaptive: true,
@@ -2151,6 +2263,7 @@ mod tests {
             bit_depth: 8,
             chroma: 1,
             bypass: false,
+            separate: false,
         }
     }
 

@@ -51,7 +51,7 @@ Implemented for that scope, and matched against dav1d on the keyframe fixtures n
 - Sequence headers, frame headers, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped.
 - Eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0` returns no picture).
 - Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
-- Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe may select its transform size.
+- Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe or an inter frame may select its transform size.
 - Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered.
 - CDEF, uniform tiles, a quantizer matrix, and a superblock quantizer delta.
 - Super resolution on a keyframe: reconstruction uses the coded width, and the shown picture is the upscaled width.
@@ -126,7 +126,7 @@ Refused with a typed error before a picture is published:
 - Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
 - Compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, and global motion.
-- CDF state carried from another frame, an inter frame that selects its transform size, a scaled reference, and interintra on an inter frame.
+- A scaled reference, and interintra on an inter frame.
 
 Super resolution on an inter frame is not proven.
 

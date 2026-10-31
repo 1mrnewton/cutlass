@@ -10,10 +10,10 @@ use crate::dims::{
     H_FLIPADST, IDTX, MAX_TX_DEPTH, MAX_TX_SIZE_RECT, MI_HEIGHT_LOG2, MI_WIDTH_LOG2, MODE_TO_TXFM,
     NUM_4X4_HIGH, NUM_4X4_WIDE, PARTITION_HORZ, PARTITION_HORZ_4, PARTITION_HORZ_A,
     PARTITION_HORZ_B, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, PARTITION_VERT_4,
-    PARTITION_VERT_A, PARTITION_VERT_B, SPLIT_TX_SIZE, TRANSFORM_ROW_SHIFT, TX_4X4, TX_16X16,
-    TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_HEIGHT,
-    TX_HEIGHT_LOG2, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_WIDTH, TX_WIDTH_LOG2, UV_CFL_PRED, V_ADST,
-    V_DCT, V_FLIPADST, block_height, block_width, intra_tx_type, partition_subsize,
+    PARTITION_VERT_A, PARTITION_VERT_B, SPLIT_TX_SIZE, TRANSFORM_ROW_SHIFT, TX_4X4, TX_8X8,
+    TX_16X16, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64,
+    TX_HEIGHT, TX_HEIGHT_LOG2, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_WIDTH, TX_WIDTH_LOG2, UV_CFL_PRED,
+    V_ADST, V_DCT, V_FLIPADST, block_height, block_width, intra_tx_type, partition_subsize,
     subsampled_size,
 };
 use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
@@ -45,15 +45,17 @@ use crate::tables::{
     DEFAULT_SCAN_16X16, DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16,
     DEFAULT_SCAN_32X32, DEFAULT_SINGLE_REF_CDF, DEFAULT_SKIP_CDF, DEFAULT_TX_8X8_CDF,
     DEFAULT_TX_16X16_CDF, DEFAULT_TX_32X32_CDF, DEFAULT_TX_64X64_CDF, DEFAULT_TXB_SKIP_CDF,
-    DEFAULT_UV_MODE_CFL_ALLOWED_CDF, DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF, DEFAULT_Y_MODE_CDF,
-    DEFAULT_ZERO_MV_CDF, MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16, MCOL_SCAN_8X4,
-    MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16, MROW_SCAN_4X4,
-    MROW_SCAN_4X8, MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16, MROW_SCAN_16X4,
-    MROW_SCAN_16X8, MROW_SCAN_16X16, SIG_REF_DIFF_OFFSET,
+    DEFAULT_TXFM_SPLIT_CDF, DEFAULT_UV_MODE_CFL_ALLOWED_CDF, DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF,
+    DEFAULT_Y_MODE_CDF, DEFAULT_ZERO_MV_CDF, MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16,
+    MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16,
+    MROW_SCAN_4X4, MROW_SCAN_4X8, MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16,
+    MROW_SCAN_16X4, MROW_SCAN_16X8, MROW_SCAN_16X16, SIG_REF_DIFF_OFFSET,
 };
 
 pub(crate) const MODE_CTX: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2, 0];
 const SB4: usize = 16;
+/// `MAX_VARTX_DEPTH`. A selected inter transform splits at most twice.
+const MAX_VARTX_DEPTH: usize = 2;
 
 pub struct DecodedPicture {
     pub y: Vec<u8>,
@@ -85,11 +87,6 @@ pub fn decode_with_refs(
     if frame.frame_type == INTER_FRAME {
         if sequence.enable_interintra {
             return Err(CodecError::Unsupported { what: "interintra" });
-        }
-        if frame.tx_select {
-            return Err(CodecError::Unsupported {
-                what: "variable transform size",
-            });
         }
         if frame.motion_mode_switchable {
             return Err(CodecError::Unsupported {
@@ -591,6 +588,8 @@ struct Tile<'a, 'r> {
     cdef: CdefParams,
     cdef_idx: Vec<i8>,
     cdfs: Cdfs,
+    /// Luma transform origins for an inter block that selects its sizes.
+    tx_origins: Vec<(u16, u16, u8)>,
     coeff_buf: Vec<i32>,
     quant_buf: Vec<i32>,
     residual_buf: Vec<i64>,
@@ -638,6 +637,7 @@ pub(crate) struct Cdfs {
     inter_tx1: Vec<u16>,
     inter_tx2: Vec<u16>,
     inter_tx3: Vec<u16>,
+    txfm_split: Vec<u16>,
     intra_y: Vec<u16>,
     delta_q: Vec<u16>,
     use_filter_intra: Vec<u16>,
@@ -770,6 +770,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             cdef: frame.cdef,
             cdef_idx: vec![-1; cells],
             cdfs: initial.clone(),
+            tx_origins: Vec::new(),
             coeff_buf: Vec::new(),
             quant_buf: Vec::new(),
             residual_buf: Vec::new(),
@@ -1086,6 +1087,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             avail_u,
             avail_l,
             inter: false,
+            var_tx: false,
             mv: Motion::default(),
             ref0: 0,
             ref1: NONE_FRAME,
@@ -1117,7 +1119,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.read_intra_in_inter(bsize, has_chroma)?
         };
-        let tx = self.read_tx_size(row, col, bsize, skip, inter)?;
+        let (tx, var_tx) = self.read_block_tx_size(row, col, bsize, skip, inter)?;
         if skip {
             self.reset_context(row, col, bw4, bh4, has_chroma);
         }
@@ -1137,6 +1139,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             avail_u,
             avail_l,
             inter,
+            var_tx,
             mv: chosen.mv,
             ref0: chosen.ref0,
             ref1: chosen.ref1,
@@ -2021,19 +2024,219 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(max_rect)
     }
 
+    /// Section 5.11.34. An inter block that is not skipped stores a transform tree.
+    /// Every other block stores one size.
+    fn read_block_tx_size(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        skip: bool,
+        inter: bool,
+    ) -> Result<(usize, bool), CodecError> {
+        self.tx_origins.clear();
+        let variable = self.tx_select && bsize > 0 && inter && !skip && !self.lossless;
+        if !variable {
+            let tx = self.read_tx_size(row, col, bsize, skip, inter)?;
+            return Ok((tx, false));
+        }
+        let max_tx = MAX_TX_SIZE_RECT[bsize];
+        let step_x = (TX_WIDTH[max_tx] / 4).max(1);
+        let step_y = (TX_HEIGHT[max_tx] / 4).max(1);
+        let bw4 = NUM_4X4_WIDE[bsize];
+        let bh4 = NUM_4X4_HIGH[bsize];
+        let mut y = row;
+        while y < row + bh4 {
+            let mut x = col;
+            while x < col + bw4 {
+                self.read_var_tx_size(y, x, max_tx, 0, (row, col, bsize))?;
+                x += step_x;
+            }
+            y += step_y;
+        }
+        Ok((max_tx, true))
+    }
+
+    /// Section 5.11.35. `txfm_split` chooses whether this node divides.
+    fn read_var_tx_size(
+        &mut self,
+        row: usize,
+        col: usize,
+        tx: usize,
+        depth: usize,
+        block: (usize, usize, usize),
+    ) -> Result<(), CodecError> {
+        if row >= self.mi_rows || col >= self.mi_cols {
+            return Ok(());
+        }
+        let (block_row, block_col, bsize) = block;
+        let split = if tx == TX_4X4 || depth == MAX_VARTX_DEPTH {
+            false
+        } else {
+            let above = usize::from(self.above_tx_width(row, col, block_row) < width_of(tx));
+            let left = usize::from(self.left_tx_height(row, col, block_col) < height_of(tx));
+            let square = square_tx(64.min(block_width(bsize).max(block_height(bsize))));
+            let sqr_up = TX_SIZE_SQR_UP.get(tx).copied().unwrap_or(square);
+            let ctx = usize::from(sqr_up != square) * 3 + (4 - square) * 6 + above + left;
+            read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.txfm_split,
+                &[21, 3],
+                &[ctx],
+            )? == 1
+        };
+        let w4 = (width_of(tx) / 4).max(1);
+        let h4 = (height_of(tx) / 4).max(1);
+        if split {
+            let sub = SPLIT_TX_SIZE[tx];
+            let step_x = (width_of(sub) / 4).max(1);
+            let step_y = (height_of(sub) / 4).max(1);
+            let mut y = 0;
+            while y < h4 {
+                let mut x = 0;
+                while x < w4 {
+                    self.read_var_tx_size(row + y, col + x, sub, depth + 1, block)?;
+                    x += step_x;
+                }
+                y += step_y;
+            }
+            return Ok(());
+        }
+        for y in 0..h4 {
+            for x in 0..w4 {
+                let at_row = row + y;
+                let at_col = col + x;
+                if at_row >= self.mi_rows || at_col >= self.mi_cols {
+                    continue;
+                }
+                self.tx_sizes[at_row * self.mi_cols + at_col] = tx as u8;
+            }
+        }
+        self.tx_origins.push((row as u16, col as u16, tx as u8));
+        Ok(())
+    }
+
+    fn reconstruct_variable_luma(&mut self, coded: &CodedBlock) -> Result<(), CodecError> {
+        let origins = std::mem::take(&mut self.tx_origins);
+        let mut result = Ok(());
+        for &(mi_row, mi_col, tx) in &origins {
+            let tx = usize::from(tx);
+            if tx >= TX_WIDTH.len() {
+                result = Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "tx size",
+                });
+                break;
+            }
+            let x4 = usize::from(mi_col).saturating_sub(coded.col);
+            let y4 = usize::from(mi_row).saturating_sub(coded.row);
+            if let Err(error) = self.transform_block(Block {
+                plane: 0,
+                row: coded.row,
+                col: coded.col,
+                bsize: coded.bsize,
+                y_mode: coded.y_mode,
+                uv_mode: coded.uv_mode,
+                angle_y: coded.angle_y,
+                angle_uv: coded.angle_uv,
+                tx,
+                skip: coded.skip,
+                avail_u: coded.avail_u,
+                avail_l: coded.avail_l,
+                x4,
+                y4,
+                sub_x: 0,
+                sub_y: 0,
+                step_x: (TX_WIDTH[tx] / 4).max(1),
+                step_y: (TX_HEIGHT[tx] / 4).max(1),
+                inter: true,
+            }) {
+                result = Err(error);
+                break;
+            }
+        }
+        self.tx_origins = origins;
+        result
+    }
+
     fn tx_depth_ctx(&self, row: usize, col: usize, max_rect: usize) -> usize {
-        // An unavailable neighbor contributes width 0. A coded neighbor contributes its transform size.
+        // An inter neighbor contributes its block size. An intra neighbor contributes its transform.
         let above = if !self.above_mi(row) {
             0
+        } else if self.inter_at(row - 1, col) {
+            block_width(self.bsize_at(row - 1, col))
         } else {
-            TX_WIDTH[self.tx_sizes[(row - 1) * self.mi_cols + col] as usize]
+            self.above_tx_width(row, col, row)
         };
         let left = if !self.left_mi(col) {
             0
+        } else if self.inter_at(row, col - 1) {
+            block_height(self.bsize_at(row, col - 1))
         } else {
-            TX_HEIGHT[self.tx_sizes[row * self.mi_cols + col - 1] as usize]
+            self.left_tx_height(row, col, col)
         };
-        usize::from(above >= TX_WIDTH[max_rect]) + usize::from(left >= TX_HEIGHT[max_rect])
+        usize::from(above >= width_of(max_rect)) + usize::from(left >= height_of(max_rect))
+    }
+
+    /// `get_above_tx_width`. At the block edge a missing neighbor is 64 wide.
+    fn above_tx_width(&self, row: usize, col: usize, block_row: usize) -> usize {
+        if row == block_row {
+            if !self.above_mi(block_row) {
+                return 64;
+            }
+            if self.skipped(row - 1, col) && self.inter_at(row - 1, col) {
+                return block_width(self.bsize_at(row - 1, col));
+            }
+        }
+        if row == 0 {
+            return 0;
+        }
+        width_of(self.tx_at(row - 1, col))
+    }
+
+    /// `get_left_tx_height`. At the block edge a missing neighbor is 64 high.
+    fn left_tx_height(&self, row: usize, col: usize, block_col: usize) -> usize {
+        if col == block_col {
+            if !self.left_mi(block_col) {
+                return 64;
+            }
+            if self.skipped(row, col - 1) && self.inter_at(row, col - 1) {
+                return block_height(self.bsize_at(row, col - 1));
+            }
+        }
+        if col == 0 {
+            return 0;
+        }
+        height_of(self.tx_at(row, col - 1))
+    }
+
+    fn inter_at(&self, row: usize, col: usize) -> bool {
+        self.mi_at(row, col)
+            .is_some_and(|at| self.inter_flag[at] != 0)
+    }
+
+    fn skipped(&self, row: usize, col: usize) -> bool {
+        self.mi_at(row, col).is_some_and(|at| self.skips[at] != 0)
+    }
+
+    fn bsize_at(&self, row: usize, col: usize) -> usize {
+        self.mi_at(row, col)
+            .map(|at| usize::from(self.sizes[at]))
+            .unwrap_or(0)
+    }
+
+    fn tx_at(&self, row: usize, col: usize) -> usize {
+        self.mi_at(row, col)
+            .map(|at| usize::from(self.tx_sizes[at]))
+            .unwrap_or(0)
+    }
+
+    fn mi_at(&self, row: usize, col: usize) -> Option<usize> {
+        if row >= self.mi_rows || col >= self.mi_cols {
+            return None;
+        }
+        Some(row * self.mi_cols + col)
     }
 
     fn has_chroma(&self, row: usize, col: usize, bw4: usize, bh4: usize) -> bool {
@@ -2088,7 +2291,9 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.uv_mode[at] = uv_mode;
                 self.skips[at] = u8::from(skip);
                 self.sizes[at] = bsize as u8;
-                self.tx_sizes[at] = tx as u8;
+                if !coded.var_tx {
+                    self.tx_sizes[at] = tx as u8;
+                }
                 self.inter_flag[at] = u8::from(coded.inter);
                 self.mvs[at] = coded.mv;
                 self.block_ref[at] = coded.ref0;
@@ -2115,7 +2320,10 @@ impl<'a, 'r> Tile<'a, 'r> {
             ..
         } = *coded;
         let planes = if has_chroma { 3 } else { 1 };
-        for plane in 0..planes {
+        if coded.var_tx {
+            self.reconstruct_variable_luma(coded)?;
+        }
+        for plane in usize::from(coded.var_tx)..planes {
             let plane_size = if plane == 0 {
                 bsize
             } else {
@@ -2943,6 +3151,8 @@ struct CodedBlock {
     avail_u: bool,
     avail_l: bool,
     inter: bool,
+    /// Luma sizes were stored per 4×4 by the variable transform tree.
+    var_tx: bool,
     mv: Motion,
     ref0: i8,
     ref1: i8,
@@ -3302,6 +3512,25 @@ const FILTER_INTRA_CDF: [u16; 66] = [
     10368, 32768, 0, 20229, 32768, 0, 18101, 32768, 0, 16384, 32768, 0, 16384, 32768, 0,
 ];
 
+fn width_of(tx: usize) -> usize {
+    TX_WIDTH.get(tx).copied().unwrap_or(0)
+}
+
+fn height_of(tx: usize) -> usize {
+    TX_HEIGHT.get(tx).copied().unwrap_or(0)
+}
+
+/// Square transform whose side is `pixels`. Sides above 64 use the 64-point transform.
+fn square_tx(pixels: usize) -> usize {
+    match pixels {
+        4 => TX_4X4,
+        8 => TX_8X8,
+        16 => TX_16X16,
+        32 => TX_32X32,
+        _ => TX_64X64,
+    }
+}
+
 /// `Filter_Intra_Mode_To_Intra_Dir`: DC, vertical, horizontal, D157, DC.
 fn filter_intra_dir(mode: u8) -> u8 {
     const MAP: [u8; 5] = [0, 1, 2, 6, 0];
@@ -3407,6 +3636,7 @@ impl Cdfs {
         zero_counters(&mut self.inter_tx1, 17);
         zero_counters(&mut self.inter_tx2, 13);
         zero_counters(&mut self.inter_tx3, 3);
+        zero_counters(&mut self.txfm_split, 3);
         zero_counters(&mut self.intra_y, 14);
         zero_counters(&mut self.delta_q, 5);
         zero_counters(&mut self.use_filter_intra, 3);
@@ -3471,6 +3701,7 @@ impl Cdfs {
             inter_tx1: DEFAULT_INTER_TX_TYPE_SET1_CDF.to_vec(),
             inter_tx2: DEFAULT_INTER_TX_TYPE_SET2_CDF.to_vec(),
             inter_tx3: DEFAULT_INTER_TX_TYPE_SET3_CDF.to_vec(),
+            txfm_split: DEFAULT_TXFM_SPLIT_CDF.to_vec(),
             intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
             delta_q: vec![28160, 32120, 32677, 32768, 0],
             use_filter_intra: FILTER_INTRA_CDF.to_vec(),

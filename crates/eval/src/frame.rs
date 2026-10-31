@@ -1,10 +1,12 @@
 use std::fmt;
 
 use cutlass_compositor::{Device, Extent, Frame, submit};
-use cutlass_generated::PictureSource;
+use cutlass_engine::ReaderFactory;
+use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
 
-use crate::sources::solid_sources;
+use crate::media::{Placed, video_layers};
+use crate::sources::{SolidLayer, solid_layers};
 
 /// A draft borrowed for evaluation. The draft is not written.
 #[derive(Clone, Copy)]
@@ -56,19 +58,63 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 }
 
 /// The composited frame at `time`. The snapshot's draft is not changed.
+///
+/// Solids and video pictures share one paint order: `render_index`, then
+/// track, then segment. A video the factory cannot open is skipped.
 pub fn frame<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
     device: &mut D,
+    media: &ReaderFactory,
 ) -> Result<Frame, EvalError<D::Error>> {
     let draft = snapshot.draft();
     let extent = canvas_extent(draft).ok_or(EvalError::Canvas)?;
-    let solids = solid_sources(draft, extent.width, extent.height);
-    let mut sources: Vec<&dyn PictureSource> = Vec::new();
-    for solid in &solids {
-        sources.push(solid);
+    let layers = ordered(
+        solid_layers(draft, extent.width, extent.height),
+        video_layers(draft, media, extent.width, extent.height, time),
+    );
+    let mut sources: Vec<&dyn PictureSource> = Vec::with_capacity(layers.len());
+    for layer in &layers {
+        sources.push(layer.source());
     }
     submit(device, extent, time, &sources).map_err(EvalError::Compose)
+}
+
+enum Paint {
+    Solid(SolidColor),
+    Video(Box<Placed>),
+}
+
+struct Ordered {
+    key: (i32, usize, usize),
+    paint: Paint,
+}
+
+impl Ordered {
+    fn source(&self) -> &dyn PictureSource {
+        match &self.paint {
+            Paint::Solid(solid) => solid,
+            Paint::Video(video) => video.as_ref(),
+        }
+    }
+}
+
+fn ordered(solids: Vec<SolidLayer>, videos: Vec<crate::media::VideoLayer>) -> Vec<Ordered> {
+    let mut layers = Vec::with_capacity(solids.len() + videos.len());
+    for solid in solids {
+        layers.push(Ordered {
+            key: (solid.render_index, solid.track_index, solid.segment_index),
+            paint: Paint::Solid(solid.solid),
+        });
+    }
+    for video in videos {
+        layers.push(Ordered {
+            key: (video.render_index, video.track_index, video.segment_index),
+            paint: Paint::Video(Box::new(video.placed)),
+        });
+    }
+    layers.sort_by_key(|layer| layer.key);
+    layers
 }
 
 /// Keeps `frame` for export. A late arrival is still the picture.
@@ -89,10 +135,17 @@ pub fn wait_export_frame<E>(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, MaterialColorConfig, Micros, Segment, TimeRange, TrackAttribute};
+    use cutlass_engine::ReaderFactory;
+    use cutlass_model::{
+        Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute,
+    };
     use cutlass_renderer_software::SoftwareDevice;
 
     use super::*;
+
+    fn media() -> ReaderFactory {
+        ReaderFactory::new()
+    }
 
     fn color_clip(color: &str, gradient: bool) -> Draft {
         let mut draft = Draft::empty("draft");
@@ -115,7 +168,8 @@ mod tests {
 
     fn pixels(draft: &Draft, time: i64) -> Vec<u8> {
         let mut device = SoftwareDevice::new();
-        frame(&Snapshot::new(draft), Micros(time), &mut device)
+        let media = media();
+        frame(&Snapshot::new(draft), Micros(time), &mut device, &media)
             .unwrap()
             .rgba
     }
@@ -125,9 +179,10 @@ mod tests {
         let draft = color_clip("0xFF336699", false);
         let before = draft.clone();
         let mut device = SoftwareDevice::new();
+        let media = media();
         let snapshot = Snapshot::new(&draft);
-        let first = frame(&snapshot, Micros(10), &mut device).unwrap();
-        let second = frame(&snapshot, Micros(10), &mut device).unwrap();
+        let first = frame(&snapshot, Micros(10), &mut device, &media).unwrap();
+        let second = frame(&snapshot, Micros(10), &mut device, &media).unwrap();
         assert_eq!(first.rgba, second.rgba);
         assert_eq!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(2));
         assert_eq!(draft, before);
@@ -209,12 +264,31 @@ mod tests {
     }
 
     #[test]
+    fn a_movie_the_factory_cannot_open_leaves_the_solid() {
+        let mut draft = color_clip("0xFF336699", false);
+        let mut video = MaterialVideo::new("movie");
+        video.path = "/no/such/movie.mp4".to_owned();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("movie", "movie", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        segment.render_index = 5;
+        draft.tracks[0].segments.push(segment);
+        let before = draft.clone();
+        assert_eq!(
+            pixels(&draft, 0),
+            vec![0x33, 0x66, 0x99, 0xFF, 0x33, 0x66, 0x99, 0xFF]
+        );
+        assert_eq!(draft, before);
+    }
+
+    #[test]
     fn a_negative_canvas_is_refused_and_the_draft_stays() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = -1;
         let before = draft.clone();
         let mut device = SoftwareDevice::new();
-        let error = frame(&Snapshot::new(&draft), Micros(0), &mut device).unwrap_err();
+        let media = media();
+        let error = frame(&Snapshot::new(&draft), Micros(0), &mut device, &media).unwrap_err();
         assert_eq!(error, EvalError::Canvas);
         assert_eq!(draft, before);
     }

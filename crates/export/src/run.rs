@@ -15,8 +15,8 @@ use cutlass_encode::{
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
 };
 use cutlass_eval::{
-    AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, Snapshot, audio_slice, frame,
-    wait_export_frame,
+    AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, ReaderFactory, Snapshot,
+    audio_slice, frame, wait_export_frame,
 };
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 
@@ -50,6 +50,8 @@ pub struct ExportRun<'a, D, M> {
     pub device: &'a mut D,
     pub request: &'a ExportRequest,
     pub factory: &'a EncodeFactory,
+    /// Opens video segments inside `frame`. An empty factory leaves those pictures out.
+    pub readers: &'a ReaderFactory,
     pub mux: &'a mut M,
     pub destination: Option<&'a Path>,
 }
@@ -398,7 +400,7 @@ where
             .checked_add(run.request.late_by)
             .ok_or(ExportError::Range)?,
     );
-    let evaluated = evaluated_frame(run.draft, run.device, time, ready)?;
+    let evaluated = evaluated_frame(run.draft, run.device, time, ready, run.readers)?;
     let bytes = scale_rgba(
         evaluated.width,
         evaluated.height,
@@ -462,9 +464,10 @@ fn evaluated_frame<D: Device>(
     device: &mut D,
     time: Micros,
     ready_at: Micros,
+    media: &ReaderFactory,
 ) -> Result<ExportedFrame, ExportError> {
     let snapshot = Snapshot::new(draft);
-    let picture = frame(&snapshot, time, device).map_err(map_eval)?;
+    let picture = frame(&snapshot, time, device, media).map_err(map_eval)?;
     let picture = wait_export_frame::<D::Error>(time, ready_at, picture).map_err(map_eval)?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| ExportError::Canvas)?;
@@ -724,8 +727,8 @@ fn stop<M: Mux>(mux: &mut M, error: ExportError) -> ExportError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, OnceLock};
 
     use cutlass_codec::access::{CodecError, SideData};
     use cutlass_codec::{CodecId, ContainerId};
@@ -734,7 +737,7 @@ mod tests {
         AudioInput, ChannelLayout, CodecParams, EncodeFactory, Encoder, FrameInput, Packet, Pcm,
         PixelFormat,
     };
-    use cutlass_eval::{ClipPcm, Snapshot, frame};
+    use cutlass_eval::{ClipPcm, ReaderFactory, Snapshot, frame};
     use cutlass_model::{
         Draft, FrameRate, HdrSettings, MaterialAudioFade, MaterialColorConfig, MaterialId,
         MaterialText, Micros, Segment, TimeRange, Track, TrackAttribute, TrackType, WordColumns,
@@ -886,11 +889,18 @@ mod tests {
         factory
     }
 
+    fn readers() -> &'static ReaderFactory {
+        static READERS: OnceLock<ReaderFactory> = OnceLock::new();
+        READERS.get_or_init(ReaderFactory::new)
+    }
+
     /// Pixels from the playback clock and from `eval::frame` at `time`.
     fn played_rgba(draft: &Draft, time: Micros, device: &mut SoftwareDevice) -> Vec<u8> {
         let session = Session::open(draft.clone());
-        let scrubbed = Player::new().scrub(&session, device, time).expect("scrub");
-        let evaluated = frame(&Snapshot::new(draft), time, device).expect("eval");
+        let mut player = Player::new();
+        player.set_readers(ReaderFactory::new());
+        let scrubbed = player.scrub(&session, device, time).expect("scrub");
+        let evaluated = frame(&Snapshot::new(draft), time, device, readers()).expect("eval");
         assert_eq!(scrubbed.rgba, evaluated.rgba);
         scrubbed.rgba
     }
@@ -1024,6 +1034,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1076,6 +1087,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1102,6 +1114,7 @@ mod tests {
                 device: &mut device,
                 request: &declined,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1124,6 +1137,7 @@ mod tests {
                 device: &mut device,
                 request: &declined,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1159,6 +1173,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1224,6 +1239,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1246,6 +1262,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1306,6 +1323,7 @@ mod tests {
                 device: &mut device,
                 request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1385,6 +1403,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1439,6 +1458,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: Some(&dir),
             },
@@ -1460,6 +1480,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut MuxDraft::new(
                     ContainerId::Isobmff,
                     MuxMode::Progressive,
@@ -1494,6 +1515,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },
@@ -1539,6 +1561,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
             },

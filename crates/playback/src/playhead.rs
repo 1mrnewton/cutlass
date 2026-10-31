@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use cutlass_eval::ReaderFactory;
 use cutlass_gpu::Device;
 use cutlass_model::Micros;
 use cutlass_session::Session;
@@ -70,6 +71,7 @@ pub struct Player {
     cache: Cache,
     shown: Option<Readback>,
     output: AudioOutput,
+    readers: ReaderFactory,
 }
 
 impl Default for Player {
@@ -90,7 +92,14 @@ impl Player {
             cache: Cache::new(),
             shown: None,
             output: AudioOutput::software(),
+            readers: ReaderFactory::new(),
         }
+    }
+
+    /// Pictures after this call open through `readers`. The preview cache is dropped.
+    pub fn set_readers(&mut self, readers: ReaderFactory) {
+        self.readers = readers;
+        self.cache = Cache::new();
     }
 
     #[must_use]
@@ -148,7 +157,7 @@ impl Player {
     ) -> Result<Presentation, PresentError<D::Error>> {
         let time = self.time;
         present::check_time(session.draft().duration, time)?;
-        let readback = present::evaluate(&mut self.cache, session, device, time)?;
+        let readback = present::evaluate(&mut self.cache, session, device, time, &self.readers)?;
         self.output.set_slice(&[]);
         let presentation = present::accept(self.audio_time, time, readback);
         if let Presentation::Shown(ref frame) = presentation {
@@ -244,7 +253,7 @@ impl Player {
         commit_time: bool,
     ) -> Result<Readback, PresentError<D::Error>> {
         present::check_time(session.draft().duration, time)?;
-        let readback = present::evaluate(&mut self.cache, session, device, time)?;
+        let readback = present::evaluate(&mut self.cache, session, device, time, &self.readers)?;
         self.output.set_slice(&[]);
         if commit_time {
             self.time = time;

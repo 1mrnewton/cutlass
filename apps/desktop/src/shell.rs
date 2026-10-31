@@ -3,7 +3,8 @@
 //! A gesture becomes a [`cutlass_session::Request`] and goes through
 //! [`Session::apply`]. Play, pause, and seek stay on the shell, so they do
 //! not push an undo step. The picture is `eval::frame` on the software
-//! device. This shell does not composite, and it does not open an audio device.
+//! device. Video segments open through the shell's reader factory. This shell
+//! does not composite, and it does not open an audio device.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +14,7 @@ use cutlass_editor::{
     hit_test, lane_category, lanes, last_accuracy_step, minimum_pixel_size, move_gesture,
 };
 use cutlass_encode::EncodeFactory;
-use cutlass_eval::{Snapshot, frame};
+use cutlass_eval::{ReaderFactory, Snapshot, frame};
 use cutlass_model::{
     Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType, Micros,
     Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
@@ -143,6 +144,7 @@ pub struct Chrome {
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
+    readers: ReaderFactory,
     settings: Settings,
     session: Option<Session>,
     folder: Option<Folder>,
@@ -168,6 +170,7 @@ impl Shell {
         Self {
             decoders,
             encoders,
+            readers: crate::readers::installed_readers(),
             settings,
             session: None,
             folder: None,
@@ -395,8 +398,13 @@ impl Shell {
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
         let draft = self.session_draft()?;
         let mut device = SoftwareDevice::new();
-        let picture = frame(&Snapshot::new(draft), self.playhead, &mut device)
-            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let picture = frame(
+            &Snapshot::new(draft),
+            self.playhead,
+            &mut device,
+            &self.readers,
+        )
+        .map_err(|error| ShellError::Eval(error.to_string()))?;
         Ok(Picture {
             width: picture.extent.width,
             height: picture.extent.height,

@@ -2,6 +2,7 @@
 
 pub mod icons;
 pub mod probe;
+mod readers;
 
 #[cfg(test)]
 mod open_movie;

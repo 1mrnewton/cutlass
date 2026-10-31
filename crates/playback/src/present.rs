@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 
-use cutlass_eval::Snapshot;
+use cutlass_eval::{ReaderFactory, Snapshot};
 use cutlass_gpu::Device;
 use cutlass_model::{DraftId, Micros};
 use cutlass_session::Session;
@@ -138,6 +138,7 @@ pub(crate) fn evaluate<D: Device>(
     session: &Session,
     device: &mut D,
     time: Micros,
+    media: &ReaderFactory,
 ) -> Result<Readback, PresentError<D::Error>> {
     let draft = session.draft();
     let revision = session.revision();
@@ -146,8 +147,8 @@ pub(crate) fn evaluate<D: Device>(
     if let Some(hit) = cache.lookup(&draft.id, revision, time, width, height) {
         return Ok(hit);
     }
-    let frame =
-        cutlass_eval::frame(&Snapshot::new(draft), time, device).map_err(PresentError::Picture)?;
+    let frame = cutlass_eval::frame(&Snapshot::new(draft), time, device, media)
+        .map_err(PresentError::Picture)?;
     let readback = Readback {
         width: frame.extent.width,
         height: frame.extent.height,

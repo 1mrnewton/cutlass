@@ -534,6 +534,7 @@ dependencies = [
  "cutlass-avi",
  "cutlass-caf",
  "cutlass-codec",
+ "cutlass-color",
  "cutlass-container",
  "cutlass-decode",
  "cutlass-editor",
@@ -770,6 +771,7 @@ dependencies = [
  "cutlass-engine",
  "cutlass-generated",
  "cutlass-model",
+ "cutlass-picture",
  "cutlass-renderer-software",
  "cutlass-text",
 ]

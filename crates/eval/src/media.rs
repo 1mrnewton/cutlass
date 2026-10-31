@@ -6,7 +6,8 @@
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
 //! A translation of 1 is half the canvas. A file display quarter turn is
-//! clockwise and is applied before that fit. Keyframes are not applied.
+//! clockwise and is applied before that fit. Alpha, rotation, position, and
+//! scale keyframes are straight lines measured from the segment start.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
@@ -15,7 +16,8 @@ use std::collections::HashMap;
 
 use cutlass_engine::{ClockKind, DisplayQuarter, ReaderFactory, VideoSource, open_segment};
 use cutlass_model::{
-    Clip, Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute, UniformScale,
+    Clip, CommonKeyframeGroup, Draft, DraftId, MaterialRef, Micros, Segment, SegmentId,
+    TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
@@ -218,9 +220,10 @@ pub(crate) fn video_layers<'a>(
             ) {
                 continue;
             }
-            let Some(transform) =
-                picture_transform(&segment.clip, &segment.uniform_scale, width, height)
-            else {
+            let Some((clip, uniform)) = segment_clip(segment, time) else {
+                continue;
+            };
+            let Some(transform) = picture_transform(&clip, &uniform, width, height) else {
                 continue;
             };
             if transform.opacity == 0 || transform.scale_x == 0.0 || transform.scale_y == 0.0 {
@@ -260,6 +263,108 @@ pub(crate) fn video_layers<'a>(
         });
     }
     layers
+}
+
+/// The clip at `time`, with line keyframes measured from the segment start.
+///
+/// A key before the first sample holds that sample. A key after the last
+/// holds the last. The same offset keeps the later key. A curve type other
+/// than a straight line is still sampled as a straight line. A non-finite
+/// sample refuses the clip. `KFTypeScale` drives both axes through uniform
+/// scale when that switch is on, and through `clip.scale` when it is off.
+/// `KFTypeScaleX` and `KFTypeScaleY` replace one axis only while uniform
+/// scale is off.
+fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let mut clip = segment.clip.clone();
+    let mut uniform = segment.uniform_scale.clone();
+    let groups = &segment.common_keyframes;
+    if let Some(value) = line_at(groups, &["KFTypeAlpha", "alpha"], offset)? {
+        clip.alpha = value;
+    }
+    if let Some(value) = line_at(groups, &["KFTypeRotation", "rotation"], offset)? {
+        clip.rotation = value;
+    }
+    if let Some(value) = line_at(groups, &["KFTypePositionX"], offset)? {
+        clip.transform.x = value;
+    }
+    if let Some(value) = line_at(groups, &["KFTypePositionY"], offset)? {
+        clip.transform.y = value;
+    }
+    if let Some(value) = line_at(groups, &["KFTypeScale"], offset)? {
+        if uniform.on {
+            uniform.value = value;
+        } else {
+            clip.scale.x = value;
+            clip.scale.y = value;
+        }
+    }
+    if !uniform.on {
+        if let Some(value) = line_at(groups, &["KFTypeScaleX"], offset)? {
+            clip.scale.x = value;
+        }
+        if let Some(value) = line_at(groups, &["KFTypeScaleY"], offset)? {
+            clip.scale.y = value;
+        }
+    }
+    Some((clip, uniform))
+}
+
+fn line_at(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Option<Option<f64>> {
+    let mut keys = Vec::new();
+    for group in groups {
+        if !names.contains(&group.property_type.as_str()) {
+            continue;
+        }
+        for key in &group.keyframe_list {
+            let Some(value) = key.values.first().copied() else {
+                continue;
+            };
+            if !value.is_finite() {
+                return None;
+            }
+            keys.push((key.time_offset.0, value, keys.len()));
+        }
+    }
+    Some(straight_line(&mut keys, offset))
+}
+
+fn straight_line(keys: &mut [(i64, f64, usize)], at: i64) -> Option<f64> {
+    if keys.is_empty() {
+        return None;
+    }
+    keys.sort_by(|left, right| left.0.cmp(&right.0).then(left.2.cmp(&right.2)));
+    let mut collapsed: Vec<(i64, f64)> = Vec::new();
+    for (time, value, _) in keys.iter().copied() {
+        if let Some(last) = collapsed.last_mut()
+            && last.0 == time
+        {
+            last.1 = value;
+            continue;
+        }
+        collapsed.push((time, value));
+    }
+    let (first_time, first) = collapsed.first().copied()?;
+    if at <= first_time {
+        return Some(first);
+    }
+    let (last_time, last) = collapsed.last().copied()?;
+    if at >= last_time {
+        return Some(last);
+    }
+    for pair in collapsed.windows(2) {
+        let (left_time, left) = pair[0];
+        let (right_time, right) = pair[1];
+        if at >= left_time && at <= right_time {
+            let span = (right_time - left_time) as f64;
+            if span == 0.0 {
+                return Some(right);
+            }
+            let t = (at - left_time) as f64 / span;
+            return Some(left + (right - left) * t);
+        }
+    }
+    Some(last)
 }
 
 fn covers(start: i64, duration: i64, time: i64) -> bool {
@@ -678,7 +783,7 @@ fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) 
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Flip, Point};
+    use cutlass_model::{CommonKeyframe, CommonKeyframeGroup, Flip, Point, Segment, TimeRange};
 
     use super::*;
 
@@ -964,6 +1069,114 @@ mod tests {
             panic!("ready");
         };
         bytes.into_rgba()
+    }
+
+    fn line(property: &str, samples: &[(i64, f64)]) -> CommonKeyframeGroup {
+        CommonKeyframeGroup {
+            property_type: property.to_owned(),
+            keyframe_list: samples
+                .iter()
+                .map(|(time, value)| CommonKeyframe {
+                    time_offset: Micros(*time),
+                    values: vec![*value],
+                    curve_type: "Line".to_owned(),
+                    ..CommonKeyframe::default()
+                })
+                .collect(),
+            ..CommonKeyframeGroup::default()
+        }
+    }
+
+    fn keyed(start: i64, groups: Vec<CommonKeyframeGroup>) -> Segment {
+        let mut segment = Segment::new("segment", "video", TimeRange::new(start, 10_000));
+        segment.common_keyframes = groups;
+        segment
+    }
+
+    #[test]
+    fn line_keyframes_move_the_clip_from_the_segment_start() {
+        let segment = keyed(1_000, vec![line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)])]);
+        let (start, _) = segment_clip(&segment, Micros(1_000)).expect("clip");
+        assert_eq!(start.alpha, 0.0);
+        let (mid, uniform) = segment_clip(&segment, Micros(1_500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-9);
+        let rgba = paint(1, 1, solid(1, 1, [200, 0, 0, 255]), mid, uniform);
+        assert_eq!(rgba, vec![100, 0, 0, 128]);
+        let (end, _) = segment_clip(&segment, Micros(3_000)).expect("clip");
+        assert_eq!(end.alpha, 1.0);
+
+        let mut curved = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        curved.keyframe_list[1].curve_type = "CurveIn".to_owned();
+        let segment = keyed(0, vec![curved]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-9);
+
+        let segment = keyed(0, vec![line("alpha", &[(0, 0.25)])]);
+        let (held, _) = segment_clip(&segment, Micros(40)).expect("clip");
+        assert_eq!(held.alpha, 0.25);
+
+        let later = keyed(
+            0,
+            vec![
+                line("KFTypeAlpha", &[(0, 0.25)]),
+                line("KFTypeAlpha", &[(0, 0.75)]),
+            ],
+        );
+        let (clip, _) = segment_clip(&later, Micros(0)).expect("clip");
+        assert_eq!(clip.alpha, 0.75);
+
+        let mut blank = line("KFTypeAlpha", &[(0, 0.25)]);
+        blank.keyframe_list[0].values.clear();
+        let segment = keyed(0, vec![blank]);
+        let (clip, _) = segment_clip(&segment, Micros(0)).expect("clip");
+        assert_eq!(clip.alpha, 1.0);
+
+        let segment = keyed(0, vec![line("KFTypePositionX", &[(0, 1.0)])]);
+        let (moved, uniform) = segment_clip(&segment, Micros(0)).expect("clip");
+        let rgba = paint(4, 1, solid(1, 1, [9, 0, 0, 255]), moved, uniform);
+        assert_eq!(&rgba[12..16], &[9, 0, 0, 255]);
+
+        let segment = keyed(0, vec![line("KFTypeRotation", &[(0, 90.0)])]);
+        let (turned, uniform) = segment_clip(&segment, Micros(0)).expect("clip");
+        let picture = CpuBytes::new(3, 1, vec![1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255]).unwrap();
+        let rgba = paint(3, 3, picture, turned, uniform);
+        assert_eq!([rgba[4], rgba[16], rgba[28]], [3, 2, 1]);
+    }
+
+    #[test]
+    fn scale_keyframes_follow_the_uniform_switch() {
+        let segment = keyed(
+            0,
+            vec![
+                line("KFTypeScale", &[(0, 2.0)]),
+                line("KFTypeScaleX", &[(0, 9.0)]),
+            ],
+        );
+        let (_, uniform) = segment_clip(&segment, Micros(0)).expect("clip");
+        assert_eq!(uniform.value, 2.0);
+        let transform = transform_of(Clip::default(), uniform, 3, 1);
+        assert_eq!(transform.scale_x, 2.0);
+
+        let mut separate = keyed(
+            0,
+            vec![
+                line("KFTypeScale", &[(0, 4.0)]),
+                line("KFTypeScaleX", &[(0, 2.0)]),
+            ],
+        );
+        separate.uniform_scale.on = false;
+        let (clip, uniform) = segment_clip(&separate, Micros(0)).expect("clip");
+        assert_eq!((clip.scale.x, clip.scale.y), (2.0, 4.0));
+        assert!(!uniform.on);
+
+        let broken = keyed(0, vec![line("KFTypeAlpha", &[(0, f64::NAN)])]);
+        assert!(segment_clip(&broken, Micros(0)).is_none());
+        let unused = keyed(0, vec![line("KFTypeScaleX", &[(0, f64::NAN)])]);
+        let (_, uniform) = segment_clip(&unused, Micros(0)).expect("clip");
+        assert_eq!(uniform.value, 1.0);
+        let other = keyed(0, vec![line("KFTypeGlobalAlpha", &[(0, f64::NAN)])]);
+        let (clip, _) = segment_clip(&other, Micros(0)).expect("clip");
+        assert_eq!(clip.alpha, 1.0);
     }
 
     #[test]

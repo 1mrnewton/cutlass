@@ -27,6 +27,7 @@ pub struct OpenClips {
     revision: u64,
     bound: bool,
     sources: HashMap<SegmentId, VideoSource>,
+    nests: HashMap<SegmentId, OpenClips>,
 }
 
 impl OpenClips {
@@ -37,15 +38,25 @@ impl OpenClips {
             revision: 0,
             bound: false,
             sources: HashMap::new(),
+            nests: HashMap::new(),
         }
     }
 
     /// Drops every open file.
     pub fn clear(&mut self) {
         self.sources.clear();
+        self.nests.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
+    }
+
+    /// Open files for the compound segment `id`.
+    ///
+    /// Each compound keeps its own child files. A second segment that stores
+    /// its own copy of a nest does not share them.
+    pub(crate) fn child(&mut self, id: &SegmentId) -> &mut Self {
+        self.nests.entry(id.clone()).or_default()
     }
 
     pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
@@ -53,6 +64,7 @@ impl OpenClips {
             return;
         }
         self.sources.clear();
+        self.nests.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;
@@ -79,7 +91,7 @@ pub(crate) struct VideoLayer<'a> {
 /// rotation, with positive Y up. `dx` is pixels to the right and `dy` is
 /// pixels up. One translation unit is half the canvas on that axis.
 #[derive(Clone, Copy, Debug)]
-struct PictureTransform {
+pub(crate) struct PictureTransform {
     scale_x: f64,
     scale_y: f64,
     sin: f64,
@@ -99,7 +111,7 @@ pub(crate) struct Placed<'a> {
     transform: PictureTransform,
 }
 
-fn picture_transform(
+pub(crate) fn picture_transform(
     clip: &Clip,
     uniform: &UniformScale,
     canvas_w: u32,
@@ -226,7 +238,7 @@ pub(crate) fn video_layers<'a>(
             let Some(transform) = picture_transform(&clip, &uniform, width, height) else {
                 continue;
             };
-            if transform.opacity == 0 || transform.scale_x == 0.0 || transform.scale_y == 0.0 {
+            if transform.omitted() {
                 continue;
             }
             if !clips.sources.contains_key(&segment.id) {
@@ -274,7 +286,7 @@ pub(crate) fn video_layers<'a>(
 /// scale when that switch is on, and through `clip.scale` when it is off.
 /// `KFTypeScaleX` and `KFTypeScaleY` replace one axis only while uniform
 /// scale is off.
-fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
+pub(crate) fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
     let offset = time.0.saturating_sub(segment.target.start.0);
     let mut clip = segment.clip.clone();
     let mut uniform = segment.uniform_scale.clone();
@@ -392,14 +404,21 @@ impl PictureSource for Placed<'_> {
     }
 }
 
-fn place_with(
+impl PictureTransform {
+    /// Nothing to draw: the picture is fully transparent or scaled to nothing.
+    pub(crate) fn omitted(self) -> bool {
+        self.opacity == 0 || self.scale_x == 0.0 || self.scale_y == 0.0
+    }
+}
+
+pub(crate) fn place_with(
     canvas_w: u32,
     canvas_h: u32,
     picture: CpuBytes,
     transform: PictureTransform,
     display: DisplayQuarter,
 ) -> Sample {
-    if transform.opacity == 0 || transform.scale_x == 0.0 || transform.scale_y == 0.0 {
+    if transform.omitted() {
         return Sample::Miss;
     }
     let Some(picture) = orient(picture, display) else {

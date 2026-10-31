@@ -6,6 +6,7 @@ use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
 
 use crate::media::{OpenClips, Placed, video_layers};
+use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
 
 /// A draft borrowed for evaluation. The draft is not written.
@@ -59,10 +60,10 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 
 /// The composited frame at `time`. The snapshot's draft is not changed.
 ///
-/// Solids and video pictures share one paint order: `render_index`, then
-/// track, then segment. A video the factory cannot open is skipped. An open
-/// file in `clips` is seeked when `time` changes. `revision` drops those
-/// files when the draft changes.
+/// Solids, nested drafts, and video pictures share one paint order:
+/// `render_index`, then track, then segment. A video the factory cannot
+/// open is skipped. An open file in `clips` is seeked when `time` changes.
+/// `revision` drops those files when the draft changes.
 pub fn frame<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -71,23 +72,55 @@ pub fn frame<D: Device>(
     clips: &mut OpenClips,
     revision: u64,
 ) -> Result<Frame, EvalError<D::Error>> {
+    compose(snapshot, time, device, media, clips, revision, &[])
+}
+
+pub(crate) fn compose<D: Device>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    ancestors: &[cutlass_model::DraftId],
+) -> Result<Frame, EvalError<D::Error>> {
     let draft = snapshot.draft();
     let extent = canvas_extent(draft).ok_or(EvalError::Canvas)?;
     clips.prepare(draft, revision);
+    let mut pass = NestPass {
+        media,
+        width: extent.width,
+        height: extent.height,
+        time,
+        device,
+        clips,
+        revision,
+        ancestors,
+    };
+    let nests = nest_layers(draft, &mut pass)?;
     let layers = ordered(
         solid_layers(draft, extent.width, extent.height),
-        video_layers(draft, media, extent.width, extent.height, time, clips),
+        video_layers(
+            draft,
+            pass.media,
+            extent.width,
+            extent.height,
+            pass.time,
+            pass.clips,
+        ),
+        nests,
     );
     let mut sources: Vec<&dyn PictureSource> = Vec::with_capacity(layers.len());
     for layer in &layers {
         sources.push(layer.source());
     }
-    submit(device, extent, time, &sources).map_err(EvalError::Compose)
+    submit(pass.device, extent, pass.time, &sources).map_err(EvalError::Compose)
 }
 
 enum Paint<'a> {
     Solid(SolidColor),
     Video(Placed<'a>),
+    Nest(NestedPicture),
 }
 
 struct Ordered<'a> {
@@ -100,6 +133,7 @@ impl Ordered<'_> {
         match &self.paint {
             Paint::Solid(solid) => solid,
             Paint::Video(video) => video,
+            Paint::Nest(nested) => nested,
         }
     }
 }
@@ -107,8 +141,9 @@ impl Ordered<'_> {
 fn ordered<'a>(
     solids: Vec<SolidLayer>,
     videos: Vec<crate::media::VideoLayer<'a>>,
+    nests: Vec<NestedLayer>,
 ) -> Vec<Ordered<'a>> {
-    let mut layers = Vec::with_capacity(solids.len() + videos.len());
+    let mut layers = Vec::with_capacity(solids.len() + videos.len() + nests.len());
     for solid in solids {
         layers.push(Ordered {
             key: (solid.render_index, solid.track_index, solid.segment_index),
@@ -119,6 +154,16 @@ fn ordered<'a>(
         layers.push(Ordered {
             key: (video.render_index, video.track_index, video.segment_index),
             paint: Paint::Video(video.placed),
+        });
+    }
+    for nested in nests {
+        layers.push(Ordered {
+            key: (
+                nested.render_index,
+                nested.track_index,
+                nested.segment_index,
+            ),
+            paint: Paint::Nest(nested.placed),
         });
     }
     layers.sort_by_key(|layer| layer.key);

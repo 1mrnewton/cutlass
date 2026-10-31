@@ -14,7 +14,8 @@ use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_engine::DecodedFrame;
 use cutlass_eval::{OpenClips, ReaderFactory, Snapshot, frame};
 use cutlass_model::{
-    Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute,
+    Draft, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros, Segment, TimeRange,
+    TrackAttribute,
 };
 use cutlass_renderer_software::SoftwareDevice;
 
@@ -269,6 +270,86 @@ fn a_real_still_is_the_evaluated_frame() {
         return;
     }
     evaluated_still(&path).unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn a_nested_still_matches_the_still() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    if !root.is_dir() {
+        eprintln!("skipped: ../local-files is missing");
+        return;
+    }
+    let path = root.join("04-motion-graphics.png");
+    if !path.is_file() {
+        eprintln!("skipped: 04-motion-graphics.png is not in ../local-files");
+        return;
+    }
+    nested_still(&path).unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn nested_still(path: &Path) -> Result<(), String> {
+    let readers = crate::readers::installed_readers();
+    let media = readers
+        .open(path)
+        .map_err(|error| format!("open {error}"))?;
+    let Some(stream) = media
+        .info()
+        .streams
+        .iter()
+        .find(|stream| stream.codec == "Png" && stream.width.is_some())
+    else {
+        return Err("no png picture stream".to_owned());
+    };
+    let width = stream.width.ok_or("width")?;
+    let height = stream.height.ok_or("height")?;
+    let direct = movie_draft(path, width, height, false)?;
+    let mut child = direct.clone();
+    child.id = "child".into();
+    let mut parent = Draft::empty("parent");
+    parent.canvas_config.width = child.canvas_config.width;
+    parent.canvas_config.height = child.canvas_config.height;
+    let span = TimeRange::new(0, 1_000_000);
+    parent.materials.drafts.push(MaterialDraft {
+        id: "nest".into(),
+        draft: Some(Box::new(child)),
+        ..MaterialDraft::default()
+    });
+    let mut segment = Segment::new("compound", "nest", span.clone());
+    segment.source_range = Some(span);
+    parent.tracks[0].segments.push(segment);
+
+    let expected = render(&readers, &direct, Micros(0))?;
+    let mut device = SoftwareDevice::new();
+    let mut clips = OpenClips::new();
+    let first = frame(
+        &Snapshot::new(&parent),
+        Micros(0),
+        &mut device,
+        &readers,
+        &mut clips,
+        0,
+    )
+    .map_err(|error| error.to_string())?;
+    let second = frame(
+        &Snapshot::new(&parent),
+        Micros(0),
+        &mut device,
+        &readers,
+        &mut clips,
+        0,
+    )
+    .map_err(|error| error.to_string())?;
+    if first.rgba != second.rgba {
+        return Err("the second nested frame changed".to_owned());
+    }
+    same_picture(&first.rgba, &expected)?;
+    if render(&readers, &parent, Micros(2_000_000))?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err("a time outside the compound drew pixels".to_owned());
+    }
+    Ok(())
 }
 
 fn evaluated_still(path: &Path) -> Result<(), String> {

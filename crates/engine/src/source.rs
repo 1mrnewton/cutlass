@@ -1,21 +1,22 @@
 //! `PictureSource` over decoded pictures.
 //!
 //! Text and shapes never open a decoder. A platform buffer stays a platform
-//! buffer. CPU pixels go through `cutlass-color`; a layout it cannot convert
-//! is a named miss.
+//! buffer. Coded video goes through `cutlass-color`. A still is scaled to
+//! 8-bit RGBA and premultiplied. Gamma, chromaticity, and a profile are not
+//! applied. A layout neither path can convert is a named miss.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 use cutlass_codec::access::{
     BitDepth, ColorPrimaries, ColorRange, ColorType, MatrixCoefficients, PixelFormat, Transfer,
-    Yuv420p,
+    Transparency, Yuv420p,
 };
 use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
 use cutlass_model::{Draft, Micros, SegmentId};
-use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample};
+use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, rgba_len};
 
 use crate::cache::FrameWindow;
 use crate::clock::{ClockKind, MediaClock};
@@ -161,9 +162,7 @@ fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
             },
             token: *token,
         })),
-        DecodedFrame::Still(image) => Err(EngineError::ColorMiss {
-            layout: still_layout(image).to_owned(),
-        }),
+        DecodedFrame::Still(image) => still_picture(image),
         DecodedFrame::Coded {
             width,
             height,
@@ -244,6 +243,139 @@ fn yuv420(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
     .ok()
 }
 
+/// Coded samples become premultiplied 8-bit RGBA.
+///
+/// A depth below 8 bits and a 16-bit sample use `sample * 255 / max`.
+/// Palette alpha past the table is opaque. A color key compares the coded
+/// samples. Partial alpha is `(channel * alpha + 127) / 255`.
+fn still_picture(image: &StillImage) -> Result<Picture, EngineError> {
+    let Some(rgba) = still_rgba(image) else {
+        return Err(EngineError::ColorMiss {
+            layout: still_layout(image).to_owned(),
+        });
+    };
+    let cpu =
+        CpuBytes::new(image.width, image.height, rgba).map_err(|_| EngineError::ColorMiss {
+            layout: still_layout(image).to_owned(),
+        })?;
+    Ok(Picture::Cpu(cpu))
+}
+
+fn still_rgba(image: &StillImage) -> Option<Vec<u8>> {
+    if image.width == 0 || image.height == 0 {
+        return None;
+    }
+    let channels = image.color.channels();
+    if channels == 0 {
+        return None;
+    }
+    let pixels = usize::try_from(image.width)
+        .ok()?
+        .checked_mul(usize::try_from(image.height).ok()?)?;
+    if image.samples.len() != pixels.checked_mul(channels)? {
+        return None;
+    }
+    let mut rgba = vec![0_u8; rgba_len(image.width, image.height)?];
+    for (pixel, chunk) in image.samples.chunks(channels).enumerate() {
+        let (red, green, blue, alpha) = straight(image, chunk)?;
+        let dest = pixel.checked_mul(4)?;
+        let slot = rgba.get_mut(dest..dest + 4)?;
+        slot[0] = premultiply(red, alpha);
+        slot[1] = premultiply(green, alpha);
+        slot[2] = premultiply(blue, alpha);
+        slot[3] = alpha;
+    }
+    Some(rgba)
+}
+
+fn straight(image: &StillImage, samples: &[u16]) -> Option<(u8, u8, u8, u8)> {
+    let max = image.depth.max_sample();
+    match image.color {
+        ColorType::Gray => {
+            let sample = *samples.first()?;
+            let gray = scale_sample(sample, max)?;
+            let alpha = match &image.transparency {
+                Transparency::None => 255,
+                Transparency::ColorKey(key) if key.len() == 1 && key[0] == sample => 0,
+                Transparency::ColorKey(key) if key.len() == 1 => 255,
+                Transparency::ColorKey(_) | Transparency::PaletteAlpha(_) => return None,
+            };
+            Some((gray, gray, gray, alpha))
+        }
+        ColorType::GrayAlpha => {
+            if !matches!(image.transparency, Transparency::None) {
+                return None;
+            }
+            let gray = scale_sample(*samples.first()?, max)?;
+            let alpha = scale_sample(*samples.get(1)?, max)?;
+            Some((gray, gray, gray, alpha))
+        }
+        ColorType::Rgb => {
+            let red_s = *samples.first()?;
+            let green_s = *samples.get(1)?;
+            let blue_s = *samples.get(2)?;
+            let alpha = match &image.transparency {
+                Transparency::None => 255,
+                Transparency::ColorKey(key)
+                    if key.len() == 3
+                        && key[0] == red_s
+                        && key[1] == green_s
+                        && key[2] == blue_s =>
+                {
+                    0
+                }
+                Transparency::ColorKey(key) if key.len() == 3 => 255,
+                Transparency::ColorKey(_) | Transparency::PaletteAlpha(_) => return None,
+            };
+            Some((
+                scale_sample(red_s, max)?,
+                scale_sample(green_s, max)?,
+                scale_sample(blue_s, max)?,
+                alpha,
+            ))
+        }
+        ColorType::Rgba => {
+            if !matches!(image.transparency, Transparency::None) {
+                return None;
+            }
+            Some((
+                scale_sample(*samples.first()?, max)?,
+                scale_sample(*samples.get(1)?, max)?,
+                scale_sample(*samples.get(2)?, max)?,
+                scale_sample(*samples.get(3)?, max)?,
+            ))
+        }
+        ColorType::Indexed => {
+            let index = usize::from(*samples.first()?);
+            let entry = image.palette.get(index)?;
+            let alpha = match &image.transparency {
+                Transparency::None => 255,
+                Transparency::PaletteAlpha(table) => table.get(index).copied().unwrap_or(255),
+                Transparency::ColorKey(_) => return None,
+            };
+            Some((entry.red, entry.green, entry.blue, alpha))
+        }
+    }
+}
+
+fn scale_sample(sample: u16, max: u16) -> Option<u8> {
+    if max == 0 || sample > max {
+        return None;
+    }
+    let scaled = u32::from(sample)
+        .checked_mul(255)?
+        .checked_div(u32::from(max))?;
+    u8::try_from(scaled).ok()
+}
+
+fn premultiply(channel: u8, alpha: u8) -> u8 {
+    if alpha == 255 {
+        return channel;
+    }
+    let mixed = u16::from(channel) * u16::from(alpha) + 127;
+    u8::try_from(mixed / 255).unwrap_or(0)
+}
+
 fn still_layout(image: &StillImage) -> &'static str {
     match (image.color, image.depth) {
         (ColorType::Gray, BitDepth::Eight) => "gray8",
@@ -260,5 +392,110 @@ fn pixel_layout(pixel: PixelFormat) -> &'static str {
         PixelFormat::Rgba8 => "rgba8",
         PixelFormat::Yuv420p => "yuv420p",
         PixelFormat::None => "none",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cutlass_codec::access::Rgb8;
+
+    fn row(color: ColorType, depth: BitDepth, samples: Vec<u16>) -> StillImage {
+        let channels = u32::try_from(color.channels()).unwrap_or(1);
+        let width = u32::try_from(samples.len()).unwrap_or(0) / channels;
+        StillImage::from_samples(width, 1, color, depth, samples)
+    }
+
+    fn rgba(image: StillImage) -> Vec<u8> {
+        let Picture::Cpu(bytes) = still_picture(&image).expect("picture") else {
+            panic!("cpu");
+        };
+        bytes.into_rgba()
+    }
+
+    #[test]
+    fn eight_bit_color_keeps_its_samples_and_partial_alpha_is_premultiplied() {
+        assert_eq!(
+            rgba(row(
+                ColorType::Rgb,
+                BitDepth::Eight,
+                vec![10, 20, 30, 40, 50, 60]
+            )),
+            vec![10, 20, 30, 255, 40, 50, 60, 255]
+        );
+        assert_eq!(
+            rgba(row(ColorType::Gray, BitDepth::Eight, vec![7])),
+            vec![7, 7, 7, 255]
+        );
+        assert_eq!(
+            rgba(row(
+                ColorType::Rgba,
+                BitDepth::Eight,
+                vec![200, 10, 20, 128]
+            )),
+            vec![100, 5, 10, 128]
+        );
+        assert_eq!(
+            rgba(row(ColorType::GrayAlpha, BitDepth::Eight, vec![100, 128])),
+            vec![50, 50, 50, 128]
+        );
+    }
+
+    #[test]
+    fn a_palette_a_color_key_and_a_narrow_sample_scale_to_eight_bits() {
+        let mut indexed = row(ColorType::Indexed, BitDepth::Eight, vec![0, 1]);
+        indexed.palette = vec![
+            Rgb8 {
+                red: 255,
+                green: 0,
+                blue: 0,
+            },
+            Rgb8 {
+                red: 0,
+                green: 255,
+                blue: 0,
+            },
+        ];
+        indexed.transparency = Transparency::PaletteAlpha(vec![0, 255]);
+        assert_eq!(rgba(indexed), vec![0, 0, 0, 0, 0, 255, 0, 255]);
+
+        let mut keyed = row(ColorType::Gray, BitDepth::Eight, vec![4, 5]);
+        keyed.transparency = Transparency::ColorKey(vec![4]);
+        assert_eq!(rgba(keyed), vec![0, 0, 0, 0, 5, 5, 5, 255]);
+
+        assert_eq!(
+            rgba(row(ColorType::Gray, BitDepth::One, vec![0, 1])),
+            vec![0, 0, 0, 255, 255, 255, 255, 255]
+        );
+        assert_eq!(
+            rgba(row(
+                ColorType::Rgb,
+                BitDepth::Sixteen,
+                vec![65535, 0, 32896]
+            )),
+            vec![255, 0, 128, 255]
+        );
+    }
+
+    #[test]
+    fn gamma_and_a_profile_do_not_change_the_samples() {
+        let mut tagged = row(ColorType::Rgb, BitDepth::Eight, vec![1, 2, 3]);
+        tagged.gamma_times_100000 = Some(45_455);
+        tagged.icc_profile = vec![1, 2, 3, 4];
+        assert_eq!(rgba(tagged), vec![1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn a_short_or_out_of_range_still_is_a_color_miss() {
+        let short = StillImage::from_samples(2, 1, ColorType::Gray, BitDepth::Eight, vec![1]);
+        assert!(matches!(
+            still_picture(&short),
+            Err(EngineError::ColorMiss { .. })
+        ));
+        let high = row(ColorType::Gray, BitDepth::Eight, vec![256]);
+        assert!(matches!(
+            still_picture(&high),
+            Err(EngineError::ColorMiss { .. })
+        ));
     }
 }

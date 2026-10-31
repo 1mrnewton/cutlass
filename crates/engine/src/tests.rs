@@ -13,8 +13,8 @@ use cutlass_container::{
     Stream, TrackId, Trim,
 };
 use cutlass_decode::{
-    CodecError, CodecParams, ColorPrimaries, Decoder, Output, Packet, PictureInfo, PictureOutput,
-    PixelFormat, Transfer,
+    BitDepth, CodecError, CodecParams, ColorPrimaries, ColorType, Decoder, Output, Packet,
+    PictureInfo, PictureOutput, PixelFormat, Transfer,
 };
 use cutlass_jpeg::JpegDecoder;
 use cutlass_model::{Draft, MaterialVideo, Micros, Segment, SegmentId, TimeRange, TrackType};
@@ -339,7 +339,7 @@ fn gif_duration_uses_the_file_timescale() {
 }
 
 #[test]
-fn export_decodes_a_fixture_and_names_the_color_miss_playback_does_not_decode() {
+fn export_returns_the_still_and_playback_does_not_decode() {
     reset_counts();
     let factory = factory();
     let path = fixture("pattern.jpg");
@@ -347,14 +347,20 @@ fn export_decodes_a_fixture_and_names_the_color_miss_playback_does_not_decode() 
     let before = draft.clone();
     let export = open_segment(&factory, &draft, &id, ClockKind::Export, 4).expect("export");
     assert_eq!(draft, before);
-    let err = export.picture_at(Micros(0)).expect_err("color");
-    assert!(matches!(err, EngineError::ColorMiss { layout } if !layout.is_empty()));
+    let picture = export.picture_at(Micros(0)).expect("rgba");
+    let Picture::Cpu(bytes) = picture else {
+        panic!("cpu picture");
+    };
+    assert_eq!(bytes.rgba(), jpeg_rgba(&path));
     assert_eq!(export.decodes(), 1);
     assert_eq!(export.cached(), 1);
-    let again = export.picture_at(Micros(100)).expect_err("cached miss");
-    assert!(matches!(again, EngineError::ColorMiss { .. }));
+    let again = export.picture_at(Micros(100)).expect("cached");
+    let Picture::Cpu(again) = again else {
+        panic!("cpu picture");
+    };
+    assert_eq!(again.rgba(), bytes.rgba());
     assert_eq!(export.decodes(), 1);
-    assert!(matches!(export.sample(Micros(0)), Sample::Miss));
+    assert!(matches!(export.sample(Micros(0)), Sample::Ready(_)));
 
     let playback = open_segment(&factory, &draft, &id, ClockKind::Playback, 4).expect("play");
     assert!(matches!(playback.sample(Micros(0)), Sample::Miss));
@@ -368,9 +374,37 @@ fn export_decodes_a_fixture_and_names_the_color_miss_playback_does_not_decode() 
 
     let waited = export.advance_audio(48_000, 48_000).expect("ahead");
     assert!(waited.0 > 0);
-    let filled = export.fill(Micros(0));
-    assert!(matches!(filled, Err(EngineError::ColorMiss { .. })));
+    let filled = export.fill(Micros(0)).expect("fill");
+    let Sample::Ready(Picture::Cpu(filled)) = filled else {
+        panic!("filled picture");
+    };
+    assert_eq!(filled.rgba(), jpeg_rgba(&path));
     assert!(export.cached() >= 1);
+}
+
+fn jpeg_rgba(path: &Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).expect("jpeg");
+    let params = CodecParams::audio(CodecId::Jpeg, 1, cutlass_decode::ChannelLayout::mono());
+    let mut decoder = JpegDecoder::open(&params).expect("decoder");
+    let image = decoder
+        .decode_picture(&Packet::audio(bytes, 0, 1, 1))
+        .expect("decode")
+        .into_iter()
+        .next()
+        .expect("still")
+        .image;
+    assert_eq!(image.color, ColorType::Rgb);
+    assert_eq!(image.depth, BitDepth::Eight);
+    let mut rgba = Vec::new();
+    for chunk in image.samples.as_chunks::<3>().0 {
+        rgba.extend([
+            u8::try_from(chunk[0]).expect("red"),
+            u8::try_from(chunk[1]).expect("green"),
+            u8::try_from(chunk[2]).expect("blue"),
+            255,
+        ]);
+    }
+    rgba
 }
 
 #[test]

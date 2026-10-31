@@ -1,4 +1,4 @@
-//! One real movie, opened with the codecs the desktop registers.
+//! One real movie and one real still, opened with the codecs the desktop registers.
 //!
 //! The folder is `../local-files` from the checkout. CI does not have it,
 //! so the test returns when that folder or a small movie is missing.
@@ -254,6 +254,103 @@ fn same_picture(got: &[u8], expected: &[u8]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[test]
+fn a_real_still_is_the_evaluated_frame() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    if !root.is_dir() {
+        eprintln!("skipped: ../local-files is missing");
+        return;
+    }
+    let path = root.join("04-motion-graphics.png");
+    if !path.is_file() {
+        eprintln!("skipped: 04-motion-graphics.png is not in ../local-files");
+        return;
+    }
+    evaluated_still(&path).unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn evaluated_still(path: &Path) -> Result<(), String> {
+    let readers = crate::readers::installed_readers();
+    let media = readers
+        .open(path)
+        .map_err(|error| format!("open {error}"))?;
+    let Some(stream) = media
+        .info()
+        .streams
+        .iter()
+        .find(|stream| stream.codec == "Png" && stream.width.is_some())
+    else {
+        return Err("no png picture stream".to_owned());
+    };
+    let width = stream.width.ok_or("width")?;
+    let height = stream.height.ok_or("height")?;
+    let Some(ffmpeg) = ffmpeg() else {
+        return Err("ffmpeg is missing".to_owned());
+    };
+    let expected = ffmpeg_rgba(&ffmpeg, path)?;
+    let draft = movie_draft(path, width, height, true)?;
+    same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
+
+    let mut wide = movie_draft(path, width, height, false)?;
+    let canvas_w = width.checked_add(2).ok_or("canvas width")?;
+    let canvas_h = height.checked_add(2).ok_or("canvas height")?;
+    wide.canvas_config.width = i32::try_from(canvas_w).map_err(|_| "canvas width")?;
+    wide.canvas_config.height = i32::try_from(canvas_h).map_err(|_| "canvas height")?;
+    centered(
+        &render(&readers, &wide, Micros(0))?,
+        canvas_w,
+        canvas_h,
+        &expected,
+        width,
+        height,
+    )?;
+
+    let mut hidden = draft.clone();
+    hidden.tracks[0].attribute = TrackAttribute(TrackAttribute::HIDE);
+    if render(&readers, &hidden, Micros(0))?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err("hidden track drew pixels".to_owned());
+    }
+    if render(&readers, &draft, Micros(2_000_000))?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err("a time outside the still drew pixels".to_owned());
+    }
+    Ok(())
+}
+
+fn ffmpeg_rgba(ffmpeg: &str, path: &Path) -> Result<Vec<u8>, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "cutlass-desktop-still-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let raw = dir.join("frame.rgba");
+    let output = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba"])
+        .arg(&raw)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!(
+            "ffmpeg rgba failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let bytes = std::fs::read(&raw).map_err(|error| error.to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
 }
 
 fn evaluated_frame(path: &Path) -> Result<(), String> {

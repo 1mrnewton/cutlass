@@ -155,9 +155,13 @@ pub fn decode_with_refs(
     };
     let sizes = tile.sizes.clone();
     let tx_sizes = tile.tx_sizes.clone();
+    let refs = tile.block_ref.clone();
+    let modes = tile.y_mode.clone();
     let edges = Edges {
         sizes: &sizes,
         tx: &tx_sizes,
+        refs: &refs,
+        modes: &modes,
         mi_cols: tile.mi_cols,
         mi_rows: tile.mi_rows,
         sub_x: tile.sub_x,

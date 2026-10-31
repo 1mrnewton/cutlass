@@ -188,7 +188,14 @@ pub fn parse_unit(
     bytes: &[u8],
     sequence: Option<&Sequence>,
 ) -> Result<(Sequence, FrameInfo), CodecError> {
-    parse_with_motion(bytes, sequence, &[None; 8], &[0; 8], &[None; 8])
+    parse_with_motion(
+        bytes,
+        sequence,
+        &[None; 8],
+        &[0; 8],
+        &[None; 8],
+        &[SavedLoopFilter::defaults(); 8],
+    )
 }
 
 /// Parse one temporal unit. `saved` is the global-motion model stored in each
@@ -199,6 +206,7 @@ pub fn parse_with_motion(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
+    saved_lf: &[SavedLoopFilter; 8],
 ) -> Result<(Sequence, FrameInfo), CodecError> {
     let mut bits = BitReader::new(bytes);
     let mut seq = sequence.cloned();
@@ -246,6 +254,7 @@ pub fn parse_with_motion(
                     saved,
                     order_hints,
                     ref_sizes,
+                    saved_lf,
                 )?);
             }
             3 | 7 => {
@@ -259,6 +268,7 @@ pub fn parse_with_motion(
                     saved,
                     order_hints,
                     ref_sizes,
+                    saved_lf,
                 )?);
             }
             4 => {
@@ -528,9 +538,10 @@ fn parse_frame(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
+    saved_lf: &[SavedLoopFilter; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
-    let mut frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes)?;
+    let mut frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, saved_lf)?;
     bits.byte_align();
     let header_bytes = (bits.position() - header_start) / 8;
     let obu_bytes = (payload_end - header_start) / 8;
@@ -568,8 +579,9 @@ fn parse_frame_header_only(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
+    saved_lf: &[SavedLoopFilter; 8],
 ) -> Result<FrameInfo, CodecError> {
-    let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes)?;
+    let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, saved_lf)?;
     trailing(bits, payload_end)?;
     if !frame.show_existing && frame.tile.is_empty() {
         return Err(CodecError::Unsupported {
@@ -585,6 +597,7 @@ fn uncompressed(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
+    saved_lf: &[SavedLoopFilter; 8],
 ) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
     let mut frame_to_show = 0u8;
@@ -828,9 +841,11 @@ fn uncompressed(
     let mut lf = [0u8; 4];
     let mut sharpness = 0u8;
     let mut lf_delta = false;
-    let ref_deltas = [1i8, 0, 0, 0, 0, -1, -1, -1];
-    let mode_deltas = [0i8; 2];
-    if !lossless {
+    let (mut ref_deltas, mut mode_deltas) = inherited_lf(primary_ref, &ref_frames, saved_lf);
+    if lossless {
+        // A lossless frame replaces whatever was inherited with the defaults.
+        (ref_deltas, mode_deltas) = SavedLoopFilter::defaults().pair();
+    } else {
         lf[0] = bits.read(6)? as u8;
         lf[1] = bits.read(6)? as u8;
         if lf[0] != 0 || lf[1] != 0 {
@@ -840,9 +855,7 @@ fn uncompressed(
         sharpness = bits.read(3)? as u8;
         lf_delta = bits.read_bool()?;
         if lf_delta && bits.read_bool()? {
-            return Err(CodecError::Unsupported {
-                what: "loop filter delta update",
-            });
+            read_lf_delta_update(bits, &mut ref_deltas, &mut mode_deltas)?;
         }
     }
     let cdef = read_cdef_params(bits, sequence)?;
@@ -1110,6 +1123,66 @@ fn read_cdef_sec(bits: &mut BitReader<'_>) -> Result<u8, CodecError> {
     Ok(if strength == 3 { 4 } else { strength })
 }
 
+/// Loop-filter reference and mode deltas stored with a reference frame.
+#[derive(Clone, Copy)]
+pub struct SavedLoopFilter {
+    pub ref_deltas: [i8; 8],
+    pub mode_deltas: [i8; 2],
+}
+
+impl SavedLoopFilter {
+    pub const fn defaults() -> Self {
+        Self {
+            // Intra, last, last2, last3, golden, backward, altref2, altref.
+            ref_deltas: [1, 0, 0, 0, -1, 0, -1, -1],
+            mode_deltas: [0, 0],
+        }
+    }
+
+    const fn pair(self) -> ([i8; 8], [i8; 2]) {
+        (self.ref_deltas, self.mode_deltas)
+    }
+}
+
+fn inherited_lf(
+    primary_ref: u8,
+    ref_frames: &[u8; 7],
+    saved: &[SavedLoopFilter; 8],
+) -> ([i8; 8], [i8; 2]) {
+    if primary_ref >= PRIMARY_REF_NONE {
+        return SavedLoopFilter::defaults().pair();
+    }
+    let slot = usize::from(ref_frames[usize::from(primary_ref)]);
+    saved
+        .get(slot)
+        .copied()
+        .unwrap_or_else(SavedLoopFilter::defaults)
+        .pair()
+}
+
+fn read_lf_delta_update(
+    bits: &mut BitReader<'_>,
+    ref_deltas: &mut [i8; 8],
+    mode_deltas: &mut [i8; 2],
+) -> Result<(), CodecError> {
+    for delta in ref_deltas {
+        if bits.read_bool()? {
+            *delta = read_lf_delta(bits)?;
+        }
+    }
+    for delta in mode_deltas {
+        if bits.read_bool()? {
+            *delta = read_lf_delta(bits)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_lf_delta(bits: &mut BitReader<'_>) -> Result<i8, CodecError> {
+    let value = bits.read_signed(7)?;
+    i8::try_from(value).map_err(|_| malformed(bits, "loop filter delta"))
+}
+
 fn read_delta_q(bits: &mut BitReader<'_>) -> Result<i32, CodecError> {
     if bits.read_bool()? {
         Ok(bits.read_signed(7)?)
@@ -1325,7 +1398,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         lf_level: [0; 4],
         lf_sharpness: 0,
         lf_delta_enabled: false,
-        lf_ref_deltas: [1, 0, 0, 0, 0, -1, -1, -1],
+        lf_ref_deltas: SavedLoopFilter::defaults().ref_deltas,
         lf_mode_deltas: [0; 2],
         cdef: CdefParams::off(),
         restoration: Restoration::off(),

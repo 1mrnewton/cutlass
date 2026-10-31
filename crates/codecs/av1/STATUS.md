@@ -81,6 +81,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` four-frame stream shown at 64×64 with super resolution on. The inter frames reconstruct at the coded width and sample the upscaled reference. All four pictures match dav1d.
 - One embedded `aomenc` four-frame stream whose sequence is 64×64 and whose frames are 32×32. A later frame copies that size from a reference. All four pictures match dav1d.
 - One embedded `aomenc` four-frame stream whose key is 32×32 and whose later frames are 64×64. The first inter frame samples the smaller reference. All four pictures match dav1d. A warp of a scaled reference is still refused.
+- One embedded four-frame stream whose keyframe sets the intra loop-filter delta to -16. Later frames keep that delta when they do not write a new one. All four pictures match dav1d. Segmentation and a per-superblock loop-filter delta are still refused.
 - Chroma decoded-neighbor flags use the chroma superblock grid. An extended intra edge stops at the tile boundary. A 2160p keyframe from `../local-files` matches dav1d when that file and dav1d are present.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 

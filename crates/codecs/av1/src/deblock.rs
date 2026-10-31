@@ -1,17 +1,20 @@
 //! In-loop deblocking from section 7.14 of the AV1 specification.
 //!
-//! Vertical edges are filtered before horizontal edges. Segmentation and
-//! per-block filter deltas are not used; frames that enable them are rejected
-//! before this runs.
+//! Vertical edges are filtered before horizontal edges. A frame may update the
+//! reference and mode deltas. Segmentation and a per-superblock filter delta
+//! are not used; frames that enable them are rejected before this runs.
 
 use crate::dims::{MAX_TX_SIZE_RECT, TX_HEIGHT, TX_WIDTH, subsampled_size};
 use crate::header::FrameInfo;
+use crate::inter::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV};
 
 const MAX_LOOP_FILTER: i32 = 63;
 
 pub struct Edges<'a> {
     pub sizes: &'a [u8],
     pub tx: &'a [u8],
+    pub refs: &'a [i8],
+    pub modes: &'a [u8],
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub sub_x: bool,
@@ -70,6 +73,8 @@ fn filter_plane(
     }
     let sub_x = usize::from(plane > 0 && edges.sub_x);
     let sub_y = usize::from(plane > 0 && edges.sub_y);
+    // A chroma plane whose coded level is 0 stays unfiltered. The reference
+    // delta is not added to that zero.
     if plane > 0 && edges.frame.lf_level[plane + 1] == 0 {
         return;
     }
@@ -79,10 +84,6 @@ fn filter_plane(
     let row_step = 1usize << sub_y;
     let col_step = 1usize << sub_x;
     for pass in 0..2 {
-        let lvl = level(edges.frame, plane, pass);
-        if lvl == 0 {
-            continue;
-        }
         let job = Job {
             width,
             plane_h: height,
@@ -92,7 +93,6 @@ fn filter_plane(
             sub_x,
             sub_y,
             col_step,
-            lvl,
         };
         if pass == 0 {
             run_bands(
@@ -122,7 +122,6 @@ struct Job<'a> {
     sub_x: usize,
     sub_y: usize,
     col_step: usize,
-    lvl: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -382,7 +381,14 @@ fn filter_edge(samples: &mut [u8], job: &Job<'_>, band_y: usize, band_h: usize, 
         return;
     }
     let filter_size = filter_size(job.pass, job.plane, tx, prev_tx);
-    let (limit, blimit, thresh) = limits(job.lvl, job.edges.frame.lf_sharpness);
+    let mut lvl = strength_at(job.edges, job.plane, job.pass, row, col);
+    if lvl == 0 {
+        lvl = strength_at(job.edges, job.plane, job.pass, prev_row, prev_col);
+    }
+    if lvl == 0 {
+        return;
+    }
+    let (limit, blimit, thresh) = limits(lvl, job.edges.frame.lf_sharpness);
     let strength = Strength {
         limit,
         blimit,
@@ -473,15 +479,38 @@ fn filter_size(pass: usize, plane: usize, tx: usize, prev: usize) -> usize {
     }
 }
 
-fn level(frame: &FrameInfo, plane: usize, pass: usize) -> i32 {
+fn strength_at(edges: &Edges<'_>, plane: usize, pass: usize, row: usize, col: usize) -> i32 {
+    let at = row * edges.mi_cols + col;
+    let reference = edges.refs.get(at).copied().unwrap_or(INTRA_FRAME);
+    let mode = edges.modes.get(at).copied().unwrap_or(0);
+    filter_level(edges.frame, plane, pass, reference, mode)
+}
+
+fn filter_level(frame: &FrameInfo, plane: usize, pass: usize, reference: i8, mode: u8) -> i32 {
     let index = if plane == 0 { pass } else { plane + 1 };
-    let mut lvl = i32::from(frame.lf_level[index]).clamp(0, MAX_LOOP_FILTER);
-    if frame.lf_delta_enabled {
-        let shift = lvl >> 5;
-        lvl += i32::from(frame.lf_ref_deltas[0]) << shift;
-        lvl = lvl.clamp(0, MAX_LOOP_FILTER);
+    let Some(base) = frame.lf_level.get(index).copied() else {
+        return 0;
+    };
+    let mut lvl = i32::from(base).clamp(0, MAX_LOOP_FILTER);
+    if plane > 0 && lvl == 0 {
+        return 0;
     }
-    lvl
+    if !frame.lf_delta_enabled {
+        return lvl;
+    }
+    let shift = lvl >> 5;
+    if reference <= INTRA_FRAME {
+        lvl += i32::from(frame.lf_ref_deltas[0]) << shift;
+    } else {
+        let slot = usize::try_from(reference).unwrap_or(0);
+        let ref_delta = frame.lf_ref_deltas.get(slot).copied().unwrap_or(0);
+        let mode_slot =
+            usize::from(mode >= NEARESTMV && mode != GLOBALMV && mode != GLOBAL_GLOBALMV);
+        let mode_delta = frame.lf_mode_deltas.get(mode_slot).copied().unwrap_or(0);
+        lvl += i32::from(ref_delta) << shift;
+        lvl += i32::from(mode_delta) << shift;
+    }
+    lvl.clamp(0, MAX_LOOP_FILTER)
 }
 
 fn limits(lvl: i32, sharpness: u8) -> (i32, i32, i32) {

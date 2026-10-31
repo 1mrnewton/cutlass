@@ -6,7 +6,9 @@ use cutlass_decode::{
 
 use crate::yuv::{Plane, Yuv420, picture_output};
 
-use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_with_motion, unit_obus};
+use crate::header::{
+    FrameInfo, SavedLoopFilter, Sequence, header_is_addressable, parse_with_motion, unit_obus,
+};
 use crate::inter::{RefView, SavedMotion};
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
 
@@ -17,6 +19,7 @@ struct Reference {
     cdfs: Arc<Cdfs>,
     gm: [[i32; 6]; 8],
     field: Arc<SavedMotion>,
+    lf: SavedLoopFilter,
 }
 
 struct KeptSlot {
@@ -161,12 +164,19 @@ impl Av1Decoder {
                 .as_ref()
                 .map(|reference| (reference.picture.y.width(), reference.picture.y.height()))
         });
+        let saved_lf = std::array::from_fn(|slot| {
+            self.refs[slot]
+                .as_ref()
+                .map(|reference| reference.lf)
+                .unwrap_or_else(SavedLoopFilter::defaults)
+        });
         let (sequence, frame) = parse_with_motion(
             bytes,
             self.sequence.as_ref(),
             &saved_motion,
             &self.order_hints,
             &ref_sizes,
+            &saved_lf,
         )?;
         header_is_addressable(&sequence, &frame)?;
         let stale = self.take_stale_refs(&frame);
@@ -259,6 +269,10 @@ impl Av1Decoder {
                     cdfs: Arc::clone(&cdfs),
                     gm: frame.gm_params,
                     field: Arc::clone(&motion),
+                    lf: SavedLoopFilter {
+                        ref_deltas: frame.lf_ref_deltas,
+                        mode_deltas: frame.lf_mode_deltas,
+                    },
                 });
                 self.order_hints[slot] = frame.order_hint;
             }
@@ -2644,6 +2658,43 @@ mod tests {
         for (index, payload) in frames.iter().enumerate() {
             let packed = push_frame(&mut decoder, payload, index as i64);
             assert_eq!(packed.len(), lengths[index], "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn loop_filter_delta_update_matches_dav1d() {
+        // The keyframe replaces the intra filter delta. Later frames keep that
+        // value when they do not write a new one. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/lfdelta_0.obu"),
+            include_bytes!("../fixtures/lfdelta_1.obu"),
+            include_bytes!("../fixtures/lfdelta_2.obu"),
+            include_bytes!("../fixtures/lfdelta_3.obu"),
+        ];
+        let expected = [
+            0x00ec_51b0_a70a_febb,
+            0x3e9b_4d41_a410_05e5,
+            0x9ec7_fa19_6d23_3a89,
+            0x9674_3f13_bccc_56b5,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(frame.lf_delta_enabled);
+                assert_eq!(frame.lf_ref_deltas[0], -16);
+            } else {
+                assert_ne!(frame.primary_ref, 7, "frame {index}");
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }

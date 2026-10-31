@@ -122,7 +122,7 @@ Refused with a typed error before a picture is published:
 - An OBU without a size field, and a reserved OBU type.
 - Screen-content tools, palette, and intra block copy.
 - Lossless (`base_q_idx` 0).
-- Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
+- Segmentation, and a per-superblock loop-filter delta.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.

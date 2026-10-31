@@ -12,7 +12,8 @@
 //! motion blends those neighboring predictors. A block may take a motion
 //! candidate from the field projected out of an earlier frame. An inter frame
 //! may sample a reference of a different size, and it may copy its upscaled
-//! size from a reference. A warp of a scaled reference is rejected.
+//! size from a reference. A warp of a scaled reference is rejected. A frame
+//! may replace a loop-filter reference or mode delta, and a later frame keeps it.
 
 #![forbid(unsafe_code)]
 

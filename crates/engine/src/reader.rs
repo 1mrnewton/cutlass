@@ -10,7 +10,7 @@ use std::path::Path;
 
 use cutlass_codec::access::{ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, Transfer};
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
-use cutlass_container::{Demux, OpenError, ProbeResult, ReadError, SeekTo};
+use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
     PictureSamples, StillImage,
@@ -47,6 +47,9 @@ pub struct MediaInfo {
     pub duration: Option<Micros>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Clockwise quarter turn of the picture stream. [`DisplayQuarter::Zero`] when
+    /// the file has no picture, or the matrix is not a quarter turn.
+    pub display: DisplayQuarter,
     pub streams: Vec<StreamReport>,
 }
 
@@ -484,11 +487,15 @@ fn unknown_tag(codec: &StreamCodec) -> String {
 }
 
 fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
+    let mut display = None;
     let streams: Vec<StreamReport> = demux
         .streams()
         .iter()
         .map(|stream| {
             let size = stream.params().size();
+            if size.is_some() && display.is_none() {
+                display = Some(stream.display());
+            }
             StreamReport {
                 track: stream.id().get(),
                 codec: unknown_tag(stream.params().codec()),
@@ -507,6 +514,7 @@ fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
         duration: None,
         width: picture.and_then(|stream| stream.width),
         height: picture.and_then(|stream| stream.height),
+        display: display.unwrap_or_default(),
         streams,
     }
 }

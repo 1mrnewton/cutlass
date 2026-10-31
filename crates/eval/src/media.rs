@@ -5,15 +5,15 @@
 //! larger picture is scaled down until it fits, then centered. The segment
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
-//! A translation of 1 is half the canvas. Keyframes and the file's display
-//! rotation are not applied.
+//! A translation of 1 is half the canvas. A file display quarter turn is
+//! clockwise and is applied before that fit. Keyframes are not applied.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
 
 use std::collections::HashMap;
 
-use cutlass_engine::{ClockKind, ReaderFactory, VideoSource, open_segment};
+use cutlass_engine::{ClockKind, DisplayQuarter, ReaderFactory, VideoSource, open_segment};
 use cutlass_model::{
     Clip, Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute, UniformScale,
 };
@@ -275,7 +275,13 @@ impl PictureSource for Placed<'_> {
             return Sample::Miss;
         };
         match picture {
-            Picture::Cpu(bytes) => place_with(self.width, self.height, bytes, self.transform),
+            Picture::Cpu(bytes) => place_with(
+                self.width,
+                self.height,
+                bytes,
+                self.transform,
+                self.source.display(),
+            ),
             Picture::Platform(_) => Sample::Miss,
         }
     }
@@ -286,10 +292,14 @@ fn place_with(
     canvas_h: u32,
     picture: CpuBytes,
     transform: PictureTransform,
+    display: DisplayQuarter,
 ) -> Sample {
     if transform.opacity == 0 || transform.scale_x == 0.0 || transform.scale_y == 0.0 {
         return Sample::Miss;
     }
+    let Some(picture) = orient(picture, display) else {
+        return Sample::Miss;
+    };
     if transform.geometry_identity {
         let sample = place(canvas_w, canvas_h, picture);
         return if transform.opacity == 255 {
@@ -299,6 +309,57 @@ fn place_with(
         };
     }
     sample_transformed(canvas_w, canvas_h, &picture, transform)
+}
+
+fn orient(picture: CpuBytes, display: DisplayQuarter) -> Option<CpuBytes> {
+    if display == DisplayQuarter::Zero {
+        return Some(picture);
+    }
+    let src_w = picture.width();
+    let src_h = picture.height();
+    let (dst_w, dst_h) = match display {
+        DisplayQuarter::Zero | DisplayQuarter::Half => (src_w, src_h),
+        DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (src_h, src_w),
+    };
+    let len = rgba_len(dst_w, dst_h)?;
+    let src = picture.rgba();
+    let mut dst = vec![0_u8; len];
+    for y in 0..dst_h {
+        for x in 0..dst_w {
+            let (sx, sy) = turned_source(display, src_w, src_h, x, y)?;
+            let from = pixel_at(src_w, sx, sy)?;
+            let to = pixel_at(dst_w, x, y)?;
+            dst.get_mut(to..to + 4)?
+                .copy_from_slice(src.get(from..from + 4)?);
+        }
+    }
+    CpuBytes::new(dst_w, dst_h, dst).ok()
+}
+
+fn turned_source(
+    display: DisplayQuarter,
+    src_w: u32,
+    src_h: u32,
+    x: u32,
+    y: u32,
+) -> Option<(u32, u32)> {
+    match display {
+        DisplayQuarter::Zero => Some((x, y)),
+        DisplayQuarter::Clockwise90 => Some((y, src_h.checked_sub(x)?.checked_sub(1)?)),
+        DisplayQuarter::Half => Some((
+            src_w.checked_sub(x)?.checked_sub(1)?,
+            src_h.checked_sub(y)?.checked_sub(1)?,
+        )),
+        DisplayQuarter::Clockwise270 => Some((src_w.checked_sub(y)?.checked_sub(1)?, x)),
+    }
+}
+
+fn pixel_at(width: u32, x: u32, y: u32) -> Option<usize> {
+    let stride = usize::try_from(width).ok()?.checked_mul(4)?;
+    usize::try_from(y)
+        .ok()?
+        .checked_mul(stride)?
+        .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)
 }
 
 fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes) -> Sample {
@@ -682,7 +743,8 @@ mod tests {
         uniform: UniformScale,
     ) -> Vec<u8> {
         let transform = transform_of(clip, uniform, width, height);
-        let Sample::Ready(Picture::Cpu(bytes)) = place_with(width, height, picture, transform)
+        let Sample::Ready(Picture::Cpu(bytes)) =
+            place_with(width, height, picture, transform, DisplayQuarter::Zero)
         else {
             panic!("ready");
         };
@@ -696,7 +758,9 @@ mod tests {
         let uniform = UniformScale::default();
         let transform = transform_of(clip, uniform, 3, 3);
         assert!(transform.geometry_identity);
-        let Sample::Ready(Picture::Cpu(bytes)) = place_with(3, 3, picture, transform) else {
+        let Sample::Ready(Picture::Cpu(bytes)) =
+            place_with(3, 3, picture, transform, DisplayQuarter::Zero)
+        else {
             panic!("ready");
         };
         assert_eq!(&bytes.rgba()[16..20], &[1, 2, 3, 4]);
@@ -723,7 +787,13 @@ mod tests {
         };
         let transform = transform_of(clear, UniformScale::default(), 1, 1);
         assert!(matches!(
-            place_with(1, 1, solid(1, 1, [1, 2, 3, 4]), transform),
+            place_with(
+                1,
+                1,
+                solid(1, 1, [1, 2, 3, 4]),
+                transform,
+                DisplayQuarter::Zero,
+            ),
             Sample::Miss
         ));
     }
@@ -843,6 +913,57 @@ mod tests {
         );
         assert_eq!(&rgba[16..20], &[6, 0, 0, 255]);
         assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_file_quarter_turn_precedes_the_clip() {
+        let row = CpuBytes::new(2, 1, vec![1, 0, 0, 255, 2, 0, 0, 255]).unwrap();
+        let upright = placed(
+            1,
+            2,
+            row.clone(),
+            Clip::default(),
+            DisplayQuarter::Clockwise90,
+        );
+        assert_eq!(upright, vec![1, 0, 0, 255, 2, 0, 0, 255]);
+
+        let half = placed(2, 1, row.clone(), Clip::default(), DisplayQuarter::Half);
+        assert_eq!(&half[..8], &[2, 0, 0, 255, 1, 0, 0, 255]);
+
+        let left = placed(
+            1,
+            2,
+            row.clone(),
+            Clip::default(),
+            DisplayQuarter::Clockwise270,
+        );
+        assert_eq!(left, vec![2, 0, 0, 255, 1, 0, 0, 255]);
+
+        let flip = Clip {
+            flip: Flip {
+                horizontal: true,
+                ..Flip::default()
+            },
+            ..Clip::default()
+        };
+        let after = placed(1, 2, row, flip, DisplayQuarter::Clockwise90);
+        assert_eq!(after, vec![1, 0, 0, 255, 2, 0, 0, 255]);
+    }
+
+    fn placed(
+        width: u32,
+        height: u32,
+        picture: CpuBytes,
+        clip: Clip,
+        display: DisplayQuarter,
+    ) -> Vec<u8> {
+        let transform = transform_of(clip, UniformScale::default(), width, height);
+        let Sample::Ready(Picture::Cpu(bytes)) =
+            place_with(width, height, picture, transform, display)
+        else {
+            panic!("ready");
+        };
+        bytes.into_rgba()
     }
 
     #[test]

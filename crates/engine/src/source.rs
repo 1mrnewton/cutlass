@@ -13,6 +13,7 @@ use cutlass_codec::access::{
     Transparency, Yuv420p,
 };
 use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
+use cutlass_container::DisplayQuarter;
 use cutlass_decode::StillImage;
 use cutlass_gpu::Extent;
 use cutlass_model::{Draft, Micros, SegmentId};
@@ -32,6 +33,7 @@ pub struct VideoSource {
     cache: RefCell<FrameWindow<DecodedFrame>>,
     clock: RefCell<MediaClock>,
     decodes: Cell<u32>,
+    display: DisplayQuarter,
 }
 
 impl VideoSource {
@@ -48,6 +50,13 @@ impl VideoSource {
     #[must_use]
     pub fn decodes(&self) -> u32 {
         self.decodes.get()
+    }
+
+    /// Clockwise quarter turn from the file. [`DisplayQuarter::Zero`] leaves
+    /// the decoded picture unchanged.
+    #[must_use]
+    pub const fn display(&self) -> DisplayQuarter {
+        self.display
     }
 
     #[must_use]
@@ -138,6 +147,7 @@ pub fn open_segment(
         });
     };
     let media = factory.open(Path::new(path))?;
+    let display = media.info().display;
     let map = map::placement_of(draft, segment)?;
     Ok(VideoSource {
         path: PathBuf::from(path),
@@ -146,6 +156,7 @@ pub fn open_segment(
         cache: RefCell::new(FrameWindow::new(window)?),
         clock: RefCell::new(MediaClock::new(clock)),
         decodes: Cell::new(0),
+        display,
     })
 }
 

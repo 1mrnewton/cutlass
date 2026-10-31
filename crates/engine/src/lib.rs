@@ -16,6 +16,7 @@ mod source;
 
 pub use cache::{FrameWindow, MAX_WINDOW};
 pub use clock::{ClockKind, MediaClock};
+pub use cutlass_container::DisplayQuarter;
 pub use error::EngineError;
 pub use map::{
     MapError, MapSpeed, TimelineMap, is_graphic, map_timeline, media_path, micros_to_ticks,

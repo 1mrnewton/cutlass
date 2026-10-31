@@ -9,8 +9,8 @@ use cutlass_codec::{
     Timestamp,
 };
 use cutlass_container::{
-    Demux, Gap, Input, Landing, OpenError, Probe, ProbeResult, ReadError, SeekLanding, SeekTo,
-    Stream, TrackId, Trim,
+    Demux, DisplayQuarter, Gap, Input, Landing, OpenError, Probe, ProbeResult, ReadError,
+    SeekLanding, SeekTo, Stream, TrackId, Trim,
 };
 use cutlass_decode::{
     BitDepth, CodecError, CodecParams, ColorPrimaries, ColorType, Decoder, Output, Packet,
@@ -559,6 +559,29 @@ fn open_leading(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
 
 fn open_silent(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
     Ok(Box::new(scripted(0, 64)))
+}
+
+fn open_turned(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let mut movie = scripted(0, 1);
+    movie.streams[0] = movie.streams[0]
+        .clone()
+        .with_display(DisplayQuarter::Clockwise90);
+    Ok(Box::new(movie))
+}
+
+#[test]
+fn the_picture_stream_keeps_its_display_quarter() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_turned);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let path = fixture("pattern.jpg");
+    let info = readers.probe(&path).expect("probe");
+    assert_eq!(info.display, DisplayQuarter::Clockwise90);
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&readers, &draft, &id, ClockKind::Export, 1).expect("source");
+    assert_eq!(source.display(), DisplayQuarter::Clockwise90);
 }
 
 fn open_one_picture(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {

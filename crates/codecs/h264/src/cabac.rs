@@ -191,6 +191,16 @@ pub fn sig8(index: usize) -> usize {
     usize::from(SIG_8X8[index])
 }
 
+/// Table 9-43 field column. A field macroblock uses these instead of [`sig8`].
+pub fn sig8_field(index: usize) -> usize {
+    const FIELD: [u8; 63] = [
+        0, 1, 1, 2, 2, 3, 3, 4, 5, 6, 7, 7, 7, 8, 4, 5, 6, 9, 10, 10, 8, 11, 12, 11, 9, 9, 10, 10,
+        8, 11, 12, 11, 9, 9, 10, 10, 8, 11, 12, 11, 9, 9, 10, 10, 8, 13, 13, 9, 9, 10, 10, 8, 13,
+        13, 9, 9, 10, 10, 14, 14, 14, 14, 14,
+    ];
+    usize::from(FIELD[index])
+}
+
 pub fn last8(index: usize) -> usize {
     usize::from(LAST_8X8[index])
 }

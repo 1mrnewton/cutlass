@@ -79,6 +79,8 @@ pub(crate) struct Mb {
     dc_c: [bool; 2],
     /// Intra_16x16 DC coded_block_flag of Cb and Cr when chroma is coded as luma.
     dc16: [bool; 2],
+    /// `mb_field_decoding_flag`. The macroblock's samples sit on every other line.
+    field_mb: bool,
 }
 
 impl Mb {
@@ -120,6 +122,7 @@ impl Mb {
             dc_coded: false,
             dc_c: [false; 2],
             dc16: [false; 2],
+            field_mb: false,
         }
     }
 }
@@ -157,6 +160,8 @@ pub(crate) struct Frame<S: Sample = u8> {
     separate_plane: bool,
     /// This buffer is one field of a complementary pair.
     field: bool,
+    /// Macroblock-adaptive frame. Edges are filtered in pair order.
+    mbaff: bool,
     /// `bottom_field_flag`.
     bottom: bool,
     max_ref: usize,
@@ -1007,6 +1012,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         nonexisting: true,
         separate_plane: sps.separate,
         field: false,
+        mbaff: false,
         bottom: false,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder: 0,
@@ -1444,7 +1450,12 @@ fn decode_slice<S: Sample>(
             planes.seen |= bit;
         }
     }
-    if header.first_mb != *next_mb {
+    let origin = if sps.mbaff && !header.field {
+        header.first_mb.saturating_mul(2)
+    } else {
+        header.first_mb
+    };
+    if origin != *next_mb {
         return Err(bits.malformed("first macroblock"));
     }
     let slice = make_slice(sets, dpb, &header, poc)?;
@@ -2008,6 +2019,7 @@ fn new_frame<S: Sample>(
         nonexisting: false,
         separate_plane: sps.separate,
         field: header.field,
+        mbaff: sps.mbaff && !header.field,
         bottom: header.bottom,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder,
@@ -2103,10 +2115,18 @@ fn blk_y(i: usize) -> usize {
     ((i >> 1) & 1) | ((i >> 2) & 2)
 }
 
-fn put_block<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, src: &[S], n: usize) {
+fn put_block<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x: usize,
+    y: usize,
+    src: &[S],
+    n: usize,
+    step: usize,
+) {
     for row in 0..n {
         for col in 0..n {
-            plane[(y + row) * stride + x + col] = src[row * n + col];
+            plane[(y + row * step) * stride + x + col] = src[row * n + col];
         }
     }
 }
@@ -2114,13 +2134,13 @@ fn put_block<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, src:
 fn add_scaled<S: Sample>(
     plane: &mut [S],
     stride: usize,
-    origin: (usize, usize),
+    origin: (usize, usize, usize),
     coeffs: &[i32],
     quant: (i32, bool),
     weight: &[u8],
     n: usize,
 ) {
-    let (x, y) = origin;
+    let (x, y, step) = origin;
     let (qp, bypass) = quant;
     if n == 4 {
         let mut block = [0i32; 16];
@@ -2141,7 +2161,7 @@ fn add_scaled<S: Sample>(
             }
             recon::idct4(&mut block);
         }
-        recon::add_block(plane, stride, x, y, &block, 4);
+        recon::add_block(plane, stride, x, y, &block, 4, step);
     } else {
         let mut block = [0i32; 64];
         if bypass {
@@ -2161,7 +2181,7 @@ fn add_scaled<S: Sample>(
             }
             recon::idct8(&mut block);
         }
-        recon::add_block(plane, stride, x, y, &block, 8);
+        recon::add_block(plane, stride, x, y, &block, 8, step);
     }
 }
 
@@ -2367,6 +2387,7 @@ mod tests {
             nonexisting: false,
             separate_plane: false,
             field: false,
+            mbaff: false,
             bottom: false,
             max_ref: 4,
             reorder: 0,
@@ -2397,6 +2418,7 @@ mod tests {
             crop_bottom: 0,
             direct_8x8_inference: true,
             frame_mbs_only: true,
+            mbaff: false,
             mb_width: 1,
             mb_height: 1,
             weight4: [[16; 16]; 6],
@@ -2742,11 +2764,30 @@ mod tests {
     #[test]
     fn hostile_parameter_sets_are_rejected() {
         let good = idr_bytes();
-        let cases = [
-            (
+        let mut params = CodecParams::video(CodecId::H264, 16, 16);
+        params.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&params).unwrap();
+        let interlaced = decoder
+            .push(&Packet::video(
                 sps_packet(66, SpsTail::Interlaced),
-                CodecError::Unsupported { what: "mbaff" },
+                0,
+                1,
+                30,
+                false,
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(
+                interlaced,
+                CodecError::Malformed {
+                    what: "direct 8x8 inference",
+                    ..
+                }
             ),
+            "{interlaced:?}"
+        );
+        assert_eq!(luma_of(&mut decoder, &good), reference_luma(&good));
+        let cases = [
             (
                 sps_packet(100, SpsTail::Deep),
                 CodecError::Unsupported { what: "bit depth" },

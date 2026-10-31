@@ -1,5 +1,5 @@
-//! H.264 / AVC, progressive 4:2:0, 4:2:2, and 4:4:4 at 8 through 14 bits,
-//! including separate colour planes.
+//! H.264 / AVC, 4:2:0, 4:2:2, and 4:4:4 at 8 through 14 bits, including
+//! separate colour planes, field pictures, and macroblock-adaptive frames.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

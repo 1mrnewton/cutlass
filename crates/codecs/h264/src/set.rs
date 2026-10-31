@@ -1,7 +1,7 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
-//! Monochrome and macroblock-adaptive frame-field are refused. 4:2:0, 4:2:2,
-//! and 4:4:4 are accepted, including separate colour planes, field pictures,
+//! Monochrome is refused. 4:2:0, 4:2:2, and 4:4:4 are accepted, including
+//! separate colour planes, field pictures, macroblock-adaptive frame-field,
 //! and QP′Y-zero transform bypass.
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
 //! is refused.
@@ -35,6 +35,8 @@ pub struct Sps {
     pub direct_8x8_inference: bool,
     /// `frame_mbs_only_flag`. False selects field or picture-adaptive coding.
     pub frame_mbs_only: bool,
+    /// `mb_adaptive_frame_field_flag`. A frame picture is pairs of macroblocks.
+    pub mbaff: bool,
     pub mb_width: usize,
     pub mb_height: usize,
     pub weight4: [[u8; 16]; 6],
@@ -206,9 +208,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         });
     }
     let frame_mbs_only = bits.bit()?;
-    if !frame_mbs_only && bits.bit()? {
-        return Err(CodecError::Unsupported { what: "mbaff" });
-    }
+    let mbaff = if frame_mbs_only { false } else { bits.bit()? };
     let height_mbs = if frame_mbs_only {
         height_map
     } else {
@@ -220,6 +220,9 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         return Err(CodecError::Limit { what: "coded size" });
     }
     let direct_8x8_inference = bits.bit()?;
+    if !frame_mbs_only && !direct_8x8_inference {
+        return Err(bits.malformed("direct 8x8 inference"));
+    }
     let mut crop_left = 0u32;
     let mut crop_right = 0u32;
     let mut crop_top = 0u32;
@@ -255,6 +258,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         crop_bottom,
         direct_8x8_inference,
         frame_mbs_only,
+        mbaff,
         mb_width: width_mbs as usize,
         mb_height: height_mbs as usize,
         weight4,

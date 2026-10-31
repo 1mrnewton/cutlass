@@ -374,6 +374,7 @@ pub(crate) fn decode_mbs<S: Sample>(
     mut entropy: Entropy<'_, '_>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
+    let mbaff = slice.sps.mbaff && !pic.field;
     let mut addr = *next_mb;
     let mut qp = slice.qp;
     while addr < total {
@@ -384,8 +385,9 @@ pub(crate) fn decode_mbs<S: Sample>(
                     if addr + run > total {
                         return Err(bits.malformed("skip run"));
                     }
-                    for _ in 0..run {
-                        skip_mb(pic, dpb, slice, slice_id, addr, qp)?;
+                    for left in 0..run {
+                        let flag = skip_field_flag(pic, bits, slice_id, addr, mbaff, run - left)?;
+                        skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
                         addr += 1;
                     }
                     if addr >= total || (run > 0 && !bits.more_rbsp()) {
@@ -393,13 +395,18 @@ pub(crate) fn decode_mbs<S: Sample>(
                     }
                 }
                 Entropy::Cabac(cab) => {
-                    let skipped = cabac_skip(pic, cab, slice.kind, slice_id, addr)?;
+                    let skipped = cabac_skip(pic, cab, slice.kind, slice_id, addr, mbaff)?;
                     if skipped {
-                        skip_mb(pic, dpb, slice, slice_id, addr, qp)?;
-                        let end = cab.terminate()?;
-                        addr += 1;
-                        if end {
-                            break;
+                        let flag = cabac_skip_field(pic, cab, slice_id, addr, mbaff)?;
+                        skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
+                        if !mbaff || pair_bottom(pic, addr, true) {
+                            let end = cab.terminate()?;
+                            addr += 1;
+                            if end {
+                                break;
+                            }
+                        } else {
+                            addr += 1;
                         }
                         continue;
                     }
@@ -407,18 +414,23 @@ pub(crate) fn decode_mbs<S: Sample>(
             }
         }
         qp = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
+        let bottom = !mbaff || pair_bottom(pic, addr, mbaff);
         match &mut entropy {
             Entropy::Cavlc(bits) => {
                 addr += 1;
-                if !bits.more_rbsp() {
+                if bottom && !bits.more_rbsp() {
                     break;
                 }
             }
             Entropy::Cabac(cab) => {
-                let end = cab.terminate()?;
-                addr += 1;
-                if end {
-                    break;
+                if bottom {
+                    let end = cab.terminate()?;
+                    addr += 1;
+                    if end {
+                        break;
+                    }
+                } else {
+                    addr += 1;
                 }
             }
         }
@@ -427,16 +439,21 @@ pub(crate) fn decode_mbs<S: Sample>(
     Ok(())
 }
 
+fn pair_bottom<S: Sample>(pic: &Frame<S>, addr: usize, mbaff: bool) -> bool {
+    locate(pic, addr, mbaff).1 % 2 == 1
+}
+
 fn cabac_skip<S: Sample>(
     pic: &Frame<S>,
     cab: &mut Cabac<'_>,
     kind: u8,
     slice_id: u16,
     addr: usize,
+    mbaff: bool,
 ) -> Result<bool, CodecError> {
-    let (mx, my) = xy(pic, addr);
+    let (mx, my) = locate(pic, addr, mbaff);
     let left = neighbor(pic, mx as i32 - 1, my as i32, slice_id);
-    let above = neighbor(pic, mx as i32, my as i32 - 1, slice_id);
+    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);
     let mut ctx = 0;
     if left.is_some_and(|mb| !mb.skip) {
         ctx += 1;
@@ -457,9 +474,12 @@ fn skip_mb<S: Sample>(
     slice_id: u16,
     addr: usize,
     qp: i32,
+    field_mb: bool,
 ) -> Result<(), CodecError> {
-    let (mx, my) = xy(pic, addr);
+    let mbaff = slice.sps.mbaff && !pic.field;
+    let (mx, my) = locate(pic, addr, mbaff);
     let mut mb = Mb::new(slice_id);
+    mb.field_mb = field_mb;
     mb.skip = true;
     mb.qp = qp as i8;
     mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
@@ -481,13 +501,14 @@ fn skip_mb<S: Sample>(
         predict_inter(pic, dpb, slice, mx, my, &mb)?;
     }
     bind_refs(&mut mb, slice);
-    pic.mb[addr] = mb;
+    let slot = my * pic.mb_w + mx;
+    pic.mb[slot] = mb;
     Ok(())
 }
 
 fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i16; 2] {
     let left = neighbor(pic, mx as i32 - 1, my as i32, slice);
-    let above = neighbor(pic, mx as i32, my as i32 - 1, slice);
+    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice);
     let zero = |mb: &Mb, bx: usize, by: usize| {
         let part = (by / 2) * 2 + (bx / 2);
         mb.ref0[part] == 0 && mb.mv0[by * 4 + bx] == [0, 0]
@@ -516,21 +537,25 @@ fn one_mb<S: Sample>(
     qp: i32,
     entropy: &mut Entropy<'_, '_>,
 ) -> Result<i32, CodecError> {
-    let (mx, my) = xy(pic, addr);
+    let mbaff = slice.sps.mbaff && !pic.field;
+    let (mx, my) = locate(pic, addr, mbaff);
+    let slot = my * pic.mb_w + mx;
     let mut mb = Mb::new(slice_id);
+    mb.field_mb = field_flag(pic, entropy, slice_id, mx, my, mbaff)?;
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
+    pic.mb[slot] = mb.clone();
     let (intra, spec) = mb_type(pic, entropy, slice.kind, mx, my, slice_id)?;
     mb.intra = intra;
     mb.direct16 = !intra && slice.kind == 1 && spec == 0;
     if intra && spec == 25 {
         mb.pcm = true;
-        read_pcm(pic, entropy, mx, my, slice)?;
+        read_pcm(pic, entropy, mx, my, mb.field_mb, slice)?;
         mb.nnz_y = [16; 16];
         mb.nnz_c = [16; 32];
         mb.qp = 0;
-        pic.mb[addr] = mb;
+        pic.mb[slot] = mb;
         return Ok(qp);
     }
     let mut qp = qp;
@@ -561,8 +586,160 @@ fn one_mb<S: Sample>(
     if !mb.intra {
         bind_refs(&mut mb, slice);
     }
-    pic.mb[addr] = mb;
+    pic.mb[slot] = mb;
     Ok(qp)
+}
+
+fn field_flag<S: Sample>(
+    pic: &Frame<S>,
+    entropy: &mut Entropy<'_, '_>,
+    slice_id: u16,
+    mx: usize,
+    my: usize,
+    mbaff: bool,
+) -> Result<bool, CodecError> {
+    if !mbaff {
+        return Ok(false);
+    }
+    if my % 2 == 1 {
+        return Ok(pic
+            .mb
+            .get((my - 1) * pic.mb_w + mx)
+            .is_some_and(|mb| mb.field_mb));
+    }
+    match entropy {
+        Entropy::Cavlc(bits) => bits.bit(),
+        Entropy::Cabac(cab) => {
+            let mut ctx = 0;
+            if mx > 0
+                && neighbor(pic, mx as i32 - 1, my as i32, slice_id).is_some_and(|mb| mb.field_mb)
+            {
+                ctx += 1;
+            }
+            if my >= 2
+                && neighbor(pic, mx as i32, my as i32 - 2, slice_id).is_some_and(|mb| mb.field_mb)
+            {
+                ctx += 1;
+            }
+            Ok(cab.decision(70 + ctx)? == 1)
+        }
+    }
+}
+
+/// CAVLC reads `mb_field_decoding_flag` on the last skipped macroblock of a pair.
+fn skip_field_flag<S: Sample>(
+    pic: &Frame<S>,
+    bits: &mut crate::bits::Bits<'_>,
+    slice_id: u16,
+    addr: usize,
+    mbaff: bool,
+    remaining: usize,
+) -> Result<bool, CodecError> {
+    if !mbaff {
+        return Ok(false);
+    }
+    let (mx, my) = locate(pic, addr, true);
+    if my % 2 == 1 {
+        return Ok(pic
+            .mb
+            .get((my - 1) * pic.mb_w + mx)
+            .is_some_and(|mb| mb.field_mb));
+    }
+    if remaining == 1 {
+        return bits.bit();
+    }
+    Ok(inferred_field(pic, mx, my, slice_id))
+}
+
+fn cabac_skip_field<S: Sample>(
+    pic: &Frame<S>,
+    cab: &mut Cabac<'_>,
+    slice_id: u16,
+    addr: usize,
+    mbaff: bool,
+) -> Result<bool, CodecError> {
+    if !mbaff {
+        return Ok(false);
+    }
+    let (mx, my) = locate(pic, addr, true);
+    if my % 2 == 1 {
+        return Ok(pic
+            .mb
+            .get((my - 1) * pic.mb_w + mx)
+            .is_some_and(|mb| mb.field_mb));
+    }
+    field_flag(pic, &mut Entropy::Cabac(cab), slice_id, mx, my, true)
+}
+
+fn inferred_field<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> bool {
+    if let Some(left) = neighbor(pic, mx as i32 - 1, my as i32, slice) {
+        return left.field_mb;
+    }
+    neighbor(pic, mx as i32, my as i32 - 2, slice).is_some_and(|mb| mb.field_mb)
+}
+
+fn locate<S: Sample>(pic: &Frame<S>, addr: usize, mbaff: bool) -> (usize, usize) {
+    if !mbaff {
+        return xy(pic, addr);
+    }
+    let pair = addr / 2;
+    let mx = pair % pic.mb_w;
+    let row = pair / pic.mb_w;
+    (mx, row * 2 + (addr % 2))
+}
+
+#[derive(Clone, Copy)]
+struct Span {
+    y: usize,
+    step: usize,
+}
+
+fn luma_span(my: usize, field: bool) -> Span {
+    if field {
+        Span {
+            y: (my & !1) * 16 + (my & 1),
+            step: 2,
+        }
+    } else {
+        Span {
+            y: my * 16,
+            step: 1,
+        }
+    }
+}
+
+fn chroma_span(my: usize, rows: usize, field: bool) -> Span {
+    if field {
+        Span {
+            y: (my & !1) * rows + (my & 1),
+            step: 2,
+        }
+    } else {
+        Span {
+            y: my * rows,
+            step: 1,
+        }
+    }
+}
+
+impl Span {
+    fn at(self, local: usize) -> usize {
+        self.y + local * self.step
+    }
+}
+
+fn block_span<S: Sample>(pic: &Frame<S>, my: usize, field: bool, plane: u8) -> Span {
+    if plane == 0 || pic.chroma() == 3 {
+        luma_span(my, field)
+    } else {
+        let rows = if pic.chroma() == 2 { 16 } else { 8 };
+        chroma_span(my, rows, field)
+    }
+}
+
+fn above_my<S: Sample>(pic: &Frame<S>, mx: usize, my: usize) -> i32 {
+    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+    my as i32 - if field { 2 } else { 1 }
 }
 
 fn mb_type<S: Sample>(
@@ -641,7 +818,7 @@ fn direct_ctx<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> us
     // Clause 9.3.3.1.1.3: a missing neighbor, B_Skip, or B_Direct_16x16 contributes 0.
     let coded = |mb: &Mb| !mb.skip && !mb.direct16;
     let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(coded);
-    let above = neighbor(pic, mx as i32, my as i32 - 1, slice).is_some_and(coded);
+    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(coded);
     usize::from(left) + usize::from(above)
 }
 
@@ -660,7 +837,7 @@ fn cabac_intra_type<S: Sample>(
         if neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(intra16) {
             ctx += 1;
         }
-        if neighbor(pic, mx as i32, my as i32 - 1, slice).is_some_and(intra16) {
+        if neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(intra16) {
             ctx += 1;
         }
         if cab.decision(base + ctx)? == 0 {
@@ -946,7 +1123,7 @@ fn mode_at<S: Sample>(
         (mx as i32, bx as usize)
     };
     let (mby, oy) = if by < 0 {
-        (my as i32 - 1, 3)
+        (above_my(pic, mx, my), 3)
     } else if by > 3 {
         (my as i32 + 1, 0)
     } else {
@@ -1019,7 +1196,7 @@ fn read_chroma_mode<S: Sample>(
             {
                 ctx += 1;
             }
-            if neighbor(pic, mx as i32, my as i32 - 1, slice)
+            if neighbor(pic, mx as i32, above_my(pic, mx, my), slice)
                 .is_some_and(|mb| mb.intra && !mb.pcm && mb.chroma_mode != 0)
             {
                 ctx += 1;
@@ -1085,7 +1262,7 @@ fn read_cbp<S: Sample>(
                 return Ok((luma, 0));
             }
             let left = cbp_chroma(pic, mx as i32 - 1, my as i32, slice);
-            let above = cbp_chroma(pic, mx as i32, my as i32 - 1, slice);
+            let above = cbp_chroma(pic, mx as i32, above_my(pic, mx, my), slice);
             let mut ctx = usize::from(left > 0) + 2 * usize::from(above > 0);
             if cab.decision(77 + ctx)? == 0 {
                 return Ok((luma, 0));
@@ -1118,7 +1295,7 @@ fn cbp_ctx<S: Sample>(
     let above_coded = if bit == 2 || bit == 3 {
         current & above_bit != 0
     } else {
-        coded_bit(pic, mx as i32, my as i32 - 1, above_bit, slice)
+        coded_bit(pic, mx as i32, above_my(pic, mx, my), above_bit, slice)
     };
     usize::from(!left_coded) + 2 * usize::from(!above_coded)
 }
@@ -1168,13 +1345,21 @@ fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, Co
 }
 
 fn prev_qpd<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> bool {
-    let addr = my * pic.mb_w + mx;
-    if addr == 0 {
-        return false;
-    }
-    pic.mb
-        .get(addr - 1)
-        .is_some_and(|mb| mb.slice == slice && mb.qpd != 0)
+    let earlier = if pic.mbaff && my % 2 == 1 {
+        (mx as i32, my as i32 - 1)
+    } else if pic.mbaff && mx > 0 {
+        (mx as i32 - 1, my as i32 + 1)
+    } else {
+        let addr = my * pic.mb_w + mx;
+        if addr == 0 {
+            return false;
+        }
+        return pic
+            .mb
+            .get(addr - 1)
+            .is_some_and(|mb| mb.slice == slice && mb.qpd != 0);
+    };
+    coded_mb(pic, earlier.0, earlier.1).is_some_and(|mb| mb.slice == slice && mb.qpd != 0)
 }
 
 fn transform8_flag<S: Sample>(
@@ -1186,7 +1371,7 @@ fn transform8_flag<S: Sample>(
 ) -> Result<bool, CodecError> {
     let on = |mb: &Mb| mb.transform8;
     let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(on);
-    let above = neighbor(pic, mx as i32, my as i32 - 1, slice).is_some_and(on);
+    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice).is_some_and(on);
     flag(entropy, 399 + usize::from(left) + usize::from(above))
 }
 
@@ -1289,7 +1474,7 @@ fn read_block<S: Sample>(
                     *flag = true;
                 }
             }
-            cabac_residual(cab, coded, &mut out[..max])?;
+            cabac_residual(cab, coded, &mut out[..max], mb.field_mb || pic.field)?;
             out
         }
     };
@@ -1347,7 +1532,7 @@ fn read8<S: Sample>(
                     return Ok(out);
                 }
             }
-            cabac_residual(cab, cat, &mut out)?;
+            cabac_residual(cab, cat, &mut out, mb.field_mb || pic.field)?;
             let count = out.iter().filter(|value| **value != 0).count() as u8;
             for dy in 0..2 {
                 for dx in 0..2 {
@@ -1461,7 +1646,7 @@ fn nnz_at<S: Sample>(
         }
     };
     let (mbx, ox) = shift(mx, bx, gx);
-    let (mby, oy) = shift(my, by, gy);
+    let (mby, oy) = shift_field(my, by, gy, current.field_mb);
     let index = if plane == 0 {
         oy * 4 + ox
     } else {
@@ -1506,7 +1691,8 @@ fn cbf_dc_plane<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, plane:
                 .unwrap_or(0)
         }
     };
-    flag(-1, 0) + 2 * flag(0, -1)
+    let up = if mb.field_mb { -2 } else { -1 };
+    flag(-1, 0) + 2 * flag(0, up)
 }
 
 fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
@@ -1517,6 +1703,15 @@ fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
         (mb as i32 + 1, 0)
     } else {
         (mb as i32, block as usize)
+    }
+}
+
+fn shift_field(mb: usize, block: i32, grid: usize, field: bool) -> (i32, usize) {
+    let (row, off) = shift(mb, block, grid);
+    if field && block < 0 {
+        (row - 1, off)
+    } else {
+        (row, off)
     }
 }
 
@@ -1534,7 +1729,8 @@ fn cbf_dc_chroma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, which
         }
         side.dc_c.get(which).copied().map(usize::from).unwrap_or(0)
     };
-    flag(-1, 0) + 2 * flag(0, -1)
+    let up = if mb.field_mb { -2 } else { -1 };
+    flag(-1, 0) + 2 * flag(0, up)
 }
 
 fn cbf_inc<S: Sample>(
@@ -1556,18 +1752,35 @@ fn cbf_inc<S: Sample>(
     usize::from(left > 0) + 2 * usize::from(above > 0)
 }
 
-fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result<(), CodecError> {
-    const SIG: [usize; 14] = [
-        105, 120, 134, 149, 152, 402, 484, 499, 513, 660, 528, 543, 557, 718,
+fn cabac_residual(
+    cab: &mut Cabac<'_>,
+    cat: usize,
+    coeffs: &mut [i32],
+    field: bool,
+) -> Result<(), CodecError> {
+    // Table 9-34. A field macroblock uses the second context block.
+    const SIG: [[usize; 14]; 2] = [
+        [
+            105, 120, 134, 149, 152, 402, 484, 499, 513, 660, 528, 543, 557, 718,
+        ],
+        [
+            277, 292, 306, 321, 324, 436, 776, 791, 805, 675, 820, 835, 849, 733,
+        ],
     ];
-    const LAST: [usize; 14] = [
-        166, 181, 195, 210, 213, 417, 572, 587, 601, 690, 616, 631, 645, 748,
+    const LAST: [[usize; 14]; 2] = [
+        [
+            166, 181, 195, 210, 213, 417, 572, 587, 601, 690, 616, 631, 645, 748,
+        ],
+        [
+            338, 353, 367, 382, 385, 451, 864, 879, 893, 699, 908, 923, 937, 757,
+        ],
     ];
     const LEVEL: [usize; 14] = [
         227, 237, 247, 257, 266, 426, 952, 962, 972, 708, 982, 992, 1002, 766,
     ];
     let which = cat.min(13);
-    let (sig_base, last_base, level_base) = (SIG[which], LAST[which], LEVEL[which]);
+    let row = usize::from(field);
+    let (sig_base, last_base, level_base) = (SIG[row][which], LAST[row][which], LEVEL[which]);
     let max = coeffs.len();
     let dc422 = cat == 3 && max == 8;
     let mut index = [0usize; 64];
@@ -1577,7 +1790,11 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result
     while pos < last_coded {
         let sig_ctx = sig_base
             + if matches!(cat, 5 | 9 | 13) {
-                cabac::sig8(pos)
+                if field {
+                    cabac::sig8_field(pos)
+                } else {
+                    cabac::sig8(pos)
+                }
             } else if dc422 {
                 const MAP: [usize; 7] = [0, 0, 1, 1, 2, 2, 2];
                 MAP[pos.min(6)]
@@ -1734,24 +1951,24 @@ fn i16_bypass(dc: &[i32; 16], ac: &[[i32; 16]; 16], coded: bool) -> [i32; 256] {
 fn add_i16_bypass<S: Sample>(
     plane: &mut [S],
     stride: usize,
-    origin: (usize, usize),
+    origin: (usize, usize, usize),
     dc: &[i32; 16],
     ac: &[[i32; 16]; 16],
     flags: (bool, u8),
 ) {
-    let (x0, y0) = origin;
+    let (x0, y0, step) = origin;
     let (coded, mode) = flags;
     let mut residual = i16_bypass(dc, ac, coded);
     if mode == 0 || mode == 1 {
         prefix_residual(&mut residual, 16, 16, mode == 1);
     }
-    recon::add_block(plane, stride, x0, y0, &residual, 16);
+    recon::add_block(plane, stride, x0, y0, &residual, 16, step);
 }
 
 fn add_chroma_bypass<S: Sample>(
     plane: &mut [S],
     stride: usize,
-    origin: (usize, usize),
+    origin: (usize, usize, usize),
     levels: (&[i32], &[[i32; 16]]),
     shape: (usize, usize, usize),
     intra_mode: Option<u8>,
@@ -1785,10 +2002,10 @@ fn add_chroma_bypass<S: Sample>(
     if let Some(mode) = intra_mode.filter(|mode| *mode == 1 || *mode == 2) {
         prefix_residual(&mut residual[..width * height], width, height, mode == 1);
     }
-    let (x0, y0) = origin;
+    let (x0, y0, step) = origin;
     for y in 0..height {
         for x in 0..width {
-            let at = (y0 + y) * stride + x0 + x;
+            let at = (y0 + y * step) * stride + x0 + x;
             let Some(sample) = plane.get(at).copied() else {
                 continue;
             };
@@ -1825,21 +2042,30 @@ fn recon_intra<S: Sample>(
         cr_ac,
     } = chroma;
     let x0 = mx * 16;
-    let y0 = my * 16;
+    let span = luma_span(my, mb.field_mb);
+    let y0 = span.y;
+    let step = span.step;
     // Neighbours inside this macroblock are already reconstructed. Publish it
     // before those samples are read back, so availability sees this slice.
     pic.mb[my * pic.mb_w + mx] = mb.clone();
     if i16 {
         let (above, left, above_ok, left_ok) =
             edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, 0);
-        let corner = corner_sample(&pic.y, pic.w, pic.h, mx, my, 16, above_ok && left_ok);
+        let corner = corner_sample(
+            &pic.y,
+            pic.w,
+            pic.h,
+            mx as i32 * 16 - 1,
+            span.y as i32 - span.step as i32,
+            above_ok && left_ok,
+        );
         let pred = recon::pred16(mode16, &above, &left, above_ok, left_ok, corner);
-        put_block(&mut pic.y, pic.w, x0, y0, &pred, 16);
+        put_block(&mut pic.y, pic.w, x0, y0, &pred, 16, step);
         if qp_bypass::<S>(slice, qp) {
             add_i16_bypass(
                 &mut pic.y,
                 pic.w,
-                (x0, y0),
+                (x0, y0, step),
                 &luma_dc,
                 ac,
                 (mb.cbp & 15 != 0, mode16),
@@ -1873,7 +2099,15 @@ fn recon_intra<S: Sample>(
                     block[0] = dc[by * 4 + bx];
                 }
                 recon::idct4(&mut block);
-                recon::add_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &block, 4);
+                recon::add_block(
+                    &mut pic.y,
+                    pic.w,
+                    x0 + bx * 4,
+                    span.at(by * 4),
+                    &block,
+                    4,
+                    step,
+                );
             }
         }
     } else if mb.transform8 {
@@ -1891,18 +2125,18 @@ fn recon_intra<S: Sample>(
                 slice.pps.constrained_intra,
                 0,
             );
-            put_block(&mut pic.y, pic.w, x0 + bx, y0 + by, &pred, 8);
+            put_block(&mut pic.y, pic.w, x0 + bx, span.at(by), &pred, 8, step);
             let mode = mb.mode4[(by / 4) * 4 + bx / 4];
             let bypass = qp_bypass::<S>(slice, qp);
             if bypass && (mode == 0 || mode == 1) {
                 let mut block = place8(samples);
                 prefix_residual(&mut block, 8, 8, mode == 1);
-                recon::add_block(&mut pic.y, pic.w, x0 + bx, y0 + by, &block, 8);
+                recon::add_block(&mut pic.y, pic.w, x0 + bx, span.at(by), &block, 8, step);
             } else {
                 super::add_scaled(
                     &mut pic.y,
                     pic.w,
-                    (x0 + bx, y0 + by),
+                    (x0 + bx, span.at(by), step),
                     samples,
                     (qp, bypass),
                     &slice.pps.weight8[0],
@@ -1922,18 +2156,34 @@ fn recon_intra<S: Sample>(
                 slice.pps.constrained_intra,
                 0,
             );
-            put_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &pred, 4);
+            put_block(
+                &mut pic.y,
+                pic.w,
+                x0 + bx * 4,
+                span.at(by * 4),
+                &pred,
+                4,
+                step,
+            );
             let mode = mb.mode4[by * 4 + bx];
             let bypass = qp_bypass::<S>(slice, qp);
             if bypass && (mode == 0 || mode == 1) {
                 let mut block = place4(samples);
                 prefix_residual(&mut block, 4, 4, mode == 1);
-                recon::add_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &block, 4);
+                recon::add_block(
+                    &mut pic.y,
+                    pic.w,
+                    x0 + bx * 4,
+                    span.at(by * 4),
+                    &block,
+                    4,
+                    step,
+                );
             } else {
                 super::add_scaled(
                     &mut pic.y,
                     pic.w,
-                    (x0 + bx * 4, y0 + by * 4),
+                    (x0 + bx * 4, span.at(by * 4), step),
                     samples,
                     (qp, bypass),
                     &slice.pps.weight4[0],
@@ -1988,6 +2238,9 @@ fn pred4_block<S: Sample>(
     let (samples, stride, height) = plane_samples(pic, plane);
     let ax = mx * 4 + bx;
     let ay = my * 4 + by;
+    let span = block_span(pic, my, mb.field_mb, plane);
+    let row0 = span.at(by * 4) as i32;
+    let down = span.step as i32;
     let mut above = [S::mid(); 8];
     let mut left = [S::mid(); 4];
     let here = (mx, my, bx, by);
@@ -1995,20 +2248,14 @@ fn pred4_block<S: Sample>(
     let left_ok = col_ok(pic, ax as i32 - 1, ay, mb.slice, constrained, here);
     if above_ok {
         for (k, slot) in above[..4].iter_mut().enumerate() {
-            *slot = pix(
-                samples,
-                stride,
-                height,
-                (ax * 4 + k) as i32,
-                ay as i32 * 4 - 1,
-            );
+            *slot = pix(samples, stride, height, (ax * 4 + k) as i32, row0 - down);
         }
         let right_ok = above_right_ok(pic, mx, my, bx, by, mb.slice, constrained);
         let fill = above[3];
         for (k, slot) in above[4..].iter_mut().enumerate() {
             let x = ax * 4 + k + 4;
             *slot = if right_ok {
-                pix(samples, stride, height, x as i32, ay as i32 * 4 - 1)
+                pix(samples, stride, height, x as i32, row0 - down)
             } else {
                 fill
             };
@@ -2021,18 +2268,12 @@ fn pred4_block<S: Sample>(
                 stride,
                 height,
                 ax as i32 * 4 - 1,
-                (ay * 4 + k) as i32,
+                row0 + k as i32 * down,
             );
         }
     }
     let corner = if above_ok && left_ok {
-        pix(
-            samples,
-            stride,
-            height,
-            ax as i32 * 4 - 1,
-            ay as i32 * 4 - 1,
-        )
+        pix(samples, stride, height, ax as i32 * 4 - 1, row0 - down)
     } else if above_ok {
         above[0]
     } else if left_ok {
@@ -2064,8 +2305,10 @@ fn pred8_block<S: Sample>(
     let mode = mb.mode4[by * 4 + bx];
     let mut raw_above = [S::mid(); 16];
     let mut raw_left = [S::mid(); 8];
+    let span = block_span(pic, my, mb.field_mb, plane);
     let x = (mx * 16 + bx * 4) as i32;
-    let y = (my * 16 + by * 4) as i32;
+    let y = span.at(by * 4) as i32;
+    let down = span.step as i32;
     let here = (mx, my, bx, by);
     let above_ok = row_ok(
         pic,
@@ -2085,14 +2328,14 @@ fn pred8_block<S: Sample>(
     );
     if above_ok {
         for (k, slot) in raw_above[..8].iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, x + k as i32, y - 1);
+            *slot = pix(samples, stride, height, x + k as i32, y - down);
         }
         // Clause 8.3.2.2: p[8..15, -1] that are not yet constructed take p[7, -1].
         let fill = raw_above[7];
-        let right = above8_right(pic, x, y, mb.slice, constrained);
+        let right = above8_right(pic, x, y, down, mb.slice, constrained);
         for (k, slot) in raw_above[8..].iter_mut().enumerate() {
             *slot = if right {
-                pix(samples, stride, height, x + 8 + k as i32, y - 1)
+                pix(samples, stride, height, x + 8 + k as i32, y - down)
             } else {
                 fill
             };
@@ -2100,11 +2343,11 @@ fn pred8_block<S: Sample>(
     }
     if left_ok {
         for (k, slot) in raw_left.iter_mut().enumerate() {
-            *slot = pix(samples, stride, height, x - 1, y + k as i32);
+            *slot = pix(samples, stride, height, x - 1, y + k as i32 * down);
         }
     }
     let corner = if above_ok && left_ok {
-        pix(samples, stride, height, x - 1, y - 1)
+        pix(samples, stride, height, x - 1, y - down)
     } else {
         S::mid()
     };
@@ -2294,9 +2537,16 @@ fn avg2<S: Sample>(a: S, b: S) -> S {
 ///
 /// They belong to one macroblock. A later macroblock in this slice is not
 /// constructed yet, so it is not a neighbour.
-fn above8_right<S: Sample>(pic: &Frame<S>, x: i32, y: i32, slice: u16, constrained: bool) -> bool {
+fn above8_right<S: Sample>(
+    pic: &Frame<S>,
+    x: i32,
+    y: i32,
+    step: i32,
+    slice: u16,
+    constrained: bool,
+) -> bool {
     let sx = x + 8;
-    let sy = y - 1;
+    let sy = y - step;
     if sx < 0 || sy < 0 {
         return false;
     }
@@ -2377,7 +2627,10 @@ fn recon_chroma<S: Sample>(
     } = paint;
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
-    let y0 = my * 8;
+    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+    let span = chroma_span(my, 8, field);
+    let y0 = span.y;
+    let step = span.step;
     let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
     let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
     // Intra chroma uses lists 1 and 2. Inter chroma uses lists 4 and 5.
@@ -2390,7 +2643,14 @@ fn recon_chroma<S: Sample>(
             let (above, left, above_ok, left_ok) =
                 edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 8);
             let plane = if cb { &pic.u } else { &pic.v };
-            let corner = corner_sample(plane, pic.w / 2, pic.h / 2, mx, my, 8, above_ok && left_ok);
+            let corner = corner_sample(
+                plane,
+                pic.w / 2,
+                pic.h / 2,
+                mx as i32 * 8 - 1,
+                span.y as i32 - span.step as i32,
+                above_ok && left_ok,
+            );
             Some(recon::pred_chroma(
                 mode, &above, &left, above_ok, left_ok, corner,
             ))
@@ -2400,13 +2660,13 @@ fn recon_chroma<S: Sample>(
         let plane = if cb { &mut pic.u } else { &mut pic.v };
         let stride = pic.w / 2;
         if let Some(pred) = pred {
-            put_block(plane, stride, x0, y0, &pred, 8);
+            put_block(plane, stride, x0, y0, &pred, 8, step);
         }
         if qp_bypass::<S>(slice, qp) {
             add_chroma_bypass(
                 plane,
                 stride,
-                (x0, y0),
+                (x0, y0, step),
                 (dc, ac),
                 (4, 8, 8),
                 intra.then_some(mode),
@@ -2433,7 +2693,7 @@ fn recon_chroma<S: Sample>(
                 };
             }
             recon::idct4(&mut block);
-            recon::add_block(plane, stride, x0 + bx * 4, y0 + by * 4, &block, 4);
+            recon::add_block(plane, stride, x0 + bx * 4, span.at(by * 4), &block, 4, step);
         }
     }
 }
@@ -2455,7 +2715,10 @@ fn recon_chroma422<S: Sample>(
     } = paint;
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
-    let y0 = my * 16;
+    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+    let span = chroma_span(my, 16, field);
+    let y0 = span.y;
+    let step = span.step;
     let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
     let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
     let base = if intra { 1 } else { 4 };
@@ -2477,7 +2740,7 @@ fn recon_chroma422<S: Sample>(
                     stride,
                     height,
                     mx as i32 * 8 - 1,
-                    my as i32 * 16 - 1,
+                    span.y as i32 - span.step as i32,
                 )
             } else {
                 S::mid()
@@ -2486,7 +2749,7 @@ fn recon_chroma422<S: Sample>(
             let plane = if cb { &mut pic.u } else { &mut pic.v };
             for row in 0..16 {
                 for col in 0..8 {
-                    plane[(y0 + row) * stride + x0 + col] = pred[row * 8 + col];
+                    plane[(y0 + row * step) * stride + x0 + col] = pred[row * 8 + col];
                 }
             }
         }
@@ -2496,7 +2759,7 @@ fn recon_chroma422<S: Sample>(
             add_chroma_bypass(
                 plane,
                 stride,
-                (x0, y0),
+                (x0, y0, step),
                 (dc, ac),
                 (8, 8, 16),
                 intra.then_some(mode),
@@ -2530,7 +2793,15 @@ fn recon_chroma422<S: Sample>(
                 };
             }
             recon::idct4(&mut samples);
-            recon::add_block(plane, stride, x0 + bx * 4, y0 + by * 4, &samples, 4);
+            recon::add_block(
+                plane,
+                stride,
+                x0 + bx * 4,
+                span.at(by * 4),
+                &samples,
+                4,
+                step,
+            );
         }
     }
 }
@@ -2599,16 +2870,25 @@ fn paint_444<S: Sample>(
     let intra = mb.intra;
     let list = quant_list(plane, intra, mb.transform8);
     let x0 = mx * 16;
-    let y0 = my * 16;
+    let span = luma_span(my, mb.field_mb);
+    let y0 = span.y;
+    let step = span.step;
     if mb.intra16 {
         let mode = mode16.unwrap_or(2);
         let (above, left, above_ok, left_ok) =
             edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, plane);
         let (samples, stride, height) = plane_samples(pic, plane);
-        let corner = corner_sample(samples, stride, height, mx, my, 16, above_ok && left_ok);
+        let corner = corner_sample(
+            samples,
+            stride,
+            height,
+            mx as i32 * 16 - 1,
+            span.y as i32 - span.step as i32,
+            above_ok && left_ok,
+        );
         let pred = recon::pred16(mode, &above, &left, above_ok, left_ok, corner);
         let (dest, dest_stride) = mutable_plane(pic, plane);
-        put_block(dest, dest_stride, x0, y0, &pred, 16);
+        put_block(dest, dest_stride, x0, y0, &pred, 16, step);
         let dc = read_block(
             pic,
             entropy,
@@ -2640,7 +2920,7 @@ fn paint_444<S: Sample>(
             add_i16_bypass(
                 dest,
                 dest_stride,
-                (x0, y0),
+                (x0, y0, step),
                 &dc,
                 &ac,
                 (mb.cbp & 15 != 0, mode),
@@ -2680,7 +2960,15 @@ fn paint_444<S: Sample>(
             }
             recon::idct4(&mut block);
             let (dest, dest_stride) = mutable_plane(pic, plane);
-            recon::add_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &block, 4);
+            recon::add_block(
+                dest,
+                dest_stride,
+                x0 + bx * 4,
+                span.at(by * 4),
+                &block,
+                4,
+                step,
+            );
         }
         return Ok(());
     }
@@ -2707,7 +2995,7 @@ fn paint_444<S: Sample>(
                     plane,
                 );
                 let (dest, dest_stride) = mutable_plane(pic, plane);
-                put_block(dest, dest_stride, x0 + bx, y0 + by, &pred, 8);
+                put_block(dest, dest_stride, x0 + bx, span.at(by), &pred, 8, step);
             }
             if mb.cbp & (1 << i) != 0 {
                 let mode = mb.mode4[(by / 4) * 4 + bx / 4];
@@ -2715,12 +3003,12 @@ fn paint_444<S: Sample>(
                 if bypass && intra && (mode == 0 || mode == 1) {
                     let mut block = place8(samples);
                     prefix_residual(&mut block, 8, 8, mode == 1);
-                    recon::add_block(dest, dest_stride, x0 + bx, y0 + by, &block, 8);
+                    recon::add_block(dest, dest_stride, x0 + bx, span.at(by), &block, 8, step);
                 } else {
                     super::add_scaled(
                         dest,
                         dest_stride,
-                        (x0 + bx, y0 + by),
+                        (x0 + bx, span.at(by), step),
                         samples,
                         (qp_base, bypass),
                         &slice.pps.weight8[list],
@@ -2763,7 +3051,15 @@ fn paint_444<S: Sample>(
                 plane,
             );
             let (dest, dest_stride) = mutable_plane(pic, plane);
-            put_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &pred, 4);
+            put_block(
+                dest,
+                dest_stride,
+                x0 + bx * 4,
+                span.at(by * 4),
+                &pred,
+                4,
+                step,
+            );
         }
         if mb.cbp & bit != 0 {
             let mode = mb.mode4[by * 4 + bx];
@@ -2771,12 +3067,20 @@ fn paint_444<S: Sample>(
             if bypass && intra && (mode == 0 || mode == 1) {
                 let mut block = place4(samples);
                 prefix_residual(&mut block, 4, 4, mode == 1);
-                recon::add_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &block, 4);
+                recon::add_block(
+                    dest,
+                    dest_stride,
+                    x0 + bx * 4,
+                    span.at(by * 4),
+                    &block,
+                    4,
+                    step,
+                );
             } else {
                 super::add_scaled(
                     dest,
                     dest_stride,
-                    (x0 + bx * 4, y0 + by * 4),
+                    (x0 + bx * 4, span.at(by * 4), step),
                     samples,
                     (qp_base, bypass),
                     &slice.pps.weight4[list],
@@ -2839,6 +3143,7 @@ mod intra8 {
             matrix: ColorMatrix::Bt709,
             nonexisting: false,
             separate_plane: false,
+            mbaff: false,
             field: false,
             bottom: false,
             max_ref: 1,
@@ -3837,21 +4142,14 @@ fn corner_sample<S: Sample>(
     plane: &[S],
     stride: usize,
     height: usize,
-    mx: usize,
-    my: usize,
-    size: i32,
+    x: i32,
+    y: i32,
     present: bool,
 ) -> S {
-    if !present || mx == 0 || my == 0 {
+    if !present || x < 0 || y < 0 {
         return S::mid();
     }
-    pix(
-        plane,
-        stride,
-        height,
-        mx as i32 * size - 1,
-        my as i32 * size - 1,
-    )
+    pix(plane, stride, height, x, y)
 }
 
 fn edge16<S: Sample>(
@@ -3863,31 +4161,21 @@ fn edge16<S: Sample>(
     plane: u8,
 ) -> (Vec<S>, Vec<S>, bool, bool) {
     let (samples, stride, height) = plane_samples(pic, plane);
-    let above_ok = my > 0
-        && neighbor(pic, mx as i32, my as i32 - 1, slice)
-            .is_some_and(|mb| !constrained || mb.intra);
+    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+    let span = luma_span(my, field);
+    let above_ok = neighbor(pic, mx as i32, above_my(pic, mx, my), slice)
+        .is_some_and(|mb| !constrained || mb.intra);
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice)
             .is_some_and(|mb| !constrained || mb.intra);
     let mut above = vec![S::mid(); 17];
     let mut left = vec![S::mid(); 17];
+    let above_y = span.y as i32 - span.step as i32;
     if above_ok {
         for (k, slot) in above[..16].iter_mut().enumerate() {
-            *slot = pix(
-                samples,
-                stride,
-                height,
-                (mx * 16 + k) as i32,
-                my as i32 * 16 - 1,
-            );
+            *slot = pix(samples, stride, height, (mx * 16 + k) as i32, above_y);
         }
-        above[16] = pix(
-            samples,
-            stride,
-            height,
-            (mx * 16 + 16) as i32,
-            my as i32 * 16 - 1,
-        );
+        above[16] = pix(samples, stride, height, (mx * 16 + 16) as i32, above_y);
     }
     if left_ok {
         for (k, slot) in left[..16].iter_mut().enumerate() {
@@ -3896,7 +4184,7 @@ fn edge16<S: Sample>(
                 stride,
                 height,
                 mx as i32 * 16 - 1,
-                (my * 16 + k) as i32,
+                span.at(k) as i32,
             );
         }
         left[16] = pix(
@@ -3904,7 +4192,7 @@ fn edge16<S: Sample>(
             stride,
             height,
             mx as i32 * 16 - 1,
-            (my * 16 + 16) as i32,
+            span.at(16) as i32,
         );
     }
     (above, left, above_ok, left_ok)
@@ -3922,26 +4210,33 @@ fn edge_chroma<S: Sample>(
     let plane = if cb { &pic.u } else { &pic.v };
     let stride = pic.chroma_stride();
     let height = pic.chroma_height();
-    let above_ok = my > 0
-        && neighbor(pic, mx as i32, my as i32 - 1, slice_id)
-            .is_some_and(|mb| !constrained || mb.intra);
+    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
+    let span = chroma_span(my, rows, field);
+    let above_ok = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id)
+        .is_some_and(|mb| !constrained || mb.intra);
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice_id)
             .is_some_and(|mb| !constrained || mb.intra);
-    let y0 = my * rows;
     let mut above = vec![S::mid(); 9];
     let mut left = vec![S::mid(); rows + 1];
+    let above_y = span.y as i32 - span.step as i32;
     if above_ok {
         for (k, slot) in above[..8].iter_mut().enumerate() {
-            *slot = pix(plane, stride, height, (mx * 8 + k) as i32, y0 as i32 - 1);
+            *slot = pix(plane, stride, height, (mx * 8 + k) as i32, above_y);
         }
-        above[8] = pix(plane, stride, height, (mx * 8 + 8) as i32, y0 as i32 - 1);
+        above[8] = pix(plane, stride, height, (mx * 8 + 8) as i32, above_y);
     }
     if left_ok {
         for (k, slot) in left[..rows].iter_mut().enumerate() {
-            *slot = pix(plane, stride, height, mx as i32 * 8 - 1, (y0 + k) as i32);
+            *slot = pix(plane, stride, height, mx as i32 * 8 - 1, span.at(k) as i32);
         }
-        left[rows] = pix(plane, stride, height, mx as i32 * 8 - 1, (y0 + rows) as i32);
+        left[rows] = pix(
+            plane,
+            stride,
+            height,
+            mx as i32 * 8 - 1,
+            span.at(rows) as i32,
+        );
     }
     (above, left, above_ok, left_ok)
 }
@@ -3959,7 +4254,14 @@ fn row_ok<S: Sample>(
     }
     let (cur_mx, cur_my, cur_bx, cur_by) = here;
     let mbx = (ax / 4) as i32;
-    let mby = ay / 4;
+    let mut mby = ay / 4;
+    let field = pic
+        .mb
+        .get(cur_my * pic.mb_w + cur_mx)
+        .is_some_and(|mb| mb.field_mb);
+    if field && mby == cur_my as i32 - 1 {
+        mby -= 1;
+    }
     if mbx == cur_mx as i32 && mby == cur_my as i32 {
         return scan_of(ax % 4, ay as usize % 4) < scan_of(cur_bx, cur_by);
     }
@@ -4003,7 +4305,7 @@ fn above_right_ok<S: Sample>(
 ) -> bool {
     if by == 0 {
         let mbx = mx + usize::from(bx == 3);
-        return neighbor(pic, mbx as i32, my as i32 - 1, slice)
+        return neighbor(pic, mbx as i32, above_my(pic, mx, my), slice)
             .is_some_and(|mb| !constrained || mb.intra);
     }
     if bx == 3 {
@@ -4091,10 +4393,11 @@ fn decode_inter<S: Sample>(
                 let block = read8(pic, entropy, mx, my, i, mb, 0)?;
                 let bx = (i & 1) * 8;
                 let by = (i >> 1) * 8;
+                let span = luma_span(my, mb.field_mb);
                 super::add_scaled(
                     &mut pic.y,
                     pic.w,
-                    (mx * 16 + bx, my * 16 + by),
+                    (mx * 16 + bx, span.at(by), span.step),
                     &block,
                     (*qp, qp_bypass::<S>(slice, *qp)),
                     &slice.pps.weight8[1],
@@ -4118,10 +4421,11 @@ fn decode_inter<S: Sample>(
                     mb,
                     0,
                 )?;
+                let span = luma_span(my, mb.field_mb);
                 super::add_scaled(
                     &mut pic.y,
                     pic.w,
-                    (mx * 16 + blk_x(i) * 4, my * 16 + blk_y(i) * 4),
+                    (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
                     &block,
                     (*qp, qp_bypass::<S>(slice, *qp)),
                     &slice.pps.weight4[3],
@@ -4361,7 +4665,7 @@ fn ref_at<S: Sample>(
         (mx as i32, (bx as usize) / 2)
     };
     let (mby, oy) = if by < 0 {
-        (my as i32 - 1, 1)
+        (above_my(pic, mx, my), 1)
     } else {
         (my as i32, (by as usize) / 2)
     };
@@ -4527,7 +4831,7 @@ fn mvd_at<S: Sample>(
     let (bx, by) = cell;
     let (list, comp) = which;
     let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift(my, by, 4);
+    let (mby, oy) = shift_field(my, by, 4, current.field_mb);
     let index = oy * 4 + ox;
     if mbx == mx as i32 && mby == my as i32 {
         let mv = if list == 0 {
@@ -4640,7 +4944,7 @@ fn part_motion<S: Sample>(
     current: &Mb,
 ) -> Motion {
     let (mbx, ox) = shift(mx, bx, 4);
-    let (mby, oy) = shift(my, by, 4);
+    let (mby, oy) = shift_field(my, by, 4, current.field_mb);
     let index = oy * 4 + ox;
     if mbx == mx as i32 && mby == my as i32 {
         if current.ready & (1 << index) == 0 {
@@ -5626,10 +5930,13 @@ fn read_pcm<S: Sample>(
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
+    field: bool,
     slice: &Slice<'_>,
 ) -> Result<(), CodecError> {
     let x0 = mx * 16;
-    let y0 = my * 16;
+    let span = luma_span(my, field);
+    let y0 = span.y;
+    let step = span.step;
     let separate = pic.separate_plane;
     match entropy {
         Entropy::Cavlc(bits) => {
@@ -5640,15 +5947,16 @@ fn read_pcm<S: Sample>(
             }
             for row in 0..16 {
                 for col in 0..16 {
-                    pic.y[(y0 + row) * pic.w + x0 + col] = S::from_code(bits.u(S::BITS)?);
+                    pic.y[(y0 + row * step) * pic.w + x0 + col] = S::from_code(bits.u(S::BITS)?);
                 }
             }
             if !separate {
-                let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
+                let (cw, ch, ox, oy, stride, cstep) = pcm_chroma(pic, x0, my, field);
                 for plane in [&mut pic.u, &mut pic.v] {
                     for row in 0..ch {
                         for col in 0..cw {
-                            plane[(oy + row) * stride + ox + col] = S::from_code(bits.u(S::BITS)?);
+                            plane[(oy + row * cstep) * stride + ox + col] =
+                                S::from_code(bits.u(S::BITS)?);
                         }
                     }
                 }
@@ -5659,15 +5967,16 @@ fn read_pcm<S: Sample>(
             let mut bit = 0usize;
             for row in 0..16 {
                 for col in 0..16 {
-                    pic.y[(y0 + row) * pic.w + x0 + col] = pcm_code::<S>(bytes, &mut bit)?;
+                    pic.y[(y0 + row * step) * pic.w + x0 + col] = pcm_code::<S>(bytes, &mut bit)?;
                 }
             }
             if !separate {
-                let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
+                let (cw, ch, ox, oy, stride, cstep) = pcm_chroma(pic, x0, my, field);
                 for plane in [&mut pic.u, &mut pic.v] {
                     for row in 0..ch {
                         for col in 0..cw {
-                            plane[(oy + row) * stride + ox + col] = pcm_code::<S>(bytes, &mut bit)?;
+                            plane[(oy + row * cstep) * stride + ox + col] =
+                                pcm_code::<S>(bytes, &mut bit)?;
                         }
                     }
                 }
@@ -5685,12 +5994,22 @@ fn read_pcm<S: Sample>(
 fn pcm_chroma<S: Sample>(
     pic: &Frame<S>,
     x0: usize,
-    y0: usize,
-) -> (usize, usize, usize, usize, usize) {
+    my: usize,
+    field: bool,
+) -> (usize, usize, usize, usize, usize, usize) {
     match pic.chroma() {
-        3 => (16, 16, x0, y0, pic.w),
-        2 => (8, 16, x0 / 2, y0, pic.w / 2),
-        _ => (8, 8, x0 / 2, y0 / 2, pic.w / 2),
+        3 => {
+            let span = luma_span(my, field);
+            (16, 16, x0, span.y, pic.w, span.step)
+        }
+        2 => {
+            let span = chroma_span(my, 16, field);
+            (8, 16, x0 / 2, span.y, pic.w / 2, span.step)
+        }
+        _ => {
+            let span = chroma_span(my, 8, field);
+            (8, 8, x0 / 2, span.y, pic.w / 2, span.step)
+        }
     }
 }
 
@@ -5712,62 +6031,70 @@ fn xy<S: Sample>(pic: &Frame<S>, addr: usize) -> (usize, usize) {
 pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
-    for my in 0..mb_h {
-        for mx in 0..mb_w {
-            let index = my * mb_w + mx;
-            if pic
-                .mb
-                .get(index)
-                .is_some_and(|mb| mb.deblock == 1 || mb.pcm)
-            {
+    let mbaff = pic.mbaff;
+    let count = mb_w.saturating_mul(mb_h);
+    for addr in 0..count {
+        let (mx, my) = if mbaff {
+            let pair = addr / 2;
+            (pair % mb_w, (pair / mb_w) * 2 + (addr % 2))
+        } else {
+            (addr % mb_w, addr / mb_w)
+        };
+        let index = my * mb_w + mx;
+        if pic
+            .mb
+            .get(index)
+            .is_some_and(|mb| mb.deblock == 1 || mb.pcm)
+        {
+            continue;
+        }
+        let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
+        let field = pic.mb.get(index).is_some_and(|mb| mb.field_mb);
+        let span = luma_span(my, field);
+        let off = offsets(pic, index);
+        for edge in 0..4 {
+            if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
                 continue;
             }
-            let transform8 = pic.mb.get(index).is_some_and(|mb| mb.transform8);
-            let off = offsets(pic, index);
-            for edge in 0..4 {
-                if edge == 0 && (mx == 0 || !filter_boundary(pic, mx, my, true)) {
-                    continue;
-                }
-                let x = mx * 16 + edge * 4;
-                let bs = edge_strength(pic, mx, my, edge, true);
-                // An 8×8 transform has no luma edge at 4 or 12.
-                if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                    let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
-                    filter_groups(
-                        &mut pic.y,
-                        pic.w,
-                        (x, my * 16),
-                        (true, false, 4),
-                        bs,
-                        qpav,
-                        off,
-                    );
-                }
-                if !pic.separate_plane {
-                    filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
-                }
+            let x = mx * 16 + edge * 4;
+            let bs = edge_strength(pic, mx, my, edge, true);
+            // An 8×8 transform has no luma edge at 4 or 12.
+            if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
+                filter_groups(
+                    &mut pic.y,
+                    pic.w,
+                    (x, span.y),
+                    (true, false, 4, span.step),
+                    bs,
+                    qpav,
+                    off,
+                );
             }
-            for edge in 0..4 {
-                if edge == 0 && (my == 0 || !filter_boundary(pic, mx, my, false)) {
-                    continue;
-                }
-                let y = my * 16 + edge * 4;
-                let bs = edge_strength(pic, mx, my, edge, false);
-                if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                    let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
-                    filter_groups(
-                        &mut pic.y,
-                        pic.w,
-                        (mx * 16, y),
-                        (false, false, 4),
-                        bs,
-                        qpav,
-                        off,
-                    );
-                }
-                if !pic.separate_plane {
-                    filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
-                }
+            if !pic.separate_plane {
+                filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
+            }
+        }
+        for edge in 0..4 {
+            if edge == 0 && (above_my(pic, mx, my) < 0 || !filter_boundary(pic, mx, my, false)) {
+                continue;
+            }
+            let y = span.at(edge * 4);
+            let bs = edge_strength(pic, mx, my, edge, false);
+            if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
+                let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
+                filter_groups(
+                    &mut pic.y,
+                    pic.w,
+                    (mx * 16, y),
+                    (false, false, 4, span.step),
+                    bs,
+                    qpav,
+                    off,
+                );
+            }
+            if !pic.separate_plane {
+                filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
             }
         }
     }
@@ -5787,7 +6114,7 @@ fn edge_strength<S: Sample>(
         let (nx, ny) = if vertical {
             (mx as i32 - 1, my as i32)
         } else {
-            (mx as i32, my as i32 - 1)
+            (mx as i32, above_my(pic, mx, my))
         };
         coded_mb(pic, nx, ny)
     } else {
@@ -5839,13 +6166,13 @@ fn filter_groups<S: Sample>(
     plane: &mut [S],
     stride: usize,
     at: (usize, usize),
-    kind: (bool, bool, usize),
+    kind: (bool, bool, usize, usize),
     bs: [u8; 4],
     qpav: i32,
     off: (i32, i32),
 ) {
     let (x, y) = at;
-    let (vertical, chroma, step) = kind;
+    let (vertical, chroma, step, row_step) = kind;
     let (offset_a, offset_b) = off;
     if bs[0] != 0 && bs[1] == bs[0] && bs[2] == bs[0] && bs[3] == bs[0] {
         recon::filter_edge(
@@ -5861,6 +6188,7 @@ fn filter_groups<S: Sample>(
                 offset_b,
                 chroma,
                 len: step * 4,
+                row_step,
             },
         );
         return;
@@ -5869,7 +6197,7 @@ fn filter_groups<S: Sample>(
         if group_bs == 0 {
             continue;
         }
-        let shift = group * step;
+        let shift = group * step * row_step;
         let (gx, gy) = if vertical {
             (x, y + shift)
         } else {
@@ -5888,6 +6216,7 @@ fn filter_groups<S: Sample>(
                 offset_b,
                 chroma,
                 len: step,
+                row_step,
             },
         );
     }
@@ -5911,20 +6240,22 @@ fn filter_chroma<S: Sample>(
 ) {
     let (mx, my) = at;
     let chroma = pic.chroma();
+    let field = pic.mb.get(my * pic.mb_w + mx).is_some_and(|mb| mb.field_mb);
     if chroma == 3 {
         if transform8 && (edge == 1 || edge == 3) {
             return;
         }
+        let span = luma_span(my, field);
         let pos = if vertical {
             mx * 16 + edge * 4
         } else {
-            my * 16 + edge * 4
+            span.at(edge * 4)
         };
         if pos < 4 {
             return;
         }
         let origin = if vertical {
-            (pos, my * 16)
+            (pos, span.y)
         } else {
             (mx * 16, pos)
         };
@@ -5936,7 +6267,15 @@ fn filter_chroma<S: Sample>(
             } else {
                 pic.v.as_mut_slice()
             };
-            filter_groups(plane, stride, origin, (vertical, false, 4), bs, qpc, off);
+            filter_groups(
+                plane,
+                stride,
+                origin,
+                (vertical, false, 4, span.step),
+                bs,
+                qpc,
+                off,
+            );
         }
         return;
     }
@@ -5948,19 +6287,20 @@ fn filter_chroma<S: Sample>(
         return;
     }
     let step = if vertical && rows_full { 4 } else { 2 };
+    let rows = if rows_full { 16 } else { 8 };
+    let span = chroma_span(my, rows, field);
     let along = if vertical {
         mx * 8 + edge * 2
     } else if rows_full {
-        my * 16 + edge * 4
+        span.at(edge * 4)
     } else {
-        my * 8 + edge * 2
+        span.at(edge * 2)
     };
     if along < 2 {
         return;
     }
     let origin = if vertical {
-        let cy = if rows_full { my * 16 } else { my * 8 };
-        (along, cy)
+        (along, span.y)
     } else {
         (mx * 8, along)
     };
@@ -5972,7 +6312,15 @@ fn filter_chroma<S: Sample>(
         } else {
             pic.v.as_mut_slice()
         };
-        filter_groups(plane, stride, origin, (vertical, true, step), bs, qpc, off);
+        filter_groups(
+            plane,
+            stride,
+            origin,
+            (vertical, true, step, span.step),
+            bs,
+            qpc,
+            off,
+        );
     }
 }
 
@@ -6005,7 +6353,7 @@ fn edge_qp<S: Sample>(
     let (nx, ny) = if vertical {
         (mx as i32 - 1, my as i32)
     } else {
-        (mx as i32, my as i32 - 1)
+        (mx as i32, above_my(pic, mx, my))
     };
     let Some(other) = coded_mb(pic, nx, ny) else {
         return current;
@@ -6103,7 +6451,7 @@ fn filter_boundary<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, vertical: bo
     let (nx, ny) = if vertical {
         (mx as i32 - 1, my as i32)
     } else {
-        (mx as i32, my as i32 - 1)
+        (mx as i32, above_my(pic, mx, my))
     };
     coded_mb(pic, nx, ny).is_some_and(|other| other.slice == mb.slice)
 }

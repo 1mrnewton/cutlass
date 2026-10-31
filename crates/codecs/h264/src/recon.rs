@@ -385,11 +385,13 @@ pub fn add_block<S: Sample>(
     y0: usize,
     block: &[i32],
     n: usize,
+    step: usize,
 ) {
     for y in 0..n {
         for x in 0..n {
-            let sample = pel(plane[(y0 + y) * stride + x0 + x]) + block[y * n + x];
-            plane[(y0 + y) * stride + x0 + x] = S::clip(sample);
+            let at = (y0 + y * step) * stride + x0 + x;
+            let sample = pel(plane[at]) + block[y * n + x];
+            plane[at] = S::clip(sample);
         }
     }
 }
@@ -1384,6 +1386,8 @@ pub struct Edge {
     pub offset_b: i32,
     pub chroma: bool,
     pub len: usize,
+    /// Frame rows between samples. Field macroblocks step by two.
+    pub row_step: usize,
 }
 
 pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, edge: Edge) {
@@ -1395,6 +1399,7 @@ pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize
         offset_b,
         chroma,
         len,
+        row_step,
     } = edge;
     if bs == 0 || len == 0 {
         return;
@@ -1409,10 +1414,11 @@ pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize
         index_a,
         chroma,
     };
+    let at = y * stride + x;
     if vertical {
-        filter_span::<S, true>(plane, stride, y * stride + x, run);
+        filter_span::<S, true>(plane, stride, row_step, at, run);
     } else {
-        filter_span::<S, false>(plane, stride, y * stride + x, run);
+        filter_span::<S, false>(plane, stride, row_step, at, run);
     }
 }
 
@@ -1428,6 +1434,7 @@ struct FilterRun {
 fn filter_span<S: Sample, const VERTICAL: bool>(
     plane: &mut [S],
     stride: usize,
+    row_step: usize,
     mut at: usize,
     run: FilterRun,
 ) {
@@ -1439,8 +1446,9 @@ fn filter_span<S: Sample, const VERTICAL: bool>(
         index_a,
         chroma,
     } = run;
-    let across = if VERTICAL { 1 } else { stride };
-    let along = if VERTICAL { stride } else { 1 };
+    let vert = stride * row_step;
+    let across = if VERTICAL { 1 } else { vert };
+    let along = if VERTICAL { vert } else { 1 };
     for _ in 0..len {
         let p0 = pel(plane[at - across]);
         let q0 = pel(plane[at]);

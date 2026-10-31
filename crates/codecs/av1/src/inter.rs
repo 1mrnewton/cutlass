@@ -5,8 +5,9 @@
 //! A global model that is not identity supplies the `GLOBALMV` vector.
 //! A rotation-zoom or affine model warps that block when the shear is valid.
 //! Interintra blends a single reference with an intra predictor.
-//! Compound prediction averages two references. A masked or distance-weighted
-//! compound, local warp, and overlapped motion stay outside this path.
+//! Compound prediction averages two references, or weights them by order-hint
+//! distance. A masked compound, local warp, and overlapped motion stay outside
+//! this path.
 
 use cutlass_decode::CodecError;
 
@@ -121,6 +122,8 @@ pub struct BlockPlace {
     pub compound: bool,
     pub global1: Motion,
     pub affine1: bool,
+    /// `RefFrameSignBias`, indexed by reference frame.
+    pub bias: [bool; 8],
 }
 
 pub struct Candidates {
@@ -200,6 +203,7 @@ struct Search {
     affine: bool,
     affine1: bool,
     compound: bool,
+    bias: [bool; 8],
 }
 
 /// Transform set for an inter block. `0` is DCT only.
@@ -269,6 +273,7 @@ pub fn find_stack(
         affine,
         affine1: at.affine1,
         compound: at.compound,
+        bias: at.bias,
     };
     search.scan_row(grid, at, -1);
     let mut above = search.found_match;
@@ -637,17 +642,34 @@ impl Search {
             if cand_ref <= INTRA_FRAME {
                 continue;
             }
-            let cand = vectors[cand_list];
             for (list, list_ref) in refs.iter().enumerate() {
+                let mut cand = vectors[cand_list];
                 if cand_ref == *list_ref && scratch.same_n[list] < 2 {
                     scratch.same[list][scratch.same_n[list]] = cand;
                     scratch.same_n[list] += 1;
                 } else if scratch.other_n[list] < 2 {
+                    if self.bias_differs(cand_ref, *list_ref) {
+                        cand = negate_mv(cand);
+                    }
                     scratch.other[list][scratch.other_n[list]] = cand;
                     scratch.other_n[list] += 1;
                 }
             }
         }
+    }
+
+    fn bias_differs(&self, candidate: i8, list_ref: i8) -> bool {
+        let cand = self
+            .bias
+            .get(usize::try_from(candidate).unwrap_or(0))
+            .copied()
+            .unwrap_or(false);
+        let list = self
+            .bias
+            .get(usize::try_from(list_ref).unwrap_or(0))
+            .copied()
+            .unwrap_or(false);
+        cand != list
     }
 
     fn extra(&mut self, grid: &MotionGrid<'_>, at: &BlockPlace) {
@@ -689,11 +711,14 @@ impl Search {
             if cand_ref <= 0 || self.found >= STACK {
                 continue;
             }
-            let mv = if list == 0 {
+            let mut mv = if list == 0 {
                 grid.mv(row, col)
             } else {
                 grid.mv1(row, col)
             };
+            if self.bias_differs(cand_ref, self.reference) {
+                mv = negate_mv(mv);
+            }
             if self.mv.iter().take(self.found).any(|have| *have == mv) {
                 continue;
             }
@@ -1106,6 +1131,19 @@ struct VerticalPass {
 /// `COMPOUND_AVERAGE`: `Clip1(Round2(a + b, 1 + InterPostRound))` with `InterPostRound` 4.
 pub fn average_compound(a: i32, b: i32) -> u8 {
     round2(a.saturating_add(b), 5).clamp(0, 255) as u8
+}
+
+/// `COMPOUND_DISTANCE`: `Clip1(Round2(fwd * a + bck * b, 4 + InterPostRound))`.
+pub fn distance_compound(a: i32, b: i32, fwd: i32, bck: i32) -> u8 {
+    let sum = a.saturating_mul(fwd).saturating_add(b.saturating_mul(bck));
+    round2(sum, 8).clamp(0, 255) as u8
+}
+
+fn negate_mv(mv: Motion) -> Motion {
+    Motion {
+        row: mv.row.wrapping_neg(),
+        col: mv.col.wrapping_neg(),
+    }
 }
 
 fn scale(reference: usize, frame: usize) -> i64 {

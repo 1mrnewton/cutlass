@@ -23,9 +23,9 @@ use crate::inter::{
     ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, BlockPlace, Candidates, GLOBAL_GLOBALMV, GLOBALMV,
     GM_TRANSLATION, GOLDEN_FRAME, INTRA_FRAME, InterSample, LAST_FRAME, LAST2_FRAME, LAST3_FRAME,
     Motion, MotionGrid, NEAREST_NEARESTMV, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView,
-    SIZE_GROUP, average_compound, find_stack, global_shear_valid, has_near_mv, inter_set_allows,
-    inter_tx_set, inter_tx_type, interintra_weight, list_mode, predict, predict_precise,
-    predict_warp, project_global,
+    SIZE_GROUP, average_compound, distance_compound, find_stack, global_shear_valid, has_near_mv,
+    inter_set_allows, inter_tx_set, inter_tx_type, interintra_weight, list_mode, predict,
+    predict_precise, predict_warp, project_global,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
@@ -591,6 +591,11 @@ struct Tile<'a, 'r> {
     reference_select: bool,
     masked_compound: bool,
     distance_compound: bool,
+    order_hint: u32,
+    order_hint_bits: u8,
+    slot_hints: [u32; 8],
+    sign_bias: [bool; 8],
+    compound_idx: Vec<u8>,
     block_ref: Vec<i8>,
     block_ref1: Vec<i8>,
     inter_flag: Vec<u8>,
@@ -668,6 +673,7 @@ pub(crate) struct Cdfs {
     comp_ref: Vec<u16>,
     comp_bwdref: Vec<u16>,
     compound_mode: Vec<u16>,
+    compound_idx: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -791,6 +797,11 @@ impl<'a, 'r> Tile<'a, 'r> {
             reference_select: frame.reference_select,
             masked_compound: sequence.enable_masked,
             distance_compound: sequence.enable_jnt,
+            order_hint: frame.order_hint,
+            order_hint_bits: sequence.order_hint_bits,
+            slot_hints: frame.slot_hints,
+            sign_bias: sign_bias(sequence, frame),
+            compound_idx: vec![1; cells],
             block_ref: vec![0; cells],
             block_ref1: vec![NONE_FRAME; cells],
             inter_flag: vec![0; cells],
@@ -1128,6 +1139,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref1: NONE_FRAME,
             ii: -1,
             interp: [0, 0],
+            compound_idx: 1,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)?;
@@ -1182,6 +1194,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref1: chosen.ref1,
             ii: chosen.ii,
             interp: chosen.interp,
+            compound_idx: chosen.compound_idx,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)
@@ -1252,6 +1265,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref1: NONE_FRAME,
             ii: -1,
             interp: [0, 0],
+            compound_idx: 1,
         })
     }
 
@@ -1294,6 +1308,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 compound,
                 global1,
                 affine1: self.gm_affine(reference1),
+                bias: self.sign_bias,
             },
             global,
             self.allow_hp,
@@ -1312,15 +1327,16 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.read_interintra(bsize)?
         };
-        if compound && (self.masked_compound || self.distance_compound) {
+        if compound && self.masked_compound {
             return Err(CodecError::Unsupported {
-                what: if self.masked_compound {
-                    "masked compound"
-                } else {
-                    "distance-weighted compound"
-                },
+                what: "masked compound",
             });
         }
+        let compound_idx = if compound && self.distance_compound {
+            self.read_compound_idx(row, col, reference, reference1)?
+        } else {
+            1
+        };
         let interp = self.read_interp(row, col, bsize, y_mode, reference, reference1)?;
         Ok(Chosen {
             y_mode,
@@ -1333,12 +1349,90 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref1: if ii >= 0 { INTRA_FRAME } else { reference1 },
             ii,
             interp,
+            compound_idx,
         })
     }
 
     fn gm_affine(&self, reference: i8) -> bool {
         let index = usize::try_from(reference).unwrap_or(0);
         self.gm_type.get(index).copied().unwrap_or(0) > GM_TRANSLATION
+    }
+
+    fn read_compound_idx(
+        &mut self,
+        row: usize,
+        col: usize,
+        reference: i8,
+        reference1: i8,
+    ) -> Result<u8, CodecError> {
+        let ctx = self.compound_idx_ctx(row, col, reference, reference1);
+        Ok(read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.compound_idx,
+            &[6, 3],
+            &[ctx],
+        )? as u8)
+    }
+
+    fn compound_idx_ctx(&self, row: usize, col: usize, reference: i8, reference1: i8) -> usize {
+        let same =
+            self.frame_dist(reference).unsigned_abs() == self.frame_dist(reference1).unsigned_abs();
+        let mut ctx = if same { 3 } else { 0 };
+        if self.above_mi(row) {
+            ctx += self.compound_neighbor((row - 1) * self.mi_cols + col);
+        }
+        if self.left_mi(col) {
+            ctx += self.compound_neighbor(row * self.mi_cols + col - 1);
+        }
+        ctx
+    }
+
+    fn compound_neighbor(&self, at: usize) -> usize {
+        if self.block_ref1.get(at).copied().unwrap_or(NONE_FRAME) > INTRA_FRAME {
+            usize::from(self.compound_idx.get(at).copied().unwrap_or(0))
+        } else if self.block_ref.get(at).copied().unwrap_or(NONE_FRAME) == ALTREF_FRAME {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn frame_dist(&self, reference: i8) -> i32 {
+        let index = usize::try_from(reference).unwrap_or(0);
+        if index == 0 || index > 7 {
+            return 0;
+        }
+        let slot = usize::from(self.frame_refs[index - 1]);
+        crate::header::relative_dist(self.slot_hints[slot], self.order_hint, self.order_hint_bits)
+    }
+
+    fn distance_weights(&self, reference: i8, reference1: i8) -> (i32, i32) {
+        let d1 = clipped_dist(self.frame_dist(reference));
+        let d0 = clipped_dist(self.frame_dist(reference1));
+        let order = d0 <= d1;
+        let band = if d0 == 0 || d1 == 0 {
+            3
+        } else {
+            let mut band = 3;
+            for (index, row) in DIST_WEIGHT.iter().enumerate().take(3) {
+                let c0 = row[usize::from(order)];
+                let c1 = row[usize::from(!order)];
+                let left = d0 * c0;
+                let right = d1 * c1;
+                let split = if order { left > right } else { left < right };
+                if split {
+                    band = index;
+                    break;
+                }
+            }
+            band
+        };
+        let side = usize::from(order);
+        (
+            DIST_LOOKUP[band][side],
+            DIST_LOOKUP[band][usize::from(!order)],
+        )
     }
 
     fn read_refs(
@@ -2182,6 +2276,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         let mut second = vec![0i32; n];
         self.predict_list(block, reference, 0, &mut first, place)?;
         self.predict_list(block, reference1, 1, &mut second, place)?;
+        let weights = (self.compound_idx[block.row * self.mi_cols + block.col] == 0)
+            .then(|| self.distance_weights(reference, reference1));
         let stride = if block.plane == 0 {
             self.width
         } else {
@@ -2196,7 +2292,12 @@ impl<'a, 'r> Tile<'a, 'r> {
         };
         for row in 0..h {
             for col in 0..w {
-                let pred = average_compound(first[row * w + col], second[row * w + col]);
+                let at = row * w + col;
+                let pred = if let Some((fwd, bck)) = weights {
+                    distance_compound(first[at], second[at], fwd, bck)
+                } else {
+                    average_compound(first[at], second[at])
+                };
                 let dx = x + col;
                 let dy = y + row;
                 if dx < stride {
@@ -3027,6 +3128,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.block_ref1[at] = coded.ref1;
                 self.interp[at] = coded.interp;
                 self.ii_mode[at] = coded.ii;
+                self.compound_idx[at] = coded.compound_idx;
             }
         }
     }
@@ -3852,6 +3954,29 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 }
 
+fn sign_bias(sequence: &Sequence, frame: &FrameInfo) -> [bool; 8] {
+    let mut bias = [false; 8];
+    if !sequence.enable_order_hint {
+        return bias;
+    }
+    for (index, slot) in frame.ref_frames.iter().enumerate() {
+        let hint = frame.slot_hints[usize::from(*slot)];
+        bias[index + 1] =
+            crate::header::relative_dist(hint, frame.order_hint, sequence.order_hint_bits) > 0;
+    }
+    bias
+}
+
+fn clipped_dist(dist: i32) -> i32 {
+    match i32::try_from(dist.unsigned_abs()) {
+        Ok(value) => value.min(31),
+        Err(_) => 31,
+    }
+}
+
+const DIST_WEIGHT: [[i32; 2]; 4] = [[2, 3], [2, 5], [2, 7], [1, 31]];
+const DIST_LOOKUP: [[i32; 2]; 4] = [[9, 7], [11, 5], [12, 4], [13, 3]];
+
 fn ref_count_ctx(counts0: usize, counts1: usize) -> usize {
     if counts0 < counts1 {
         0
@@ -3881,6 +4006,8 @@ struct Chosen {
     ref1: i8,
     ii: i8,
     interp: [u8; 2],
+    /// 1 averages the two predictors. 0 uses distance weights.
+    compound_idx: u8,
 }
 
 struct CodedBlock {
@@ -3907,6 +4034,7 @@ struct CodedBlock {
     ref1: i8,
     ii: i8,
     interp: [u8; 2],
+    compound_idx: u8,
 }
 
 struct CoeffPlace {
@@ -4400,6 +4528,7 @@ impl Cdfs {
         zero_counters(&mut self.comp_ref, 3);
         zero_counters(&mut self.comp_bwdref, 3);
         zero_counters(&mut self.compound_mode, 9);
+        zero_counters(&mut self.compound_idx, 3);
     }
 
     fn load(q: usize) -> Self {
@@ -4474,6 +4603,7 @@ impl Cdfs {
             comp_ref: COMP_REF_CDF.to_vec(),
             comp_bwdref: COMP_BWDREF_CDF.to_vec(),
             compound_mode: COMPOUND_MODE_CDF.to_vec(),
+            compound_idx: COMPOUND_IDX_CDF.to_vec(),
         }
     }
 }
@@ -4512,6 +4642,12 @@ const COMP_REF_CDF: [u16; 27] = [
 const COMP_BWDREF_CDF: [u16; 18] = [
     2235, 32768, 0, 1423, 32768, 0, 17182, 32768, 0, 15175, 32768, 0, 30606, 32768, 0, 30489,
     32768, 0,
+];
+
+/// `Default_Compound_Idx_Cdf`. Six contexts, one probability, the end, and the counter.
+const COMPOUND_IDX_CDF: [u16; 18] = [
+    18244, 32768, 0, 12865, 32768, 0, 7053, 32768, 0, 13259, 32768, 0, 9334, 32768, 0, 4644, 32768,
+    0,
 ];
 
 /// `Default_Compound_Mode_Cdf`. Eight contexts, eight modes.

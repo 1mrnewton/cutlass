@@ -64,8 +64,12 @@ impl Decoder for Av1Decoder {
         }
         let saved_motion =
             std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
-        let (sequence, frame) =
-            parse_with_motion(&packet.data, self.sequence.as_ref(), &saved_motion)?;
+        let (sequence, frame) = parse_with_motion(
+            &packet.data,
+            self.sequence.as_ref(),
+            &saved_motion,
+            &self.order_hints,
+        )?;
         header_is_addressable(&sequence, &frame)?;
         let saved = self.take_stale_refs(&frame);
         let (picture, cdfs) = match self.picture_before_grain(&sequence, &frame) {
@@ -2071,6 +2075,47 @@ mod tests {
             assert!(!seq.enable_order_hint);
             assert!(!seq.enable_masked);
             assert!(!seq.enable_jnt);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn distance_compound_matches_dav1d() {
+        // aomenc 64×64 with order hint. Later frames set reference_select and
+        // may weight the two predictors by order-hint distance. Masked
+        // compound is off. The frame does not signal skip mode. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/distance_0.obu"),
+            include_bytes!("../fixtures/distance_1.obu"),
+            include_bytes!("../fixtures/distance_2.obu"),
+            include_bytes!("../fixtures/distance_3.obu"),
+            include_bytes!("../fixtures/distance_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0x6ee4_5945_eef4_d3ef,
+            0xf558_739c_be0b_97d8,
+            0xd8f8_2c4e_99cf_d80b,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_order_hint);
+            assert!(seq.enable_jnt);
+            assert!(!seq.enable_masked);
             if index >= 2 {
                 assert!(frame.reference_select);
             }

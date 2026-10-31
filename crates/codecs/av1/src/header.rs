@@ -113,6 +113,8 @@ pub struct FrameInfo {
     pub height: u32,
     pub upscaled_width: u32,
     pub order_hint: u32,
+    /// Order hint stored in each reference slot when this frame was parsed.
+    pub slot_hints: [u32; 8],
     /// Reference order hints carried by an error-resilient frame.
     pub signaled_order_hints: Option<[u32; 8]>,
     pub refresh_flags: u8,
@@ -184,7 +186,7 @@ pub fn parse_unit(
     bytes: &[u8],
     sequence: Option<&Sequence>,
 ) -> Result<(Sequence, FrameInfo), CodecError> {
-    parse_with_motion(bytes, sequence, &[None; 8])
+    parse_with_motion(bytes, sequence, &[None; 8], &[0; 8])
 }
 
 /// Parse one temporal unit. `saved` is the global-motion model stored in each
@@ -193,6 +195,7 @@ pub fn parse_with_motion(
     bytes: &[u8],
     sequence: Option<&Sequence>,
     saved: &[Option<[[i32; 6]; 8]>; 8],
+    order_hints: &[u32; 8],
 ) -> Result<(Sequence, FrameInfo), CodecError> {
     let mut bits = BitReader::new(bytes);
     let mut seq = sequence.cloned();
@@ -233,7 +236,13 @@ pub fn parse_with_motion(
                 let sequence = seq.as_ref().ok_or(CodecError::InvalidApi {
                     what: "frame before sequence",
                 })?;
-                frame = Some(parse_frame(&mut bits, sequence, payload_end, saved)?);
+                frame = Some(parse_frame(
+                    &mut bits,
+                    sequence,
+                    payload_end,
+                    saved,
+                    order_hints,
+                )?);
             }
             3 | 7 => {
                 let sequence = seq.as_ref().ok_or(CodecError::InvalidApi {
@@ -244,6 +253,7 @@ pub fn parse_with_motion(
                     sequence,
                     payload_end,
                     saved,
+                    order_hints,
                 )?);
             }
             4 => {
@@ -463,9 +473,10 @@ fn parse_frame(
     sequence: &Sequence,
     payload_end: usize,
     saved: &[Option<[[i32; 6]; 8]>; 8],
+    order_hints: &[u32; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
-    let mut frame = uncompressed(bits, sequence, saved)?;
+    let mut frame = uncompressed(bits, sequence, saved, order_hints)?;
     bits.byte_align();
     let header_bytes = (bits.position() - header_start) / 8;
     let obu_bytes = (payload_end - header_start) / 8;
@@ -501,8 +512,9 @@ fn parse_frame_header_only(
     sequence: &Sequence,
     payload_end: usize,
     saved: &[Option<[[i32; 6]; 8]>; 8],
+    order_hints: &[u32; 8],
 ) -> Result<FrameInfo, CodecError> {
-    let frame = uncompressed(bits, sequence, saved)?;
+    let frame = uncompressed(bits, sequence, saved, order_hints)?;
     trailing(bits, payload_end)?;
     if !frame.show_existing && frame.tile.is_empty() {
         return Err(CodecError::Unsupported {
@@ -516,6 +528,7 @@ fn uncompressed(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
     saved: &[Option<[[i32; 6]; 8]>; 8],
+    order_hints: &[u32; 8],
 ) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
     let mut frame_to_show = 0u8;
@@ -802,7 +815,18 @@ fn uncompressed(
     }
     let tx_select = if lossless { false } else { bits.read_bool()? };
     let reference_select = if intra { false } else { bits.read_bool()? };
-    let skip_mode = false;
+    let skip_mode = skip_mode_signaled(
+        bits,
+        sequence,
+        intra,
+        reference_select,
+        order_hint,
+        &ref_frames,
+        order_hints,
+    )?;
+    if skip_mode {
+        return Err(CodecError::Unsupported { what: "skip mode" });
+    }
     let allow_warped = if intra || error_resilient || !sequence.enable_warped {
         false
     } else {
@@ -841,6 +865,7 @@ fn uncompressed(
         height,
         upscaled_width,
         order_hint,
+        slot_hints: *order_hints,
         signaled_order_hints,
         refresh_flags: refresh,
         primary_ref,
@@ -1219,6 +1244,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         height: sequence.height,
         upscaled_width: sequence.width,
         order_hint: 0,
+        slot_hints: [0; 8],
         signaled_order_hints: None,
         refresh_flags: 0,
         primary_ref: PRIMARY_REF_NONE,
@@ -1285,6 +1311,80 @@ const GM_TRANS_ONLY_PREC_BITS: u32 = 3;
 struct GlobalMotion {
     kind: [u8; 8],
     params: [[i32; 6]; 8],
+}
+
+/// `skip_mode_present`. The bit is in the header only when two references
+/// sit on opposite sides of this frame, or two sit in front of it.
+fn skip_mode_signaled(
+    bits: &mut BitReader<'_>,
+    sequence: &Sequence,
+    intra: bool,
+    reference_select: bool,
+    order_hint: u32,
+    ref_frames: &[u8; 7],
+    slot_hints: &[u32; 8],
+) -> Result<bool, CodecError> {
+    if !skip_mode_allowed(
+        sequence,
+        intra,
+        reference_select,
+        order_hint,
+        ref_frames,
+        slot_hints,
+    ) {
+        return Ok(false);
+    }
+    bits.read_bool()
+}
+
+fn skip_mode_allowed(
+    sequence: &Sequence,
+    intra: bool,
+    reference_select: bool,
+    order_hint: u32,
+    ref_frames: &[u8; 7],
+    slot_hints: &[u32; 8],
+) -> bool {
+    if intra || !reference_select || !sequence.enable_order_hint {
+        return false;
+    }
+    let width = sequence.order_hint_bits;
+    let mut forward = None;
+    let mut backward = None;
+    for slot in ref_frames {
+        let hint = slot_hints[usize::from(*slot)];
+        let dist = relative_dist(hint, order_hint, width);
+        if dist < 0 {
+            let closer = forward.is_none_or(|previous| relative_dist(hint, previous, width) > 0);
+            if closer {
+                forward = Some(hint);
+            }
+        } else if dist > 0 {
+            let closer = backward.is_none_or(|previous| relative_dist(hint, previous, width) < 0);
+            if closer {
+                backward = Some(hint);
+            }
+        }
+    }
+    let Some(forward_hint) = forward else {
+        return false;
+    };
+    if backward.is_some() {
+        return true;
+    }
+    ref_frames.iter().any(|slot| {
+        let hint = slot_hints[usize::from(*slot)];
+        relative_dist(hint, forward_hint, width) < 0
+    })
+}
+
+pub(crate) fn relative_dist(a: u32, b: u32, bits: u8) -> i32 {
+    if bits == 0 {
+        return 0;
+    }
+    let diff = a.wrapping_sub(b);
+    let m = 1u32 << (bits - 1);
+    i32::try_from(diff & (m - 1)).unwrap_or(0) - i32::try_from(diff & m).unwrap_or(0)
 }
 
 fn identity_gm() -> [[i32; 6]; 8] {

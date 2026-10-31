@@ -8,7 +8,8 @@
 //! Compound prediction averages two references, weights them by order-hint
 //! distance, or blends them through a wedge or difference mask. A local warp
 //! fits an affine model to neighboring motion, and overlapped motion blends
-//! the neighboring predictors into the block.
+//! the neighboring predictors into the block. A frame that asks for reference
+//! motion vectors also searches the field projected from earlier frames.
 
 use cutlass_decode::CodecError;
 
@@ -101,6 +102,14 @@ pub struct RefView<'a> {
     pub v: &'a [u8],
     pub width: usize,
     pub height: usize,
+    pub frame_type: u8,
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    /// Order hint this reference saw for each frame type. Index 0 is unused.
+    pub saved_hints: [u32; 8],
+    /// Reference named by each 4×4 of the saved motion field, or `NONE_FRAME`.
+    pub mf_refs: &'a [i8],
+    pub mf_mvs: &'a [Motion],
 }
 
 pub struct MotionGrid<'a> {
@@ -136,6 +145,8 @@ pub struct Candidates {
     pub found: usize,
     pub new_ctx: usize,
     pub ref_ctx: usize,
+    /// Context for the single-reference global-motion symbol.
+    pub zero_ctx: usize,
     pub drl: [usize; STACK],
 }
 
@@ -208,6 +219,7 @@ struct Search {
     affine1: bool,
     compound: bool,
     bias: [bool; 8],
+    zero_ctx: usize,
 }
 
 /// Transform set for an inter block. `0` is DCT only.
@@ -260,6 +272,7 @@ pub fn find_stack(
     hp: bool,
     integer: bool,
     affine: bool,
+    field: Option<&MotionField>,
 ) -> Candidates {
     let mut search = Search {
         mv: [Motion::default(); STACK],
@@ -278,6 +291,7 @@ pub fn find_stack(
         affine1: at.affine1,
         compound: at.compound,
         bias: at.bias,
+        zero_ctx: 0,
     };
     search.scan_row(grid, at, -1);
     let mut above = search.found_match;
@@ -297,7 +311,7 @@ pub fn find_stack(
     for weight in search.weight.iter_mut().take(nearest) {
         *weight += REF_CAT_LEVEL;
     }
-    search.scan_far(grid, at, &mut above, &mut left);
+    search.scan_far(grid, at, &mut above, &mut left, field);
     let total = usize::from(above) + usize::from(left);
     search.sort(0, nearest);
     search.sort(nearest, search.found);
@@ -316,6 +330,7 @@ pub fn find_stack(
         found: search.found,
         new_ctx,
         ref_ctx,
+        zero_ctx: search.zero_ctx,
         drl,
     }
 }
@@ -357,7 +372,11 @@ impl Search {
         at: &BlockPlace,
         above: &mut bool,
         left: &mut bool,
+        field: Option<&MotionField>,
     ) {
+        if let Some(field) = field {
+            self.temporal(grid, at, field);
+        }
         self.found_match = false;
         self.scan_point(grid, at, -1, -1);
         if self.found_match {
@@ -759,6 +778,118 @@ impl Search {
             mv.col = clamp_edge(mv.col, at.col, at.bw4, grid.cols, MV_BORDER + bw * 8);
         }
     }
+
+    /// Temporal scan. Samples inside the block, then three positions that stay
+    /// inside the same 64×64 superblock. A missing field entry is `-32768`.
+    fn temporal(&mut self, grid: &MotionGrid<'_>, at: &BlockPlace, field: &MotionField) {
+        let step_w = if at.bw4 >= 16 { 4 } else { 2 };
+        let step_h = if at.bh4 >= 16 { 4 } else { 2 };
+        let rows = i32::try_from(at.bh4.min(16)).unwrap_or(0);
+        let cols = i32::try_from(at.bw4.min(16)).unwrap_or(0);
+        let mut delta_row = 0;
+        while delta_row < rows {
+            let mut delta_col = 0;
+            while delta_col < cols {
+                self.add_temporal(grid, at, field, delta_row, delta_col);
+                delta_col += step_w;
+            }
+            delta_row += step_h;
+        }
+        if !(2..16).contains(&at.bh4) || !(2..16).contains(&at.bw4) {
+            return;
+        }
+        let bh4 = i32::try_from(at.bh4).unwrap_or(0);
+        let bw4 = i32::try_from(at.bw4).unwrap_or(0);
+        for (row_off, col_off) in [(bh4, -2), (bh4, bw4), (bh4 - 2, bw4)] {
+            if superblock_contains(at.row, at.col, row_off, col_off) {
+                self.add_temporal(grid, at, field, row_off, col_off);
+            }
+        }
+    }
+
+    fn add_temporal(
+        &mut self,
+        grid: &MotionGrid<'_>,
+        at: &BlockPlace,
+        field: &MotionField,
+        delta_row: i32,
+        delta_col: i32,
+    ) {
+        let mv_row = (at.row as i32).wrapping_add(delta_row) | 1;
+        let mv_col = (at.col as i32).wrapping_add(delta_col) | 1;
+        if !grid.inside(mv_row, mv_col) {
+            return;
+        }
+        let y8 = (mv_row as usize) >> 1;
+        let x8 = (mv_col as usize) >> 1;
+        if delta_row == 0 && delta_col == 0 {
+            self.zero_ctx = 1;
+        }
+        if self.compound {
+            self.add_temporal_pair(field, y8, x8, delta_row, delta_col);
+        } else {
+            self.add_temporal_single(field, y8, x8, delta_row, delta_col);
+        }
+    }
+
+    fn add_temporal_single(
+        &mut self,
+        field: &MotionField,
+        y8: usize,
+        x8: usize,
+        delta_row: i32,
+        delta_col: i32,
+    ) {
+        let cand = field.get(self.reference, y8, x8);
+        if cand.row == INVALID_MV {
+            return;
+        }
+        let cand = lower(cand, self.hp, self.integer);
+        if delta_row == 0 && delta_col == 0 {
+            self.zero_ctx = usize::from(vector_is_far(cand, self.global));
+        }
+        if let Some(idx) = (0..self.found).find(|&idx| self.mv[idx] == cand) {
+            self.weight[idx] += 2;
+        } else if self.found < STACK {
+            self.mv[self.found] = cand;
+            self.weight[self.found] = 2;
+            self.found += 1;
+        }
+    }
+
+    fn add_temporal_pair(
+        &mut self,
+        field: &MotionField,
+        y8: usize,
+        x8: usize,
+        delta_row: i32,
+        delta_col: i32,
+    ) {
+        let cand0 = field.get(self.reference, y8, x8);
+        if cand0.row == INVALID_MV {
+            return;
+        }
+        let cand1 = field.get(self.reference1, y8, x8);
+        if cand1.row == INVALID_MV {
+            return;
+        }
+        let cand0 = lower(cand0, self.hp, self.integer);
+        let cand1 = lower(cand1, self.hp, self.integer);
+        if delta_row == 0 && delta_col == 0 {
+            let far = vector_is_far(cand0, self.global) || vector_is_far(cand1, self.global1);
+            self.zero_ctx = usize::from(far);
+        }
+        if let Some(idx) =
+            (0..self.found).find(|&idx| self.mv[idx] == cand0 && self.mv1[idx] == cand1)
+        {
+            self.weight[idx] += 2;
+        } else if self.found < STACK {
+            self.mv[self.found] = cand0;
+            self.mv1[self.found] = cand1;
+            self.weight[self.found] = 2;
+            self.found += 1;
+        }
+    }
 }
 
 impl MotionGrid<'_> {
@@ -813,6 +944,417 @@ fn clip3(min: i32, max: i32, value: i32) -> i32 {
     } else {
         value
     }
+}
+
+fn superblock_contains(mi_row: usize, mi_col: usize, delta_row: i32, delta_col: i32) -> bool {
+    let row = (mi_row as i32 & 15).wrapping_add(delta_row);
+    let col = (mi_col as i32 & 15).wrapping_add(delta_col);
+    (0..16).contains(&row) && (0..16).contains(&col)
+}
+
+fn vector_is_far(cand: Motion, global: Motion) -> bool {
+    cand.row.abs_diff(global.row) >= 16 || cand.col.abs_diff(global.col) >= 16
+}
+
+const INVALID_MV: i32 = -32_768;
+const MAX_FRAME_DISTANCE: i32 = 31;
+const MFMV_STACK_SIZE: i32 = 3;
+const REFMVS_LIMIT: u32 = (1 << 12) - 1;
+const MV_CLAMP: i32 = (1 << 14) - 1;
+const DIV_MULT: [i32; 32] = [
+    0, 16384, 8192, 5461, 4096, 3276, 2730, 2340, 2048, 1820, 1638, 1489, 1365, 1260, 1170, 1092,
+    1024, 963, 910, 862, 819, 780, 744, 712, 682, 655, 630, 606, 585, 564, 546, 528,
+];
+
+/// Motion vectors projected onto the current frame, one 8×8 grid per reference.
+pub struct MotionField {
+    cols8: usize,
+    rows8: usize,
+    mvs: Vec<Motion>,
+}
+
+impl MotionField {
+    pub fn empty() -> Self {
+        Self {
+            cols8: 0,
+            rows8: 0,
+            mvs: Vec::new(),
+        }
+    }
+
+    fn filled(mi_cols: usize, mi_rows: usize) -> Self {
+        let cols8 = mi_cols >> 1;
+        let rows8 = mi_rows >> 1;
+        let count = cols8.saturating_mul(rows8).saturating_mul(7);
+        Self {
+            cols8,
+            rows8,
+            mvs: vec![
+                Motion {
+                    row: INVALID_MV,
+                    col: INVALID_MV,
+                };
+                count
+            ],
+        }
+    }
+
+    fn get(&self, reference: i8, y8: usize, x8: usize) -> Motion {
+        let invalid = Motion {
+            row: INVALID_MV,
+            col: INVALID_MV,
+        };
+        let Some(index) = self.index(reference, y8, x8) else {
+            return invalid;
+        };
+        self.mvs.get(index).copied().unwrap_or(invalid)
+    }
+
+    fn set(&mut self, reference: i8, y8: usize, x8: usize, mv: Motion) {
+        let Some(index) = self.index(reference, y8, x8) else {
+            return;
+        };
+        if let Some(slot) = self.mvs.get_mut(index) {
+            *slot = mv;
+        }
+    }
+
+    fn index(&self, reference: i8, y8: usize, x8: usize) -> Option<usize> {
+        if !(LAST_FRAME..=ALTREF_FRAME).contains(&reference)
+            || self.cols8 == 0
+            || y8 >= self.rows8
+            || x8 >= self.cols8
+        {
+            return None;
+        }
+        let plane = usize::from(u8::try_from(reference - LAST_FRAME).unwrap_or(0));
+        Some(
+            plane
+                .saturating_mul(self.rows8)
+                .saturating_add(y8)
+                .saturating_mul(self.cols8)
+                .saturating_add(x8),
+        )
+    }
+}
+
+/// One reference slot's saved motion field. Only the odd 4×4 of each 8×8 is read.
+pub struct SavedMotion {
+    pub frame_type: u8,
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub saved_hints: [u32; 8],
+    pub refs: Vec<i8>,
+    pub mvs: Vec<Motion>,
+}
+
+impl SavedMotion {
+    fn unused() -> Self {
+        Self {
+            frame_type: crate::header::KEY_FRAME,
+            mi_cols: 0,
+            mi_rows: 0,
+            saved_hints: [0; 8],
+            refs: Vec::new(),
+            mvs: Vec::new(),
+        }
+    }
+}
+
+/// The motion field a reference stored, borrowed for projection.
+pub struct SavedView<'a> {
+    pub frame_type: u8,
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub saved_hints: [u32; 8],
+    pub refs: &'a [i8],
+    pub mvs: &'a [Motion],
+}
+
+/// Inputs to motion-field estimation. `slot_hints` are the current frame's eight slots.
+pub struct FieldSource<'a> {
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub order_hint: u32,
+    pub hint_bits: u8,
+    pub ref_slots: [u8; 7],
+    pub slot_hints: &'a [u32; 8],
+    pub saved: &'a [Option<SavedView<'a>>; 8],
+}
+
+pub fn saved_views<'a>(refs: &[Option<RefView<'a>>]) -> [Option<SavedView<'a>>; 8] {
+    let mut saved = std::array::from_fn(|_| None);
+    for (slot, view) in refs.iter().enumerate().take(8) {
+        if let Some(view) = view {
+            saved[slot] = Some(SavedView {
+                frame_type: view.frame_type,
+                mi_cols: view.mi_cols,
+                mi_rows: view.mi_rows,
+                saved_hints: view.saved_hints,
+                refs: view.mf_refs,
+                mvs: view.mf_mvs,
+            });
+        }
+    }
+    saved
+}
+
+/// Project earlier motion onto this frame. Section 7.9. An invalid entry stays `-32768`.
+pub fn project_motion_field(source: &FieldSource<'_>) -> MotionField {
+    let mut field = MotionField::filled(source.mi_cols, source.mi_rows);
+    let last_slot = usize::from(source.ref_slots[0]);
+    let last_alt = source
+        .saved
+        .get(last_slot)
+        .and_then(|slot| slot.as_ref())
+        .map(|saved| saved.saved_hints[7])
+        .unwrap_or(0);
+    if last_alt != order_hint_of(source, GOLDEN_FRAME) {
+        let _ = project_reference(&mut field, source, LAST_FRAME, -1);
+    }
+    let mut stamp = MFMV_STACK_SIZE - 2;
+    if forward_of(source, BWDREF_FRAME) && project_reference(&mut field, source, BWDREF_FRAME, 1) {
+        stamp -= 1;
+    }
+    if forward_of(source, ALTREF2_FRAME) && project_reference(&mut field, source, ALTREF2_FRAME, 1)
+    {
+        stamp -= 1;
+    }
+    if stamp >= 0
+        && forward_of(source, ALTREF_FRAME)
+        && project_reference(&mut field, source, ALTREF_FRAME, 1)
+    {
+        stamp -= 1;
+    }
+    if stamp >= 0 {
+        let _ = project_reference(&mut field, source, LAST2_FRAME, -1);
+    }
+    field
+}
+
+fn forward_of(source: &FieldSource<'_>, reference: i8) -> bool {
+    crate::header::relative_dist(
+        order_hint_of(source, reference),
+        source.order_hint,
+        source.hint_bits,
+    ) > 0
+}
+
+fn order_hint_of(source: &FieldSource<'_>, reference: i8) -> u32 {
+    let index = usize::try_from(reference - LAST_FRAME).unwrap_or(0);
+    let slot = usize::from(*source.ref_slots.get(index).unwrap_or(&0));
+    source.slot_hints.get(slot).copied().unwrap_or(0)
+}
+
+/// One source reference. Returns whether that reference was a same-size inter frame.
+fn project_reference(
+    field: &mut MotionField,
+    source: &FieldSource<'_>,
+    src: i8,
+    dst_sign: i32,
+) -> bool {
+    let slot = usize::from(
+        *source
+            .ref_slots
+            .get(usize::try_from(src - LAST_FRAME).unwrap_or(0))
+            .unwrap_or(&0),
+    );
+    let Some(saved) = source.saved.get(slot).and_then(|item| item.as_ref()) else {
+        return false;
+    };
+    if saved.mi_rows != source.mi_rows
+        || saved.mi_cols != source.mi_cols
+        || saved.frame_type == crate::header::KEY_FRAME
+        || saved.frame_type == crate::header::INTRA_ONLY
+    {
+        return false;
+    }
+    let cells = source.mi_rows.saturating_mul(source.mi_cols);
+    if saved.refs.len() < cells || saved.mvs.len() < cells {
+        return false;
+    }
+    let src_hint = source.slot_hints.get(slot).copied().unwrap_or(0);
+    let width8 = source.mi_cols >> 1;
+    let height8 = source.mi_rows >> 1;
+    for y8 in 0..height8 {
+        for x8 in 0..width8 {
+            let row = 2 * y8 + 1;
+            let col = 2 * x8 + 1;
+            let cell = row.saturating_mul(saved.mi_cols).saturating_add(col);
+            let Some(&src_ref) = saved.refs.get(cell) else {
+                continue;
+            };
+            if src_ref <= INTRA_FRAME {
+                continue;
+            }
+            let ref_to_cur =
+                crate::header::relative_dist(src_hint, source.order_hint, source.hint_bits);
+            let past = saved
+                .saved_hints
+                .get(usize::try_from(src_ref).unwrap_or(0))
+                .copied()
+                .unwrap_or(0);
+            let ref_offset = crate::header::relative_dist(src_hint, past, source.hint_bits);
+            if ref_to_cur.unsigned_abs() > u32::try_from(MAX_FRAME_DISTANCE).unwrap_or(31)
+                || ref_offset.unsigned_abs() > u32::try_from(MAX_FRAME_DISTANCE).unwrap_or(31)
+                || ref_offset <= 0
+            {
+                continue;
+            }
+            let Some(&mv) = saved.mvs.get(cell) else {
+                continue;
+            };
+            let placed = project_mv(mv, ref_to_cur.wrapping_mul(dst_sign), ref_offset);
+            let (pos_y, pos_x, valid) = block_position(x8, y8, dst_sign, placed, height8, width8);
+            if !valid {
+                continue;
+            }
+            for dst in LAST_FRAME..=ALTREF_FRAME {
+                let ref_to_dst = crate::header::relative_dist(
+                    source.order_hint,
+                    order_hint_of(source, dst),
+                    source.hint_bits,
+                );
+                field.set(dst, pos_y, pos_x, project_mv(mv, ref_to_dst, ref_offset));
+            }
+        }
+    }
+    true
+}
+
+fn project_mv(mv: Motion, numerator: i32, denominator: i32) -> Motion {
+    let clipped_den = if denominator < 0 {
+        0
+    } else {
+        denominator.min(MAX_FRAME_DISTANCE)
+    };
+    let clipped_num = numerator.clamp(-MAX_FRAME_DISTANCE, MAX_FRAME_DISTANCE);
+    let factor = DIV_MULT[usize::try_from(clipped_den).unwrap_or(0)];
+    Motion {
+        row: scale_mv_component(mv.row, clipped_num, factor),
+        col: scale_mv_component(mv.col, clipped_num, factor),
+    }
+}
+
+fn scale_mv_component(value: i32, numerator: i32, factor: i32) -> i32 {
+    let product = i64::from(value)
+        .wrapping_mul(i64::from(numerator))
+        .wrapping_mul(i64::from(factor));
+    round2_signed_i64(product, 14).clamp(-MV_CLAMP, MV_CLAMP)
+}
+
+fn block_position(
+    x8: usize,
+    y8: usize,
+    dst_sign: i32,
+    mv: Motion,
+    max_y: usize,
+    max_x: usize,
+) -> (usize, usize, bool) {
+    let (y, y_ok) = project_coord(i32::try_from(y8).unwrap_or(0), mv.row, dst_sign, max_y, 0);
+    let (x, x_ok) = project_coord(i32::try_from(x8).unwrap_or(0), mv.col, dst_sign, max_x, 8);
+    (
+        usize::try_from(y).unwrap_or(0),
+        usize::try_from(x).unwrap_or(0),
+        y_ok && x_ok,
+    )
+}
+
+fn project_coord(v8: i32, delta: i32, dst_sign: i32, max8: usize, max_off: i32) -> (i32, bool) {
+    let base8 = v8 >> 3 << 3;
+    let offset8 = if delta >= 0 {
+        delta >> 6
+    } else {
+        -(delta.wrapping_neg() >> 6)
+    };
+    let next = v8.wrapping_add(dst_sign.wrapping_mul(offset8));
+    let max8 = i32::try_from(max8).unwrap_or(i32::MAX);
+    let ok = next >= 0 && next < max8 && next >= base8 - max_off && next < base8 + 8 + max_off;
+    (next, ok)
+}
+
+/// Inputs to the motion-field storage process. Backward vectors within the limit are kept.
+pub struct SaveQuery<'a> {
+    pub frame_type: u8,
+    pub mi_cols: usize,
+    pub mi_rows: usize,
+    pub order_hint: u32,
+    pub hint_bits: u8,
+    pub ref_slots: [u8; 7],
+    pub slot_hints: &'a [u32; 8],
+    pub block_ref: &'a [i8],
+    pub block_ref1: &'a [i8],
+    pub mvs: &'a [Motion],
+    pub mvs1: &'a [Motion],
+}
+
+pub fn save_motion_field(query: &SaveQuery<'_>) -> SavedMotion {
+    if query.frame_type == crate::header::KEY_FRAME || query.frame_type == crate::header::INTRA_ONLY
+    {
+        return SavedMotion {
+            frame_type: query.frame_type,
+            mi_cols: query.mi_cols,
+            mi_rows: query.mi_rows,
+            saved_hints: [0; 8],
+            refs: Vec::new(),
+            mvs: Vec::new(),
+        };
+    }
+    let cells = query.mi_rows.saturating_mul(query.mi_cols);
+    let mut refs = vec![NONE_FRAME; cells];
+    let mut mvs = vec![Motion::default(); cells];
+    let mut saved_hints = [0u32; 8];
+    for (index, slot) in query.ref_slots.iter().enumerate() {
+        let slot = usize::from(*slot);
+        saved_hints[index + 1] = query.slot_hints.get(slot).copied().unwrap_or(0);
+    }
+    for cell in 0..cells {
+        if let Some((reference, mv)) = kept_mv(
+            query,
+            query.block_ref.get(cell).copied().unwrap_or(INTRA_FRAME),
+            query.mvs.get(cell).copied().unwrap_or_default(),
+        ) {
+            refs[cell] = reference;
+            mvs[cell] = mv;
+        }
+        if let Some((reference, mv)) = kept_mv(
+            query,
+            query.block_ref1.get(cell).copied().unwrap_or(NONE_FRAME),
+            query.mvs1.get(cell).copied().unwrap_or_default(),
+        ) {
+            refs[cell] = reference;
+            mvs[cell] = mv;
+        }
+    }
+    SavedMotion {
+        frame_type: query.frame_type,
+        mi_cols: query.mi_cols,
+        mi_rows: query.mi_rows,
+        saved_hints,
+        refs,
+        mvs,
+    }
+}
+
+fn kept_mv(query: &SaveQuery<'_>, reference: i8, mv: Motion) -> Option<(i8, Motion)> {
+    if reference <= INTRA_FRAME {
+        return None;
+    }
+    let index = usize::try_from(reference - LAST_FRAME).unwrap_or(0);
+    let slot = usize::from(*query.ref_slots.get(index).unwrap_or(&0));
+    let hint = query.slot_hints.get(slot).copied().unwrap_or(0);
+    if crate::header::relative_dist(hint, query.order_hint, query.hint_bits) >= 0 {
+        return None;
+    }
+    if mv.row.unsigned_abs() > REFMVS_LIMIT || mv.col.unsigned_abs() > REFMVS_LIMIT {
+        return None;
+    }
+    Some((reference, mv))
+}
+
+/// An empty motion field. A sequence that leaves reference motion off stores this.
+pub fn motion_unused() -> SavedMotion {
+    SavedMotion::unused()
 }
 
 /// Project one block's global motion vector. Section 7.10.2.1.

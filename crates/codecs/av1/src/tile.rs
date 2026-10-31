@@ -20,14 +20,15 @@ use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
 use crate::idct::{InverseScratch, inverse_2d_into};
 use crate::inter::{
-    ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, BlockPlace, Candidates, GLOBAL_GLOBALMV, GLOBALMV,
-    GM_TRANSLATION, GOLDEN_FRAME, INTRA_FRAME, InterSample, LAST_FRAME, LAST2_FRAME, LAST3_FRAME,
-    MOTION_LOCAL_WARP, MOTION_OBMC, MOTION_SIMPLE, Motion, MotionGrid, NEAREST_NEARESTMV,
-    NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP, average_compound,
-    compound_mask_weight, difference_mask, distance_compound, find_stack, global_shear_valid,
-    has_near_mv, inter_set_allows, inter_tx_set, inter_tx_type, interintra_weight, list_mode,
-    local_warp_params, mask_compound, predict, predict_precise, predict_warp, project_global,
-    wedge_bits, wedge_mask,
+    ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, BlockPlace, Candidates, FieldSource,
+    GLOBAL_GLOBALMV, GLOBALMV, GM_TRANSLATION, GOLDEN_FRAME, INTRA_FRAME, InterSample, LAST_FRAME,
+    LAST2_FRAME, LAST3_FRAME, MOTION_LOCAL_WARP, MOTION_OBMC, MOTION_SIMPLE, Motion, MotionField,
+    MotionGrid, NEAREST_NEARESTMV, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP,
+    SaveQuery, average_compound, compound_mask_weight, difference_mask, distance_compound,
+    find_stack, global_shear_valid, has_near_mv, inter_set_allows, inter_tx_set, inter_tx_type,
+    interintra_weight, list_mode, local_warp_params, mask_compound, motion_unused, predict,
+    predict_precise, predict_warp, project_global, project_motion_field, save_motion_field,
+    saved_views, wedge_bits, wedge_mask,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
@@ -74,6 +75,7 @@ pub struct DecodedPicture {
 pub struct Reconstructed {
     pub picture: DecodedPicture,
     pub cdfs: Cdfs,
+    pub motion: crate::inter::SavedMotion,
 }
 
 /// Decode one frame from its own bytes. Tests use this when the frame does not
@@ -277,6 +279,23 @@ pub fn decode_with_refs(
     } else {
         (y, u, v)
     };
+    let motion = if sequence.enable_ref_mvs {
+        save_motion_field(&SaveQuery {
+            frame_type: frame.frame_type,
+            mi_cols: tile.mi_cols,
+            mi_rows: tile.mi_rows,
+            order_hint: frame.order_hint,
+            hint_bits: sequence.order_hint_bits,
+            ref_slots: frame.ref_frames,
+            slot_hints: &frame.slot_hints,
+            block_ref: &tile.block_ref,
+            block_ref1: &tile.block_ref1,
+            mvs: &tile.mvs,
+            mvs1: &tile.mvs1,
+        })
+    } else {
+        motion_unused()
+    };
     Ok(Reconstructed {
         picture: DecodedPicture {
             y,
@@ -286,6 +305,7 @@ pub fn decode_with_refs(
             height: visible_h,
         },
         cdfs,
+        motion,
     })
 }
 
@@ -454,6 +474,10 @@ fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
         copy_cells(&mut dst.tx_sizes, &src.tx_sizes, start, n);
         copy_cells(&mut dst.skips, &src.skips, start, n);
         copy_cells(&mut dst.cdef_idx, &src.cdef_idx, start, n);
+        copy_cells(&mut dst.mvs, &src.mvs, start, n);
+        copy_cells(&mut dst.mvs1, &src.mvs1, start, n);
+        copy_cells(&mut dst.block_ref, &src.block_ref, start, n);
+        copy_cells(&mut dst.block_ref1, &src.block_ref1, start, n);
     }
 }
 
@@ -604,6 +628,8 @@ struct Tile<'a, 'r> {
     motion_modes: Vec<u8>,
     allow_warped: bool,
     motion_switchable: bool,
+    use_ref_mvs: bool,
+    motion_field: MotionField,
     block_ref: Vec<i8>,
     block_ref1: Vec<i8>,
     inter_flag: Vec<u8>,
@@ -826,6 +852,21 @@ impl<'a, 'r> Tile<'a, 'r> {
             motion_modes: vec![MOTION_SIMPLE; cells],
             allow_warped: frame.allow_warped,
             motion_switchable: frame.motion_mode_switchable,
+            use_ref_mvs: frame.use_ref_frame_mvs,
+            motion_field: if frame.use_ref_frame_mvs {
+                let saved = saved_views(refs);
+                project_motion_field(&FieldSource {
+                    mi_cols,
+                    mi_rows,
+                    order_hint: frame.order_hint,
+                    hint_bits: sequence.order_hint_bits,
+                    ref_slots: frame.ref_frames,
+                    slot_hints: &frame.slot_hints,
+                    saved: &saved,
+                })
+            } else {
+                MotionField::empty()
+            },
             block_ref: vec![0; cells],
             block_ref1: vec![NONE_FRAME; cells],
             inter_flag: vec![0; cells],
@@ -1385,6 +1426,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             self.allow_hp,
             self.force_integer,
             self.gm_affine(reference),
+            self.use_ref_mvs.then_some(&self.motion_field),
         );
         let y_mode = if skip_mode {
             NEAREST_NEARESTMV
@@ -1957,7 +1999,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             self.update,
             &mut self.cdfs.zero_mv,
             &[2, 3],
-            &[0],
+            &[stack.zero_ctx],
         )?;
         if zero_mv == 0 {
             return Ok(GLOBALMV);

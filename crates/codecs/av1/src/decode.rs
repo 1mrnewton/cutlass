@@ -7,7 +7,7 @@ use cutlass_decode::{
 use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_with_motion, unit_obus};
-use crate::inter::RefView;
+use crate::inter::{RefView, SavedMotion};
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
 
 use std::sync::Arc;
@@ -16,6 +16,7 @@ struct Reference {
     picture: Yuv420,
     cdfs: Arc<Cdfs>,
     gm: [[i32; 6]; 8],
+    field: Arc<SavedMotion>,
 }
 
 struct KeptSlot {
@@ -163,14 +164,14 @@ impl Av1Decoder {
         )?;
         header_is_addressable(&sequence, &frame)?;
         let stale = self.take_stale_refs(&frame);
-        let (picture, cdfs) = match self.picture_before_grain(&sequence, &frame) {
+        let (picture, cdfs, motion) = match self.picture_before_grain(&sequence, &frame) {
             Ok(decoded) => decoded,
             Err(error) => {
                 self.restore_refs(stale);
                 return Err(error);
             }
         };
-        let stored = self.store(&frame, &picture, cdfs);
+        let stored = self.store(&frame, &picture, cdfs, motion);
         self.sequence = Some(sequence);
         if !frame.show_frame {
             return Ok((None, FrameUndo { stored, stale }));
@@ -222,11 +223,23 @@ impl Av1Decoder {
                 v: reference.picture.v.samples(),
                 width: reference.picture.y.width() as usize,
                 height: reference.picture.y.height() as usize,
+                frame_type: reference.field.frame_type,
+                mi_cols: reference.field.mi_cols,
+                mi_rows: reference.field.mi_rows,
+                saved_hints: reference.field.saved_hints,
+                mf_refs: &reference.field.refs,
+                mf_mvs: &reference.field.mvs,
             })
         })
     }
 
-    fn store(&mut self, frame: &FrameInfo, picture: &Yuv420, cdfs: Arc<Cdfs>) -> Vec<KeptSlot> {
+    fn store(
+        &mut self,
+        frame: &FrameInfo,
+        picture: &Yuv420,
+        cdfs: Arc<Cdfs>,
+        motion: Arc<SavedMotion>,
+    ) -> Vec<KeptSlot> {
         let mut kept = Vec::new();
         for slot in 0..8 {
             if frame.refresh_flags & (1 << slot) != 0 {
@@ -239,6 +252,7 @@ impl Av1Decoder {
                     picture: picture.clone(),
                     cdfs: Arc::clone(&cdfs),
                     gm: frame.gm_params,
+                    field: Arc::clone(&motion),
                 });
                 self.order_hints[slot] = frame.order_hint;
             }
@@ -264,7 +278,7 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
-    ) -> Result<(Yuv420, Arc<Cdfs>), CodecError> {
+    ) -> Result<(Yuv420, Arc<Cdfs>, Arc<SavedMotion>), CodecError> {
         if frame.show_existing {
             let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
                 return Err(CodecError::Malformed {
@@ -272,10 +286,18 @@ impl Av1Decoder {
                     what: "missing reference",
                 });
             };
-            return Ok((stored.picture.clone(), Arc::clone(&stored.cdfs)));
+            return Ok((
+                stored.picture.clone(),
+                Arc::clone(&stored.cdfs),
+                Arc::clone(&stored.field),
+            ));
         }
         let reconstructed = self.decode_picture(sequence, frame)?;
-        Ok((owned(reconstructed.picture)?, Arc::new(reconstructed.cdfs)))
+        Ok((
+            owned(reconstructed.picture)?,
+            Arc::new(reconstructed.cdfs),
+            Arc::new(reconstructed.motion),
+        ))
     }
 
     fn take_stale_refs(&mut self, frame: &FrameInfo) -> [Option<Reference>; 8] {
@@ -2447,6 +2469,53 @@ mod tests {
             if index > 0 {
                 assert!(!frame.allow_warped);
                 assert!(frame.motion_mode_switchable);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn reference_motion_matches_dav1d() {
+        // aomenc 64×64 translating ramp. Order hint and reference motion
+        // vectors are on. A block's candidate stack includes the field
+        // projected from an earlier frame. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/refmv_0.obu"),
+            include_bytes!("../fixtures/refmv_1.obu"),
+            include_bytes!("../fixtures/refmv_2.obu"),
+            include_bytes!("../fixtures/refmv_3.obu"),
+            include_bytes!("../fixtures/refmv_4.obu"),
+            include_bytes!("../fixtures/refmv_5.obu"),
+            include_bytes!("../fixtures/refmv_6.obu"),
+            include_bytes!("../fixtures/refmv_7.obu"),
+        ];
+        let expected = [
+            0xcfef_e949_6c51_7954,
+            0x9fdf_f457_5e9a_9914,
+            0x6b24_2ef4_2f4e_c08a,
+            0x50b8_1bd4_5032_17d8,
+            0xd2b7_389b_37ea_96d2,
+            0xf9e7_ceb6_a08d_c10b,
+            0x0554_021b_7090_f238,
+            0x145b_519c_22cd_e7ac,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(seq.enable_ref_mvs);
+                assert!(seq.enable_order_hint);
+            }
+            if index > 0 {
+                assert!(frame.use_ref_frame_mvs);
             }
             sequence = Some(seq);
         }

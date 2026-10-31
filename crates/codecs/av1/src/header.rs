@@ -725,11 +725,6 @@ fn uncompressed(
         if !error_resilient && sequence.enable_ref_mvs {
             use_ref_mvs = bits.read_bool()?;
         }
-        if use_ref_mvs {
-            return Err(CodecError::Unsupported {
-                what: "reference motion vectors",
-            });
-        }
         size
     };
     let disable_end = if sequence.reduced || disable_cdf {
@@ -931,7 +926,7 @@ fn uncompressed(
         interpolation,
         filter_switchable,
         motion_mode_switchable: motion_switchable,
-        use_ref_frame_mvs: false,
+        use_ref_frame_mvs: use_ref_mvs,
         allow_warped,
         lf_level: lf,
         lf_sharpness: sharpness,

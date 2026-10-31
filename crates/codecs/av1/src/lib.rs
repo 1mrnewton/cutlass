@@ -9,7 +9,8 @@
 //! averaged, weighted by order-hint distance, or blended with a wedge or a
 //! difference mask. A skip-mode block uses the nearest compound pair and
 //! writes no residual. A local warp fits the neighboring motion, and overlapped
-//! motion blends those neighboring predictors.
+//! motion blends those neighboring predictors. A block may take a motion
+//! candidate from the field projected out of an earlier frame.
 
 #![forbid(unsafe_code)]
 

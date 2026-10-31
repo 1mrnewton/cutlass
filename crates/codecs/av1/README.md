@@ -125,7 +125,7 @@ Refused with a typed error before a picture is published:
 - Lossless (`base_q_idx` 0).
 - Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
-- Reference-frame motion vectors and short reference signaling.
+- Short reference signaling.
 - A scaled reference, and an interintra wedge.
 
 Super resolution on an inter frame is not proven.

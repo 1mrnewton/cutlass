@@ -164,6 +164,10 @@ pub struct FrameInfo {
     pub mi_row_starts: Vec<u32>,
     pub mi_cols: u32,
     pub mi_rows: u32,
+    /// Global motion type for each reference, `LAST_FRAME` through `ALTREF_FRAME`.
+    pub gm_type: [u8; 8],
+    /// Global motion parameters stored with `WARPEDMODEL_PREC_BITS` fractional bits.
+    pub gm_params: [[i32; 6]; 8],
 }
 
 /// One tile's bytes and the MI rectangle it reconstructs.
@@ -175,9 +179,20 @@ pub struct TilePart {
     pub data: Vec<u8>,
 }
 
+#[cfg(test)]
 pub fn parse_unit(
     bytes: &[u8],
     sequence: Option<&Sequence>,
+) -> Result<(Sequence, FrameInfo), CodecError> {
+    parse_with_motion(bytes, sequence, &[None; 8])
+}
+
+/// Parse one temporal unit. `saved` is the global-motion model stored in each
+/// reference slot, used as `PrevGmParams` when the frame names a primary reference.
+pub fn parse_with_motion(
+    bytes: &[u8],
+    sequence: Option<&Sequence>,
+    saved: &[Option<[[i32; 6]; 8]>; 8],
 ) -> Result<(Sequence, FrameInfo), CodecError> {
     let mut bits = BitReader::new(bytes);
     let mut seq = sequence.cloned();
@@ -218,13 +233,18 @@ pub fn parse_unit(
                 let sequence = seq.as_ref().ok_or(CodecError::InvalidApi {
                     what: "frame before sequence",
                 })?;
-                frame = Some(parse_frame(&mut bits, sequence, payload_end)?);
+                frame = Some(parse_frame(&mut bits, sequence, payload_end, saved)?);
             }
             3 | 7 => {
                 let sequence = seq.as_ref().ok_or(CodecError::InvalidApi {
                     what: "frame before sequence",
                 })?;
-                frame = Some(parse_frame_header_only(&mut bits, sequence, payload_end)?);
+                frame = Some(parse_frame_header_only(
+                    &mut bits,
+                    sequence,
+                    payload_end,
+                    saved,
+                )?);
             }
             4 => {
                 return Err(CodecError::Unsupported {
@@ -442,9 +462,10 @@ fn parse_frame(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
     payload_end: usize,
+    saved: &[Option<[[i32; 6]; 8]>; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
-    let mut frame = uncompressed(bits, sequence)?;
+    let mut frame = uncompressed(bits, sequence, saved)?;
     bits.byte_align();
     let header_bytes = (bits.position() - header_start) / 8;
     let obu_bytes = (payload_end - header_start) / 8;
@@ -479,8 +500,9 @@ fn parse_frame_header_only(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
     payload_end: usize,
+    saved: &[Option<[[i32; 6]; 8]>; 8],
 ) -> Result<FrameInfo, CodecError> {
-    let frame = uncompressed(bits, sequence)?;
+    let frame = uncompressed(bits, sequence, saved)?;
     trailing(bits, payload_end)?;
     if !frame.show_existing && frame.tile.is_empty() {
         return Err(CodecError::Unsupported {
@@ -490,7 +512,11 @@ fn parse_frame_header_only(
     Ok(frame)
 }
 
-fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameInfo, CodecError> {
+fn uncompressed(
+    bits: &mut BitReader<'_>,
+    sequence: &Sequence,
+    saved: &[Option<[[i32; 6]; 8]>; 8],
+) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
     let mut frame_to_show = 0u8;
     let frame_type;
@@ -793,15 +819,14 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         });
     }
     let reduced_tx = bits.read_bool()?;
-    if !intra {
-        for _ in 0..7 {
-            if bits.read_bool()? {
-                return Err(CodecError::Unsupported {
-                    what: "global motion",
-                });
-            }
-        }
-    }
+    let motion = read_global_motion(
+        bits,
+        intra,
+        allow_high_precision,
+        primary_ref,
+        ref_frames,
+        saved,
+    )?;
     let grain = crate::grain::read(bits, sequence, frame_type, show_frame, showable)?;
     let mi_cols = 2 * ((width + 7) >> 3);
     let mi_rows = 2 * ((height + 7) >> 3);
@@ -868,6 +893,8 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         mi_row_starts,
         mi_cols,
         mi_rows,
+        gm_type: motion.kind,
+        gm_params: motion.params,
     })
 }
 
@@ -1244,7 +1271,199 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         mi_row_starts: vec![0],
         mi_cols: 0,
         mi_rows: 0,
+        gm_type: [0; 8],
+        gm_params: identity_gm(),
     }
+}
+
+const GM_TRANSLATION: u8 = 1;
+const GM_ROTZOOM: u8 = 2;
+const GM_AFFINE: u8 = 3;
+const WARPED_PREC_BITS: u32 = 16;
+const GM_ABS_ALPHA_BITS: u32 = 12;
+const GM_ALPHA_PREC_BITS: u32 = 15;
+const GM_ABS_TRANS_BITS: u32 = 12;
+const GM_TRANS_PREC_BITS: u32 = 6;
+const GM_ABS_TRANS_ONLY_BITS: u32 = 9;
+const GM_TRANS_ONLY_PREC_BITS: u32 = 3;
+
+struct GlobalMotion {
+    kind: [u8; 8],
+    params: [[i32; 6]; 8],
+}
+
+fn identity_gm() -> [[i32; 6]; 8] {
+    let mut params = [[0; 6]; 8];
+    let one = 1 << WARPED_PREC_BITS;
+    for row in &mut params {
+        row[2] = one;
+        row[5] = one;
+    }
+    params
+}
+
+/// Section 5.9.24. Identity is seven zero bits. Any other type carries parameters.
+fn read_global_motion(
+    bits: &mut BitReader<'_>,
+    intra: bool,
+    allow_hp: bool,
+    primary_ref: u8,
+    ref_frames: [u8; 7],
+    saved: &[Option<[[i32; 6]; 8]>; 8],
+) -> Result<GlobalMotion, CodecError> {
+    let mut motion = GlobalMotion {
+        kind: [0; 8],
+        params: identity_gm(),
+    };
+    if intra {
+        return Ok(motion);
+    }
+    let prev = if primary_ref >= 7 {
+        identity_gm()
+    } else {
+        let slot = usize::from(ref_frames[usize::from(primary_ref)]);
+        saved
+            .get(slot)
+            .copied()
+            .flatten()
+            .unwrap_or_else(identity_gm)
+    };
+    for reference in 1..8 {
+        let kind = if !bits.read_bool()? {
+            0
+        } else if bits.read_bool()? {
+            GM_ROTZOOM
+        } else if bits.read_bool()? {
+            GM_TRANSLATION
+        } else {
+            GM_AFFINE
+        };
+        motion.kind[reference] = kind;
+        if kind >= GM_ROTZOOM {
+            read_global_param(bits, &mut motion, &prev, allow_hp, kind, reference, 2)?;
+            read_global_param(bits, &mut motion, &prev, allow_hp, kind, reference, 3)?;
+            if kind == GM_AFFINE {
+                read_global_param(bits, &mut motion, &prev, allow_hp, kind, reference, 4)?;
+                read_global_param(bits, &mut motion, &prev, allow_hp, kind, reference, 5)?;
+            } else {
+                motion.params[reference][4] = -motion.params[reference][3];
+                motion.params[reference][5] = motion.params[reference][2];
+            }
+        }
+        if kind >= GM_TRANSLATION {
+            read_global_param(bits, &mut motion, &prev, allow_hp, kind, reference, 0)?;
+            read_global_param(bits, &mut motion, &prev, allow_hp, kind, reference, 1)?;
+        }
+    }
+    Ok(motion)
+}
+
+fn read_global_param(
+    bits: &mut BitReader<'_>,
+    motion: &mut GlobalMotion,
+    prev: &[[i32; 6]; 8],
+    allow_hp: bool,
+    kind: u8,
+    reference: usize,
+    index: usize,
+) -> Result<(), CodecError> {
+    let (abs_bits, prec_bits) = if index < 2 {
+        if kind == GM_TRANSLATION {
+            let lost = u32::from(!allow_hp);
+            (
+                GM_ABS_TRANS_ONLY_BITS - lost,
+                GM_TRANS_ONLY_PREC_BITS - lost,
+            )
+        } else {
+            (GM_ABS_TRANS_BITS, GM_TRANS_PREC_BITS)
+        }
+    } else {
+        (GM_ABS_ALPHA_BITS, GM_ALPHA_PREC_BITS)
+    };
+    let prec_diff = WARPED_PREC_BITS - prec_bits;
+    let round = if index % 3 == 2 {
+        1 << WARPED_PREC_BITS
+    } else {
+        0
+    };
+    let sub = if index % 3 == 2 { 1 << prec_bits } else { 0 };
+    let mx = 1 << abs_bits;
+    let recenter = (prev[reference][index] >> prec_diff) - sub;
+    let value = decode_signed_subexp(bits, -mx, mx + 1, recenter)?;
+    motion.params[reference][index] = (value << prec_diff) + round;
+    Ok(())
+}
+
+fn decode_signed_subexp(
+    bits: &mut BitReader<'_>,
+    low: i32,
+    high: i32,
+    reference: i32,
+) -> Result<i32, CodecError> {
+    let value = decode_unsigned_subexp(bits, high - low, reference - low)?;
+    Ok(value + low)
+}
+
+fn decode_unsigned_subexp(
+    bits: &mut BitReader<'_>,
+    symbols: i32,
+    reference: i32,
+) -> Result<i32, CodecError> {
+    let value = decode_subexp(bits, symbols)?;
+    if (reference << 1) <= symbols {
+        Ok(inverse_recenter(reference, value))
+    } else {
+        Ok(symbols - 1 - inverse_recenter(symbols - 1 - reference, value))
+    }
+}
+
+fn decode_subexp(bits: &mut BitReader<'_>, symbols: i32) -> Result<i32, CodecError> {
+    let mut index = 0i32;
+    let mut mk = 0i32;
+    let k = 3i32;
+    for _ in 0..32 {
+        let width = if index == 0 { k } else { k + index - 1 };
+        let span = 1i32 << width;
+        if symbols <= mk + 3 * span {
+            let rest = ns(bits, (symbols - mk).max(0))?;
+            return Ok(rest + mk);
+        }
+        if bits.read_bool()? {
+            index += 1;
+            mk += span;
+        } else {
+            return Ok(bits.read(width as u32)? as i32 + mk);
+        }
+    }
+    Err(CodecError::Malformed {
+        at_bit: bits.position() as u64,
+        what: "global motion",
+    })
+}
+
+fn inverse_recenter(reference: i32, value: i32) -> i32 {
+    if value > 2 * reference {
+        value
+    } else if value & 1 == 1 {
+        reference - ((value + 1) >> 1)
+    } else {
+        reference + (value >> 1)
+    }
+}
+
+/// `ns(n)` on the uncompressed header.
+fn ns(bits: &mut BitReader<'_>, n: i32) -> Result<i32, CodecError> {
+    if n <= 1 {
+        return Ok(0);
+    }
+    let w = u32::ilog2(n as u32) + 1;
+    let m = (1i32 << w) - n;
+    let v = bits.read(w - 1)? as i32;
+    if v < m {
+        return Ok(v);
+    }
+    let extra = bits.read(1)? as i32;
+    Ok((v << 1) - m + extra)
 }
 
 pub(crate) fn header_is_addressable(

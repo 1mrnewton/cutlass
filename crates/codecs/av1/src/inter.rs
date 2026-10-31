@@ -2,7 +2,10 @@
 //!
 //! Motion-vector candidates follow the find-MV-stack process. The sample
 //! predictor is the two-tap separable subpel filter from the decoding process.
-//! Compound, warped, and overlapped motion stay outside this path.
+//! A global model that is not identity supplies the `GLOBALMV` vector.
+//! A rotation-zoom or affine model warps that block when the shear is valid.
+//! Interintra blends that prediction with an intra predictor.
+//! Compound, local warped, and overlapped motion stay outside this path.
 
 use cutlass_decode::CodecError;
 
@@ -12,7 +15,7 @@ use crate::dims::{
     TX_16X16, TX_32X32, TX_SIZE_SQR, TX_SIZE_SQR_UP, V_ADST, V_DCT, V_FLIPADST, block_height,
     block_width,
 };
-use crate::tables::SUBPEL_FILTERS;
+use crate::tables::{DIV_LUT, SUBPEL_FILTERS, WARPED_FILTERS};
 
 pub const NEARESTMV: u8 = 14;
 pub const NEARMV: u8 = 15;
@@ -20,6 +23,9 @@ pub const GLOBALMV: u8 = 16;
 pub const NEWMV: u8 = 17;
 pub const LAST_FRAME: i8 = 1;
 pub const NONE_FRAME: i8 = -1;
+pub const INTRA_FRAME: i8 = 0;
+pub const GM_IDENTITY: u8 = 0;
+pub const GM_TRANSLATION: u8 = 1;
 const REF_CAT_LEVEL: i32 = 640;
 const MV_BORDER: i32 = 128;
 const STACK: usize = 8;
@@ -123,6 +129,8 @@ struct Search {
     reference: i8,
     hp: bool,
     integer: bool,
+    /// The current reference uses a rotation-zoom or affine model.
+    affine: bool,
 }
 
 /// Transform set for an inter block. `0` is DCT only.
@@ -168,17 +176,25 @@ pub fn inter_set_allows(set: usize, kind: u8) -> bool {
 }
 
 #[must_use]
-pub fn find_stack(grid: &MotionGrid<'_>, at: &BlockPlace, hp: bool, integer: bool) -> Candidates {
+pub fn find_stack(
+    grid: &MotionGrid<'_>,
+    at: &BlockPlace,
+    global: Motion,
+    hp: bool,
+    integer: bool,
+    affine: bool,
+) -> Candidates {
     let mut search = Search {
         mv: [Motion::default(); STACK],
         weight: [0; STACK],
         found: 0,
         new_count: 0,
         found_match: false,
-        global: lower(Motion::default(), hp, integer),
+        global,
         reference: at.reference,
         hp,
         integer,
+        affine,
     };
     search.scan_row(grid, at, -1);
     let mut above = search.found_match;
@@ -387,7 +403,12 @@ impl Search {
 
     fn search(&mut self, grid: &MotionGrid<'_>, row: i32, col: i32, list: usize, weight: i32) {
         let mode = grid.mode(row, col);
-        let mv = if list == 0 {
+        let size = grid.size(row, col);
+        let large = block_width(size).min(block_height(size)) >= 8;
+        // A large global-motion neighbor contributes this block's model, not the vector it stored.
+        let mv = if self.affine && large && mode == GLOBALMV {
+            self.global
+        } else if list == 0 {
             grid.mv(row, col)
         } else {
             Motion::default()
@@ -531,6 +552,58 @@ fn clip3(min: i32, max: i32, value: i32) -> i32 {
     }
 }
 
+/// Project one block's global motion vector. Section 7.10.2.1.
+pub fn project_global(
+    kind: u8,
+    params: [i32; 6],
+    row: usize,
+    col: usize,
+    bsize: usize,
+    hp: bool,
+    integer: bool,
+) -> Motion {
+    let mv = if kind == GM_IDENTITY {
+        Motion::default()
+    } else if kind == GM_TRANSLATION {
+        Motion {
+            row: params[0] >> (WARPED_PREC_BITS - 3),
+            col: params[1] >> (WARPED_PREC_BITS - 3),
+        }
+    } else {
+        let bw = block_width(bsize) as i64;
+        let bh = block_height(bsize) as i64;
+        let x = col as i64 * 4 + bw / 2 - 1;
+        let y = row as i64 * 4 + bh / 2 - 1;
+        let one = 1i64 << WARPED_PREC_BITS;
+        let xc = (i64::from(params[2]) - one) * x + i64::from(params[3]) * y + i64::from(params[0]);
+        let yc = i64::from(params[4]) * x + (i64::from(params[5]) - one) * y + i64::from(params[1]);
+        if hp {
+            Motion {
+                row: round2_signed_i64(yc, WARPED_PREC_BITS - 3),
+                col: round2_signed_i64(xc, WARPED_PREC_BITS - 3),
+            }
+        } else {
+            Motion {
+                row: round2_signed_i64(yc, WARPED_PREC_BITS - 2) * 2,
+                col: round2_signed_i64(xc, WARPED_PREC_BITS - 2) * 2,
+            }
+        }
+    };
+    lower(mv, hp, integer)
+}
+
+const WARPED_PREC_BITS: u32 = 16;
+
+fn round2_signed_i64(value: i64, bits: u32) -> i32 {
+    let bias = 1i64 << (bits - 1);
+    let rounded = if value >= 0 {
+        (value + bias) >> bits
+    } else {
+        -((value.saturating_neg() + bias) >> bits)
+    };
+    i32::try_from(rounded).unwrap_or(if rounded > 0 { i32::MAX } else { i32::MIN })
+}
+
 fn lower(mv: Motion, hp: bool, integer: bool) -> Motion {
     if hp {
         return mv;
@@ -572,7 +645,205 @@ pub struct InterSample<'a> {
     pub frame_h: usize,
     pub ref_w: usize,
     pub ref_h: usize,
+    /// Where the predicted samples are stored. The motion vector still uses `x` and `y`.
+    pub write_x: usize,
+    pub write_y: usize,
 }
+
+/// Shear of a rotation-zoom or affine model. Section 7.11.3.6.
+#[must_use]
+pub fn global_shear_valid(params: [i32; 6]) -> bool {
+    shear(params).is_some()
+}
+
+fn shear(params: [i32; 6]) -> Option<(i32, i32, i32, i32)> {
+    let prec = 1i64 << WARPED_PREC_BITS;
+    let alpha0 = (i64::from(params[2]) - prec).clamp(-32768, 32767);
+    let beta0 = i64::from(params[3]).clamp(-32768, 32767);
+    let (div_shift, div_factor) = resolve_divisor(i64::from(params[2]))?;
+    let v = i128::from(params[4]) << WARPED_PREC_BITS;
+    let gamma0 = round2_signed_i128(v * i128::from(div_factor), div_shift).clamp(-32768, 32767);
+    let w = i128::from(params[3]) * i128::from(params[4]);
+    let delta0 =
+        (i64::from(params[5]) - round2_signed_i128(w * i128::from(div_factor), div_shift) - prec)
+            .clamp(-32768, 32767);
+    let alpha = reduce_warp(alpha0)?;
+    let beta = reduce_warp(beta0)?;
+    let gamma = reduce_warp(gamma0)?;
+    let delta = reduce_warp(delta0)?;
+    let valid = 4 * alpha.abs() + 7 * beta.abs() < (1 << WARPED_PREC_BITS)
+        && 4 * gamma.abs() + 4 * delta.abs() < (1 << WARPED_PREC_BITS);
+    valid.then_some((alpha, beta, gamma, delta))
+}
+
+fn reduce_warp(value: i64) -> Option<i32> {
+    let reduced =
+        round2_signed_i128(i128::from(value), WARP_PARAM_REDUCE_BITS) << WARP_PARAM_REDUCE_BITS;
+    i32::try_from(reduced).ok()
+}
+
+fn resolve_divisor(value: i64) -> Option<(u32, i64)> {
+    if value == 0 {
+        return None;
+    }
+    let magnitude = value.unsigned_abs();
+    let n = 63 - magnitude.leading_zeros();
+    let e = magnitude - (1u64 << n);
+    let f = if n > DIV_LUT_BITS {
+        let shift = n - DIV_LUT_BITS;
+        (e + (1u64 << (shift - 1))) >> shift
+    } else {
+        e << (DIV_LUT_BITS - n)
+    };
+    let factor = i64::from(*DIV_LUT.get(usize::try_from(f).ok()?)?);
+    let shift = n + DIV_LUT_PREC_BITS;
+    if shift >= 63 {
+        return None;
+    }
+    Some((shift, if value < 0 { -factor } else { factor }))
+}
+
+fn round2_signed_i128(value: i128, bits: u32) -> i64 {
+    if bits == 0 {
+        return i64::try_from(value).unwrap_or(if value > 0 { i64::MAX } else { i64::MIN });
+    }
+    let bias = 1i128 << (bits - 1);
+    let rounded = if value >= 0 {
+        (value + bias) >> bits
+    } else {
+        -((value.saturating_neg() + bias) >> bits)
+    };
+    i64::try_from(rounded).unwrap_or(if rounded > 0 { i64::MAX } else { i64::MIN })
+}
+
+/// Warp one plane from a global rotation-zoom or affine model. Section 7.11.3.5.
+pub fn predict_warp(sample: &mut InterSample<'_>, params: [i32; 6]) -> Result<(), CodecError> {
+    let x_scale = scale(sample.ref_w, sample.frame_w);
+    let y_scale = scale(sample.ref_h, sample.frame_h);
+    if x_scale != NO_SCALE || y_scale != NO_SCALE {
+        return Err(CodecError::Unsupported {
+            what: "scaled reference",
+        });
+    }
+    let Some((alpha, beta, gamma, delta)) = shear(params) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "global warp",
+        });
+    };
+    let sub_x = i32::from(sample.sub_x);
+    let sub_y = i32::from(sample.sub_y);
+    let last_x = plane_last(sample.ref_w, sample.sub_x, sample.plane_w);
+    let last_y = plane_last(sample.ref_h, sample.sub_y, sample.plane_h);
+    let mut i8 = 0i32;
+    while i8 * 8 < sample.h as i32 {
+        let mut j8 = 0i32;
+        while j8 * 8 < sample.w as i32 {
+            warp_section(
+                sample,
+                params,
+                (alpha, beta, gamma, delta),
+                (sub_x, sub_y),
+                (last_x, last_y),
+                (i8, j8),
+            )?;
+            j8 += 1;
+        }
+        i8 += 1;
+    }
+    Ok(())
+}
+
+fn warp_section(
+    sample: &mut InterSample<'_>,
+    params: [i32; 6],
+    shear: (i32, i32, i32, i32),
+    sub: (i32, i32),
+    last: (i32, i32),
+    section: (i32, i32),
+) -> Result<(), CodecError> {
+    let (alpha, beta, gamma, delta) = shear;
+    let (sub_x, sub_y) = sub;
+    let (last_x, last_y) = last;
+    let (i8, j8) = section;
+    let src_x = (sample.x as i32 + j8 * 8 + 4) << sub_x;
+    let src_y = (sample.y as i32 + i8 * 8 + 4) << sub_y;
+    let dst_x = i64::from(params[2]) * i64::from(src_x)
+        + i64::from(params[3]) * i64::from(src_y)
+        + i64::from(params[0]);
+    let dst_y = i64::from(params[4]) * i64::from(src_x)
+        + i64::from(params[5]) * i64::from(src_y)
+        + i64::from(params[1]);
+    let x4 = dst_x >> sub_x;
+    let y4 = dst_y >> sub_y;
+    let ix4 = (x4 >> WARPED_PREC_BITS) as i32;
+    let sx4 = (x4 & ((1i64 << WARPED_PREC_BITS) - 1)) as i32;
+    let iy4 = (y4 >> WARPED_PREC_BITS) as i32;
+    let sy4 = (y4 & ((1i64 << WARPED_PREC_BITS) - 1)) as i32;
+    let mut intermediate = [[0i32; 8]; 15];
+    for i1 in -7..8 {
+        for i2 in -4..4 {
+            let sx = sx4 + alpha * i2 + beta * i1;
+            let offs = warp_offset(sx)?;
+            let mut sum = 0i32;
+            let taps = warp_taps(offs)?;
+            for (i3, coeff) in taps.iter().enumerate() {
+                let sx = ix4 + i2 - 3 + i3 as i32;
+                sum += i32::from(*coeff) * ref_sample(sample, last_x, last_y, sx, iy4 + i1);
+            }
+            intermediate[(i1 + 7) as usize][(i2 + 4) as usize] = round2(sum, 3);
+        }
+    }
+    let row_limit = 4.min(sample.h as i32 - i8 * 8 - 4);
+    let col_limit = 4.min(sample.w as i32 - j8 * 8 - 4);
+    for i1 in -4..row_limit {
+        for i2 in -4..col_limit {
+            let sy = sy4 + gamma * i2 + delta * i1;
+            let offs = warp_offset(sy)?;
+            let mut sum = 0i32;
+            let taps = warp_taps(offs)?;
+            for (i3, coeff) in taps.iter().enumerate() {
+                let row = (i1 + i3 as i32 + 4) as usize;
+                let col = (i2 + 4) as usize;
+                sum += i32::from(*coeff) * intermediate[row][col];
+            }
+            let pred = round2(sum, 11).clamp(0, 255) as u8;
+            let y = sample.write_y + (i8 * 8 + i1 + 4) as usize;
+            let x = sample.write_x + (j8 * 8 + i2 + 4) as usize;
+            if x < sample.stride {
+                let at = y * sample.stride + x;
+                if at < sample.dst.len() {
+                    sample.dst[at] = pred;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn warp_offset(value: i32) -> Result<usize, CodecError> {
+    let offs = round2(value, WARPEDDIFF_PREC_BITS) + WARPEDPIXEL_PREC_SHIFTS;
+    usize::try_from(offs).map_err(|_| CodecError::Malformed {
+        at_bit: 0,
+        what: "global warp",
+    })
+}
+
+fn warp_taps(offset: usize) -> Result<&'static [i8], CodecError> {
+    let start = offset * 8;
+    WARPED_FILTERS
+        .get(start..start + 8)
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "global warp",
+        })
+}
+
+const WARPEDDIFF_PREC_BITS: u32 = 10;
+const WARPEDPIXEL_PREC_SHIFTS: i32 = 64;
+const WARP_PARAM_REDUCE_BITS: u32 = 6;
+const DIV_LUT_BITS: u32 = 8;
+const DIV_LUT_PREC_BITS: u32 = 14;
 
 pub fn predict(sample: &mut InterSample<'_>) -> Result<(), CodecError> {
     if sample.w == 0 || sample.h == 0 || sample.frame_w == 0 || sample.frame_h == 0 {
@@ -685,8 +956,8 @@ fn vertical(
                 sum += i32::from(*coeff) * intermediate.get(at).copied().unwrap_or(0);
             }
             let pred = round2(sum, 11).clamp(0, 255) as u8;
-            let y = sample.y + row;
-            let x = sample.x + col;
+            let y = sample.write_y + row;
+            let x = sample.write_x + col;
             if x < sample.stride {
                 let at = y * sample.stride + x;
                 if at < sample.dst.len() {
@@ -742,4 +1013,24 @@ fn round2_signed(value: i64, n: u32) -> i64 {
     } else {
         -(((-value) + bias) >> n)
     }
+}
+
+/// `Ii_Weights_1d`. The intra predictor is weighted by this value, the inter by its complement.
+pub const II_WEIGHTS: [u8; 128] = [
+    60, 58, 56, 54, 52, 50, 48, 47, 45, 44, 42, 41, 39, 38, 37, 35, 34, 33, 32, 31, 30, 29, 28, 27,
+    26, 25, 24, 23, 22, 22, 21, 20, 19, 19, 18, 18, 17, 16, 16, 15, 15, 14, 14, 13, 13, 12, 12, 12,
+    11, 11, 10, 10, 10, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 4, 4, 4, 4,
+    4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+];
+
+/// Interintra mask sample. Mode 0 is DC, 1 vertical, 2 horizontal, 3 smooth.
+pub fn interintra_weight(mode: u8, y: usize, x: usize, scale: usize) -> i32 {
+    let index = match mode {
+        1 => y * scale,
+        2 => x * scale,
+        3 => y.min(x) * scale,
+        _ => return 32,
+    };
+    i32::from(II_WEIGHTS[index.min(II_WEIGHTS.len() - 1)])
 }

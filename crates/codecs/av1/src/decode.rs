@@ -4,7 +4,7 @@ use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Output, Packet, 
 
 use crate::yuv::{Plane, Yuv420, picture_output};
 
-use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_unit};
+use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_with_motion};
 use crate::inter::RefView;
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
 
@@ -13,6 +13,7 @@ use std::sync::Arc;
 struct Reference {
     picture: Yuv420,
     cdfs: Arc<Cdfs>,
+    gm: [[i32; 6]; 8],
 }
 
 /// Rust AV1 decoder. Reference slots stay inside this type.
@@ -61,7 +62,10 @@ impl Decoder for Av1Decoder {
                 what: "empty packet",
             });
         }
-        let (sequence, frame) = parse_unit(&packet.data, self.sequence.as_ref())?;
+        let saved_motion =
+            std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
+        let (sequence, frame) =
+            parse_with_motion(&packet.data, self.sequence.as_ref(), &saved_motion)?;
         header_is_addressable(&sequence, &frame)?;
         let saved = self.take_stale_refs(&frame);
         let (picture, cdfs) = match self.picture_before_grain(&sequence, &frame) {
@@ -139,6 +143,7 @@ impl Av1Decoder {
                 self.refs[slot] = Some(Reference {
                     picture: picture.clone(),
                     cdfs: Arc::clone(&cdfs),
+                    gm: frame.gm_params,
                 });
                 self.order_hints[slot] = frame.order_hint;
             }
@@ -1967,5 +1972,75 @@ mod tests {
         assert_eq!(packed.len(), 64 * 64 * 3 / 2);
         assert_eq!(packed[0], 51);
         assert_eq!(frame_digest(&packed), 0x5e0f_45d9_39c1_a370);
+    }
+
+    #[test]
+    fn rotzoom_global_motion_matches_dav1d() {
+        // aomenc 128×128. The inter frame uses a rotation-zoom model, high
+        // precision motion vectors, and switchable filters in both directions.
+        // Some blocks use a different horizontal filter from the vertical one.
+        // Digests are `ffmpeg -c:v libdav1d -threads 1` of those three frames.
+        let frames: [&[u8]; 3] = [
+            include_bytes!("../fixtures/rotzoom_0.obu"),
+            include_bytes!("../fixtures/rotzoom_1.obu"),
+            include_bytes!("../fixtures/rotzoom_2.obu"),
+        ];
+        let expected = [
+            0x453f_7daf_99a0_ebd2,
+            0xd04f_763d_2dee_d1f2,
+            0xb89c_65a9_84a2_b011,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_dual_filter);
+            if index == 1 {
+                assert!(frame.allow_high_precision_mv);
+                assert!(frame.filter_switchable);
+                assert_eq!(frame.gm_type[1], 2);
+                assert_eq!(
+                    frame.gm_params[1],
+                    [613_376, 46_080, 66_148, 1_216, -1_216, 66_148]
+                );
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn smooth_interintra_matches_dav1d() {
+        // aomenc 64×64. The inter frame blends one 16×16 block with DC intra.
+        // The wedge symbol is 0. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/interintra_0.obu"),
+            include_bytes!("../fixtures/interintra_1.obu"),
+        ];
+        let expected = [0xe08b_dc0c_5a92_ee12, 0xf8fe_56b7_21e1_855d];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_interintra);
+            if index == 1 {
+                assert!(frame.allow_high_precision_mv);
+                assert!(!frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
     }
 }

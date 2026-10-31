@@ -10,19 +10,20 @@ use crate::dims::{
     H_FLIPADST, IDTX, MAX_TX_DEPTH, MAX_TX_SIZE_RECT, MI_HEIGHT_LOG2, MI_WIDTH_LOG2, MODE_TO_TXFM,
     NUM_4X4_HIGH, NUM_4X4_WIDE, PARTITION_HORZ, PARTITION_HORZ_4, PARTITION_HORZ_A,
     PARTITION_HORZ_B, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, PARTITION_VERT_4,
-    PARTITION_VERT_A, PARTITION_VERT_B, SPLIT_TX_SIZE, TRANSFORM_ROW_SHIFT, TX_4X4, TX_8X8,
-    TX_16X16, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64,
-    TX_HEIGHT, TX_HEIGHT_LOG2, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_WIDTH, TX_WIDTH_LOG2, UV_CFL_PRED,
-    V_ADST, V_DCT, V_FLIPADST, block_height, block_width, intra_tx_type, partition_subsize,
-    subsampled_size,
+    PARTITION_VERT_A, PARTITION_VERT_B, SMOOTH_PRED, SPLIT_TX_SIZE, TRANSFORM_ROW_SHIFT, TX_4X4,
+    TX_8X8, TX_16X16, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32,
+    TX_64X64, TX_HEIGHT, TX_HEIGHT_LOG2, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_WIDTH, TX_WIDTH_LOG2,
+    UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, V_PRED, block_height, block_width, intra_tx_type,
+    partition_subsize, subsampled_size,
 };
 use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
 use crate::idct::{InverseScratch, inverse_2d_into};
 use crate::inter::{
-    BlockPlace, Candidates, GLOBALMV, InterSample, LAST_FRAME, Motion, MotionGrid, NEARESTMV,
-    NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP, find_stack, inter_set_allows, inter_tx_set,
-    inter_tx_type, predict,
+    BlockPlace, Candidates, GLOBALMV, GM_TRANSLATION, INTRA_FRAME, InterSample, LAST_FRAME, Motion,
+    MotionGrid, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP, find_stack,
+    global_shear_valid, inter_set_allows, inter_tx_set, inter_tx_type, interintra_weight, predict,
+    predict_warp, project_global,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
@@ -84,15 +85,10 @@ pub fn decode_with_refs(
     refs: &[Option<RefView<'_>>],
     carried: Option<&Cdfs>,
 ) -> Result<Reconstructed, CodecError> {
-    if frame.frame_type == INTER_FRAME {
-        if sequence.enable_interintra {
-            return Err(CodecError::Unsupported { what: "interintra" });
-        }
-        if frame.motion_mode_switchable {
-            return Err(CodecError::Unsupported {
-                what: "overlapped motion",
-            });
-        }
+    if frame.frame_type == INTER_FRAME && frame.motion_mode_switchable {
+        return Err(CodecError::Unsupported {
+            what: "overlapped motion",
+        });
     }
     if frame.lossless {
         return Err(CodecError::Unsupported { what: "lossless" });
@@ -566,6 +562,9 @@ struct Tile<'a, 'r> {
     filter_switchable: bool,
     interpolation: u8,
     dual_filter: bool,
+    interintra: bool,
+    gm_type: [u8; 8],
+    gm_params: [[i32; 6]; 8],
     frame_refs: [u8; 7],
     visible_w: usize,
     visible_h: usize,
@@ -580,6 +579,8 @@ struct Tile<'a, 'r> {
     block_ref1: Vec<i8>,
     inter_flag: Vec<u8>,
     interp: Vec<[u8; 2]>,
+    /// Interintra mode for each 4×4, or -1 when the block is not interintra.
+    ii_mode: Vec<i8>,
     tx_kind: Vec<u8>,
     coding_inter: bool,
     cur_luma_row: usize,
@@ -642,6 +643,9 @@ pub(crate) struct Cdfs {
     delta_q: Vec<u16>,
     use_filter_intra: Vec<u16>,
     filter_intra: Vec<u16>,
+    inter_intra: Vec<u16>,
+    inter_intra_mode: Vec<u16>,
+    wedge_interintra: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -748,6 +752,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             filter_switchable: frame.filter_switchable,
             interpolation: frame.interpolation,
             dual_filter: sequence.enable_dual_filter,
+            interintra: sequence.enable_interintra,
+            gm_type: frame.gm_type,
+            gm_params: frame.gm_params,
             frame_refs: frame.ref_frames,
             visible_w: frame.width as usize,
             visible_h: frame.height as usize,
@@ -762,6 +769,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             block_ref1: vec![NONE_FRAME; cells],
             inter_flag: vec![0; cells],
             interp: vec![[0, 0]; cells],
+            ii_mode: vec![-1; cells],
             tx_kind: vec![DCT_DCT; cells],
             coding_inter: false,
             cur_luma_row: 0,
@@ -1091,6 +1099,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             mv: Motion::default(),
             ref0: 0,
             ref1: NONE_FRAME,
+            ii: -1,
             interp: [0, 0],
         };
         self.fill_grid(&coded);
@@ -1143,6 +1152,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             mv: chosen.mv,
             ref0: chosen.ref0,
             ref1: chosen.ref1,
+            ii: chosen.ii,
             interp: chosen.interp,
         };
         self.fill_grid(&coded);
@@ -1211,6 +1221,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             mv: Motion::default(),
             ref0: 0,
             ref1: NONE_FRAME,
+            ii: -1,
             interp: [0, 0],
         })
     }
@@ -1224,6 +1235,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         bh4: usize,
     ) -> Result<Chosen, CodecError> {
         let reference = self.read_single_ref(row, col)?;
+        let global = self.global_mv(reference, row, col, bsize);
         let stack = find_stack(
             &MotionGrid {
                 cols: self.mi_cols,
@@ -1243,12 +1255,19 @@ impl<'a, 'r> Tile<'a, 'r> {
                 bsize,
                 reference,
             },
+            global,
             self.allow_hp,
             self.force_integer,
+            self.gm_type
+                .get(usize::try_from(reference).unwrap_or(0))
+                .copied()
+                .unwrap_or(0)
+                > GM_TRANSLATION,
         );
         let y_mode = self.read_inter_mode(&stack)?;
         let mv_index = self.read_drl(y_mode, stack.found, &stack)?;
-        let mv = self.assign_mv(y_mode, mv_index, &stack)?;
+        let mv = self.assign_mv(y_mode, mv_index, &stack, global)?;
+        let ii = self.read_interintra(bsize)?;
         let interp = self.read_interp(row, col, bsize, y_mode, reference)?;
         Ok(Chosen {
             y_mode,
@@ -1257,7 +1276,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             angle_uv: 0,
             mv,
             ref0: reference,
-            ref1: NONE_FRAME,
+            ref1: if ii >= 0 { INTRA_FRAME } else { NONE_FRAME },
+            ii,
             interp,
         })
     }
@@ -1410,18 +1430,76 @@ impl<'a, 'r> Tile<'a, 'r> {
         )
     }
 
+    fn global_mv(&self, reference: i8, row: usize, col: usize, bsize: usize) -> Motion {
+        let index = usize::try_from(reference).unwrap_or(0);
+        let kind = self.gm_type.get(index).copied().unwrap_or(0);
+        let params = self.gm_params.get(index).copied().unwrap_or([0; 6]);
+        project_global(
+            kind,
+            params,
+            row,
+            col,
+            bsize,
+            self.allow_hp,
+            self.force_integer,
+        )
+    }
+
+    /// Interintra is a single-reference blend. A wedge mask stays unsupported.
+    fn read_interintra(&mut self, bsize: usize) -> Result<i8, CodecError> {
+        if !self.interintra || !(3..=9).contains(&bsize) {
+            return Ok(-1);
+        }
+        let ctx = SIZE_GROUP
+            .get(bsize)
+            .copied()
+            .unwrap_or(1)
+            .saturating_sub(1);
+        let on = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.inter_intra,
+            &[3, 3],
+            &[ctx],
+        )? == 1;
+        if !on {
+            return Ok(-1);
+        }
+        let mode = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.inter_intra_mode,
+            &[3, 5],
+            &[ctx],
+        )? as i8;
+        let wedge = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.wedge_interintra,
+            &[22, 3],
+            &[bsize],
+        )? == 1;
+        if wedge {
+            return Err(CodecError::Unsupported {
+                what: "interintra wedge",
+            });
+        }
+        Ok(mode)
+    }
+
     fn assign_mv(
         &mut self,
         mode: u8,
         index: usize,
         stack: &Candidates,
+        global: Motion,
     ) -> Result<Motion, CodecError> {
         let mut pos = if mode == NEARESTMV { 0 } else { index };
         if mode == NEWMV && stack.found <= 1 {
             pos = 0;
         }
         let pred = if mode == GLOBALMV {
-            Motion::default()
+            global
         } else {
             stack.mv[pos.min(7)]
         };
@@ -1468,8 +1546,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             &mut self.symbols,
             self.update,
             &mut self.cdfs.mv_sign,
-            &[3],
-            &[],
+            &[2, 3],
+            &[comp],
         )? == 1;
         let class = read_sym(
             &mut self.symbols,
@@ -1491,8 +1569,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             &mut self.symbols,
             self.update,
             &mut self.cdfs.mv_class0_bit,
-            &[3],
-            &[],
+            &[2, 3],
+            &[comp],
         )?;
         let fr = if self.force_integer {
             3
@@ -1510,8 +1588,8 @@ impl<'a, 'r> Tile<'a, 'r> {
                 &mut self.symbols,
                 self.update,
                 &mut self.cdfs.mv_class0_hp,
-                &[3],
-                &[],
+                &[2, 3],
+                &[comp],
             )?
         } else {
             1
@@ -1526,8 +1604,8 @@ impl<'a, 'r> Tile<'a, 'r> {
                 &mut self.symbols,
                 self.update,
                 &mut self.cdfs.mv_bit,
-                &[10, 3],
-                &[i as usize],
+                &[2, 10, 3],
+                &[comp, i as usize],
             )?;
             bits |= (bit as i32) << i;
         }
@@ -1547,8 +1625,8 @@ impl<'a, 'r> Tile<'a, 'r> {
                 &mut self.symbols,
                 self.update,
                 &mut self.cdfs.mv_hp,
-                &[3],
-                &[],
+                &[2, 3],
+                &[comp],
             )?
         } else {
             1
@@ -1570,7 +1648,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let dirs = if self.dual_filter { 2 } else { 1 };
         let mut filter = [0u8; 2];
         for (dir, slot) in filter.iter_mut().enumerate().take(dirs) {
-            if self.needs_interp(bsize, mode) {
+            if self.needs_interp(bsize, mode, reference) {
                 let ctx = self.interp_ctx(row, col, dir, reference);
                 *slot = read_sym(
                     &mut self.symbols,
@@ -1587,9 +1665,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(filter)
     }
 
-    fn needs_interp(&self, bsize: usize, mode: u8) -> bool {
+    fn needs_interp(&self, bsize: usize, mode: u8, reference: i8) -> bool {
         let large = block_width(bsize).min(block_height(bsize)) >= 8;
-        !(large && mode == GLOBALMV)
+        if large && mode == GLOBALMV {
+            let index = usize::try_from(reference).unwrap_or(0);
+            return self.gm_type.get(index).copied().unwrap_or(0) == GM_TRANSLATION;
+        }
+        true
     }
 
     fn interp_ctx(&self, row: usize, col: usize, dir: usize, reference: i8) -> usize {
@@ -1642,11 +1724,6 @@ impl<'a, 'r> Tile<'a, 'r> {
         let ref_h = self.ref_h[slot];
         let frame_w = self.visible_w;
         let frame_h = self.visible_h;
-        let reference: &[u8] = match block.plane {
-            0 => self.ref_y[slot],
-            1 => self.ref_u[slot],
-            _ => self.ref_v[slot],
-        };
         let (sub_x, sub_y) = (block.sub_x != 0, block.sub_y != 0);
         let x = (block.col >> block.sub_x) * 4;
         let y = (block.row >> block.sub_y) * 4;
@@ -1662,10 +1739,59 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             ref_h.div_ceil(2)
         };
+        let ii = self.ii_mode.get(at).copied().unwrap_or(-1);
+        let gm_index = usize::try_from(frame_ref).unwrap_or(0);
+        let gm_kind = self.gm_type.get(gm_index).copied().unwrap_or(0);
+        let gm_params = self.gm_params.get(gm_index).copied().unwrap_or([0; 6]);
+        let warp = block.y_mode == GLOBALMV
+            && gm_kind > GM_TRANSLATION
+            && w >= 8
+            && h >= 8
+            && !self.force_integer
+            && global_shear_valid(gm_params);
+        if ii >= 0 {
+            self.predict_block_intra(block, interintra_intra_mode(ii as u8), x, y, w, h)?;
+            let mut packed = vec![0u8; w.saturating_mul(h)];
+            let reference = self.ref_plane(slot, block.plane);
+            let mut sample = InterSample {
+                dst: &mut packed,
+                stride: w,
+                x,
+                y,
+                w,
+                h,
+                sub_x,
+                sub_y,
+                mv,
+                filter,
+                reference,
+                ref_stride: plane_w,
+                plane_w,
+                plane_h,
+                frame_w,
+                frame_h,
+                ref_w,
+                ref_h,
+                write_x: 0,
+                write_y: 0,
+            };
+            if warp {
+                predict_warp(&mut sample, gm_params)?;
+            } else {
+                predict(&mut sample)?;
+            }
+            self.blend_interintra(block.plane, ii as u8, (x, y, w, h), &packed);
+            return Ok(());
+        }
         let stride = if block.plane == 0 {
             self.width
         } else {
             self.chroma_w
+        };
+        let reference: &[u8] = match block.plane {
+            0 => self.ref_y[slot],
+            1 => self.ref_u[slot],
+            _ => self.ref_v[slot],
         };
         let dst: &mut [u8] = if block.plane == 0 {
             &mut self.y
@@ -1674,7 +1800,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             &mut self.v
         };
-        predict(&mut InterSample {
+        let mut sample = InterSample {
             dst,
             stride,
             x,
@@ -1693,7 +1819,112 @@ impl<'a, 'r> Tile<'a, 'r> {
             frame_h,
             ref_w,
             ref_h,
-        })
+            write_x: x,
+            write_y: y,
+        };
+        if warp {
+            predict_warp(&mut sample, gm_params)
+        } else {
+            predict(&mut sample)
+        }
+    }
+
+    fn ref_plane(&self, slot: usize, plane: usize) -> &'r [u8] {
+        match plane {
+            0 => self.ref_y[slot],
+            1 => self.ref_u[slot],
+            _ => self.ref_v[slot],
+        }
+    }
+
+    /// Intra half of an interintra block, at the plane's own resolution.
+    fn predict_block_intra(
+        &mut self,
+        block: &Block,
+        mode: u8,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+    ) -> Result<(), CodecError> {
+        let (sub_x, sub_y) = self.subsampling(block.plane);
+        let row_mask = (SB4 >> sub_y) - 1;
+        let col_mask = (SB4 >> sub_x) - 1;
+        let local_row = ((y >> 2) & row_mask) as i32;
+        let local_col = ((x >> 2) & col_mask) as i32;
+        let above_right = self.decoded_at(block.plane, local_row - 1, local_col + (w / 4) as i32);
+        let below_left = self.decoded_at(block.plane, local_row + (h / 4) as i32, local_col - 1);
+        let filter_type = self.smooth_neighbor(block.plane, block.row, block.col);
+        let edge_filter = self.edge_filter;
+        let (plane_w, plane_h, stride) = if block.plane == 0 {
+            (self.width, self.height, self.width)
+        } else {
+            (self.chroma_w, self.chroma_h, self.chroma_w)
+        };
+        let pred = IntraPred {
+            x,
+            y,
+            w,
+            h,
+            have_left: block.avail_l && x > 0,
+            have_above: block.avail_u && y > 0,
+            have_above_right: above_right,
+            have_below_left: below_left,
+            mode,
+            angle_delta: 0,
+            edge_filter,
+            filter_type,
+            max_x: plane_w.saturating_sub(1),
+            max_y: plane_h.saturating_sub(1),
+            filter: None,
+        };
+        let plane = if block.plane == 0 {
+            &mut self.y
+        } else if block.plane == 1 {
+            &mut self.u
+        } else {
+            &mut self.v
+        };
+        predict_intra(plane, stride, &pred, &mut self.predict)
+    }
+
+    /// `COMPOUND_INTRA` blend. The mask is built at this plane's resolution.
+    fn blend_interintra(
+        &mut self,
+        plane: usize,
+        mode: u8,
+        place: (usize, usize, usize, usize),
+        inter: &[u8],
+    ) {
+        let (x, y, w, h) = place;
+        let stride = if plane == 0 {
+            self.width
+        } else {
+            self.chroma_w
+        };
+        let dst = if plane == 0 {
+            &mut self.y
+        } else if plane == 1 {
+            &mut self.u
+        } else {
+            &mut self.v
+        };
+        let scale = 128 / h.max(w).max(1);
+        for row in 0..h {
+            for col in 0..w {
+                let Some(sample) = inter.get(row * w + col).copied() else {
+                    continue;
+                };
+                let at = (y + row) * stride + x + col;
+                let Some(slot) = dst.get_mut(at) else {
+                    continue;
+                };
+                let weight = interintra_weight(mode, row, col, scale);
+                let intra = i32::from(*slot);
+                let mixed = weight * intra + (64 - weight) * i32::from(sample);
+                *slot = ((mixed + 32) >> 6).clamp(0, 255) as u8;
+            }
+        }
     }
 
     fn inter_tx(&mut self, plane: usize, tx: usize) -> Result<u8, CodecError> {
@@ -2299,6 +2530,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.block_ref[at] = coded.ref0;
                 self.block_ref1[at] = coded.ref1;
                 self.interp[at] = coded.interp;
+                self.ii_mode[at] = coded.ii;
             }
         }
     }
@@ -3132,6 +3364,7 @@ struct Chosen {
     mv: Motion,
     ref0: i8,
     ref1: i8,
+    ii: i8,
     interp: [u8; 2],
 }
 
@@ -3156,6 +3389,7 @@ struct CodedBlock {
     mv: Motion,
     ref0: i8,
     ref1: i8,
+    ii: i8,
     interp: [u8; 2],
 }
 
@@ -3641,6 +3875,9 @@ impl Cdfs {
         zero_counters(&mut self.delta_q, 5);
         zero_counters(&mut self.use_filter_intra, 3);
         zero_counters(&mut self.filter_intra, 6);
+        zero_counters(&mut self.inter_intra, 3);
+        zero_counters(&mut self.inter_intra_mode, 5);
+        zero_counters(&mut self.wedge_interintra, 3);
     }
 
     fn load(q: usize) -> Self {
@@ -3689,14 +3926,14 @@ impl Cdfs {
             ref_mv: DEFAULT_REF_MV_CDF.to_vec(),
             drl: DEFAULT_DRL_MODE_CDF.to_vec(),
             mv_joint: DEFAULT_MV_JOINT_CDF.to_vec(),
-            mv_sign: DEFAULT_MV_SIGN_CDF.to_vec(),
+            mv_sign: both_components(&DEFAULT_MV_SIGN_CDF),
             mv_class: DEFAULT_MV_CLASS_CDF.to_vec(),
-            mv_class0_bit: DEFAULT_MV_CLASS0_BIT_CDF.to_vec(),
+            mv_class0_bit: both_components(&DEFAULT_MV_CLASS0_BIT_CDF),
             mv_class0_fr: DEFAULT_MV_CLASS0_FR_CDF.to_vec(),
-            mv_class0_hp: DEFAULT_MV_CLASS0_HP_CDF.to_vec(),
-            mv_bit: DEFAULT_MV_BIT_CDF.to_vec(),
+            mv_class0_hp: both_components(&DEFAULT_MV_CLASS0_HP_CDF),
+            mv_bit: both_components(&DEFAULT_MV_BIT_CDF),
             mv_fr: DEFAULT_MV_FR_CDF.to_vec(),
-            mv_hp: DEFAULT_MV_HP_CDF.to_vec(),
+            mv_hp: both_components(&DEFAULT_MV_HP_CDF),
             interp_filter: DEFAULT_INTERP_FILTER_CDF.to_vec(),
             inter_tx1: DEFAULT_INTER_TX_TYPE_SET1_CDF.to_vec(),
             inter_tx2: DEFAULT_INTER_TX_TYPE_SET2_CDF.to_vec(),
@@ -3706,8 +3943,45 @@ impl Cdfs {
             delta_q: vec![28160, 32120, 32677, 32768, 0],
             use_filter_intra: FILTER_INTRA_CDF.to_vec(),
             filter_intra: vec![8949, 12776, 17211, 29558, 32768, 0],
+            inter_intra: INTER_INTRA_CDF.to_vec(),
+            inter_intra_mode: INTER_INTRA_MODE_CDF.to_vec(),
+            wedge_interintra: WEDGE_INTERINTRA_CDF.to_vec(),
         }
     }
+}
+
+/// `Default_Inter_Intra_Cdf`. Three size groups, one probability, then the end and the counter.
+const INTER_INTRA_CDF: [u16; 9] = [26887, 32768, 0, 27597, 32768, 0, 30237, 32768, 0];
+
+/// `Default_Inter_Intra_Mode_Cdf`. Four modes, then the end and the counter.
+const INTER_INTRA_MODE_CDF: [u16; 15] = [
+    1875, 11082, 27332, 32768, 0, 2473, 9996, 26388, 32768, 0, 4238, 11537, 25926, 32768, 0,
+];
+
+/// `Default_Wedge_Inter_Intra_Cdf`. Only sizes 8×8 through 32×32 are read.
+const WEDGE_INTERINTRA_CDF: [u16; 66] = [
+    16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 20036, 32768, 0, 24957, 32768, 0, 26704,
+    32768, 0, 27530, 32768, 0, 29564, 32768, 0, 29444, 32768, 0, 26872, 32768, 0, 16384, 32768, 0,
+    16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384,
+    32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0,
+];
+
+/// Map an interintra mode onto the intra predictor. 0 DC, 1 vertical, 2 horizontal, 3 smooth.
+fn interintra_intra_mode(mode: u8) -> u8 {
+    match mode {
+        1 => V_PRED,
+        2 => 2,
+        3 => SMOOTH_PRED,
+        _ => DC_PRED,
+    }
+}
+
+/// The specification copies one default motion-vector row into each component.
+fn both_components(row: &[u16]) -> Vec<u16> {
+    let mut table = Vec::with_capacity(row.len() * 2);
+    table.extend_from_slice(row);
+    table.extend_from_slice(row);
+    table
 }
 
 fn zero_counters(table: &mut [u16], width: usize) {

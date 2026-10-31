@@ -5,8 +5,8 @@
 //! an order hint. A frame may use a uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
-//! Lossless and bit depths other than 8 are rejected. Compound, warped, and
-//! overlapped motion are rejected.
+//! Lossless and bit depths other than 8 are rejected. Compound prediction,
+//! local warped motion, and overlapped motion are rejected.
 
 #![forbid(unsafe_code)]
 

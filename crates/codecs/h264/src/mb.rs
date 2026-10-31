@@ -5,7 +5,7 @@ use cutlass_decode::CodecError;
 use crate::cabac::{self, Cabac};
 use crate::cavlc;
 use crate::recon::{self, Sample};
-use crate::set::ZIGZAG4;
+use crate::set::{ZIGZAG4, ZIGZAG8};
 
 use super::{Entropy, Frame, Header, Mb, Mod, Slice, blk_x, blk_y, put_block};
 
@@ -1665,6 +1665,140 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result
     Ok(())
 }
 
+/// Clause 8.5. `qp` is SliceQPY. Bypass applies when the flag is set and QP′Y is 0.
+fn qp_bypass<S: Sample>(slice: &Slice<'_>, qp: i32) -> bool {
+    slice.sps.bypass && qp + S::QP_BD == 0
+}
+
+fn place4(coeffs: &[i32]) -> [i32; 16] {
+    let mut block = [0i32; 16];
+    for (index, &pos) in ZIGZAG4.iter().enumerate() {
+        block[pos] = coeffs.get(index).copied().unwrap_or(0);
+    }
+    block
+}
+
+fn place8(coeffs: &[i32]) -> [i32; 64] {
+    let mut block = [0i32; 64];
+    for (index, &pos) in ZIGZAG8.iter().enumerate() {
+        block[pos] = coeffs.get(index).copied().unwrap_or(0);
+    }
+    block
+}
+
+/// Clause 8.5.15. `horizontal` is horPredFlag.
+fn prefix_residual(block: &mut [i32], width: usize, height: usize, horizontal: bool) {
+    if horizontal {
+        for y in 0..height {
+            let mut sum = 0i32;
+            for x in 0..width {
+                let at = y * width + x;
+                sum = sum.wrapping_add(block[at]);
+                block[at] = sum;
+            }
+        }
+    } else {
+        for x in 0..width {
+            let mut sum = 0i32;
+            for y in 0..height {
+                let at = y * width + x;
+                sum = sum.wrapping_add(block[at]);
+                block[at] = sum;
+            }
+        }
+    }
+}
+
+fn i16_bypass(dc: &[i32; 16], ac: &[[i32; 16]; 16], coded: bool) -> [i32; 256] {
+    let raster = luma_dc_raster(dc);
+    let mut out = [0i32; 256];
+    for (i, samples) in ac.iter().enumerate() {
+        let bx = blk_x(i);
+        let by = blk_y(i);
+        let mut coeffs = [0i32; 16];
+        coeffs[0] = raster[by * 4 + bx];
+        if coded {
+            coeffs[1..].copy_from_slice(&samples[..15]);
+        }
+        let block = place4(&coeffs);
+        for y in 0..4 {
+            for x in 0..4 {
+                out[(by * 4 + y) * 16 + bx * 4 + x] = block[y * 4 + x];
+            }
+        }
+    }
+    out
+}
+
+fn add_i16_bypass<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    origin: (usize, usize),
+    dc: &[i32; 16],
+    ac: &[[i32; 16]; 16],
+    flags: (bool, u8),
+) {
+    let (x0, y0) = origin;
+    let (coded, mode) = flags;
+    let mut residual = i16_bypass(dc, ac, coded);
+    if mode == 0 || mode == 1 {
+        prefix_residual(&mut residual, 16, 16, mode == 1);
+    }
+    recon::add_block(plane, stride, x0, y0, &residual, 16);
+}
+
+fn add_chroma_bypass<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    origin: (usize, usize),
+    levels: (&[i32], &[[i32; 16]]),
+    shape: (usize, usize, usize),
+    intra_mode: Option<u8>,
+) {
+    let (dc, ac) = levels;
+    let (blocks, width, height) = shape;
+    let raster = if blocks == 8 {
+        raster422(dc)
+    } else {
+        [0i32; 8]
+    };
+    let mut residual = [0i32; 128];
+    for i in 0..blocks {
+        let (bx, by) = chroma_pos(i, blocks);
+        let mut coeffs = [0i32; 16];
+        coeffs[0] = if blocks == 8 {
+            raster[by * 2 + bx]
+        } else {
+            dc.get(i).copied().unwrap_or(0)
+        };
+        if let Some(block) = ac.get(i) {
+            coeffs[1..].copy_from_slice(&block[..15]);
+        }
+        let levels = place4(&coeffs);
+        for y in 0..4 {
+            for x in 0..4 {
+                residual[(by * 4 + y) * width + bx * 4 + x] = levels[y * 4 + x];
+            }
+        }
+    }
+    if let Some(mode) = intra_mode.filter(|mode| *mode == 1 || *mode == 2) {
+        prefix_residual(&mut residual[..width * height], width, height, mode == 1);
+    }
+    let (x0, y0) = origin;
+    for y in 0..height {
+        for x in 0..width {
+            let at = (y0 + y) * stride + x0 + x;
+            let Some(sample) = plane.get(at).copied() else {
+                continue;
+            };
+            let sum = sample.into().wrapping_add(residual[y * width + x]);
+            if let Some(slot) = plane.get_mut(at) {
+                *slot = S::clip(sum);
+            }
+        }
+    }
+}
+
 fn recon_intra<S: Sample>(
     pic: &mut Frame<S>,
     slice: &Slice<'_>,
@@ -1700,35 +1834,46 @@ fn recon_intra<S: Sample>(
         let corner = corner_sample(&pic.y, pic.w, pic.h, mx, my, 16, above_ok && left_ok);
         let pred = recon::pred16(mode16, &above, &left, above_ok, left_ok, corner);
         put_block(&mut pic.y, pic.w, x0, y0, &pred, 16);
-        let dc = recon::luma_dc(
-            &luma_dc_raster(&luma_dc),
-            qp + S::QP_BD,
-            i32::from(slice.pps.weight4[0][0]),
-        );
-        for (i, samples) in ac.iter().enumerate() {
-            let bx = blk_x(i);
-            let by = blk_y(i);
-            let mut coeffs = [0i32; 16];
-            if mb.cbp & 15 != 0 {
-                coeffs[1..].copy_from_slice(&samples[..15]);
+        if qp_bypass::<S>(slice, qp) {
+            add_i16_bypass(
+                &mut pic.y,
+                pic.w,
+                (x0, y0),
+                &luma_dc,
+                ac,
+                (mb.cbp & 15 != 0, mode16),
+            );
+        } else {
+            let dc = recon::luma_dc(
+                &luma_dc_raster(&luma_dc),
+                qp + S::QP_BD,
+                i32::from(slice.pps.weight4[0][0]),
+            );
+            for (i, samples) in ac.iter().enumerate() {
+                let bx = blk_x(i);
+                let by = blk_y(i);
+                let mut coeffs = [0i32; 16];
+                if mb.cbp & 15 != 0 {
+                    coeffs[1..].copy_from_slice(&samples[..15]);
+                }
+                let mut block = [0i32; 16];
+                for n in 0..16 {
+                    let pos = ZIGZAG4[n];
+                    let (ry, rx) = (pos / 4, pos % 4);
+                    let level = if n == 0 { dc[by * 4 + bx] } else { coeffs[n] };
+                    let weight = i32::from(slice.pps.weight4[0][pos]);
+                    block[ry * 4 + rx] = if n == 0 {
+                        level
+                    } else {
+                        recon::scale4(level, qp + S::QP_BD, rx, ry, weight)
+                    };
+                }
+                if mb.cbp & 15 == 0 {
+                    block[0] = dc[by * 4 + bx];
+                }
+                recon::idct4(&mut block);
+                recon::add_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &block, 4);
             }
-            let mut block = [0i32; 16];
-            for n in 0..16 {
-                let pos = ZIGZAG4[n];
-                let (ry, rx) = (pos / 4, pos % 4);
-                let level = if n == 0 { dc[by * 4 + bx] } else { coeffs[n] };
-                let weight = i32::from(slice.pps.weight4[0][pos]);
-                block[ry * 4 + rx] = if n == 0 {
-                    level
-                } else {
-                    recon::scale4(level, qp + S::QP_BD, rx, ry, weight)
-                };
-            }
-            if mb.cbp & 15 == 0 {
-                block[0] = dc[by * 4 + bx];
-            }
-            recon::idct4(&mut block);
-            recon::add_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &block, 4);
         }
     } else if mb.transform8 {
         for (i, samples) in block8.iter().enumerate() {
@@ -1746,15 +1891,23 @@ fn recon_intra<S: Sample>(
                 0,
             );
             put_block(&mut pic.y, pic.w, x0 + bx, y0 + by, &pred, 8);
-            super::add_scaled(
-                &mut pic.y,
-                pic.w,
-                (x0 + bx, y0 + by),
-                samples,
-                qp,
-                &slice.pps.weight8[0],
-                8,
-            );
+            let mode = mb.mode4[(by / 4) * 4 + bx / 4];
+            let bypass = qp_bypass::<S>(slice, qp);
+            if bypass && (mode == 0 || mode == 1) {
+                let mut block = place8(samples);
+                prefix_residual(&mut block, 8, 8, mode == 1);
+                recon::add_block(&mut pic.y, pic.w, x0 + bx, y0 + by, &block, 8);
+            } else {
+                super::add_scaled(
+                    &mut pic.y,
+                    pic.w,
+                    (x0 + bx, y0 + by),
+                    samples,
+                    (qp, bypass),
+                    &slice.pps.weight8[0],
+                    8,
+                );
+            }
         }
     } else {
         for (i, samples) in ac.iter().enumerate() {
@@ -1769,15 +1922,23 @@ fn recon_intra<S: Sample>(
                 0,
             );
             put_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &pred, 4);
-            super::add_scaled(
-                &mut pic.y,
-                pic.w,
-                (x0 + bx * 4, y0 + by * 4),
-                samples,
-                qp,
-                &slice.pps.weight4[0],
-                4,
-            );
+            let mode = mb.mode4[by * 4 + bx];
+            let bypass = qp_bypass::<S>(slice, qp);
+            if bypass && (mode == 0 || mode == 1) {
+                let mut block = place4(samples);
+                prefix_residual(&mut block, 4, 4, mode == 1);
+                recon::add_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &block, 4);
+            } else {
+                super::add_scaled(
+                    &mut pic.y,
+                    pic.w,
+                    (x0 + bx * 4, y0 + by * 4),
+                    samples,
+                    (qp, bypass),
+                    &slice.pps.weight4[0],
+                    4,
+                );
+            }
         }
     }
     if pic.chroma() != 3 {
@@ -2240,6 +2401,17 @@ fn recon_chroma<S: Sample>(
         if let Some(pred) = pred {
             put_block(plane, stride, x0, y0, &pred, 8);
         }
+        if qp_bypass::<S>(slice, qp) {
+            add_chroma_bypass(
+                plane,
+                stride,
+                (x0, y0),
+                (dc, ac),
+                (4, 8, 8),
+                intra.then_some(mode),
+            );
+            continue;
+        }
         let weight = i32::from(slice.pps.weight4[list][0]);
         let scaled = recon::chroma_dc(dc[0], dc[1], dc[2], dc[3], qp_c, weight);
         for i in 0..4 {
@@ -2319,6 +2491,17 @@ fn recon_chroma422<S: Sample>(
         }
         let plane = if cb { &mut pic.u } else { &mut pic.v };
         let stride = pic.w / 2;
+        if qp_bypass::<S>(slice, qp) {
+            add_chroma_bypass(
+                plane,
+                stride,
+                (x0, y0),
+                (dc, ac),
+                (8, 8, 16),
+                intra.then_some(mode),
+            );
+            continue;
+        }
         let weight = i32::from(slice.pps.weight4[list][0]);
         // 4:2:2 chroma DC is scaled at QP′C + 3. The eight-point Hadamard
         // needs that extra factor; 4:2:0 stays on the four-point scale.
@@ -2396,7 +2579,7 @@ fn recon_444<S: Sample>(
             slice,
             Place { mx, my },
             mb,
-            (plane, qp_c, qp_base, mode16),
+            (plane, qp_c, qp_base, mode16, qp_bypass::<S>(slice, qp)),
         )?;
     }
     Ok(())
@@ -2408,10 +2591,10 @@ fn paint_444<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     mb: &mut Mb,
-    job: (u8, i32, i32, Option<u8>),
+    job: (u8, i32, i32, Option<u8>, bool),
 ) -> Result<(), CodecError> {
     let Place { mx, my } = at;
-    let (plane, qp_c, qp_base, mode16) = job;
+    let (plane, qp_c, qp_base, mode16, bypass) = job;
     let intra = mb.intra;
     let list = quant_list(plane, intra, mb.transform8);
     let x0 = mx * 16;
@@ -2450,6 +2633,18 @@ fn paint_444<S: Sample>(
                     plane,
                 )?;
             }
+        }
+        if bypass {
+            let (dest, dest_stride) = mutable_plane(pic, plane);
+            add_i16_bypass(
+                dest,
+                dest_stride,
+                (x0, y0),
+                &dc,
+                &ac,
+                (mb.cbp & 15 != 0, mode),
+            );
+            return Ok(());
         }
         let scaled = recon::luma_dc(
             &luma_dc_raster(&dc),
@@ -2514,16 +2709,23 @@ fn paint_444<S: Sample>(
                 put_block(dest, dest_stride, x0 + bx, y0 + by, &pred, 8);
             }
             if mb.cbp & (1 << i) != 0 {
+                let mode = mb.mode4[(by / 4) * 4 + bx / 4];
                 let (dest, dest_stride) = mutable_plane(pic, plane);
-                super::add_scaled(
-                    dest,
-                    dest_stride,
-                    (x0 + bx, y0 + by),
-                    samples,
-                    qp_base,
-                    &slice.pps.weight8[list],
-                    8,
-                );
+                if bypass && intra && (mode == 0 || mode == 1) {
+                    let mut block = place8(samples);
+                    prefix_residual(&mut block, 8, 8, mode == 1);
+                    recon::add_block(dest, dest_stride, x0 + bx, y0 + by, &block, 8);
+                } else {
+                    super::add_scaled(
+                        dest,
+                        dest_stride,
+                        (x0 + bx, y0 + by),
+                        samples,
+                        (qp_base, bypass),
+                        &slice.pps.weight8[list],
+                        8,
+                    );
+                }
             }
         }
         return Ok(());
@@ -2563,16 +2765,23 @@ fn paint_444<S: Sample>(
             put_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &pred, 4);
         }
         if mb.cbp & bit != 0 {
+            let mode = mb.mode4[by * 4 + bx];
             let (dest, dest_stride) = mutable_plane(pic, plane);
-            super::add_scaled(
-                dest,
-                dest_stride,
-                (x0 + bx * 4, y0 + by * 4),
-                samples,
-                qp_base,
-                &slice.pps.weight4[list],
-                4,
-            );
+            if bypass && intra && (mode == 0 || mode == 1) {
+                let mut block = place4(samples);
+                prefix_residual(&mut block, 4, 4, mode == 1);
+                recon::add_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &block, 4);
+            } else {
+                super::add_scaled(
+                    dest,
+                    dest_stride,
+                    (x0 + bx * 4, y0 + by * 4),
+                    samples,
+                    (qp_base, bypass),
+                    &slice.pps.weight4[list],
+                    4,
+                );
+            }
         }
     }
     Ok(())
@@ -3883,7 +4092,7 @@ fn decode_inter<S: Sample>(
                     pic.w,
                     (mx * 16 + bx, my * 16 + by),
                     &block,
-                    *qp,
+                    (*qp, qp_bypass::<S>(slice, *qp)),
                     &slice.pps.weight8[1],
                     8,
                 );
@@ -3910,7 +4119,7 @@ fn decode_inter<S: Sample>(
                     pic.w,
                     (mx * 16 + blk_x(i) * 4, my * 16 + blk_y(i) * 4),
                     &block,
-                    *qp,
+                    (*qp, qp_bypass::<S>(slice, *qp)),
                     &slice.pps.weight4[3],
                     4,
                 );

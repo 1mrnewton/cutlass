@@ -1,8 +1,9 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
 //! Interlaced pictures, monochrome, and separate colour planes are refused.
-//! 4:2:0, 4:2:2, and 4:4:4 are accepted. A bit depth outside 8 through 14, or a
-//! luma depth that differs from chroma, is refused.
+//! 4:2:0, 4:2:2, and 4:4:4 are accepted, including QP′Y-zero transform bypass.
+//! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
+//! is refused.
 
 use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, Transfer};
 
@@ -43,6 +44,8 @@ pub struct Sps {
     pub bit_depth: u8,
     /// `chroma_format_idc`: 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4.
     pub chroma: u8,
+    /// `qpprime_y_zero_transform_bypass_flag`.
+    pub bypass: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +121,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     }
     let mut chroma_format = 1u8;
     let mut bit_depth = 8u8;
+    let mut bypass = false;
     let mut weight4 = flat4();
     let mut weight8 = flat8();
     if matches!(
@@ -136,11 +140,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
             return Err(CodecError::Unsupported { what: "bit depth" });
         }
         bit_depth = (8 + bit_depth_luma) as u8;
-        if bits.bit()? {
-            return Err(CodecError::Unsupported {
-                what: "qpprime transform bypass",
-            });
-        }
+        bypass = bits.bit()?;
         if bits.bit()? {
             (weight4, weight8) = scaling_lists(&mut bits, true, chroma_format == 3)?;
         }
@@ -257,6 +257,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         max_reorder: vui.max_reorder,
         bit_depth,
         chroma: chroma_format,
+        bypass,
     };
     sps.visible()?;
     Ok(sps)

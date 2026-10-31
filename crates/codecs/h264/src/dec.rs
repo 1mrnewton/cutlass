@@ -1865,38 +1865,51 @@ fn add_scaled<S: Sample>(
     stride: usize,
     origin: (usize, usize),
     coeffs: &[i32],
-    qp: i32,
+    quant: (i32, bool),
     weight: &[u8],
     n: usize,
 ) {
     let (x, y) = origin;
+    let (qp, bypass) = quant;
     if n == 4 {
         let mut block = [0i32; 16];
-        for (i, &pos) in ZIGZAG4.iter().enumerate() {
-            let (ry, rx) = (pos / 4, pos % 4);
-            block[ry * 4 + rx] = recon::scale4(
-                coeffs.get(i).copied().unwrap_or(0),
-                qp + S::QP_BD,
-                rx,
-                ry,
-                i32::from(weight[ry * 4 + rx]),
-            );
+        if bypass {
+            for (i, &pos) in ZIGZAG4.iter().enumerate() {
+                block[pos] = coeffs.get(i).copied().unwrap_or(0);
+            }
+        } else {
+            for (i, &pos) in ZIGZAG4.iter().enumerate() {
+                let (ry, rx) = (pos / 4, pos % 4);
+                block[ry * 4 + rx] = recon::scale4(
+                    coeffs.get(i).copied().unwrap_or(0),
+                    qp + S::QP_BD,
+                    rx,
+                    ry,
+                    i32::from(weight[ry * 4 + rx]),
+                );
+            }
+            recon::idct4(&mut block);
         }
-        recon::idct4(&mut block);
         recon::add_block(plane, stride, x, y, &block, 4);
     } else {
         let mut block = [0i32; 64];
-        for (i, &pos) in ZIGZAG8.iter().enumerate() {
-            let (ry, rx) = (pos / 8, pos % 8);
-            block[ry * 8 + rx] = recon::scale8(
-                coeffs.get(i).copied().unwrap_or(0),
-                qp + S::QP_BD,
-                rx,
-                ry,
-                i32::from(weight[pos]),
-            );
+        if bypass {
+            for (i, &pos) in ZIGZAG8.iter().enumerate() {
+                block[pos] = coeffs.get(i).copied().unwrap_or(0);
+            }
+        } else {
+            for (i, &pos) in ZIGZAG8.iter().enumerate() {
+                let (ry, rx) = (pos / 8, pos % 8);
+                block[ry * 8 + rx] = recon::scale8(
+                    coeffs.get(i).copied().unwrap_or(0),
+                    qp + S::QP_BD,
+                    rx,
+                    ry,
+                    i32::from(weight[pos]),
+                );
+            }
+            recon::idct8(&mut block);
         }
-        recon::idct8(&mut block);
         recon::add_block(plane, stride, x, y, &block, 8);
     }
 }
@@ -2137,6 +2150,7 @@ mod tests {
             max_reorder: 0,
             bit_depth: 8,
             chroma: 1,
+            bypass: false,
         }
     }
 

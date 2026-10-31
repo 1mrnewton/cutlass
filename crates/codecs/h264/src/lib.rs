@@ -26,4 +26,6 @@ mod depth;
 #[cfg(test)]
 mod high10;
 #[cfg(test)]
+mod lossless;
+#[cfg(test)]
 mod uhd420;

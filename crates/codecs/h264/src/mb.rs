@@ -4,7 +4,7 @@ use cutlass_decode::CodecError;
 
 use crate::cabac::{self, Cabac};
 use crate::cavlc;
-use crate::recon;
+use crate::recon::{self, Sample};
 use crate::set::ZIGZAG4;
 
 use super::{Entropy, Frame, Header, Mb, Mod, Slice, blk_x, blk_y, put_block};
@@ -40,13 +40,23 @@ struct ChromaPaint<'a> {
 /// A list slot the initialisation process left as "no reference picture".
 const NO_PICTURE: usize = usize::MAX;
 
-pub(crate) fn reference_lists(
-    dpb: &[Frame],
+/// SliceQPY after `mb_qp_delta`. The result stays in `-QpBdOffsetY..=51`.
+fn next_qp<S: Sample>(qp: i32, delta: i32) -> i32 {
+    let span = 52 + S::QP_BD;
+    (qp + delta + span + S::QP_BD).rem_euclid(span) - S::QP_BD
+}
+
+fn chroma_deblock<S: Sample>(luma_qp: i32, offset: i32) -> i8 {
+    recon::chroma_qps(luma_qp, offset, S::QP_BD).1 as i8
+}
+
+pub(crate) fn reference_lists<S: Sample>(
+    dpb: &[Frame<S>],
     header: &Header,
     poc: i32,
     max_fn: u32,
 ) -> Result<(Vec<usize>, Vec<usize>), CodecError> {
-    let short = |frame: &&Frame| frame.referenced && !frame.long_term && !frame.nonexisting;
+    let short = |frame: &&Frame<S>| frame.referenced && !frame.long_term && !frame.nonexisting;
     let mut shorts: Vec<usize> = dpb
         .iter()
         .enumerate()
@@ -121,7 +131,7 @@ pub(crate) fn reference_lists(
     Ok((list0, list1))
 }
 
-fn pic_num(frame: &Frame, current: u32, max_fn: u32) -> i32 {
+fn pic_num<S: Sample>(frame: &Frame<S>, current: u32, max_fn: u32) -> i32 {
     let mut number = i32::try_from(frame.frame_num).unwrap_or(0);
     if frame.frame_num > current {
         number -= i32::try_from(max_fn).unwrap_or(0);
@@ -132,10 +142,10 @@ fn pic_num(frame: &Frame, current: u32, max_fn: u32) -> i32 {
 /// Clause 8.2.4.2 pads a short initial list, then 8.2.4.3 may repeat a picture
 /// so the active length is filled. A slot left as "no reference picture" stays
 /// [`NO_PICTURE`] and is rejected when a macroblock uses it.
-fn reorder(
+fn reorder<S: Sample>(
     mut list: Vec<usize>,
     active: usize,
-    dpb: &[Frame],
+    dpb: &[Frame<S>],
     mods: &[Mod],
     current: u32,
     max_fn: u32,
@@ -263,13 +273,13 @@ struct ShortNums {
     max_pic: i32,
 }
 
-fn place_short(
+fn place_short<S: Sample>(
     list: &mut [usize],
     ref_idx: usize,
     active: usize,
     picture: usize,
     pic_num: i32,
-    dpb: &[Frame],
+    dpb: &[Frame<S>],
     nums: ShortNums,
 ) {
     for c in (ref_idx + 1..=active).rev() {
@@ -285,13 +295,13 @@ fn place_short(
     }
 }
 
-fn place_long(
+fn place_long<S: Sample>(
     list: &mut [usize],
     ref_idx: usize,
     active: usize,
     picture: usize,
     long_num: u32,
-    dpb: &[Frame],
+    dpb: &[Frame<S>],
 ) {
     for c in (ref_idx + 1..=active).rev() {
         list[c] = list[c - 1];
@@ -306,7 +316,12 @@ fn place_long(
     }
 }
 
-fn short_index(dpb: &[Frame], number: i32, current: u32, max_fn: u32) -> Option<usize> {
+fn short_index<S: Sample>(
+    dpb: &[Frame<S>],
+    number: i32,
+    current: u32,
+    max_fn: u32,
+) -> Option<usize> {
     dpb.iter().position(|frame| {
         frame.referenced
             && !frame.long_term
@@ -315,7 +330,7 @@ fn short_index(dpb: &[Frame], number: i32, current: u32, max_fn: u32) -> Option<
     })
 }
 
-fn long_index(dpb: &[Frame], long_num: u32) -> Option<usize> {
+fn long_index<S: Sample>(dpb: &[Frame<S>], long_num: u32) -> Option<usize> {
     let Ok(long_num) = i32::try_from(long_num) else {
         return None;
     };
@@ -324,7 +339,7 @@ fn long_index(dpb: &[Frame], long_num: u32) -> Option<usize> {
     })
 }
 
-fn pic_num_f(dpb: &[Frame], slot: usize, nums: &ShortNums) -> i32 {
+fn pic_num_f<S: Sample>(dpb: &[Frame<S>], slot: usize, nums: &ShortNums) -> i32 {
     let Some(frame) = dpb.get(slot) else {
         return nums.max_pic;
     };
@@ -334,7 +349,7 @@ fn pic_num_f(dpb: &[Frame], slot: usize, nums: &ShortNums) -> i32 {
     pic_num(frame, nums.current, nums.max_fn)
 }
 
-fn same_long(dpb: &[Frame], slot: usize, long_num: u32) -> bool {
+fn same_long<S: Sample>(dpb: &[Frame<S>], slot: usize, long_num: u32) -> bool {
     let Ok(long_num) = i32::try_from(long_num) else {
         return false;
     };
@@ -343,9 +358,9 @@ fn same_long(dpb: &[Frame], slot: usize, long_num: u32) -> bool {
     })
 }
 
-pub(crate) fn decode_mbs(
-    pic: &mut Frame,
-    dpb: &[Frame],
+pub(crate) fn decode_mbs<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     slice_id: u16,
     next_mb: &mut usize,
@@ -405,8 +420,8 @@ pub(crate) fn decode_mbs(
     Ok(())
 }
 
-fn cabac_skip(
-    pic: &Frame,
+fn cabac_skip<S: Sample>(
+    pic: &Frame<S>,
     cab: &mut Cabac<'_>,
     kind: u8,
     slice_id: u16,
@@ -428,9 +443,9 @@ fn cabac_skip(
     Ok(cab.decision(11 + ctx)? == 1)
 }
 
-fn skip_mb(
-    pic: &mut Frame,
-    dpb: &[Frame],
+fn skip_mb<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
@@ -440,8 +455,8 @@ fn skip_mb(
     let mut mb = Mb::new(slice_id);
     mb.skip = true;
     mb.qp = qp as i8;
-    mb.qp_c = recon::chroma_qp(qp, slice.pps.chroma_qp_offset) as i8;
-    mb.qp_cr = recon::chroma_qp(qp, slice.pps.second_chroma_qp_offset) as i8;
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
@@ -463,7 +478,7 @@ fn skip_mb(
     Ok(())
 }
 
-fn p_skip_mv(pic: &Frame, mx: usize, my: usize, slice: u16) -> [i16; 2] {
+fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i16; 2] {
     let left = neighbor(pic, mx as i32 - 1, my as i32, slice);
     let above = neighbor(pic, mx as i32, my as i32 - 1, slice);
     let zero = |mb: &Mb, bx: usize, by: usize| {
@@ -485,9 +500,9 @@ fn p_skip_mv(pic: &Frame, mx: usize, my: usize, slice: u16) -> [i16; 2] {
     }
 }
 
-fn one_mb(
-    pic: &mut Frame,
-    dpb: &[Frame],
+fn one_mb<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
@@ -534,8 +549,8 @@ fn one_mb(
         )?;
     }
     mb.qp = qp as i8;
-    mb.qp_c = recon::chroma_qp(qp, slice.pps.chroma_qp_offset) as i8;
-    mb.qp_cr = recon::chroma_qp(qp, slice.pps.second_chroma_qp_offset) as i8;
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
     if !mb.intra {
         bind_refs(&mut mb, slice);
     }
@@ -543,8 +558,8 @@ fn one_mb(
     Ok(qp)
 }
 
-fn mb_type(
-    pic: &Frame,
+fn mb_type<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     kind: u8,
     mx: usize,
@@ -568,8 +583,8 @@ fn mb_type(
     }
 }
 
-fn cabac_mb_type(
-    pic: &Frame,
+fn cabac_mb_type<S: Sample>(
+    pic: &Frame<S>,
     cab: &mut Cabac<'_>,
     kind: u8,
     mx: usize,
@@ -615,7 +630,7 @@ fn cabac_mb_type(
     Ok((true, cabac_intra_type(pic, cab, 3, true, mx, my, slice)?))
 }
 
-fn direct_ctx(pic: &Frame, mx: usize, my: usize, slice: u16) -> usize {
+fn direct_ctx<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> usize {
     // Clause 9.3.3.1.1.3: a missing neighbor, B_Skip, or B_Direct_16x16 contributes 0.
     let coded = |mb: &Mb| !mb.skip && !mb.direct16;
     let left = neighbor(pic, mx as i32 - 1, my as i32, slice).is_some_and(coded);
@@ -623,8 +638,8 @@ fn direct_ctx(pic: &Frame, mx: usize, my: usize, slice: u16) -> usize {
     usize::from(left) + usize::from(above)
 }
 
-fn cabac_intra_type(
-    pic: &Frame,
+fn cabac_intra_type<S: Sample>(
+    pic: &Frame<S>,
     cab: &mut Cabac<'_>,
     base: usize,
     intra_slice: bool,
@@ -663,8 +678,8 @@ fn cabac_intra_type(
     Ok(kind)
 }
 
-fn decode_intra(
-    pic: &mut Frame,
+fn decode_intra<S: Sample>(
+    pic: &mut Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     at: Place,
@@ -715,7 +730,7 @@ fn decode_intra(
     let mut delta = 0;
     if luma_cbp > 0 || chroma_cbp > 0 || i16 {
         delta = qp_delta(entropy, prev_qpd(pic, mx, my, mb.slice))?;
-        *qp = (*qp + delta).rem_euclid(52);
+        *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
     let mut luma_dc = [0i32; 16];
@@ -797,8 +812,8 @@ fn decode_intra(
     Ok(())
 }
 
-fn read_intra4(
-    pic: &Frame,
+fn read_intra4<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     mx: usize,
@@ -835,8 +850,8 @@ fn read_intra4(
     Ok(0)
 }
 
-fn read_intra8(
-    pic: &Frame,
+fn read_intra8<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     mx: usize,
@@ -877,8 +892,8 @@ fn read_intra8(
     Ok(0)
 }
 
-fn mode_at(
-    pic: &Frame,
+fn mode_at<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     bx: i32,
@@ -945,8 +960,8 @@ fn read_mode(entropy: &mut Entropy<'_, '_>, pred: u8) -> Result<u8, CodecError> 
     }
 }
 
-fn read_chroma_mode(
-    pic: &Frame,
+fn read_chroma_mode<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
@@ -987,8 +1002,8 @@ fn read_chroma_mode(
     }
 }
 
-fn read_cbp(
-    pic: &Frame,
+fn read_cbp<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
@@ -1028,7 +1043,14 @@ fn read_cbp(
     }
 }
 
-fn cbp_ctx(pic: &Frame, mx: usize, my: usize, bit: usize, current: u8, slice: u16) -> usize {
+fn cbp_ctx<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    bit: usize,
+    current: u8,
+    slice: u16,
+) -> usize {
     let (left_bit, above_bit) = match bit {
         0 => (0x02, 0x04),
         1 => (0x01, 0x08),
@@ -1048,14 +1070,14 @@ fn cbp_ctx(pic: &Frame, mx: usize, my: usize, bit: usize, current: u8, slice: u1
     usize::from(!left_coded) + 2 * usize::from(!above_coded)
 }
 
-fn coded_bit(pic: &Frame, mx: i32, my: i32, bit: u8, slice: u16) -> bool {
+fn coded_bit<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, bit: u8, slice: u16) -> bool {
     match neighbor(pic, mx, my, slice) {
         Some(mb) => mb.pcm || mb.cbp & bit != 0,
         None => true,
     }
 }
 
-fn cbp_chroma(pic: &Frame, mx: i32, my: i32, slice: u16) -> u8 {
+fn cbp_chroma<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> u8 {
     match neighbor(pic, mx, my, slice) {
         Some(mb) if mb.pcm => 2,
         Some(mb) => mb.cbp >> 4,
@@ -1092,7 +1114,7 @@ fn qp_delta(entropy: &mut Entropy<'_, '_>, prev_nonzero: bool) -> Result<i32, Co
     }
 }
 
-fn prev_qpd(pic: &Frame, mx: usize, my: usize, slice: u16) -> bool {
+fn prev_qpd<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> bool {
     let addr = my * pic.mb_w + mx;
     if addr == 0 {
         return false;
@@ -1102,8 +1124,8 @@ fn prev_qpd(pic: &Frame, mx: usize, my: usize, slice: u16) -> bool {
         .is_some_and(|mb| mb.slice == slice && mb.qpd != 0)
 }
 
-fn transform8_flag(
-    pic: &Frame,
+fn transform8_flag<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
@@ -1122,8 +1144,8 @@ fn flag(entropy: &mut Entropy<'_, '_>, ctx: usize) -> Result<bool, CodecError> {
     }
 }
 
-fn read_block(
-    pic: &Frame,
+fn read_block<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     ask: (usize, usize, bool),
     at: Place,
@@ -1180,8 +1202,8 @@ fn read_block(
     Ok(coeffs)
 }
 
-fn read8(
-    pic: &Frame,
+fn read8<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
@@ -1220,8 +1242,8 @@ fn read8(
 
 type ChromaResidual = ([i32; 4], [i32; 4], [[i32; 16]; 4], [[i32; 16]; 4]);
 
-fn read_chroma(
-    pic: &Frame,
+fn read_chroma<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
@@ -1290,7 +1312,15 @@ fn read_chroma(
     Ok((cb_dc, cr_dc, cb_ac, cr_ac))
 }
 
-fn nc_of(pic: &Frame, mx: usize, my: usize, bx: usize, by: usize, mb: &Mb, plane: u8) -> i32 {
+fn nc_of<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    bx: usize,
+    by: usize,
+    mb: &Mb,
+    plane: u8,
+) -> i32 {
     let left = nnz_at(pic, mx, my, bx as i32 - 1, by as i32, mb, plane);
     let above = nnz_at(pic, mx, my, bx as i32, by as i32 - 1, mb, plane);
     match (left, above) {
@@ -1301,8 +1331,8 @@ fn nc_of(pic: &Frame, mx: usize, my: usize, bx: usize, by: usize, mb: &Mb, plane
     }
 }
 
-fn nnz_at(
-    pic: &Frame,
+fn nnz_at<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     bx: i32,
@@ -1348,7 +1378,7 @@ fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
 }
 
 /// Clause 9.3.3.1.1.9 for ctxBlockCat 0. A neighbour contributes its DC flag only when it is Intra_16x16.
-fn cbf_dc_luma(pic: &Frame, mx: usize, my: usize, mb: &Mb) -> usize {
+fn cbf_dc_luma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> usize {
     let flag = |dx: i32, dy: i32| -> usize {
         let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
             return usize::from(mb.intra);
@@ -1365,7 +1395,7 @@ fn cbf_dc_luma(pic: &Frame, mx: usize, my: usize, mb: &Mb) -> usize {
 }
 
 /// Clause 9.3.3.1.1.9 for ctxBlockCat 3. The neighbour contributes its chroma DC flag.
-fn cbf_dc_chroma(pic: &Frame, mx: usize, my: usize, mb: &Mb, which: usize) -> usize {
+fn cbf_dc_chroma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, which: usize) -> usize {
     let flag = |dx: i32, dy: i32| -> usize {
         let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
             return usize::from(mb.intra);
@@ -1381,7 +1411,14 @@ fn cbf_dc_chroma(pic: &Frame, mx: usize, my: usize, mb: &Mb, which: usize) -> us
     flag(-1, 0) + 2 * flag(0, -1)
 }
 
-fn cbf_inc(pic: &Frame, at: Place, cell: Cell, mb: &Mb, plane: u8, dc: bool) -> usize {
+fn cbf_inc<S: Sample>(
+    pic: &Frame<S>,
+    at: Place,
+    cell: Cell,
+    mb: &Mb,
+    plane: u8,
+    dc: bool,
+) -> usize {
     let Place { mx, my } = at;
     let Cell { bx, by } = cell;
     let left = nnz_at(pic, mx, my, bx as i32 - 1, by as i32, mb, plane)
@@ -1488,8 +1525,8 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result
     Ok(())
 }
 
-fn recon_intra(
-    pic: &mut Frame,
+fn recon_intra<S: Sample>(
+    pic: &mut Frame<S>,
     slice: &Slice<'_>,
     at: Place,
     mb: &Mb,
@@ -1525,7 +1562,7 @@ fn recon_intra(
         put_block(&mut pic.y, pic.w, x0, y0, &pred, 16);
         let dc = recon::luma_dc(
             &luma_dc_raster(&luma_dc),
-            qp,
+            qp + S::QP_BD,
             i32::from(slice.pps.weight4[0][0]),
         );
         for (i, samples) in ac.iter().enumerate() {
@@ -1544,7 +1581,7 @@ fn recon_intra(
                 block[ry * 4 + rx] = if n == 0 {
                     level
                 } else {
-                    recon::scale4(level, qp, rx, ry, weight)
+                    recon::scale4(level, qp + S::QP_BD, rx, ry, weight)
                 };
             }
             if mb.cbp & 15 == 0 {
@@ -1609,19 +1646,19 @@ fn luma_dc_raster(scan: &[i32; 16]) -> [i32; 16] {
     out
 }
 
-fn pred4_block(
-    pic: &Frame,
+fn pred4_block<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     bx: usize,
     by: usize,
     mb: &Mb,
     constrained: bool,
-) -> [u8; 16] {
+) -> [S; 16] {
     let ax = mx * 4 + bx;
     let ay = my * 4 + by;
-    let mut above = [128u8; 8];
-    let mut left = [128u8; 4];
+    let mut above = [S::mid(); 8];
+    let mut left = [S::mid(); 4];
     let here = (mx, my, bx, by);
     let above_ok = row_ok(pic, ax, ay as i32 - 1, mb.slice, constrained, here);
     let left_ok = col_ok(pic, ax as i32 - 1, ay, mb.slice, constrained, here);
@@ -1652,7 +1689,7 @@ fn pred4_block(
     } else if left_ok {
         left[0]
     } else {
-        128
+        S::mid()
     };
     recon::pred4(
         mb.mode4[by * 4 + bx],
@@ -1664,18 +1701,18 @@ fn pred4_block(
     )
 }
 
-fn pred8_block(
-    pic: &Frame,
+fn pred8_block<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     bx: usize,
     by: usize,
     mb: &Mb,
     constrained: bool,
-) -> [u8; 64] {
+) -> [S; 64] {
     let mode = mb.mode4[by * 4 + bx];
-    let mut raw_above = [128u8; 16];
-    let mut raw_left = [128u8; 8];
+    let mut raw_above = [S::mid(); 16];
+    let mut raw_left = [S::mid(); 8];
     let x = (mx * 16 + bx * 4) as i32;
     let y = (my * 16 + by * 4) as i32;
     let here = (mx, my, bx, by);
@@ -1718,7 +1755,7 @@ fn pred8_block(
     let corner = if above_ok && left_ok {
         pix(&pic.y, pic.w, pic.h, x - 1, y - 1)
     } else {
-        128
+        S::mid()
     };
     let above = filter_row(&raw_above, corner, above_ok, left_ok);
     let left = filter_col(&raw_left, corner, above_ok, left_ok);
@@ -1727,7 +1764,7 @@ fn pred8_block(
     } else {
         corner
     };
-    let mut out = [0u8; 64];
+    let mut out = [S::default(); 64];
     for row in 0..8 {
         for col in 0..8 {
             out[row * 8 + col] =
@@ -1737,14 +1774,14 @@ fn pred8_block(
     out
 }
 
-fn pred8_at(
+fn pred8_at<S: Sample>(
     mode: u8,
     at: (usize, usize),
-    above: &[u8; 16],
-    left: &[u8; 8],
-    corner: u8,
+    above: &[S; 16],
+    left: &[S; 8],
+    corner: S,
     present: (bool, bool),
-) -> u8 {
+) -> S {
     let (x, y) = at;
     let (above_ok, left_ok) = present;
     match mode {
@@ -1760,7 +1797,7 @@ fn pred8_at(
     }
 }
 
-fn pred8_down_left(x: usize, y: usize, above: &[u8; 16]) -> u8 {
+fn pred8_down_left<S: Sample>(x: usize, y: usize, above: &[S; 16]) -> S {
     if x == 7 && y == 7 {
         avg3(above[14], above[15], above[15])
     } else {
@@ -1768,7 +1805,7 @@ fn pred8_down_left(x: usize, y: usize, above: &[u8; 16]) -> u8 {
     }
 }
 
-fn pred8_down_right(x: usize, y: usize, above: &[u8; 16], left: &[u8; 8], corner: u8) -> u8 {
+fn pred8_down_right<S: Sample>(x: usize, y: usize, above: &[S; 16], left: &[S; 8], corner: S) -> S {
     let x = i32::try_from(x).unwrap_or(0);
     let y = i32::try_from(y).unwrap_or(0);
     if x > y {
@@ -1788,7 +1825,13 @@ fn pred8_down_right(x: usize, y: usize, above: &[u8; 16], left: &[u8; 8], corner
     }
 }
 
-fn pred8_vertical_right(x: usize, y: usize, above: &[u8; 16], left: &[u8; 8], corner: u8) -> u8 {
+fn pred8_vertical_right<S: Sample>(
+    x: usize,
+    y: usize,
+    above: &[S; 16],
+    left: &[S; 8],
+    corner: S,
+) -> S {
     let x = i32::try_from(x).unwrap_or(0);
     let y = i32::try_from(y).unwrap_or(0);
     let z = 2 * x - y;
@@ -1818,7 +1861,13 @@ fn pred8_vertical_right(x: usize, y: usize, above: &[u8; 16], left: &[u8; 8], co
     }
 }
 
-fn pred8_horizontal_down(x: usize, y: usize, above: &[u8; 16], left: &[u8; 8], corner: u8) -> u8 {
+fn pred8_horizontal_down<S: Sample>(
+    x: usize,
+    y: usize,
+    above: &[S; 16],
+    left: &[S; 8],
+    corner: S,
+) -> S {
     let x = i32::try_from(x).unwrap_or(0);
     let y = i32::try_from(y).unwrap_or(0);
     let z = 2 * y - x;
@@ -1848,7 +1897,7 @@ fn pred8_horizontal_down(x: usize, y: usize, above: &[u8; 16], left: &[u8; 8], c
     }
 }
 
-fn pred8_vertical_left(x: usize, y: usize, above: &[u8; 16]) -> u8 {
+fn pred8_vertical_left<S: Sample>(x: usize, y: usize, above: &[S; 16]) -> S {
     let base = x + (y >> 1);
     if y.is_multiple_of(2) {
         avg2(above[base], above[base + 1])
@@ -1857,7 +1906,7 @@ fn pred8_vertical_left(x: usize, y: usize, above: &[u8; 16]) -> u8 {
     }
 }
 
-fn pred8_horizontal_up(x: usize, y: usize, left: &[u8; 8]) -> u8 {
+fn pred8_horizontal_up<S: Sample>(x: usize, y: usize, left: &[S; 8]) -> S {
     let z = x + 2 * y;
     let base = y + (x >> 1);
     if matches!(z, 0 | 2 | 4 | 6 | 8 | 10 | 12) {
@@ -1871,29 +1920,30 @@ fn pred8_horizontal_up(x: usize, y: usize, left: &[u8; 8]) -> u8 {
     }
 }
 
-fn above_at(above: &[u8; 16], corner: u8, index: i32) -> u8 {
+fn above_at<S: Sample>(above: &[S; 16], corner: S, index: i32) -> S {
     let Ok(index) = usize::try_from(index) else {
         return corner;
     };
     above.get(index).copied().unwrap_or(corner)
 }
 
-fn left_at(left: &[u8; 8], corner: u8, index: i32) -> u8 {
+fn left_at<S: Sample>(left: &[S; 8], corner: S, index: i32) -> S {
     let Ok(index) = usize::try_from(index) else {
         return corner;
     };
     left.get(index).copied().unwrap_or(corner)
 }
 
-fn avg2(a: u8, b: u8) -> u8 {
-    u8::try_from((i32::from(a) + i32::from(b) + 1) >> 1).unwrap_or(0)
+fn avg2<S: Sample>(a: S, b: S) -> S {
+    let (a, b): (i32, i32) = (a.into(), b.into());
+    S::clip((a + b + 1) >> 1)
 }
 
 /// The eight samples to the right of an Intra_8x8 block's above row.
 ///
 /// They belong to one macroblock. A later macroblock in this slice is not
 /// constructed yet, so it is not a neighbour.
-fn above8_right(pic: &Frame, x: i32, y: i32, slice: u16, constrained: bool) -> bool {
+fn above8_right<S: Sample>(pic: &Frame<S>, x: i32, y: i32, slice: u16, constrained: bool) -> bool {
     let sx = x + 8;
     let sy = y - 1;
     if sx < 0 || sy < 0 {
@@ -1905,7 +1955,7 @@ fn above8_right(pic: &Frame, x: i32, y: i32, slice: u16, constrained: bool) -> b
     !constrained || side.intra
 }
 
-fn filter_row(raw: &[u8; 16], corner: u8, above_ok: bool, left_ok: bool) -> [u8; 16] {
+fn filter_row<S: Sample>(raw: &[S; 16], corner: S, above_ok: bool, left_ok: bool) -> [S; 16] {
     let mut out = *raw;
     if !above_ok {
         return out;
@@ -1919,7 +1969,7 @@ fn filter_row(raw: &[u8; 16], corner: u8, above_ok: bool, left_ok: bool) -> [u8;
     out
 }
 
-fn filter_col(raw: &[u8; 8], corner: u8, above_ok: bool, left_ok: bool) -> [u8; 8] {
+fn filter_col<S: Sample>(raw: &[S; 8], corner: S, above_ok: bool, left_ok: bool) -> [S; 8] {
     let mut out = *raw;
     if !left_ok {
         return out;
@@ -1933,28 +1983,30 @@ fn filter_col(raw: &[u8; 8], corner: u8, above_ok: bool, left_ok: bool) -> [u8; 
     out
 }
 
-fn avg3(a: u8, b: u8, c: u8) -> u8 {
-    ((i32::from(a) + 2 * i32::from(b) + i32::from(c) + 2) >> 2) as u8
+fn avg3<S: Sample>(a: S, b: S, c: S) -> S {
+    let (a, b, c): (i32, i32, i32) = (a.into(), b.into(), c.into());
+    S::clip((a + 2 * b + c + 2) >> 2)
 }
 
-fn dc8(above: &[u8], left: &[u8], above_ok: bool, left_ok: bool) -> u8 {
+fn dc8<S: Sample>(above: &[S], left: &[S], above_ok: bool, left_ok: bool) -> S {
+    let sample = |v: &S| -> i32 { (*v).into() };
     if above_ok && left_ok {
-        let sum = above[..8].iter().map(|v| i32::from(*v)).sum::<i32>()
-            + left[..8].iter().map(|v| i32::from(*v)).sum::<i32>();
-        ((sum + 8) >> 4) as u8
+        let sum =
+            above[..8].iter().map(sample).sum::<i32>() + left[..8].iter().map(sample).sum::<i32>();
+        S::clip((sum + 8) >> 4)
     } else if above_ok {
-        let sum = above[..8].iter().map(|v| i32::from(*v)).sum::<i32>();
-        ((sum + 4) >> 3) as u8
+        let sum = above[..8].iter().map(sample).sum::<i32>();
+        S::clip((sum + 4) >> 3)
     } else if left_ok {
-        let sum = left[..8].iter().map(|v| i32::from(*v)).sum::<i32>();
-        ((sum + 4) >> 3) as u8
+        let sum = left[..8].iter().map(sample).sum::<i32>();
+        S::clip((sum + 4) >> 3)
     } else {
-        128
+        S::mid()
     }
 }
 
-fn recon_chroma(
-    pic: &mut Frame,
+fn recon_chroma<S: Sample>(
+    pic: &mut Frame<S>,
     slice: &Slice<'_>,
     at: Place,
     mode: u8,
@@ -1971,8 +2023,8 @@ fn recon_chroma(
     let (qp, intra, slice_id) = flags;
     let x0 = mx * 8;
     let y0 = my * 8;
-    let qp_cb = recon::chroma_qp(qp, slice.pps.chroma_qp_offset);
-    let qp_cr = recon::chroma_qp(qp, slice.pps.second_chroma_qp_offset);
+    let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
+    let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
     // Intra chroma uses lists 1 and 2. Inter chroma uses lists 4 and 5.
     let base = if intra { 1 } else { 4 };
     for (cb, dc, ac, qp_c, list) in [
@@ -3034,17 +3086,17 @@ mod oracle {
     }
 }
 
-fn corner_sample(
-    plane: &[u8],
+fn corner_sample<S: Sample>(
+    plane: &[S],
     stride: usize,
     height: usize,
     mx: usize,
     my: usize,
     size: i32,
     present: bool,
-) -> u8 {
+) -> S {
     if !present || mx == 0 || my == 0 {
-        return 128;
+        return S::mid();
     }
     pix(
         plane,
@@ -3055,21 +3107,21 @@ fn corner_sample(
     )
 }
 
-fn edge16(
-    pic: &Frame,
+fn edge16<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     slice: u16,
     constrained: bool,
-) -> (Vec<u8>, Vec<u8>, bool, bool) {
+) -> (Vec<S>, Vec<S>, bool, bool) {
     let above_ok = my > 0
         && neighbor(pic, mx as i32, my as i32 - 1, slice)
             .is_some_and(|mb| !constrained || mb.intra);
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice)
             .is_some_and(|mb| !constrained || mb.intra);
-    let mut above = vec![128u8; 17];
-    let mut left = vec![128u8; 17];
+    let mut above = vec![S::mid(); 17];
+    let mut left = vec![S::mid(); 17];
     if above_ok {
         for (k, slot) in above[..16].iter_mut().enumerate() {
             *slot = pix(
@@ -3109,14 +3161,14 @@ fn edge16(
     (above, left, above_ok, left_ok)
 }
 
-fn edge_chroma(
-    pic: &Frame,
+fn edge_chroma<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     cb: bool,
     slice_id: u16,
     constrained: bool,
-) -> (Vec<u8>, Vec<u8>, bool, bool) {
+) -> (Vec<S>, Vec<S>, bool, bool) {
     let plane = if cb { &pic.u } else { &pic.v };
     let stride = pic.w / 2;
     let height = pic.h / 2;
@@ -3126,8 +3178,8 @@ fn edge_chroma(
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice_id)
             .is_some_and(|mb| !constrained || mb.intra);
-    let mut above = vec![128u8; 9];
-    let mut left = vec![128u8; 9];
+    let mut above = vec![S::mid(); 9];
+    let mut left = vec![S::mid(); 9];
     if above_ok {
         for (k, slot) in above[..8].iter_mut().enumerate() {
             *slot = pix(
@@ -3167,8 +3219,8 @@ fn edge_chroma(
     (above, left, above_ok, left_ok)
 }
 
-fn row_ok(
-    pic: &Frame,
+fn row_ok<S: Sample>(
+    pic: &Frame<S>,
     ax: usize,
     ay: i32,
     slice: u16,
@@ -3190,8 +3242,8 @@ fn row_ok(
     !constrained || mb.intra
 }
 
-fn col_ok(
-    pic: &Frame,
+fn col_ok<S: Sample>(
+    pic: &Frame<S>,
     ax: i32,
     ay: usize,
     slice: u16,
@@ -3213,8 +3265,8 @@ fn col_ok(
     !constrained || mb.intra
 }
 
-fn above_right_ok(
-    pic: &Frame,
+fn above_right_ok<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     bx: usize,
@@ -3256,18 +3308,18 @@ fn scan_of(bx: usize, by: usize) -> usize {
     }
 }
 
-fn pix(plane: &[u8], stride: usize, height: usize, x: i32, y: i32) -> u8 {
+fn pix<S: Sample>(plane: &[S], stride: usize, height: usize, x: i32, y: i32) -> S {
     if stride == 0 || height == 0 {
-        return 128;
+        return S::mid();
     }
     let x = x.clamp(0, stride as i32 - 1) as usize;
     let y = y.clamp(0, height as i32 - 1) as usize;
-    plane.get(y * stride + x).copied().unwrap_or(128)
+    plane.get(y * stride + x).copied().unwrap_or(S::mid())
 }
 
-fn decode_inter(
-    pic: &mut Frame,
-    dpb: &[Frame],
+fn decode_inter<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     at: Place,
@@ -3302,7 +3354,7 @@ fn decode_inter(
     let mut delta = 0;
     if luma_cbp > 0 || chroma_cbp > 0 {
         delta = qp_delta(entropy, prev_qpd(pic, mx, my, mb.slice))?;
-        *qp = (*qp + delta).rem_euclid(52);
+        *qp = next_qp::<S>(*qp, delta);
     }
     mb.qpd = delta as i8;
     predict_inter(pic, dpb, slice, mx, my, mb)?;
@@ -3368,8 +3420,8 @@ fn decode_inter(
     Ok(())
 }
 
-fn read_parts(
-    pic: &Frame,
+fn read_parts<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     mx: usize,
@@ -3549,13 +3601,29 @@ fn read_te(entropy: &mut Entropy<'_, '_>, range: usize, ctx: usize) -> Result<u3
     }
 }
 
-fn ref_ctx(pic: &Frame, mx: usize, my: usize, bx: usize, by: usize, list: usize, mb: &Mb) -> usize {
+fn ref_ctx<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    bx: usize,
+    by: usize,
+    list: usize,
+    mb: &Mb,
+) -> usize {
     let left = ref_at(pic, mx, my, bx as i32 - 1, by as i32, list, mb);
     let above = ref_at(pic, mx, my, bx as i32, by as i32 - 1, list, mb);
     usize::from(left > 0) + 2 * usize::from(above > 0)
 }
 
-fn ref_at(pic: &Frame, mx: usize, my: usize, bx: i32, by: i32, list: usize, current: &Mb) -> i8 {
+fn ref_at<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    bx: i32,
+    by: i32,
+    list: usize,
+    current: &Mb,
+) -> i8 {
     let (mbx, ox) = if bx < 0 {
         (mx as i32 - 1, 1)
     } else {
@@ -3588,8 +3656,8 @@ fn listed_ref(mb: &Mb, index: usize, list: usize) -> i8 {
     }
 }
 
-fn read_mvd_part(
-    pic: &Frame,
+fn read_mvd_part<S: Sample>(
+    pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     at: Place,
@@ -3690,7 +3758,13 @@ fn read_mvd(entropy: &mut Entropy<'_, '_>, sum: i32, base: usize) -> Result<i32,
     }
 }
 
-fn mvd_sum(pic: &Frame, at: Place, cell: Cell, which: (usize, usize), mb: &Mb) -> i32 {
+fn mvd_sum<S: Sample>(
+    pic: &Frame<S>,
+    at: Place,
+    cell: Cell,
+    which: (usize, usize),
+    mb: &Mb,
+) -> i32 {
     let Place { mx, my } = at;
     let Cell { bx, by } = cell;
     let (list, comp) = which;
@@ -3711,7 +3785,13 @@ fn mvd_sum(pic: &Frame, at: Place, cell: Cell, which: (usize, usize), mb: &Mb) -
     left.abs() + above.abs()
 }
 
-fn mvd_at(pic: &Frame, at: Place, cell: (i32, i32), which: (usize, usize), current: &Mb) -> i32 {
+fn mvd_at<S: Sample>(
+    pic: &Frame<S>,
+    at: Place,
+    cell: (i32, i32),
+    which: (usize, usize),
+    current: &Mb,
+) -> i32 {
     let Place { mx, my } = at;
     let (bx, by) = cell;
     let (list, comp) = which;
@@ -3744,8 +3824,8 @@ struct Motion {
     reference: i8,
 }
 
-fn mvp(
-    pic: &Frame,
+fn mvp<S: Sample>(
+    pic: &Frame<S>,
     at: Place,
     cell: Cell,
     size: (usize, usize),
@@ -3819,8 +3899,8 @@ fn mark_decoded(mb: &mut Mb, x: usize, y: usize, w: usize, h: usize) {
     }
 }
 
-fn part_motion(
-    pic: &Frame,
+fn part_motion<S: Sample>(
+    pic: &Frame<S>,
     mx: usize,
     my: usize,
     bx: i32,
@@ -3884,9 +3964,9 @@ fn motion_of(mb: &Mb, index: usize, list: usize) -> Motion {
     }
 }
 
-fn read_sub(
-    pic: &Frame,
-    dpb: &[Frame],
+fn read_sub<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     at: Place,
@@ -4066,9 +4146,9 @@ fn sub_shape(kind: u8, spec: u32) -> (bool, bool, usize, usize) {
     (l0, l1, w, h)
 }
 
-fn direct_8(
-    pic: &Frame,
-    dpb: &[Frame],
+fn direct_8<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     at: Place,
     origin: (usize, usize),
@@ -4087,9 +4167,9 @@ fn direct_8(
     apply_direct(pic, dpb, slice, mx, my, mb, &blocks);
 }
 
-fn direct_16(
-    pic: &Frame,
-    dpb: &[Frame],
+fn direct_16<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     mx: usize,
     my: usize,
@@ -4104,9 +4184,9 @@ fn direct_16(
 }
 
 /// Clause 8.4.1.2.3. Scale the co-located motion vector by the picture-order distance.
-fn temporal_direct(
-    pic: &Frame,
-    dpb: &[Frame],
+fn temporal_direct<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     mx: usize,
     my: usize,
@@ -4194,9 +4274,9 @@ fn clip_mv(value: i32) -> i16 {
 }
 
 /// Clause 8.4.1.2.2. One reference pair for the macroblock; each 4×4 may be forced to a zero vector.
-fn apply_direct(
-    pic: &Frame,
-    dpb: &[Frame],
+fn apply_direct<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     mx: usize,
     my: usize,
@@ -4260,7 +4340,7 @@ fn apply_direct(
     }
 }
 
-fn direct_refs(pic: &Frame, mx: usize, my: usize, mb: &Mb) -> (i8, i8, bool) {
+fn direct_refs<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> (i8, i8, bool) {
     let reference = |list: usize| {
         let a = part_motion(pic, mx, my, -1, 0, list, mb);
         let b = part_motion(pic, mx, my, 0, -1, list, mb);
@@ -4290,7 +4370,7 @@ fn min_positive(left: i8, right: i8) -> i8 {
     }
 }
 
-fn col_zero(dpb: &[Frame], slice: &Slice<'_>, addr: usize, index: usize) -> bool {
+fn col_zero<S: Sample>(dpb: &[Frame<S>], slice: &Slice<'_>, addr: usize, index: usize) -> bool {
     let Some(&frame_index) = slice.ref1.first() else {
         return false;
     };
@@ -4317,9 +4397,9 @@ fn col_zero(dpb: &[Frame], slice: &Slice<'_>, addr: usize, index: usize) -> bool
     reference == 0 && (-1..=1).contains(&mv[0]) && (-1..=1).contains(&mv[1])
 }
 
-fn predict_inter(
-    pic: &mut Frame,
-    dpb: &[Frame],
+fn predict_inter<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     mx: usize,
     my: usize,
@@ -4403,17 +4483,17 @@ struct McMotion {
     mv1: [i16; 2],
 }
 
-fn mc_block(
-    pic: &mut Frame,
-    dpb: &[Frame],
+fn mc_block<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     block: Block,
     motion: McMotion,
 ) -> Result<(), CodecError> {
     let Block { x, y, w, h } = block;
     let McMotion { r0, r1, mv0, mv1 } = motion;
-    let mut luma0 = [0u8; 256];
-    let mut luma1 = [0u8; 256];
+    let mut luma0 = [S::default(); 256];
+    let mut luma1 = [S::default(); 256];
     if r0 >= 0 {
         let frame = reference_frame(dpb, slice, 0, r0)?;
         predict_luma(&mut luma0, frame, x, y, w, h, mv0);
@@ -4424,10 +4504,10 @@ fn mc_block(
     }
     let cw = w / 2;
     let ch = h / 2;
-    let mut u0 = [0u8; 64];
-    let mut v0 = [0u8; 64];
-    let mut u1 = [0u8; 64];
-    let mut v1 = [0u8; 64];
+    let mut u0 = [S::default(); 64];
+    let mut v0 = [S::default(); 64];
+    let mut u1 = [S::default(); 64];
+    let mut v1 = [S::default(); 64];
     if r0 >= 0 && cw > 0 && ch > 0 {
         let frame = reference_frame(dpb, slice, 0, r0)?;
         predict_chroma((&mut u0, &mut v0), frame, (x, y), (cw, ch), mv0);
@@ -4443,7 +4523,7 @@ fn mc_block(
         (w, h),
         (&luma0, &luma1),
         mix(slice, r0, r1, -1),
-        0,
+        S::default(),
     );
     if cw > 0 && ch > 0 {
         let stride = pic.w / 2;
@@ -4456,7 +4536,7 @@ fn mc_block(
             size,
             (&u0, &u1),
             mix(slice, r0, r1, 0),
-            128,
+            S::mid(),
         );
         store_block(
             &mut pic.v,
@@ -4465,7 +4545,7 @@ fn mc_block(
             size,
             (&v0, &v1),
             mix(slice, r0, r1, 1),
-            128,
+            S::mid(),
         );
     }
     Ok(())
@@ -4556,14 +4636,14 @@ fn uni_mix(slice: &Slice<'_>, list: usize, reference: i8, plane: i8) -> Mix {
     }
 }
 
-fn store_block(
-    dst: &mut [u8],
+fn store_block<S: Sample>(
+    dst: &mut [S],
     stride: usize,
     origin: (usize, usize),
     size: (usize, usize),
-    pred: (&[u8], &[u8]),
+    pred: (&[S], &[S]),
     mix: Mix,
-    fill: u8,
+    fill: S,
 ) {
     let (x, y) = origin;
     let (w, h) = size;
@@ -4636,12 +4716,12 @@ fn store_block(
     }
 }
 
-fn reference_frame<'a>(
-    dpb: &'a [Frame],
+fn reference_frame<'a, S: Sample>(
+    dpb: &'a [Frame<S>],
     slice: &Slice<'_>,
     list: usize,
     reference: i8,
-) -> Result<&'a Frame, CodecError> {
+) -> Result<&'a Frame<S>, CodecError> {
     let refs = if list == 0 { &slice.ref0 } else { &slice.ref1 };
     let index = usize::try_from(reference).map_err(|_| CodecError::Malformed {
         at_bit: 0,
@@ -4674,9 +4754,9 @@ fn reference_frame<'a>(
     Ok(frame)
 }
 
-fn predict_luma(
-    dst: &mut [u8],
-    frame: &Frame,
+fn predict_luma<S: Sample>(
+    dst: &mut [S],
+    frame: &Frame<S>,
     x: usize,
     y: usize,
     w: usize,
@@ -4705,9 +4785,9 @@ fn predict_luma(
     );
 }
 
-fn predict_chroma(
-    planes: (&mut [u8], &mut [u8]),
-    frame: &Frame,
+fn predict_chroma<S: Sample>(
+    planes: (&mut [S], &mut [S]),
+    frame: &Frame<S>,
     at: (usize, usize),
     size: (usize, usize),
     mv: [i16; 2],
@@ -4761,8 +4841,24 @@ fn listed<T: Copy>(values: &[T], index: i8) -> Option<T> {
     values.get(index).copied()
 }
 
-fn read_pcm(
-    pic: &mut Frame,
+fn pcm_code<S: Sample>(bytes: &[u8], bit: &mut usize) -> Result<S, CodecError> {
+    let mut value = 0u32;
+    for _ in 0..S::BITS {
+        let Some(byte) = bytes.get(*bit / 8).copied() else {
+            return Err(CodecError::Truncated {
+                at_bit: 0,
+                what: "pcm",
+            });
+        };
+        let shift = 7 - (*bit % 8);
+        value = (value << 1) | u32::from((byte >> shift) & 1);
+        *bit += 1;
+    }
+    Ok(S::from_code(value))
+}
+
+fn read_pcm<S: Sample>(
+    pic: &mut Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     mx: usize,
     my: usize,
@@ -4779,46 +4875,47 @@ fn read_pcm(
             }
             for row in 0..16 {
                 for col in 0..16 {
-                    pic.y[(y0 + row) * pic.w + x0 + col] = bits.u(8)? as u8;
+                    pic.y[(y0 + row) * pic.w + x0 + col] = S::from_code(bits.u(S::BITS)?);
                 }
             }
             for plane in [&mut pic.u, &mut pic.v] {
                 let stride = pic.w / 2;
                 for row in 0..8 {
                     for col in 0..8 {
-                        plane[(y0 / 2 + row) * stride + x0 / 2 + col] = bits.u(8)? as u8;
+                        plane[(y0 / 2 + row) * stride + x0 / 2 + col] =
+                            S::from_code(bits.u(S::BITS)?);
                     }
                 }
             }
         }
         Entropy::Cabac(cab) => {
             let bytes = cab.tail();
-            if bytes.len() < 384 {
-                return Err(CodecError::Truncated {
-                    at_bit: 0,
-                    what: "pcm",
-                });
-            }
+            let mut bit = 0usize;
             for row in 0..16 {
                 for col in 0..16 {
-                    pic.y[(y0 + row) * pic.w + x0 + col] = bytes[row * 16 + col];
+                    pic.y[(y0 + row) * pic.w + x0 + col] = pcm_code::<S>(bytes, &mut bit)?;
                 }
             }
-            for row in 0..8 {
-                for col in 0..8 {
-                    let stride = pic.w / 2;
-                    pic.u[(y0 / 2 + row) * stride + x0 / 2 + col] = bytes[256 + row * 8 + col];
-                    pic.v[(y0 / 2 + row) * stride + x0 / 2 + col] = bytes[320 + row * 8 + col];
+            let stride = pic.w / 2;
+            for plane in [&mut pic.u, &mut pic.v] {
+                for row in 0..8 {
+                    for col in 0..8 {
+                        plane[(y0 / 2 + row) * stride + x0 / 2 + col] =
+                            pcm_code::<S>(bytes, &mut bit)?;
+                    }
                 }
             }
-            let rest = &bytes[384..];
+            let rest = bytes.get(bit.div_ceil(8)..).ok_or(CodecError::Truncated {
+                at_bit: 0,
+                what: "pcm",
+            })?;
             **cab = Cabac::open(rest, slice.qp, if slice.kind == 2 { 0 } else { 1 })?;
         }
     }
     Ok(())
 }
 
-fn neighbor(pic: &Frame, mx: i32, my: i32, slice: u16) -> Option<&Mb> {
+fn neighbor<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> Option<&Mb> {
     if mx < 0 || my < 0 || mx as usize >= pic.mb_w || my as usize >= pic.h / 16 {
         return None;
     }
@@ -4829,11 +4926,11 @@ fn neighbor(pic: &Frame, mx: i32, my: i32, slice: u16) -> Option<&Mb> {
     Some(mb)
 }
 
-fn xy(pic: &Frame, addr: usize) -> (usize, usize) {
+fn xy<S: Sample>(pic: &Frame<S>, addr: usize) -> (usize, usize) {
     (addr % pic.mb_w, addr / pic.mb_w)
 }
 
-pub(crate) fn deblock(pic: &mut Frame) {
+pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
     let mb_w = pic.mb_w;
     let mb_h = pic.h / 16;
     for my in 0..mb_h {
@@ -4939,7 +5036,13 @@ pub(crate) fn deblock(pic: &mut Frame) {
     }
 }
 
-fn edge_strength(pic: &Frame, mx: usize, my: usize, edge: usize, vertical: bool) -> [u8; 4] {
+fn edge_strength<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    edge: usize,
+    vertical: bool,
+) -> [u8; 4] {
     let Some(current) = pic.mb.get(my * pic.mb_w + mx) else {
         return [0; 4];
     };
@@ -4995,8 +5098,8 @@ fn inter_strength(q: &Mb, neighbor: Option<&Mb>, edge: usize, line: usize, verti
     motion_strength(p_pred, q_pred)
 }
 
-fn filter_groups(
-    plane: &mut [u8],
+fn filter_groups<S: Sample>(
+    plane: &mut [S],
     stride: usize,
     at: (usize, usize),
     kind: (bool, bool, usize),
@@ -5053,14 +5156,21 @@ fn filter_groups(
     }
 }
 
-fn offsets(pic: &Frame, index: usize) -> (i32, i32) {
+fn offsets<S: Sample>(pic: &Frame<S>, index: usize) -> (i32, i32) {
     pic.mb
         .get(index)
         .map(|mb| (i32::from(mb.off_a), i32::from(mb.off_b)))
         .unwrap_or((0, 0))
 }
 
-fn edge_qp(pic: &Frame, mx: usize, my: usize, luma: bool, vertical: bool, boundary: bool) -> i32 {
+fn edge_qp<S: Sample>(
+    pic: &Frame<S>,
+    mx: usize,
+    my: usize,
+    luma: bool,
+    vertical: bool,
+    boundary: bool,
+) -> i32 {
     let index = my * pic.mb_w + mx;
     let current = pic
         .mb
@@ -5165,7 +5275,7 @@ fn ref_slot(list: &[usize], index: i8) -> i8 {
 }
 
 /// A macroblock edge is filtered across slices unless this slice asked not to.
-fn filter_boundary(pic: &Frame, mx: usize, my: usize, vertical: bool) -> bool {
+fn filter_boundary<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, vertical: bool) -> bool {
     let Some(mb) = coded_mb(pic, mx as i32, my as i32) else {
         return false;
     };
@@ -5180,7 +5290,7 @@ fn filter_boundary(pic: &Frame, mx: usize, my: usize, vertical: bool) -> bool {
     coded_mb(pic, nx, ny).is_some_and(|other| other.slice == mb.slice)
 }
 
-fn coded_mb(pic: &Frame, mx: i32, my: i32) -> Option<&Mb> {
+fn coded_mb<S: Sample>(pic: &Frame<S>, mx: i32, my: i32) -> Option<&Mb> {
     if mx < 0 || my < 0 || mx as usize >= pic.mb_w || my as usize >= pic.h / 16 {
         return None;
     }

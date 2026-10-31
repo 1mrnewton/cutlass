@@ -1,6 +1,7 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
-//! Interlaced pictures, other chroma formats, and other bit depths are refused.
+//! Interlaced pictures and chroma formats other than 4:2:0 are refused.
+//! Bit depths other than 8 and 10 are refused.
 
 use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, Transfer};
 
@@ -38,6 +39,7 @@ pub struct Sps {
     pub transfer: Transfer,
     pub matrix: ColorMatrix,
     pub max_reorder: u32,
+    pub bit_depth: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +104,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         });
     }
     let mut chroma_format = 1u8;
+    let mut bit_depth = 8u8;
     let mut weight4 = flat4();
     let mut weight8 = flat8();
     if matches!(
@@ -116,9 +119,10 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         }
         let bit_depth_luma = bits.ue()?;
         let bit_depth_chroma = bits.ue()?;
-        if bit_depth_luma != 0 || bit_depth_chroma != 0 {
+        if bit_depth_luma != bit_depth_chroma || !matches!(bit_depth_luma, 0 | 2) {
             return Err(CodecError::Unsupported { what: "bit depth" });
         }
+        bit_depth = (8 + bit_depth_luma) as u8;
         if bits.bit()? {
             return Err(CodecError::Unsupported {
                 what: "qpprime transform bypass",
@@ -238,6 +242,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         transfer: vui.transfer,
         matrix: vui.matrix,
         max_reorder: vui.max_reorder,
+        bit_depth,
     };
     sps.visible()?;
     Ok(sps)
@@ -393,7 +398,12 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
     }
     let weighted_pred = bits.bit()?;
     let weighted_bipred = bits.u(2)? as u8;
-    let init_qp = bits.se()? + 26;
+    let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
+    let init_minus = bits.se()?;
+    if !(-(26 + qp_bd)..=25).contains(&init_minus) {
+        return Err(bits.malformed("init qp"));
+    }
+    let init_qp = init_minus + 26;
     let _ = bits.se()?;
     let chroma_qp_offset = bits.se()?;
     let deblocking_control = bits.bit()?;

@@ -35,7 +35,7 @@ pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
     ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
     PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
-    VideoFrame, Yuv420p,
+    VideoFrame, Yuv420p, Yuv420p10,
 };
 pub use video::VideoDecodeFactory;
 
@@ -245,11 +245,13 @@ pub trait Decoder: Send {
 
 /// One decoded picture, in display order once it is released.
 ///
-/// `picture` is the cropped coded-domain sample buffer. Color tags describe
-/// that buffer. They are not a conversion.
+/// `picture` is the cropped 8-bit 4:2:0 buffer. When `yuv420p10` is set, that
+/// buffer is the decoded picture and `picture` is those samples shifted right
+/// by two bits. Color tags describe the decoded samples. They are not a conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoOutput {
     pub picture: Yuv420p,
+    pub yuv420p10: Option<Yuv420p10>,
     pub pts: i64,
     pub duration: i64,
     pub timescale: u32,
@@ -629,6 +631,7 @@ mod tests {
             let picture = Yuv420p::solid(2, 2, 16, 128, 128).expect("picture");
             Ok(vec![VideoOutput {
                 picture,
+                yuv420p10: None,
                 pts: packet.pts,
                 duration: packet.duration,
                 timescale: packet.timescale,

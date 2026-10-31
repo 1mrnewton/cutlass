@@ -286,9 +286,84 @@ impl Yuv420p {
     }
 }
 
+/// Tightly packed 10-bit 4:2:0, visible region only.
+///
+/// Each sample is a `u16` in `0..=1023`, stored in the low 10 bits. `y` is
+/// `width * height` samples. `u` and `v` are each `(width / 2) * (height / 2)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv420p10 {
+    width: u32,
+    height: u32,
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+}
+
+impl Yuv420p10 {
+    /// Both edges must be even, non-zero, and at most 8192.
+    pub fn try_new(
+        width: u32,
+        height: u32,
+        y: Vec<u16>,
+        u: Vec<u16>,
+        v: Vec<u16>,
+    ) -> Result<Self, FrameError> {
+        if width == 0 || height == 0 {
+            return Err(FrameError::Empty);
+        }
+        if width > 8192 || height > 8192 {
+            return Err(FrameError::Limit);
+        }
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(FrameError::Odd);
+        }
+        let y_len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(FrameError::Limit)?;
+        let c_len = ((width / 2) as usize)
+            .checked_mul((height / 2) as usize)
+            .ok_or(FrameError::Limit)?;
+        if y.len() != y_len || u.len() != c_len || v.len() != c_len {
+            return Err(FrameError::Length);
+        }
+        Ok(Self {
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u16] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u16] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u16] {
+        &self.v
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FrameError, Plane, VideoFrame, Yuv420p};
+    use super::{FrameError, Plane, VideoFrame, Yuv420p, Yuv420p10};
 
     #[test]
     fn a_solid_picture_keeps_even_planes() {
@@ -330,5 +405,17 @@ mod tests {
         assert_eq!(frame.u.width, 2);
         assert_eq!(frame.u.height, 1);
         assert_eq!(frame.y.samples.len(), 6);
+    }
+
+    #[test]
+    fn ten_bit_420_keeps_the_sample_count() {
+        let frame =
+            Yuv420p10::try_new(4, 2, vec![1000; 8], vec![512, 512], vec![0, 4]).expect("frame");
+        assert_eq!(frame.y(), &[1000; 8]);
+        assert_eq!(frame.u(), &[512, 512]);
+        assert_eq!(
+            Yuv420p10::try_new(4, 2, vec![0; 8], vec![0], vec![0, 0]),
+            Err(FrameError::Length)
+        );
     }
 }

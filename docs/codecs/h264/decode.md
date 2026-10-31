@@ -36,7 +36,7 @@ These are the current code limits, not Annex A. A picture inside a level the rec
 | PPS ids | 256 |
 | CPB count in the HRD | 32 |
 
-3840×2160 is 8,294,400 pixels, so that size already fits. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg inside the cropped rectangle: 351 pictures, 20536 ms, 17.1 fps, release, Apple M5 Pro. 4096×2160 is 8,847,360 pixels. Annex A level 5.2 allows it. This decoder refuses it. The earlier measured run is 1280×720.
+3840×2160 is 8,294,400 pixels, so that size already fits. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg inside the cropped rectangle: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro. 4096×2160 is 8,847,360 pixels. Annex A level 5.2 allows it. This decoder refuses it. The earlier measured run is 1280×720.
 
 ## Head to head
 
@@ -47,7 +47,7 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | Progressive 8-bit 4:2:0 | Clauses 7–8 | Yes | Yes | Done |
 | Baseline, Main, High (`profile_idc` 66, 77, 100) | Annex A | Yes | Yes | Done |
 | Extended (`88`) without data partitions | Annex A | Yes | The profile id is accepted. Partition NALs still fail. | Yet |
-| 10-bit 4:2:0 | High 10. `bit_depth_luma_minus8` is 2 | Yes | Refused | Yet |
+| 10-bit 4:2:0 | High 10. `bit_depth_luma_minus8` is 2 | Yes | Pictures match | Done |
 | Bit depths 9, 12, and 14 | `bit_depth_luma_minus8` 1, 4, and 6 | Yes, at 4:2:0, 4:2:2, and 4:4:4 | Refused | Yet |
 | Bit depths 11 and 13 | `bit_depth_luma_minus8` 3 and 5 | Refused (`Unimplemented luma bit depth`) | Refused | Yet. The recommendation is the oracle. |
 | 4:2:2 and 4:4:4 | High 4:2:2, High 4:4:4 | Yes, at 8, 9, 10, 12, and 14 bits | Refused | Yet |
@@ -80,7 +80,7 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | Error concealment | Not in the decoding process | Conceals missing slices | An incomplete picture is an error. The next good IDR still decodes. | Out. Do not conceal. |
 | Frame threads and slice threads | Not in the decoding process | Both, from a shared pool in `libavcodec`. `-threads 1` forces one thread. Omitting `-threads` uses FFmpeg’s own count. | One thread. The decoder does not spawn. | Later. A shared Cutlass pool, not a pool inside this crate. |
 | 1280×720 High, one thread | — | 140 ms, 849 fps, 120 frames | 420 ms, 286 fps, 120 frames | Speed |
-| 3840×2160 High 8-bit 4:2:0, one thread | Legal at this size | Pictures match. Not timed. | 20536 ms, 17.1 fps, 351 frames | Done |
+| 3840×2160 High 8-bit 4:2:0, one thread | Legal at this size | Pictures match. Not timed. | 21348 ms, 16.4 fps, 351 frames | Done |
 
 The 720p numbers are the recorded `against_ffmpeg` run: median of 3 after one warmup, Apple M5 Pro, release, FFmpeg 8.1.1. FFmpeg’s row includes process startup. Cutlass was about 3.0× slower. That run is throughput, not a second pixel check. Pixel checks on the supported tools are bit-exact inside the cropped rectangle against FFmpeg.
 
@@ -102,8 +102,8 @@ Do these in order. Each step is software decode. It is done when a new test fail
 
 The oracle command is `ffmpeg -hwaccel none -threads 1`. That is one software thread. This pass does not add a thread pool.
 
-1. **Prove the 8-bit 4:2:0 path.** Done. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg: 351 pictures, 20536 ms, 17.1 fps, release, Apple M5 Pro.
-2. **High 10.** `bit_depth_luma_minus8` and `bit_depth_chroma_minus8` are 2. Chroma stays 4:2:0. The output samples stay 10-bit. They match FFmpeg’s software decoder. An 8-bit picture still matches the pictures from step 1.
+1. **Prove the 8-bit 4:2:0 path.** Done. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro.
+2. **High 10.** Done. A libx264 High 10 4:2:0 stream matches `ffmpeg -hwaccel none -threads 1` as `yuv420p10le`. The samples stay 10-bit. The 3840×2160 High file still matches: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro.
 3. **Bit depths 9, 12, and 14.** `bit_depth_*_minus8` values 1, 4, and 6. FFmpeg’s software decoder reconstructs these. Then 11 and 13 (`minus8` 3 and 5). FFmpeg refuses those two, so the recommendation is the oracle. An 8-bit and a 10-bit picture still match the pictures from the earlier steps.
 4. **4:2:2 and 4:4:4.** At 8, 9, 10, 11, 12, 13, and 14 bits. Chroma block size follows the specification. FFmpeg is the oracle at 8, 9, 10, 12, and 14. The recommendation is the oracle at 11 and 13.
 5. **Separate colour planes, then lossless bypass.** `separate_colour_plane_flag`, then `qpprime_y_zero_transform_bypass_flag`. FFmpeg refuses separate colour planes, so the recommendation is the oracle for that flag. FFmpeg is the oracle for lossless bypass.

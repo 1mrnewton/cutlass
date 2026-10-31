@@ -2,13 +2,13 @@
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, DecodeFactory,
-    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420p,
+    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420p, Yuv420p10,
 };
 
 use crate::bits::Bits;
 use crate::cabac::Cabac;
 use crate::nal::{self, Nal};
-use crate::recon;
+use crate::recon::{self, Sample};
 use crate::set::{self, Pps, Sps, ZIGZAG4, ZIGZAG8};
 
 #[path = "mb.rs"]
@@ -117,10 +117,10 @@ impl Mb {
 }
 
 #[derive(Clone)]
-pub(crate) struct Frame {
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
+pub(crate) struct Frame<S: Sample = u8> {
+    y: Vec<S>,
+    u: Vec<S>,
+    v: Vec<S>,
     mb: Vec<Mb>,
     w: usize,
     h: usize,
@@ -189,10 +189,32 @@ impl Poc {
     }
 }
 
+#[derive(Clone)]
+enum Store {
+    Eight(Vec<Frame<u8>>),
+    Ten(Vec<Frame<recon::Ten>>),
+}
+
+impl Store {
+    fn depth(&self) -> u8 {
+        match self {
+            Store::Eight(_) => 8,
+            Store::Ten(_) => 10,
+        }
+    }
+
+    fn release(&mut self, keep: usize) -> Vec<VideoOutput> {
+        match self {
+            Store::Eight(dpb) => take_output(dpb, keep),
+            Store::Ten(dpb) => take_output(dpb, keep),
+        }
+    }
+}
+
 pub struct H264Decoder {
     length_size: u8,
     sets: Sets,
-    dpb: Vec<Frame>,
+    dpb: Store,
     poc: Poc,
     drained: bool,
     extra: Vec<u8>,
@@ -218,7 +240,7 @@ impl H264Decoder {
                 params.nal_length_size
             },
             sets: Sets::new(),
-            dpb: Vec::new(),
+            dpb: Store::Eight(Vec::new()),
             poc: Poc::new(),
             drained: false,
             extra: params.extra.clone(),
@@ -259,12 +281,10 @@ impl H264Decoder {
 
     /// The reconstructed picture for `pts`, including one still held for reorder.
     pub(crate) fn picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-        let frame = self
-            .dpb
-            .iter()
-            .rev()
-            .find(|frame| frame.pts == pts && !frame.nonexisting)?;
-        let output = emit(frame)?;
+        let output = match &self.dpb {
+            Store::Eight(dpb) => held_picture(dpb, pts)?,
+            Store::Ten(dpb) => held_picture(dpb, pts)?,
+        };
         Some((
             output.picture.y().to_vec(),
             output.picture.u().to_vec(),
@@ -286,18 +306,51 @@ impl VideoDecoder for H264Decoder {
         }
         let mut sets = self.sets.clone();
         let mut poc = self.poc.clone();
-        let mut dpb = self.dpb.clone();
-        let out = decode_au(
-            &mut sets,
-            &mut poc,
-            &mut dpb,
-            &packet.data,
-            self.length_size,
-            packet,
-        )?;
+        let depth = au_depth(&self.sets, &packet.data, self.length_size, self.dpb.depth())?;
+        let mut prior = if depth == self.dpb.depth() {
+            Vec::new()
+        } else {
+            poc = Poc::new();
+            let mut old = self.dpb.clone();
+            old.release(0)
+        };
+        let out = if depth == 10 {
+            let mut dpb = match &self.dpb {
+                Store::Ten(held) => held.clone(),
+                Store::Eight(_) => Vec::new(),
+            };
+            let out = decode_au::<recon::Ten>(
+                &mut sets,
+                &mut poc,
+                &mut dpb,
+                &packet.data,
+                self.length_size,
+                packet,
+            )?;
+            self.dpb = Store::Ten(dpb);
+            out
+        } else if depth == 8 {
+            let mut dpb = match &self.dpb {
+                Store::Eight(held) => held.clone(),
+                Store::Ten(_) => Vec::new(),
+            };
+            let out = decode_au::<u8>(
+                &mut sets,
+                &mut poc,
+                &mut dpb,
+                &packet.data,
+                self.length_size,
+                packet,
+            )?;
+            self.dpb = Store::Eight(dpb);
+            out
+        } else {
+            return Err(CodecError::Unsupported { what: "bit depth" });
+        };
+        prior.extend(out);
+        let out = prior;
         self.sets = sets;
         self.poc = poc;
-        self.dpb = dpb;
         self.drained = false;
         Ok(out)
     }
@@ -307,11 +360,11 @@ impl VideoDecoder for H264Decoder {
             return Ok(Vec::new());
         }
         self.drained = true;
-        Ok(take_output(&mut self.dpb, 0))
+        Ok(self.dpb.release(0))
     }
 
     fn reset(&mut self) {
-        self.dpb.clear();
+        self.dpb = Store::Eight(Vec::new());
         self.poc = Poc::new();
         self.drained = false;
         self.sets = Sets::new();
@@ -322,16 +375,56 @@ impl VideoDecoder for H264Decoder {
     }
 }
 
-fn decode_au(
+fn held_picture<S: Sample>(dpb: &[Frame<S>], pts: i64) -> Option<VideoOutput> {
+    let frame = dpb
+        .iter()
+        .rev()
+        .find(|frame| frame.pts == pts && !frame.nonexisting)?;
+    emit(frame)
+}
+
+fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8, CodecError> {
+    let nals = nal::access_unit(data, length_size)?;
+    let mut sets = sets.clone();
+    for nal in &nals {
+        match nal.kind {
+            7 => {
+                let sps = set::parse_sps(&nal.rbsp)?;
+                let id = usize::from(sps.id);
+                sets.sps[id] = Some(sps);
+            }
+            8 => {
+                let pps = set::parse_pps(&nal.rbsp, &sets.sps)?;
+                let id = usize::from(pps.id);
+                sets.pps[id] = Some(pps);
+            }
+            1 | 5 => {
+                let mut bits = Bits::new(&nal.rbsp);
+                let header = read_header(&mut bits, &sets, nal.kind == 5, nal.ref_idc != 0)?;
+                let Some(sps) = sets.sps[usize::from(header.sps_id)].as_ref() else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "missing sps",
+                    });
+                };
+                return Ok(sps.bit_depth);
+            }
+            _ => {}
+        }
+    }
+    Ok(current)
+}
+
+fn decode_au<S: Sample>(
     sets: &mut Sets,
     poc: &mut Poc,
-    dpb: &mut Vec<Frame>,
+    dpb: &mut Vec<Frame<S>>,
     data: &[u8],
     length_size: u8,
     packet: &Packet,
 ) -> Result<Vec<VideoOutput>, CodecError> {
     let nals = nal::access_unit(data, length_size)?;
-    let mut picture: Option<Frame> = None;
+    let mut picture: Option<Frame<S>> = None;
     let mut prior = Vec::new();
     let mut slice_id = 0u16;
     let mut next_mb = 0usize;
@@ -392,10 +485,10 @@ fn decode_au(
     Ok(pictures)
 }
 
-fn finish_picture(
+fn finish_picture<S: Sample>(
     _poc: &mut Poc,
-    dpb: &mut Vec<Frame>,
-    mut pic: Frame,
+    dpb: &mut Vec<Frame<S>>,
+    mut pic: Frame<S>,
 ) -> Result<Vec<VideoOutput>, CodecError> {
     let max_ref = dpb_max(dpb, &pic);
     if pic.referenced {
@@ -411,16 +504,16 @@ fn finish_picture(
     Ok(take_output(dpb, reorder))
 }
 
-fn dpb_max(dpb: &[Frame], pic: &Frame) -> usize {
+fn dpb_max<S: Sample>(dpb: &[Frame<S>], pic: &Frame<S>) -> usize {
     let _ = dpb;
     pic.max_ref.clamp(1, 16)
 }
 
-fn pic_reorder(pic: &Frame) -> usize {
+fn pic_reorder<S: Sample>(pic: &Frame<S>) -> usize {
     pic.reorder
 }
 
-fn mark_ref(dpb: &mut [Frame], pic: &Frame, max_ref: usize) {
+fn mark_ref<S: Sample>(dpb: &mut [Frame<S>], pic: &Frame<S>, max_ref: usize) {
     let mut short = dpb.iter().filter(|f| f.referenced && !f.long_term).count();
     let long = dpb.iter().filter(|f| f.referenced && f.long_term).count();
     short += 1;
@@ -435,7 +528,11 @@ fn mark_ref(dpb: &mut [Frame], pic: &Frame, max_ref: usize) {
 }
 
 /// Clause 8.2.5. Adaptive marking replaces the sliding window for this picture.
-fn apply_mmco(dpb: &mut [Frame], pic: &mut Frame, poc: &mut Poc) -> Result<(), CodecError> {
+fn apply_mmco<S: Sample>(
+    dpb: &mut [Frame<S>],
+    pic: &mut Frame<S>,
+    poc: &mut Poc,
+) -> Result<(), CodecError> {
     let mut current_long = false;
     for mark in pic.mmco.clone() {
         match mark.op {
@@ -538,8 +635,8 @@ fn apply_mmco(dpb: &mut [Frame], pic: &mut Frame, poc: &mut Poc) -> Result<(), C
     Ok(())
 }
 
-fn short_at(
-    dpb: &[Frame],
+fn short_at<S: Sample>(
+    dpb: &[Frame<S>],
     pic_num: i32,
     current: u32,
     max_fn: u32,
@@ -558,7 +655,7 @@ fn short_at(
     })
 }
 
-fn wrapped(frame: &Frame, current: u32, max_fn: u32) -> i32 {
+fn wrapped<S: Sample>(frame: &Frame<S>, current: u32, max_fn: u32) -> i32 {
     let mut number = i32::try_from(frame.frame_num).unwrap_or(0);
     if frame.frame_num > current {
         number -= i32::try_from(max_fn).unwrap_or(0);
@@ -566,8 +663,8 @@ fn wrapped(frame: &Frame, current: u32, max_fn: u32) -> i32 {
     number
 }
 
-fn assign_long(
-    dpb: &mut [Frame],
+fn assign_long<S: Sample>(
+    dpb: &mut [Frame<S>],
     pos: usize,
     idx: i32,
     max_long: Option<u8>,
@@ -589,7 +686,7 @@ fn assign_long(
     Ok(())
 }
 
-fn oldest_short(dpb: &[Frame], current: u32, max_fn: u32) -> Option<usize> {
+fn oldest_short<S: Sample>(dpb: &[Frame<S>], current: u32, max_fn: u32) -> Option<usize> {
     dpb.iter()
         .enumerate()
         .filter(|(_, frame)| frame.referenced && !frame.long_term)
@@ -600,10 +697,10 @@ fn oldest_short(dpb: &[Frame], current: u32, max_fn: u32) -> Option<usize> {
 /// Clause 8.2.5.2. Each missing frame_num becomes a non-existing short-term reference
 /// and can slide an older reference out. Those pictures are not displayed and are not
 /// eligible as inter references.
-fn fill_frame_num_gap(
+fn fill_frame_num_gap<S: Sample>(
     sps: &Sps,
     state: &mut Poc,
-    dpb: &mut Vec<Frame>,
+    dpb: &mut Vec<Frame<S>>,
     frame_num: u32,
 ) -> Result<(), CodecError> {
     if !state.have_ref {
@@ -662,7 +759,7 @@ fn ghost_order(sps: &Sps, state: &Poc, frame_num: u32) -> Result<(i32, u32), Cod
     Ok((poc, offset))
 }
 
-fn absent_frame(sps: &Sps, frame_num: u32, poc: i32) -> Frame {
+fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
     Frame {
         y: Vec::new(),
         u: Vec::new(),
@@ -698,7 +795,7 @@ fn absent_frame(sps: &Sps, frame_num: u32, poc: i32) -> Frame {
     }
 }
 
-fn take_output(dpb: &mut Vec<Frame>, keep: usize) -> Vec<VideoOutput> {
+fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<VideoOutput> {
     let mut out = Vec::new();
     loop {
         let pending: Vec<usize> = dpb
@@ -720,7 +817,24 @@ fn take_output(dpb: &mut Vec<Frame>, keep: usize) -> Vec<VideoOutput> {
     out
 }
 
-fn emit(frame: &Frame) -> Option<VideoOutput> {
+fn ten_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
+    if S::BITS == 10 {
+        Some(Vec::with_capacity(len))
+    } else {
+        None
+    }
+}
+
+fn pack_row<S: Sample>(src: &[S], eight: &mut [u8], mut ten: Option<&mut Vec<u16>>) {
+    for (out, sample) in eight.iter_mut().zip(src) {
+        *out = sample.pack_eight();
+        if let (Some(plane), Some(value)) = (ten.as_mut(), sample.pack_ten()) {
+            plane.push(value);
+        }
+    }
+}
+
+fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.nonexisting {
         return None;
     }
@@ -731,19 +845,39 @@ fn emit(frame: &Frame) -> Option<VideoOutput> {
     let mut y = vec![0u8; w * h];
     let mut u = vec![0u8; (w / 2) * (h / 2)];
     let mut v = vec![0u8; (w / 2) * (h / 2)];
+    let mut y10 = ten_plane::<S>(w * h);
+    let mut u10 = ten_plane::<S>((w / 2) * (h / 2));
+    let mut v10 = ten_plane::<S>((w / 2) * (h / 2));
     for row in 0..h {
         let src = (y0 + row) * frame.w + x0;
-        y[row * w..row * w + w].copy_from_slice(&frame.y[src..src + w]);
+        pack_row(
+            &frame.y[src..src + w],
+            &mut y[row * w..row * w + w],
+            y10.as_mut(),
+        );
     }
     for row in 0..h / 2 {
         let src = (y0 / 2 + row) * (frame.w / 2) + x0 / 2;
         let n = w / 2;
-        u[row * n..row * n + n].copy_from_slice(&frame.u[src..src + n]);
-        v[row * n..row * n + n].copy_from_slice(&frame.v[src..src + n]);
+        pack_row(
+            &frame.u[src..src + n],
+            &mut u[row * n..row * n + n],
+            u10.as_mut(),
+        );
+        pack_row(
+            &frame.v[src..src + n],
+            &mut v[row * n..row * n + n],
+            v10.as_mut(),
+        );
     }
     let picture = Yuv420p::try_new(frame.vis_w, frame.vis_h, y, u, v).ok()?;
+    let yuv420p10 = match (y10, u10, v10) {
+        (Some(y), Some(u), Some(v)) => Yuv420p10::try_new(frame.vis_w, frame.vis_h, y, u, v).ok(),
+        _ => None,
+    };
     Some(VideoOutput {
         picture,
+        yuv420p10,
         pts: frame.pts,
         duration: frame.duration,
         timescale: frame.timescale,
@@ -790,12 +924,12 @@ struct SliceCursor<'a> {
     packet: &'a Packet,
 }
 
-fn decode_slice(
+fn decode_slice<S: Sample>(
     sets: &mut Sets,
     poc_state: &mut Poc,
-    dpb: &mut Vec<Frame>,
+    dpb: &mut Vec<Frame<S>>,
     cursor: SliceCursor<'_>,
-    picture: &mut Option<Frame>,
+    picture: &mut Option<Frame<S>>,
     next_mb: &mut usize,
     prior: &mut Vec<VideoOutput>,
 ) -> Result<bool, CodecError> {
@@ -815,6 +949,9 @@ fn decode_slice(
     let Some(sps) = sets.sps[sps_id].clone() else {
         return Err(bits.malformed("missing sps"));
     };
+    if sps.bit_depth != S::BITS as u8 {
+        return Err(CodecError::Unsupported { what: "bit depth" });
+    }
     if picture.is_none() && !idr {
         fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
     }
@@ -1020,11 +1157,13 @@ fn read_header(
         if luma_denom > 7 || chroma_denom > 7 {
             return Err(bits.malformed("weight denom"));
         }
+        let sample_shift = i32::from(sps.bit_depth) - 8;
         read_weights(
             bits,
             0,
             num_ref_l0,
             (luma_denom, chroma_denom),
+            sample_shift,
             WeightTables {
                 yw: &mut yw,
                 yo: &mut yo,
@@ -1038,6 +1177,7 @@ fn read_header(
                 1,
                 num_ref_l1,
                 (luma_denom, chroma_denom),
+                sample_shift,
                 WeightTables {
                     yw: &mut yw,
                     yo: &mut yo,
@@ -1093,7 +1233,8 @@ fn read_header(
         }
     }
     let qp = pps.init_qp + bits.se()?;
-    if !(0..=51).contains(&qp) {
+    let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
+    if !(-qp_bd..=51).contains(&qp) {
         return Err(bits.malformed("slice qp"));
     }
     let mut deblock = 0u8;
@@ -1182,6 +1323,7 @@ fn read_weights(
     list: usize,
     n: usize,
     denom: (i32, i32),
+    sample_shift: i32,
     tables: WeightTables<'_>,
 ) -> Result<(), CodecError> {
     let (luma_denom, chroma_denom) = denom;
@@ -1193,12 +1335,12 @@ fn read_weights(
         co[list][i] = [0, 0];
         if bits.bit()? {
             yw[list][i] = bits.se()?;
-            yo[list][i] = bits.se()?;
+            yo[list][i] = bits.se()? << sample_shift;
         }
         if bits.bit()? {
             for c in 0..2 {
                 cw[list][i][c] = bits.se()?;
-                co[list][i][c] = bits.se()?;
+                co[list][i][c] = bits.se()? << sample_shift;
             }
         }
     }
@@ -1306,13 +1448,13 @@ fn poc_type1(
     })
 }
 
-fn new_frame(
+fn new_frame<S: Sample>(
     sps: &Sps,
     header: &Header,
     poc: i32,
     packet: &Packet,
     idr: bool,
-) -> Result<Frame, CodecError> {
+) -> Result<Frame<S>, CodecError> {
     let (vis_w, vis_h) = sps.visible()?;
     let w = sps.width as usize;
     let h = sps.height as usize;
@@ -1327,9 +1469,9 @@ fn new_frame(
         0
     };
     Ok(Frame {
-        y: vec![0; w.saturating_mul(h)],
-        u: vec![128; chroma],
-        v: vec![128; chroma],
+        y: vec![S::default(); w.saturating_mul(h)],
+        u: vec![S::mid(); chroma],
+        v: vec![S::mid(); chroma],
         mb: vec![Mb::new(u16::MAX); mb_w.saturating_mul(mb_h)],
         w,
         h,
@@ -1361,9 +1503,9 @@ fn new_frame(
     })
 }
 
-fn make_slice<'a>(
+fn make_slice<'a, S: Sample>(
     sets: &'a Sets,
-    dpb: &[Frame],
+    dpb: &[Frame<S>],
     header: &Header,
     poc: i32,
 ) -> Result<Slice<'a>, CodecError> {
@@ -1412,7 +1554,7 @@ fn make_slice<'a>(
     })
 }
 
-fn ref_marks(dpb: &[Frame], list: &[usize]) -> (Vec<i32>, Vec<bool>) {
+fn ref_marks<S: Sample>(dpb: &[Frame<S>], list: &[usize]) -> (Vec<i32>, Vec<bool>) {
     let mut pocs = Vec::with_capacity(list.len());
     let mut longs = Vec::with_capacity(list.len());
     for &index in list {
@@ -1447,7 +1589,7 @@ fn blk_y(i: usize) -> usize {
     ((i >> 1) & 1) | ((i >> 2) & 2)
 }
 
-fn put_block(plane: &mut [u8], stride: usize, x: usize, y: usize, src: &[u8], n: usize) {
+fn put_block<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, src: &[S], n: usize) {
     for row in 0..n {
         for col in 0..n {
             plane[(y + row) * stride + x + col] = src[row * n + col];
@@ -1455,8 +1597,8 @@ fn put_block(plane: &mut [u8], stride: usize, x: usize, y: usize, src: &[u8], n:
     }
 }
 
-fn add_scaled(
-    plane: &mut [u8],
+fn add_scaled<S: Sample>(
+    plane: &mut [S],
     stride: usize,
     origin: (usize, usize),
     coeffs: &[i32],
@@ -1471,7 +1613,7 @@ fn add_scaled(
             let (ry, rx) = (pos / 4, pos % 4);
             block[ry * 4 + rx] = recon::scale4(
                 coeffs.get(i).copied().unwrap_or(0),
-                qp,
+                qp + S::QP_BD,
                 rx,
                 ry,
                 i32::from(weight[ry * 4 + rx]),
@@ -1485,7 +1627,7 @@ fn add_scaled(
             let (ry, rx) = (pos / 8, pos % 8);
             block[ry * 8 + rx] = recon::scale8(
                 coeffs.get(i).copied().unwrap_or(0),
-                qp,
+                qp + S::QP_BD,
                 rx,
                 ry,
                 i32::from(weight[pos]),
@@ -1730,6 +1872,7 @@ mod tests {
             transfer: Transfer::Unspecified,
             matrix: ColorMatrix::Unspecified,
             max_reorder: 0,
+            bit_depth: 8,
         }
     }
 

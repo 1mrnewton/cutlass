@@ -55,6 +55,21 @@ pub fn chroma_qp(luma_qp: i32, offset: i32) -> i32 {
     CHROMA_QP[(luma_qp + offset).clamp(0, 51) as usize]
 }
 
+/// QP′C, which includes `qp_bd`, and the deblock index with that offset removed.
+///
+/// `luma_qp` is SliceQPY. For an 8-bit picture `qp_bd` is 0 and the quantiser
+/// index is [`chroma_qp`].
+pub fn chroma_qps(luma_qp: i32, offset: i32, qp_bd: i32) -> (i32, i32) {
+    let max = 51 + qp_bd;
+    let index = (luma_qp + qp_bd + offset).clamp(0, max);
+    let quant = if qp_bd > 0 && index < qp_bd {
+        index
+    } else {
+        CHROMA_QP[(index - qp_bd) as usize] + qp_bd
+    };
+    (quant, quant - qp_bd)
+}
+
 fn norm4(i: usize, j: usize) -> usize {
     if i.is_multiple_of(2) && j.is_multiple_of(2) {
         0
@@ -238,38 +253,127 @@ fn idct8_1d(d: &[i32], f: &mut [i32]) {
     f[4] = b6 - b1;
 }
 
-pub fn clip_u8(value: i32) -> u8 {
-    value.clamp(0, 255) as u8
+/// One sample width. `u8` is 8-bit. [`Ten`] is 10-bit.
+pub trait Sample: Copy + Default + Into<i32> {
+    const LIMIT: i32;
+    const MID: i32;
+    const SHIFT: i32;
+    const QP_BD: i32;
+    const BITS: u32;
+
+    fn clip(value: i32) -> Self;
+
+    fn mid() -> Self {
+        Self::clip(Self::MID)
+    }
+
+    /// A PCM code of [`Self::BITS`] bits.
+    fn from_code(value: u32) -> Self;
+
+    /// The sample in an 8-bit plane. A 10-bit sample keeps the top 8 bits.
+    fn pack_eight(self) -> u8;
+
+    /// The sample when this width is 10 bits.
+    fn pack_ten(self) -> Option<u16>;
 }
 
-pub fn add_block(plane: &mut [u8], stride: usize, x0: usize, y0: usize, block: &[i32], n: usize) {
+impl Sample for u8 {
+    const LIMIT: i32 = 255;
+    const MID: i32 = 128;
+    const SHIFT: i32 = 0;
+    const QP_BD: i32 = 0;
+    const BITS: u32 = 8;
+
+    fn clip(value: i32) -> Self {
+        value.clamp(0, Self::LIMIT) as u8
+    }
+
+    fn from_code(value: u32) -> Self {
+        value as u8
+    }
+
+    fn pack_eight(self) -> u8 {
+        self
+    }
+
+    fn pack_ten(self) -> Option<u16> {
+        None
+    }
+}
+
+/// One 10-bit sample, stored in the low 10 bits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ten(pub u16);
+
+impl From<Ten> for i32 {
+    fn from(value: Ten) -> Self {
+        i32::from(value.0)
+    }
+}
+
+impl Sample for Ten {
+    const LIMIT: i32 = 1023;
+    const MID: i32 = 512;
+    const SHIFT: i32 = 2;
+    const QP_BD: i32 = 12;
+    const BITS: u32 = 10;
+
+    fn clip(value: i32) -> Self {
+        Self(value.clamp(0, Self::LIMIT) as u16)
+    }
+
+    fn from_code(value: u32) -> Self {
+        Self((value & 1023) as u16)
+    }
+
+    fn pack_eight(self) -> u8 {
+        (self.0 >> 2) as u8
+    }
+
+    fn pack_ten(self) -> Option<u16> {
+        Some(self.0)
+    }
+}
+
+fn pel<S: Sample>(value: S) -> i32 {
+    value.into()
+}
+
+pub fn add_block<S: Sample>(
+    plane: &mut [S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    block: &[i32],
+    n: usize,
+) {
     for y in 0..n {
         for x in 0..n {
-            let sample = i32::from(plane[(y0 + y) * stride + x0 + x]) + block[y * n + x];
-            plane[(y0 + y) * stride + x0 + x] = clip_u8(sample);
+            let sample = pel(plane[(y0 + y) * stride + x0 + x]) + block[y * n + x];
+            plane[(y0 + y) * stride + x0 + x] = S::clip(sample);
         }
     }
 }
 
 /// `above` is 8 samples, `left` is 4, `corner` is p[-1,-1]. `above_ok[4..]` may be copied from above[3].
-pub fn pred4(
+pub fn pred4<S: Sample>(
     mode: u8,
-    above: &[u8; 8],
-    left: &[u8; 4],
-    corner: u8,
+    above: &[S; 8],
+    left: &[S; 4],
+    corner: S,
     above_ok: bool,
     left_ok: bool,
-) -> [u8; 16] {
-    let mut out = [0u8; 16];
+) -> [S; 16] {
+    let mut out = [S::default(); 16];
     let p = |x: i32, y: i32| -> i32 {
         if y == -1 && x == -1 {
-            i32::from(corner)
+            pel(corner)
         } else if y == -1 {
             let index = x.clamp(0, above.len() as i32 - 1) as usize;
-            i32::from(above[index])
+            pel(above[index])
         } else {
             let index = y.clamp(0, left.len() as i32 - 1) as usize;
-            i32::from(left[index])
+            pel(left[index])
         }
     };
     for y in 0..4 {
@@ -355,43 +459,42 @@ pub fn pred4(
                 }
                 _ => dc4(above, left, above_ok, left_ok),
             };
-            out[(y as usize) * 4 + x as usize] = clip_u8(sample);
+            out[(y as usize) * 4 + x as usize] = S::clip(sample);
         }
     }
     out
 }
 
-fn dc4(above: &[u8; 8], left: &[u8; 4], above_ok: bool, left_ok: bool) -> i32 {
+fn dc4<S: Sample>(above: &[S; 8], left: &[S; 4], above_ok: bool, left_ok: bool) -> i32 {
     if above_ok && left_ok {
-        (i32::from(above[0])
-            + i32::from(above[1])
-            + i32::from(above[2])
-            + i32::from(above[3])
-            + i32::from(left[0])
-            + i32::from(left[1])
-            + i32::from(left[2])
-            + i32::from(left[3])
+        (pel(above[0])
+            + pel(above[1])
+            + pel(above[2])
+            + pel(above[3])
+            + pel(left[0])
+            + pel(left[1])
+            + pel(left[2])
+            + pel(left[3])
             + 4)
             >> 3
     } else if left_ok {
-        (i32::from(left[0]) + i32::from(left[1]) + i32::from(left[2]) + i32::from(left[3]) + 2) >> 2
+        (pel(left[0]) + pel(left[1]) + pel(left[2]) + pel(left[3]) + 2) >> 2
     } else if above_ok {
-        (i32::from(above[0]) + i32::from(above[1]) + i32::from(above[2]) + i32::from(above[3]) + 2)
-            >> 2
+        (pel(above[0]) + pel(above[1]) + pel(above[2]) + pel(above[3]) + 2) >> 2
     } else {
-        128
+        S::MID
     }
 }
 
-pub fn pred16(
+pub fn pred16<S: Sample>(
     mode: u8,
-    above: &[u8],
-    left: &[u8],
+    above: &[S],
+    left: &[S],
     above_ok: bool,
     left_ok: bool,
-    corner: u8,
-) -> [u8; 256] {
-    let mut out = [128u8; 256];
+    corner: S,
+) -> [S; 256] {
+    let mut out = [S::mid(); 256];
     match mode {
         0 if above_ok => {
             for y in 0..16 {
@@ -405,17 +508,17 @@ pub fn pred16(
         }
         2 => {
             let value = if above_ok && left_ok {
-                let sum = above[..16].iter().map(|v| i32::from(*v)).sum::<i32>()
-                    + left[..16].iter().map(|v| i32::from(*v)).sum::<i32>();
-                ((sum + 16) >> 5) as u8
+                let sum = above[..16].iter().map(|v| pel(*v)).sum::<i32>()
+                    + left[..16].iter().map(|v| pel(*v)).sum::<i32>();
+                S::clip((sum + 16) >> 5)
             } else if left_ok {
-                let sum = left[..16].iter().map(|v| i32::from(*v)).sum::<i32>();
-                ((sum + 8) >> 4) as u8
+                let sum = left[..16].iter().map(|v| pel(*v)).sum::<i32>();
+                S::clip((sum + 8) >> 4)
             } else if above_ok {
-                let sum = above[..16].iter().map(|v| i32::from(*v)).sum::<i32>();
-                ((sum + 8) >> 4) as u8
+                let sum = above[..16].iter().map(|v| pel(*v)).sum::<i32>();
+                S::clip((sum + 8) >> 4)
             } else {
-                128
+                S::mid()
             };
             out.fill(value);
         }
@@ -426,44 +529,47 @@ pub fn pred16(
 }
 
 /// Equations 8-128 and 8-129. The last term on each side is the corner sample p[−1, −1].
-fn plane_gradient(samples: &[u8], corner: u8, half: usize) -> i32 {
+fn plane_gradient<S: Sample>(samples: &[S], corner: S, half: usize) -> i32 {
     let mut sum = 0i32;
     let last = half - 1;
     for step in 0..half {
         let weight = i32::try_from(step + 1).unwrap_or(0);
-        let right = i32::from(samples.get(half + step).copied().unwrap_or(0));
+        let right = pel(samples.get(half + step).copied().unwrap_or(S::default()));
         let left = if step == last {
-            i32::from(corner)
+            pel(corner)
         } else {
-            i32::from(samples.get(half - 2 - step).copied().unwrap_or(0))
+            pel(samples
+                .get(half - 2 - step)
+                .copied()
+                .unwrap_or(S::default()))
         };
         sum += weight * (right - left);
     }
     sum
 }
 
-fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8], corner: u8) {
+fn plane16<S: Sample>(out: &mut [S; 256], above: &[S], left: &[S], corner: S) {
     let h = plane_gradient(above, corner, 8);
     let v = plane_gradient(left, corner, 8);
-    let a = 16 * (i32::from(above[15]) + i32::from(left[15]));
+    let a = 16 * (pel(above[15]) + pel(left[15]));
     let b = (5 * h + 32) >> 6;
     let c = (5 * v + 32) >> 6;
     for y in 0..16 {
         for x in 0..16 {
-            out[y * 16 + x] = clip_u8((a + b * (x as i32 - 7) + c * (y as i32 - 7) + 16) >> 5);
+            out[y * 16 + x] = S::clip((a + b * (x as i32 - 7) + c * (y as i32 - 7) + 16) >> 5);
         }
     }
 }
 
-pub fn pred_chroma(
+pub fn pred_chroma<S: Sample>(
     mode: u8,
-    above: &[u8],
-    left: &[u8],
+    above: &[S],
+    left: &[S],
     above_ok: bool,
     left_ok: bool,
-    corner: u8,
-) -> [u8; 64] {
-    let mut out = [128u8; 64];
+    corner: S,
+) -> [S; 64] {
+    let mut out = [S::mid(); 64];
     match mode {
         1 if left_ok => {
             for y in 0..8 {
@@ -478,82 +584,64 @@ pub fn pred_chroma(
         3 if above_ok && left_ok => {
             let h = plane_gradient(above, corner, 4);
             let v = plane_gradient(left, corner, 4);
-            let a = 16 * (i32::from(above[7]) + i32::from(left[7]));
+            let a = 16 * (pel(above[7]) + pel(left[7]));
             let b = (17 * h + 16) >> 5;
             let c = (17 * v + 16) >> 5;
             for y in 0..8 {
                 for x in 0..8 {
                     out[y * 8 + x] =
-                        clip_u8((a + b * (x as i32 - 3) + c * (y as i32 - 3) + 16) >> 5);
+                        S::clip((a + b * (x as i32 - 3) + c * (y as i32 - 3) + 16) >> 5);
                 }
             }
         }
         _ => {
             // DC, four 4x4 regions.
-            let dc = |sum: i32, n: i32| ((sum + (n / 2)) / n) as u8;
+            let dc = |sum: i32, n: i32| S::clip((sum + (n / 2)) / n);
             let top_left = if above_ok && left_ok {
                 dc(
-                    i32::from(above[0])
-                        + i32::from(above[1])
-                        + i32::from(above[2])
-                        + i32::from(above[3])
-                        + i32::from(left[0])
-                        + i32::from(left[1])
-                        + i32::from(left[2])
-                        + i32::from(left[3]),
+                    pel(above[0])
+                        + pel(above[1])
+                        + pel(above[2])
+                        + pel(above[3])
+                        + pel(left[0])
+                        + pel(left[1])
+                        + pel(left[2])
+                        + pel(left[3]),
                     8,
                 )
             } else if above_ok {
                 dc(
-                    i32::from(above[0])
-                        + i32::from(above[1])
-                        + i32::from(above[2])
-                        + i32::from(above[3]),
+                    pel(above[0]) + pel(above[1]) + pel(above[2]) + pel(above[3]),
                     4,
                 )
             } else if left_ok {
-                dc(
-                    i32::from(left[0])
-                        + i32::from(left[1])
-                        + i32::from(left[2])
-                        + i32::from(left[3]),
-                    4,
-                )
+                dc(pel(left[0]) + pel(left[1]) + pel(left[2]) + pel(left[3]), 4)
             } else {
-                128
+                S::mid()
             };
             let top_right = if above_ok {
                 dc(
-                    i32::from(above[4])
-                        + i32::from(above[5])
-                        + i32::from(above[6])
-                        + i32::from(above[7]),
+                    pel(above[4]) + pel(above[5]) + pel(above[6]) + pel(above[7]),
                     4,
                 )
             } else {
                 top_left
             };
             let bot_left = if left_ok {
-                dc(
-                    i32::from(left[4])
-                        + i32::from(left[5])
-                        + i32::from(left[6])
-                        + i32::from(left[7]),
-                    4,
-                )
+                dc(pel(left[4]) + pel(left[5]) + pel(left[6]) + pel(left[7]), 4)
             } else {
                 top_left
             };
             let bot_right = if above_ok && left_ok {
                 dc(
-                    i32::from(above[4])
-                        + i32::from(above[5])
-                        + i32::from(above[6])
-                        + i32::from(above[7])
-                        + i32::from(left[4])
-                        + i32::from(left[5])
-                        + i32::from(left[6])
-                        + i32::from(left[7]),
+                    pel(above[4])
+                        + pel(above[5])
+                        + pel(above[6])
+                        + pel(above[7])
+                        + pel(left[4])
+                        + pel(left[5])
+                        + pel(left[6])
+                        + pel(left[7]),
                     8,
                 )
             } else if above_ok {
@@ -561,7 +649,7 @@ pub fn pred_chroma(
             } else if left_ok {
                 bot_left
             } else {
-                128
+                S::mid()
             };
             for y in 0..8 {
                 for x in 0..8 {
@@ -578,13 +666,21 @@ pub fn pred_chroma(
     out
 }
 
-pub fn sample(plane: &[u8], stride: usize, w: i32, h: i32, x: i32, y: i32) -> i32 {
+pub fn sample<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, x: i32, y: i32) -> i32 {
     let x = x.clamp(0, w - 1) as usize;
     let y = y.clamp(0, h - 1) as usize;
-    i32::from(plane[y * stride + x])
+    pel(plane[y * stride + x])
 }
 
-fn tap(plane: &[u8], stride: usize, w: i32, h: i32, x: i32, y: i32, horizontal: bool) -> i32 {
+fn tap<S: Sample>(
+    plane: &[S],
+    stride: usize,
+    w: i32,
+    h: i32,
+    x: i32,
+    y: i32,
+    horizontal: bool,
+) -> i32 {
     let at = |d: i32| {
         if horizontal {
             sample(plane, stride, w, h, x + d, y)
@@ -603,7 +699,7 @@ pub struct Pel {
 }
 
 /// Quarter-sample luma. `x` and `y` are the integer part, fractions are 0..3.
-pub fn qpel(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
+pub fn qpel<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, at: Pel) -> S {
     let Pel {
         x,
         y,
@@ -612,9 +708,9 @@ pub fn qpel(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
     } = at;
     let full = |dx: i32, dy: i32| sample(plane, stride, w, h, x + dx, y + dy);
     let half_h =
-        |dx: i32, dy: i32| clip_u8((tap(plane, stride, w, h, x + dx, y + dy, true) + 16) >> 5);
+        |dx: i32, dy: i32| S::clip((tap(plane, stride, w, h, x + dx, y + dy, true) + 16) >> 5);
     let half_v =
-        |dx: i32, dy: i32| clip_u8((tap(plane, stride, w, h, x + dx, y + dy, false) + 16) >> 5);
+        |dx: i32, dy: i32| S::clip((tap(plane, stride, w, h, x + dx, y + dy, false) + 16) >> 5);
     let half_h_raw = |dx: i32, dy: i32| tap(plane, stride, w, h, x + dx, y + dy, true);
     let diag = |dx: i32| {
         let mut acc = 0i32;
@@ -623,18 +719,18 @@ pub fn qpel(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
         for (k, &dy) in weights.iter().enumerate() {
             acc += coef[k] * half_h_raw(dx, dy);
         }
-        clip_u8((acc + 512) >> 10)
+        S::clip((acc + 512) >> 10)
     };
-    let avg = |a: u8, b: u8| (i32::from(a) + i32::from(b) + 1) >> 1;
+    let avg = |a: S, b: S| (pel(a) + pel(b) + 1) >> 1;
     let value = match (x_frac, y_frac) {
         (0, 0) => full(0, 0),
-        (1, 0) => avg(clip_u8(full(0, 0)), half_h(0, 0)),
-        (2, 0) => i32::from(half_h(0, 0)),
-        (3, 0) => avg(half_h(0, 0), clip_u8(full(1, 0))),
-        (0, 1) => avg(clip_u8(full(0, 0)), half_v(0, 0)),
-        (0, 2) => i32::from(half_v(0, 0)),
-        (0, 3) => avg(half_v(0, 0), clip_u8(full(0, 1))),
-        (2, 2) => i32::from(diag(0)),
+        (1, 0) => avg(S::clip(full(0, 0)), half_h(0, 0)),
+        (2, 0) => pel(half_h(0, 0)),
+        (3, 0) => avg(half_h(0, 0), S::clip(full(1, 0))),
+        (0, 1) => avg(S::clip(full(0, 0)), half_v(0, 0)),
+        (0, 2) => pel(half_v(0, 0)),
+        (0, 3) => avg(half_v(0, 0), S::clip(full(0, 1))),
+        (2, 2) => pel(diag(0)),
         (2, 1) => avg(half_h(0, 0), diag(0)),
         (1, 2) => avg(half_v(0, 0), diag(0)),
         (2, 3) => avg(diag(0), half_h(0, 1)),
@@ -644,10 +740,10 @@ pub fn qpel(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
         (1, 3) => avg(half_v(0, 0), half_h(0, 1)),
         _ => avg(half_v(1, 0), half_h(0, 1)),
     };
-    clip_u8(value)
+    S::clip(value)
 }
 
-pub fn chroma_mc(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
+pub fn chroma_mc<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, at: Pel) -> S {
     let Pel {
         x,
         y,
@@ -660,7 +756,7 @@ pub fn chroma_mc(plane: &[u8], stride: usize, w: i32, h: i32, at: Pel) -> u8 {
     let d = sample(plane, stride, w, h, x + 1, y + 1);
     let xf = x_frac.clamp(0, 7);
     let yf = y_frac.clamp(0, 7);
-    clip_u8(
+    S::clip(
         ((8 - xf) * (8 - yf) * a + xf * (8 - yf) * b + (8 - xf) * yf * c + xf * yf * d + 32) >> 6,
     )
 }
@@ -677,10 +773,10 @@ pub struct BlockMc {
 }
 
 /// Luma motion compensation for one partition. Matches [`qpel`] sample for sample.
-pub fn put_luma_block(
-    dst: &mut [u8],
+pub fn put_luma_block<S: Sample>(
+    dst: &mut [S],
     dst_stride: usize,
-    src: &[u8],
+    src: &[S],
     src_stride: usize,
     pic: (i32, i32),
     block: BlockMc,
@@ -761,10 +857,10 @@ pub fn put_luma_block(
 }
 
 /// Chroma motion compensation for one partition. Matches [`chroma_mc`].
-pub fn put_chroma_block(
-    dst: &mut [u8],
+pub fn put_chroma_block<S: Sample>(
+    dst: &mut [S],
     dst_stride: usize,
-    src: &[u8],
+    src: &[S],
     src_stride: usize,
     pic: (i32, i32),
     block: BlockMc,
@@ -804,8 +900,8 @@ pub fn put_chroma_block(
             let span = &src[start..start + w + 1];
             let out = &mut dst[row * dst_stride..row * dst_stride + w];
             for (sample, pair) in out.iter_mut().zip(span.windows(2)) {
-                let value = wa * i32::from(pair[0]) + xf * i32::from(pair[1]);
-                *sample = clip_u8((value + 4) >> 3);
+                let value = wa * pel(pair[0]) + xf * pel(pair[1]);
+                *sample = S::clip((value + 4) >> 3);
             }
         }
         return;
@@ -818,8 +914,8 @@ pub fn put_chroma_block(
             let row1 = &src[start + src_stride..start + src_stride + w];
             let out = &mut dst[row * dst_stride..row * dst_stride + w];
             for (sample, (&left, &right)) in out.iter_mut().zip(row0.iter().zip(row1)) {
-                let value = wa * i32::from(left) + yf * i32::from(right);
-                *sample = clip_u8((value + 4) >> 3);
+                let value = wa * pel(left) + yf * pel(right);
+                *sample = S::clip((value + 4) >> 3);
             }
         }
         return;
@@ -834,12 +930,12 @@ pub fn put_chroma_block(
         let row1 = &src[start + src_stride..start + src_stride + w + 1];
         let out = &mut dst[row * dst_stride..row * dst_stride + w];
         for (sample, (left, right)) in out.iter_mut().zip(row0.windows(2).zip(row1.windows(2))) {
-            let value = wa * i32::from(left[0])
-                + wb * i32::from(left[1])
-                + wc * i32::from(right[0])
-                + wd * i32::from(right[1])
+            let value = wa * pel(left[0])
+                + wb * pel(left[1])
+                + wc * pel(right[0])
+                + wd * pel(right[1])
                 + 32;
-            *sample = clip_u8(value >> 6);
+            *sample = S::clip(value >> 6);
         }
     }
 }
@@ -850,10 +946,10 @@ fn luma_window_inside(x: i32, y: i32, w: usize, h: usize, pic_w: i32, pic_h: i32
     x >= 2 && y >= 2 && x + bw + 3 <= pic_w && y + bh + 3 <= pic_h
 }
 
-fn put_chroma_extended(
-    dst: &mut [u8],
+fn put_chroma_extended<S: Sample>(
+    dst: &mut [S],
     dst_stride: usize,
-    src: &[u8],
+    src: &[S],
     src_stride: usize,
     pic: (i32, i32),
     block: BlockMc,
@@ -861,12 +957,12 @@ fn put_chroma_extended(
     let (pic_w, pic_h) = pic;
     let width = block.w + 1;
     let height = block.h + 1;
-    let mut window = [0u8; 17 * 17];
+    let mut window = [S::default(); 17 * 17];
     for row in 0..height {
         for col in 0..width {
             let sx = block.x + i32::try_from(col).unwrap_or(0);
             let sy = block.y + i32::try_from(row).unwrap_or(0);
-            window[row * width + col] = clip_u8(sample(src, src_stride, pic_w, pic_h, sx, sy));
+            window[row * width + col] = S::clip(sample(src, src_stride, pic_w, pic_h, sx, sy));
         }
     }
     let wide = i32::try_from(width).unwrap_or(0);
@@ -888,10 +984,10 @@ fn put_chroma_extended(
     );
 }
 
-fn put_luma_extended(
-    dst: &mut [u8],
+fn put_luma_extended<S: Sample>(
+    dst: &mut [S],
     dst_stride: usize,
-    src: &[u8],
+    src: &[S],
     src_stride: usize,
     pic: (i32, i32),
     block: BlockMc,
@@ -899,12 +995,12 @@ fn put_luma_extended(
     let (pic_w, pic_h) = pic;
     let width = block.w + 5;
     let height = block.h + 5;
-    let mut window = [0u8; 21 * 21];
+    let mut window = [S::default(); 21 * 21];
     for row in 0..height {
         for col in 0..width {
             let sx = block.x - 2 + i32::try_from(col).unwrap_or(0);
             let sy = block.y - 2 + i32::try_from(row).unwrap_or(0);
-            window[row * width + col] = clip_u8(sample(src, src_stride, pic_w, pic_h, sx, sy));
+            window[row * width + col] = S::clip(sample(src, src_stride, pic_w, pic_h, sx, sy));
         }
     }
     let wide = i32::try_from(width).unwrap_or(0);
@@ -926,10 +1022,10 @@ fn put_luma_extended(
     );
 }
 
-fn put_luma_scalar(
-    dst: &mut [u8],
+fn put_luma_scalar<S: Sample>(
+    dst: &mut [S],
     dst_stride: usize,
-    src: &[u8],
+    src: &[S],
     src_stride: usize,
     pic: (i32, i32),
     block: BlockMc,
@@ -953,15 +1049,15 @@ fn put_luma_scalar(
     }
 }
 
-fn avg_blocks(
-    dst: &mut [u8],
+fn avg_blocks<S: Sample>(
+    dst: &mut [S],
     dst_stride: usize,
     w: usize,
     h: usize,
-    fill: impl FnOnce(&mut [u8], &mut [u8]),
+    fill: impl FnOnce(&mut [S], &mut [S]),
 ) {
-    let mut left = [0u8; 256];
-    let mut right = [0u8; 256];
+    let mut left = [S::default(); 256];
+    let mut right = [S::default(); 256];
     fill(&mut left, &mut right);
     for row in 0..h {
         let out = &mut dst[row * dst_stride..row * dst_stride + w];
@@ -973,14 +1069,14 @@ fn avg_blocks(
     }
 }
 
-struct Src<'a> {
-    samples: &'a [u8],
+struct Src<'a, S: Sample> {
+    samples: &'a [S],
     stride: usize,
     x: usize,
     y: usize,
 }
 
-fn src_at(samples: &[u8], stride: usize, x: i32, y: i32) -> Src<'_> {
+fn src_at<S: Sample>(samples: &[S], stride: usize, x: i32, y: i32) -> Src<'_, S> {
     Src {
         samples,
         stride,
@@ -989,7 +1085,7 @@ fn src_at(samples: &[u8], stride: usize, x: i32, y: i32) -> Src<'_> {
     }
 }
 
-fn copy_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: Src<'_, S>, size: (usize, usize)) {
     let (w, h) = size;
     for row in 0..h {
         let from = (src.y + row) * src.stride + src.x;
@@ -997,19 +1093,29 @@ fn copy_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usi
     }
 }
 
-fn half_h_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+fn half_h_block<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: Src<'_, S>,
+    size: (usize, usize),
+) {
     let (w, h) = size;
     for row in 0..h {
         let start = (src.y + row) * src.stride + src.x - 2;
         let taps = &src.samples[start..start + w + 5];
         let out = &mut dst[row * dst_stride..row * dst_stride + w];
         for (col, sample) in out.iter_mut().enumerate() {
-            *sample = clip_u8((fir6_at(taps, col) + 16) >> 5);
+            *sample = S::clip((fir6_at(taps, col) + 16) >> 5);
         }
     }
 }
 
-fn half_v_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+fn half_v_block<S: Sample>(
+    dst: &mut [S],
+    dst_stride: usize,
+    src: Src<'_, S>,
+    size: (usize, usize),
+) {
     let (w, h) = size;
     for row in 0..h {
         let mut rows = [&[][..]; 6];
@@ -1020,17 +1126,17 @@ fn half_v_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, u
         }
         let out = &mut dst[row * dst_stride..row * dst_stride + w];
         for (col, sample) in out.iter_mut().enumerate() {
-            let acc = i32::from(rows[0][col]) - 5 * i32::from(rows[1][col])
-                + 20 * i32::from(rows[2][col])
-                + 20 * i32::from(rows[3][col])
-                - 5 * i32::from(rows[4][col])
-                + i32::from(rows[5][col]);
-            *sample = clip_u8((acc + 16) >> 5);
+            let acc = pel(rows[0][col]) - 5 * pel(rows[1][col])
+                + 20 * pel(rows[2][col])
+                + 20 * pel(rows[3][col])
+                - 5 * pel(rows[4][col])
+                + pel(rows[5][col]);
+            *sample = S::clip((acc + 16) >> 5);
         }
     }
 }
 
-fn diag_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usize)) {
+fn diag_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: Src<'_, S>, size: (usize, usize)) {
     let (w, h) = size;
     let mut tmp = [0i32; 21 * 16];
     for vy in 0..h + 5 {
@@ -1048,26 +1154,24 @@ fn diag_block(dst: &mut [u8], dst_stride: usize, src: Src<'_>, size: (usize, usi
                 + 20 * tmp[(row + 3) * 16 + col]
                 - 5 * tmp[(row + 4) * 16 + col]
                 + tmp[(row + 5) * 16 + col];
-            *sample = clip_u8((acc + 512) >> 10);
+            *sample = S::clip((acc + 512) >> 10);
         }
     }
 }
 
-fn fir6_at(taps: &[u8], col: usize) -> i32 {
-    i32::from(taps[col]) - 5 * i32::from(taps[col + 1])
-        + 20 * i32::from(taps[col + 2])
-        + 20 * i32::from(taps[col + 3])
-        - 5 * i32::from(taps[col + 4])
-        + i32::from(taps[col + 5])
+fn fir6_at<S: Sample>(taps: &[S], col: usize) -> i32 {
+    pel(taps[col]) - 5 * pel(taps[col + 1]) + 20 * pel(taps[col + 2]) + 20 * pel(taps[col + 3])
+        - 5 * pel(taps[col + 4])
+        + pel(taps[col + 5])
 }
 
-pub fn weight_uni(sample: u8, w: i32, o: i32, denom: i32) -> u8 {
+pub fn weight_uni<S: Sample>(sample: S, w: i32, o: i32, denom: i32) -> S {
     let v = if denom >= 1 {
-        ((i32::from(sample) * w + (1 << (denom - 1))) >> denom) + o
+        ((pel(sample) * w + (1 << (denom - 1))) >> denom) + o
     } else {
-        i32::from(sample) * w + o
+        pel(sample) * w + o
     };
-    clip_u8(v)
+    S::clip(v)
 }
 
 #[derive(Clone, Copy)]
@@ -1080,7 +1184,7 @@ pub struct BiWeight {
 }
 
 #[inline(always)]
-pub fn weight_bi(a: u8, b: u8, weight: BiWeight) -> u8 {
+pub fn weight_bi<S: Sample>(a: S, b: S, weight: BiWeight) -> S {
     let BiWeight {
         w0,
         w1,
@@ -1089,14 +1193,13 @@ pub fn weight_bi(a: u8, b: u8, weight: BiWeight) -> u8 {
         denom,
     } = weight;
     let shift = denom + 1;
-    let value = ((i32::from(a) * w0 + i32::from(b) * w1 + (1 << (shift - 1))) >> shift)
-        + ((o0 + o1 + 1) >> 1);
-    clip_u8(value)
+    let value = ((pel(a) * w0 + pel(b) * w1 + (1 << (shift - 1))) >> shift) + ((o0 + o1 + 1) >> 1);
+    S::clip(value)
 }
 
 /// One row of bipred weights. The weights stay outside the pixel loop so the
 /// compiler can widen and multiply several samples at once.
-pub fn weight_row(dst: &mut [u8], a: &[u8], b: &[u8], weight: BiWeight) {
+pub fn weight_row<S: Sample>(dst: &mut [S], a: &[S], b: &[S], weight: BiWeight) {
     let n = dst.len();
     if a.len() < n || b.len() < n {
         return;
@@ -1115,14 +1218,14 @@ pub fn weight_row(dst: &mut [u8], a: &[u8], b: &[u8], weight: BiWeight) {
     let w0 = weight.w0;
     let w1 = weight.w1;
     for (sample, (&left, &right)) in dst.iter_mut().zip(a.iter().zip(b)) {
-        let value = ((i32::from(left) * w0 + i32::from(right) * w1 + round) >> shift) + off;
-        *sample = clip_u8(value);
+        let value = ((pel(left) * w0 + pel(right) * w1 + round) >> shift) + off;
+        *sample = S::clip(value);
     }
 }
 
 #[inline(always)]
-pub fn avg(a: u8, b: u8) -> u8 {
-    clip_u8((i32::from(a) + i32::from(b) + 1) >> 1)
+pub fn avg<S: Sample>(a: S, b: S) -> S {
+    S::clip((pel(a) + pel(b) + 1) >> 1)
 }
 
 #[derive(Clone, Copy)]
@@ -1136,7 +1239,7 @@ pub struct Edge {
     pub len: usize,
 }
 
-pub fn filter_edge(plane: &mut [u8], stride: usize, x: usize, y: usize, edge: Edge) {
+pub fn filter_edge<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, edge: Edge) {
     let Edge {
         vertical,
         bs,
@@ -1154,15 +1257,15 @@ pub fn filter_edge(plane: &mut [u8], stride: usize, x: usize, y: usize, edge: Ed
     let run = FilterRun {
         len,
         bs,
-        alpha: i32::from(ALPHA[index_a]),
-        beta: i32::from(BETA[index_b]),
+        alpha: i32::from(ALPHA[index_a]) << S::SHIFT,
+        beta: i32::from(BETA[index_b]) << S::SHIFT,
         index_a,
         chroma,
     };
     if vertical {
-        filter_span::<true>(plane, stride, y * stride + x, run);
+        filter_span::<S, true>(plane, stride, y * stride + x, run);
     } else {
-        filter_span::<false>(plane, stride, y * stride + x, run);
+        filter_span::<S, false>(plane, stride, y * stride + x, run);
     }
 }
 
@@ -1175,8 +1278,8 @@ struct FilterRun {
     chroma: bool,
 }
 
-fn filter_span<const VERTICAL: bool>(
-    plane: &mut [u8],
+fn filter_span<S: Sample, const VERTICAL: bool>(
+    plane: &mut [S],
     stride: usize,
     mut at: usize,
     run: FilterRun,
@@ -1192,20 +1295,20 @@ fn filter_span<const VERTICAL: bool>(
     let across = if VERTICAL { 1 } else { stride };
     let along = if VERTICAL { stride } else { 1 };
     for _ in 0..len {
-        let p0 = i32::from(plane[at - across]);
-        let q0 = i32::from(plane[at]);
-        let p1 = i32::from(plane[at - 2 * across]);
-        let q1 = i32::from(plane[at + across]);
+        let p0 = pel(plane[at - across]);
+        let q0 = pel(plane[at]);
+        let p1 = pel(plane[at - 2 * across]);
+        let q1 = pel(plane[at + across]);
         if (p0 - q0).abs() >= alpha || (p1 - p0).abs() >= beta || (q1 - q0).abs() >= beta {
             at += along;
             continue;
         }
-        let p2 = i32::from(plane[at - 3 * across]);
-        let q2 = i32::from(plane[at + 2 * across]);
-        let p3 = i32::from(plane[at - 4 * across]);
-        let q3 = i32::from(plane[at + 3 * across]);
+        let p2 = pel(plane[at - 3 * across]);
+        let q2 = pel(plane[at + 2 * across]);
+        let p3 = pel(plane[at - 4 * across]);
+        let q3 = pel(plane[at + 3 * across]);
         if bs < 4 {
-            let tc0 = i32::from(TC0[bs as usize - 1][index_a]);
+            let tc0 = i32::from(TC0[bs as usize - 1][index_a]) << S::SHIFT;
             let ap = (p2 - p0).abs();
             let aq = (q2 - q0).abs();
             let tc = if chroma {
@@ -1214,15 +1317,15 @@ fn filter_span<const VERTICAL: bool>(
                 tc0 + i32::from(ap < beta) + i32::from(aq < beta)
             };
             let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
-            plane[at - across] = clip_u8(p0 + delta);
-            plane[at] = clip_u8(q0 - delta);
+            plane[at - across] = S::clip(p0 + delta);
+            plane[at] = S::clip(q0 - delta);
             if !chroma && ap < beta {
                 let d = ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
-                plane[at - 2 * across] = clip_u8(p1 + d);
+                plane[at - 2 * across] = S::clip(p1 + d);
             }
             if !chroma && aq < beta {
                 let d = ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
-                plane[at + across] = clip_u8(q1 + d);
+                plane[at + across] = S::clip(q1 + d);
             }
         } else {
             let strong_p =
@@ -1230,18 +1333,18 @@ fn filter_span<const VERTICAL: bool>(
             let strong_q =
                 !chroma && (q2 - q0).abs() < beta && (p0 - q0).abs() < ((alpha >> 2) + 2);
             if strong_p {
-                plane[at - across] = clip_u8((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
-                plane[at - 2 * across] = clip_u8((p2 + p1 + p0 + q0 + 2) >> 2);
-                plane[at - 3 * across] = clip_u8((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
+                plane[at - across] = S::clip((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3);
+                plane[at - 2 * across] = S::clip((p2 + p1 + p0 + q0 + 2) >> 2);
+                plane[at - 3 * across] = S::clip((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3);
             } else {
-                plane[at - across] = clip_u8((2 * p1 + p0 + q1 + 2) >> 2);
+                plane[at - across] = S::clip((2 * p1 + p0 + q1 + 2) >> 2);
             }
             if strong_q {
-                plane[at] = clip_u8((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
-                plane[at + across] = clip_u8((p0 + q0 + q1 + q2 + 2) >> 2);
-                plane[at + 2 * across] = clip_u8((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
+                plane[at] = S::clip((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3);
+                plane[at + across] = S::clip((p0 + q0 + q1 + q2 + 2) >> 2);
+                plane[at + 2 * across] = S::clip((2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3);
             } else {
-                plane[at] = clip_u8((2 * q1 + q0 + p1 + 2) >> 2);
+                plane[at] = S::clip((2 * q1 + q0 + p1 + 2) >> 2);
             }
         }
         at += along;
@@ -1251,8 +1354,22 @@ fn filter_span<const VERTICAL: bool>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockMc, Pel, chroma_mc, pred_chroma, pred16, put_chroma_block, put_luma_block, qpel,
+        BlockMc, Pel, chroma_mc, chroma_qps, pred_chroma, pred16, put_chroma_block, put_luma_block,
+        qpel,
     };
+
+    #[test]
+    fn ten_bit_chroma_qp_keeps_the_low_indices() {
+        assert_eq!(chroma_qps(20, 0, 0), (chroma_qp_at(20), chroma_qp_at(20)));
+        assert_eq!(chroma_qps(-6, 0, 12), (6, -6));
+        assert_eq!(chroma_qps(26, 0, 12), (38, 26));
+        assert_eq!(chroma_qps(40, 0, 12), (48, 36));
+        assert_eq!(chroma_qps(51, 0, 12), (51, 39));
+    }
+
+    fn chroma_qp_at(luma: i32) -> i32 {
+        super::chroma_qp(luma, 0)
+    }
 
     /// Equations 8-124 through 8-129. The corner sample is p[−1, −1], not p[0, −1].
     #[test]

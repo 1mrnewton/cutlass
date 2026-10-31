@@ -4,9 +4,9 @@
 //! A video segment opens through the caller’s reader factory. [`OpenClips`]
 //! keeps that file for one draft revision and seeks it at a later time.
 //! A compound segment is the inlined child draft's picture, placed with the
-//! compound clip. `audio_slice` is the engine mix at that time. The mix does
-//! not yet take the child's samples. Text, captions, and effects are not
-//! drawn on this path.
+//! compound clip. `audio_slice` is the engine mix at that time, and a
+//! compound segment contributes the child's mix. Text, captions, and effects
+//! are not drawn on this path.
 
 #![forbid(unsafe_code)]
 

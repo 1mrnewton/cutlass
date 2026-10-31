@@ -87,7 +87,7 @@ pub(crate) fn nest_layers<D: Device>(
             let Some(child) = material.draft.as_deref() else {
                 continue;
             };
-            if pass.ancestors.len() >= MAX_COMPOUND_DEPTH || repeats(draft, child, pass.ancestors) {
+            if skips_child(draft, child, pass.ancestors) {
                 continue;
             }
             let Some((clip, uniform)) = segment_clip(segment, pass.time) else {
@@ -138,7 +138,7 @@ fn child_frame<D: Device>(
     pass: &mut NestPass<'_, D>,
 ) -> Result<Option<crate::Frame>, EvalError<D::Error>> {
     let child_clips = pass.clips.child(segment);
-    let chain = with_here(pass.ancestors, &draft.id);
+    let chain = descend(pass.ancestors, &draft.id);
     match compose(
         &Snapshot::new(child),
         time,
@@ -154,11 +154,13 @@ fn child_frame<D: Device>(
     }
 }
 
-fn repeats(draft: &Draft, child: &Draft, ancestors: &[DraftId]) -> bool {
-    child.id == draft.id || ancestors.iter().any(|id| id == &child.id)
+pub(crate) fn skips_child(draft: &Draft, child: &Draft, ancestors: &[DraftId]) -> bool {
+    ancestors.len() >= MAX_COMPOUND_DEPTH
+        || child.id == draft.id
+        || ancestors.iter().any(|id| id == &child.id)
 }
 
-fn with_here(ancestors: &[DraftId], here: &DraftId) -> Vec<DraftId> {
+pub(crate) fn descend(ancestors: &[DraftId], here: &DraftId) -> Vec<DraftId> {
     let mut chain = Vec::with_capacity(ancestors.len().saturating_add(1));
     chain.extend_from_slice(ancestors);
     chain.push(here.clone());

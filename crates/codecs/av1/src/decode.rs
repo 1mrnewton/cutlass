@@ -2129,4 +2129,82 @@ mod tests {
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }
+
+    #[test]
+    fn masked_compound_matches_dav1d() {
+        // aomenc 64×64 with masked compound and order hint off, so skip mode
+        // is not signaled. Later frames set reference_select. A compound block
+        // blends with a wedge or a difference mask. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/masked_0.obu"),
+            include_bytes!("../fixtures/masked_1.obu"),
+            include_bytes!("../fixtures/masked_2.obu"),
+            include_bytes!("../fixtures/masked_3.obu"),
+            include_bytes!("../fixtures/masked_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0xba4a_27af_1e96_b104,
+            0xbf61_2dcf_b440_08ab,
+            0x197e_b9c0_0513_3b51,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_masked);
+            assert!(!seq.enable_order_hint);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn difference_compound_matches_dav1d() {
+        // Same source as the wedge stream, with wedge compound turned off.
+        // A compound block that asks for a mask uses the difference weight.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/diffwtd_0.obu"),
+            include_bytes!("../fixtures/diffwtd_1.obu"),
+            include_bytes!("../fixtures/diffwtd_2.obu"),
+            include_bytes!("../fixtures/diffwtd_3.obu"),
+            include_bytes!("../fixtures/diffwtd_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0xd4f2_2750_7b89_37d7,
+            0xd0a6_f70e_63ff_6f91,
+            0xb942_e0b9_20d6_ba82,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_masked);
+            assert!(!seq.enable_order_hint);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
 }

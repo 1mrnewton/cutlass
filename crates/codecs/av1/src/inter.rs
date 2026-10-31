@@ -5,9 +5,9 @@
 //! A global model that is not identity supplies the `GLOBALMV` vector.
 //! A rotation-zoom or affine model warps that block when the shear is valid.
 //! Interintra blends a single reference with an intra predictor.
-//! Compound prediction averages two references, or weights them by order-hint
-//! distance. A masked compound, local warp, and overlapped motion stay outside
-//! this path.
+//! Compound prediction averages two references, weights them by order-hint
+//! distance, or blends them through a wedge or difference mask. Local warp
+//! and overlapped motion stay outside this path.
 
 use cutlass_decode::CodecError;
 
@@ -1139,6 +1139,213 @@ pub fn distance_compound(a: i32, b: i32, fwd: i32, bck: i32) -> u8 {
     round2(sum, 8).clamp(0, 255) as u8
 }
 
+/// `COMPOUND_WEDGE` and `COMPOUND_DIFFWTD`: `Clip1(Round2(m * a + (64 - m) * b, 6 + InterPostRound))`.
+pub fn mask_compound(a: i32, b: i32, weight: i32) -> u8 {
+    let sum = i64::from(weight) * i64::from(a) + i64::from(64 - weight) * i64::from(b);
+    ((sum + 512) >> 10).clamp(0, 255) as u8
+}
+
+/// `Wedge_Bits`. Sizes with a zero have no wedge index; the mask is difference-weighted.
+pub fn wedge_bits(bsize: usize) -> u8 {
+    const BITS: [u8; 22] = [
+        0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 0, 0,
+    ];
+    BITS.get(bsize).copied().unwrap_or(0)
+}
+
+/// Luma wedge mask for one block. `sign` selects the complement of the master ramp.
+pub fn wedge_mask(w: usize, h: usize, index: usize, sign: u8, out: &mut [u8]) {
+    let n = w.saturating_mul(h);
+    if w == 0 || h == 0 || out.len() < n {
+        return;
+    }
+    let shape = if h > w {
+        0
+    } else if h < w {
+        1
+    } else {
+        2
+    };
+    let code = WEDGE_CODEBOOK[shape][index.min(15)];
+    let xoff = 32 - ((i32::from(code[1]) * i32::try_from(w).unwrap_or(0)) >> 3);
+    let yoff = 32 - ((i32::from(code[2]) * i32::try_from(h).unwrap_or(0)) >> 3);
+    let mut sum = 0i32;
+    for col in 0..w {
+        sum += i32::from(master(
+            code[0],
+            yoff,
+            xoff + i32::try_from(col).unwrap_or(0),
+        ));
+    }
+    for row in 1..h {
+        sum += i32::from(master(
+            code[0],
+            yoff + i32::try_from(row).unwrap_or(0),
+            xoff,
+        ));
+    }
+    let denom = i32::try_from(w + h - 1).unwrap_or(1).max(1);
+    let flip = (sum + denom / 2) / denom < 32;
+    let keep = (sign != 0) == flip;
+    for row in 0..h {
+        for col in 0..w {
+            let sample = master(
+                code[0],
+                yoff + i32::try_from(row).unwrap_or(0),
+                xoff + i32::try_from(col).unwrap_or(0),
+            );
+            out[row * w + col] = if keep { sample } else { 64 - sample };
+        }
+    }
+}
+
+/// Difference-weight mask from the two luma predictors, still at `InterPostRound`.
+pub fn difference_mask(a: &[i32], b: &[i32], w: usize, h: usize, mask_type: u8, out: &mut [u8]) {
+    let n = w.saturating_mul(h);
+    for index in 0..n.min(out.len()).min(a.len()).min(b.len()) {
+        let diff = (i64::from(a[index]) - i64::from(b[index])).unsigned_abs();
+        let rounded = i32::try_from(diff).unwrap_or(i32::MAX);
+        let scaled = rounded.saturating_add(8) >> 4;
+        let weight = (38 + scaled / 16).clamp(0, 64) as u8;
+        out[index] = if mask_type == 0 { weight } else { 64 - weight };
+    }
+}
+
+/// Chroma takes the rounded average of the luma mask samples that cover it.
+pub fn compound_mask_weight(
+    mask: &[u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    sub_x: bool,
+    sub_y: bool,
+) -> i32 {
+    if stride == 0 {
+        return 0;
+    }
+    if !sub_x && !sub_y {
+        return mask_at(mask, stride, y, x);
+    }
+    if sub_x && !sub_y {
+        return (mask_at(mask, stride, y, 2 * x) + mask_at(mask, stride, y, 2 * x + 1) + 1) >> 1;
+    }
+    let sum = mask_at(mask, stride, 2 * y, 2 * x)
+        + mask_at(mask, stride, 2 * y, 2 * x + 1)
+        + mask_at(mask, stride, 2 * y + 1, 2 * x)
+        + mask_at(mask, stride, 2 * y + 1, 2 * x + 1);
+    (sum + 2) >> 2
+}
+
+fn mask_at(mask: &[u8], stride: usize, y: usize, x: usize) -> i32 {
+    i32::from(
+        mask.get(y.saturating_mul(stride).saturating_add(x))
+            .copied()
+            .unwrap_or(0),
+    )
+}
+
+fn master(dir: u8, y: i32, x: i32) -> u8 {
+    match dir {
+        0 => ramp(y),
+        1 => ramp(x),
+        2 => oblique63(x, y),
+        3 => oblique63(y, x),
+        4 => 64 - oblique63(y, 63 - x),
+        _ => 64 - oblique63(x, 63 - y),
+    }
+}
+
+fn ramp(index: i32) -> u8 {
+    WEDGE_VERTICAL[index.clamp(0, 63) as usize]
+}
+
+fn oblique63(y: i32, x: i32) -> u8 {
+    let row = y.clamp(0, 63) as usize;
+    let shift = 16 - ((row + (row & 1)) / 2) as i32;
+    let index = (x - shift).clamp(0, 63) as usize;
+    if row.is_multiple_of(2) {
+        WEDGE_EVEN[index]
+    } else {
+        WEDGE_ODD[index]
+    }
+}
+
+/// `Wedge_Codebook`. Direction, horizontal offset, vertical offset, for tall, wide, and square blocks.
+const WEDGE_CODEBOOK: [[[u8; 3]; 16]; 3] = [
+    [
+        [2, 4, 4],
+        [3, 4, 4],
+        [4, 4, 4],
+        [5, 4, 4],
+        [0, 4, 2],
+        [0, 4, 4],
+        [0, 4, 6],
+        [1, 4, 4],
+        [2, 4, 2],
+        [2, 4, 6],
+        [5, 4, 2],
+        [5, 4, 6],
+        [3, 2, 4],
+        [3, 6, 4],
+        [4, 2, 4],
+        [4, 6, 4],
+    ],
+    [
+        [2, 4, 4],
+        [3, 4, 4],
+        [4, 4, 4],
+        [5, 4, 4],
+        [1, 2, 4],
+        [1, 4, 4],
+        [1, 6, 4],
+        [0, 4, 4],
+        [2, 4, 2],
+        [2, 4, 6],
+        [5, 4, 2],
+        [5, 4, 6],
+        [3, 2, 4],
+        [3, 6, 4],
+        [4, 2, 4],
+        [4, 6, 4],
+    ],
+    [
+        [2, 4, 4],
+        [3, 4, 4],
+        [4, 4, 4],
+        [5, 4, 4],
+        [0, 4, 2],
+        [0, 4, 6],
+        [1, 2, 4],
+        [1, 6, 4],
+        [2, 4, 2],
+        [2, 4, 6],
+        [5, 4, 2],
+        [5, 4, 6],
+        [3, 2, 4],
+        [3, 6, 4],
+        [4, 2, 4],
+        [4, 6, 4],
+    ],
+];
+
+const WEDGE_ODD: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 6,
+    18, 37, 53, 60, 63, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64,
+];
+
+const WEDGE_EVEN: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4, 11,
+    27, 46, 58, 62, 63, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64,
+];
+
+const WEDGE_VERTICAL: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 7,
+    21, 43, 57, 62, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+    64, 64, 64, 64, 64, 64, 64, 64, 64,
+];
+
 fn negate_mv(mv: Motion) -> Motion {
     Motion {
         row: mv.row.wrapping_neg(),
@@ -1356,4 +1563,34 @@ pub fn interintra_weight(mode: u8, y: usize, x: usize, scale: usize) -> i32 {
         _ => return 32,
     };
     i32::from(II_WEIGHTS[index.min(II_WEIGHTS.len() - 1)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{difference_mask, mask_compound, wedge_mask};
+
+    #[test]
+    fn wedge_signs_are_complements() {
+        let mut mask = [0u8; 64];
+        let mut flipped = [0u8; 64];
+        wedge_mask(8, 8, 0, 0, &mut mask);
+        wedge_mask(8, 8, 0, 1, &mut flipped);
+        assert!(mask.iter().all(|sample| *sample <= 64));
+        assert!(mask.iter().any(|sample| *sample < 32));
+        assert!(mask.iter().any(|sample| *sample > 32));
+        for (sample, other) in mask.iter().zip(flipped) {
+            assert_eq!(u16::from(*sample) + u16::from(other), 64);
+        }
+    }
+
+    #[test]
+    fn difference_mask_uses_the_predictor_gap() {
+        let mut out = [0u8; 4];
+        difference_mask(&[0; 4], &[0; 4], 2, 2, 0, &mut out);
+        assert_eq!(out, [38, 38, 38, 38]);
+        difference_mask(&[0; 4], &[0; 4], 2, 2, 1, &mut out);
+        assert_eq!(out, [26, 26, 26, 26]);
+        assert_eq!(mask_compound(16, 0, 64), 1);
+        assert_eq!(mask_compound(16, 0, 0), 0);
+    }
 }

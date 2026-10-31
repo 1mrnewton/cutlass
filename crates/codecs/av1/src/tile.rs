@@ -23,9 +23,10 @@ use crate::inter::{
     ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, BlockPlace, Candidates, GLOBAL_GLOBALMV, GLOBALMV,
     GM_TRANSLATION, GOLDEN_FRAME, INTRA_FRAME, InterSample, LAST_FRAME, LAST2_FRAME, LAST3_FRAME,
     Motion, MotionGrid, NEAREST_NEARESTMV, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView,
-    SIZE_GROUP, average_compound, distance_compound, find_stack, global_shear_valid, has_near_mv,
-    inter_set_allows, inter_tx_set, inter_tx_type, interintra_weight, list_mode, predict,
-    predict_precise, predict_warp, project_global,
+    SIZE_GROUP, average_compound, compound_mask_weight, difference_mask, distance_compound,
+    find_stack, global_shear_valid, has_near_mv, inter_set_allows, inter_tx_set, inter_tx_type,
+    interintra_weight, list_mode, mask_compound, predict, predict_precise, predict_warp,
+    project_global, wedge_bits, wedge_mask,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
@@ -596,6 +597,11 @@ struct Tile<'a, 'r> {
     slot_hints: [u32; 8],
     sign_bias: [bool; 8],
     compound_idx: Vec<u8>,
+    /// Packed compound mask: group, kind, wedge index, sign, and mask type.
+    compound_mask: Vec<u16>,
+    blend_mask: Vec<u8>,
+    blend_w: usize,
+    blend_ready: bool,
     block_ref: Vec<i8>,
     block_ref1: Vec<i8>,
     inter_flag: Vec<u8>,
@@ -674,6 +680,9 @@ pub(crate) struct Cdfs {
     comp_bwdref: Vec<u16>,
     compound_mode: Vec<u16>,
     compound_idx: Vec<u16>,
+    comp_group: Vec<u16>,
+    compound_type: Vec<u16>,
+    wedge_index: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -802,6 +811,10 @@ impl<'a, 'r> Tile<'a, 'r> {
             slot_hints: frame.slot_hints,
             sign_bias: sign_bias(sequence, frame),
             compound_idx: vec![1; cells],
+            compound_mask: vec![0; cells],
+            blend_mask: Vec::new(),
+            blend_w: 0,
+            blend_ready: false,
             block_ref: vec![0; cells],
             block_ref1: vec![NONE_FRAME; cells],
             inter_flag: vec![0; cells],
@@ -1140,6 +1153,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ii: -1,
             interp: [0, 0],
             compound_idx: 1,
+            compound_mask: 0,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)?;
@@ -1195,6 +1209,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ii: chosen.ii,
             interp: chosen.interp,
             compound_idx: chosen.compound_idx,
+            compound_mask: chosen.compound_mask,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)
@@ -1266,6 +1281,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ii: -1,
             interp: [0, 0],
             compound_idx: 1,
+            compound_mask: 0,
         })
     }
 
@@ -1327,15 +1343,10 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.read_interintra(bsize)?
         };
-        if compound && self.masked_compound {
-            return Err(CodecError::Unsupported {
-                what: "masked compound",
-            });
-        }
-        let compound_idx = if compound && self.distance_compound {
-            self.read_compound_idx(row, col, reference, reference1)?
+        let compound_choice = if compound {
+            self.read_compound_choice(row, col, bsize, reference, reference1)?
         } else {
-            1
+            CompoundChoice::average()
         };
         let interp = self.read_interp(row, col, bsize, y_mode, reference, reference1)?;
         Ok(Chosen {
@@ -1349,8 +1360,119 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref1: if ii >= 0 { INTRA_FRAME } else { reference1 },
             ii,
             interp,
-            compound_idx,
+            compound_idx: compound_choice.idx,
+            compound_mask: compound_choice.pack(),
         })
+    }
+
+    /// `read_compound_type`. A mask is a wedge or a difference weight. Otherwise the block averages or uses distance.
+    fn read_compound_choice(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        reference: i8,
+        reference1: i8,
+    ) -> Result<CompoundChoice, CodecError> {
+        if !self.masked_compound {
+            let idx = if self.distance_compound {
+                self.read_compound_idx(row, col, reference, reference1)?
+            } else {
+                1
+            };
+            return Ok(CompoundChoice::from_index(idx));
+        }
+        let ctx = self.comp_group_ctx(row, col);
+        let group = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.comp_group,
+            &[6, 3],
+            &[ctx],
+        )? as u8;
+        if group == 0 {
+            let idx = if self.distance_compound {
+                self.read_compound_idx(row, col, reference, reference1)?
+            } else {
+                1
+            };
+            return Ok(CompoundChoice {
+                idx,
+                group: 0,
+                kind: 0,
+                wedge: 0,
+                sign: 0,
+                mask_type: 0,
+            });
+        }
+        let bits = wedge_bits(bsize);
+        if bits == 0 {
+            let mask_type = u8::from(self.symbols.read_bool()?);
+            return Ok(CompoundChoice {
+                idx: 1,
+                group,
+                kind: MASK_DIFF,
+                wedge: 0,
+                sign: 0,
+                mask_type,
+            });
+        }
+        let symbol = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.compound_type,
+            &[22, 3],
+            &[bsize],
+        )?;
+        if symbol == 0 {
+            let wedge = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.wedge_index,
+                &[22, 17],
+                &[bsize],
+            )? as u8;
+            let sign = u8::from(self.symbols.read_bool()?);
+            Ok(CompoundChoice {
+                idx: 1,
+                group,
+                kind: MASK_WEDGE,
+                wedge,
+                sign,
+                mask_type: 0,
+            })
+        } else {
+            let mask_type = u8::from(self.symbols.read_bool()?);
+            Ok(CompoundChoice {
+                idx: 1,
+                group,
+                kind: MASK_DIFF,
+                wedge: 0,
+                sign: 0,
+                mask_type,
+            })
+        }
+    }
+
+    fn comp_group_ctx(&self, row: usize, col: usize) -> usize {
+        let mut ctx = 0;
+        if self.above_mi(row) {
+            ctx += self.group_neighbor((row - 1) * self.mi_cols + col);
+        }
+        if self.left_mi(col) {
+            ctx += self.group_neighbor(row * self.mi_cols + col - 1);
+        }
+        ctx.min(5)
+    }
+
+    fn group_neighbor(&self, at: usize) -> usize {
+        if self.block_ref1.get(at).copied().unwrap_or(NONE_FRAME) > INTRA_FRAME {
+            usize::from(self.compound_mask.get(at).copied().unwrap_or(0) & 1)
+        } else if self.block_ref.get(at).copied().unwrap_or(NONE_FRAME) == ALTREF_FRAME {
+            3
+        } else {
+            0
+        }
     }
 
     fn gm_affine(&self, reference: i8) -> bool {
@@ -2270,14 +2392,51 @@ impl<'a, 'r> Tile<'a, 'r> {
         reference1: i8,
         place: PlaneRect,
     ) -> Result<(), CodecError> {
-        let PlaneRect { x, y, w, h, .. } = place;
+        let PlaneRect {
+            x,
+            y,
+            w,
+            h,
+            sub_x,
+            sub_y,
+        } = place;
         let n = w.saturating_mul(h);
         let mut first = vec![0i32; n];
         let mut second = vec![0i32; n];
         self.predict_list(block, reference, 0, &mut first, place)?;
         self.predict_list(block, reference1, 1, &mut second, place)?;
-        let weights = (self.compound_idx[block.row * self.mi_cols + block.col] == 0)
+        let at = block.row * self.mi_cols + block.col;
+        let packed = self.compound_mask.get(at).copied().unwrap_or(0);
+        let kind = mask_kind(packed);
+        let weights = (kind == 0 && self.compound_idx.get(at).copied().unwrap_or(1) == 0)
             .then(|| self.distance_weights(reference, reference1));
+        if kind != 0 && block.plane == 0 {
+            self.fill_blend_mask(w, h, packed, &first, &second);
+        } else if kind != 0 && !self.blend_ready {
+            self.build_luma_mask(block, reference, reference1, packed)?;
+        }
+        let luma_w = if self.blend_w == 0 {
+            block_width(block.bsize)
+        } else {
+            self.blend_w
+        };
+        let mut blended = vec![0u8; n];
+        for row in 0..h {
+            for col in 0..w {
+                let sample = row * w + col;
+                blended[sample] = if kind == 0 {
+                    if let Some((fwd, bck)) = weights {
+                        distance_compound(first[sample], second[sample], fwd, bck)
+                    } else {
+                        average_compound(first[sample], second[sample])
+                    }
+                } else {
+                    let weight =
+                        compound_mask_weight(&self.blend_mask, luma_w, col, row, sub_x, sub_y);
+                    mask_compound(first[sample], second[sample], weight)
+                };
+            }
+        }
         let stride = if block.plane == 0 {
             self.width
         } else {
@@ -2292,22 +2451,81 @@ impl<'a, 'r> Tile<'a, 'r> {
         };
         for row in 0..h {
             for col in 0..w {
-                let at = row * w + col;
-                let pred = if let Some((fwd, bck)) = weights {
-                    distance_compound(first[at], second[at], fwd, bck)
-                } else {
-                    average_compound(first[at], second[at])
-                };
                 let dx = x + col;
                 let dy = y + row;
                 if dx < stride {
-                    let at = dy * stride + dx;
-                    if let Some(slot) = dst.get_mut(at) {
-                        *slot = pred;
+                    let dest = dy * stride + dx;
+                    if let Some(slot) = dst.get_mut(dest) {
+                        *slot = blended[row * w + col];
                     }
                 }
             }
         }
+        Ok(())
+    }
+
+    fn fill_blend_mask(&mut self, w: usize, h: usize, packed: u16, first: &[i32], second: &[i32]) {
+        let n = w.saturating_mul(h);
+        self.blend_mask.resize(n, 0);
+        if mask_kind(packed) == MASK_WEDGE {
+            wedge_mask(
+                w,
+                h,
+                usize::from(mask_wedge(packed)),
+                mask_sign(packed),
+                &mut self.blend_mask,
+            );
+        } else {
+            difference_mask(first, second, w, h, mask_type(packed), &mut self.blend_mask);
+        }
+        self.blend_w = w;
+        self.blend_ready = true;
+    }
+
+    fn build_luma_mask(
+        &mut self,
+        block: &Block,
+        reference: i8,
+        reference1: i8,
+        packed: u16,
+    ) -> Result<(), CodecError> {
+        let w = block_width(block.bsize);
+        let h = block_height(block.bsize);
+        let n = w.saturating_mul(h);
+        let luma = Block {
+            plane: 0,
+            row: block.row,
+            col: block.col,
+            bsize: block.bsize,
+            y_mode: block.y_mode,
+            uv_mode: block.uv_mode,
+            angle_y: block.angle_y,
+            angle_uv: block.angle_uv,
+            tx: block.tx,
+            skip: block.skip,
+            avail_u: block.avail_u,
+            avail_l: block.avail_l,
+            x4: 0,
+            y4: 0,
+            sub_x: 0,
+            sub_y: 0,
+            step_x: block.step_x,
+            step_y: block.step_y,
+            inter: true,
+        };
+        let place = PlaneRect {
+            x: block.col * 4,
+            y: block.row * 4,
+            w,
+            h,
+            sub_x: false,
+            sub_y: false,
+        };
+        let mut first = vec![0i32; n];
+        let mut second = vec![0i32; n];
+        self.predict_list(&luma, reference, 0, &mut first, place)?;
+        self.predict_list(&luma, reference1, 1, &mut second, place)?;
+        self.fill_blend_mask(w, h, packed, &first, &second);
         Ok(())
     }
 
@@ -3129,11 +3347,13 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.interp[at] = coded.interp;
                 self.ii_mode[at] = coded.ii;
                 self.compound_idx[at] = coded.compound_idx;
+                self.compound_mask[at] = coded.compound_mask;
             }
         }
     }
 
     fn predict_and_residual(&mut self, coded: &CodedBlock) -> Result<(), CodecError> {
+        self.blend_ready = false;
         let CodedBlock {
             row,
             col,
@@ -3995,6 +4215,62 @@ fn same_direction(first: i8, second: i8) -> bool {
     (first >= BWDREF_FRAME) == (second >= BWDREF_FRAME)
 }
 
+const MASK_WEDGE: u8 = 1;
+const MASK_DIFF: u8 = 2;
+
+struct CompoundChoice {
+    idx: u8,
+    group: u8,
+    kind: u8,
+    wedge: u8,
+    sign: u8,
+    mask_type: u8,
+}
+
+impl CompoundChoice {
+    fn average() -> Self {
+        Self {
+            idx: 1,
+            group: 0,
+            kind: 0,
+            wedge: 0,
+            sign: 0,
+            mask_type: 0,
+        }
+    }
+
+    fn from_index(idx: u8) -> Self {
+        Self {
+            idx,
+            ..Self::average()
+        }
+    }
+
+    fn pack(self) -> u16 {
+        u16::from(self.group)
+            | (u16::from(self.kind) << 1)
+            | (u16::from(self.wedge) << 3)
+            | (u16::from(self.sign) << 7)
+            | (u16::from(self.mask_type) << 8)
+    }
+}
+
+fn mask_kind(packed: u16) -> u8 {
+    ((packed >> 1) & 3) as u8
+}
+
+fn mask_wedge(packed: u16) -> u8 {
+    ((packed >> 3) & 15) as u8
+}
+
+fn mask_sign(packed: u16) -> u8 {
+    ((packed >> 7) & 1) as u8
+}
+
+fn mask_type(packed: u16) -> u8 {
+    ((packed >> 8) & 1) as u8
+}
+
 struct Chosen {
     y_mode: u8,
     uv_mode: u8,
@@ -4008,6 +4284,7 @@ struct Chosen {
     interp: [u8; 2],
     /// 1 averages the two predictors. 0 uses distance weights.
     compound_idx: u8,
+    compound_mask: u16,
 }
 
 struct CodedBlock {
@@ -4035,6 +4312,7 @@ struct CodedBlock {
     ii: i8,
     interp: [u8; 2],
     compound_idx: u8,
+    compound_mask: u16,
 }
 
 struct CoeffPlace {
@@ -4529,6 +4807,9 @@ impl Cdfs {
         zero_counters(&mut self.comp_bwdref, 3);
         zero_counters(&mut self.compound_mode, 9);
         zero_counters(&mut self.compound_idx, 3);
+        zero_counters(&mut self.comp_group, 3);
+        zero_counters(&mut self.compound_type, 3);
+        zero_counters(&mut self.wedge_index, 17);
     }
 
     fn load(q: usize) -> Self {
@@ -4604,6 +4885,9 @@ impl Cdfs {
             comp_bwdref: COMP_BWDREF_CDF.to_vec(),
             compound_mode: COMPOUND_MODE_CDF.to_vec(),
             compound_idx: COMPOUND_IDX_CDF.to_vec(),
+            comp_group: COMP_GROUP_CDF.to_vec(),
+            compound_type: COMPOUND_TYPE_CDF.to_vec(),
+            wedge_index: WEDGE_INDEX_CDF.to_vec(),
         }
     }
 }
@@ -4648,6 +4932,51 @@ const COMP_BWDREF_CDF: [u16; 18] = [
 const COMPOUND_IDX_CDF: [u16; 18] = [
     18244, 32768, 0, 12865, 32768, 0, 7053, 32768, 0, 13259, 32768, 0, 9334, 32768, 0, 4644, 32768,
     0,
+];
+
+/// `Default_Comp_Group_Idx_Cdf`. Six contexts.
+const COMP_GROUP_CDF: [u16; 18] = [
+    26607, 32768, 0, 22891, 32768, 0, 18840, 32768, 0, 24594, 32768, 0, 19934, 32768, 0, 22674,
+    32768, 0,
+];
+
+/// `Default_Compound_Type_Cdf`. One row per block size. Symbol 0 is a wedge.
+const COMPOUND_TYPE_CDF: [u16; 66] = [
+    16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 23431, 32768, 0, 13171, 32768, 0, 11470,
+    32768, 0, 9770, 32768, 0, 9100, 32768, 0, 8233, 32768, 0, 6172, 32768, 0, 16384, 32768, 0,
+    16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 16384,
+    32768, 0, 16384, 32768, 0, 11820, 32768, 0, 7701, 32768, 0, 16384, 32768, 0, 16384, 32768, 0,
+];
+
+/// `Default_Wedge_Index_Cdf`. Sixteen wedges per block size.
+const WEDGE_INDEX_CDF: [u16; 374] = [
+    2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672,
+    30720, 32768, 0, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528,
+    24576, 26624, 28672, 30720, 32768, 0, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384,
+    18432, 20480, 22528, 24576, 26624, 28672, 30720, 32768, 0, 2438, 4440, 6599, 8663, 11005,
+    12874, 15751, 18094, 20359, 22362, 24127, 25702, 27752, 29450, 31171, 32768, 0, 806, 3266,
+    6005, 6738, 7218, 7367, 7771, 14588, 16323, 17367, 18452, 19422, 22839, 26127, 29629, 32768, 0,
+    2779, 3738, 4683, 7213, 7775, 8017, 8655, 14357, 17939, 21332, 24520, 27470, 29456, 30529,
+    31656, 32768, 0, 1684, 3625, 5675, 7108, 9302, 11274, 14429, 17144, 19163, 20961, 22884, 24471,
+    26719, 28714, 30877, 32768, 0, 1142, 3491, 6277, 7314, 8089, 8355, 9023, 13624, 15369, 16730,
+    18114, 19313, 22521, 26012, 29550, 32768, 0, 2742, 4195, 5727, 8035, 8980, 9336, 10146, 14124,
+    17270, 20533, 23434, 25972, 27944, 29570, 31416, 32768, 0, 1727, 3948, 6101, 7796, 9841, 12344,
+    15766, 18944, 20638, 22038, 23963, 25311, 26988, 28766, 31012, 32768, 0, 2048, 4096, 6144,
+    8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672, 30720, 32768, 0,
+    2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672,
+    30720, 32768, 0, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528,
+    24576, 26624, 28672, 30720, 32768, 0, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384,
+    18432, 20480, 22528, 24576, 26624, 28672, 30720, 32768, 0, 2048, 4096, 6144, 8192, 10240,
+    12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672, 30720, 32768, 0, 2048, 4096,
+    6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672, 30720, 32768,
+    0, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624,
+    28672, 30720, 32768, 0, 2048, 4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480,
+    22528, 24576, 26624, 28672, 30720, 32768, 0, 154, 987, 1925, 2051, 2088, 2111, 2151, 23033,
+    23703, 24284, 24985, 25684, 27259, 28883, 30911, 32768, 0, 1135, 1322, 1493, 2635, 2696, 2737,
+    2770, 21016, 22935, 25057, 27251, 29173, 30089, 30960, 31933, 32768, 0, 2048, 4096, 6144, 8192,
+    10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672, 30720, 32768, 0, 2048,
+    4096, 6144, 8192, 10240, 12288, 14336, 16384, 18432, 20480, 22528, 24576, 26624, 28672, 30720,
+    32768, 0,
 ];
 
 /// `Default_Compound_Mode_Cdf`. Eight contexts, eight modes.

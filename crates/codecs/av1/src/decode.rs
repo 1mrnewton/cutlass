@@ -6,12 +6,19 @@ use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_unit};
 use crate::inter::RefView;
-use crate::tile::{DecodedPicture, decode_tile, decode_with_refs};
+use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
+
+use std::sync::Arc;
+
+struct Reference {
+    picture: Yuv420,
+    cdfs: Arc<Cdfs>,
+}
 
 /// Rust AV1 decoder. Reference slots stay inside this type.
 pub struct Av1Decoder {
     sequence: Option<Sequence>,
-    refs: [Option<Yuv420>; 8],
+    refs: [Option<Reference>; 8],
     order_hints: [u32; 8],
 }
 
@@ -57,14 +64,14 @@ impl Decoder for Av1Decoder {
         let (sequence, frame) = parse_unit(&packet.data, self.sequence.as_ref())?;
         header_is_addressable(&sequence, &frame)?;
         let saved = self.take_stale_refs(&frame);
-        let picture = match self.picture_before_grain(&sequence, &frame) {
-            Ok(picture) => picture,
+        let (picture, cdfs) = match self.picture_before_grain(&sequence, &frame) {
+            Ok(decoded) => decoded,
             Err(error) => {
                 self.restore_refs(saved);
                 return Err(error);
             }
         };
-        self.store(&frame, &picture);
+        self.store(&frame, &picture, cdfs);
         self.sequence = Some(sequence);
         if !frame.show_frame {
             return Ok(Vec::new());
@@ -92,31 +99,47 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
-    ) -> Result<DecodedPicture, CodecError> {
-        let views = self.ref_views();
-        if frame.intra || views.iter().all(Option::is_none) {
-            decode_tile(sequence, frame)
-        } else {
-            decode_with_refs(sequence, frame, &views)
+    ) -> Result<Reconstructed, CodecError> {
+        let carried = self.carried_cdf(frame)?;
+        decode_with_refs(sequence, frame, &self.ref_views(), carried.as_deref())
+    }
+
+    /// `load_cdfs(ref_frame_idx[primary_ref_frame])` when the frame names a primary reference.
+    /// An intra frame initializes its CDFs instead.
+    fn carried_cdf(&self, frame: &FrameInfo) -> Result<Option<Arc<Cdfs>>, CodecError> {
+        if frame.intra || frame.primary_ref >= 7 {
+            return Ok(None);
         }
+        let index = usize::from(frame.primary_ref);
+        let slot = usize::from(frame.ref_frames[index]);
+        let Some(reference) = &self.refs[slot] else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        };
+        Ok(Some(Arc::clone(&reference.cdfs)))
     }
 
     fn ref_views(&self) -> [Option<RefView<'_>>; 8] {
         std::array::from_fn(|slot| {
-            self.refs[slot].as_ref().map(|picture| RefView {
-                y: picture.y.samples(),
-                u: picture.u.samples(),
-                v: picture.v.samples(),
-                width: picture.y.width() as usize,
-                height: picture.y.height() as usize,
+            self.refs[slot].as_ref().map(|reference| RefView {
+                y: reference.picture.y.samples(),
+                u: reference.picture.u.samples(),
+                v: reference.picture.v.samples(),
+                width: reference.picture.y.width() as usize,
+                height: reference.picture.y.height() as usize,
             })
         })
     }
 
-    fn store(&mut self, frame: &FrameInfo, picture: &Yuv420) {
+    fn store(&mut self, frame: &FrameInfo, picture: &Yuv420, cdfs: Arc<Cdfs>) {
         for slot in 0..8 {
             if frame.refresh_flags & (1 << slot) != 0 {
-                self.refs[slot] = Some(picture.clone());
+                self.refs[slot] = Some(Reference {
+                    picture: picture.clone(),
+                    cdfs: Arc::clone(&cdfs),
+                });
                 self.order_hints[slot] = frame.order_hint;
             }
         }
@@ -126,20 +149,21 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
-    ) -> Result<Yuv420, CodecError> {
+    ) -> Result<(Yuv420, Arc<Cdfs>), CodecError> {
         if frame.show_existing {
-            let Some(stored) = self.refs[usize::from(frame.frame_to_show)].clone() else {
+            let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
                 return Err(CodecError::Malformed {
                     at_bit: 0,
                     what: "missing reference",
                 });
             };
-            return Ok(stored);
+            return Ok((stored.picture.clone(), Arc::clone(&stored.cdfs)));
         }
-        owned(self.decode_picture(sequence, frame)?)
+        let reconstructed = self.decode_picture(sequence, frame)?;
+        Ok((owned(reconstructed.picture)?, Arc::new(reconstructed.cdfs)))
     }
 
-    fn take_stale_refs(&mut self, frame: &FrameInfo) -> [Option<Yuv420>; 8] {
+    fn take_stale_refs(&mut self, frame: &FrameInfo) -> [Option<Reference>; 8] {
         let mut saved = std::array::from_fn(|_| None);
         let Some(hints) = frame.signaled_order_hints else {
             return saved;
@@ -152,10 +176,10 @@ impl Av1Decoder {
         saved
     }
 
-    fn restore_refs(&mut self, saved: [Option<Yuv420>; 8]) {
-        for (slot, picture) in saved.into_iter().enumerate() {
-            if let Some(picture) = picture {
-                self.refs[slot] = Some(picture);
+    fn restore_refs(&mut self, saved: [Option<Reference>; 8]) {
+        for (slot, reference) in saved.into_iter().enumerate() {
+            if let Some(reference) = reference {
+                self.refs[slot] = Some(reference);
             }
         }
     }
@@ -454,6 +478,53 @@ mod tests {
                 assert_eq!(packed[24], 180);
                 assert_eq!(packed[56], 40);
             }
+        }
+    }
+
+    #[test]
+    fn a_primary_reference_cdf_matches_dav1d() {
+        // aomenc 64×64. The keyframe adapts its CDFs. Each inter frame loads the
+        // primary reference and keeps adapting. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1` of those three frames.
+        let frames: [&[u8]; 3] = [
+            &[
+                0x12, 0x00, 0x0a, 0x09, 0x00, 0x00, 0x00, 0x02, 0xaf, 0xff, 0x88, 0x30, 0x01, 0x32,
+                0x14, 0x10, 0x48, 0x00, 0x00, 0x01, 0x00, 0xb4, 0x5a, 0xcc, 0xa6, 0x0b, 0xe2, 0xb6,
+                0x29, 0x06, 0x56, 0x79, 0xa1, 0xd0, 0xe0,
+            ],
+            &[
+                0x12, 0x00, 0x32, 0x2c, 0x30, 0xc0, 0x40, 0x00, 0x00, 0x41, 0x51, 0x00, 0x41, 0x00,
+                0x00, 0x40, 0x00, 0xd1, 0x1f, 0xd1, 0x7c, 0xfb, 0xef, 0xec, 0x11, 0xcb, 0x95, 0x22,
+                0xc9, 0x7d, 0x61, 0x78, 0xc2, 0x2f, 0x74, 0x36, 0x15, 0x06, 0x7f, 0xd0, 0xdc, 0x8d,
+                0xb2, 0xb5, 0x4f, 0x96, 0xd5, 0xf6,
+            ],
+            &[
+                0x12, 0x00, 0x32, 0x14, 0x30, 0x60, 0x80, 0x02, 0x00, 0x41, 0x50, 0x00, 0x41, 0x00,
+                0x00, 0x40, 0x00, 0xcd, 0xb9, 0x61, 0x4d, 0x7b, 0xb7, 0xa0,
+            ],
+        ];
+        let expected = [
+            0x95c8_589e_9dee_2325,
+            0xa64d_3fcf_0838_ab25,
+            0x1377_4ca4_510c_0b25,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index > 0 {
+                assert!(!frame.error_resilient, "frame {index}");
+                assert!(frame.primary_ref < 7, "frame {index}");
+                assert!(!frame.disable_cdf_update, "frame {index}");
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }
 

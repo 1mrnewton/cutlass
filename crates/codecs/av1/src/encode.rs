@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(frame.width, 64);
         assert!(frame.intra);
         assert_eq!(frame.base_q, 40);
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         assert!(
             picture.y.iter().all(|sample| *sample == 128),
             "luma {}",
@@ -1416,7 +1416,7 @@ mod tests {
     fn a_step_at_quality_40_keeps_luma_detail() {
         let bytes = encode(64, 64, 40, |col, _| if col < 32 { 40 } else { 180 });
         let (sequence, frame) = parse_unit(&bytes, None).expect("parse");
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         let mut sse = 0u64;
         for row in 0..64 {
             for col in 0..64 {
@@ -1522,7 +1522,7 @@ mod tests {
         let decoded = std::fs::read(&yuv_path).expect("yuv");
         let _ = std::fs::remove_file(&yuv_path);
         let (sequence, frame) = parse_unit(&bytes, None).expect("parse");
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         let mut ours = picture.y.clone();
         ours.extend_from_slice(&picture.u);
         ours.extend_from_slice(&picture.v);

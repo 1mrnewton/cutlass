@@ -63,21 +63,28 @@ pub struct DecodedPicture {
     pub height: usize,
 }
 
-pub fn decode_tile(sequence: &Sequence, frame: &FrameInfo) -> Result<DecodedPicture, CodecError> {
-    decode_with_refs(sequence, frame, &[])
+/// A reconstructed picture and the CDF context stored with its reference slots.
+pub struct Reconstructed {
+    pub picture: DecodedPicture,
+    pub cdfs: Cdfs,
+}
+
+/// Decode one frame from its own bytes. Tests use this when the frame does not
+/// name a primary reference.
+#[cfg(test)]
+pub fn decode_tile(sequence: &Sequence, frame: &FrameInfo) -> Result<Reconstructed, CodecError> {
+    decode_with_refs(sequence, frame, &[], None)
 }
 
 pub fn decode_with_refs(
     sequence: &Sequence,
     frame: &FrameInfo,
     refs: &[Option<RefView<'_>>],
-) -> Result<DecodedPicture, CodecError> {
+    carried: Option<&Cdfs>,
+) -> Result<Reconstructed, CodecError> {
     if frame.frame_type == INTER_FRAME {
         if sequence.enable_interintra {
             return Err(CodecError::Unsupported { what: "interintra" });
-        }
-        if !frame.error_resilient {
-            return Err(CodecError::Unsupported { what: "cdf carry" });
         }
         if frame.tx_select {
             return Err(CodecError::Unsupported {
@@ -119,18 +126,38 @@ pub fn decode_with_refs(
         });
     }
     let sb = if sequence.use_128 { 32 } else { SB4 };
+    let initial = frame_cdfs(frame, carried)?;
     let mut lr = restore::Grid::new(frame)?;
+    let mut end_cdfs = None;
     let mut tile = if parts.len() > 1 && !lr.active() {
-        decode_tiles(sequence, frame, &parts, buf_w, buf_h, refs, sb)?
+        let (tile, end) = decode_tiles(sequence, frame, &parts, buf_w, buf_h, refs, &initial)?;
+        end_cdfs = end;
+        tile
     } else {
-        let mut tile = Tile::new(sequence, frame, &parts[0].data, buf_w, buf_h, refs)?;
+        let mut tile = Tile::new(
+            sequence,
+            frame,
+            &parts[0].data,
+            buf_w,
+            buf_h,
+            refs,
+            &initial,
+        )?;
         for (index, part) in parts.iter().enumerate() {
             if index > 0 {
                 tile.restart(&part.data)?;
             }
             tile.decode_part(frame, part, sb, &mut lr)?;
+            if part_tile_num(frame, part)? == frame.context_update as usize {
+                end_cdfs = Some(tile.cdfs.clone());
+            }
         }
         tile
+    };
+    let cdfs = if frame.disable_frame_end_update {
+        initial
+    } else {
+        end_cdfs.unwrap_or(initial)
     };
     let sizes = tile.sizes.clone();
     let tx_sizes = tile.tx_sizes.clone();
@@ -258,12 +285,15 @@ pub fn decode_with_refs(
     } else {
         (y, u, v)
     };
-    Ok(DecodedPicture {
-        y,
-        u,
-        v,
-        width: out_w,
-        height: visible_h,
+    Ok(Reconstructed {
+        picture: DecodedPicture {
+            y,
+            u,
+            v,
+            width: out_w,
+            height: visible_h,
+        },
+        cdfs,
     })
 }
 
@@ -285,6 +315,60 @@ fn restore_plane(
     }
 }
 
+/// Section 6.8.2. A primary reference supplies its saved CDFs with counters cleared.
+/// An intra frame, or `PRIMARY_REF_NONE`, loads the default tables for this quantizer.
+fn frame_cdfs(frame: &FrameInfo, carried: Option<&Cdfs>) -> Result<Cdfs, CodecError> {
+    if !frame.intra && frame.primary_ref < 7 {
+        let Some(saved) = carried else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        };
+        let mut cdfs = saved.clone();
+        cdfs.clear_counts();
+        Ok(cdfs)
+    } else {
+        Ok(Cdfs::load(quantizer_context(frame.base_q)))
+    }
+}
+
+fn quantizer_context(base_q: u8) -> usize {
+    match base_q {
+        0..=20 => 0,
+        21..=60 => 1,
+        61..=120 => 2,
+        _ => 3,
+    }
+}
+
+fn part_tile_num(frame: &FrameInfo, part: &crate::header::TilePart) -> Result<usize, CodecError> {
+    let cols = frame.tile_cols as usize;
+    if cols == 0 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "tile grid",
+        });
+    }
+    let row = frame
+        .mi_row_starts
+        .iter()
+        .position(|start| *start as usize == part.row)
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "tile grid",
+        })?;
+    let col = frame
+        .mi_col_starts
+        .iter()
+        .position(|start| *start as usize == part.col)
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "tile grid",
+        })?;
+    Ok(row * cols + col)
+}
+
 /// Tiles reconstruct independently. Loop-filter rows then share the remaining cores.
 fn decode_tiles<'a, 'r>(
     sequence: &Sequence,
@@ -293,13 +377,14 @@ fn decode_tiles<'a, 'r>(
     buf_w: usize,
     buf_h: usize,
     refs: &[Option<RefView<'r>>],
-    sb: usize,
-) -> Result<Tile<'a, 'r>, CodecError> {
+    initial: &Cdfs,
+) -> Result<(Tile<'a, 'r>, Option<Cdfs>), CodecError> {
+    let sb = if sequence.use_128 { 32 } else { SB4 };
     let decoded = std::thread::scope(|scope| {
         let mut joins = Vec::with_capacity(parts.len());
         for part in parts {
             joins.push(scope.spawn(|| {
-                let mut tile = Tile::new(sequence, frame, &part.data, buf_w, buf_h, refs)?;
+                let mut tile = Tile::new(sequence, frame, &part.data, buf_w, buf_h, refs, initial)?;
                 let mut grid = restore::Grid::new(frame)?;
                 tile.decode_part(frame, part, sb, &mut grid)?;
                 Ok(tile)
@@ -325,6 +410,11 @@ fn decode_tiles<'a, 'r>(
         Ok(tiles)
     })?;
     let mut tiles = decoded;
+    let context = frame.context_update as usize;
+    let end_cdfs = tiles
+        .iter()
+        .find(|tile| tile.tile_num == context)
+        .map(|tile| tile.cdfs.clone());
     let Some(mut base) = tiles.pop() else {
         return Err(CodecError::Truncated {
             at_bit: 0,
@@ -335,7 +425,7 @@ fn decode_tiles<'a, 'r>(
     for extra in tiles {
         copy_tile_region(&mut base, &extra);
     }
-    Ok(base)
+    Ok((base, end_cdfs))
 }
 
 fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
@@ -442,7 +532,8 @@ struct Tile<'a, 'r> {
     tile_col: usize,
     tile_row_end: usize,
     tile_col_end: usize,
-    q_index: usize,
+    tile_num: usize,
+    initial_cdfs: Cdfs,
     y_mode: Vec<u8>,
     uv_mode: Vec<u8>,
     skips: Vec<u8>,
@@ -508,7 +599,8 @@ struct Tile<'a, 'r> {
     predict: PredictScratch,
 }
 
-struct Cdfs {
+#[derive(Clone)]
+pub(crate) struct Cdfs {
     partition: [Vec<u16>; 5],
     skip: Vec<u16>,
     y_mode: Vec<u16>,
@@ -560,6 +652,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         width: usize,
         height: usize,
         refs: &[Option<RefView<'r>>],
+        initial: &Cdfs,
     ) -> Result<Self, CodecError> {
         let mi_cols = frame.mi_cols as usize;
         let mi_rows = frame.mi_rows as usize;
@@ -579,12 +672,6 @@ impl<'a, 'r> Tile<'a, 'r> {
             height.div_ceil(2)
         } else {
             height
-        };
-        let q_ctx = match frame.base_q {
-            0..=20 => 0,
-            21..=60 => 1,
-            61..=120 => 2,
-            _ => 3,
         };
         let mut ref_y: [&'r [u8]; 8] = [&[]; 8];
         let mut ref_u: [&'r [u8]; 8] = [&[]; 8];
@@ -618,7 +705,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             tile_col: 0,
             tile_row_end: frame.mi_rows as usize,
             tile_col_end: frame.mi_cols as usize,
-            q_index: q_ctx,
+            tile_num: 0,
+            initial_cdfs: initial.clone(),
             y_mode: vec![DC_PRED; cells],
             uv_mode: vec![DC_PRED; cells],
             skips: vec![0; cells],
@@ -681,7 +769,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             cdef_on: sequence.enable_cdef,
             cdef: frame.cdef,
             cdef_idx: vec![-1; cells],
-            cdfs: Cdfs::load(q_ctx),
+            cdfs: initial.clone(),
             coeff_buf: Vec::new(),
             quant_buf: Vec::new(),
             residual_buf: Vec::new(),
@@ -693,7 +781,7 @@ impl<'a, 'r> Tile<'a, 'r> {
 
     fn restart(&mut self, bytes: &'a [u8]) -> Result<(), CodecError> {
         self.symbols = SymbolDecoder::new(bytes)?;
-        self.cdfs = Cdfs::load(self.q_index);
+        self.cdfs = self.initial_cdfs.clone();
         self.current_q = self.base_q;
         self.read_deltas = false;
         self.filter_mode = None;
@@ -711,6 +799,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.tile_col = part.col;
         self.tile_row_end = part.row_end;
         self.tile_col_end = part.col_end;
+        self.tile_num = part_tile_num(frame, part)?;
         self.clear_above(part.col, part.col_end);
         let mut row = part.row;
         while row < part.row_end {
@@ -3270,6 +3359,60 @@ pub(crate) fn row_range(
 }
 
 impl Cdfs {
+    /// `load_cdfs`: every adaptation counter, the last entry of each row, goes back to zero.
+    fn clear_counts(&mut self) {
+        const PARTITION_WIDTH: [usize; 5] = [5, 11, 11, 11, 9];
+        const TX_WIDTH: [usize; 4] = [3, 4, 4, 4];
+        const EOB_WIDTH: [usize; 7] = [6, 7, 8, 9, 10, 11, 12];
+        for (table, width) in self.partition.iter_mut().zip(PARTITION_WIDTH) {
+            zero_counters(table, width);
+        }
+        for (table, width) in self.tx.iter_mut().zip(TX_WIDTH) {
+            zero_counters(table, width);
+        }
+        for (table, width) in self.eob.iter_mut().zip(EOB_WIDTH) {
+            zero_counters(table, width);
+        }
+        zero_counters(&mut self.skip, 3);
+        zero_counters(&mut self.y_mode, 14);
+        zero_counters(&mut self.uv_yes, 15);
+        zero_counters(&mut self.uv_no, 14);
+        zero_counters(&mut self.angle, 8);
+        zero_counters(&mut self.intra_tx1, 8);
+        zero_counters(&mut self.intra_tx2, 6);
+        zero_counters(&mut self.txb_skip, 3);
+        zero_counters(&mut self.eob_extra, 3);
+        zero_counters(&mut self.dc_sign, 3);
+        zero_counters(&mut self.coeff_eob, 4);
+        zero_counters(&mut self.coeff_base, 5);
+        zero_counters(&mut self.coeff_br, 5);
+        zero_counters(&mut self.cfl_sign, 9);
+        zero_counters(&mut self.cfl_alpha, 17);
+        zero_counters(&mut self.is_inter, 3);
+        zero_counters(&mut self.single_ref, 3);
+        zero_counters(&mut self.new_mv, 3);
+        zero_counters(&mut self.zero_mv, 3);
+        zero_counters(&mut self.ref_mv, 3);
+        zero_counters(&mut self.drl, 3);
+        zero_counters(&mut self.mv_joint, 5);
+        zero_counters(&mut self.mv_sign, 3);
+        zero_counters(&mut self.mv_class, 12);
+        zero_counters(&mut self.mv_class0_bit, 3);
+        zero_counters(&mut self.mv_class0_fr, 5);
+        zero_counters(&mut self.mv_class0_hp, 3);
+        zero_counters(&mut self.mv_bit, 3);
+        zero_counters(&mut self.mv_fr, 5);
+        zero_counters(&mut self.mv_hp, 3);
+        zero_counters(&mut self.interp_filter, 4);
+        zero_counters(&mut self.inter_tx1, 17);
+        zero_counters(&mut self.inter_tx2, 13);
+        zero_counters(&mut self.inter_tx3, 3);
+        zero_counters(&mut self.intra_y, 14);
+        zero_counters(&mut self.delta_q, 5);
+        zero_counters(&mut self.use_filter_intra, 3);
+        zero_counters(&mut self.filter_intra, 6);
+    }
+
     fn load(q: usize) -> Self {
         Self {
             partition: [
@@ -3336,6 +3479,17 @@ impl Cdfs {
     }
 }
 
+fn zero_counters(table: &mut [u16], width: usize) {
+    if width == 0 {
+        return;
+    }
+    let mut index = width - 1;
+    while index < table.len() {
+        table[index] = 0;
+        index = index.saturating_add(width);
+    }
+}
+
 pub(crate) fn slice_q(table: &[u16], parts: usize, q: usize) -> Vec<u16> {
     let chunk = table.len() / parts;
     table[q * chunk..(q + 1) * chunk].to_vec()
@@ -3346,6 +3500,21 @@ mod tests {
     use super::{br_ctx, coeff_base_ctx, decode_tile};
     use crate::dims::{H_DCT, V_DCT};
     use crate::header::parse_unit;
+
+    #[test]
+    fn load_cdfs_clears_adaptation_counters() {
+        let mut cdfs = super::Cdfs::load(1);
+        let kept = cdfs.skip[0];
+        cdfs.skip[2] = 32;
+        cdfs.skip[5] = 17;
+        cdfs.coeff_base[4] = 9;
+        cdfs.clear_counts();
+        assert_eq!(cdfs.skip[0], kept);
+        assert_eq!(cdfs.skip[2], 0);
+        assert_eq!(cdfs.skip[5], 0);
+        assert_eq!(cdfs.coeff_base[4], 0);
+        assert_ne!(cdfs.coeff_base[0], 0);
+    }
 
     #[test]
     fn one_dimensional_transforms_use_the_spec_class() {
@@ -3374,7 +3543,7 @@ mod tests {
             0x5b, 0x9e, 0x40, 0xd0, 0xd1, 0x23, 0x96,
         ];
         let (sequence, frame) = parse_unit(&bytes, None).expect("parse");
-        let picture = decode_tile(&sequence, &frame).expect("decode");
+        let picture = decode_tile(&sequence, &frame).expect("decode").picture;
         assert_eq!(picture.width, 64);
         assert_eq!(picture.height, 64);
         for row in 0..64 {
@@ -3434,8 +3603,9 @@ mod tests {
             let mut got = Vec::new();
             for payload in &frames {
                 let (seq, frame) = parse_unit(payload, sequence.as_ref()).expect("parse");
-                let picture =
-                    decode_tile(&seq, &frame).unwrap_or_else(|err| panic!("{ivf}: {err:?}"));
+                let picture = decode_tile(&seq, &frame)
+                    .unwrap_or_else(|err| panic!("{ivf}: {err:?}"))
+                    .picture;
                 got.extend_from_slice(&picture.y);
                 got.extend_from_slice(&picture.u);
                 got.extend_from_slice(&picture.v);

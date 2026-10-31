@@ -157,6 +157,8 @@ pub struct FrameInfo {
     pub tile_rows: u32,
     pub tile_cols_log: u32,
     pub tile_rows_log: u32,
+    /// Tile whose final CDF is stored when the frame updates its context.
+    pub context_update: u32,
     pub tile_size_bytes: u32,
     pub mi_col_starts: Vec<u32>,
     pub mi_row_starts: Vec<u32>,
@@ -652,6 +654,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
     let uniform = bits.read_bool()?;
     let mut tile_cols_log = 0u32;
     let mut tile_rows_log = 0u32;
+    let mut context_update = 0u32;
     let mut tile_size_bytes = 0u32;
     let mut mi_col_starts = vec![0, 2 * ((width + 7) >> 3)];
     let mut mi_row_starts = vec![0, 2 * ((height + 7) >> 3)];
@@ -682,7 +685,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         mi_col_starts = mi_starts(sb_cols, cols_log, mi_cols_now);
         mi_row_starts = mi_starts(sb_rows, rows_log, mi_rows_now);
         if cols_log > 0 || rows_log > 0 {
-            let _context_update = bits.read(rows_log + cols_log)?;
+            context_update = bits.read(rows_log + cols_log)?;
             tile_size_bytes = bits.read(2)? + 1;
         }
     } else if sb_cols != 1 || sb_rows != 1 {
@@ -859,6 +862,7 @@ fn uncompressed(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<FrameIn
         tile_rows: mi_row_starts.len().saturating_sub(1) as u32,
         tile_cols_log,
         tile_rows_log,
+        context_update,
         tile_size_bytes,
         mi_col_starts,
         mi_row_starts,
@@ -1234,6 +1238,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         tile_rows: 1,
         tile_cols_log: 0,
         tile_rows_log: 0,
+        context_update: 0,
         tile_size_bytes: 0,
         mi_col_starts: vec![0],
         mi_row_starts: vec![0],

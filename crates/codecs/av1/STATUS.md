@@ -70,9 +70,9 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - Chroma decoded-neighbor flags use the chroma superblock grid. An extended intra edge stops at the tile boundary. A 2160p keyframe from `../local-files` matches dav1d when that file and dav1d are present.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 
-Within-frame CDF adaptation is implemented. The inter streams above turned it off.
+Within-frame CDF adaptation is implemented. An inter frame loads the CDFs saved for its primary reference and clears the adaptation counters. The error-resilient inter streams above turned CDF updates off.
 
-Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, CDF state carried from another frame, an inter frame that selects its transform size, scaled references, lossless, a per-superblock loop-filter delta, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A keyframe may select its transform size. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. That keyframe matches dav1d. A later frame from the same file is not part of that check.
+Unsupported, refused with a typed error before a picture is published: compound prediction, warped motion, overlapped motion, reference-frame motion vectors, short reference signaling, an inter frame that selects its transform size, scaled references, lossless, a per-superblock loop-filter delta, film grain copied from another frame, 10-bit, 12-bit, monochrome, and the other tools named above. A keyframe may select its transform size. A 2160p Main-profile sample from `../local-files` was pushed after `ffmpeg` copied one frame out of the container. That keyframe matches dav1d. A later frame from the same file is not part of that check.
 
 ### Encoder
 

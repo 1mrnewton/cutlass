@@ -16,7 +16,9 @@ use crate::dims::{
     UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, V_PRED, block_height, block_width, intra_tx_type,
     partition_subsize, subsampled_size,
 };
-use crate::header::{CdefParams, FrameInfo, INTER_FRAME, Sequence};
+use crate::header::{
+    CdefParams, FrameInfo, INTER_FRAME, SEG_ALT_Q, SEG_GLOBALMV, SEG_REF_FRAME, SEG_SKIP, Sequence,
+};
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
 use crate::idct::{InverseScratch, inverse_2d_into};
 use crate::inter::{
@@ -76,6 +78,7 @@ pub struct Reconstructed {
     pub picture: DecodedPicture,
     pub cdfs: Cdfs,
     pub motion: crate::inter::SavedMotion,
+    pub segments: Vec<u8>,
 }
 
 /// Decode one frame from its own bytes. Tests use this when the frame does not
@@ -158,12 +161,14 @@ pub fn decode_with_refs(
     let refs = tile.block_ref.clone();
     let modes = tile.y_mode.clone();
     let lf = tile.lf_delta.clone();
+    let segments = tile.seg_ids.clone();
     let edges = Edges {
         sizes: &sizes,
         tx: &tx_sizes,
         refs: &refs,
         modes: &modes,
         lf: &lf,
+        segments: &segments,
         mi_cols: tile.mi_cols,
         mi_rows: tile.mi_rows,
         sub_x: tile.sub_x,
@@ -302,6 +307,15 @@ pub fn decode_with_refs(
     } else {
         motion_unused()
     };
+    let stored_segments = if frame.segmentation.enabled && !frame.segmentation.update_map {
+        if frame.prev_segment_ids.len() == segments.len() {
+            frame.prev_segment_ids.clone()
+        } else {
+            vec![0; segments.len()]
+        }
+    } else {
+        segments
+    };
     Ok(Reconstructed {
         picture: DecodedPicture {
             y,
@@ -312,6 +326,7 @@ pub fn decode_with_refs(
         },
         cdfs,
         motion,
+        segments: stored_segments,
     })
 }
 
@@ -490,6 +505,7 @@ fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
             start.saturating_mul(4),
             n.saturating_mul(4),
         );
+        copy_cells(&mut dst.seg_ids, &src.seg_ids, start, n);
     }
 }
 
@@ -592,6 +608,12 @@ struct Tile<'a, 'r> {
     delta_lf_multi: bool,
     current_lf: [i8; 4],
     lf_delta: Vec<i8>,
+    seg: crate::header::Segmentation,
+    segment_id: u8,
+    seg_ids: Vec<u8>,
+    prev_ids: Vec<u8>,
+    above_seg_pred: Vec<u8>,
+    left_seg_pred: Vec<u8>,
     deltas: [i32; 5],
     tx_select: bool,
     reduced_tx: bool,
@@ -714,6 +736,8 @@ pub(crate) struct Cdfs {
     intra_y: Vec<u16>,
     delta_q: Vec<u16>,
     delta_lf: Vec<u16>,
+    segment_id: Vec<u16>,
+    segment_pred: Vec<u16>,
     use_filter_intra: Vec<u16>,
     filter_intra: Vec<u16>,
     inter_intra: Vec<u16>,
@@ -817,6 +841,16 @@ impl<'a, 'r> Tile<'a, 'r> {
             delta_lf_multi: frame.delta_lf_multi,
             current_lf: [0; 4],
             lf_delta: vec![0; cells.saturating_mul(4)],
+            seg: frame.segmentation,
+            segment_id: 0,
+            seg_ids: vec![0; cells],
+            prev_ids: if frame.prev_segment_ids.len() == cells {
+                frame.prev_segment_ids.clone()
+            } else {
+                Vec::new()
+            },
+            above_seg_pred: vec![0; mi_cols],
+            left_seg_pred: vec![0; mi_rows],
             deltas: [
                 frame.delta_y_dc,
                 frame.delta_u_dc,
@@ -970,6 +1004,9 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.above_dc[plane][x] = 0;
             }
         }
+        for x in col..col_end.min(self.above_seg_pred.len()) {
+            self.above_seg_pred[x] = 0;
+        }
     }
 
     fn clear_left(&mut self) {
@@ -977,6 +1014,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             self.left_level[plane].fill(0);
             self.left_dc[plane].fill(0);
         }
+        self.left_seg_pred.fill(0);
     }
 
     fn clear_decoded(&mut self, mi_row: usize, mi_col: usize) {
@@ -1184,7 +1222,17 @@ impl<'a, 'r> Tile<'a, 'r> {
         let avail_u = self.above_mi(row);
         let avail_l = self.left_mi(col);
         let skip_ctx = self.neighbor_sum(row, col);
-        let skip = self.read_skip(skip_ctx)?;
+        if self.seg.preskip {
+            self.read_intra_segment(row, col, false)?;
+        }
+        let skip = if self.seg.preskip && self.seg_on(SEG_SKIP) {
+            true
+        } else {
+            self.read_skip(skip_ctx)?
+        };
+        if !self.seg.preskip {
+            self.read_intra_segment(row, col, skip)?;
+        }
         self.read_cdef(row, col, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
         let y_mode = self.read_y_mode(row, col, avail_u, avail_l)?;
@@ -1249,12 +1297,18 @@ impl<'a, 'r> Tile<'a, 'r> {
         let has_chroma = self.has_chroma(row, col, bw4, bh4);
         let avail_u = self.above_mi(row);
         let avail_l = self.left_mi(col);
+        if self.seg.preskip {
+            self.read_inter_segment(row, col, bsize, true, false)?;
+        }
         let skip_mode = self.read_block_skip_mode(row, col, bsize)?;
-        let skip = if skip_mode {
+        let skip = if skip_mode || (self.seg.preskip && self.seg_on(SEG_SKIP)) {
             true
         } else {
             self.read_skip(self.neighbor_sum(row, col))?
         };
+        if !self.seg.preskip {
+            self.read_inter_segment(row, col, bsize, false, skip)?;
+        }
         self.read_cdef(row, col, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
         self.filter_mode = None;
@@ -1304,7 +1358,181 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.predict_and_residual(&coded)
     }
 
+    fn seg_on(&self, feature: usize) -> bool {
+        self.seg.active(usize::from(self.segment_id), feature)
+    }
+
+    fn seg_value(&self, feature: usize) -> i32 {
+        self.seg.value(usize::from(self.segment_id), feature)
+    }
+
+    fn read_intra_segment(&mut self, row: usize, col: usize, skip: bool) -> Result<(), CodecError> {
+        if !self.seg.enabled {
+            self.segment_id = 0;
+            return Ok(());
+        }
+        self.segment_id = self.read_spatial_id(row, col, skip)?;
+        Ok(())
+    }
+
+    fn read_inter_segment(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        pre_skip: bool,
+        skip: bool,
+    ) -> Result<(), CodecError> {
+        if !self.seg.enabled {
+            self.segment_id = 0;
+            return Ok(());
+        }
+        let bw4 = NUM_4X4_WIDE[bsize];
+        let bh4 = NUM_4X4_HIGH[bsize];
+        if !self.seg.update_map {
+            self.segment_id = self.predicted_segment(row, col, bw4, bh4);
+            return Ok(());
+        }
+        if pre_skip && !self.seg.preskip {
+            self.segment_id = 0;
+            return Ok(());
+        }
+        if !pre_skip && skip {
+            self.stamp_seg_pred(row, col, bw4, bh4, 0);
+            self.segment_id = self.read_spatial_id(row, col, true)?;
+            return Ok(());
+        }
+        if self.seg.temporal {
+            let ctx = self.seg_pred_context(row, col);
+            let predicted = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.segment_pred,
+                &[3, 3],
+                &[ctx],
+            )? == 1;
+            self.segment_id = if predicted {
+                self.predicted_segment(row, col, bw4, bh4)
+            } else {
+                self.read_spatial_id(row, col, false)?
+            };
+            self.stamp_seg_pred(row, col, bw4, bh4, u8::from(predicted));
+            return Ok(());
+        }
+        self.segment_id = self.read_spatial_id(row, col, false)?;
+        Ok(())
+    }
+
+    fn read_spatial_id(&mut self, row: usize, col: usize, skip: bool) -> Result<u8, CodecError> {
+        let (pred, ctx) = self.spatial_segment(row, col);
+        if skip {
+            return Ok(pred);
+        }
+        let diff = i32::try_from(read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.segment_id,
+            &[3, 9],
+            &[ctx],
+        )?)
+        .unwrap_or(0);
+        let max = i32::from(self.seg.last_active) + 1;
+        let id = neg_deinterleave(diff, i32::from(pred), max);
+        if id < 0 || id > i32::from(self.seg.last_active) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "segment id",
+            });
+        }
+        u8::try_from(id).map_err(|_| CodecError::Malformed {
+            at_bit: 0,
+            what: "segment id",
+        })
+    }
+
+    fn spatial_segment(&self, row: usize, col: usize) -> (u8, usize) {
+        let above = self.above_mi(row);
+        let left = self.left_mi(col);
+        let prev_ul = if above && left {
+            self.seg_at(row - 1, col - 1)
+        } else {
+            -1
+        };
+        let prev_u = if above { self.seg_at(row - 1, col) } else { -1 };
+        let prev_l = if left { self.seg_at(row, col - 1) } else { -1 };
+        let pred = if prev_u < 0 {
+            if prev_l < 0 { 0 } else { prev_l }
+        } else if prev_l < 0 || prev_ul == prev_u {
+            prev_u
+        } else {
+            prev_l
+        };
+        let ctx = if prev_ul < 0 {
+            0
+        } else if prev_ul == prev_u && prev_ul == prev_l {
+            2
+        } else if prev_ul == prev_u || prev_ul == prev_l || prev_u == prev_l {
+            1
+        } else {
+            0
+        };
+        (u8::try_from(pred).unwrap_or(0), ctx)
+    }
+
+    fn seg_at(&self, row: usize, col: usize) -> i32 {
+        let at = row.saturating_mul(self.mi_cols).saturating_add(col);
+        i32::from(self.seg_ids.get(at).copied().unwrap_or(0))
+    }
+
+    fn predicted_segment(&self, row: usize, col: usize, bw4: usize, bh4: usize) -> u8 {
+        let cells = self.mi_cols.saturating_mul(self.mi_rows);
+        if self.prev_ids.len() != cells {
+            return 0;
+        }
+        let x_mis = bw4.min(self.mi_cols.saturating_sub(col));
+        let y_mis = bh4.min(self.mi_rows.saturating_sub(row));
+        let mut seg = 7u8;
+        for y in 0..y_mis {
+            for x in 0..x_mis {
+                let at = (row + y)
+                    .saturating_mul(self.mi_cols)
+                    .saturating_add(col + x);
+                if let Some(id) = self.prev_ids.get(at) {
+                    seg = seg.min(*id);
+                }
+            }
+        }
+        seg
+    }
+
+    fn seg_pred_context(&self, row: usize, col: usize) -> usize {
+        let above = self.above_seg_pred.get(col).copied().unwrap_or(0);
+        let left = self.left_seg_pred.get(row).copied().unwrap_or(0);
+        usize::from(above) + usize::from(left)
+    }
+
+    fn stamp_seg_pred(&mut self, row: usize, col: usize, bw4: usize, bh4: usize, value: u8) {
+        let x_end = (col + bw4).min(self.mi_cols);
+        let y_end = (row + bh4).min(self.mi_rows);
+        for x in col..x_end {
+            if let Some(slot) = self.above_seg_pred.get_mut(x) {
+                *slot = value;
+            }
+        }
+        for y in row..y_end {
+            if let Some(slot) = self.left_seg_pred.get_mut(y) {
+                *slot = value;
+            }
+        }
+    }
+
     fn read_is_inter(&mut self, row: usize, col: usize) -> Result<bool, CodecError> {
+        if self.seg_on(SEG_REF_FRAME) {
+            return Ok(self.seg_value(SEG_REF_FRAME) != i32::from(INTRA_FRAME));
+        }
+        if self.seg_on(SEG_GLOBALMV) {
+            return Ok(true);
+        }
         let ctx = self.is_inter_ctx(row, col);
         Ok(read_sym(
             &mut self.symbols,
@@ -1381,6 +1609,9 @@ impl<'a, 'r> Tile<'a, 'r> {
         col: usize,
         bsize: usize,
     ) -> Result<bool, CodecError> {
+        if self.seg_on(SEG_SKIP) || self.seg_on(SEG_REF_FRAME) || self.seg_on(SEG_GLOBALMV) {
+            return Ok(false);
+        }
         if !self.skip_present || block_width(bsize) < 8 || block_height(bsize) < 8 {
             return Ok(false);
         }
@@ -1454,6 +1685,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         );
         let y_mode = if skip_mode {
             NEAREST_NEARESTMV
+        } else if self.seg_on(SEG_SKIP) || self.seg_on(SEG_GLOBALMV) {
+            GLOBALMV
         } else if compound {
             self.read_compound_mode(&stack)?
         } else {
@@ -1716,6 +1949,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         bw4: usize,
         bh4: usize,
     ) -> Result<(i8, i8), CodecError> {
+        if self.seg_on(SEG_REF_FRAME) {
+            let reference = i8::try_from(self.seg_value(SEG_REF_FRAME)).unwrap_or(LAST_FRAME);
+            return Ok((reference, NONE_FRAME));
+        }
+        if self.seg_on(SEG_SKIP) || self.seg_on(SEG_GLOBALMV) {
+            return Ok((LAST_FRAME, NONE_FRAME));
+        }
         let ctx = self.comp_mode_ctx(row, col);
         let compound = self.reference_select && bw4.min(bh4) >= 2 && {
             read_sym(
@@ -3992,6 +4232,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.compound_mask[at] = coded.compound_mask;
                 self.skip_modes[at] = u8::from(coded.skip_mode);
                 self.motion_modes[at] = coded.motion_mode;
+                self.seg_ids[at] = self.segment_id;
                 let lf_at = at.saturating_mul(4);
                 if let Some(slot) = self.lf_delta.get_mut(lf_at..lf_at + 4) {
                     slot.copy_from_slice(&self.current_lf);
@@ -4716,6 +4957,9 @@ impl<'a, 'r> Tile<'a, 'r> {
         tx_type: u8,
         quant: &[i32],
     ) -> Result<(), CodecError> {
+        if self.qindex() == 0 && self.deltas.iter().all(|delta| *delta == 0) {
+            return Err(CodecError::Unsupported { what: "lossless" });
+        }
         let w = TX_WIDTH[tx];
         let h = TX_HEIGHT[tx];
         let tw = w.min(32);
@@ -4803,6 +5047,15 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
+    fn qindex(&self) -> i32 {
+        let q = i32::from(self.current_q);
+        if self.seg_on(SEG_ALT_Q) {
+            (q + self.seg_value(SEG_ALT_Q)).clamp(0, 255)
+        } else {
+            q
+        }
+    }
+
     fn quantizer(&self, plane: usize, dc: bool) -> i32 {
         let delta = if dc {
             match plane {
@@ -4817,7 +5070,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 _ => 0,
             }
         };
-        let q = (i32::from(self.current_q) + delta).clamp(0, 255) as usize;
+        let q = (self.qindex() + delta).clamp(0, 255) as usize;
         i32::from(if dc { DC_QLOOKUP[q] } else { AC_QLOOKUP[q] })
     }
 }
@@ -5419,6 +5672,39 @@ fn read_coded_delta(
     }
 }
 
+fn neg_deinterleave(diff: i32, reference: i32, max: i32) -> i32 {
+    if reference == 0 {
+        return diff;
+    }
+    if reference >= max - 1 {
+        return max - diff - 1;
+    }
+    if 2 * reference < max {
+        if diff <= 2 * reference {
+            if diff & 1 == 1 {
+                reference + ((diff + 1) >> 1)
+            } else {
+                reference - (diff >> 1)
+            }
+        } else {
+            diff
+        }
+    } else if diff <= 2 * (max - reference - 1) {
+        if diff & 1 == 1 {
+            reference + ((diff + 1) >> 1)
+        } else {
+            reference - (diff >> 1)
+        }
+    } else {
+        max - (diff + 1)
+    }
+}
+
+const SEGMENT_ID_CDF: [u16; 27] = [
+    5622, 7893, 16093, 18233, 27809, 28373, 32533, 32768, 0, 14274, 18230, 22557, 24935, 29980,
+    30851, 32344, 32768, 0, 27527, 28487, 28723, 28890, 32397, 32647, 32679, 32768, 0,
+];
+
 fn read_sym(
     symbols: &mut SymbolDecoder<'_>,
     update: bool,
@@ -5522,6 +5808,8 @@ impl Cdfs {
         zero_counters(&mut self.intra_y, 14);
         zero_counters(&mut self.delta_q, 5);
         zero_counters(&mut self.delta_lf, 5);
+        zero_counters(&mut self.segment_id, 9);
+        zero_counters(&mut self.segment_pred, 3);
         zero_counters(&mut self.use_filter_intra, 3);
         zero_counters(&mut self.filter_intra, 6);
         zero_counters(&mut self.inter_intra, 3);
@@ -5604,6 +5892,8 @@ impl Cdfs {
             intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
             delta_q: vec![28160, 32120, 32677, 32768, 0],
             delta_lf: [28160u16, 32120, 32677, 32768, 0].repeat(5),
+            segment_id: SEGMENT_ID_CDF.to_vec(),
+            segment_pred: [16384u16, 32768, 0].repeat(3),
             use_filter_intra: FILTER_INTRA_CDF.to_vec(),
             filter_intra: vec![8949, 12776, 17211, 29558, 32768, 0],
             inter_intra: INTER_INTRA_CDF.to_vec(),

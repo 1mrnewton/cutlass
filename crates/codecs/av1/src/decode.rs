@@ -7,7 +7,8 @@ use cutlass_decode::{
 use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{
-    FrameInfo, SavedLoopFilter, Sequence, header_is_addressable, parse_with_motion, unit_obus,
+    FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, header_is_addressable,
+    parse_with_motion, unit_obus,
 };
 use crate::inter::{RefView, SavedMotion};
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
@@ -20,6 +21,20 @@ struct Reference {
     gm: [[i32; 6]; 8],
     field: Arc<SavedMotion>,
     lf: SavedLoopFilter,
+    segmentation: Segmentation,
+    segments: Arc<Vec<u8>>,
+    mi_cols: u32,
+    mi_rows: u32,
+}
+
+struct Held {
+    picture: Yuv420,
+    cdfs: Arc<Cdfs>,
+    motion: Arc<SavedMotion>,
+    segmentation: Segmentation,
+    segments: Arc<Vec<u8>>,
+    mi_cols: u32,
+    mi_rows: u32,
 }
 
 struct KeptSlot {
@@ -164,35 +179,39 @@ impl Av1Decoder {
                 .as_ref()
                 .map(|reference| (reference.picture.y.width(), reference.picture.y.height()))
         });
-        let saved_lf = std::array::from_fn(|slot| {
+        let inherited = std::array::from_fn(|slot| {
             self.refs[slot]
                 .as_ref()
-                .map(|reference| reference.lf)
-                .unwrap_or_else(SavedLoopFilter::defaults)
+                .map(|reference| Inherited {
+                    lf: reference.lf,
+                    seg: reference.segmentation,
+                })
+                .unwrap_or_else(Inherited::defaults)
         });
-        let (sequence, frame) = parse_with_motion(
+        let (sequence, mut frame) = parse_with_motion(
             bytes,
             self.sequence.as_ref(),
             &saved_motion,
             &self.order_hints,
             &ref_sizes,
-            &saved_lf,
+            &inherited,
         )?;
+        self.attach_prev_segments(&mut frame);
         header_is_addressable(&sequence, &frame)?;
         let stale = self.take_stale_refs(&frame);
-        let (picture, cdfs, motion) = match self.picture_before_grain(&sequence, &frame) {
+        let held = match self.picture_before_grain(&sequence, &frame) {
             Ok(decoded) => decoded,
             Err(error) => {
                 self.restore_refs(stale);
                 return Err(error);
             }
         };
-        let stored = self.store(&frame, &picture, cdfs, motion);
+        let stored = self.store(&frame, &held);
         self.sequence = Some(sequence);
         if !frame.show_frame {
             return Ok((None, FrameUndo { stored, stale }));
         }
-        let picture = match shown(&picture, &frame)
+        let picture = match shown(&held.picture, &frame)
             .and_then(|picture| picture_output(&picture, packet.pts, packet.timescale))
         {
             Ok(picture) => picture,
@@ -249,13 +268,26 @@ impl Av1Decoder {
         })
     }
 
-    fn store(
-        &mut self,
-        frame: &FrameInfo,
-        picture: &Yuv420,
-        cdfs: Arc<Cdfs>,
-        motion: Arc<SavedMotion>,
-    ) -> Vec<KeptSlot> {
+    fn attach_prev_segments(&self, frame: &mut FrameInfo) {
+        if !frame.segmentation.enabled || frame.primary_ref >= 7 {
+            return;
+        }
+        let Some(slot) = frame
+            .ref_frames
+            .get(usize::from(frame.primary_ref))
+            .copied()
+        else {
+            return;
+        };
+        let Some(reference) = self.refs[usize::from(slot)].as_ref() else {
+            return;
+        };
+        if reference.mi_cols == frame.mi_cols && reference.mi_rows == frame.mi_rows {
+            frame.prev_segment_ids = (*reference.segments).clone();
+        }
+    }
+
+    fn store(&mut self, frame: &FrameInfo, held: &Held) -> Vec<KeptSlot> {
         let mut kept = Vec::new();
         for slot in 0..8 {
             if frame.refresh_flags & (1 << slot) != 0 {
@@ -265,14 +297,18 @@ impl Av1Decoder {
                     hint: self.order_hints[slot],
                 });
                 self.refs[slot] = Some(Reference {
-                    picture: picture.clone(),
-                    cdfs: Arc::clone(&cdfs),
+                    picture: held.picture.clone(),
+                    cdfs: Arc::clone(&held.cdfs),
                     gm: frame.gm_params,
-                    field: Arc::clone(&motion),
+                    field: Arc::clone(&held.motion),
                     lf: SavedLoopFilter {
                         ref_deltas: frame.lf_ref_deltas,
                         mode_deltas: frame.lf_mode_deltas,
                     },
+                    segmentation: held.segmentation,
+                    segments: Arc::clone(&held.segments),
+                    mi_cols: held.mi_cols,
+                    mi_rows: held.mi_rows,
                 });
                 self.order_hints[slot] = frame.order_hint;
             }
@@ -298,7 +334,7 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
-    ) -> Result<(Yuv420, Arc<Cdfs>, Arc<SavedMotion>), CodecError> {
+    ) -> Result<Held, CodecError> {
         if frame.show_existing {
             let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
                 return Err(CodecError::Malformed {
@@ -306,18 +342,26 @@ impl Av1Decoder {
                     what: "missing reference",
                 });
             };
-            return Ok((
-                stored.picture.clone(),
-                Arc::clone(&stored.cdfs),
-                Arc::clone(&stored.field),
-            ));
+            return Ok(Held {
+                picture: stored.picture.clone(),
+                cdfs: Arc::clone(&stored.cdfs),
+                motion: Arc::clone(&stored.field),
+                segmentation: stored.segmentation,
+                segments: Arc::clone(&stored.segments),
+                mi_cols: stored.mi_cols,
+                mi_rows: stored.mi_rows,
+            });
         }
         let reconstructed = self.decode_picture(sequence, frame)?;
-        Ok((
-            owned(reconstructed.picture)?,
-            Arc::new(reconstructed.cdfs),
-            Arc::new(reconstructed.motion),
-        ))
+        Ok(Held {
+            picture: owned(reconstructed.picture)?,
+            cdfs: Arc::new(reconstructed.cdfs),
+            motion: Arc::new(reconstructed.motion),
+            segmentation: frame.segmentation,
+            segments: Arc::new(reconstructed.segments),
+            mi_cols: frame.mi_cols,
+            mi_rows: frame.mi_rows,
+        })
     }
 
     fn take_stale_refs(&mut self, frame: &FrameInfo) -> [Option<Reference>; 8] {
@@ -2717,6 +2761,50 @@ mod tests {
             assert!(frame.delta_lf_present, "frame {index}");
             assert!(!frame.delta_lf_multi, "frame {index}");
             assert_ne!(frame.lf_level[0], 0, "frame {index}");
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn segmentation_quantizer_matches_dav1d() {
+        // aomenc variance adaptive quantization. The keyframe assigns a
+        // quantizer delta to each segment. A later frame keeps the previous
+        // map and does not rewrite the feature values. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/seg_0.obu"),
+            include_bytes!("../fixtures/seg_1.obu"),
+            include_bytes!("../fixtures/seg_2.obu"),
+            include_bytes!("../fixtures/seg_3.obu"),
+        ];
+        let expected = [
+            0xdcbd_5a56_a7f2_81f8,
+            0x6e04_7338_a20a_5d6f,
+            0x6e04_7338_a20a_5d6f,
+            0x6e04_7338_a20a_5d6f,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(frame.segmentation.enabled, "frame {index}");
+            if index == 0 {
+                assert!(frame.segmentation.update_data);
+                assert!(frame.segmentation.update_map);
+                assert!(!frame.segmentation.preskip);
+                assert_eq!(frame.segmentation.data[0][0], -50);
+                assert_eq!(frame.segmentation.data[7][0], 25);
+            }
+            if index == 3 {
+                assert!(!frame.segmentation.update_map);
+                assert!(!frame.segmentation.update_data);
+            }
             sequence = Some(seq);
         }
         let params = CodecParams::video(CodecId::Av1, 128, 128);

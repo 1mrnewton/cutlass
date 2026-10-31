@@ -1,11 +1,11 @@
 //! In-loop deblocking from section 7.14 of the AV1 specification.
 //!
 //! Vertical edges are filtered before horizontal edges. A frame may update the
-//! reference and mode deltas, and a superblock may add its own delta.
-//! Segmentation is not used; a frame that enables it is rejected before this runs.
+//! reference and mode deltas, a superblock may add its own delta, and a segment
+//! may add one more.
 
 use crate::dims::{MAX_TX_SIZE_RECT, TX_HEIGHT, TX_WIDTH, subsampled_size};
-use crate::header::FrameInfo;
+use crate::header::{FrameInfo, SEG_ALT_LF_Y_V};
 use crate::inter::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV};
 
 const MAX_LOOP_FILTER: i32 = 63;
@@ -17,6 +17,7 @@ pub struct Edges<'a> {
     pub modes: &'a [u8],
     /// Four loop-filter deltas per 4×4, in superblock order.
     pub lf: &'a [i8],
+    pub segments: &'a [u8],
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub sub_x: bool,
@@ -492,6 +493,7 @@ fn strength_at(edges: &Edges<'_>, plane: usize, pass: usize, row: usize, col: us
         reference,
         mode,
         superblock_delta(edges, plane, pass, at),
+        edges.segments.get(at).copied().unwrap_or(0),
     )
 }
 
@@ -512,17 +514,23 @@ fn filter_level(
     reference: i8,
     mode: u8,
     delta_lf: i32,
+    segment: u8,
 ) -> i32 {
     let index = if plane == 0 { pass } else { plane + 1 };
     let Some(base) = frame.lf_level.get(index).copied() else {
         return 0;
     };
     // A chroma plane whose coded level is 0 stays unfiltered. The superblock
-    // delta is not added to that zero.
+    // delta and the segment delta are not added to that zero.
     if plane > 0 && base == 0 {
         return 0;
     }
     let mut lvl = (i32::from(base) + delta_lf).clamp(0, MAX_LOOP_FILTER);
+    let feature = SEG_ALT_LF_Y_V + index;
+    if frame.segmentation.active(usize::from(segment), feature) {
+        lvl = (lvl + frame.segmentation.value(usize::from(segment), feature))
+            .clamp(0, MAX_LOOP_FILTER);
+    }
     if !frame.lf_delta_enabled {
         return lvl;
     }

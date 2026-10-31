@@ -158,7 +158,10 @@ pub struct FrameInfo {
     pub cdef: CdefParams,
     pub restoration: Restoration,
     pub grain: crate::grain::Grain,
-    pub segmentation: bool,
+    pub segmentation: Segmentation,
+    /// Segment ids from the primary reference when this frame may use them.
+    /// Empty means every id is zero.
+    pub prev_segment_ids: Vec<u8>,
     pub lossless: bool,
     pub all_lossless: bool,
     pub ref_frames: [u8; 7],
@@ -200,7 +203,7 @@ pub fn parse_unit(
         &[None; 8],
         &[0; 8],
         &[None; 8],
-        &[SavedLoopFilter::defaults(); 8],
+        &[Inherited::defaults(); 8],
     )
 }
 
@@ -212,7 +215,7 @@ pub fn parse_with_motion(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
-    saved_lf: &[SavedLoopFilter; 8],
+    inherited: &[Inherited; 8],
 ) -> Result<(Sequence, FrameInfo), CodecError> {
     let mut bits = BitReader::new(bytes);
     let mut seq = sequence.cloned();
@@ -260,7 +263,7 @@ pub fn parse_with_motion(
                     saved,
                     order_hints,
                     ref_sizes,
-                    saved_lf,
+                    inherited,
                 )?);
             }
             3 | 7 => {
@@ -274,7 +277,7 @@ pub fn parse_with_motion(
                     saved,
                     order_hints,
                     ref_sizes,
-                    saved_lf,
+                    inherited,
                 )?);
             }
             4 => {
@@ -544,10 +547,10 @@ fn parse_frame(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
-    saved_lf: &[SavedLoopFilter; 8],
+    inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
-    let mut frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, saved_lf)?;
+    let mut frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, inherited)?;
     bits.byte_align();
     let header_bytes = (bits.position() - header_start) / 8;
     let obu_bytes = (payload_end - header_start) / 8;
@@ -585,9 +588,9 @@ fn parse_frame_header_only(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
-    saved_lf: &[SavedLoopFilter; 8],
+    inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
-    let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, saved_lf)?;
+    let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, inherited)?;
     trailing(bits, payload_end)?;
     if !frame.show_existing && frame.tile.is_empty() {
         return Err(CodecError::Unsupported {
@@ -603,7 +606,7 @@ fn uncompressed(
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32)>; 8],
-    saved_lf: &[SavedLoopFilter; 8],
+    inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
     let mut frame_to_show = 0u8;
@@ -818,12 +821,7 @@ fn uncompressed(
     } else {
         [15, 15, 15]
     };
-    let segmentation = bits.read_bool()?;
-    if segmentation {
-        return Err(CodecError::Unsupported {
-            what: "segmentation",
-        });
-    }
+    let segmentation = read_segmentation(bits, primary_ref, &ref_frames, inherited)?;
     let delta_q_present = if base_q > 0 { bits.read_bool()? } else { false };
     let delta_q_res = if delta_q_present {
         bits.read(2)? as u8
@@ -848,7 +846,7 @@ fn uncompressed(
     let mut lf = [0u8; 4];
     let mut sharpness = 0u8;
     let mut lf_delta = false;
-    let (mut ref_deltas, mut mode_deltas) = inherited_lf(primary_ref, &ref_frames, saved_lf);
+    let (mut ref_deltas, mut mode_deltas) = inherited_lf(primary_ref, &ref_frames, inherited);
     if lossless {
         // A lossless frame replaces whatever was inherited with the defaults.
         (ref_deltas, mode_deltas) = SavedLoopFilter::defaults().pair();
@@ -958,7 +956,8 @@ fn uncompressed(
         cdef,
         restoration,
         grain,
-        segmentation: false,
+        segmentation,
+        prev_segment_ids: Vec::new(),
         lossless,
         all_lossless: lossless,
         ref_frames,
@@ -1133,6 +1132,100 @@ fn read_cdef_sec(bits: &mut BitReader<'_>) -> Result<u8, CodecError> {
     Ok(if strength == 3 { 4 } else { strength })
 }
 
+/// `SEG_LVL_ALT_Q`. Added to the block quantizer index.
+pub const SEG_ALT_Q: usize = 0;
+/// `SEG_LVL_ALT_LF_Y_V`. The next three features are the other loop-filter deltas.
+pub const SEG_ALT_LF_Y_V: usize = 1;
+/// `SEG_LVL_REF_FRAME`.
+pub const SEG_REF_FRAME: usize = 5;
+/// `SEG_LVL_SKIP`.
+pub const SEG_SKIP: usize = 6;
+/// `SEG_LVL_GLOBALMV`.
+pub const SEG_GLOBALMV: usize = 7;
+
+const FEATURE_BITS: [u32; 8] = [8, 6, 6, 6, 6, 3, 0, 0];
+const FEATURE_SIGNED: [bool; 8] = [true, true, true, true, true, false, false, false];
+const FEATURE_MAX: [i32; 8] = [255, 63, 63, 63, 63, 7, 0, 0];
+
+/// Segmentation features for one frame. Eight segments, eight features each.
+#[derive(Clone, Copy, Debug)]
+pub struct Segmentation {
+    pub enabled: bool,
+    pub update_map: bool,
+    pub temporal: bool,
+    pub update_data: bool,
+    pub feature: [[bool; 8]; 8],
+    pub data: [[i16; 8]; 8],
+    pub last_active: u8,
+    pub preskip: bool,
+}
+
+impl Segmentation {
+    pub const fn off() -> Self {
+        Self {
+            enabled: false,
+            update_map: false,
+            temporal: false,
+            update_data: false,
+            feature: [[false; 8]; 8],
+            data: [[0; 8]; 8],
+            last_active: 0,
+            preskip: false,
+        }
+    }
+
+    pub fn active(self, id: usize, feature: usize) -> bool {
+        self.enabled
+            && self
+                .feature
+                .get(id)
+                .and_then(|row| row.get(feature))
+                .copied()
+                .unwrap_or(false)
+    }
+
+    pub fn value(self, id: usize, feature: usize) -> i32 {
+        i32::from(
+            self.data
+                .get(id)
+                .and_then(|row| row.get(feature))
+                .copied()
+                .unwrap_or(0),
+        )
+    }
+
+    fn finish(&mut self) {
+        self.last_active = 0;
+        self.preskip = false;
+        for (id, row) in self.feature.iter().enumerate() {
+            for (feature, enabled) in row.iter().enumerate() {
+                if *enabled {
+                    self.last_active = u8::try_from(id).unwrap_or(0);
+                    if feature >= SEG_REF_FRAME {
+                        self.preskip = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Loop-filter deltas and segmentation features stored with one reference slot.
+#[derive(Clone, Copy)]
+pub struct Inherited {
+    pub lf: SavedLoopFilter,
+    pub seg: Segmentation,
+}
+
+impl Inherited {
+    pub const fn defaults() -> Self {
+        Self {
+            lf: SavedLoopFilter::defaults(),
+            seg: Segmentation::off(),
+        }
+    }
+}
+
 /// Loop-filter reference and mode deltas stored with a reference frame.
 #[derive(Clone, Copy)]
 pub struct SavedLoopFilter {
@@ -1157,7 +1250,7 @@ impl SavedLoopFilter {
 fn inherited_lf(
     primary_ref: u8,
     ref_frames: &[u8; 7],
-    saved: &[SavedLoopFilter; 8],
+    saved: &[Inherited; 8],
 ) -> ([i8; 8], [i8; 2]) {
     if primary_ref >= PRIMARY_REF_NONE {
         return SavedLoopFilter::defaults().pair();
@@ -1165,9 +1258,87 @@ fn inherited_lf(
     let slot = usize::from(ref_frames[usize::from(primary_ref)]);
     saved
         .get(slot)
-        .copied()
+        .map(|saved| saved.lf)
         .unwrap_or_else(SavedLoopFilter::defaults)
         .pair()
+}
+
+fn read_segmentation(
+    bits: &mut BitReader<'_>,
+    primary_ref: u8,
+    ref_frames: &[u8; 7],
+    saved: &[Inherited; 8],
+) -> Result<Segmentation, CodecError> {
+    if !bits.read_bool()? {
+        return Ok(Segmentation::off());
+    }
+    let (update_map, temporal, update_data) = if primary_ref >= PRIMARY_REF_NONE {
+        (true, false, true)
+    } else {
+        let update_map = bits.read_bool()?;
+        let temporal = if update_map { bits.read_bool()? } else { false };
+        (update_map, temporal, bits.read_bool()?)
+    };
+    let stored = if update_data {
+        read_feature_data(bits)?
+    } else {
+        inherited_features(primary_ref, ref_frames, saved)
+    };
+    let mut segmentation = Segmentation {
+        enabled: true,
+        update_map,
+        temporal,
+        update_data,
+        feature: stored.feature,
+        data: stored.data,
+        last_active: 0,
+        preskip: false,
+    };
+    segmentation.finish();
+    Ok(segmentation)
+}
+
+fn inherited_features(
+    primary_ref: u8,
+    ref_frames: &[u8; 7],
+    saved: &[Inherited; 8],
+) -> Segmentation {
+    if primary_ref >= PRIMARY_REF_NONE {
+        return Segmentation::off();
+    }
+    let slot = usize::from(ref_frames[usize::from(primary_ref)]);
+    saved
+        .get(slot)
+        .map(|saved| saved.seg)
+        .unwrap_or_else(Segmentation::off)
+}
+
+fn read_feature_data(bits: &mut BitReader<'_>) -> Result<Segmentation, CodecError> {
+    let mut stored = Segmentation::off();
+    for row in 0..8 {
+        for column in 0..8 {
+            if !bits.read_bool()? {
+                continue;
+            }
+            stored.feature[row][column] = true;
+            let width = FEATURE_BITS[column];
+            let limit = FEATURE_MAX[column];
+            let raw = if FEATURE_SIGNED[column] {
+                bits.read_signed(1 + width)?
+            } else if width == 0 {
+                0
+            } else {
+                i32::try_from(bits.read(width)?).unwrap_or(0)
+            };
+            let clipped = if FEATURE_SIGNED[column] {
+                raw.clamp(-limit, limit)
+            } else {
+                raw.clamp(0, limit)
+            };
+            stored.data[row][column] = i16::try_from(clipped).unwrap_or(0);
+        }
+    }
+    Ok(stored)
 }
 
 fn read_lf_delta_update(
@@ -1416,7 +1587,8 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         cdef: CdefParams::off(),
         restoration: Restoration::off(),
         grain: crate::grain::Grain::off(),
-        segmentation: false,
+        segmentation: Segmentation::off(),
+        prev_segment_ids: Vec::new(),
         lossless: false,
         all_lossless: false,
         ref_frames: [0; 7],
@@ -1769,7 +1941,8 @@ pub(crate) fn header_is_addressable(
         .wrapping_add(u32::from(frame.allow_warped))
         .wrapping_add(u32::from(frame.lf_mode_deltas[0].unsigned_abs()))
         .wrapping_add(u32::from(frame.lf_mode_deltas[1].unsigned_abs()))
-        .wrapping_add(u32::from(frame.segmentation))
+        .wrapping_add(u32::from(frame.segmentation.enabled))
+        .wrapping_add(u32::from(frame.segmentation.update_data))
         .wrapping_add(u32::from(frame.all_lossless))
         .wrapping_add(
             frame

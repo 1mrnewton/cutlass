@@ -135,6 +135,8 @@ pub struct FrameInfo {
     pub reduced_tx: bool,
     pub reference_select: bool,
     pub skip_mode: bool,
+    /// The two reference frames a skip-mode block predicts from. Unused when `skip_mode` is false.
+    pub skip_frames: [i8; 2],
     pub allow_intrabc: bool,
     pub allow_high_precision_mv: bool,
     pub interpolation: u8,
@@ -296,6 +298,54 @@ pub fn parse_with_motion(
         what: "missing frame",
     })?;
     Ok((sequence, frame))
+}
+
+/// One OBU inside a temporal unit, including its header and size field.
+pub(crate) struct UnitObu<'a> {
+    pub kind: u8,
+    pub bytes: &'a [u8],
+}
+
+/// Split a temporal unit into OBUs. A pyramid puts several frame OBUs in one unit.
+pub(crate) fn unit_obus(bytes: &[u8]) -> Result<Vec<UnitObu<'_>>, CodecError> {
+    let mut bits = BitReader::new(bytes);
+    let mut obus = Vec::new();
+    while bits.bits_left() >= 8 {
+        let start = bits.position() / 8;
+        let header = bits.read(8)?;
+        if header & 0x80 != 0 {
+            return Err(malformed(&bits, "obu forbidden"));
+        }
+        let kind = ((header >> 3) & 0xf) as u8;
+        let extension = (header >> 2) & 1 == 1;
+        let has_size = (header >> 1) & 1 == 1;
+        if !has_size {
+            return Err(CodecError::Unsupported {
+                what: "obu without a size",
+            });
+        }
+        if extension {
+            let _ = bits.read(8)?;
+        }
+        let size = read_leb128(&mut bits)? as usize;
+        let payload_bits = size.saturating_mul(8);
+        if bits.bits_left() < payload_bits {
+            return Err(CodecError::Truncated {
+                at_bit: bits.position() as u64,
+                what: "obu",
+            });
+        }
+        bits.skip(payload_bits)?;
+        let end = bits.position() / 8;
+        let Some(slice) = bytes.get(start..end) else {
+            return Err(CodecError::Truncated {
+                at_bit: bits.position() as u64,
+                what: "obu",
+            });
+        };
+        obus.push(UnitObu { kind, bytes: slice });
+    }
+    Ok(obus)
 }
 
 fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
@@ -815,7 +865,7 @@ fn uncompressed(
     }
     let tx_select = if lossless { false } else { bits.read_bool()? };
     let reference_select = if intra { false } else { bits.read_bool()? };
-    let skip_mode = skip_mode_signaled(
+    let (skip_mode, skip_frames) = skip_mode_signaled(
         bits,
         sequence,
         intra,
@@ -824,9 +874,6 @@ fn uncompressed(
         &ref_frames,
         order_hints,
     )?;
-    if skip_mode {
-        return Err(CodecError::Unsupported { what: "skip mode" });
-    }
     let allow_warped = if intra || error_resilient || !sequence.enable_warped {
         false
     } else {
@@ -883,6 +930,7 @@ fn uncompressed(
         reduced_tx,
         reference_select,
         skip_mode,
+        skip_frames,
         allow_intrabc: false,
         allow_high_precision_mv: allow_high_precision,
         interpolation,
@@ -1262,6 +1310,7 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         reduced_tx: false,
         reference_select: false,
         skip_mode: false,
+        skip_frames: [0, 0],
         allow_intrabc: false,
         allow_high_precision_mv: false,
         interpolation: 0,
@@ -1323,59 +1372,75 @@ fn skip_mode_signaled(
     order_hint: u32,
     ref_frames: &[u8; 7],
     slot_hints: &[u32; 8],
-) -> Result<bool, CodecError> {
-    if !skip_mode_allowed(
+) -> Result<(bool, [i8; 2]), CodecError> {
+    let Some(frames) = skip_mode_frames(
         sequence,
         intra,
         reference_select,
         order_hint,
         ref_frames,
         slot_hints,
-    ) {
-        return Ok(false);
-    }
-    bits.read_bool()
+    ) else {
+        return Ok((false, [0, 0]));
+    };
+    let present = bits.read_bool()?;
+    Ok((present, frames))
 }
 
-fn skip_mode_allowed(
+/// `SkipModeFrame`. The closest forward reference, paired with the closest backward one, or with a second forward reference.
+fn skip_mode_frames(
     sequence: &Sequence,
     intra: bool,
     reference_select: bool,
     order_hint: u32,
     ref_frames: &[u8; 7],
     slot_hints: &[u32; 8],
-) -> bool {
+) -> Option<[i8; 2]> {
     if intra || !reference_select || !sequence.enable_order_hint {
-        return false;
+        return None;
     }
     let width = sequence.order_hint_bits;
     let mut forward = None;
     let mut backward = None;
-    for slot in ref_frames {
+    for (index, slot) in ref_frames.iter().enumerate() {
         let hint = slot_hints[usize::from(*slot)];
         let dist = relative_dist(hint, order_hint, width);
         if dist < 0 {
-            let closer = forward.is_none_or(|previous| relative_dist(hint, previous, width) > 0);
+            let closer =
+                forward.is_none_or(|(_, previous)| relative_dist(hint, previous, width) > 0);
             if closer {
-                forward = Some(hint);
+                forward = Some((index, hint));
             }
         } else if dist > 0 {
-            let closer = backward.is_none_or(|previous| relative_dist(hint, previous, width) < 0);
+            let closer =
+                backward.is_none_or(|(_, previous)| relative_dist(hint, previous, width) < 0);
             if closer {
-                backward = Some(hint);
+                backward = Some((index, hint));
             }
         }
     }
-    let Some(forward_hint) = forward else {
-        return false;
-    };
-    if backward.is_some() {
-        return true;
+    let (forward_index, forward_hint) = forward?;
+    if let Some((backward_index, _)) = backward {
+        return Some(skip_pair(forward_index, backward_index));
     }
-    ref_frames.iter().any(|slot| {
+    let mut second = None;
+    for (index, slot) in ref_frames.iter().enumerate() {
         let hint = slot_hints[usize::from(*slot)];
-        relative_dist(hint, forward_hint, width) < 0
-    })
+        if relative_dist(hint, forward_hint, width) < 0 {
+            let closer =
+                second.is_none_or(|(_, previous)| relative_dist(hint, previous, width) > 0);
+            if closer {
+                second = Some((index, hint));
+            }
+        }
+    }
+    second.map(|(index, _)| skip_pair(forward_index, index))
+}
+
+fn skip_pair(first: usize, second: usize) -> [i8; 2] {
+    let low = i8::try_from(first.min(second) + 1).unwrap_or(1);
+    let high = i8::try_from(first.max(second) + 1).unwrap_or(1);
+    [low, high]
 }
 
 pub(crate) fn relative_dist(a: u32, b: u32, bits: u8) -> i32 {

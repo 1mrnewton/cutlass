@@ -602,6 +602,9 @@ struct Tile<'a, 'r> {
     blend_mask: Vec<u8>,
     blend_w: usize,
     blend_ready: bool,
+    skip_present: bool,
+    skip_ref: [i8; 2],
+    skip_modes: Vec<u8>,
     block_ref: Vec<i8>,
     block_ref1: Vec<i8>,
     inter_flag: Vec<u8>,
@@ -683,6 +686,7 @@ pub(crate) struct Cdfs {
     comp_group: Vec<u16>,
     compound_type: Vec<u16>,
     wedge_index: Vec<u16>,
+    skip_mode: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -815,6 +819,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             blend_mask: Vec::new(),
             blend_w: 0,
             blend_ready: false,
+            skip_present: frame.skip_mode,
+            skip_ref: frame.skip_frames,
+            skip_modes: vec![0; cells],
             block_ref: vec![0; cells],
             block_ref1: vec![NONE_FRAME; cells],
             inter_flag: vec![0; cells],
@@ -1154,6 +1161,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             interp: [0, 0],
             compound_idx: 1,
             compound_mask: 0,
+            skip_mode: false,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)?;
@@ -1171,13 +1179,22 @@ impl<'a, 'r> Tile<'a, 'r> {
         let has_chroma = self.has_chroma(row, col, bw4, bh4);
         let avail_u = self.above_mi(row);
         let avail_l = self.left_mi(col);
-        let skip = self.read_skip(self.neighbor_sum(row, col))?;
+        let skip_mode = self.read_block_skip_mode(row, col, bsize)?;
+        let skip = if skip_mode {
+            true
+        } else {
+            self.read_skip(self.neighbor_sum(row, col))?
+        };
         self.read_cdef(row, col, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
         self.filter_mode = None;
-        let inter = self.read_is_inter(row, col)?;
+        let inter = if skip_mode {
+            true
+        } else {
+            self.read_is_inter(row, col)?
+        };
         let chosen = if inter {
-            self.read_inter_block(row, col, bsize, bw4, bh4)?
+            self.read_inter_block(row, col, bsize, skip_mode)?
         } else {
             self.read_intra_in_inter(bsize, has_chroma)?
         };
@@ -1210,6 +1227,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             interp: chosen.interp,
             compound_idx: chosen.compound_idx,
             compound_mask: chosen.compound_mask,
+            skip_mode,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)
@@ -1285,15 +1303,45 @@ impl<'a, 'r> Tile<'a, 'r> {
         })
     }
 
+    fn read_block_skip_mode(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+    ) -> Result<bool, CodecError> {
+        if !self.skip_present || block_width(bsize) < 8 || block_height(bsize) < 8 {
+            return Ok(false);
+        }
+        let mut ctx = 0;
+        if self.above_mi(row) {
+            ctx += usize::from(self.skip_modes[(row - 1) * self.mi_cols + col]);
+        }
+        if self.left_mi(col) {
+            ctx += usize::from(self.skip_modes[row * self.mi_cols + col - 1]);
+        }
+        Ok(read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.skip_mode,
+            &[3, 3],
+            &[ctx],
+        )? == 1)
+    }
+
     fn read_inter_block(
         &mut self,
         row: usize,
         col: usize,
         bsize: usize,
-        bw4: usize,
-        bh4: usize,
+        skip_mode: bool,
     ) -> Result<Chosen, CodecError> {
-        let (reference, reference1) = self.read_refs(row, col, bw4, bh4)?;
+        let bw4 = NUM_4X4_WIDE[bsize];
+        let bh4 = NUM_4X4_HIGH[bsize];
+        let (reference, reference1) = if skip_mode {
+            (self.skip_ref[0], self.skip_ref[1])
+        } else {
+            self.read_refs(row, col, bw4, bh4)?
+        };
         let compound = reference1 > INTRA_FRAME;
         let global = self.global_mv(reference, row, col, bsize);
         let global1 = if compound {
@@ -1331,7 +1379,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             self.force_integer,
             self.gm_affine(reference),
         );
-        let y_mode = if compound {
+        let y_mode = if skip_mode {
+            NEAREST_NEARESTMV
+        } else if compound {
             self.read_compound_mode(&stack)?
         } else {
             self.read_inter_mode(&stack)?
@@ -1343,12 +1393,22 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.read_interintra(bsize)?
         };
-        let compound_choice = if compound {
-            self.read_compound_choice(row, col, bsize, reference, reference1)?
-        } else {
+        let compound_choice = if skip_mode || !compound {
             CompoundChoice::average()
+        } else {
+            self.read_compound_choice(row, col, bsize, reference, reference1)?
         };
-        let interp = self.read_interp(row, col, bsize, y_mode, reference, reference1)?;
+        // A skip-mode block carries no interpolation symbol. The frame filter
+        // is used, or eight-tap regular when that filter is switchable.
+        let interp = if skip_mode {
+            if self.filter_switchable {
+                [0, 0]
+            } else {
+                [self.interpolation, self.interpolation]
+            }
+        } else {
+            self.read_interp(row, col, bsize, y_mode, reference, reference1)?
+        };
         Ok(Chosen {
             y_mode,
             uv_mode: DC_PRED,
@@ -3348,6 +3408,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.ii_mode[at] = coded.ii;
                 self.compound_idx[at] = coded.compound_idx;
                 self.compound_mask[at] = coded.compound_mask;
+                self.skip_modes[at] = u8::from(coded.skip_mode);
             }
         }
     }
@@ -4313,6 +4374,7 @@ struct CodedBlock {
     interp: [u8; 2],
     compound_idx: u8,
     compound_mask: u16,
+    skip_mode: bool,
 }
 
 struct CoeffPlace {
@@ -4810,6 +4872,7 @@ impl Cdfs {
         zero_counters(&mut self.comp_group, 3);
         zero_counters(&mut self.compound_type, 3);
         zero_counters(&mut self.wedge_index, 17);
+        zero_counters(&mut self.skip_mode, 3);
     }
 
     fn load(q: usize) -> Self {
@@ -4888,6 +4951,7 @@ impl Cdfs {
             comp_group: COMP_GROUP_CDF.to_vec(),
             compound_type: COMPOUND_TYPE_CDF.to_vec(),
             wedge_index: WEDGE_INDEX_CDF.to_vec(),
+            skip_mode: SKIP_MODE_CDF.to_vec(),
         }
     }
 }
@@ -4933,6 +4997,9 @@ const COMPOUND_IDX_CDF: [u16; 18] = [
     18244, 32768, 0, 12865, 32768, 0, 7053, 32768, 0, 13259, 32768, 0, 9334, 32768, 0, 4644, 32768,
     0,
 ];
+
+/// `Default_Skip_Mode_Cdf`. The context is how many of the above and left blocks use skip mode.
+const SKIP_MODE_CDF: [u16; 9] = [32621, 32768, 0, 20708, 32768, 0, 8127, 32768, 0];
 
 /// `Default_Comp_Group_Idx_Cdf`. Six contexts.
 const COMP_GROUP_CDF: [u16; 18] = [

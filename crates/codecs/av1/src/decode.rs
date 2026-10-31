@@ -1,10 +1,12 @@
 //! Public AV1 decoder. One access unit is one temporal unit.
 
-use cutlass_decode::{CodecError, CodecId, CodecParams, Decoder, Output, Packet, PixelFormat};
+use cutlass_decode::{
+    CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput, PixelFormat,
+};
 
 use crate::yuv::{Plane, Yuv420, picture_output};
 
-use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_with_motion};
+use crate::header::{FrameInfo, Sequence, header_is_addressable, parse_with_motion, unit_obus};
 use crate::inter::RefView;
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
 
@@ -14,6 +16,17 @@ struct Reference {
     picture: Yuv420,
     cdfs: Arc<Cdfs>,
     gm: [[i32; 6]; 8],
+}
+
+struct KeptSlot {
+    slot: usize,
+    reference: Option<Reference>,
+    hint: u32,
+}
+
+struct FrameUndo {
+    stored: Vec<KeptSlot>,
+    stale: [Option<Reference>; 8],
 }
 
 /// Rust AV1 decoder. Reference slots stay inside this type.
@@ -62,34 +75,16 @@ impl Decoder for Av1Decoder {
                 what: "empty packet",
             });
         }
-        let saved_motion =
-            std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
-        let (sequence, frame) = parse_with_motion(
-            &packet.data,
-            self.sequence.as_ref(),
-            &saved_motion,
-            &self.order_hints,
-        )?;
-        header_is_addressable(&sequence, &frame)?;
-        let saved = self.take_stale_refs(&frame);
-        let (picture, cdfs) = match self.picture_before_grain(&sequence, &frame) {
-            Ok(decoded) => decoded,
+        let sequence_before = self.sequence.clone();
+        let mut undo = Vec::new();
+        match self.decode_unit(packet, &mut undo) {
+            Ok(shown) => Ok(shown),
             Err(error) => {
-                self.restore_refs(saved);
-                return Err(error);
+                self.undo_frames(undo);
+                self.sequence = sequence_before;
+                Err(error)
             }
-        };
-        self.store(&frame, &picture, cdfs);
-        self.sequence = Some(sequence);
-        if !frame.show_frame {
-            return Ok(Vec::new());
         }
-        let picture = shown(&picture, &frame)?;
-        Ok(vec![Output::Picture(picture_output(
-            &picture,
-            packet.pts,
-            packet.timescale,
-        )?)])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -103,6 +98,96 @@ impl Decoder for Av1Decoder {
 }
 
 impl Av1Decoder {
+    /// Every frame OBU in the temporal unit, hidden frames first.
+    fn decode_unit(
+        &mut self,
+        packet: &Packet,
+        undo: &mut Vec<FrameUndo>,
+    ) -> Result<Vec<Output>, CodecError> {
+        let obus = unit_obus(&packet.data)?;
+        let mut prefix = Vec::new();
+        let mut shown = Vec::new();
+        let mut saw_frame = false;
+        for obu in obus {
+            match obu.kind {
+                2 | 5 | 15 => {}
+                1 => prefix.extend_from_slice(obu.bytes),
+                3 | 6 | 7 => {
+                    saw_frame = true;
+                    let mut bytes = std::mem::take(&mut prefix);
+                    bytes.extend_from_slice(obu.bytes);
+                    let (picture, frame_undo) = self.decode_frame(&bytes, packet)?;
+                    undo.push(frame_undo);
+                    if let Some(picture) = picture {
+                        shown.push(Output::Picture(picture));
+                    }
+                }
+                4 => {
+                    return Err(CodecError::Unsupported {
+                        what: "tile group outside a frame",
+                    });
+                }
+                8 => {
+                    return Err(CodecError::Unsupported {
+                        what: "large scale tile list",
+                    });
+                }
+                _ => {
+                    return Err(CodecError::Unsupported {
+                        what: "reserved obu",
+                    });
+                }
+            }
+        }
+        if !saw_frame {
+            return Err(CodecError::InvalidApi {
+                what: "missing frame",
+            });
+        }
+        Ok(shown)
+    }
+
+    /// Decode one frame OBU. A hidden frame updates reference slots and shows nothing.
+    fn decode_frame(
+        &mut self,
+        bytes: &[u8],
+        packet: &Packet,
+    ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
+        let saved_motion =
+            std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
+        let (sequence, frame) = parse_with_motion(
+            bytes,
+            self.sequence.as_ref(),
+            &saved_motion,
+            &self.order_hints,
+        )?;
+        header_is_addressable(&sequence, &frame)?;
+        let stale = self.take_stale_refs(&frame);
+        let (picture, cdfs) = match self.picture_before_grain(&sequence, &frame) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.restore_refs(stale);
+                return Err(error);
+            }
+        };
+        let stored = self.store(&frame, &picture, cdfs);
+        self.sequence = Some(sequence);
+        if !frame.show_frame {
+            return Ok((None, FrameUndo { stored, stale }));
+        }
+        let picture = match shown(&picture, &frame)
+            .and_then(|picture| picture_output(&picture, packet.pts, packet.timescale))
+        {
+            Ok(picture) => picture,
+            Err(error) => {
+                self.undo_store(stored);
+                self.restore_refs(stale);
+                return Err(error);
+            }
+        };
+        Ok((Some(picture), FrameUndo { stored, stale }))
+    }
+
     fn decode_picture(
         &self,
         sequence: &Sequence,
@@ -141,9 +226,15 @@ impl Av1Decoder {
         })
     }
 
-    fn store(&mut self, frame: &FrameInfo, picture: &Yuv420, cdfs: Arc<Cdfs>) {
+    fn store(&mut self, frame: &FrameInfo, picture: &Yuv420, cdfs: Arc<Cdfs>) -> Vec<KeptSlot> {
+        let mut kept = Vec::new();
         for slot in 0..8 {
             if frame.refresh_flags & (1 << slot) != 0 {
+                kept.push(KeptSlot {
+                    slot,
+                    reference: self.refs[slot].take(),
+                    hint: self.order_hints[slot],
+                });
                 self.refs[slot] = Some(Reference {
                     picture: picture.clone(),
                     cdfs: Arc::clone(&cdfs),
@@ -151,6 +242,21 @@ impl Av1Decoder {
                 });
                 self.order_hints[slot] = frame.order_hint;
             }
+        }
+        kept
+    }
+
+    fn undo_store(&mut self, kept: Vec<KeptSlot>) {
+        for slot in kept.into_iter().rev() {
+            self.order_hints[slot.slot] = slot.hint;
+            self.refs[slot.slot] = slot.reference;
+        }
+    }
+
+    fn undo_frames(&mut self, frames: Vec<FrameUndo>) {
+        for frame in frames.into_iter().rev() {
+            self.undo_store(frame.stored);
+            self.restore_refs(frame.stale);
         }
     }
 
@@ -2199,6 +2305,57 @@ mod tests {
             }
             sequence = Some(seq);
         }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn skip_mode_matches_dav1d() {
+        // aomenc 64×64 luma ramp with a short golden-frame pyramid. Some
+        // temporal units hold a hidden reference before the shown frame.
+        // A skip-mode block predicts the nearest compound pair and writes
+        // no residual. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 16] = [
+            include_bytes!("../fixtures/skip_0.obu"),
+            include_bytes!("../fixtures/skip_1.obu"),
+            include_bytes!("../fixtures/skip_2.obu"),
+            include_bytes!("../fixtures/skip_3.obu"),
+            include_bytes!("../fixtures/skip_4.obu"),
+            include_bytes!("../fixtures/skip_5.obu"),
+            include_bytes!("../fixtures/skip_6.obu"),
+            include_bytes!("../fixtures/skip_7.obu"),
+            include_bytes!("../fixtures/skip_8.obu"),
+            include_bytes!("../fixtures/skip_9.obu"),
+            include_bytes!("../fixtures/skip_10.obu"),
+            include_bytes!("../fixtures/skip_11.obu"),
+            include_bytes!("../fixtures/skip_12.obu"),
+            include_bytes!("../fixtures/skip_13.obu"),
+            include_bytes!("../fixtures/skip_14.obu"),
+            include_bytes!("../fixtures/skip_15.obu"),
+        ];
+        let expected = [
+            0x7c7f_f1cc_caf8_0325,
+            0x7d47_ecca_8864_0325,
+            0x8ddf_9224_2738_0325,
+            0x2067_6a1f_17e4_0325,
+            0x8945_a93f_11e8_0325,
+            0x1bcd_813a_0294_0325,
+            0xfa5b_03a5_62e8_0325,
+            0xb570_a2bd_73b4_0325,
+            0x7067_64bc_2198_0325,
+            0xb6e1_bb9f_8ba4_0325,
+            0x11b7_8b2f_4238_0325,
+            0xf7fe_688f_8e04_0325,
+            0x692a_5500_50e8_0325,
+            0xa7f3_2795_e674_0325,
+            0xc6cf_71aa_fe48_0325,
+            0xbc4c_a205_d3b4_0325,
+        ];
         let params = CodecParams::video(CodecId::Av1, 64, 64);
         let mut decoder = Av1Decoder::open(&params).expect("open");
         for (index, payload) in frames.iter().enumerate() {

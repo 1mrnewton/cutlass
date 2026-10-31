@@ -156,11 +156,17 @@ impl Av1Decoder {
     ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
         let saved_motion =
             std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
+        let ref_sizes = std::array::from_fn(|slot| {
+            self.refs[slot]
+                .as_ref()
+                .map(|reference| (reference.picture.y.width(), reference.picture.y.height()))
+        });
         let (sequence, frame) = parse_with_motion(
             bytes,
             self.sequence.as_ref(),
             &saved_motion,
             &self.order_hints,
+            &ref_sizes,
         )?;
         header_is_addressable(&sequence, &frame)?;
         let stale = self.take_stale_refs(&frame);
@@ -2524,6 +2530,120 @@ mod tests {
         for (index, payload) in frames.iter().enumerate() {
             let packed = push_frame(&mut decoder, payload, index as i64);
             assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn inter_superres_matches_dav1d() {
+        // aomenc 64×64 shown, coded narrower. The inter frames sample the
+        // upscaled reference through the scaled motion filter. Digests are
+        // dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/super_0.obu"),
+            include_bytes!("../fixtures/super_1.obu"),
+            include_bytes!("../fixtures/super_2.obu"),
+            include_bytes!("../fixtures/super_3.obu"),
+        ];
+        let expected = [
+            0x2eba_7fac_4977_792a,
+            0xd1d6_7332_739c_ae46,
+            0x1ac4_0e41_5928_5a78,
+            0xdc78_a476_9c66_1bc2,
+        ];
+        let mut sequence = None;
+        for payload in frames {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_superres);
+            assert!(frame.upscaled_width > frame.width);
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn frame_size_from_a_reference_matches_dav1d() {
+        // The sequence is 64×64. Every frame is shown at 32×32, so the size
+        // is not the sequence size. A later frame copies that size from a
+        // reference instead of coding it again. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/size_0.obu"),
+            include_bytes!("../fixtures/size_1.obu"),
+            include_bytes!("../fixtures/size_2.obu"),
+            include_bytes!("../fixtures/size_3.obu"),
+        ];
+        let expected = [
+            0x66fd_0ea1_018d_ba92,
+            0x49ba_3638_8cd8_c716,
+            0xaf94_1afd_3c5d_08f4,
+            0xe8bb_81a2_b771_96f8,
+        ];
+        // A later frame copies its size from a reference. A parse that has
+        // not stored that reference cannot read the size bits, because they
+        // are not there.
+        let mut sequence = None;
+        let mut copied = false;
+        for (index, payload) in frames.iter().enumerate() {
+            match crate::header::parse_unit(payload, sequence.as_ref()) {
+                Ok((seq, frame)) => {
+                    assert_eq!(frame.width, 32, "frame {index}");
+                    assert_eq!(frame.height, 32, "frame {index}");
+                    sequence = Some(seq);
+                }
+                Err(cutlass_decode::CodecError::Malformed {
+                    what: "missing reference",
+                    ..
+                }) => {
+                    assert!(index > 0);
+                    copied = true;
+                }
+                Err(err) => panic!("frame {index}: {err}"),
+            }
+        }
+        assert!(copied);
+        let params = CodecParams::video(CodecId::Av1, 32, 32);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 32 * 32 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn scaled_reference_matches_dav1d() {
+        // The key is 32×32. The next frame is 64×64 and samples that smaller
+        // reference. Digests are `ffmpeg -c:v libdav1d -threads 1 -noautoscale`.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/scale_0.obu"),
+            include_bytes!("../fixtures/scale_1.obu"),
+            include_bytes!("../fixtures/scale_2.obu"),
+            include_bytes!("../fixtures/scale_3.obu"),
+        ];
+        let expected = [
+            0x66fd_0ea1_018d_ba92,
+            0xfe7a_b0ac_d0a7_15fd,
+            0xfb97_91fc_340c_7254,
+            0x0571_778f_0ca8_1061,
+        ];
+        let lengths = [
+            32 * 32 * 3 / 2,
+            64 * 64 * 3 / 2,
+            64 * 64 * 3 / 2,
+            64 * 64 * 3 / 2,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), lengths[index], "frame {index}");
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }

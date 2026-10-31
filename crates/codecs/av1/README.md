@@ -120,15 +120,14 @@ Refused with a typed error before a picture is published:
 - A profile other than 0, a second operating point, and the decoder model.
 - 128×128 superblocks, large-scale tile lists, a tile group outside a frame, and non-uniform tile spacing.
 - An OBU without a size field, and a reserved OBU type.
-- A render size that differs from the coded size.
 - Screen-content tools, palette, and intra block copy.
 - Lossless (`base_q_idx` 0).
 - Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
 - Short reference signaling.
-- A scaled reference, and an interintra wedge.
+- An interintra wedge, and a warp of a scaled reference.
 
-Super resolution on an inter frame is not proven.
+A display size that differs from the frame size is read and not published on the picture.
 
 The encoder does not emit inter frames, CDEF, restoration, super resolution, or film grain. Its blocks stay DC-predicted 4×4 and 8×8.
 

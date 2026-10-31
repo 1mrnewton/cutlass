@@ -2003,6 +2003,14 @@ fn scale(reference: usize, frame: usize) -> i64 {
     (((reference as i64) << 14) + (frame as i64 / 2)) / frame as i64
 }
 
+/// `2 * frame >= reference` and `frame <= 16 * reference`.
+fn scale_ratio_ok(reference: usize, frame: usize) -> bool {
+    reference > 0
+        && frame > 0
+        && reference <= frame.saturating_mul(2)
+        && frame <= reference.saturating_mul(16)
+}
+
 fn start_and_step(origin: usize, mv: i32, sub: bool, scale_value: i64) -> (i64, i64) {
     let half = 8i64;
     let shifted = (i64::from(mv) * 2) >> usize::from(sub);
@@ -2060,17 +2068,22 @@ fn prepare(sample: &InterSample<'_>) -> Result<Option<VerticalPass>, CodecError>
     if sample.w == 0 || sample.h == 0 || sample.frame_w == 0 || sample.frame_h == 0 {
         return Ok(None);
     }
-    let x_scale = scale(sample.ref_w, sample.frame_w);
-    let y_scale = scale(sample.ref_h, sample.frame_h);
-    if x_scale != NO_SCALE || y_scale != NO_SCALE {
-        return Err(CodecError::Unsupported {
+    if !scale_ratio_ok(sample.ref_w, sample.frame_w)
+        || !scale_ratio_ok(sample.ref_h, sample.frame_h)
+    {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
             what: "scaled reference",
         });
     }
+    let x_scale = scale(sample.ref_w, sample.frame_w);
+    let y_scale = scale(sample.ref_h, sample.frame_h);
     let (start_x, step_x) = start_and_step(sample.x, sample.mv.col, sample.sub_x, x_scale);
     let (start_y, step_y) = start_and_step(sample.y, sample.mv.row, sample.sub_y, y_scale);
     let rows = intermediate_rows(sample.h, step_y);
-    if rows > 128 || sample.w > 128 {
+    // A legal reference is at most twice as tall, which adds about two rows per output row.
+    let row_limit = sample.h.saturating_mul(2).saturating_add(16);
+    if rows > row_limit || sample.w > 128 {
         return Err(CodecError::Limit {
             what: "inter block",
         });

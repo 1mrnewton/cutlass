@@ -188,7 +188,7 @@ pub fn parse_unit(
     bytes: &[u8],
     sequence: Option<&Sequence>,
 ) -> Result<(Sequence, FrameInfo), CodecError> {
-    parse_with_motion(bytes, sequence, &[None; 8], &[0; 8])
+    parse_with_motion(bytes, sequence, &[None; 8], &[0; 8], &[None; 8])
 }
 
 /// Parse one temporal unit. `saved` is the global-motion model stored in each
@@ -198,6 +198,7 @@ pub fn parse_with_motion(
     sequence: Option<&Sequence>,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
+    ref_sizes: &[Option<(u32, u32)>; 8],
 ) -> Result<(Sequence, FrameInfo), CodecError> {
     let mut bits = BitReader::new(bytes);
     let mut seq = sequence.cloned();
@@ -244,6 +245,7 @@ pub fn parse_with_motion(
                     payload_end,
                     saved,
                     order_hints,
+                    ref_sizes,
                 )?);
             }
             3 | 7 => {
@@ -256,6 +258,7 @@ pub fn parse_with_motion(
                     payload_end,
                     saved,
                     order_hints,
+                    ref_sizes,
                 )?);
             }
             4 => {
@@ -524,9 +527,10 @@ fn parse_frame(
     payload_end: usize,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
+    ref_sizes: &[Option<(u32, u32)>; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
-    let mut frame = uncompressed(bits, sequence, saved, order_hints)?;
+    let mut frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes)?;
     bits.byte_align();
     let header_bytes = (bits.position() - header_start) / 8;
     let obu_bytes = (payload_end - header_start) / 8;
@@ -563,8 +567,9 @@ fn parse_frame_header_only(
     payload_end: usize,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
+    ref_sizes: &[Option<(u32, u32)>; 8],
 ) -> Result<FrameInfo, CodecError> {
-    let frame = uncompressed(bits, sequence, saved, order_hints)?;
+    let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes)?;
     trailing(bits, payload_end)?;
     if !frame.show_existing && frame.tile.is_empty() {
         return Err(CodecError::Unsupported {
@@ -579,6 +584,7 @@ fn uncompressed(
     sequence: &Sequence,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
+    ref_sizes: &[Option<(u32, u32)>; 8],
 ) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
     let mut frame_to_show = 0u8;
@@ -676,12 +682,9 @@ fn uncompressed(
     let mut use_ref_mvs = false;
     let (width, upscaled_width, height) = if intra {
         let size = frame_size(bits, sequence, size_override)?;
-        let _render_diff = bits.read_bool()?;
-        if _render_diff {
-            return Err(CodecError::Unsupported {
-                what: "render size",
-            });
-        }
+        // The sample picture stays the frame size. The display size is only
+        // consumed so the rest of the header stays aligned.
+        read_render_size(bits)?;
         let mut allow_intrabc = false;
         if allow_screen {
             allow_intrabc = bits.read_bool()?;
@@ -704,14 +707,10 @@ fn uncompressed(
             }
         }
         let size = if size_override && !error_resilient {
-            frame_size_with_refs(bits, sequence)?
+            frame_size_with_refs(bits, sequence, &ref_frames, ref_sizes)?
         } else {
             let size = frame_size(bits, sequence, size_override)?;
-            if bits.read_bool()? {
-                return Err(CodecError::Unsupported {
-                    what: "render size",
-                });
-            }
+            read_render_size(bits)?;
             size
         };
         if !force_integer {
@@ -993,21 +992,36 @@ fn coded_size(
 fn frame_size_with_refs(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
+    ref_frames: &[u8; 7],
+    ref_sizes: &[Option<(u32, u32)>; 8],
 ) -> Result<(u32, u32, u32), CodecError> {
-    for _ in 0..7 {
+    let mut copied = None;
+    for slot in ref_frames {
         if bits.read_bool()? {
-            return Err(CodecError::Unsupported {
-                what: "frame size from a reference",
-            });
+            let index = usize::from(*slot);
+            let Some(size) = ref_sizes.get(index).copied().flatten() else {
+                return Err(malformed(bits, "missing reference"));
+            };
+            copied = Some(size);
+            break;
         }
     }
-    let size = frame_size(bits, sequence, true)?;
-    if bits.read_bool()? {
-        return Err(CodecError::Unsupported {
-            what: "render size",
-        });
+    if let Some((upscaled, height)) = copied {
+        let coded = coded_size(bits, sequence, upscaled)?;
+        return Ok((coded, upscaled, height));
     }
+    let size = frame_size(bits, sequence, true)?;
+    read_render_size(bits)?;
     Ok(size)
+}
+
+/// Reads the display size. The sample picture stays the frame size.
+fn read_render_size(bits: &mut BitReader<'_>) -> Result<(), CodecError> {
+    if bits.read_bool()? {
+        let _ = bits.read(16)?;
+        let _ = bits.read(16)?;
+    }
+    Ok(())
 }
 
 fn floor_bits(stored: u32) -> u32 {

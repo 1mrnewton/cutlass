@@ -1,11 +1,12 @@
-//! Single-reference inter prediction.
+//! Inter prediction.
 //!
 //! Motion-vector candidates follow the find-MV-stack process. The sample
 //! predictor is the two-tap separable subpel filter from the decoding process.
 //! A global model that is not identity supplies the `GLOBALMV` vector.
 //! A rotation-zoom or affine model warps that block when the shear is valid.
-//! Interintra blends that prediction with an intra predictor.
-//! Compound, local warped, and overlapped motion stay outside this path.
+//! Interintra blends a single reference with an intra predictor.
+//! Compound prediction averages two references. A masked or distance-weighted
+//! compound, local warp, and overlapped motion stay outside this path.
 
 use cutlass_decode::CodecError;
 
@@ -21,7 +22,21 @@ pub const NEARESTMV: u8 = 14;
 pub const NEARMV: u8 = 15;
 pub const GLOBALMV: u8 = 16;
 pub const NEWMV: u8 = 17;
+pub const NEAREST_NEARESTMV: u8 = 18;
+pub const NEAR_NEARMV: u8 = 19;
+pub const NEAREST_NEWMV: u8 = 20;
+pub const NEW_NEARESTMV: u8 = 21;
+pub const NEAR_NEWMV: u8 = 22;
+pub const NEW_NEARMV: u8 = 23;
+pub const GLOBAL_GLOBALMV: u8 = 24;
+pub const NEW_NEWMV: u8 = 25;
 pub const LAST_FRAME: i8 = 1;
+pub const LAST2_FRAME: i8 = 2;
+pub const LAST3_FRAME: i8 = 3;
+pub const GOLDEN_FRAME: i8 = 4;
+pub const BWDREF_FRAME: i8 = 5;
+pub const ALTREF2_FRAME: i8 = 6;
+pub const ALTREF_FRAME: i8 = 7;
 pub const NONE_FRAME: i8 = -1;
 pub const INTRA_FRAME: i8 = 0;
 pub const GM_IDENTITY: u8 = 0;
@@ -90,6 +105,7 @@ pub struct MotionGrid<'a> {
     pub refs: &'a [i8],
     pub refs1: &'a [i8],
     pub mvs: &'a [Motion],
+    pub mvs1: &'a [Motion],
     pub modes: &'a [u8],
     pub sizes: &'a [u8],
 }
@@ -101,14 +117,62 @@ pub struct BlockPlace {
     pub bh4: usize,
     pub bsize: usize,
     pub reference: i8,
+    pub reference1: i8,
+    pub compound: bool,
+    pub global1: Motion,
+    pub affine1: bool,
 }
 
 pub struct Candidates {
     pub mv: [Motion; STACK],
+    pub mv1: [Motion; STACK],
     pub found: usize,
     pub new_ctx: usize,
     pub ref_ctx: usize,
     pub drl: [usize; STACK],
+}
+
+/// The mode one compound list uses when the block mode names both lists.
+#[must_use]
+pub fn list_mode(y_mode: u8, list: usize) -> u8 {
+    if list == 0 {
+        if y_mode < NEAREST_NEARESTMV {
+            return y_mode;
+        }
+        if matches!(y_mode, NEW_NEWMV | NEW_NEARESTMV | NEW_NEARMV) {
+            return NEWMV;
+        }
+        if matches!(y_mode, NEAREST_NEARESTMV | NEAREST_NEWMV) {
+            return NEARESTMV;
+        }
+        if matches!(y_mode, NEAR_NEARMV | NEAR_NEWMV) {
+            return NEARMV;
+        }
+        return GLOBALMV;
+    }
+    if matches!(y_mode, NEW_NEWMV | NEAREST_NEWMV | NEAR_NEWMV) {
+        return NEWMV;
+    }
+    if matches!(y_mode, NEAREST_NEARESTMV | NEW_NEARESTMV) {
+        return NEARESTMV;
+    }
+    if matches!(y_mode, NEAR_NEARMV | NEW_NEARMV) {
+        return NEARMV;
+    }
+    GLOBALMV
+}
+
+#[must_use]
+pub fn has_new_mv(mode: u8) -> bool {
+    matches!(
+        mode,
+        NEWMV | NEW_NEWMV | NEAR_NEWMV | NEW_NEARMV | NEAREST_NEWMV | NEW_NEARESTMV
+    )
+}
+
+#[must_use]
+pub fn has_near_mv(mode: u8) -> bool {
+    matches!(mode, NEARMV | NEAR_NEARMV | NEAR_NEWMV | NEW_NEARMV)
 }
 
 struct Line {
@@ -121,16 +185,21 @@ struct Line {
 
 struct Search {
     mv: [Motion; STACK],
+    mv1: [Motion; STACK],
     weight: [i32; STACK],
     found: usize,
     new_count: usize,
     found_match: bool,
     global: Motion,
+    global1: Motion,
     reference: i8,
+    reference1: i8,
     hp: bool,
     integer: bool,
     /// The current reference uses a rotation-zoom or affine model.
     affine: bool,
+    affine1: bool,
+    compound: bool,
 }
 
 /// Transform set for an inter block. `0` is DCT only.
@@ -186,15 +255,20 @@ pub fn find_stack(
 ) -> Candidates {
     let mut search = Search {
         mv: [Motion::default(); STACK],
+        mv1: [Motion::default(); STACK],
         weight: [0; STACK],
         found: 0,
         new_count: 0,
         found_match: false,
         global,
+        global1: at.global1,
         reference: at.reference,
+        reference1: at.reference1,
         hp,
         integer,
         affine,
+        affine1: at.affine1,
+        compound: at.compound,
     };
     search.scan_row(grid, at, -1);
     let mut above = search.found_match;
@@ -229,6 +303,7 @@ pub fn find_stack(
     }
     Candidates {
         mv: search.mv,
+        mv1: search.mv1,
         found: search.found,
         new_ctx,
         ref_ctx,
@@ -257,6 +332,13 @@ fn drl_context(weight: &[i32], found: usize, idx: usize) -> usize {
     } else {
         2
     }
+}
+
+struct CompoundScratch<'a> {
+    same: &'a mut [[Motion; 2]; 2],
+    same_n: &'a mut [usize; 2],
+    other: &'a mut [[Motion; 2]; 2],
+    other_n: &'a mut [usize; 2],
 }
 
 impl Search {
@@ -393,6 +475,13 @@ impl Search {
         if grid.inter_at(row, col) == 0 {
             return;
         }
+        if self.compound {
+            if grid.ref_at(row, col) == self.reference && grid.ref1_at(row, col) == self.reference1
+            {
+                self.compound_search(grid, row, col, weight);
+            }
+            return;
+        }
         let refs = [grid.ref_at(row, col), grid.ref1_at(row, col)];
         for (list, cand_ref) in refs.into_iter().enumerate() {
             if cand_ref == self.reference {
@@ -406,15 +495,15 @@ impl Search {
         let size = grid.size(row, col);
         let large = block_width(size).min(block_height(size)) >= 8;
         // A large global-motion neighbor contributes this block's model, not the vector it stored.
-        let mv = if self.affine && large && mode == GLOBALMV {
+        let mv = if self.affine && large && (mode == GLOBALMV || mode == GLOBAL_GLOBALMV) {
             self.global
         } else if list == 0 {
             grid.mv(row, col)
         } else {
-            Motion::default()
+            grid.mv1(row, col)
         };
         let mv = lower(mv, self.hp, self.integer);
-        if mode == NEWMV {
+        if has_new_mv(mode) {
             self.new_count += 1;
         }
         self.found_match = true;
@@ -429,7 +518,143 @@ impl Search {
         }
     }
 
+    fn compound_search(&mut self, grid: &MotionGrid<'_>, row: i32, col: i32, weight: i32) {
+        let mode = grid.mode(row, col);
+        let mut mv0 = grid.mv(row, col);
+        let mut mv1 = grid.mv1(row, col);
+        if mode == GLOBAL_GLOBALMV {
+            if self.affine {
+                mv0 = self.global;
+            }
+            if self.affine1 {
+                mv1 = self.global1;
+            }
+        }
+        let mv0 = lower(mv0, self.hp, self.integer);
+        let mv1 = lower(mv1, self.hp, self.integer);
+        self.found_match = true;
+        if let Some(idx) = (0..self.found).find(|idx| self.mv[*idx] == mv0 && self.mv1[*idx] == mv1)
+        {
+            self.weight[idx] += weight;
+        } else if self.found < STACK {
+            self.mv[self.found] = mv0;
+            self.mv1[self.found] = mv1;
+            self.weight[self.found] = weight;
+            self.found += 1;
+        }
+        if has_new_mv(mode) {
+            self.new_count += 1;
+        }
+    }
+
+    /// Partial neighbors, then this block's two global vectors. Section 7.10.2.12.
+    fn compound_extra(&mut self, grid: &MotionGrid<'_>, at: &BlockPlace) {
+        let w4 = 16.min(at.bw4).min(grid.cols.saturating_sub(at.col));
+        let h4 = 16.min(at.bh4).min(grid.rows.saturating_sub(at.row));
+        let num = w4.min(h4);
+        let mut same = [[Motion::default(); 2]; 2];
+        let mut other = [[Motion::default(); 2]; 2];
+        let mut same_n = [0usize; 2];
+        let mut other_n = [0usize; 2];
+        for pass in 0..2 {
+            let mut idx = 0usize;
+            while idx < num {
+                let (row, col) = if pass == 0 {
+                    (at.row as i32 - 1, at.col as i32 + idx as i32)
+                } else {
+                    (at.row as i32 + idx as i32, at.col as i32 - 1)
+                };
+                if !grid.inside(row, col) {
+                    break;
+                }
+                self.collect_compound_extra(
+                    grid,
+                    row,
+                    col,
+                    &mut CompoundScratch {
+                        same: &mut same,
+                        same_n: &mut same_n,
+                        other: &mut other,
+                        other_n: &mut other_n,
+                    },
+                );
+                let size = grid.size(row, col);
+                idx += if pass == 0 {
+                    NUM_4X4_WIDE[size]
+                } else {
+                    NUM_4X4_HIGH[size]
+                };
+            }
+        }
+        let mut combined = [[Motion::default(); 2]; 2];
+        for list in 0..2 {
+            let mut count = 0usize;
+            for motion in same[list].iter().take(same_n[list]) {
+                combined[count][list] = *motion;
+                count += 1;
+            }
+            for motion in other[list].iter().take(other_n[list]) {
+                if count >= 2 {
+                    break;
+                }
+                combined[count][list] = *motion;
+                count += 1;
+            }
+            let global = if list == 0 { self.global } else { self.global1 };
+            while count < 2 {
+                combined[count][list] = global;
+                count += 1;
+            }
+        }
+        if self.found == 1 {
+            let use_second = self.mv[0] == combined[0][0] && self.mv1[0] == combined[0][1];
+            let pick = usize::from(use_second);
+            self.mv[self.found] = combined[pick][0];
+            self.mv1[self.found] = combined[pick][1];
+            self.weight[self.found] = 2;
+            self.found += 1;
+        } else {
+            for pair in &combined {
+                self.mv[self.found] = pair[0];
+                self.mv1[self.found] = pair[1];
+                self.weight[self.found] = 2;
+                self.found += 1;
+            }
+        }
+    }
+
+    fn collect_compound_extra(
+        &self,
+        grid: &MotionGrid<'_>,
+        row: i32,
+        col: i32,
+        scratch: &mut CompoundScratch<'_>,
+    ) {
+        let refs = [self.reference, self.reference1];
+        let stored = [grid.ref_at(row, col), grid.ref1_at(row, col)];
+        let vectors = [grid.mv(row, col), grid.mv1(row, col)];
+        for (cand_list, cand_ref) in stored.into_iter().enumerate() {
+            if cand_ref <= INTRA_FRAME {
+                continue;
+            }
+            let cand = vectors[cand_list];
+            for (list, list_ref) in refs.iter().enumerate() {
+                if cand_ref == *list_ref && scratch.same_n[list] < 2 {
+                    scratch.same[list][scratch.same_n[list]] = cand;
+                    scratch.same_n[list] += 1;
+                } else if scratch.other_n[list] < 2 {
+                    scratch.other[list][scratch.other_n[list]] = cand;
+                    scratch.other_n[list] += 1;
+                }
+            }
+        }
+    }
+
     fn extra(&mut self, grid: &MotionGrid<'_>, at: &BlockPlace) {
+        if self.compound {
+            self.compound_extra(grid, at);
+            return;
+        }
         let w4 = 16.min(at.bw4).min(grid.cols.saturating_sub(at.col));
         let h4 = 16.min(at.bh4).min(grid.rows.saturating_sub(at.row));
         let num = w4.min(h4);
@@ -467,7 +692,7 @@ impl Search {
             let mv = if list == 0 {
                 grid.mv(row, col)
             } else {
-                Motion::default()
+                grid.mv1(row, col)
             };
             if self.mv.iter().take(self.found).any(|have| *have == mv) {
                 continue;
@@ -485,6 +710,7 @@ impl Search {
                 if self.weight[idx - 1] < self.weight[idx] {
                     self.weight.swap(idx - 1, idx);
                     self.mv.swap(idx - 1, idx);
+                    self.mv1.swap(idx - 1, idx);
                     new_end = idx;
                 }
             }
@@ -496,6 +722,10 @@ impl Search {
         let bh = block_height(at.bsize) as i32;
         let bw = block_width(at.bsize) as i32;
         for mv in self.mv.iter_mut().take(self.found) {
+            mv.row = clamp_edge(mv.row, at.row, at.bh4, grid.rows, MV_BORDER + bh * 8);
+            mv.col = clamp_edge(mv.col, at.col, at.bw4, grid.cols, MV_BORDER + bw * 8);
+        }
+        for mv in self.mv1.iter_mut().take(self.found) {
             mv.row = clamp_edge(mv.row, at.row, at.bh4, grid.rows, MV_BORDER + bh * 8);
             mv.col = clamp_edge(mv.col, at.col, at.bw4, grid.cols, MV_BORDER + bw * 8);
         }
@@ -525,6 +755,10 @@ impl MotionGrid<'_> {
 
     fn mv(&self, row: i32, col: i32) -> Motion {
         self.mvs[self.index(row, col)]
+    }
+
+    fn mv1(&self, row: i32, col: i32) -> Motion {
+        self.mvs1[self.index(row, col)]
     }
 
     fn mode(&self, row: i32, col: i32) -> u8 {
@@ -846,38 +1080,32 @@ const DIV_LUT_BITS: u32 = 8;
 const DIV_LUT_PREC_BITS: u32 = 14;
 
 pub fn predict(sample: &mut InterSample<'_>) -> Result<(), CodecError> {
-    if sample.w == 0 || sample.h == 0 || sample.frame_w == 0 || sample.frame_h == 0 {
+    let Some(pass) = prepare(sample)? else {
         return Ok(());
-    }
-    let x_scale = scale(sample.ref_w, sample.frame_w);
-    let y_scale = scale(sample.ref_h, sample.frame_h);
-    if x_scale != NO_SCALE || y_scale != NO_SCALE {
-        return Err(CodecError::Unsupported {
-            what: "scaled reference",
-        });
-    }
-    let (start_x, step_x) = start_and_step(sample.x, sample.mv.col, sample.sub_x, x_scale);
-    let (start_y, step_y) = start_and_step(sample.y, sample.mv.row, sample.sub_y, y_scale);
-    let rows = intermediate_rows(sample.h, step_y);
-    if rows > 128 || sample.w > 128 {
-        return Err(CodecError::Limit {
-            what: "inter block",
-        });
-    }
-    let mut intermediate = vec![0i32; rows * sample.w];
-    let h_filter = small_filter(sample.filter[1], sample.w);
-    horizontal(
-        sample,
-        &mut intermediate,
-        rows,
-        start_x,
-        start_y,
-        step_x,
-        h_filter,
-    );
-    let v_filter = small_filter(sample.filter[0], sample.h);
-    vertical(sample, &intermediate, start_y, step_y, v_filter);
+    };
+    vertical_pixels(sample, &pass);
     Ok(())
+}
+
+/// One compound reference, still shifted by `InterPostRound` (4 for 8-bit).
+pub fn predict_precise(sample: &InterSample<'_>, out: &mut [i32]) -> Result<(), CodecError> {
+    let Some(pass) = prepare(sample)? else {
+        return Ok(());
+    };
+    vertical_precise(sample, &pass, 7, out);
+    Ok(())
+}
+
+struct VerticalPass {
+    start_y: i64,
+    step_y: i64,
+    filter: u8,
+    rows: Vec<i32>,
+}
+
+/// `COMPOUND_AVERAGE`: `Clip1(Round2(a + b, 1 + InterPostRound))` with `InterPostRound` 4.
+pub fn average_compound(a: i32, b: i32) -> u8 {
+    round2(a.saturating_add(b), 5).clamp(0, 255) as u8
 }
 
 fn scale(reference: usize, frame: usize) -> i64 {
@@ -937,24 +1165,50 @@ fn horizontal(
     }
 }
 
-fn vertical(
-    sample: &mut InterSample<'_>,
-    intermediate: &[i32],
-    start_y: i64,
-    step_y: i64,
-    filter: u8,
-) {
-    let frac = start_y & 1023;
+fn prepare(sample: &InterSample<'_>) -> Result<Option<VerticalPass>, CodecError> {
+    if sample.w == 0 || sample.h == 0 || sample.frame_w == 0 || sample.frame_h == 0 {
+        return Ok(None);
+    }
+    let x_scale = scale(sample.ref_w, sample.frame_w);
+    let y_scale = scale(sample.ref_h, sample.frame_h);
+    if x_scale != NO_SCALE || y_scale != NO_SCALE {
+        return Err(CodecError::Unsupported {
+            what: "scaled reference",
+        });
+    }
+    let (start_x, step_x) = start_and_step(sample.x, sample.mv.col, sample.sub_x, x_scale);
+    let (start_y, step_y) = start_and_step(sample.y, sample.mv.row, sample.sub_y, y_scale);
+    let rows = intermediate_rows(sample.h, step_y);
+    if rows > 128 || sample.w > 128 {
+        return Err(CodecError::Limit {
+            what: "inter block",
+        });
+    }
+    let mut intermediate = vec![0i32; rows * sample.w];
+    let h_filter = small_filter(sample.filter[1], sample.w);
+    horizontal(
+        sample,
+        &mut intermediate,
+        rows,
+        start_x,
+        start_y,
+        step_x,
+        h_filter,
+    );
+    let filter = small_filter(sample.filter[0], sample.h);
+    Ok(Some(VerticalPass {
+        start_y,
+        step_y,
+        filter,
+        rows: intermediate,
+    }))
+}
+
+fn vertical_pixels(sample: &mut InterSample<'_>, pass: &VerticalPass) {
+    let frac = pass.start_y & 1023;
     for row in 0..sample.h {
         for col in 0..sample.w {
-            let p = frac + step_y * row as i64;
-            let mut sum = 0i32;
-            let taps = filter_taps(filter, phase(p));
-            for (tap, coeff) in taps.iter().enumerate() {
-                let sy = (p >> 10) as usize + tap;
-                let at = sy * sample.w + col;
-                sum += i32::from(*coeff) * intermediate.get(at).copied().unwrap_or(0);
-            }
+            let sum = vertical_sum(sample, pass, frac, row, col);
             let pred = round2(sum, 11).clamp(0, 255) as u8;
             let y = sample.write_y + row;
             let x = sample.write_x + col;
@@ -966,6 +1220,37 @@ fn vertical(
             }
         }
     }
+}
+
+fn vertical_precise(sample: &InterSample<'_>, pass: &VerticalPass, round1: u32, out: &mut [i32]) {
+    let frac = pass.start_y & 1023;
+    for row in 0..sample.h {
+        for col in 0..sample.w {
+            let sum = vertical_sum(sample, pass, frac, row, col);
+            let at = row * sample.w + col;
+            if at < out.len() {
+                out[at] = round2(sum, round1);
+            }
+        }
+    }
+}
+
+fn vertical_sum(
+    sample: &InterSample<'_>,
+    pass: &VerticalPass,
+    frac: i64,
+    row: usize,
+    col: usize,
+) -> i32 {
+    let p = frac + pass.step_y * row as i64;
+    let mut sum = 0i32;
+    let taps = filter_taps(pass.filter, phase(p));
+    for (tap, coeff) in taps.iter().enumerate() {
+        let sy = (p >> 10) as usize + tap;
+        let at = sy * sample.w + col;
+        sum += i32::from(*coeff) * pass.rows.get(at).copied().unwrap_or(0);
+    }
+    sum
 }
 
 fn plane_last(luma: usize, sub: bool, plane: usize) -> i32 {

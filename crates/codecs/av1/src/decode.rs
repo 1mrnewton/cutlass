@@ -2043,4 +2043,45 @@ mod tests {
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }
+
+    #[test]
+    fn average_compound_matches_dav1d() {
+        // aomenc 64×64. Later frames set reference_select and average two
+        // references. Masked compound and distance weights are off, so the
+        // predictors stay at the compound filter precision and the average
+        // rounds the sum. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames: [&[u8]; 5] = [
+            include_bytes!("../fixtures/compound_0.obu"),
+            include_bytes!("../fixtures/compound_1.obu"),
+            include_bytes!("../fixtures/compound_2.obu"),
+            include_bytes!("../fixtures/compound_3.obu"),
+            include_bytes!("../fixtures/compound_4.obu"),
+        ];
+        let expected = [
+            0xfe5f_9b89_ae87_0b0f,
+            0x2872_93cd_3351_db0a,
+            0x7e37_e459_41b5_7851,
+            0x5bfb_a649_6f7b_8281,
+            0xd519_f6d7_94f4_2cdf,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(!seq.enable_order_hint);
+            assert!(!seq.enable_masked);
+            assert!(!seq.enable_jnt);
+            if index >= 2 {
+                assert!(frame.reference_select);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
 }

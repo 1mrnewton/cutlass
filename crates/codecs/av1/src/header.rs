@@ -802,11 +802,6 @@ fn uncompressed(
     }
     let tx_select = if lossless { false } else { bits.read_bool()? };
     let reference_select = if intra { false } else { bits.read_bool()? };
-    if reference_select {
-        return Err(CodecError::Unsupported {
-            what: "compound prediction",
-        });
-    }
     let skip_mode = false;
     let allow_warped = if intra || error_resilient || !sequence.enable_warped {
         false
@@ -861,7 +856,7 @@ fn uncompressed(
         delta_q_res,
         tx_select,
         reduced_tx,
-        reference_select: false,
+        reference_select,
         skip_mode,
         allow_intrabc: false,
         allow_high_precision_mv: allow_high_precision,

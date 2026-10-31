@@ -157,11 +157,13 @@ pub fn decode_with_refs(
     let tx_sizes = tile.tx_sizes.clone();
     let refs = tile.block_ref.clone();
     let modes = tile.y_mode.clone();
+    let lf = tile.lf_delta.clone();
     let edges = Edges {
         sizes: &sizes,
         tx: &tx_sizes,
         refs: &refs,
         modes: &modes,
+        lf: &lf,
         mi_cols: tile.mi_cols,
         mi_rows: tile.mi_rows,
         sub_x: tile.sub_x,
@@ -482,6 +484,12 @@ fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
         copy_cells(&mut dst.mvs1, &src.mvs1, start, n);
         copy_cells(&mut dst.block_ref, &src.block_ref, start, n);
         copy_cells(&mut dst.block_ref1, &src.block_ref1, start, n);
+        copy_cells(
+            &mut dst.lf_delta,
+            &src.lf_delta,
+            start.saturating_mul(4),
+            n.saturating_mul(4),
+        );
     }
 }
 
@@ -579,6 +587,11 @@ struct Tile<'a, 'r> {
     delta_q_res: u8,
     current_q: u8,
     read_deltas: bool,
+    delta_lf_present: bool,
+    delta_lf_res: u8,
+    delta_lf_multi: bool,
+    current_lf: [i8; 4],
+    lf_delta: Vec<i8>,
     deltas: [i32; 5],
     tx_select: bool,
     reduced_tx: bool,
@@ -700,6 +713,7 @@ pub(crate) struct Cdfs {
     txfm_split: Vec<u16>,
     intra_y: Vec<u16>,
     delta_q: Vec<u16>,
+    delta_lf: Vec<u16>,
     use_filter_intra: Vec<u16>,
     filter_intra: Vec<u16>,
     inter_intra: Vec<u16>,
@@ -798,6 +812,11 @@ impl<'a, 'r> Tile<'a, 'r> {
             delta_q_res: frame.delta_q_res,
             current_q: frame.base_q,
             read_deltas: false,
+            delta_lf_present: frame.delta_lf_present,
+            delta_lf_res: frame.delta_lf_res,
+            delta_lf_multi: frame.delta_lf_multi,
+            current_lf: [0; 4],
+            lf_delta: vec![0; cells.saturating_mul(4)],
             deltas: [
                 frame.delta_y_dc,
                 frame.delta_u_dc,
@@ -899,6 +918,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.cdfs = self.initial_cdfs.clone();
         self.current_q = self.base_q;
         self.read_deltas = false;
+        self.current_lf = [0; 4];
         self.filter_mode = None;
         Ok(())
     }
@@ -3440,32 +3460,40 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
-    /// Superblock quantizer delta. The first coded block of the superblock
-    /// reads it. A skipped 64×64 block leaves the running index unchanged.
+    /// Superblock quantizer delta, then the loop-filter delta when the frame has one.
+    /// The first coded block of the superblock reads them. A skipped 64×64 block
+    /// leaves the running values unchanged.
     fn read_quantizer_delta(&mut self, bsize: usize, skip: bool) -> Result<(), CodecError> {
         let full_superblock = bsize == 12 || bsize == BLOCK_128X128;
         if self.read_deltas && !(full_superblock && skip) {
-            let mut magnitude = read_sym(
+            let reduced = read_coded_delta(
                 &mut self.symbols,
                 self.update,
                 &mut self.cdfs.delta_q,
                 &[5],
                 &[0],
             )?;
-            if magnitude == 3 {
-                let extra = self.symbols.read_literal(3)? + 1;
-                magnitude = self.symbols.read_literal(extra)? + (1 << extra) + 1;
-            }
-            if magnitude != 0 {
-                let sign = i32::from(self.symbols.read_bool()?);
-                let reduced = if sign == 1 {
-                    -i32::try_from(magnitude).unwrap_or(0)
-                } else {
-                    i32::try_from(magnitude).unwrap_or(0)
-                };
+            if reduced != 0 {
                 let shifted = reduced << self.delta_q_res;
                 let next = i32::from(self.current_q) + shifted;
                 self.current_q = next.clamp(1, 255) as u8;
+            }
+            if self.delta_lf_present {
+                let count = if self.delta_lf_multi { 4 } else { 1 };
+                for index in 0..count {
+                    let reduced = read_coded_delta(
+                        &mut self.symbols,
+                        self.update,
+                        &mut self.cdfs.delta_lf,
+                        &[5, 5],
+                        &[if self.delta_lf_multi { index + 1 } else { 0 }, 0],
+                    )?;
+                    if reduced != 0 {
+                        let shifted = reduced << self.delta_lf_res;
+                        let next = i32::from(self.current_lf[index]).wrapping_add(shifted);
+                        self.current_lf[index] = i8::try_from(next.clamp(-63, 63)).unwrap_or(0);
+                    }
+                }
             }
         }
         self.read_deltas = false;
@@ -3964,6 +3992,10 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.compound_mask[at] = coded.compound_mask;
                 self.skip_modes[at] = u8::from(coded.skip_mode);
                 self.motion_modes[at] = coded.motion_mode;
+                let lf_at = at.saturating_mul(4);
+                if let Some(slot) = self.lf_delta.get_mut(lf_at..lf_at + 4) {
+                    slot.copy_from_slice(&self.current_lf);
+                }
             }
         }
     }
@@ -5363,6 +5395,30 @@ fn filter_intra_dir(mode: u8) -> u8 {
     MAP.get(usize::from(mode)).copied().unwrap_or(0)
 }
 
+/// `delta_q_abs` and `delta_lf_abs`. A magnitude of 3 is the small-value escape.
+fn read_coded_delta(
+    symbols: &mut SymbolDecoder<'_>,
+    update: bool,
+    table: &mut [u16],
+    shape: &[usize],
+    index: &[usize],
+) -> Result<i32, CodecError> {
+    let mut magnitude = read_sym(symbols, update, table, shape, index)?;
+    if magnitude == 3 {
+        let extra = symbols.read_literal(3)? + 1;
+        magnitude = symbols.read_literal(extra)? + (1 << extra) + 1;
+    }
+    if magnitude == 0 {
+        return Ok(0);
+    }
+    let reduced = i32::try_from(magnitude).unwrap_or(0);
+    if symbols.read_bool()? {
+        Ok(-reduced)
+    } else {
+        Ok(reduced)
+    }
+}
+
 fn read_sym(
     symbols: &mut SymbolDecoder<'_>,
     update: bool,
@@ -5465,6 +5521,7 @@ impl Cdfs {
         zero_counters(&mut self.txfm_split, 3);
         zero_counters(&mut self.intra_y, 14);
         zero_counters(&mut self.delta_q, 5);
+        zero_counters(&mut self.delta_lf, 5);
         zero_counters(&mut self.use_filter_intra, 3);
         zero_counters(&mut self.filter_intra, 6);
         zero_counters(&mut self.inter_intra, 3);
@@ -5546,6 +5603,7 @@ impl Cdfs {
             txfm_split: DEFAULT_TXFM_SPLIT_CDF.to_vec(),
             intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
             delta_q: vec![28160, 32120, 32677, 32768, 0],
+            delta_lf: [28160u16, 32120, 32677, 32768, 0].repeat(5),
             use_filter_intra: FILTER_INTRA_CDF.to_vec(),
             filter_intra: vec![8949, 12776, 17211, 29558, 32768, 0],
             inter_intra: INTER_INTRA_CDF.to_vec(),

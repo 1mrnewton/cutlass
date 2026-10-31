@@ -2698,4 +2698,33 @@ mod tests {
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }
+
+    #[test]
+    fn superblock_loop_filter_delta_matches_dav1d() {
+        // aomenc keyframes with a quantizer delta and one loop-filter delta
+        // per superblock. The luma filter levels are non-zero, so that delta
+        // changes samples. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/lfblock_0.obu"),
+            include_bytes!("../fixtures/lfblock_1.obu"),
+        ];
+        let expected = [0xf892_381c_0e3d_8319, 0xf892_381c_0e3d_8319];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(frame.delta_q_present, "frame {index}");
+            assert!(frame.delta_lf_present, "frame {index}");
+            assert!(!frame.delta_lf_multi, "frame {index}");
+            assert_ne!(frame.lf_level[0], 0, "frame {index}");
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
 }

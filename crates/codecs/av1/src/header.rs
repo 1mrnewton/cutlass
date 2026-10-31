@@ -131,6 +131,12 @@ pub struct FrameInfo {
     pub delta_q_present: bool,
     /// Left shift applied to a superblock quantizer delta.
     pub delta_q_res: u8,
+    /// A superblock may add a loop-filter delta.
+    pub delta_lf_present: bool,
+    /// Left shift applied to a superblock loop-filter delta.
+    pub delta_lf_res: u8,
+    /// Each plane, and each luma direction, has its own delta.
+    pub delta_lf_multi: bool,
     pub tx_select: bool,
     pub reduced_tx: bool,
     pub reference_select: bool,
@@ -824,14 +830,15 @@ fn uncompressed(
     } else {
         0
     };
-    // Intra block copy was already rejected, so this frame does not use it.
-    if delta_q_present && bits.read_bool()? {
-        let _res = bits.read(2)?;
-        let _multi = bits.read_bool()?;
-        return Err(CodecError::Unsupported {
-            what: "loop filter delta",
-        });
-    }
+    // Intra block copy was already rejected, so the delta bit is present
+    // whenever the quantizer delta is.
+    let delta_lf_present = delta_q_present && bits.read_bool()?;
+    let delta_lf_res = if delta_lf_present {
+        bits.read(2)? as u8
+    } else {
+        0
+    };
+    let delta_lf_multi = delta_lf_present && bits.read_bool()?;
     let lossless = base_q == 0
         && delta_y_dc == 0
         && delta_u_ac == 0
@@ -928,6 +935,9 @@ fn uncompressed(
         qm,
         delta_q_present,
         delta_q_res,
+        delta_lf_present,
+        delta_lf_res,
+        delta_lf_multi,
         tx_select,
         reduced_tx,
         reference_select,
@@ -1383,6 +1393,9 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         qm: [15, 15, 15],
         delta_q_present: false,
         delta_q_res: 0,
+        delta_lf_present: false,
+        delta_lf_res: 0,
+        delta_lf_multi: false,
         tx_select: false,
         reduced_tx: false,
         reference_select: false,

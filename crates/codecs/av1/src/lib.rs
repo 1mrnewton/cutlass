@@ -14,6 +14,7 @@
 //! may sample a reference of a different size, and it may copy its upscaled
 //! size from a reference. A warp of a scaled reference is rejected. A frame
 //! may replace a loop-filter reference or mode delta, and a later frame keeps it.
+//! A superblock may add its own loop-filter delta.
 
 #![forbid(unsafe_code)]
 

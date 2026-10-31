@@ -1,8 +1,8 @@
 //! In-loop deblocking from section 7.14 of the AV1 specification.
 //!
 //! Vertical edges are filtered before horizontal edges. A frame may update the
-//! reference and mode deltas. Segmentation and a per-superblock filter delta
-//! are not used; frames that enable them are rejected before this runs.
+//! reference and mode deltas, and a superblock may add its own delta.
+//! Segmentation is not used; a frame that enables it is rejected before this runs.
 
 use crate::dims::{MAX_TX_SIZE_RECT, TX_HEIGHT, TX_WIDTH, subsampled_size};
 use crate::header::FrameInfo;
@@ -15,6 +15,8 @@ pub struct Edges<'a> {
     pub tx: &'a [u8],
     pub refs: &'a [i8],
     pub modes: &'a [u8],
+    /// Four loop-filter deltas per 4×4, in superblock order.
+    pub lf: &'a [i8],
     pub mi_cols: usize,
     pub mi_rows: usize,
     pub sub_x: bool,
@@ -483,18 +485,44 @@ fn strength_at(edges: &Edges<'_>, plane: usize, pass: usize, row: usize, col: us
     let at = row * edges.mi_cols + col;
     let reference = edges.refs.get(at).copied().unwrap_or(INTRA_FRAME);
     let mode = edges.modes.get(at).copied().unwrap_or(0);
-    filter_level(edges.frame, plane, pass, reference, mode)
+    filter_level(
+        edges.frame,
+        plane,
+        pass,
+        reference,
+        mode,
+        superblock_delta(edges, plane, pass, at),
+    )
 }
 
-fn filter_level(frame: &FrameInfo, plane: usize, pass: usize, reference: i8, mode: u8) -> i32 {
+fn superblock_delta(edges: &Edges<'_>, plane: usize, pass: usize, at: usize) -> i32 {
+    let index = if edges.frame.delta_lf_multi {
+        if plane == 0 { pass } else { plane + 1 }
+    } else {
+        0
+    };
+    let slot = at.saturating_mul(4).saturating_add(index);
+    i32::from(edges.lf.get(slot).copied().unwrap_or(0))
+}
+
+fn filter_level(
+    frame: &FrameInfo,
+    plane: usize,
+    pass: usize,
+    reference: i8,
+    mode: u8,
+    delta_lf: i32,
+) -> i32 {
     let index = if plane == 0 { pass } else { plane + 1 };
     let Some(base) = frame.lf_level.get(index).copied() else {
         return 0;
     };
-    let mut lvl = i32::from(base).clamp(0, MAX_LOOP_FILTER);
-    if plane > 0 && lvl == 0 {
+    // A chroma plane whose coded level is 0 stays unfiltered. The superblock
+    // delta is not added to that zero.
+    if plane > 0 && base == 0 {
         return 0;
     }
+    let mut lvl = (i32::from(base) + delta_lf).clamp(0, MAX_LOOP_FILTER);
     if !frame.lf_delta_enabled {
         return lvl;
     }

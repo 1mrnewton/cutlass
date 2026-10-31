@@ -2,7 +2,8 @@
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, DecodeFactory,
-    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420High, Yuv420p, Yuv420p10,
+    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420High, Yuv420p, Yuv420p10, Yuv422High,
+    Yuv422p, Yuv444High, Yuv444p,
 };
 
 use crate::bits::Bits;
@@ -22,6 +23,9 @@ pub(crate) const CBP_INTER: [u8; 48] = [
     0, 16, 1, 2, 4, 8, 32, 3, 5, 10, 12, 15, 47, 7, 11, 13, 14, 6, 9, 31, 35, 37, 42, 44, 33, 34,
     36, 40, 39, 43, 45, 46, 17, 18, 20, 24, 19, 21, 26, 28, 23, 27, 29, 30, 22, 25, 38, 41,
 ];
+/// Coded block pattern when chroma is coded as luma (4:4:4). Table 9-4, the 16-entry column.
+pub(crate) const CBP_INTRA_444: [u8; 16] = [15, 0, 7, 11, 13, 14, 3, 5, 10, 12, 1, 2, 4, 8, 6, 9];
+pub(crate) const CBP_INTER_444: [u8; 16] = [0, 1, 2, 4, 8, 3, 5, 10, 12, 15, 7, 11, 13, 14, 6, 9];
 
 #[derive(Clone)]
 pub(crate) struct Mb {
@@ -40,7 +44,8 @@ pub(crate) struct Mb {
     direct16: bool,
     intra16: bool,
     nnz_y: [u8; 16],
-    nnz_c: [u8; 8],
+    /// Chroma coded-coeff counts. Each plane has 16 slots; 4:2:0 uses the first four.
+    nnz_c: [u8; 32],
     mode4: [u8; 16],
     chroma_mode: u8,
     ref0: [i8; 4],
@@ -72,6 +77,8 @@ pub(crate) struct Mb {
     dc_coded: bool,
     /// coded_block_flag of the Cb and Cr DC blocks.
     dc_c: [bool; 2],
+    /// Intra_16x16 DC coded_block_flag of Cb and Cr when chroma is coded as luma.
+    dc16: [bool; 2],
 }
 
 impl Mb {
@@ -90,7 +97,7 @@ impl Mb {
             direct16: false,
             intra16: false,
             nnz_y: [0; 16],
-            nnz_c: [0; 8],
+            nnz_c: [0; 32],
             mode4: [2; 16],
             chroma_mode: 0,
             ref0: [-1; 4],
@@ -112,6 +119,7 @@ impl Mb {
             qpd: 0,
             dc_coded: false,
             dc_c: [false; 2],
+            dc16: [false; 2],
         }
     }
 }
@@ -149,6 +157,40 @@ pub(crate) struct Frame<S: Sample = u8> {
     adaptive: bool,
     mmco: Vec<Mark>,
     max_fn: u32,
+}
+
+impl<S: Sample> Frame<S> {
+    /// 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4. The plane lengths decide it.
+    pub(crate) fn chroma(&self) -> u8 {
+        let y = self.w.saturating_mul(self.h);
+        if y == 0 {
+            return 1;
+        }
+        let chroma = self.u.len();
+        if chroma == y {
+            3
+        } else if chroma == y / 2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    pub(crate) fn chroma_stride(&self) -> usize {
+        if self.chroma() == 3 {
+            self.w
+        } else {
+            self.w / 2
+        }
+    }
+
+    pub(crate) fn chroma_height(&self) -> usize {
+        if self.chroma() == 1 {
+            self.h / 2
+        } else {
+            self.h
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -874,6 +916,14 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.nonexisting {
         return None;
     }
+    match frame.chroma() {
+        2 => emit_422(frame),
+        3 => emit_444(frame),
+        _ => emit_420(frame),
+    }
+}
+
+fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     let x0 = frame.crop_x as usize;
     let y0 = frame.crop_y as usize;
     let w = frame.vis_w as usize;
@@ -913,6 +963,10 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
         picture,
         yuv420p10,
         yuv420_high,
+        yuv422: None,
+        yuv422_high: None,
+        yuv444: None,
+        yuv444_high: None,
         pts: frame.pts,
         duration: frame.duration,
         timescale: frame.timescale,
@@ -922,6 +976,175 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
         transfer: frame.transfer,
         matrix: frame.matrix,
     })
+}
+
+fn emit_422<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
+    let packed = pack_visible(frame, 2, 1)?;
+    let (yuv422, yuv422_high) = if S::BITS == 8 {
+        (
+            Yuv422p::try_new(frame.vis_w, frame.vis_h, packed.y, packed.u, packed.v).ok(),
+            None,
+        )
+    } else {
+        let (Some(y), Some(u), Some(v)) = (packed.y_wide, packed.u_wide, packed.v_wide) else {
+            return None;
+        };
+        (
+            None,
+            Yuv422High::try_new(S::BITS as u8, frame.vis_w, frame.vis_h, y, u, v).ok(),
+        )
+    };
+    Some(output_of(
+        frame,
+        packed.picture,
+        yuv422,
+        yuv422_high,
+        None,
+        None,
+    ))
+}
+
+fn emit_444<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
+    let packed = pack_visible(frame, 1, 1)?;
+    let (yuv444, yuv444_high) = if S::BITS == 8 {
+        (
+            Yuv444p::try_new(frame.vis_w, frame.vis_h, packed.y, packed.u, packed.v).ok(),
+            None,
+        )
+    } else {
+        let (Some(y), Some(u), Some(v)) = (packed.y_wide, packed.u_wide, packed.v_wide) else {
+            return None;
+        };
+        (
+            None,
+            Yuv444High::try_new(S::BITS as u8, frame.vis_w, frame.vis_h, y, u, v).ok(),
+        )
+    };
+    Some(output_of(
+        frame,
+        packed.picture,
+        None,
+        None,
+        yuv444,
+        yuv444_high,
+    ))
+}
+
+struct Packed {
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+    y_wide: Option<Vec<u16>>,
+    u_wide: Option<Vec<u16>>,
+    v_wide: Option<Vec<u16>>,
+    picture: Yuv420p,
+}
+
+fn pack_visible<S: Sample>(frame: &Frame<S>, sub_w: usize, sub_h: usize) -> Option<Packed> {
+    let x0 = frame.crop_x as usize;
+    let y0 = frame.crop_y as usize;
+    let w = frame.vis_w as usize;
+    let h = frame.vis_h as usize;
+    let cw = w / sub_w;
+    let ch = h / sub_h;
+    let (y, y_wide) = pack_rect(&frame.y, frame.w, x0, y0, w, h)?;
+    let (u, u_wide) = pack_rect(
+        &frame.u,
+        frame.chroma_stride(),
+        x0 / sub_w,
+        y0 / sub_h,
+        cw,
+        ch,
+    )?;
+    let (v, v_wide) = pack_rect(
+        &frame.v,
+        frame.chroma_stride(),
+        x0 / sub_w,
+        y0 / sub_h,
+        cw,
+        ch,
+    )?;
+    let view_w = w / 2 * 2;
+    let view_h = h / 2 * 2;
+    let picture = if view_w >= 2 && view_h >= 2 {
+        let cu = view_w / 2;
+        let cv = view_h / 2;
+        let mut u420 = vec![0u8; cu * cv];
+        let mut v420 = vec![0u8; cu * cv];
+        for row in 0..cv {
+            for col in 0..cu {
+                let sx = col * (2 / sub_w);
+                let sy = row * (2 / sub_h);
+                u420[row * cu + col] = u[sy * cw + sx];
+                v420[row * cu + col] = v[sy * cw + sx];
+            }
+        }
+        let mut y420 = vec![0u8; view_w * view_h];
+        for row in 0..view_h {
+            y420[row * view_w..row * view_w + view_w]
+                .copy_from_slice(&y[row * w..row * w + view_w]);
+        }
+        Yuv420p::try_new(view_w as u32, view_h as u32, y420, u420, v420).ok()?
+    } else {
+        Yuv420p::try_new(2, 2, vec![0; 4], vec![0; 1], vec![0; 1]).ok()?
+    };
+    Some(Packed {
+        y,
+        u,
+        v,
+        y_wide,
+        u_wide,
+        v_wide,
+        picture,
+    })
+}
+
+fn pack_rect<S: Sample>(
+    plane: &[S],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    w: usize,
+    h: usize,
+) -> Option<(Vec<u8>, Option<Vec<u16>>)> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut eight = vec![0u8; w * h];
+    let mut wide = wide_plane::<S>(w * h);
+    for row in 0..h {
+        let start = (y0 + row).checked_mul(stride)?.checked_add(x0)?;
+        let src = plane.get(start..start + w)?;
+        pack_row(src, &mut eight[row * w..row * w + w], wide.as_mut());
+    }
+    Some((eight, wide))
+}
+
+fn output_of<S: Sample>(
+    frame: &Frame<S>,
+    picture: Yuv420p,
+    yuv422: Option<Yuv422p>,
+    yuv422_high: Option<Yuv422High>,
+    yuv444: Option<Yuv444p>,
+    yuv444_high: Option<Yuv444High>,
+) -> VideoOutput {
+    VideoOutput {
+        picture,
+        yuv420p10: None,
+        yuv420_high: None,
+        yuv422,
+        yuv422_high,
+        yuv444,
+        yuv444_high,
+        pts: frame.pts,
+        duration: frame.duration,
+        timescale: frame.timescale,
+        keyframe: frame.key,
+        range: frame.range,
+        primaries: frame.primaries,
+        transfer: frame.transfer,
+        matrix: frame.matrix,
+    }
 }
 
 pub(crate) struct Slice<'a> {
@@ -1495,7 +1718,12 @@ fn new_frame<S: Sample>(
     let h = sps.height as usize;
     let mb_w = sps.mb_width;
     let mb_h = sps.mb_height;
-    let chroma = (w / 2).saturating_mul(h / 2);
+    let chroma = match sps.chroma {
+        3 => w.saturating_mul(h),
+        2 => (w / 2).saturating_mul(h),
+        _ => (w / 2).saturating_mul(h / 2),
+    };
+    let (unit_x, unit_y) = sps.crop_unit();
     let reorder = if sps.max_reorder > 0 {
         sps.max_reorder as usize
     } else if sps.max_num_ref_frames > 1 {
@@ -1521,8 +1749,8 @@ fn new_frame<S: Sample>(
         pts: packet.pts,
         duration: packet.duration,
         timescale: packet.timescale,
-        crop_x: sps.crop_left.saturating_mul(2),
-        crop_y: sps.crop_top.saturating_mul(2),
+        crop_x: sps.crop_left.saturating_mul(unit_x),
+        crop_y: sps.crop_top.saturating_mul(unit_y),
         vis_w,
         vis_h,
         range: sps.range,
@@ -1908,6 +2136,7 @@ mod tests {
             matrix: ColorMatrix::Unspecified,
             max_reorder: 0,
             bit_depth: 8,
+            chroma: 1,
         }
     }
 

@@ -208,6 +208,40 @@ pub fn chroma_dc(c00: i32, c01: i32, c10: i32, c11: i32, qp: i32, weight00: i32)
     out
 }
 
+/// Inverse 2×4 Hadamard and scale for a 4:2:2 chroma DC block.
+///
+/// `raster` is row-major, index `y * 2 + x`. The scale matches the Intra_16x16
+/// DC scale: round when `qp < 36`, otherwise shift.
+pub fn chroma_dc422(raster: &[i32; 8], qp: i32, weight: i32) -> [i32; 8] {
+    let mut temp = [0i64; 8];
+    for y in 0..4 {
+        let left = i64::from(raster[y * 2]);
+        let right = i64::from(raster[y * 2 + 1]);
+        temp[y * 2] = left + right;
+        temp[y * 2 + 1] = left - right;
+    }
+    let ls = i64::from(weight) * i64::from(NORM4[(qp.rem_euclid(6)) as usize][0]);
+    let q = qp / 6;
+    let mut out = [0i32; 8];
+    for x in 0..2 {
+        let z0 = temp[x] + temp[4 + x];
+        let z1 = temp[x] - temp[4 + x];
+        let z2 = temp[2 + x] - temp[6 + x];
+        let z3 = temp[2 + x] + temp[6 + x];
+        let mixed = [z0 + z3, z1 + z2, z1 - z2, z0 - z3];
+        for (y, value) in mixed.iter().enumerate() {
+            let v = value * ls;
+            let scaled = if qp >= 36 {
+                v << (q - 6)
+            } else {
+                (v + (1i64 << (5 - q))) >> (6 - q)
+            };
+            out[y * 2 + x] = scaled as i32;
+        }
+    }
+    out
+}
+
 pub fn idct8(block: &mut [i32; 64]) {
     let mut mid = [0i32; 64];
     for i in 0..8 {
@@ -669,6 +703,114 @@ pub fn pred_chroma<S: Sample>(
         }
     }
     out
+}
+
+/// 8×16 chroma intra prediction for 4:2:2. Modes are DC, horizontal, vertical, and plane.
+pub fn pred_chroma422<S: Sample>(
+    mode: u8,
+    above: &[S],
+    left: &[S],
+    above_ok: bool,
+    left_ok: bool,
+    corner: S,
+) -> [S; 128] {
+    let mut out = [S::mid(); 128];
+    match mode {
+        1 if left_ok => {
+            for y in 0..16 {
+                out[y * 8..y * 8 + 8].fill(left[y]);
+            }
+        }
+        2 if above_ok => {
+            for y in 0..16 {
+                out[y * 8..y * 8 + 8].copy_from_slice(&above[..8]);
+            }
+        }
+        3 if above_ok && left_ok => plane8x16(&mut out, above, left, corner),
+        _ => dc8x16(&mut out, above, left, above_ok, left_ok),
+    }
+    out
+}
+
+fn dc8x16<S: Sample>(out: &mut [S; 128], above: &[S], left: &[S], above_ok: bool, left_ok: bool) {
+    let group = |samples: &[S], at: usize| -> i32 {
+        pel(samples[at]) + pel(samples[at + 1]) + pel(samples[at + 2]) + pel(samples[at + 3])
+    };
+    let avg = |sum: i32, n: i32| S::clip((sum + (n / 2)) / n);
+    if above_ok && left_ok {
+        let top = group(above, 4);
+        let rows = [
+            (avg(group(left, 0) + group(above, 0), 8), avg(top, 4)),
+            (avg(group(left, 4), 4), avg(top + group(left, 4), 8)),
+            (avg(group(left, 8), 4), avg(top + group(left, 8), 8)),
+            (avg(group(left, 12), 4), avg(top + group(left, 12), 8)),
+        ];
+        for (band, (left_dc, right_dc)) in rows.iter().enumerate() {
+            for y in 0..4 {
+                let row = (band * 4 + y) * 8;
+                out[row..row + 4].fill(*left_dc);
+                out[row + 4..row + 8].fill(*right_dc);
+            }
+        }
+        return;
+    }
+    if above_ok {
+        let left_dc = avg(group(above, 0), 4);
+        let right_dc = avg(group(above, 4), 4);
+        for y in 0..16 {
+            let row = y * 8;
+            out[row..row + 4].fill(left_dc);
+            out[row + 4..row + 8].fill(right_dc);
+        }
+        return;
+    }
+    if left_ok {
+        for band in 0..4 {
+            let value = avg(group(left, band * 4), 4);
+            for y in 0..4 {
+                out[(band * 4 + y) * 8..(band * 4 + y) * 8 + 8].fill(value);
+            }
+        }
+    }
+}
+
+fn plane8x16<S: Sample>(out: &mut [S; 128], above: &[S], left: &[S], corner: S) {
+    let h = (pel(above[4]) - pel(above[2]))
+        + 2 * (pel(above[5]) - pel(above[1]))
+        + 3 * (pel(above[6]) - pel(above[0]))
+        + 4 * (pel(above[7]) - pel(corner));
+    let mut v = pel(left[8]) - pel(left[6]);
+    let down = [
+        pel(left[9]),
+        pel(left[10]),
+        pel(left[11]),
+        pel(left[12]),
+        pel(left[13]),
+        pel(left[14]),
+        pel(left[15]),
+    ];
+    let up = [
+        pel(left[5]),
+        pel(left[4]),
+        pel(left[3]),
+        pel(left[2]),
+        pel(left[1]),
+        pel(left[0]),
+        pel(corner),
+    ];
+    for (k, (low, high)) in up.into_iter().zip(down).enumerate() {
+        v += (k as i32 + 2) * (high - low);
+    }
+    let h = (17 * h + 16) >> 5;
+    let v = (5 * v + 32) >> 6;
+    let mut a = 16 * (pel(left[15]) + pel(above[7]) + 1) - 7 * v - 3 * h;
+    for y in 0..16 {
+        let b = a;
+        a += v;
+        for x in 0..8 {
+            out[y * 8 + x] = S::clip((b + x as i32 * h) >> 5);
+        }
+    }
 }
 
 pub fn sample<S: Sample>(plane: &[S], stride: usize, w: i32, h: i32, x: i32, y: i32) -> i32 {

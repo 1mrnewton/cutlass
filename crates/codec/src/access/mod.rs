@@ -13,7 +13,10 @@ mod sample;
 mod still;
 
 pub use error::CodecError;
-pub use frame::{FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10};
+pub use frame::{
+    FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High,
+    Yuv444p,
+};
 pub use packet::{Packet, SideData};
 pub use params::CodecParams;
 pub use pixel::{

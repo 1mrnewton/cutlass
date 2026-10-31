@@ -3,7 +3,9 @@
 use cutlass_decode::CodecError;
 
 use crate::bits::Bits;
-use crate::tables::{COEFF_CHROMA_DC, COEFF_NC01, COEFF_NC8, COEFF_NC23, COEFF_NC47, RUN, ZEROS};
+use crate::tables::{
+    COEFF_CHROMA_DC, COEFF_CHROMA422_DC, COEFF_NC01, COEFF_NC8, COEFF_NC23, COEFF_NC47, RUN, ZEROS,
+};
 use crate::{bits, tables::Vlc};
 
 pub fn coeff_token(bits: &mut Bits<'_>, nc: i32) -> Result<(u8, u8), CodecError> {
@@ -25,9 +27,16 @@ pub fn chroma_dc_token(bits: &mut Bits<'_>) -> Result<(u8, u8), CodecError> {
     Ok((code.a, code.b))
 }
 
+fn chroma422_dc_token(bits: &mut Bits<'_>) -> Result<(u8, u8), CodecError> {
+    let code = bits::vlc(bits, COEFF_CHROMA422_DC)?;
+    Ok((code.a, code.b))
+}
+
 /// One residual block in scan order. `max_coeff` is 15 when the DC is elsewhere, else 16.
 pub fn residual(bits: &mut Bits<'_>, nc: i32, max_coeff: usize) -> Result<Vec<i32>, CodecError> {
-    let (total, trailing) = if nc < 0 {
+    let (total, trailing) = if nc == -2 {
+        chroma422_dc_token(bits)?
+    } else if nc < 0 {
         chroma_dc_token(bits)?
     } else {
         coeff_token(bits, nc)?
@@ -55,7 +64,7 @@ pub fn residual(bits: &mut Bits<'_>, nc: i32, max_coeff: usize) -> Result<Vec<i3
     }
     let mut runs = vec![0usize; total];
     if total > 0 && total < max_coeff {
-        let zeros = total_zeros(bits, total, nc < 0)?;
+        let zeros = total_zeros(bits, total, nc)?;
         let mut left = zeros;
         for slot in runs.iter_mut().take(total.saturating_sub(1)) {
             if left == 0 {
@@ -117,12 +126,22 @@ fn level(bits: &mut Bits<'_>, suffix: &mut u32, bump: bool) -> Result<i32, Codec
     }
 }
 
-fn total_zeros(bits: &mut Bits<'_>, total: usize, chroma_dc: bool) -> Result<usize, CodecError> {
-    if chroma_dc {
-        let table = crate::tables::CHROMA_ZEROS[total - 1];
+fn total_zeros(bits: &mut Bits<'_>, total: usize, nc: i32) -> Result<usize, CodecError> {
+    if nc == -2 {
+        let Some(table) = crate::tables::CHROMA422_ZEROS.get(total - 1) else {
+            return Err(bits.malformed("total zeros"));
+        };
         return Ok(usize::from(bits::vlc(bits, table)?.a));
     }
-    let table = ZEROS[total - 1];
+    if nc < 0 {
+        let Some(table) = crate::tables::CHROMA_ZEROS.get(total - 1) else {
+            return Err(bits.malformed("total zeros"));
+        };
+        return Ok(usize::from(bits::vlc(bits, table)?.a));
+    }
+    let Some(table) = ZEROS.get(total - 1) else {
+        return Err(bits.malformed("total zeros"));
+    };
     Ok(usize::from(bits::vlc(bits, table)?.a))
 }
 

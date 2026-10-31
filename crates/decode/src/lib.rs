@@ -35,7 +35,7 @@ pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
     ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
     PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
-    VideoFrame, Yuv420High, Yuv420p, Yuv420p10,
+    VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 pub use video::VideoDecodeFactory;
 
@@ -245,17 +245,24 @@ pub trait Decoder: Send {
 
 /// One decoded picture, in display order once it is released.
 ///
-/// `picture` is the cropped 8-bit 4:2:0 buffer. When `yuv420p10` is set, that
-/// buffer is the decoded 10-bit picture and `picture` is those samples shifted
-/// right by two bits. When `yuv420_high` is set, that buffer is the decoded
-/// picture at 9, 11, 12, 13, or 14 bits and `picture` is those samples shifted
-/// right by `bit_depth - 8`. Color tags describe the decoded samples. They are
-/// not a conversion.
+/// `picture` is the cropped 8-bit 4:2:0 view. A 4:2:2 or 4:4:4 decode keeps the
+/// real samples in `yuv422`, `yuv422_high`, `yuv444`, or `yuv444_high`, and
+/// `picture` is those samples subsampled to 4:2:0. When `yuv420p10` is set, that
+/// buffer is the decoded 10-bit 4:2:0 picture and `picture` is those samples
+/// shifted right by two bits. When `yuv420_high` is set, that buffer is the
+/// decoded 4:2:0 picture at 9, 11, 12, 13, or 14 bits and `picture` is those
+/// samples shifted right by `bit_depth - 8`. A 10-bit 4:2:2 or 4:4:4 picture is
+/// the matching high buffer with `bit_depth` 10. Color tags describe the decoded
+/// samples. They are not a conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoOutput {
     pub picture: Yuv420p,
     pub yuv420p10: Option<Yuv420p10>,
     pub yuv420_high: Option<Yuv420High>,
+    pub yuv422: Option<Yuv422p>,
+    pub yuv422_high: Option<Yuv422High>,
+    pub yuv444: Option<Yuv444p>,
+    pub yuv444_high: Option<Yuv444High>,
     pub pts: i64,
     pub duration: i64,
     pub timescale: u32,
@@ -637,6 +644,10 @@ mod tests {
                 picture,
                 yuv420p10: None,
                 yuv420_high: None,
+                yuv422: None,
+                yuv422_high: None,
+                yuv444: None,
+                yuv444_high: None,
                 pts: packet.pts,
                 duration: packet.duration,
                 timescale: packet.timescale,

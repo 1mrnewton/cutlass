@@ -31,10 +31,17 @@ struct LumaPaint<'a> {
 }
 
 struct ChromaPaint<'a> {
-    cb_dc: [i32; 4],
-    cr_dc: [i32; 4],
-    cb_ac: &'a [[i32; 16]; 4],
-    cr_ac: &'a [[i32; 16]; 4],
+    cb_dc: &'a [i32],
+    cr_dc: &'a [i32],
+    cb_ac: &'a [[i32; 16]],
+    cr_ac: &'a [[i32; 16]],
+}
+
+struct ChromaResidual {
+    cb_dc: [i32; 8],
+    cr_dc: [i32; 8],
+    cb_ac: [[i32; 16]; 8],
+    cr_ac: [[i32; 16]; 8],
 }
 
 /// A list slot the initialisation process left as "no reference picture".
@@ -521,7 +528,7 @@ fn one_mb<S: Sample>(
         mb.pcm = true;
         read_pcm(pic, entropy, mx, my, slice)?;
         mb.nnz_y = [16; 16];
-        mb.nnz_c = [16; 8];
+        mb.nnz_c = [16; 32];
         mb.qp = 0;
         pic.mb[addr] = mb;
         return Ok(qp);
@@ -716,12 +723,22 @@ fn decode_intra<S: Sample>(
             read_intra4(pic, entropy, slice, mx, my, mb)?;
         }
     }
-    let chroma = read_chroma_mode(pic, entropy, mx, my, mb.slice)?;
+    if slice.sps.chroma == 3 && i16 && cbp_chroma != 0 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "chroma cbp",
+        });
+    }
+    let chroma = if slice.sps.chroma == 3 {
+        0
+    } else {
+        read_chroma_mode(pic, entropy, mx, my, mb.slice)?
+    };
     mb.chroma_mode = chroma;
     let (luma_cbp, chroma_cbp) = if i16 {
-        (cbp_luma, cbp_chroma)
+        (cbp_luma, u8::from(slice.sps.chroma != 3) * cbp_chroma)
     } else {
-        read_cbp(pic, entropy, mx, my, true, mb.slice)?
+        read_cbp(pic, entropy, mx, my, true, mb.slice, slice.sps.chroma)?
     };
     mb.cbp = luma_cbp | (chroma_cbp << 4);
     if luma_cbp > 0 && slice.pps.transform_8x8 && !i16 && !transform8 {
@@ -765,7 +782,7 @@ fn decode_intra<S: Sample>(
     } else if transform8 {
         for (i, slot) in block8.iter_mut().enumerate() {
             if luma_cbp & (1 << i) != 0 {
-                *slot = read8(pic, entropy, mx, my, i, mb)?;
+                *slot = read8(pic, entropy, mx, my, i, mb, 0)?;
             }
         }
     } else {
@@ -787,7 +804,16 @@ fn decode_intra<S: Sample>(
             }
         }
     }
-    let (cb_dc, cr_dc, cb_ac, cr_ac) = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
+    let chroma_res = if slice.sps.chroma == 3 {
+        ChromaResidual {
+            cb_dc: [0; 8],
+            cr_dc: [0; 8],
+            cb_ac: [[0; 16]; 8],
+            cr_ac: [[0; 16]; 8],
+        }
+    } else {
+        read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?
+    };
     recon_intra(
         pic,
         slice,
@@ -802,13 +828,24 @@ fn decode_intra<S: Sample>(
             block8: &block8,
         },
         ChromaPaint {
-            cb_dc,
-            cr_dc,
-            cb_ac: &cb_ac,
-            cr_ac: &cr_ac,
+            cb_dc: &chroma_res.cb_dc,
+            cr_dc: &chroma_res.cr_dc,
+            cb_ac: &chroma_res.cb_ac,
+            cr_ac: &chroma_res.cr_ac,
         },
         *qp,
     );
+    if slice.sps.chroma == 3 {
+        recon_444(
+            pic,
+            entropy,
+            slice,
+            Place { mx, my },
+            mb,
+            *qp,
+            i16.then_some(mode16),
+        )?;
+    }
     Ok(())
 }
 
@@ -1009,10 +1046,23 @@ fn read_cbp<S: Sample>(
     my: usize,
     intra: bool,
     slice: u16,
+    chroma: u8,
 ) -> Result<(u8, u8), CodecError> {
     match entropy {
         Entropy::Cavlc(bits) => {
             let code = bits.ue()? as usize;
+            if chroma == 3 {
+                let Some(value) = (if intra {
+                    super::CBP_INTRA_444
+                } else {
+                    super::CBP_INTER_444
+                })
+                .get(code)
+                .copied() else {
+                    return Err(bits.malformed("cbp"));
+                };
+                return Ok((value, 0));
+            }
             if code >= 48 {
                 return Err(bits.malformed("cbp"));
             }
@@ -1030,6 +1080,9 @@ fn read_cbp<S: Sample>(
                 if cab.decision(73 + ctx)? == 1 {
                     luma |= 1 << bit;
                 }
+            }
+            if chroma == 3 {
+                return Ok((luma, 0));
             }
             let left = cbp_chroma(pic, mx as i32 - 1, my as i32, slice);
             let above = cbp_chroma(pic, mx as i32, my as i32 - 1, slice);
@@ -1144,6 +1197,41 @@ fn flag(entropy: &mut Entropy<'_, '_>, ctx: usize) -> Result<bool, CodecError> {
     }
 }
 
+const CBF_BASE: [usize; 14] = [
+    85, 89, 93, 97, 101, 1012, 460, 464, 468, 1016, 472, 476, 480, 1020,
+];
+
+/// ctxBlockCat for a chroma plane that uses the luma residual process.
+fn block_cat(cat: usize, plane: u8, chroma444: bool) -> usize {
+    if !chroma444 || plane == 0 {
+        return cat;
+    }
+    let row = match cat {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        5 => 3,
+        _ => return cat,
+    };
+    const MAP: [[usize; 3]; 4] = [[0, 6, 10], [1, 7, 11], [2, 8, 12], [5, 9, 13]];
+    MAP[row][usize::from(plane.min(2))]
+}
+
+fn chroma_slot(chroma: u8, plane: u8, bx: usize, by: usize) -> usize {
+    let across = if chroma == 3 { 4 } else { 2 };
+    usize::from(plane.saturating_sub(1)) * 16 + by * across + bx
+}
+
+fn chroma_pos(index: usize, blocks: usize) -> (usize, usize) {
+    if blocks == 8 {
+        let sub = index & 3;
+        let band = index >> 2;
+        (sub & 1, band * 2 + (sub >> 1))
+    } else {
+        (index & 1, index >> 1)
+    }
+}
+
 fn read_block<S: Sample>(
     pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
@@ -1160,9 +1248,9 @@ fn read_block<S: Sample>(
     let coeffs = match entropy {
         Entropy::Cavlc(bits) => {
             let nc = if cat == 3 {
-                -1
+                if max == 8 { -2 } else { -1 }
             } else {
-                nc_of(pic, mx, my, bx, by, mb, plane)
+                nc_of(pic, Place { mx, my }, Cell { bx, by }, mb, plane)
             };
             let coeffs = cavlc::residual(bits, nc, max)?;
             for (index, value) in coeffs.iter().enumerate() {
@@ -1171,33 +1259,47 @@ fn read_block<S: Sample>(
             out
         }
         Entropy::Cabac(cab) => {
+            let coded = block_cat(cat, plane, pic.chroma() == 3);
             // Luma DC (cat 0) has a coded_block_flag. Its neighbours are Intra_16x16 DC blocks.
             let inc = if cat == 0 {
-                cbf_dc_luma(pic, mx, my, mb)
+                cbf_dc_plane(pic, mx, my, mb, plane)
             } else if cat == 3 {
                 cbf_dc_chroma(pic, mx, my, mb, usize::from(plane.saturating_sub(1)))
             } else {
                 cbf_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane, dc)
             };
-            let base = [85, 89, 93, 97, 101][cat.min(4)];
+            let Some(base) = CBF_BASE.get(coded).copied() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "cabac residual",
+                });
+            };
             if cab.decision(base + inc)? == 0 {
                 return Ok(out);
             }
             if cat == 0 {
-                mb.dc_coded = true;
+                if plane == 0 {
+                    mb.dc_coded = true;
+                } else if let Some(flag) = mb.dc16.get_mut(usize::from(plane - 1)) {
+                    *flag = true;
+                }
             } else if cat == 3 {
                 let which = usize::from(plane.saturating_sub(1));
                 if let Some(flag) = mb.dc_c.get_mut(which) {
                     *flag = true;
                 }
             }
-            cabac_residual(cab, cat, &mut out[..max])?;
+            cabac_residual(cab, coded, &mut out[..max])?;
             out
         }
     };
-    let count = coeffs.iter().filter(|value| **value != 0).count() as u8;
-    if plane == 0 && !dc {
-        mb.nnz_y[by * 4 + bx] = count;
+    let count = coeffs.iter().take(max).filter(|value| **value != 0).count() as u8;
+    if !dc {
+        if plane == 0 {
+            mb.nnz_y[by * 4 + bx] = count;
+        } else if let Some(slot) = mb.nnz_c.get_mut(chroma_slot(pic.chroma(), plane, bx, by)) {
+            *slot = count;
+        }
     }
     Ok(coeffs)
 }
@@ -1209,6 +1311,7 @@ fn read8<S: Sample>(
     my: usize,
     which: usize,
     mb: &mut Mb,
+    plane: u8,
 ) -> Result<[i32; 64], CodecError> {
     let mut out = [0i32; 64];
     let bx = (which & 1) * 2;
@@ -1218,21 +1321,36 @@ fn read8<S: Sample>(
             for i4 in 0..4 {
                 let x = bx + (i4 & 1);
                 let y = by + (i4 >> 1);
-                let nc = nc_of(pic, mx, my, x, y, mb, 0);
+                let nc = nc_of(pic, Place { mx, my }, Cell { bx: x, by: y }, mb, plane);
                 let block = cavlc::residual(bits, nc, 16)?;
                 let count = block.iter().filter(|value| **value != 0).count() as u8;
-                mb.nnz_y[y * 4 + x] = count;
+                store_nnz(pic, mb, plane, x, y, count);
                 for (index, value) in block.iter().enumerate() {
                     out[index * 4 + i4] = *value;
                 }
             }
         }
         Entropy::Cabac(cab) => {
-            cabac_residual(cab, 5, &mut out)?;
+            let cat = block_cat(5, plane, pic.chroma() == 3);
+            // 4:2:0 and 4:2:2 omit the luma 8×8 coded-block flag; the CBP bit
+            // is that flag. 4:4:4 reads it for luma and for both chroma planes.
+            if plane != 0 || pic.chroma() == 3 {
+                let inc = cbf_inc(pic, Place { mx, my }, Cell { bx, by }, mb, plane, false);
+                let Some(base) = CBF_BASE.get(cat).copied() else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "cabac residual",
+                    });
+                };
+                if cab.decision(base + inc)? == 0 {
+                    return Ok(out);
+                }
+            }
+            cabac_residual(cab, cat, &mut out)?;
             let count = out.iter().filter(|value| **value != 0).count() as u8;
             for dy in 0..2 {
                 for dx in 0..2 {
-                    mb.nnz_y[(by + dy) * 4 + bx + dx] = count;
+                    store_nnz(pic, mb, plane, bx + dx, by + dy, count);
                 }
             }
         }
@@ -1240,7 +1358,15 @@ fn read8<S: Sample>(
     Ok(out)
 }
 
-type ChromaResidual = ([i32; 4], [i32; 4], [[i32; 16]; 4], [[i32; 16]; 4]);
+fn store_nnz<S: Sample>(pic: &Frame<S>, mb: &mut Mb, plane: u8, x: usize, y: usize, count: u8) {
+    if plane == 0 {
+        mb.nnz_y[y * 4 + x] = count;
+        return;
+    }
+    if let Some(slot) = mb.nnz_c.get_mut(chroma_slot(pic.chroma(), plane, x, y)) {
+        *slot = count;
+    }
+}
 
 fn read_chroma<S: Sample>(
     pic: &Frame<S>,
@@ -1250,79 +1376,63 @@ fn read_chroma<S: Sample>(
     cbp: u8,
     mb: &mut Mb,
 ) -> Result<ChromaResidual, CodecError> {
-    let mut cb_dc = [0i32; 4];
-    let mut cr_dc = [0i32; 4];
-    let mut cb_ac = [[0i32; 16]; 4];
-    let mut cr_ac = [[0i32; 16]; 4];
+    let mut residual = ChromaResidual {
+        cb_dc: [0; 8],
+        cr_dc: [0; 8],
+        cb_ac: [[0; 16]; 8],
+        cr_ac: [[0; 16]; 8],
+    };
     if cbp == 0 {
-        return Ok((cb_dc, cr_dc, cb_ac, cr_ac));
+        return Ok(residual);
     }
+    let blocks = if pic.chroma() == 2 { 8 } else { 4 };
     let dc0 = read_block(
         pic,
         entropy,
-        (3, 4, true),
+        (3, blocks, true),
         Place { mx, my },
         Cell { bx: 0, by: 0 },
         mb,
         1,
     )?;
-    cb_dc.copy_from_slice(&dc0[..4]);
+    residual.cb_dc[..blocks].copy_from_slice(&dc0[..blocks]);
     let dc1 = read_block(
         pic,
         entropy,
-        (3, 4, true),
+        (3, blocks, true),
         Place { mx, my },
         Cell { bx: 0, by: 0 },
         mb,
         2,
     )?;
-    cr_dc.copy_from_slice(&dc1[..4]);
+    residual.cr_dc[..blocks].copy_from_slice(&dc1[..blocks]);
     if cbp == 2 {
-        for (i, slot) in cb_ac.iter_mut().enumerate() {
-            *slot = read_block(
-                pic,
-                entropy,
-                (4, 15, false),
-                Place { mx, my },
-                Cell {
-                    bx: i & 1,
-                    by: i >> 1,
-                },
-                mb,
-                1,
-            )?;
-            mb.nnz_c[i] = slot.iter().filter(|value| **value != 0).count() as u8;
-        }
-        for (i, slot) in cr_ac.iter_mut().enumerate() {
-            *slot = read_block(
-                pic,
-                entropy,
-                (4, 15, false),
-                Place { mx, my },
-                Cell {
-                    bx: i & 1,
-                    by: i >> 1,
-                },
-                mb,
-                2,
-            )?;
-            mb.nnz_c[4 + i] = slot.iter().filter(|value| **value != 0).count() as u8;
+        for (plane, ac) in [
+            (1u8, residual.cb_ac.as_mut_slice()),
+            (2, residual.cr_ac.as_mut_slice()),
+        ] {
+            for (i, slot) in ac.iter_mut().take(blocks).enumerate() {
+                let (bx, by) = chroma_pos(i, blocks);
+                *slot = read_block(
+                    pic,
+                    entropy,
+                    (4, 15, false),
+                    Place { mx, my },
+                    Cell { bx, by },
+                    mb,
+                    plane,
+                )?;
+            }
         }
     }
-    Ok((cb_dc, cr_dc, cb_ac, cr_ac))
+    Ok(residual)
 }
 
-fn nc_of<S: Sample>(
-    pic: &Frame<S>,
-    mx: usize,
-    my: usize,
-    bx: usize,
-    by: usize,
-    mb: &Mb,
-    plane: u8,
-) -> i32 {
-    let left = nnz_at(pic, mx, my, bx as i32 - 1, by as i32, mb, plane);
-    let above = nnz_at(pic, mx, my, bx as i32, by as i32 - 1, mb, plane);
+fn nc_of<S: Sample>(pic: &Frame<S>, at: Place, cell: Cell, mb: &Mb, plane: u8) -> i32 {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let left = nnz_at(pic, Place { mx, my }, (bx as i32 - 1, by as i32), mb, plane);
+    let above = nnz_at(pic, Place { mx, my }, (bx as i32, by as i32 - 1), mb, plane);
     match (left, above) {
         (Some(a), Some(b)) => (i32::from(a) + i32::from(b) + 1) >> 1,
         (Some(a), None) => i32::from(a),
@@ -1333,20 +1443,28 @@ fn nc_of<S: Sample>(
 
 fn nnz_at<S: Sample>(
     pic: &Frame<S>,
-    mx: usize,
-    my: usize,
-    bx: i32,
-    by: i32,
+    at: Place,
+    block: (i32, i32),
     current: &Mb,
     plane: u8,
 ) -> Option<u8> {
-    let grid = if plane == 0 { 4 } else { 2 };
-    let (mbx, ox) = shift(mx, bx, grid);
-    let (mby, oy) = shift(my, by, grid);
+    let Place { mx, my } = at;
+    let (bx, by) = block;
+    let (gx, gy) = if plane == 0 {
+        (4, 4)
+    } else {
+        match pic.chroma() {
+            2 => (2, 4),
+            3 => (4, 4),
+            _ => (2, 2),
+        }
+    };
+    let (mbx, ox) = shift(mx, bx, gx);
+    let (mby, oy) = shift(my, by, gy);
     let index = if plane == 0 {
         oy * 4 + ox
     } else {
-        usize::from(plane - 1) * 4 + oy * 2 + ox
+        chroma_slot(pic.chroma(), plane, ox, oy)
     };
     if mbx == mx as i32 && mby == my as i32 {
         return Some(if plane == 0 {
@@ -1366,19 +1484,7 @@ fn nnz_at<S: Sample>(
     })
 }
 
-fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
-    let last = grid - 1;
-    if block < 0 {
-        (mb as i32 - 1, last)
-    } else if block >= grid as i32 {
-        (mb as i32 + 1, 0)
-    } else {
-        (mb as i32, block as usize)
-    }
-}
-
-/// Clause 9.3.3.1.1.9 for ctxBlockCat 0. A neighbour contributes its DC flag only when it is Intra_16x16.
-fn cbf_dc_luma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> usize {
+fn cbf_dc_plane<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb, plane: u8) -> usize {
     let flag = |dx: i32, dy: i32| -> usize {
         let Some(side) = neighbor(pic, mx as i32 + dx, my as i32 + dy, mb.slice) else {
             return usize::from(mb.intra);
@@ -1389,9 +1495,28 @@ fn cbf_dc_luma<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, mb: &Mb) -> usiz
         if !side.intra16 {
             return 0;
         }
-        usize::from(side.dc_coded)
+        if plane == 0 {
+            usize::from(side.dc_coded)
+        } else {
+            side.dc16
+                .get(usize::from(plane - 1))
+                .copied()
+                .map(usize::from)
+                .unwrap_or(0)
+        }
     };
     flag(-1, 0) + 2 * flag(0, -1)
+}
+
+fn shift(mb: usize, block: i32, grid: usize) -> (i32, usize) {
+    let last = grid - 1;
+    if block < 0 {
+        (mb as i32 - 1, last)
+    } else if block >= grid as i32 {
+        (mb as i32 + 1, 0)
+    } else {
+        (mb as i32, block as usize)
+    }
 }
 
 /// Clause 9.3.3.1.1.9 for ctxBlockCat 3. The neighbour contributes its chroma DC flag.
@@ -1421,9 +1546,9 @@ fn cbf_inc<S: Sample>(
 ) -> usize {
     let Place { mx, my } = at;
     let Cell { bx, by } = cell;
-    let left = nnz_at(pic, mx, my, bx as i32 - 1, by as i32, mb, plane)
+    let left = nnz_at(pic, Place { mx, my }, (bx as i32 - 1, by as i32), mb, plane)
         .or(dc.then_some(u8::from(mb.intra)));
-    let above = nnz_at(pic, mx, my, bx as i32, by as i32 - 1, mb, plane)
+    let above = nnz_at(pic, Place { mx, my }, (bx as i32, by as i32 - 1), mb, plane)
         .or(dc.then_some(u8::from(mb.intra)));
     let left = left.unwrap_or(u8::from(mb.intra));
     let above = above.unwrap_or(u8::from(mb.intra));
@@ -1431,27 +1556,35 @@ fn cbf_inc<S: Sample>(
 }
 
 fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result<(), CodecError> {
-    let (sig_base, last_base, level_base) = match cat {
-        0 => (105, 166, 227),
-        1 => (120, 181, 237),
-        2 => (134, 195, 247),
-        3 => (149, 210, 257),
-        4 => (152, 213, 266),
-        _ => (402, 417, 426),
-    };
+    const SIG: [usize; 14] = [
+        105, 120, 134, 149, 152, 402, 484, 499, 513, 660, 528, 543, 557, 718,
+    ];
+    const LAST: [usize; 14] = [
+        166, 181, 195, 210, 213, 417, 572, 587, 601, 690, 616, 631, 645, 748,
+    ];
+    const LEVEL: [usize; 14] = [
+        227, 237, 247, 257, 266, 426, 952, 962, 972, 708, 982, 992, 1002, 766,
+    ];
+    let which = cat.min(13);
+    let (sig_base, last_base, level_base) = (SIG[which], LAST[which], LEVEL[which]);
     let max = coeffs.len();
+    let dc422 = cat == 3 && max == 8;
     let mut index = [0usize; 64];
     let mut count = 0usize;
     let last_coded = max.saturating_sub(1);
     let mut pos = 0;
     while pos < last_coded {
-        let sig_ctx = if cat == 5 {
-            sig_base + cabac::sig8(pos)
-        } else if cat == 3 {
-            sig_base + pos.min(2)
-        } else {
-            sig_base + pos
-        };
+        let sig_ctx = sig_base
+            + if matches!(cat, 5 | 9 | 13) {
+                cabac::sig8(pos)
+            } else if dc422 {
+                const MAP: [usize; 7] = [0, 0, 1, 1, 2, 2, 2];
+                MAP[pos.min(6)]
+            } else if cat == 3 {
+                pos.min(2)
+            } else {
+                pos
+            };
         if cab.decision(sig_ctx)? == 1 {
             let Some(slot) = index.get_mut(count) else {
                 return Err(CodecError::Limit {
@@ -1460,13 +1593,17 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result
             };
             *slot = pos;
             count += 1;
-            let last_ctx = if cat == 5 {
-                last_base + cabac::last8(pos)
-            } else if cat == 3 {
-                last_base + pos.min(2)
-            } else {
-                last_base + pos
-            };
+            let last_ctx = last_base
+                + if matches!(cat, 5 | 9 | 13) {
+                    cabac::last8(pos)
+                } else if dc422 {
+                    const MAP: [usize; 7] = [0, 0, 1, 1, 2, 2, 2];
+                    MAP[pos.min(6)]
+                } else if cat == 3 {
+                    pos.min(2)
+                } else {
+                    pos
+                };
             if cab.decision(last_ctx)? == 1 {
                 pos = max;
                 break;
@@ -1491,7 +1628,10 @@ fn cabac_residual(cab: &mut Cabac<'_>, cat: usize, coeffs: &mut [i32]) -> Result
     }
     let mut node = 0usize;
     let level1 = [1usize, 2, 3, 4, 0, 0, 0, 0];
-    let gt1 = [5usize, 5, 5, 5, 6, 7, 8, 9];
+    let mut gt1 = [5usize, 5, 5, 5, 6, 7, 8, 9];
+    if dc422 {
+        gt1[7] = 8;
+    }
     let trans1 = [1usize, 2, 3, 3, 4, 5, 6, 7];
     let trans_gt = [4usize, 4, 4, 4, 5, 6, 7, 7];
     for scan in index[..count].iter().rev() {
@@ -1556,7 +1696,7 @@ fn recon_intra<S: Sample>(
     pic.mb[my * pic.mb_w + mx] = mb.clone();
     if i16 {
         let (above, left, above_ok, left_ok) =
-            edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra);
+            edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, 0);
         let corner = corner_sample(&pic.y, pic.w, pic.h, mx, my, 16, above_ok && left_ok);
         let pred = recon::pred16(mode16, &above, &left, above_ok, left_ok, corner);
         put_block(&mut pic.y, pic.w, x0, y0, &pred, 16);
@@ -1594,7 +1734,17 @@ fn recon_intra<S: Sample>(
         for (i, samples) in block8.iter().enumerate() {
             let bx = (i & 1) * 8;
             let by = (i >> 1) * 8;
-            let pred = pred8_block(pic, mx, my, bx / 4, by / 4, mb, slice.pps.constrained_intra);
+            let pred = pred8_block(
+                pic,
+                Place { mx, my },
+                Cell {
+                    bx: bx / 4,
+                    by: by / 4,
+                },
+                mb,
+                slice.pps.constrained_intra,
+                0,
+            );
             put_block(&mut pic.y, pic.w, x0 + bx, y0 + by, &pred, 8);
             super::add_scaled(
                 &mut pic.y,
@@ -1610,7 +1760,14 @@ fn recon_intra<S: Sample>(
         for (i, samples) in ac.iter().enumerate() {
             let bx = blk_x(i);
             let by = blk_y(i);
-            let pred = pred4_block(pic, mx, my, bx, by, mb, slice.pps.constrained_intra);
+            let pred = pred4_block(
+                pic,
+                Place { mx, my },
+                Cell { bx, by },
+                mb,
+                slice.pps.constrained_intra,
+                0,
+            );
             put_block(&mut pic.y, pic.w, x0 + bx * 4, y0 + by * 4, &pred, 4);
             super::add_scaled(
                 &mut pic.y,
@@ -1623,19 +1780,21 @@ fn recon_intra<S: Sample>(
             );
         }
     }
-    recon_chroma(
-        pic,
-        slice,
-        Place { mx, my },
-        chroma_mode,
-        ChromaPaint {
-            cb_dc,
-            cr_dc,
-            cb_ac,
-            cr_ac,
-        },
-        (qp, true, mb.slice),
-    );
+    if pic.chroma() != 3 {
+        recon_chroma(
+            pic,
+            slice,
+            Place { mx, my },
+            chroma_mode,
+            ChromaPaint {
+                cb_dc,
+                cr_dc,
+                cb_ac,
+                cr_ac,
+            },
+            (qp, true, mb.slice),
+        );
+    }
 }
 
 fn luma_dc_raster(scan: &[i32; 16]) -> [i32; 16] {
@@ -1646,15 +1805,25 @@ fn luma_dc_raster(scan: &[i32; 16]) -> [i32; 16] {
     out
 }
 
+fn plane_samples<S: Sample>(pic: &Frame<S>, plane: u8) -> (&[S], usize, usize) {
+    match plane {
+        1 => (&pic.u, pic.chroma_stride(), pic.chroma_height()),
+        2 => (&pic.v, pic.chroma_stride(), pic.chroma_height()),
+        _ => (&pic.y, pic.w, pic.h),
+    }
+}
+
 fn pred4_block<S: Sample>(
     pic: &Frame<S>,
-    mx: usize,
-    my: usize,
-    bx: usize,
-    by: usize,
+    at: Place,
+    cell: Cell,
     mb: &Mb,
     constrained: bool,
+    plane: u8,
 ) -> [S; 16] {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let (samples, stride, height) = plane_samples(pic, plane);
     let ax = mx * 4 + bx;
     let ay = my * 4 + by;
     let mut above = [S::mid(); 8];
@@ -1664,14 +1833,20 @@ fn pred4_block<S: Sample>(
     let left_ok = col_ok(pic, ax as i32 - 1, ay, mb.slice, constrained, here);
     if above_ok {
         for (k, slot) in above[..4].iter_mut().enumerate() {
-            *slot = pix(&pic.y, pic.w, pic.h, (ax * 4 + k) as i32, ay as i32 * 4 - 1);
+            *slot = pix(
+                samples,
+                stride,
+                height,
+                (ax * 4 + k) as i32,
+                ay as i32 * 4 - 1,
+            );
         }
         let right_ok = above_right_ok(pic, mx, my, bx, by, mb.slice, constrained);
         let fill = above[3];
         for (k, slot) in above[4..].iter_mut().enumerate() {
             let x = ax * 4 + k + 4;
             *slot = if right_ok {
-                pix(&pic.y, pic.w, pic.h, x as i32, ay as i32 * 4 - 1)
+                pix(samples, stride, height, x as i32, ay as i32 * 4 - 1)
             } else {
                 fill
             };
@@ -1679,11 +1854,23 @@ fn pred4_block<S: Sample>(
     }
     if left_ok {
         for (k, slot) in left.iter_mut().enumerate() {
-            *slot = pix(&pic.y, pic.w, pic.h, ax as i32 * 4 - 1, (ay * 4 + k) as i32);
+            *slot = pix(
+                samples,
+                stride,
+                height,
+                ax as i32 * 4 - 1,
+                (ay * 4 + k) as i32,
+            );
         }
     }
     let corner = if above_ok && left_ok {
-        pix(&pic.y, pic.w, pic.h, ax as i32 * 4 - 1, ay as i32 * 4 - 1)
+        pix(
+            samples,
+            stride,
+            height,
+            ax as i32 * 4 - 1,
+            ay as i32 * 4 - 1,
+        )
     } else if above_ok {
         above[0]
     } else if left_ok {
@@ -1703,13 +1890,15 @@ fn pred4_block<S: Sample>(
 
 fn pred8_block<S: Sample>(
     pic: &Frame<S>,
-    mx: usize,
-    my: usize,
-    bx: usize,
-    by: usize,
+    at: Place,
+    cell: Cell,
     mb: &Mb,
     constrained: bool,
+    plane: u8,
 ) -> [S; 64] {
+    let Place { mx, my } = at;
+    let Cell { bx, by } = cell;
+    let (samples, stride, height) = plane_samples(pic, plane);
     let mode = mb.mode4[by * 4 + bx];
     let mut raw_above = [S::mid(); 16];
     let mut raw_left = [S::mid(); 8];
@@ -1734,14 +1923,14 @@ fn pred8_block<S: Sample>(
     );
     if above_ok {
         for (k, slot) in raw_above[..8].iter_mut().enumerate() {
-            *slot = pix(&pic.y, pic.w, pic.h, x + k as i32, y - 1);
+            *slot = pix(samples, stride, height, x + k as i32, y - 1);
         }
         // Clause 8.3.2.2: p[8..15, -1] that are not yet constructed take p[7, -1].
         let fill = raw_above[7];
         let right = above8_right(pic, x, y, mb.slice, constrained);
         for (k, slot) in raw_above[8..].iter_mut().enumerate() {
             *slot = if right {
-                pix(&pic.y, pic.w, pic.h, x + 8 + k as i32, y - 1)
+                pix(samples, stride, height, x + 8 + k as i32, y - 1)
             } else {
                 fill
             };
@@ -1749,11 +1938,11 @@ fn pred8_block<S: Sample>(
     }
     if left_ok {
         for (k, slot) in raw_left.iter_mut().enumerate() {
-            *slot = pix(&pic.y, pic.w, pic.h, x - 1, y + k as i32);
+            *slot = pix(samples, stride, height, x - 1, y + k as i32);
         }
     }
     let corner = if above_ok && left_ok {
-        pix(&pic.y, pic.w, pic.h, x - 1, y - 1)
+        pix(samples, stride, height, x - 1, y - 1)
     } else {
         S::mid()
     };
@@ -2014,6 +2203,10 @@ fn recon_chroma<S: Sample>(
     flags: (i32, bool, u16),
 ) {
     let Place { mx, my } = at;
+    if pic.chroma() == 2 {
+        recon_chroma422(pic, slice, at, mode, paint, flags);
+        return;
+    }
     let ChromaPaint {
         cb_dc,
         cr_dc,
@@ -2033,7 +2226,7 @@ fn recon_chroma<S: Sample>(
     ] {
         let pred = if intra {
             let (above, left, above_ok, left_ok) =
-                edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra);
+                edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 8);
             let plane = if cb { &pic.u } else { &pic.v };
             let corner = corner_sample(plane, pic.w / 2, pic.h / 2, mx, my, 8, above_ok && left_ok);
             Some(recon::pred_chroma(
@@ -2070,6 +2263,333 @@ fn recon_chroma<S: Sample>(
             recon::add_block(plane, stride, x0 + bx * 4, y0 + by * 4, &block, 4);
         }
     }
+}
+
+fn recon_chroma422<S: Sample>(
+    pic: &mut Frame<S>,
+    slice: &Slice<'_>,
+    at: Place,
+    mode: u8,
+    paint: ChromaPaint<'_>,
+    flags: (i32, bool, u16),
+) {
+    let Place { mx, my } = at;
+    let ChromaPaint {
+        cb_dc,
+        cr_dc,
+        cb_ac,
+        cr_ac,
+    } = paint;
+    let (qp, intra, slice_id) = flags;
+    let x0 = mx * 8;
+    let y0 = my * 16;
+    let (qp_cb, _) = recon::chroma_qps(qp, slice.pps.chroma_qp_offset, S::QP_BD);
+    let (qp_cr, _) = recon::chroma_qps(qp, slice.pps.second_chroma_qp_offset, S::QP_BD);
+    let base = if intra { 1 } else { 4 };
+    for (cb, dc, ac, qp_c, list) in [
+        (true, cb_dc, cb_ac, qp_cb, base),
+        (false, cr_dc, cr_ac, qp_cr, base + 1),
+    ] {
+        if intra {
+            let (above, left, above_ok, left_ok) =
+                edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 16);
+            let (samples, stride, height) = if cb {
+                (&pic.u[..], pic.chroma_stride(), pic.chroma_height())
+            } else {
+                (&pic.v[..], pic.chroma_stride(), pic.chroma_height())
+            };
+            let corner = if above_ok && left_ok {
+                pix(
+                    samples,
+                    stride,
+                    height,
+                    mx as i32 * 8 - 1,
+                    my as i32 * 16 - 1,
+                )
+            } else {
+                S::mid()
+            };
+            let pred = recon::pred_chroma422(mode, &above, &left, above_ok, left_ok, corner);
+            let plane = if cb { &mut pic.u } else { &mut pic.v };
+            for row in 0..16 {
+                for col in 0..8 {
+                    plane[(y0 + row) * stride + x0 + col] = pred[row * 8 + col];
+                }
+            }
+        }
+        let plane = if cb { &mut pic.u } else { &mut pic.v };
+        let stride = pic.w / 2;
+        let weight = i32::from(slice.pps.weight4[list][0]);
+        // 4:2:2 chroma DC is scaled at QP′C + 3. The eight-point Hadamard
+        // needs that extra factor; 4:2:0 stays on the four-point scale.
+        let scaled = recon::chroma_dc422(&raster422(dc), qp_c + 3, weight);
+        for i in 0..8 {
+            let (bx, by) = chroma_pos(i, 8);
+            let mut coeffs = [0i32; 16];
+            if let Some(block) = ac.get(i) {
+                coeffs[1..].copy_from_slice(&block[..15]);
+            }
+            let mut samples = [0i32; 16];
+            for n in 0..16 {
+                let pos = ZIGZAG4[n];
+                let (ry, rx) = (pos / 4, pos % 4);
+                let level = if n == 0 {
+                    scaled[by * 2 + bx]
+                } else {
+                    coeffs[n]
+                };
+                let w = i32::from(slice.pps.weight4[list][pos]);
+                samples[ry * 4 + rx] = if n == 0 {
+                    level
+                } else {
+                    recon::scale4(level, qp_c, rx, ry, w)
+                };
+            }
+            recon::idct4(&mut samples);
+            recon::add_block(plane, stride, x0 + bx * 4, y0 + by * 4, &samples, 4);
+        }
+    }
+}
+
+fn raster422(scan: &[i32]) -> [i32; 8] {
+    const AT: [usize; 8] = [0, 2, 1, 4, 6, 3, 5, 7];
+    let mut raster = [0i32; 8];
+    for (index, slot) in AT.iter().enumerate() {
+        raster[*slot] = scan.get(index).copied().unwrap_or(0);
+    }
+    raster
+}
+
+fn quant_list(plane: u8, intra: bool, eight: bool) -> usize {
+    if eight {
+        let base = usize::from(!intra);
+        if plane == 0 {
+            base
+        } else {
+            base + 2 * usize::from(plane)
+        }
+    } else {
+        usize::from(!intra) * 3 + usize::from(plane)
+    }
+}
+
+fn recon_444<S: Sample>(
+    pic: &mut Frame<S>,
+    entropy: &mut Entropy<'_, '_>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &mut Mb,
+    qp: i32,
+    mode16: Option<u8>,
+) -> Result<(), CodecError> {
+    let Place { mx, my } = at;
+    for plane in [1u8, 2] {
+        let offset = if plane == 1 {
+            slice.pps.chroma_qp_offset
+        } else {
+            slice.pps.second_chroma_qp_offset
+        };
+        let (qp_c, qp_base) = recon::chroma_qps(qp, offset, S::QP_BD);
+        paint_444(
+            pic,
+            entropy,
+            slice,
+            Place { mx, my },
+            mb,
+            (plane, qp_c, qp_base, mode16),
+        )?;
+    }
+    Ok(())
+}
+
+fn paint_444<S: Sample>(
+    pic: &mut Frame<S>,
+    entropy: &mut Entropy<'_, '_>,
+    slice: &Slice<'_>,
+    at: Place,
+    mb: &mut Mb,
+    job: (u8, i32, i32, Option<u8>),
+) -> Result<(), CodecError> {
+    let Place { mx, my } = at;
+    let (plane, qp_c, qp_base, mode16) = job;
+    let intra = mb.intra;
+    let list = quant_list(plane, intra, mb.transform8);
+    let x0 = mx * 16;
+    let y0 = my * 16;
+    if mb.intra16 {
+        let mode = mode16.unwrap_or(2);
+        let (above, left, above_ok, left_ok) =
+            edge16(pic, mx, my, mb.slice, slice.pps.constrained_intra, plane);
+        let (samples, stride, height) = plane_samples(pic, plane);
+        let corner = corner_sample(samples, stride, height, mx, my, 16, above_ok && left_ok);
+        let pred = recon::pred16(mode, &above, &left, above_ok, left_ok, corner);
+        let (dest, dest_stride) = mutable_plane(pic, plane);
+        put_block(dest, dest_stride, x0, y0, &pred, 16);
+        let dc = read_block(
+            pic,
+            entropy,
+            (0, 16, true),
+            Place { mx, my },
+            Cell { bx: 0, by: 0 },
+            mb,
+            plane,
+        )?;
+        let mut ac = [[0i32; 16]; 16];
+        if mb.cbp & 15 != 0 {
+            for (i, slot) in ac.iter_mut().enumerate() {
+                *slot = read_block(
+                    pic,
+                    entropy,
+                    (1, 15, false),
+                    Place { mx, my },
+                    Cell {
+                        bx: blk_x(i),
+                        by: blk_y(i),
+                    },
+                    mb,
+                    plane,
+                )?;
+            }
+        }
+        let scaled = recon::luma_dc(
+            &luma_dc_raster(&dc),
+            qp_c,
+            i32::from(slice.pps.weight4[list][0]),
+        );
+        for (i, samples) in ac.iter().enumerate() {
+            let bx = blk_x(i);
+            let by = blk_y(i);
+            let mut coeffs = [0i32; 16];
+            if mb.cbp & 15 != 0 {
+                coeffs[1..].copy_from_slice(&samples[..15]);
+            }
+            let mut block = [0i32; 16];
+            for n in 0..16 {
+                let pos = ZIGZAG4[n];
+                let (ry, rx) = (pos / 4, pos % 4);
+                let level = if n == 0 {
+                    scaled[by * 4 + bx]
+                } else {
+                    coeffs[n]
+                };
+                let weight = i32::from(slice.pps.weight4[list][pos]);
+                block[ry * 4 + rx] = if n == 0 {
+                    level
+                } else {
+                    recon::scale4(level, qp_c, rx, ry, weight)
+                };
+            }
+            if mb.cbp & 15 == 0 {
+                block[0] = scaled[by * 4 + bx];
+            }
+            recon::idct4(&mut block);
+            let (dest, dest_stride) = mutable_plane(pic, plane);
+            recon::add_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &block, 4);
+        }
+        return Ok(());
+    }
+    if mb.transform8 {
+        let mut blocks = [[0i32; 64]; 4];
+        for (i, slot) in blocks.iter_mut().enumerate() {
+            if mb.cbp & (1 << i) != 0 {
+                *slot = read8(pic, entropy, mx, my, i, mb, plane)?;
+            }
+        }
+        for (i, samples) in blocks.iter().enumerate() {
+            let bx = (i & 1) * 8;
+            let by = (i >> 1) * 8;
+            if intra {
+                let pred = pred8_block(
+                    pic,
+                    Place { mx, my },
+                    Cell {
+                        bx: bx / 4,
+                        by: by / 4,
+                    },
+                    mb,
+                    slice.pps.constrained_intra,
+                    plane,
+                );
+                let (dest, dest_stride) = mutable_plane(pic, plane);
+                put_block(dest, dest_stride, x0 + bx, y0 + by, &pred, 8);
+            }
+            if mb.cbp & (1 << i) != 0 {
+                let (dest, dest_stride) = mutable_plane(pic, plane);
+                super::add_scaled(
+                    dest,
+                    dest_stride,
+                    (x0 + bx, y0 + by),
+                    samples,
+                    qp_base,
+                    &slice.pps.weight8[list],
+                    8,
+                );
+            }
+        }
+        return Ok(());
+    }
+    let mut ac = [[0i32; 16]; 16];
+    for (i, slot) in ac.iter_mut().enumerate() {
+        let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
+        if mb.cbp & bit != 0 {
+            *slot = read_block(
+                pic,
+                entropy,
+                (2, 16, false),
+                Place { mx, my },
+                Cell {
+                    bx: blk_x(i),
+                    by: blk_y(i),
+                },
+                mb,
+                plane,
+            )?;
+        }
+    }
+    for (i, samples) in ac.iter().enumerate() {
+        let bx = blk_x(i);
+        let by = blk_y(i);
+        let bit = 1 << ((by / 2) * 2 + bx / 2);
+        if intra {
+            let pred = pred4_block(
+                pic,
+                Place { mx, my },
+                Cell { bx, by },
+                mb,
+                slice.pps.constrained_intra,
+                plane,
+            );
+            let (dest, dest_stride) = mutable_plane(pic, plane);
+            put_block(dest, dest_stride, x0 + bx * 4, y0 + by * 4, &pred, 4);
+        }
+        if mb.cbp & bit != 0 {
+            let (dest, dest_stride) = mutable_plane(pic, plane);
+            super::add_scaled(
+                dest,
+                dest_stride,
+                (x0 + bx * 4, y0 + by * 4),
+                samples,
+                qp_base,
+                &slice.pps.weight4[list],
+                4,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn mutable_plane<S: Sample>(pic: &mut Frame<S>, plane: u8) -> (&mut [S], usize) {
+    let stride = if plane == 0 {
+        pic.w
+    } else {
+        pic.chroma_stride()
+    };
+    let samples = match plane {
+        1 => pic.u.as_mut_slice(),
+        2 => pic.v.as_mut_slice(),
+        _ => pic.y.as_mut_slice(),
+    };
+    (samples, stride)
 }
 
 #[cfg(test)]
@@ -2136,7 +2656,14 @@ mod intra8 {
         for row in 8..16 {
             paint(&mut pic, 7, row, 200);
         }
-        let pred = super::pred8_block(&pic, 0, 0, 2, 2, &mb, false);
+        let pred = super::pred8_block(
+            &pic,
+            super::Place { mx: 0, my: 0 },
+            super::Cell { bx: 2, by: 2 },
+            &mb,
+            false,
+            0,
+        );
         assert!(
             pred.iter().all(|sample| *sample == 200),
             "dc drifted to {}",
@@ -2145,7 +2672,14 @@ mod intra8 {
 
         pic.mb[1].slice = 7;
         pic.mb[1].intra = true;
-        let pred = super::pred8_block(&pic, 0, 0, 2, 2, &mb, false);
+        let pred = super::pred8_block(
+            &pic,
+            super::Place { mx: 0, my: 0 },
+            super::Cell { bx: 2, by: 2 },
+            &mb,
+            false,
+            0,
+        );
         assert_eq!(pred[0], 197, "an available zero above-right must be read");
     }
 
@@ -3113,7 +3647,9 @@ fn edge16<S: Sample>(
     my: usize,
     slice: u16,
     constrained: bool,
+    plane: u8,
 ) -> (Vec<S>, Vec<S>, bool, bool) {
+    let (samples, stride, height) = plane_samples(pic, plane);
     let above_ok = my > 0
         && neighbor(pic, mx as i32, my as i32 - 1, slice)
             .is_some_and(|mb| !constrained || mb.intra);
@@ -3125,17 +3661,17 @@ fn edge16<S: Sample>(
     if above_ok {
         for (k, slot) in above[..16].iter_mut().enumerate() {
             *slot = pix(
-                &pic.y,
-                pic.w,
-                pic.h,
+                samples,
+                stride,
+                height,
                 (mx * 16 + k) as i32,
                 my as i32 * 16 - 1,
             );
         }
         above[16] = pix(
-            &pic.y,
-            pic.w,
-            pic.h,
+            samples,
+            stride,
+            height,
             (mx * 16 + 16) as i32,
             my as i32 * 16 - 1,
         );
@@ -3143,17 +3679,17 @@ fn edge16<S: Sample>(
     if left_ok {
         for (k, slot) in left[..16].iter_mut().enumerate() {
             *slot = pix(
-                &pic.y,
-                pic.w,
-                pic.h,
+                samples,
+                stride,
+                height,
                 mx as i32 * 16 - 1,
                 (my * 16 + k) as i32,
             );
         }
         left[16] = pix(
-            &pic.y,
-            pic.w,
-            pic.h,
+            samples,
+            stride,
+            height,
             mx as i32 * 16 - 1,
             (my * 16 + 16) as i32,
         );
@@ -3168,53 +3704,31 @@ fn edge_chroma<S: Sample>(
     cb: bool,
     slice_id: u16,
     constrained: bool,
+    rows: usize,
 ) -> (Vec<S>, Vec<S>, bool, bool) {
     let plane = if cb { &pic.u } else { &pic.v };
-    let stride = pic.w / 2;
-    let height = pic.h / 2;
+    let stride = pic.chroma_stride();
+    let height = pic.chroma_height();
     let above_ok = my > 0
         && neighbor(pic, mx as i32, my as i32 - 1, slice_id)
             .is_some_and(|mb| !constrained || mb.intra);
     let left_ok = mx > 0
         && neighbor(pic, mx as i32 - 1, my as i32, slice_id)
             .is_some_and(|mb| !constrained || mb.intra);
+    let y0 = my * rows;
     let mut above = vec![S::mid(); 9];
-    let mut left = vec![S::mid(); 9];
+    let mut left = vec![S::mid(); rows + 1];
     if above_ok {
         for (k, slot) in above[..8].iter_mut().enumerate() {
-            *slot = pix(
-                plane,
-                stride,
-                height,
-                (mx * 8 + k) as i32,
-                my as i32 * 8 - 1,
-            );
+            *slot = pix(plane, stride, height, (mx * 8 + k) as i32, y0 as i32 - 1);
         }
-        above[8] = pix(
-            plane,
-            stride,
-            height,
-            (mx * 8 + 8) as i32,
-            my as i32 * 8 - 1,
-        );
+        above[8] = pix(plane, stride, height, (mx * 8 + 8) as i32, y0 as i32 - 1);
     }
     if left_ok {
-        for (k, slot) in left[..8].iter_mut().enumerate() {
-            *slot = pix(
-                plane,
-                stride,
-                height,
-                mx as i32 * 8 - 1,
-                (my * 8 + k) as i32,
-            );
+        for (k, slot) in left[..rows].iter_mut().enumerate() {
+            *slot = pix(plane, stride, height, mx as i32 * 8 - 1, (y0 + k) as i32);
         }
-        left[8] = pix(
-            plane,
-            stride,
-            height,
-            mx as i32 * 8 - 1,
-            (my * 8 + 8) as i32,
-        );
+        left[rows] = pix(plane, stride, height, mx as i32 * 8 - 1, (y0 + rows) as i32);
     }
     (above, left, above_ok, left_ok)
 }
@@ -3340,7 +3854,7 @@ fn decode_inter<S: Sample>(
     } else {
         read_parts(pic, entropy, slice, mx, my, spec, mb)?;
     }
-    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, mb.slice)?;
+    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, mb.slice, slice.sps.chroma)?;
     mb.cbp = luma_cbp | (chroma_cbp << 4);
     let direct16 = slice.kind == 1 && spec == 0;
     let allow8 = if direct16 {
@@ -3361,7 +3875,7 @@ fn decode_inter<S: Sample>(
     if mb.transform8 {
         for i in 0..4 {
             if luma_cbp & (1 << i) != 0 {
-                let block = read8(pic, entropy, mx, my, i, mb)?;
+                let block = read8(pic, entropy, mx, my, i, mb, 0)?;
                 let bx = (i & 1) * 8;
                 let by = (i >> 1) * 8;
                 super::add_scaled(
@@ -3403,20 +3917,24 @@ fn decode_inter<S: Sample>(
             }
         }
     }
-    let (cb_dc, cr_dc, cb_ac, cr_ac) = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
-    recon_chroma(
-        pic,
-        slice,
-        Place { mx, my },
-        0,
-        ChromaPaint {
-            cb_dc,
-            cr_dc,
-            cb_ac: &cb_ac,
-            cr_ac: &cr_ac,
-        },
-        (*qp, false, mb.slice),
-    );
+    if slice.sps.chroma == 3 {
+        recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
+    } else {
+        let chroma_res = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
+        recon_chroma(
+            pic,
+            slice,
+            Place { mx, my },
+            0,
+            ChromaPaint {
+                cb_dc: &chroma_res.cb_dc,
+                cr_dc: &chroma_res.cr_dc,
+                cb_ac: &chroma_res.cb_ac,
+                cr_ac: &chroma_res.cr_ac,
+            },
+            (*qp, false, mb.slice),
+        );
+    }
     Ok(())
 }
 
@@ -4502,12 +5020,16 @@ fn mc_block<S: Sample>(
         let frame = reference_frame(dpb, slice, 1, r1)?;
         predict_luma(&mut luma1, frame, x, y, w, h, mv1);
     }
-    let cw = w / 2;
-    let ch = h / 2;
-    let mut u0 = [S::default(); 64];
-    let mut v0 = [S::default(); 64];
-    let mut u1 = [S::default(); 64];
-    let mut v1 = [S::default(); 64];
+    let chroma = pic.chroma();
+    let (cw, ch) = match chroma {
+        3 => (w, h),
+        2 => (w / 2, h),
+        _ => (w / 2, h / 2),
+    };
+    let mut u0 = [S::default(); 256];
+    let mut v0 = [S::default(); 256];
+    let mut u1 = [S::default(); 256];
+    let mut v1 = [S::default(); 256];
     if r0 >= 0 && cw > 0 && ch > 0 {
         let frame = reference_frame(dpb, slice, 0, r0)?;
         predict_chroma((&mut u0, &mut v0), frame, (x, y), (cw, ch), mv0);
@@ -4526,8 +5048,12 @@ fn mc_block<S: Sample>(
         S::default(),
     );
     if cw > 0 && ch > 0 {
-        let stride = pic.w / 2;
-        let origin = (x / 2, y / 2);
+        let stride = if chroma == 3 { pic.w } else { pic.w / 2 };
+        let origin = match chroma {
+            3 => (x, y),
+            2 => (x / 2, y),
+            _ => (x / 2, y / 2),
+        };
         let size = (cw, ch);
         store_block(
             &mut pic.u,
@@ -4763,16 +5289,28 @@ fn predict_luma<S: Sample>(
     h: usize,
     mv: [i16; 2],
 ) {
+    predict_qpel(dst, &frame.y, (frame.w, frame.h), (x, y, w, h), mv);
+}
+
+fn predict_qpel<S: Sample>(
+    dst: &mut [S],
+    src: &[S],
+    pic: (usize, usize),
+    block: (usize, usize, usize, usize),
+    mv: [i16; 2],
+) {
+    let (pic_w, pic_h) = pic;
+    let (x, y, w, h) = block;
     let mvx = i32::from(mv[0]);
     let mvy = i32::from(mv[1]);
     recon::put_luma_block(
         dst,
         w,
-        &frame.y,
-        frame.w,
+        src,
+        pic_w,
         (
-            i32::try_from(frame.w).unwrap_or(0),
-            i32::try_from(frame.h).unwrap_or(0),
+            i32::try_from(pic_w).unwrap_or(0),
+            i32::try_from(pic_h).unwrap_or(0),
         ),
         recon::BlockMc {
             x: i32::try_from(x).unwrap_or(0) + (mvx >> 2),
@@ -4795,22 +5333,34 @@ fn predict_chroma<S: Sample>(
     let (u, v) = planes;
     let (x, y) = at;
     let (w, h) = size;
+    if frame.chroma() == 3 {
+        predict_qpel(u, &frame.u, (frame.w, frame.h), (x, y, w, h), mv);
+        predict_qpel(v, &frame.v, (frame.w, frame.h), (x, y, w, h), mv);
+        return;
+    }
     let mvx = i32::from(mv[0]);
     let mvy = i32::from(mv[1]);
+    let full_height = frame.chroma() == 2;
     let block = recon::BlockMc {
         x: i32::try_from(x / 2).unwrap_or(0) + (mvx >> 3),
-        y: i32::try_from(y / 2).unwrap_or(0) + (mvy >> 3),
+        y: if full_height {
+            i32::try_from(y).unwrap_or(0) + (mvy >> 2)
+        } else {
+            i32::try_from(y / 2).unwrap_or(0) + (mvy >> 3)
+        },
         w,
         h,
         x_frac: mvx & 7,
-        y_frac: mvy & 7,
+        y_frac: if full_height { (mvy << 1) & 7 } else { mvy & 7 },
     };
+    let pic_h = if full_height { frame.h } else { frame.h / 2 };
     let pic = (
         i32::try_from(frame.w / 2).unwrap_or(0),
-        i32::try_from(frame.h / 2).unwrap_or(0),
+        i32::try_from(pic_h).unwrap_or(0),
     );
-    recon::put_chroma_block(u, w, &frame.u, frame.w / 2, pic, block);
-    recon::put_chroma_block(v, w, &frame.v, frame.w / 2, pic, block);
+    let stride = frame.w / 2;
+    recon::put_chroma_block(u, w, &frame.u, stride, pic, block);
+    recon::put_chroma_block(v, w, &frame.v, stride, pic, block);
 }
 
 /// Clause 8.4.3 implicit bipred weights from the picture-order distance.
@@ -4878,12 +5428,11 @@ fn read_pcm<S: Sample>(
                     pic.y[(y0 + row) * pic.w + x0 + col] = S::from_code(bits.u(S::BITS)?);
                 }
             }
+            let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
             for plane in [&mut pic.u, &mut pic.v] {
-                let stride = pic.w / 2;
-                for row in 0..8 {
-                    for col in 0..8 {
-                        plane[(y0 / 2 + row) * stride + x0 / 2 + col] =
-                            S::from_code(bits.u(S::BITS)?);
+                for row in 0..ch {
+                    for col in 0..cw {
+                        plane[(oy + row) * stride + ox + col] = S::from_code(bits.u(S::BITS)?);
                     }
                 }
             }
@@ -4896,12 +5445,11 @@ fn read_pcm<S: Sample>(
                     pic.y[(y0 + row) * pic.w + x0 + col] = pcm_code::<S>(bytes, &mut bit)?;
                 }
             }
-            let stride = pic.w / 2;
+            let (cw, ch, ox, oy, stride) = pcm_chroma(pic, x0, y0);
             for plane in [&mut pic.u, &mut pic.v] {
-                for row in 0..8 {
-                    for col in 0..8 {
-                        plane[(y0 / 2 + row) * stride + x0 / 2 + col] =
-                            pcm_code::<S>(bytes, &mut bit)?;
+                for row in 0..ch {
+                    for col in 0..cw {
+                        plane[(oy + row) * stride + ox + col] = pcm_code::<S>(bytes, &mut bit)?;
                     }
                 }
             }
@@ -4913,6 +5461,18 @@ fn read_pcm<S: Sample>(
         }
     }
     Ok(())
+}
+
+fn pcm_chroma<S: Sample>(
+    pic: &Frame<S>,
+    x0: usize,
+    y0: usize,
+) -> (usize, usize, usize, usize, usize) {
+    match pic.chroma() {
+        3 => (16, 16, x0, y0, pic.w),
+        2 => (8, 16, x0 / 2, y0, pic.w / 2),
+        _ => (8, 8, x0 / 2, y0 / 2, pic.w / 2),
+    }
 }
 
 fn neighbor<S: Sample>(pic: &Frame<S>, mx: i32, my: i32, slice: u16) -> Option<&Mb> {
@@ -4953,7 +5513,7 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                 let bs = edge_strength(pic, mx, my, edge, true);
                 // An 8×8 transform has no luma edge at 4 or 12.
                 if x >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                    let qpav = edge_qp(pic, mx, my, true, true, edge == 0);
+                    let qpav = edge_qp(pic, mx, my, true, true, true, edge == 0);
                     filter_groups(
                         &mut pic.y,
                         pic.w,
@@ -4964,30 +5524,7 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                         off,
                     );
                 }
-                if edge % 2 == 0 {
-                    let cx = mx * 8 + edge * 2;
-                    if cx >= 2 {
-                        let qpc = edge_qp(pic, mx, my, false, true, edge == 0);
-                        filter_groups(
-                            &mut pic.u,
-                            pic.w / 2,
-                            (cx, my * 8),
-                            (true, true, 2),
-                            bs,
-                            qpc,
-                            off,
-                        );
-                        filter_groups(
-                            &mut pic.v,
-                            pic.w / 2,
-                            (cx, my * 8),
-                            (true, true, 2),
-                            bs,
-                            qpc,
-                            off,
-                        );
-                    }
-                }
+                filter_chroma(pic, (mx, my), edge, true, transform8, bs, off);
             }
             for edge in 0..4 {
                 if edge == 0 && (my == 0 || !filter_boundary(pic, mx, my, false)) {
@@ -4996,7 +5533,7 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                 let y = my * 16 + edge * 4;
                 let bs = edge_strength(pic, mx, my, edge, false);
                 if y >= 4 && !(transform8 && (edge == 1 || edge == 3)) {
-                    let qpav = edge_qp(pic, mx, my, true, false, edge == 0);
+                    let qpav = edge_qp(pic, mx, my, true, true, false, edge == 0);
                     filter_groups(
                         &mut pic.y,
                         pic.w,
@@ -5007,30 +5544,7 @@ pub(crate) fn deblock<S: Sample>(pic: &mut Frame<S>) {
                         off,
                     );
                 }
-                if edge % 2 == 0 {
-                    let cy = my * 8 + edge * 2;
-                    if cy >= 2 {
-                        let qpc = edge_qp(pic, mx, my, false, false, edge == 0);
-                        filter_groups(
-                            &mut pic.u,
-                            pic.w / 2,
-                            (mx * 8, cy),
-                            (false, true, 2),
-                            bs,
-                            qpc,
-                            off,
-                        );
-                        filter_groups(
-                            &mut pic.v,
-                            pic.w / 2,
-                            (mx * 8, cy),
-                            (false, true, 2),
-                            bs,
-                            qpc,
-                            off,
-                        );
-                    }
-                }
+                filter_chroma(pic, (mx, my), edge, false, transform8, bs, off);
             }
         }
     }
@@ -5163,11 +5677,88 @@ fn offsets<S: Sample>(pic: &Frame<S>, index: usize) -> (i32, i32) {
         .unwrap_or((0, 0))
 }
 
+fn filter_chroma<S: Sample>(
+    pic: &mut Frame<S>,
+    at: (usize, usize),
+    edge: usize,
+    vertical: bool,
+    transform8: bool,
+    bs: [u8; 4],
+    off: (i32, i32),
+) {
+    let (mx, my) = at;
+    let chroma = pic.chroma();
+    if chroma == 3 {
+        if transform8 && (edge == 1 || edge == 3) {
+            return;
+        }
+        let pos = if vertical {
+            mx * 16 + edge * 4
+        } else {
+            my * 16 + edge * 4
+        };
+        if pos < 4 {
+            return;
+        }
+        let origin = if vertical {
+            (pos, my * 16)
+        } else {
+            (mx * 16, pos)
+        };
+        let stride = pic.w;
+        for cb in [true, false] {
+            let qpc = edge_qp(pic, mx, my, false, cb, vertical, edge == 0);
+            let plane = if cb {
+                pic.u.as_mut_slice()
+            } else {
+                pic.v.as_mut_slice()
+            };
+            filter_groups(plane, stride, origin, (vertical, false, 4), bs, qpc, off);
+        }
+        return;
+    }
+    let rows_full = chroma == 2;
+    if vertical && !edge.is_multiple_of(2) {
+        return;
+    }
+    if !vertical && !rows_full && !edge.is_multiple_of(2) {
+        return;
+    }
+    let step = if vertical && rows_full { 4 } else { 2 };
+    let along = if vertical {
+        mx * 8 + edge * 2
+    } else if rows_full {
+        my * 16 + edge * 4
+    } else {
+        my * 8 + edge * 2
+    };
+    if along < 2 {
+        return;
+    }
+    let origin = if vertical {
+        let cy = if rows_full { my * 16 } else { my * 8 };
+        (along, cy)
+    } else {
+        (mx * 8, along)
+    };
+    let stride = pic.w / 2;
+    for cb in [true, false] {
+        let qpc = edge_qp(pic, mx, my, false, cb, vertical, edge == 0);
+        let plane = if cb {
+            pic.u.as_mut_slice()
+        } else {
+            pic.v.as_mut_slice()
+        };
+        filter_groups(plane, stride, origin, (vertical, true, step), bs, qpc, off);
+    }
+}
+
 fn edge_qp<S: Sample>(
     pic: &Frame<S>,
     mx: usize,
     my: usize,
     luma: bool,
+    cb: bool,
     vertical: bool,
     boundary: bool,
 ) -> i32 {
@@ -5178,8 +5769,10 @@ fn edge_qp<S: Sample>(
         .map(|mb| {
             if luma {
                 i32::from(mb.qp)
-            } else {
+            } else if cb {
                 i32::from(mb.qp_c)
+            } else {
+                i32::from(mb.qp_cr)
             }
         })
         .unwrap_or(26);
@@ -5196,8 +5789,10 @@ fn edge_qp<S: Sample>(
     };
     let side = if luma {
         i32::from(other.qp)
-    } else {
+    } else if cb {
         i32::from(other.qp_c)
+    } else {
+        i32::from(other.qp_cr)
     };
     (current + side + 1) >> 1
 }

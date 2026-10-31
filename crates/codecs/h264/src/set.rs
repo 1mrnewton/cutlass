@@ -1,7 +1,8 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
-//! Interlaced pictures and chroma formats other than 4:2:0 are refused.
-//! A bit depth outside 8 through 14, or a luma depth that differs from chroma, is refused.
+//! Interlaced pictures, monochrome, and separate colour planes are refused.
+//! 4:2:0, 4:2:2, and 4:4:4 are accepted. A bit depth outside 8 through 14, or a
+//! luma depth that differs from chroma, is refused.
 
 use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, Transfer};
 
@@ -40,6 +41,8 @@ pub struct Sps {
     pub matrix: ColorMatrix,
     pub max_reorder: u32,
     pub bit_depth: u8,
+    /// `chroma_format_idc`: 1 is 4:2:0, 2 is 4:2:2, 3 is 4:4:4.
+    pub chroma: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -64,15 +67,25 @@ pub struct Pps {
 }
 
 impl Sps {
+    /// CropUnitX and CropUnitY from Table 6-1. Monochrome is not stored.
+    pub fn crop_unit(&self) -> (u32, u32) {
+        match self.chroma {
+            3 => (1, 1),
+            2 => (2, 1),
+            _ => (2, 2),
+        }
+    }
+
     pub fn visible(&self) -> Result<(u32, u32), CodecError> {
+        let (unit_x, unit_y) = self.crop_unit();
         let crop_x = self
             .crop_left
             .saturating_add(self.crop_right)
-            .saturating_mul(2);
+            .saturating_mul(unit_x);
         let crop_y = self
             .crop_top
             .saturating_add(self.crop_bottom)
-            .saturating_mul(2);
+            .saturating_mul(unit_y);
         if crop_x >= self.width || crop_y >= self.height {
             return Err(CodecError::Malformed {
                 at_bit: 0,
@@ -81,7 +94,7 @@ impl Sps {
         }
         let width = self.width - crop_x;
         let height = self.height - crop_y;
-        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        if (unit_x == 2 && !width.is_multiple_of(2)) || (unit_y == 2 && !height.is_multiple_of(2)) {
             return Err(CodecError::Malformed {
                 at_bit: 0,
                 what: "visible size",
@@ -129,10 +142,10 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
             });
         }
         if bits.bit()? {
-            (weight4, weight8) = scaling_lists(&mut bits, true)?;
+            (weight4, weight8) = scaling_lists(&mut bits, true, chroma_format == 3)?;
         }
     }
-    if chroma_format != 1 {
+    if chroma_format == 0 || chroma_format > 3 {
         return Err(CodecError::Unsupported {
             what: "chroma format",
         });
@@ -243,6 +256,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         matrix: vui.matrix,
         max_reorder: vui.max_reorder,
         bit_depth,
+        chroma: chroma_format,
     };
     sps.visible()?;
     Ok(sps)
@@ -416,7 +430,7 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
     if bits.more_rbsp() {
         transform_8x8 = bits.bit()?;
         if bits.bit()? {
-            (weight4, weight8) = scaling_lists(&mut bits, transform_8x8)?;
+            (weight4, weight8) = scaling_lists(&mut bits, transform_8x8, sps.chroma == 3)?;
         }
         if bits.more_rbsp() {
             second = bits.se()?;
@@ -446,7 +460,7 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
 
 type Scaling = ([[u8; 16]; 6], [[u8; 64]; 6]);
 
-fn scaling_lists(bits: &mut Bits<'_>, with8: bool) -> Result<Scaling, CodecError> {
+fn scaling_lists(bits: &mut Bits<'_>, with8: bool, chroma444: bool) -> Result<Scaling, CodecError> {
     let mut w4 = flat4();
     let mut w8 = flat8();
     for i in 0..6 {
@@ -470,12 +484,15 @@ fn scaling_lists(bits: &mut Bits<'_>, with8: bool) -> Result<Scaling, CodecError
         }
     }
     if with8 {
-        for i in 0..2 {
+        // 4:4:4 carries six 8×8 lists: intra Y, inter Y, then Cb and Cr for each.
+        // 4:2:0 and 4:2:2 carry the two luma lists and copy them onto chroma.
+        let count: usize = if chroma444 { 6 } else { 2 };
+        for i in 0..count {
             if bits.bit()? {
                 let mut list = [0u8; 64];
                 read_list(bits, &mut list, 64)?;
                 if list.iter().all(|v| *v == 0) {
-                    list = if i == 0 {
+                    list = if i.is_multiple_of(2) {
                         DEFAULT8_INTRA
                     } else {
                         DEFAULT8_INTER
@@ -484,11 +501,15 @@ fn scaling_lists(bits: &mut Bits<'_>, with8: bool) -> Result<Scaling, CodecError
                 w8[i] = inverse8(&list);
             } else if i == 0 {
                 w8[i] = inverse8(&DEFAULT8_INTRA);
-            } else {
+            } else if i == 1 {
                 w8[i] = inverse8(&DEFAULT8_INTER);
+            } else {
+                w8[i] = w8[i - 2];
             }
-            w8[i + 2] = w8[i];
-            w8[i + 4] = w8[i];
+            if !chroma444 {
+                w8[i + 2] = w8[i];
+                w8[i + 4] = w8[i];
+            }
         }
     }
     Ok((w4, w8))

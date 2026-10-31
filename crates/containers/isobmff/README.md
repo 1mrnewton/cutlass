@@ -127,4 +127,6 @@ Codec bitstreams are not parsed. Vorbis, JPEG, PNG, WebP, and GIF are rejected b
 
 Edit lists are exposed and are not applied to packet timestamps. Fragmented files are read and written as described above; `sidx` is parsed, a reference to another index is rejected, and the muxer does not emit `sidx`. HEIF items are packets, the image is not assembled, and construction methods other than 0 and 1 are rejected. The muxer does not write HEIF items.
 
+The movie matrix and the track matrix are multiplied. A clockwise quarter turn of 0, 90, 180, or 270 degrees is reported on the stream. A flip or any other matrix is reported as no turn, and the samples are not rotated.
+
 Only the first sample description is exposed on a track. The muxer writes `co64` chunk offsets. `mvhd`, `tkhd`, `mdhd`, and `elst` are version 0, and a duration that does not fit in `u32` is stored as `u32::MAX`. An external media file is refused at open. Edition 8 boxes are not implemented.

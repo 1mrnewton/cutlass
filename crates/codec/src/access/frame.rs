@@ -361,9 +361,96 @@ impl Yuv420p10 {
     }
 }
 
+/// Tightly packed 4:2:0 at 9 through 14 bits, visible region only.
+///
+/// Each sample is a `u16` in `0..(1 << bit_depth)`, stored in the low
+/// `bit_depth` bits. `y` is `width * height` samples. `u` and `v` are each
+/// `(width / 2) * (height / 2)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv420High {
+    bit_depth: u8,
+    width: u32,
+    height: u32,
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+}
+
+impl Yuv420High {
+    /// `bit_depth` is 9 through 14. Both edges must be even, non-zero, and at most 8192.
+    pub fn try_new(
+        bit_depth: u8,
+        width: u32,
+        height: u32,
+        y: Vec<u16>,
+        u: Vec<u16>,
+        v: Vec<u16>,
+    ) -> Result<Self, FrameError> {
+        if !(9..=14).contains(&bit_depth) {
+            return Err(FrameError::Limit);
+        }
+        if width == 0 || height == 0 {
+            return Err(FrameError::Empty);
+        }
+        if width > 8192 || height > 8192 {
+            return Err(FrameError::Limit);
+        }
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(FrameError::Odd);
+        }
+        let y_len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(FrameError::Limit)?;
+        let c_len = ((width / 2) as usize)
+            .checked_mul((height / 2) as usize)
+            .ok_or(FrameError::Limit)?;
+        if y.len() != y_len || u.len() != c_len || v.len() != c_len {
+            return Err(FrameError::Length);
+        }
+        Ok(Self {
+            bit_depth,
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u16] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u16] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u16] {
+        &self.v
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FrameError, Plane, VideoFrame, Yuv420p, Yuv420p10};
+    use super::{FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10};
 
     #[test]
     fn a_solid_picture_keeps_even_planes() {
@@ -415,6 +502,22 @@ mod tests {
         assert_eq!(frame.u(), &[512, 512]);
         assert_eq!(
             Yuv420p10::try_new(4, 2, vec![0; 8], vec![0], vec![0, 0]),
+            Err(FrameError::Length)
+        );
+    }
+
+    #[test]
+    fn high_bit_420_records_the_depth() {
+        let frame = Yuv420High::try_new(12, 4, 2, vec![4000; 8], vec![100, 200], vec![0, 4])
+            .expect("frame");
+        assert_eq!(frame.bit_depth(), 12);
+        assert_eq!(frame.y(), &[4000; 8]);
+        assert_eq!(
+            Yuv420High::try_new(8, 4, 2, vec![0; 8], vec![0, 0], vec![0, 0]),
+            Err(FrameError::Limit)
+        );
+        assert_eq!(
+            Yuv420High::try_new(14, 4, 2, vec![0; 8], vec![0], vec![0, 0]),
             Err(FrameError::Length)
         );
     }

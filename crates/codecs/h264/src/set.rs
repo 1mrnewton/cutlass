@@ -1,7 +1,7 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
 //! Interlaced pictures and chroma formats other than 4:2:0 are refused.
-//! Bit depths other than 8 and 10 are refused.
+//! A bit depth outside 8 through 14, or a luma depth that differs from chroma, is refused.
 
 use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, Transfer};
 
@@ -119,7 +119,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         }
         let bit_depth_luma = bits.ue()?;
         let bit_depth_chroma = bits.ue()?;
-        if bit_depth_luma != bit_depth_chroma || !matches!(bit_depth_luma, 0 | 2) {
+        if bit_depth_luma != bit_depth_chroma || bit_depth_luma > 6 {
             return Err(CodecError::Unsupported { what: "bit depth" });
         }
         bit_depth = (8 + bit_depth_luma) as u8;

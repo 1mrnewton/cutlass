@@ -48,8 +48,8 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | Baseline, Main, High (`profile_idc` 66, 77, 100) | Annex A | Yes | Yes | Done |
 | Extended (`88`) without data partitions | Annex A | Yes | The profile id is accepted. Partition NALs still fail. | Yet |
 | 10-bit 4:2:0 | High 10. `bit_depth_luma_minus8` is 2 | Yes | Pictures match | Done |
-| Bit depths 9, 12, and 14 | `bit_depth_luma_minus8` 1, 4, and 6 | Yes, at 4:2:0, 4:2:2, and 4:4:4 | Refused | Yet |
-| Bit depths 11 and 13 | `bit_depth_luma_minus8` 3 and 5 | Refused (`Unimplemented luma bit depth`) | Refused | Yet. The recommendation is the oracle. |
+| Bit depths 9, 12, and 14 | `bit_depth_luma_minus8` 1, 4, and 6 | Yes, at 4:2:0, 4:2:2, and 4:4:4 | Pictures match at 4:2:0 | Done at 4:2:0 |
+| Bit depths 11 and 13 | `bit_depth_luma_minus8` 3 and 5 | Refused (`Unimplemented luma bit depth`) | PCM and DC prediction follow the recommendation at 4:2:0 | Done at 4:2:0. The recommendation is the oracle. |
 | 4:2:2 and 4:4:4 | High 4:2:2, High 4:4:4 | Yes, at 8, 9, 10, 12, and 14 bits | Refused | Yet |
 | Separate colour planes | `separate_colour_plane_flag` | Refused (`separate color planes are not supported`) | Refused | Yet. The recommendation is the oracle. |
 | QP-prime transform bypass (lossless) | Clause 8 | Yes | Refused | Yet |
@@ -91,7 +91,7 @@ The 720p numbers are the recorded `against_ffmpeg` run: median of 3 after one wa
 - SPS and PPS, including High-profile fields, scaling lists, and frame crop. `level_idc` is not stored.
 - Slice header for I, P, and B, including list modification, weights, and decoded-reference marking.
 - Macroblocks: I 4×4, I 8×8, I 16×16, I_PCM, P partitions and P skip, B partitions, B skip, B direct 16×16 and 8×8, spatial and temporal direct.
-- Reconstruction: inverse 4×4 and 8×8, intra and inter prediction, weighted prediction, deblock, then crop to the visible size.
+- Reconstruction: inverse 4×4 and 8×8, intra and inter prediction, weighted prediction, deblock, then crop to the visible size. 4:2:0 samples are 8 through 14 bits.
 - DPB output order, POC 0, 1, and 2, gaps, long-term marks, redundant pictures dropped.
 - A bad packet returns an error and leaves a later good IDR decodable.
 - `#![forbid(unsafe_code)]`. No SIMD intrinsics. No second thread.
@@ -104,7 +104,7 @@ The oracle command is `ffmpeg -hwaccel none -threads 1`. That is one software th
 
 1. **Prove the 8-bit 4:2:0 path.** Done. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro.
 2. **High 10.** Done. A libx264 High 10 4:2:0 stream matches `ffmpeg -hwaccel none -threads 1` as `yuv420p10le`. The samples stay 10-bit. The 3840×2160 High file still matches: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro.
-3. **Bit depths 9, 12, and 14.** `bit_depth_*_minus8` values 1, 4, and 6. FFmpeg’s software decoder reconstructs these. Then 11 and 13 (`minus8` 3 and 5). FFmpeg refuses those two, so the recommendation is the oracle. An 8-bit and a 10-bit picture still match the pictures from the earlier steps.
+3. **Bit depths 9, 12, and 14.** Done at 4:2:0. libx264 on this machine writes 8-bit and 10-bit only, so the test builds a 16×16 CAVLC stream. At 9, 12, and 14 bits that stream matches `ffmpeg -hwaccel none -threads 1` as `yuv420p9le`, `yuv420p12le`, and `yuv420p14le`: a flat I_16x16 DC picture, an I_16x16 picture with one luma DC coefficient, and an I_PCM picture. 11 and 13 follow the recommendation. PCM codes round-trip, and an unavailable intra DC prediction is the midpoint. FFmpeg refuses those two. 4:2:2 and 4:4:4 stay on step 4. The High 10 stream still matches. The 3840×2160 High file is still the 8-bit check.
 4. **4:2:2 and 4:4:4.** At 8, 9, 10, 11, 12, 13, and 14 bits. Chroma block size follows the specification. FFmpeg is the oracle at 8, 9, 10, 12, and 14. The recommendation is the oracle at 11 and 13.
 5. **Separate colour planes, then lossless bypass.** `separate_colour_plane_flag`, then `qpprime_y_zero_transform_bypass_flag`. FFmpeg refuses separate colour planes, so the recommendation is the oracle for that flag. FFmpeg is the oracle for lossless bypass.
 6. **Interlaced.** Field pictures, PAFF, and MBAFF. A progressive picture from step 1 still matches.

@@ -1,4 +1,4 @@
-//! H.264 / AVC, progressive 8-bit and 10-bit 4:2:0.
+//! H.264 / AVC, progressive 4:2:0 at 8 through 14 bits.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is
@@ -19,6 +19,8 @@ mod tables;
 pub use dec::{H264Decoder, register_decoders};
 pub use enc::{H264Encoder, register_encoders};
 
+#[cfg(test)]
+mod depth;
 #[cfg(test)]
 mod high10;
 #[cfg(test)]

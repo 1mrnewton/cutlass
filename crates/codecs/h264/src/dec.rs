@@ -2,7 +2,7 @@
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, DecodeFactory,
-    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420p, Yuv420p10,
+    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420High, Yuv420p, Yuv420p10,
 };
 
 use crate::bits::Bits;
@@ -192,23 +192,57 @@ impl Poc {
 #[derive(Clone)]
 enum Store {
     Eight(Vec<Frame<u8>>),
+    Nine(Vec<Frame<recon::Depth<9>>>),
     Ten(Vec<Frame<recon::Ten>>),
+    Eleven(Vec<Frame<recon::Depth<11>>>),
+    Twelve(Vec<Frame<recon::Depth<12>>>),
+    Thirteen(Vec<Frame<recon::Depth<13>>>),
+    Fourteen(Vec<Frame<recon::Depth<14>>>),
 }
 
 impl Store {
     fn depth(&self) -> u8 {
         match self {
             Store::Eight(_) => 8,
+            Store::Nine(_) => 9,
             Store::Ten(_) => 10,
+            Store::Eleven(_) => 11,
+            Store::Twelve(_) => 12,
+            Store::Thirteen(_) => 13,
+            Store::Fourteen(_) => 14,
         }
     }
 
     fn release(&mut self, keep: usize) -> Vec<VideoOutput> {
         match self {
             Store::Eight(dpb) => take_output(dpb, keep),
+            Store::Nine(dpb) => take_output(dpb, keep),
             Store::Ten(dpb) => take_output(dpb, keep),
+            Store::Eleven(dpb) => take_output(dpb, keep),
+            Store::Twelve(dpb) => take_output(dpb, keep),
+            Store::Thirteen(dpb) => take_output(dpb, keep),
+            Store::Fourteen(dpb) => take_output(dpb, keep),
         }
     }
+}
+
+macro_rules! decode_depth {
+    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $variant:ident, $sample:ty) => {{
+        let mut dpb = match &$self.dpb {
+            Store::$variant(held) => held.clone(),
+            _ => Vec::new(),
+        };
+        let decoded = decode_au::<$sample>(
+            &mut $sets,
+            &mut $poc,
+            &mut dpb,
+            &$packet.data,
+            $self.length_size,
+            $packet,
+        )?;
+        $self.dpb = Store::$variant(dpb);
+        decoded
+    }};
 }
 
 pub struct H264Decoder {
@@ -283,7 +317,12 @@ impl H264Decoder {
     pub(crate) fn picture_at(&self, pts: i64) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let output = match &self.dpb {
             Store::Eight(dpb) => held_picture(dpb, pts)?,
+            Store::Nine(dpb) => held_picture(dpb, pts)?,
             Store::Ten(dpb) => held_picture(dpb, pts)?,
+            Store::Eleven(dpb) => held_picture(dpb, pts)?,
+            Store::Twelve(dpb) => held_picture(dpb, pts)?,
+            Store::Thirteen(dpb) => held_picture(dpb, pts)?,
+            Store::Fourteen(dpb) => held_picture(dpb, pts)?,
         };
         Some((
             output.picture.y().to_vec(),
@@ -314,38 +353,15 @@ impl VideoDecoder for H264Decoder {
             let mut old = self.dpb.clone();
             old.release(0)
         };
-        let out = if depth == 10 {
-            let mut dpb = match &self.dpb {
-                Store::Ten(held) => held.clone(),
-                Store::Eight(_) => Vec::new(),
-            };
-            let out = decode_au::<recon::Ten>(
-                &mut sets,
-                &mut poc,
-                &mut dpb,
-                &packet.data,
-                self.length_size,
-                packet,
-            )?;
-            self.dpb = Store::Ten(dpb);
-            out
-        } else if depth == 8 {
-            let mut dpb = match &self.dpb {
-                Store::Eight(held) => held.clone(),
-                Store::Ten(_) => Vec::new(),
-            };
-            let out = decode_au::<u8>(
-                &mut sets,
-                &mut poc,
-                &mut dpb,
-                &packet.data,
-                self.length_size,
-                packet,
-            )?;
-            self.dpb = Store::Eight(dpb);
-            out
-        } else {
-            return Err(CodecError::Unsupported { what: "bit depth" });
+        let out = match depth {
+            8 => decode_depth!(self, sets, poc, packet, Eight, u8),
+            9 => decode_depth!(self, sets, poc, packet, Nine, recon::Depth<9>),
+            10 => decode_depth!(self, sets, poc, packet, Ten, recon::Ten),
+            11 => decode_depth!(self, sets, poc, packet, Eleven, recon::Depth<11>),
+            12 => decode_depth!(self, sets, poc, packet, Twelve, recon::Depth<12>),
+            13 => decode_depth!(self, sets, poc, packet, Thirteen, recon::Depth<13>),
+            14 => decode_depth!(self, sets, poc, packet, Fourteen, recon::Depth<14>),
+            _ => return Err(CodecError::Unsupported { what: "bit depth" }),
         };
         prior.extend(out);
         let out = prior;
@@ -817,20 +833,40 @@ fn take_output<S: Sample>(dpb: &mut Vec<Frame<S>>, keep: usize) -> Vec<VideoOutp
     out
 }
 
-fn ten_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
-    if S::BITS == 10 {
+fn wide_plane<S: Sample>(len: usize) -> Option<Vec<u16>> {
+    if S::BITS > 8 {
         Some(Vec::with_capacity(len))
     } else {
         None
     }
 }
 
-fn pack_row<S: Sample>(src: &[S], eight: &mut [u8], mut ten: Option<&mut Vec<u16>>) {
+fn pack_row<S: Sample>(src: &[S], eight: &mut [u8], mut wide: Option<&mut Vec<u16>>) {
     for (out, sample) in eight.iter_mut().zip(src) {
         *out = sample.pack_eight();
-        if let (Some(plane), Some(value)) = (ten.as_mut(), sample.pack_ten()) {
+        if let (Some(plane), Some(value)) = (wide.as_mut(), sample.pack_wide()) {
             plane.push(value);
         }
+    }
+}
+
+fn wide_output<S: Sample>(
+    width: u32,
+    height: u32,
+    y: Option<Vec<u16>>,
+    u: Option<Vec<u16>>,
+    v: Option<Vec<u16>>,
+) -> (Option<Yuv420p10>, Option<Yuv420High>) {
+    let (Some(y), Some(u), Some(v)) = (y, u, v) else {
+        return (None, None);
+    };
+    if S::BITS == 10 {
+        (Yuv420p10::try_new(width, height, y, u, v).ok(), None)
+    } else {
+        (
+            None,
+            Yuv420High::try_new(S::BITS as u8, width, height, y, u, v).ok(),
+        )
     }
 }
 
@@ -845,15 +881,15 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     let mut y = vec![0u8; w * h];
     let mut u = vec![0u8; (w / 2) * (h / 2)];
     let mut v = vec![0u8; (w / 2) * (h / 2)];
-    let mut y10 = ten_plane::<S>(w * h);
-    let mut u10 = ten_plane::<S>((w / 2) * (h / 2));
-    let mut v10 = ten_plane::<S>((w / 2) * (h / 2));
+    let mut y_wide = wide_plane::<S>(w * h);
+    let mut u_wide = wide_plane::<S>((w / 2) * (h / 2));
+    let mut v_wide = wide_plane::<S>((w / 2) * (h / 2));
     for row in 0..h {
         let src = (y0 + row) * frame.w + x0;
         pack_row(
             &frame.y[src..src + w],
             &mut y[row * w..row * w + w],
-            y10.as_mut(),
+            y_wide.as_mut(),
         );
     }
     for row in 0..h / 2 {
@@ -862,22 +898,21 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
         pack_row(
             &frame.u[src..src + n],
             &mut u[row * n..row * n + n],
-            u10.as_mut(),
+            u_wide.as_mut(),
         );
         pack_row(
             &frame.v[src..src + n],
             &mut v[row * n..row * n + n],
-            v10.as_mut(),
+            v_wide.as_mut(),
         );
     }
     let picture = Yuv420p::try_new(frame.vis_w, frame.vis_h, y, u, v).ok()?;
-    let yuv420p10 = match (y10, u10, v10) {
-        (Some(y), Some(u), Some(v)) => Yuv420p10::try_new(frame.vis_w, frame.vis_h, y, u, v).ok(),
-        _ => None,
-    };
+    let (yuv420p10, yuv420_high) =
+        wide_output::<S>(frame.vis_w, frame.vis_h, y_wide, u_wide, v_wide);
     Some(VideoOutput {
         picture,
         yuv420p10,
+        yuv420_high,
         pts: frame.pts,
         duration: frame.duration,
         timescale: frame.timescale,

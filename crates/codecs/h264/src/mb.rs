@@ -5297,3 +5297,23 @@ fn coded_mb<S: Sample>(pic: &Frame<S>, mx: i32, my: i32) -> Option<&Mb> {
     let mb = pic.mb.get(my as usize * pic.mb_w + mx as usize)?;
     if mb.slice == u16::MAX { None } else { Some(mb) }
 }
+
+#[cfg(test)]
+mod qp_wrap {
+    use crate::recon::Depth;
+
+    use super::next_qp;
+
+    #[test]
+    fn slice_qp_wraps_inside_each_bit_depth() {
+        assert_eq!(next_qp::<u8>(51, 1), 0);
+        assert_eq!(next_qp::<Depth<9>>(51, 1), -6);
+        assert_eq!(next_qp::<Depth<10>>(51, 1), -12);
+        assert_eq!(next_qp::<Depth<11>>(51, 1), -18);
+        assert_eq!(next_qp::<Depth<12>>(51, 1), -24);
+        assert_eq!(next_qp::<Depth<13>>(51, 1), -30);
+        assert_eq!(next_qp::<Depth<14>>(51, 1), -36);
+        assert_eq!(next_qp::<Depth<14>>(-36, -1), 51);
+        assert_eq!(next_qp::<Depth<9>>(-6, 0), -6);
+    }
+}

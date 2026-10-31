@@ -253,7 +253,7 @@ fn idct8_1d(d: &[i32], f: &mut [i32]) {
     f[4] = b6 - b1;
 }
 
-/// One sample width. `u8` is 8-bit. [`Ten`] is 10-bit.
+/// One sample width. `u8` is 8-bit. [`Depth`] is 9 through 14 bits.
 pub trait Sample: Copy + Default + Into<i32> {
     const LIMIT: i32;
     const MID: i32;
@@ -270,11 +270,11 @@ pub trait Sample: Copy + Default + Into<i32> {
     /// A PCM code of [`Self::BITS`] bits.
     fn from_code(value: u32) -> Self;
 
-    /// The sample in an 8-bit plane. A 10-bit sample keeps the top 8 bits.
+    /// The sample in an 8-bit plane. A wider sample keeps the top 8 bits.
     fn pack_eight(self) -> u8;
 
-    /// The sample when this width is 10 bits.
-    fn pack_ten(self) -> Option<u16>;
+    /// The sample in a `u16` plane. 8-bit has no wide plane.
+    fn pack_wide(self) -> Option<u16>;
 }
 
 impl Sample for u8 {
@@ -296,41 +296,46 @@ impl Sample for u8 {
         self
     }
 
-    fn pack_ten(self) -> Option<u16> {
+    fn pack_wide(self) -> Option<u16> {
         None
     }
 }
 
-/// One 10-bit sample, stored in the low 10 bits.
+/// One sample of `BITS` bits, stored in the low `BITS` of a `u16`.
+///
+/// `BITS` is 9, 10, 11, 12, 13, or 14. [`Ten`] is the 10-bit width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Ten(pub u16);
+pub struct Depth<const BITS: u32>(pub u16);
 
-impl From<Ten> for i32 {
-    fn from(value: Ten) -> Self {
+/// One 10-bit sample.
+pub type Ten = Depth<10>;
+
+impl<const BITS: u32> From<Depth<BITS>> for i32 {
+    fn from(value: Depth<BITS>) -> Self {
         i32::from(value.0)
     }
 }
 
-impl Sample for Ten {
-    const LIMIT: i32 = 1023;
-    const MID: i32 = 512;
-    const SHIFT: i32 = 2;
-    const QP_BD: i32 = 12;
-    const BITS: u32 = 10;
+impl<const BITS: u32> Sample for Depth<BITS> {
+    const LIMIT: i32 = (1i32 << BITS) - 1;
+    const MID: i32 = 1i32 << (BITS - 1);
+    const SHIFT: i32 = BITS as i32 - 8;
+    const QP_BD: i32 = 6 * (BITS as i32 - 8);
+    const BITS: u32 = BITS;
 
     fn clip(value: i32) -> Self {
         Self(value.clamp(0, Self::LIMIT) as u16)
     }
 
     fn from_code(value: u32) -> Self {
-        Self((value & 1023) as u16)
+        Self((value & ((1u32 << BITS) - 1)) as u16)
     }
 
     fn pack_eight(self) -> u8 {
-        (self.0 >> 2) as u8
+        (self.0 >> (BITS - 8)) as u8
     }
 
-    fn pack_ten(self) -> Option<u16> {
+    fn pack_wide(self) -> Option<u16> {
         Some(self.0)
     }
 }
@@ -1354,8 +1359,8 @@ fn filter_span<S: Sample, const VERTICAL: bool>(
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockMc, Pel, chroma_mc, chroma_qps, pred_chroma, pred16, put_chroma_block, put_luma_block,
-        qpel,
+        BlockMc, Depth, Pel, Sample, chroma_mc, chroma_qps, pel, pred_chroma, pred16,
+        put_chroma_block, put_luma_block, qpel,
     };
 
     #[test]
@@ -1365,6 +1370,34 @@ mod tests {
         assert_eq!(chroma_qps(26, 0, 12), (38, 26));
         assert_eq!(chroma_qps(40, 0, 12), (48, 36));
         assert_eq!(chroma_qps(51, 0, 12), (51, 39));
+        // QpBdOffsetY is 6, 18, 24, 30, and 36 at 9, 11, 12, 13, and 14 bits.
+        assert_eq!(chroma_qps(26, 0, 6), (32, 26));
+        assert_eq!(chroma_qps(-6, 0, 6), (0, -6));
+        assert_eq!(chroma_qps(26, 0, 18), (44, 26));
+        assert_eq!(chroma_qps(26, 0, 24), (50, 26));
+        assert_eq!(chroma_qps(26, 0, 30), (56, 26));
+        assert_eq!(chroma_qps(26, 0, 36), (62, 26));
+        assert_eq!(chroma_qps(51, 0, 36), (75, 39));
+    }
+
+    #[test]
+    fn each_depth_clips_at_its_own_limit() {
+        assert_eq!(pel(Depth::<9>::clip(10_000)), 511);
+        assert_eq!(pel(Depth::<9>::mid()), 256);
+        assert_eq!(Depth::<9>::QP_BD, 6);
+        assert_eq!(pel(Depth::<11>::clip(10_000)), 2047);
+        assert_eq!(pel(Depth::<11>::mid()), 1024);
+        assert_eq!(Depth::<11>::QP_BD, 18);
+        assert_eq!(pel(Depth::<12>::clip(10_000)), 4095);
+        assert_eq!(pel(Depth::<12>::mid()), 2048);
+        assert_eq!(pel(Depth::<13>::clip(10_000)), 8191);
+        assert_eq!(pel(Depth::<13>::mid()), 4096);
+        assert_eq!(pel(Depth::<14>::clip(20_000)), 16383);
+        assert_eq!(pel(Depth::<14>::clip(10_000)), 10_000);
+        assert_eq!(pel(Depth::<14>::mid()), 8192);
+        assert_eq!(Depth::<14>::QP_BD, 36);
+        assert_eq!(Depth::<10>::from_code(1000).pack_eight(), 250);
+        assert_eq!(Depth::<9>::from_code(600).pack_wide(), Some(88));
     }
 
     fn chroma_qp_at(luma: i32) -> i32 {

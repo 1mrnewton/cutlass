@@ -2,8 +2,11 @@
 //!
 //! A segment the factory cannot open is omitted. The other layers still draw.
 //! Identity keeps the decoded size when it fits, centered on the canvas. A
-//! larger picture is scaled down until it fits, then centered. Clip scale,
-//! rotation, flip, and position are not applied.
+//! larger picture is scaled down until it fits, then centered. The segment
+//! clip then scales, rotates, flips, and moves that picture, and multiplies
+//! its opacity. Rotation is degrees counterclockwise with positive Y up.
+//! A translation of 1 is half the canvas. Keyframes and the file's display
+//! rotation are not applied.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
@@ -11,7 +14,9 @@
 use std::collections::HashMap;
 
 use cutlass_engine::{ClockKind, ReaderFactory, VideoSource, open_segment};
-use cutlass_model::{Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute};
+use cutlass_model::{
+    Clip, Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute, UniformScale,
+};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 /// Open video files for one draft revision.
@@ -65,10 +70,122 @@ pub(crate) struct VideoLayer<'a> {
     pub(crate) placed: Placed<'a>,
 }
 
+/// Scale, rotation, flip, translation, and opacity for one picture.
+///
+/// `scale_x` and `scale_y` are positive. A negative clip scale flips that
+/// axis and uses the absolute value. `sin` and `cos` are the counterclockwise
+/// rotation, with positive Y up. `dx` is pixels to the right and `dy` is
+/// pixels up. One translation unit is half the canvas on that axis.
+#[derive(Clone, Copy, Debug)]
+struct PictureTransform {
+    scale_x: f64,
+    scale_y: f64,
+    sin: f64,
+    cos: f64,
+    flip_h: bool,
+    flip_v: bool,
+    dx: f64,
+    dy: f64,
+    opacity: u8,
+    geometry_identity: bool,
+}
+
 pub(crate) struct Placed<'a> {
     source: &'a VideoSource,
     width: u32,
     height: u32,
+    transform: PictureTransform,
+}
+
+fn picture_transform(
+    clip: &Clip,
+    uniform: &UniformScale,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Option<PictureTransform> {
+    let (mut scale_x, mut scale_y) = if uniform.on {
+        (uniform.value, uniform.value)
+    } else {
+        (clip.scale.x, clip.scale.y)
+    };
+    if !scale_x.is_finite()
+        || !scale_y.is_finite()
+        || !clip.rotation.is_finite()
+        || !clip.transform.x.is_finite()
+        || !clip.transform.y.is_finite()
+        || !clip.alpha.is_finite()
+    {
+        return None;
+    }
+    let mut flip_h = clip.flip.horizontal;
+    let mut flip_v = clip.flip.vertical;
+    if scale_x < 0.0 {
+        flip_h = !flip_h;
+        scale_x = -scale_x;
+    }
+    if scale_y < 0.0 {
+        flip_v = !flip_v;
+        scale_y = -scale_y;
+    }
+    let degrees = clip.rotation.rem_euclid(360.0);
+    let (sin, cos) = sin_cos(degrees);
+    let dx = clip.transform.x * f64::from(canvas_w) / 2.0;
+    let dy = clip.transform.y * f64::from(canvas_h) / 2.0;
+    let opacity = opacity_byte(clip.alpha)?;
+    let geometry_identity = scale_x == 1.0
+        && scale_y == 1.0
+        && degrees == 0.0
+        && !flip_h
+        && !flip_v
+        && dx == 0.0
+        && dy == 0.0;
+    Some(PictureTransform {
+        scale_x,
+        scale_y,
+        sin,
+        cos,
+        flip_h,
+        flip_v,
+        dx,
+        dy,
+        opacity,
+        geometry_identity,
+    })
+}
+
+fn sin_cos(degrees: f64) -> (f64, f64) {
+    if degrees == 0.0 {
+        (0.0, 1.0)
+    } else if degrees == 90.0 {
+        (1.0, 0.0)
+    } else if degrees == 180.0 {
+        (0.0, -1.0)
+    } else if degrees == 270.0 {
+        (-1.0, 0.0)
+    } else {
+        let radians = degrees.to_radians();
+        (radians.sin(), radians.cos())
+    }
+}
+
+fn opacity_byte(alpha: f64) -> Option<u8> {
+    if !alpha.is_finite() {
+        return None;
+    }
+    if alpha <= 0.0 {
+        return Some(0);
+    }
+    if alpha >= 1.0 {
+        return Some(255);
+    }
+    let scaled = (alpha * 255.0).round();
+    let mut byte = 0_u8;
+    let mut cursor = 0.0_f64;
+    while cursor + 0.5 < scaled && byte < 255 {
+        byte = byte.saturating_add(1);
+        cursor += 1.0;
+    }
+    Some(byte)
 }
 
 /// Visible video segments whose target covers `time`.
@@ -101,6 +218,14 @@ pub(crate) fn video_layers<'a>(
             ) {
                 continue;
             }
+            let Some(transform) =
+                picture_transform(&segment.clip, &segment.uniform_scale, width, height)
+            else {
+                continue;
+            };
+            if transform.opacity == 0 || transform.scale_x == 0.0 || transform.scale_y == 0.0 {
+                continue;
+            }
             if !clips.sources.contains_key(&segment.id) {
                 let Ok(source) = open_segment(media, draft, &segment.id, ClockKind::Export, 1)
                 else {
@@ -113,11 +238,12 @@ pub(crate) fn video_layers<'a>(
                 track_index,
                 segment_index,
                 segment.id.clone(),
+                transform,
             ));
         }
     }
     let mut layers = Vec::with_capacity(chosen.len());
-    for (render_index, track_index, segment_index, id) in chosen {
+    for (render_index, track_index, segment_index, id, transform) in chosen {
         let Some(source) = clips.sources.get(&id) else {
             continue;
         };
@@ -129,6 +255,7 @@ pub(crate) fn video_layers<'a>(
                 source,
                 width,
                 height,
+                transform,
             },
         });
     }
@@ -148,10 +275,30 @@ impl PictureSource for Placed<'_> {
             return Sample::Miss;
         };
         match picture {
-            Picture::Cpu(bytes) => place(self.width, self.height, bytes),
+            Picture::Cpu(bytes) => place_with(self.width, self.height, bytes, self.transform),
             Picture::Platform(_) => Sample::Miss,
         }
     }
+}
+
+fn place_with(
+    canvas_w: u32,
+    canvas_h: u32,
+    picture: CpuBytes,
+    transform: PictureTransform,
+) -> Sample {
+    if transform.opacity == 0 || transform.scale_x == 0.0 || transform.scale_y == 0.0 {
+        return Sample::Miss;
+    }
+    if transform.geometry_identity {
+        let sample = place(canvas_w, canvas_h, picture);
+        return if transform.opacity == 255 {
+            sample
+        } else {
+            fade(sample, transform.opacity)
+        };
+    }
+    sample_transformed(canvas_w, canvas_h, &picture, transform)
 }
 
 fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes) -> Sample {
@@ -178,6 +325,220 @@ fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes) -> Sample {
         Ok(bytes) => Sample::Ready(Picture::Cpu(bytes)),
         Err(_) => Sample::Miss,
     }
+}
+
+fn fade(sample: Sample, opacity: u8) -> Sample {
+    let Sample::Ready(Picture::Cpu(bytes)) = sample else {
+        return sample;
+    };
+    if opacity == 255 {
+        return Sample::Ready(Picture::Cpu(bytes));
+    }
+    let mut rgba = bytes.rgba().to_vec();
+    for pixel in rgba.chunks_mut(4) {
+        for channel in pixel {
+            *channel = mix_channel(*channel, opacity);
+        }
+    }
+    match CpuBytes::new(bytes.width(), bytes.height(), rgba) {
+        Ok(bytes) => Sample::Ready(Picture::Cpu(bytes)),
+        Err(_) => Sample::Miss,
+    }
+}
+
+fn mix_channel(channel: u8, opacity: u8) -> u8 {
+    let mixed = u16::from(channel) * u16::from(opacity) + 127;
+    u8::try_from(mixed / 255).unwrap_or(0)
+}
+
+fn sample_transformed(
+    canvas_w: u32,
+    canvas_h: u32,
+    picture: &CpuBytes,
+    transform: PictureTransform,
+) -> Sample {
+    let src_w = picture.width();
+    let src_h = picture.height();
+    let Some((fitted_w, fitted_h)) = fitted_size(src_w, src_h, canvas_w, canvas_h) else {
+        return Sample::Miss;
+    };
+    let draw = Draw {
+        src_w,
+        src_h,
+        fitted_w: f64::from(fitted_w),
+        fitted_h: f64::from(fitted_h),
+        center_x: f64::from(canvas_w) / 2.0 + transform.dx,
+        center_y: f64::from(canvas_h) / 2.0 - transform.dy,
+        transform,
+    };
+    if draw.drawn_w() <= 0.0 || draw.drawn_h() <= 0.0 {
+        return Sample::Miss;
+    }
+    let Some(canvas_len) = rgba_len(canvas_w, canvas_h) else {
+        return Sample::Miss;
+    };
+    let mut canvas = vec![0_u8; canvas_len];
+    let Some((x0, x1, y0, y1)) = cover_box(&draw, canvas_w, canvas_h) else {
+        return Sample::Miss;
+    };
+    let src = picture.rgba();
+    let mut wrote = false;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let Some((sx, sy)) = source_pixel(x, y, &draw) else {
+                continue;
+            };
+            let Some(pixel) = src_pixel(src, src_w, sx, sy) else {
+                continue;
+            };
+            let Some(dest) = canvas_slot(&mut canvas, canvas_w, x, y) else {
+                continue;
+            };
+            dest[0] = mix_channel(pixel[0], draw.transform.opacity);
+            dest[1] = mix_channel(pixel[1], draw.transform.opacity);
+            dest[2] = mix_channel(pixel[2], draw.transform.opacity);
+            dest[3] = mix_channel(pixel[3], draw.transform.opacity);
+            wrote = true;
+        }
+    }
+    if !wrote {
+        return Sample::Miss;
+    }
+    match CpuBytes::new(canvas_w, canvas_h, canvas) {
+        Ok(bytes) => Sample::Ready(Picture::Cpu(bytes)),
+        Err(_) => Sample::Miss,
+    }
+}
+
+fn fitted_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32)> {
+    if src_w == 0 || src_h == 0 {
+        return None;
+    }
+    if src_w <= canvas_w && src_h <= canvas_h {
+        Some((src_w, src_h))
+    } else {
+        contain_size(src_w, src_h, canvas_w, canvas_h)
+    }
+}
+
+struct Draw {
+    src_w: u32,
+    src_h: u32,
+    fitted_w: f64,
+    fitted_h: f64,
+    center_x: f64,
+    center_y: f64,
+    transform: PictureTransform,
+}
+
+impl Draw {
+    fn drawn_w(&self) -> f64 {
+        self.fitted_w * self.transform.scale_x
+    }
+
+    fn drawn_h(&self) -> f64 {
+        self.fitted_h * self.transform.scale_y
+    }
+}
+
+fn cover_box(draw: &Draw, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32, u32, u32)> {
+    let half_w = draw.drawn_w() / 2.0;
+    let half_h = draw.drawn_h() / 2.0;
+    let corners = [
+        (half_w, half_h),
+        (half_w, -half_h),
+        (-half_w, half_h),
+        (-half_w, -half_h),
+    ];
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (x, y) in corners {
+        let rotated_x = x * draw.transform.cos - y * draw.transform.sin;
+        let rotated_y = x * draw.transform.sin + y * draw.transform.cos;
+        let canvas_x = draw.center_x + rotated_x;
+        let canvas_y = draw.center_y - rotated_y;
+        min_x = min_x.min(canvas_x);
+        max_x = max_x.max(canvas_x);
+        min_y = min_y.min(canvas_y);
+        max_y = max_y.max(canvas_y);
+    }
+    let x0 = axis_bound(min_x.floor(), canvas_w)?;
+    let y0 = axis_bound(min_y.floor(), canvas_h)?;
+    let x1 = axis_bound(max_x.ceil(), canvas_w)?;
+    let y1 = axis_bound(max_y.ceil(), canvas_h)?;
+    if x0 >= x1 || y0 >= y1 {
+        None
+    } else {
+        Some((x0, x1, y0, y1))
+    }
+}
+
+fn axis_bound(value: f64, limit: u32) -> Option<u32> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value <= 0.0 {
+        return Some(0);
+    }
+    if value >= f64::from(limit) {
+        return Some(limit);
+    }
+    u32::try_from(value as u64).ok()
+}
+
+fn source_pixel(x: u32, y: u32, draw: &Draw) -> Option<(u32, u32)> {
+    let rel_x = f64::from(x) + 0.5 - draw.center_x;
+    let rel_y = f64::from(y) + 0.5 - draw.center_y;
+    let up_y = -rel_y;
+    let local_x = (rel_x * draw.transform.cos + up_y * draw.transform.sin) / draw.transform.scale_x;
+    let local_y =
+        (-rel_x * draw.transform.sin + up_y * draw.transform.cos) / draw.transform.scale_y;
+    let half_w = draw.fitted_w / 2.0;
+    let half_h = draw.fitted_h / 2.0;
+    // The covered span is half-open on the right and on the bottom, matching
+    // the integer center used when the clip is identity.
+    if local_x < -half_w || local_x >= half_w || local_y <= -half_h || local_y > half_h {
+        return None;
+    }
+    let su = (local_x + half_w) / draw.fitted_w * f64::from(draw.src_w);
+    let sv = (half_h - local_y) / draw.fitted_h * f64::from(draw.src_h);
+    let mut sx = floor_index(su, draw.src_w)?;
+    let mut sy = floor_index(sv, draw.src_h)?;
+    if draw.transform.flip_h {
+        sx = draw.src_w.saturating_sub(sx).saturating_sub(1);
+    }
+    if draw.transform.flip_v {
+        sy = draw.src_h.saturating_sub(sy).saturating_sub(1);
+    }
+    Some((sx, sy))
+}
+
+fn floor_index(value: f64, limit: u32) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 || value >= f64::from(limit) {
+        return None;
+    }
+    u32::try_from(value as u64).ok()
+}
+
+fn src_pixel(src: &[u8], src_w: u32, x: u32, y: u32) -> Option<[u8; 4]> {
+    let stride = usize::try_from(src_w).ok()?.checked_mul(4)?;
+    let index = usize::try_from(y)
+        .ok()?
+        .checked_mul(stride)?
+        .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
+    let pixel = src.get(index..index + 4)?;
+    Some([pixel[0], pixel[1], pixel[2], pixel[3]])
+}
+
+fn canvas_slot(canvas: &mut [u8], canvas_w: u32, x: u32, y: u32) -> Option<&mut [u8]> {
+    let stride = usize::try_from(canvas_w).ok()?.checked_mul(4)?;
+    let index = usize::try_from(y)
+        .ok()?
+        .checked_mul(stride)?
+        .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
+    canvas.get_mut(index..index + 4)
 }
 
 fn contain_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32)> {
@@ -256,6 +617,8 @@ fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) 
 
 #[cfg(test)]
 mod tests {
+    use cutlass_model::{Flip, Point};
+
     use super::*;
 
     fn solid(width: u32, height: u32, pixel: [u8; 4]) -> CpuBytes {
@@ -300,5 +663,194 @@ mod tests {
         let rgba = bytes.rgba();
         assert_eq!(&rgba[0..8], &[1, 0, 0, 255, 3, 0, 0, 255]);
         assert_eq!(&rgba[8..16], &[0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    fn transform_of(
+        clip: Clip,
+        uniform: UniformScale,
+        width: u32,
+        height: u32,
+    ) -> PictureTransform {
+        picture_transform(&clip, &uniform, width, height).expect("transform")
+    }
+
+    fn paint(
+        width: u32,
+        height: u32,
+        picture: CpuBytes,
+        clip: Clip,
+        uniform: UniformScale,
+    ) -> Vec<u8> {
+        let transform = transform_of(clip, uniform, width, height);
+        let Sample::Ready(Picture::Cpu(bytes)) = place_with(width, height, picture, transform)
+        else {
+            panic!("ready");
+        };
+        bytes.into_rgba()
+    }
+
+    #[test]
+    fn a_default_clip_matches_the_untransformed_placement() {
+        let picture = solid(1, 1, [1, 2, 3, 4]);
+        let clip = Clip::default();
+        let uniform = UniformScale::default();
+        let transform = transform_of(clip, uniform, 3, 3);
+        assert!(transform.geometry_identity);
+        let Sample::Ready(Picture::Cpu(bytes)) = place_with(3, 3, picture, transform) else {
+            panic!("ready");
+        };
+        assert_eq!(&bytes.rgba()[16..20], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn opacity_scales_premultiplied_channels_and_zero_draws_nothing() {
+        let clip = Clip {
+            alpha: 0.5,
+            ..Clip::default()
+        };
+        let rgba = paint(
+            1,
+            1,
+            solid(1, 1, [200, 0, 0, 255]),
+            clip,
+            UniformScale::default(),
+        );
+        assert_eq!(rgba, vec![100, 0, 0, 128]);
+
+        let clear = Clip {
+            alpha: 0.0,
+            ..Clip::default()
+        };
+        let transform = transform_of(clear, UniformScale::default(), 1, 1);
+        assert!(matches!(
+            place_with(1, 1, solid(1, 1, [1, 2, 3, 4]), transform),
+            Sample::Miss
+        ));
+    }
+
+    #[test]
+    fn flip_scale_and_translation_move_the_source_pixels() {
+        let flip = Clip {
+            flip: Flip {
+                horizontal: true,
+                ..Flip::default()
+            },
+            ..Clip::default()
+        };
+        let row = CpuBytes::new(2, 1, vec![1, 0, 0, 255, 2, 0, 0, 255]).unwrap();
+        assert_eq!(
+            &paint(2, 1, row, flip, UniformScale::default())[..8],
+            &[2, 0, 0, 255, 1, 0, 0, 255]
+        );
+
+        let wide = Clip {
+            scale: Point::new(3.0, 1.0),
+            ..Clip::default()
+        };
+        let separate = UniformScale {
+            on: false,
+            ..UniformScale::default()
+        };
+        let scaled = paint(3, 1, solid(1, 1, [4, 0, 0, 255]), wide, separate);
+        assert_eq!(scaled, vec![4, 0, 0, 255, 4, 0, 0, 255, 4, 0, 0, 255]);
+
+        let shift = Clip {
+            transform: Point::new(1.0, 0.0),
+            ..Clip::default()
+        };
+        let moved = paint(
+            4,
+            1,
+            solid(1, 1, [9, 0, 0, 255]),
+            shift,
+            UniformScale::default(),
+        );
+        assert_eq!(&moved[0..12], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&moved[12..16], &[9, 0, 0, 255]);
+
+        let up = Clip {
+            transform: Point::new(0.0, 0.5),
+            ..Clip::default()
+        };
+        let raised = paint(
+            1,
+            4,
+            solid(1, 1, [8, 0, 0, 255]),
+            up,
+            UniformScale::default(),
+        );
+        assert_eq!(&raised[0..4], &[8, 0, 0, 255]);
+        assert!(raised[4..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn a_quarter_turn_puts_the_right_pixel_on_top() {
+        let clip = Clip {
+            rotation: 90.0,
+            ..Clip::default()
+        };
+        let picture = CpuBytes::new(3, 1, vec![1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255]).unwrap();
+        let rgba = paint(3, 3, picture, clip, UniformScale::default());
+        let column = [rgba[4], rgba[16], rgba[28]];
+        assert_eq!(column, [3, 2, 1]);
+        assert_eq!(rgba[0], 0);
+        assert_eq!(rgba[8], 0);
+    }
+
+    #[test]
+    fn uniform_scale_drives_both_axes_and_a_negative_scale_flips() {
+        let clip = Clip {
+            scale: Point::new(9.0, 1.0),
+            ..Clip::default()
+        };
+        let uniform = UniformScale::default();
+        let doubled = UniformScale {
+            value: 3.0,
+            ..UniformScale::default()
+        };
+        let wide = paint(3, 1, solid(1, 1, [4, 0, 0, 255]), clip.clone(), doubled);
+        assert_eq!(wide, vec![4, 0, 0, 255, 4, 0, 0, 255, 4, 0, 0, 255]);
+        let ignored = transform_of(clip, uniform, 3, 1);
+        assert_eq!(ignored.scale_x, 1.0);
+
+        let negative = Clip {
+            scale: Point::new(-1.0, 1.0),
+            ..Clip::default()
+        };
+        let separate = UniformScale {
+            on: false,
+            ..UniformScale::default()
+        };
+        let row = CpuBytes::new(2, 1, vec![1, 0, 0, 255, 2, 0, 0, 255]).unwrap();
+        assert_eq!(
+            &paint(2, 1, row, negative, separate)[..8],
+            &[2, 0, 0, 255, 1, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn an_angle_that_is_not_a_quarter_turn_keeps_the_center_pixel() {
+        let clip = Clip {
+            rotation: 45.0,
+            ..Clip::default()
+        };
+        let rgba = paint(
+            3,
+            3,
+            solid(1, 1, [6, 0, 0, 255]),
+            clip,
+            UniformScale::default(),
+        );
+        assert_eq!(&rgba[16..20], &[6, 0, 0, 255]);
+        assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_non_finite_clip_is_not_a_transform() {
+        let clip = Clip {
+            rotation: f64::NAN,
+            ..Clip::default()
+        };
+        assert!(picture_transform(&clip, &UniformScale::default(), 2, 2).is_none());
     }
 }

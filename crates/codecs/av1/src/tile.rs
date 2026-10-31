@@ -20,7 +20,7 @@ use crate::header::{
     CdefParams, FrameInfo, INTER_FRAME, SEG_ALT_Q, SEG_GLOBALMV, SEG_REF_FRAME, SEG_SKIP, Sequence,
 };
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
-use crate::idct::{InverseScratch, inverse_2d_into};
+use crate::idct::{InverseScratch, inverse_2d_into, inverse_wht4};
 use crate::inter::{
     ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, BlockPlace, Candidates, FieldSource,
     GLOBAL_GLOBALMV, GLOBALMV, GM_TRANSLATION, GOLDEN_FRAME, INTRA_FRAME, InterSample, LAST_FRAME,
@@ -94,9 +94,6 @@ pub fn decode_with_refs(
     refs: &[Option<RefView<'_>>],
     carried: Option<&Cdfs>,
 ) -> Result<Reconstructed, CodecError> {
-    if frame.lossless {
-        return Err(CodecError::Unsupported { what: "lossless" });
-    }
     if frame.allow_screen {
         return Err(CodecError::Unsupported {
             what: "screen content",
@@ -3835,8 +3832,14 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 
     fn read_uv_mode(&mut self, bsize: usize, y_mode: u8) -> Result<u8, CodecError> {
-        let large = block_width(bsize).max(block_height(bsize)) > 32 || self.lossless;
-        let mode = if large {
+        // Chroma-from-luma is allowed on a lossless block only when the chroma
+        // residual is 4×4. A lossy block allows it up to 32 on a side.
+        let cfl = if self.lossless {
+            subsampled_size(bsize, self.sub_x, self.sub_y) == 0
+        } else {
+            block_width(bsize).max(block_height(bsize)) <= 32
+        };
+        let mode = if !cfl {
             read_sym(
                 &mut self.symbols,
                 self.update,
@@ -4308,7 +4311,8 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 
     fn plane_tx(&self, plane: usize, bsize: usize, tx: usize) -> usize {
-        if plane == 0 {
+        // A lossless block is 4×4 on every plane, including chroma.
+        if self.lossless || plane == 0 {
             return tx;
         }
         let uv = MAX_TX_SIZE_RECT[subsampled_size(bsize, self.sub_x, self.sub_y)];
@@ -4957,7 +4961,10 @@ impl<'a, 'r> Tile<'a, 'r> {
         tx_type: u8,
         quant: &[i32],
     ) -> Result<(), CodecError> {
-        if self.qindex() == 0 && self.deltas.iter().all(|delta| *delta == 0) {
+        // A lossless segment inside a lossy frame still reads a lossy transform
+        // size. That path stays refused. A frame with `base_q_idx` 0 is 4×4.
+        let segment_lossless = self.qindex() == 0 && self.deltas.iter().all(|delta| *delta == 0);
+        if segment_lossless && !self.lossless {
             return Err(CodecError::Unsupported { what: "lossless" });
         }
         let w = TX_WIDTH[tx];
@@ -4971,7 +4978,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         };
         let dc = self.quantizer(plane, true);
         let ac = self.quantizer(plane, false);
-        let qm_level = if tx_type < IDTX { self.qm[plane] } else { 15 };
+        // A lossless block ignores the quantizer matrix. The lookup at index 0 is 4,
+        // and the Walsh-Hadamard row shift of 2 brings that scale back to 1.
+        let qm_level = if self.lossless || tx_type >= IDTX {
+            15
+        } else {
+            self.qm[plane]
+        };
         let n = w.saturating_mul(h);
         let row_n = w.max(h);
         if self.coeff_buf.len() < n {
@@ -4999,18 +5012,22 @@ impl<'a, 'r> Tile<'a, 'r> {
                     i32::try_from(value.clamp(-32768, 32767)).unwrap_or(0);
             }
         }
-        inverse_2d_into(
-            &self.coeff_buf,
-            &mut InverseScratch {
-                residual: &mut self.residual_buf,
-                row: &mut self.idct_row,
-                out: &mut self.idct_out,
-            },
-            w,
-            h,
-            tx_type,
-            TRANSFORM_ROW_SHIFT[tx],
-        );
+        if self.lossless {
+            inverse_wht4(&self.coeff_buf, &mut self.idct_out);
+        } else {
+            inverse_2d_into(
+                &self.coeff_buf,
+                &mut InverseScratch {
+                    residual: &mut self.residual_buf,
+                    row: &mut self.idct_row,
+                    out: &mut self.idct_out,
+                },
+                w,
+                h,
+                tx_type,
+                TRANSFORM_ROW_SHIFT[tx],
+            );
+        }
         let flip_ud = matches!(
             tx_type,
             FLIPADST_DCT | FLIPADST_ADST | V_FLIPADST | FLIPADST_FLIPADST

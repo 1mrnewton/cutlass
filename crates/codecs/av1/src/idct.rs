@@ -550,3 +550,82 @@ pub fn inverse_2d_into(
         *slot = i32::try_from(*sample).unwrap_or(0);
     }
 }
+
+/// One 4-point inverse Walsh-Hadamard step. `shift` is 2 on a row and 0 on a column.
+fn wht4(values: &mut [i64; 4], shift: u32) {
+    let mut a = values[0] >> shift;
+    let mut c = values[1] >> shift;
+    let mut d = values[2] >> shift;
+    let mut b = values[3] >> shift;
+    a += c;
+    d -= b;
+    let e = (a - d) >> 1;
+    b = e - b;
+    c = e - c;
+    a -= b;
+    d += c;
+    values[0] = a;
+    values[1] = b;
+    values[2] = c;
+    values[3] = d;
+}
+
+/// Inverse 4×4 Walsh-Hadamard transform. `coeff` is the dequantized row-major block.
+///
+/// A lossless block uses this instead of the DCT. The row step shifts by 2, which
+/// cancels the quantizer value of 4 at `qindex` 0. The column step does not shift.
+pub fn inverse_wht4(coeff: &[i32], out: &mut [i32]) {
+    let mut residual = [0i64; 16];
+    for row in 0..4 {
+        let mut line = [0i64; 4];
+        for (col, slot) in line.iter_mut().enumerate() {
+            *slot = i64::from(coeff.get(row * 4 + col).copied().unwrap_or(0));
+        }
+        wht4(&mut line, 2);
+        for col in 0..4 {
+            residual[row * 4 + col] = line[col];
+        }
+    }
+    for sample in &mut residual {
+        *sample = (*sample).clamp(-(1 << 15), (1 << 15) - 1);
+    }
+    for col in 0..4 {
+        let mut line = [0i64; 4];
+        for (row, slot) in line.iter_mut().enumerate() {
+            *slot = residual[row * 4 + col];
+        }
+        wht4(&mut line, 0);
+        for row in 0..4 {
+            residual[row * 4 + col] = line[row];
+        }
+    }
+    for (slot, sample) in out.iter_mut().zip(residual) {
+        *slot = i32::try_from(sample).unwrap_or(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inverse_wht4;
+
+    #[test]
+    fn wht_dc_stays_in_one_sample() {
+        let mut coeff = [0i32; 16];
+        coeff[0] = 4;
+        let mut out = [0i32; 16];
+        inverse_wht4(&coeff, &mut out);
+        let mut expected = [0i32; 16];
+        expected[0] = 1;
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn wht_uses_an_arithmetic_shift() {
+        let mut coeff = [0i32; 16];
+        coeff[0] = 4;
+        coeff[1] = 8;
+        let mut out = [0i32; 16];
+        inverse_wht4(&coeff, &mut out);
+        assert_eq!(out, [1, 1, 0, 0, 1, 0, -1, -1, 1, 0, -1, -1, 1, 0, -1, -1]);
+    }
+}

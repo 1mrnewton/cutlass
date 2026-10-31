@@ -782,32 +782,47 @@ mod tests {
     }
 
     #[test]
-    fn a_lossless_frame_is_refused() {
-        let payload = [
-            0x12, 0x00, 0x0a, 0x06, 0x18, 0x15, 0x7f, 0xfc, 0x80, 0x08, 0x32, 0x40, 0x90, 0x00,
-            0x00, 0xdd, 0x2b, 0x2e, 0x3d, 0x05, 0xe2, 0xd5, 0xaa, 0xec, 0x96, 0xd6, 0x6a, 0x7b,
-            0x02, 0x3d, 0xec, 0x3f, 0x86, 0x48, 0x12, 0xb7, 0x37, 0xc5, 0x8c, 0xba, 0x47, 0x66,
-            0x06, 0x1b, 0x6c, 0x58, 0x2f, 0x02, 0xf0, 0x14, 0xb2, 0x66, 0x28, 0xe1, 0xf4, 0xbd,
-            0xab, 0x63, 0x00, 0xb7, 0x06, 0x39, 0x68, 0xf1, 0x5c, 0xdb, 0x64, 0x04, 0x8d, 0xe6,
-            0xdd, 0xc7, 0x2b, 0xa4, 0x87, 0x4f,
+    fn lossless_walsh_hadamard_matches_dav1d() {
+        // aomenc --lossless=1, from a scaled photographic frame. base_q_idx is 0,
+        // so every block is a 4×4 Walsh-Hadamard transform and the frame header
+        // omits the loop-filter levels and the CDEF strengths. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/ll_0.obu"),
+            include_bytes!("../fixtures/ll_1.obu"),
+            include_bytes!("../fixtures/ll_2.obu"),
+            include_bytes!("../fixtures/ll_3.obu"),
         ];
-        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let expected = [
+            0xf5c7_fad9_a756_c601,
+            0xb764_46d4_5d8d_96ea,
+            0x863c_b381_802e_9309,
+            0xe4a4_2ebe_186b_d4e6,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(!frame.show_existing, "frame {index}");
+            assert!(frame.lossless, "frame {index}");
+            assert_eq!(frame.base_q, 0, "frame {index}");
+            assert!(!frame.tx_select, "frame {index}");
+            assert_eq!(frame.lf_level, [0, 0, 0, 0], "frame {index}");
+            assert_eq!(frame.cdef.bits, 0, "frame {index}");
+            assert!(!frame.restoration.uses, "frame {index}");
+            if index == 0 {
+                assert_eq!(frame.frame_type, crate::header::KEY_FRAME);
+            } else {
+                assert_eq!(frame.frame_type, crate::header::INTER_FRAME);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
         let mut decoder = Av1Decoder::open(&params).expect("open");
-        let error = decoder
-            .push(&cutlass_decode::Packet {
-                stream: 0,
-                data: payload.to_vec(),
-                pts: 0,
-                duration: 1,
-                timescale: 30,
-                keyframe: true,
-                side: Vec::new(),
-            })
-            .expect_err("lossless");
-        assert_eq!(
-            error,
-            cutlass_decode::CodecError::Unsupported { what: "lossless" }
-        );
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
     }
 
     #[test]

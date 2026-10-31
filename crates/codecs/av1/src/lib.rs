@@ -5,7 +5,8 @@
 //! an order hint. A frame may use a uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
-//! Lossless and bit depths other than 8 are rejected. Two references may be
+//! Bit depths other than 8 are rejected. A frame with `base_q_idx` 0 uses a
+//! 4×4 Walsh-Hadamard transform. Two references may be
 //! averaged, weighted by order-hint distance, or blended with a wedge or a
 //! difference mask. A skip-mode block uses the nearest compound pair and
 //! writes no residual. A local warp fits the neighboring motion, and overlapped

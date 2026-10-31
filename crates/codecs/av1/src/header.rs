@@ -863,7 +863,11 @@ fn uncompressed(
             read_lf_delta_update(bits, &mut ref_deltas, &mut mode_deltas)?;
         }
     }
-    let cdef = read_cdef_params(bits, sequence)?;
+    let cdef = if lossless {
+        CdefParams::off()
+    } else {
+        read_cdef_params(bits, sequence)?
+    };
     let restoration = read_lr_params(bits, sequence, lossless && width == upscaled_width, false)?;
     if restoration.plane.iter().any(|kind| {
         *kind != RESTORE_NONE

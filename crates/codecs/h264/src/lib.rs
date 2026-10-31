@@ -25,6 +25,8 @@ mod chroma;
 #[cfg(test)]
 mod depth;
 #[cfg(test)]
+mod fields;
+#[cfg(test)]
 mod high10;
 #[cfg(test)]
 mod lossless;

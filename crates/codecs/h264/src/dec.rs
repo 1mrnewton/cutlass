@@ -155,6 +155,10 @@ pub(crate) struct Frame<S: Sample = u8> {
     /// The picture is three monochrome colour planes. Reconstruction swaps one
     /// plane into `y` and the same plane of every reference.
     separate_plane: bool,
+    /// This buffer is one field of a complementary pair.
+    field: bool,
+    /// `bottom_field_flag`.
+    bottom: bool,
     max_ref: usize,
     reorder: usize,
     adaptive: bool,
@@ -490,6 +494,7 @@ fn decode_au<S: Sample>(
     let mut slice_id = 0u16;
     let mut next_mb = 0usize;
     let mut planes = ColourPlanes { active: 0, seen: 0 };
+    let mut held_field: Option<Frame<S>> = None;
     for nal in &nals {
         match nal.kind {
             7 | 8 => {
@@ -520,6 +525,7 @@ fn decode_au<S: Sample>(
                         next_mb: &mut next_mb,
                         prior: &mut prior,
                         planes: &mut planes,
+                        held: &mut held_field,
                     },
                 )?;
                 if built {
@@ -544,6 +550,25 @@ fn decode_au<S: Sample>(
         });
     }
     let mut pic = pic;
+    if held_field.is_some() {
+        mb::deblock(&mut pic);
+        let Some(other) = held_field.take() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "field pair",
+            });
+        };
+        let pic = weave(other, pic)?;
+        let mut pictures = prior;
+        pictures.extend(finish_picture(poc, dpb, pic)?);
+        return Ok(pictures);
+    }
+    if pic.field {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "incomplete picture",
+        });
+    }
     if pic.separate_plane {
         mb::deblock(&mut pic);
         exchange_refs(&mut pic, dpb, planes.active);
@@ -612,6 +637,70 @@ fn begin_plane<S: Sample>(
         *active = plane;
     }
     Ok(())
+}
+
+fn interleave<S: Sample>(
+    top: &[S],
+    bottom: &[S],
+    stride: usize,
+    rows: usize,
+) -> Result<Vec<S>, CodecError> {
+    if stride == 0
+        || top.len() < stride.saturating_mul(rows)
+        || bottom.len() < stride.saturating_mul(rows)
+    {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "field pair",
+        });
+    }
+    let mut out = Vec::with_capacity(stride.saturating_mul(rows.saturating_mul(2)));
+    for row in 0..rows {
+        let start = row * stride;
+        out.extend_from_slice(&top[start..start + stride]);
+        out.extend_from_slice(&bottom[start..start + stride]);
+    }
+    Ok(out)
+}
+
+fn weave<S: Sample>(first: Frame<S>, second: Frame<S>) -> Result<Frame<S>, CodecError> {
+    let (top, bottom) = if first.bottom {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    if top.bottom || !bottom.bottom || top.w != bottom.w || top.h != bottom.h || top.h == 0 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "field pair",
+        });
+    }
+    let (c_stride, c_rows) = match top.chroma() {
+        3 => (top.w, top.h),
+        2 => (top.w / 2, top.h),
+        _ => (top.w / 2, top.h / 2),
+    };
+    let y = interleave(&top.y, &bottom.y, top.w, top.h)?;
+    let u = interleave(&top.u, &bottom.u, c_stride, c_rows)?;
+    let v = interleave(&top.v, &bottom.v, c_stride, c_rows)?;
+    let h = top.h.saturating_mul(2);
+    let poc = top.poc.min(bottom.poc);
+    let key = top.key || bottom.key;
+    let referenced = top.referenced || bottom.referenced;
+    let mut frame = top;
+    frame.y = y;
+    frame.u = u;
+    frame.v = v;
+    frame.h = h;
+    frame.vis_h = frame.vis_h.saturating_mul(2);
+    frame.crop_y = frame.crop_y.saturating_mul(2);
+    frame.field = false;
+    frame.bottom = false;
+    frame.mb = vec![Mb::new(u16::MAX); frame.mb_w.saturating_mul(h / 16)];
+    frame.poc = poc;
+    frame.key = key;
+    frame.referenced = referenced;
+    Ok(frame)
 }
 
 fn finish_picture<S: Sample>(
@@ -917,6 +1006,8 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         matrix: sps.matrix,
         nonexisting: true,
         separate_plane: sps.separate,
+        field: false,
+        bottom: false,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder: 0,
         adaptive: false,
@@ -1259,6 +1350,7 @@ struct AuScratch<'a, S: Sample> {
     next_mb: &'a mut usize,
     prior: &'a mut Vec<VideoOutput>,
     planes: &'a mut ColourPlanes,
+    held: &'a mut Option<Frame<S>>,
 }
 
 fn decode_slice<S: Sample>(
@@ -1279,6 +1371,7 @@ fn decode_slice<S: Sample>(
         next_mb,
         prior,
         planes,
+        held,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0)?;
@@ -1292,6 +1385,22 @@ fn decode_slice<S: Sample>(
     };
     if sps.bit_depth != S::BITS as u8 {
         return Err(CodecError::Unsupported { what: "bit depth" });
+    }
+    if header.field
+        && let Some(existing) = picture.as_ref()
+    {
+        let pair = existing.field
+            && existing.bottom != header.bottom
+            && existing.frame_num == header.frame_num;
+        if pair {
+            let total = existing.mb_w.saturating_mul(existing.h / 16);
+            if header.first_mb != 0 || *next_mb != total || held.is_some() {
+                return Err(bits.malformed("field pair"));
+            }
+            let mut done = picture.take().ok_or_else(|| bits.malformed("field pair"))?;
+            mb::deblock(&mut done);
+            *held = Some(done);
+        }
     }
     if picture.is_none() && !idr {
         fill_frame_num_gap(&sps, poc_state, dpb, header.frame_num)?;
@@ -1384,6 +1493,10 @@ struct Header {
     kind: u8,
     /// `colour_plane_id` when the SPS sets separate colour planes. Otherwise 0.
     colour_plane: u8,
+    /// `field_pic_flag`.
+    field: bool,
+    /// `bottom_field_flag`.
+    bottom: bool,
     frame_num: u32,
     poc_lsb: i32,
     delta_poc: [i32; 2],
@@ -1452,6 +1565,14 @@ fn read_header(
         colour_plane = id as u8;
     }
     let frame_num = bits.u(u32::from(sps.log2_max_frame_num))?;
+    let mut field = false;
+    let mut bottom = false;
+    if !sps.frame_mbs_only {
+        field = bits.bit()?;
+        if field {
+            bottom = bits.bit()?;
+        }
+    }
     if idr {
         let _ = bits.ue()?;
     }
@@ -1459,12 +1580,12 @@ fn read_header(
     let mut delta_poc = [0i32; 2];
     if sps.poc_type == 0 {
         poc_lsb = bits.u(u32::from(sps.log2_max_poc_lsb))? as i32;
-        if pps.bottom_field_pic_order {
+        if pps.bottom_field_pic_order && !field {
             let _ = bits.se()?;
         }
     } else if sps.poc_type == 1 && !sps.delta_pic_order_always_zero {
         delta_poc[0] = bits.se()?;
-        if pps.bottom_field_pic_order {
+        if pps.bottom_field_pic_order && !field {
             delta_poc[1] = bits.se()?;
         }
     }
@@ -1625,6 +1746,8 @@ fn read_header(
         sps_id: pps.sps_id,
         kind: kind as u8,
         colour_plane,
+        field,
+        bottom,
         frame_num,
         poc_lsb,
         delta_poc,
@@ -1822,11 +1945,23 @@ fn new_frame<S: Sample>(
     packet: &Packet,
     idr: bool,
 ) -> Result<Frame<S>, CodecError> {
-    let (vis_w, vis_h) = sps.visible()?;
+    let (vis_w, mut vis_h) = sps.visible()?;
     let w = sps.width as usize;
-    let h = sps.height as usize;
+    let field_pic = header.field;
+    let h = if field_pic {
+        (sps.height as usize) / 2
+    } else {
+        sps.height as usize
+    };
     let mb_w = sps.mb_width;
-    let mb_h = sps.mb_height;
+    let mb_h = if field_pic {
+        sps.mb_height / 2
+    } else {
+        sps.mb_height
+    };
+    if field_pic {
+        vis_h /= 2;
+    }
     let chroma = match sps.chroma {
         3 => w.saturating_mul(h),
         2 => (w / 2).saturating_mul(h),
@@ -1859,7 +1994,11 @@ fn new_frame<S: Sample>(
         duration: packet.duration,
         timescale: packet.timescale,
         crop_x: sps.crop_left.saturating_mul(unit_x),
-        crop_y: sps.crop_top.saturating_mul(unit_y),
+        crop_y: if field_pic {
+            sps.crop_top.saturating_mul(unit_y) / 2
+        } else {
+            sps.crop_top.saturating_mul(unit_y)
+        },
         vis_w,
         vis_h,
         range: sps.range,
@@ -1868,6 +2007,8 @@ fn new_frame<S: Sample>(
         matrix: sps.matrix,
         nonexisting: false,
         separate_plane: sps.separate,
+        field: header.field,
+        bottom: header.bottom,
         max_ref: usize::from(sps.max_num_ref_frames).clamp(1, 16),
         reorder,
         adaptive: header.adaptive,
@@ -2164,6 +2305,8 @@ mod tests {
             sps_id: 0,
             kind: 0,
             colour_plane: 0,
+            field: false,
+            bottom: false,
             frame_num,
             poc_lsb: 0,
             delta_poc: [0, 0],
@@ -2223,6 +2366,8 @@ mod tests {
             matrix: ColorMatrix::Unspecified,
             nonexisting: false,
             separate_plane: false,
+            field: false,
+            bottom: false,
             max_ref: 4,
             reorder: 0,
             adaptive: true,
@@ -2251,6 +2396,7 @@ mod tests {
             crop_top: 0,
             crop_bottom: 0,
             direct_8x8_inference: true,
+            frame_mbs_only: true,
             mb_width: 1,
             mb_height: 1,
             weight4: [[16; 16]; 6],
@@ -2599,9 +2745,7 @@ mod tests {
         let cases = [
             (
                 sps_packet(66, SpsTail::Interlaced),
-                CodecError::Unsupported {
-                    what: "interlaced picture",
-                },
+                CodecError::Unsupported { what: "mbaff" },
             ),
             (
                 sps_packet(100, SpsTail::Deep),
@@ -2868,7 +3012,15 @@ mod tests {
                     bits.ue(256);
                     bits.ue(0);
                 }
-                SpsTail::Interlaced | SpsTail::Deep => {
+                SpsTail::Interlaced => {
+                    bits.ue(1);
+                    bits.bit(false);
+                    bits.ue(0);
+                    bits.ue(0);
+                    bits.bit(false);
+                    bits.bit(true);
+                }
+                SpsTail::Deep => {
                     bits.ue(1);
                     bits.bit(false);
                     bits.ue(0);

@@ -1,7 +1,8 @@
 //! Sequence and picture parameter sets, clauses 7.3.2.1 and 7.3.2.2.
 //!
-//! Interlaced pictures and monochrome are refused. 4:2:0, 4:2:2, and 4:4:4 are
-//! accepted, including separate colour planes and QP′Y-zero transform bypass.
+//! Monochrome and macroblock-adaptive frame-field are refused. 4:2:0, 4:2:2,
+//! and 4:4:4 are accepted, including separate colour planes, field pictures,
+//! and QP′Y-zero transform bypass.
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
 //! is refused.
 
@@ -32,6 +33,8 @@ pub struct Sps {
     pub crop_top: u32,
     pub crop_bottom: u32,
     pub direct_8x8_inference: bool,
+    /// `frame_mbs_only_flag`. False selects field or picture-adaptive coding.
+    pub frame_mbs_only: bool,
     pub mb_width: usize,
     pub mb_height: usize,
     pub weight4: [[u8; 16]; 6],
@@ -74,10 +77,11 @@ pub struct Pps {
 impl Sps {
     /// CropUnitX and CropUnitY from Table 6-1. Monochrome is not stored.
     pub fn crop_unit(&self) -> (u32, u32) {
+        let frame = u32::from(self.frame_mbs_only);
         match self.chroma {
-            3 => (1, 1),
-            2 => (2, 1),
-            _ => (2, 2),
+            3 => (1, 2 - frame),
+            2 => (2, 2 - frame),
+            _ => (2, (2 - frame) * 2),
         }
     }
 
@@ -202,13 +206,16 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         });
     }
     let frame_mbs_only = bits.bit()?;
-    if !frame_mbs_only {
-        return Err(CodecError::Unsupported {
-            what: "interlaced picture",
-        });
+    if !frame_mbs_only && bits.bit()? {
+        return Err(CodecError::Unsupported { what: "mbaff" });
     }
+    let height_mbs = if frame_mbs_only {
+        height_map
+    } else {
+        height_map.saturating_mul(2)
+    };
     let width = width_mbs.saturating_mul(16);
-    let height = height_map.saturating_mul(16);
+    let height = height_mbs.saturating_mul(16);
     if width > 4096 || height > 4096 || width.saturating_mul(height) > 8_388_608 {
         return Err(CodecError::Limit { what: "coded size" });
     }
@@ -247,8 +254,9 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         crop_top,
         crop_bottom,
         direct_8x8_inference,
+        frame_mbs_only,
         mb_width: width_mbs as usize,
-        mb_height: height_map as usize,
+        mb_height: height_mbs as usize,
         weight4,
         weight8,
         range: vui.range,

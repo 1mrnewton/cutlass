@@ -2839,6 +2839,8 @@ mod intra8 {
             matrix: ColorMatrix::Bt709,
             nonexisting: false,
             separate_plane: false,
+            field: false,
+            bottom: false,
             max_ref: 1,
             reorder: 0,
             adaptive: false,

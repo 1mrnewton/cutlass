@@ -3,9 +3,11 @@
 //! A gesture becomes a [`cutlass_session::Request`] and goes through
 //! [`Session::apply`]. Play, pause, and seek stay on the shell, so they do
 //! not push an undo step. The picture is `eval::frame` on the software
-//! device. Video segments open through the shell's reader factory. This shell
-//! does not composite, and it does not open an audio device.
+//! device. Video segments open through the shell's reader factory. A repeated
+//! playhead reuses the stored picture. This shell does not composite, and it
+//! does not open an audio device.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
@@ -14,11 +16,12 @@ use cutlass_editor::{
     hit_test, lane_category, lanes, last_accuracy_step, minimum_pixel_size, move_gesture,
 };
 use cutlass_encode::EncodeFactory;
-use cutlass_eval::{ReaderFactory, Snapshot, frame};
+use cutlass_eval::ReaderFactory;
 use cutlass_model::{
     Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType, Micros,
     Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
 };
+use cutlass_playback::FrameCache;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
@@ -145,6 +148,7 @@ pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
     readers: ReaderFactory,
+    preview_cache: RefCell<FrameCache>,
     settings: Settings,
     session: Option<Session>,
     folder: Option<Folder>,
@@ -171,6 +175,7 @@ impl Shell {
             decoders,
             encoders,
             readers: crate::readers::installed_readers(),
+            preview_cache: RefCell::new(FrameCache::new()),
             settings,
             session: None,
             folder: None,
@@ -395,19 +400,24 @@ impl Shell {
         self.playhead = Micros(next);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
+        self.readers = readers;
+        self.preview_cache.borrow_mut().clear();
+    }
+
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
-        let draft = self.session_draft()?;
+        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let time = self.playhead;
         let mut device = SoftwareDevice::new();
-        let picture = frame(
-            &Snapshot::new(draft),
-            self.playhead,
-            &mut device,
-            &self.readers,
-        )
-        .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let picture = self
+            .preview_cache
+            .borrow_mut()
+            .frame(session, &mut device, time, &self.readers)
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
         Ok(Picture {
-            width: picture.extent.width,
-            height: picture.extent.height,
+            width: picture.width,
+            height: picture.height,
             rgba: picture.rgba,
         })
     }
@@ -1013,15 +1023,41 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
 #[cfg(test)]
 mod tests {
     use super::{ExportRequest, LONG_SIDES, Shell, ShellError};
+    use cutlass_codec::ContainerId;
+    use cutlass_container::{Demux, OpenError, ProbeResult};
     use cutlass_decode::CodecId;
+    use cutlass_eval::ReaderFactory;
     use cutlass_model::{
-        Draft, MaterialColorConfig, Micros, Segment, SegmentId, TimeRange, TrackAttribute,
+        Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, SegmentId, TimeRange,
+        TrackAttribute,
     };
     use cutlass_session::EditError;
     use cutlass_settings::{SeekDuringPlayback, Settings};
     use cutlass_store::Folder;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    static MOVIE_OPENS: AtomicU32 = AtomicU32::new(0);
+
+    fn probe_counted(header: &[u8]) -> ProbeResult {
+        if header.len() < 8 {
+            return ProbeResult::NeedBytes {
+                have: header.len(),
+                need: 8,
+            };
+        }
+        ProbeResult::Accept {
+            family: ContainerId::Isobmff,
+            examined: 8,
+        }
+    }
+
+    fn open_counted(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+        MOVIE_OPENS.fetch_add(1, Ordering::Relaxed);
+        Err(OpenError::Source {
+            message: "counted".to_owned(),
+        })
+    }
 
     fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
@@ -1320,6 +1356,72 @@ mod tests {
         desktop.pause();
         assert!(!desktop.playing());
         assert_eq!(desktop.revision(), revision);
+    }
+
+    #[test]
+    fn a_second_paint_does_not_open_the_movie() {
+        MOVIE_OPENS.store(0, Ordering::Relaxed);
+        let temp = Temp::new();
+        let movie = temp.path.join("clip.bin");
+        std::fs::write(&movie, b"12345678").unwrap();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "color".into(),
+            is_color_clip: true,
+            solid_color: "0xFF336699".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("color", "color", TimeRange::new(0, 1_000_000)));
+        let mut video = MaterialVideo::new("movie");
+        video.path = movie.display().to_string();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("movie", "movie", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        segment.render_index = 1;
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let mut readers = ReaderFactory::new();
+        readers.register_container(probe_counted, open_counted);
+        desktop.set_readers(readers);
+
+        let first = desktop.preview_bytes().unwrap();
+        assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), 1);
+        assert_eq!(first.rgba, [0x33, 0x66, 0x99, 0xFF, 0x33, 0x66, 0x99, 0xFF]);
+        let second = desktop.preview_bytes().unwrap();
+        assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), 1);
+        assert_eq!(second.rgba, first.rgba);
+
+        for (step, time) in [10_i64, 20, 30, 40].into_iter().enumerate() {
+            desktop.seek(Micros(time));
+            let picture = desktop.preview_bytes().unwrap();
+            assert_eq!(picture.rgba, first.rgba);
+            assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), step as u32 + 2);
+        }
+        desktop.seek(Micros(0));
+        let again = desktop.preview_bytes().unwrap();
+        assert_eq!(again.rgba, first.rgba);
+        assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), 6);
+
+        desktop.seek(Micros(2_000_000));
+        let outside = desktop.preview_bytes().unwrap();
+        assert_eq!(outside.rgba, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), 6);
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop.seek(Micros(0));
+        desktop
+            .toggle_attribute(track, TrackAttribute::HIDE)
+            .unwrap();
+        let hidden = desktop.preview_bytes().unwrap();
+        assert_eq!(hidden.rgba, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(MOVIE_OPENS.load(Ordering::Relaxed), 6);
     }
 
     #[test]

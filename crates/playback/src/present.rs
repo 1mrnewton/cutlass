@@ -133,6 +133,46 @@ impl Cache {
     }
 }
 
+/// Composited pictures kept for the preview.
+///
+/// The key is the draft id, the revision, the timeline time, and the canvas
+/// size. Four pictures is enough for a short scrub. A new draft or revision
+/// drops what was stored.
+pub struct FrameCache {
+    inner: Cache,
+}
+
+impl FrameCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Cache::new(),
+        }
+    }
+
+    /// Drops every stored picture.
+    pub fn clear(&mut self) {
+        self.inner = Cache::new();
+    }
+
+    /// The picture at `time`. A stored key is returned without evaluating again.
+    pub fn frame<D: Device>(
+        &mut self,
+        session: &Session,
+        device: &mut D,
+        time: Micros,
+        media: &ReaderFactory,
+    ) -> Result<Readback, PresentError<D::Error>> {
+        evaluate(&mut self.inner, session, device, time, media)
+    }
+}
+
+impl Default for FrameCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) fn evaluate<D: Device>(
     cache: &mut Cache,
     session: &Session,

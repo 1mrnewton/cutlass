@@ -19,7 +19,7 @@ mod present;
 
 pub use apple::{AudioGap, AudioHost, AudioOutput, CopyOutcome};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
-pub use present::{PresentError, Presentation};
+pub use present::{FrameCache, PresentError, Presentation};
 
 #[cfg(test)]
 pub(crate) fn color_session(duration_us: i64, segment_us: i64) -> cutlass_session::Session {

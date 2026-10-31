@@ -22,6 +22,9 @@ pub struct Decoder {
     refs: [Option<Arc<Reference>>; 8],
     prev: Option<Arc<Motion>>,
     last_seg: Vec<u8>,
+    /// Frames whose segmentation map was coded relative to the previous map.
+    #[cfg(test)]
+    temporal_frames: u32,
 }
 
 impl Decoder {
@@ -31,7 +34,15 @@ impl Decoder {
             refs: [const { None }; 8],
             prev: None,
             last_seg: Vec::new(),
+            #[cfg(test)]
+            temporal_frames: 0,
         }
+    }
+
+    /// How many decoded frames coded the segmentation map temporally.
+    #[cfg(test)]
+    pub fn temporal_frames(&self) -> u32 {
+        self.temporal_frames
     }
 
     pub fn decode(&mut self, packet: &[u8]) -> Result<Option<Picture>, CodecError> {
@@ -41,6 +52,10 @@ impl Decoder {
             });
         }
         let parsed = parse(&self.persist, packet)?;
+        #[cfg(test)]
+        if parsed.header.seg.temporal {
+            self.temporal_frames = self.temporal_frames.saturating_add(1);
+        }
         if parsed.header.show_existing {
             let picture = self.shown(&parsed.header)?;
             self.persist.last_width = parsed.header.width;
@@ -72,6 +87,10 @@ impl Decoder {
         self.refs = [const { None }; 8];
         self.prev = None;
         self.last_seg.clear();
+        #[cfg(test)]
+        {
+            self.temporal_frames = 0;
+        }
     }
 
     fn slots(&self) -> RefSlots<'_> {
@@ -273,6 +292,13 @@ impl VideoDecoder for Vp9Decoder {
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel)
+    }
+}
+
+#[cfg(test)]
+impl Vp9Decoder {
+    pub(crate) fn temporal_frames(&self) -> u32 {
+        self.inner.temporal_frames()
     }
 }
 

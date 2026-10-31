@@ -19,6 +19,9 @@ mod recon;
 mod tables;
 mod txfm;
 
+#[cfg(test)]
+mod prove;
+
 pub use decode::{Decoder, Vp9Decoder};
 pub use encode::Vp9Encoder;
 

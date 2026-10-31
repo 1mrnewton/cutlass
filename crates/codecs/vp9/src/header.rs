@@ -53,6 +53,11 @@ pub struct Persist {
     pub ref_deltas: [i8; 4],
     pub mode_deltas: [i8; 2],
     pub sign_bias: [u8; 4],
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub bit_depth: u8,
+    pub color_space: u8,
+    pub color_range: u8,
 }
 
 impl Persist {
@@ -74,6 +79,11 @@ impl Persist {
             ref_deltas: [0; 4],
             mode_deltas: [0; 2],
             sign_bias: [0; 4],
+            ss_x: 1,
+            ss_y: 1,
+            bit_depth: 8,
+            color_space: 1,
+            color_range: 0,
         }
     }
 }
@@ -97,6 +107,9 @@ pub struct Header {
     pub refresh_flags: u8,
     pub color_space: u8,
     pub color_range: u8,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub bit_depth: u8,
     pub width: u32,
     pub height: u32,
     pub render_width: u32,
@@ -150,7 +163,10 @@ pub fn parse<'a>(state: &Persist, data: &'a [u8]) -> Result<Parsed<'a>, CodecErr
         return Err(bad(&bits, "frame marker"));
     }
     let profile = read_profile(&mut bits)?;
-    if profile != 0 {
+    if profile > 3 {
+        return Err(bad(&bits, "vp9 profile"));
+    }
+    if profile != 0 && profile != 1 {
         return Err(CodecError::Unsupported {
             what: "vp9 profile",
         });
@@ -182,6 +198,13 @@ pub fn parse<'a>(state: &Persist, data: &'a [u8]) -> Result<Parsed<'a>, CodecErr
         )?;
     }
     header.need_resync = need_resync;
+    if !key_frame && !header.intra_only {
+        header.ss_x = state.ss_x;
+        header.ss_y = state.ss_y;
+        header.bit_depth = state.bit_depth;
+        header.color_space = state.color_space;
+        header.color_range = state.color_range;
+    }
 
     read_context_flags(&mut bits, &mut header)?;
     if header.intra() || error_resilient {
@@ -327,8 +350,15 @@ fn read_inter_setup(
 
 fn read_intra_only(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
     read_sync(bits)?;
-    header.color_space = 1;
-    header.color_range = 0;
+    if header.profile > 0 {
+        read_color(bits, header)?;
+    } else {
+        header.color_space = 1;
+        header.color_range = 0;
+        header.ss_x = 1;
+        header.ss_y = 1;
+        header.bit_depth = 8;
+    }
     header.refresh_flags = u8::try_from(bits.read(8)?).unwrap_or(0);
     read_frame_size(bits, header)
 }
@@ -776,11 +806,34 @@ fn read_sync(bits: &mut BitReader<'_>) -> Result<(), CodecError> {
 }
 
 fn read_color(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
+    header.bit_depth = 8;
     header.color_space = u8::try_from(bits.read(3)?).unwrap_or(0);
     if header.color_space == 7 {
-        return Err(bad(bits, "profile 0 rgb"));
+        if header.profile & 1 == 0 {
+            return Err(bad(bits, "profile 0 rgb"));
+        }
+        header.color_range = 1;
+        header.ss_x = 0;
+        header.ss_y = 0;
+        if bits.read(1)? == 1 {
+            return Err(bad(bits, "reserved bit"));
+        }
+        return Ok(());
     }
     header.color_range = u8::try_from(bits.read(1)?).unwrap_or(0);
+    if header.profile & 1 == 1 {
+        header.ss_x = bits.read(1)?;
+        header.ss_y = bits.read(1)?;
+        if header.ss_x == 1 && header.ss_y == 1 {
+            return Err(bad(bits, "profile chroma"));
+        }
+        if bits.read(1)? == 1 {
+            return Err(bad(bits, "reserved bit"));
+        }
+    } else {
+        header.ss_x = 1;
+        header.ss_y = 1;
+    }
     Ok(())
 }
 
@@ -931,6 +984,9 @@ fn empty_header(profile: u8, key_frame: bool, show_frame: bool, error_resilient:
         refresh_flags: 0,
         color_space: 0,
         color_range: 0,
+        ss_x: 1,
+        ss_y: 1,
+        bit_depth: 8,
         width: 0,
         height: 0,
         render_width: 0,
@@ -1036,9 +1092,17 @@ mod tests {
     }
 
     #[test]
-    fn profile_one_is_unsupported() {
-        let err = must_fail(&[0xa0]);
+    fn profile_two_is_unsupported() {
+        let err = must_fail(&[0x90]);
         assert!(err.contains("profile"), "{err}");
+    }
+
+    #[test]
+    fn profile_one_reserved_bit_is_malformed() {
+        // Marker, profile 1, key frame, shown, sync, sRGB, reserved bit 1.
+        let bytes = [0xa2, 0x49, 0x83, 0x42, 0b1111_0000];
+        let err = must_fail(&bytes);
+        assert!(err.contains("reserved"), "{err}");
     }
 
     #[test]

@@ -115,6 +115,10 @@ impl Decoder {
             v: reference.v.samples.clone(),
             width: reference.width,
             height: reference.height,
+            ss_x: reference.ss_x,
+            ss_y: reference.ss_y,
+            color_space: reference.color_space,
+            color_range: reference.color_range,
         })
     }
 
@@ -138,6 +142,11 @@ impl Decoder {
         self.persist.intra_only = header.intra_only;
         self.persist.last_show_frame = header.show_frame;
         self.persist.sign_bias = header.sign_bias;
+        self.persist.ss_x = header.ss_x;
+        self.persist.ss_y = header.ss_y;
+        self.persist.bit_depth = header.bit_depth;
+        self.persist.color_space = header.color_space;
+        self.persist.color_range = header.color_range;
         self.persist.seg = header.seg.clone();
         self.persist.ref_deltas = header.ref_deltas;
         self.persist.mode_deltas = header.mode_deltas;
@@ -237,7 +246,14 @@ impl Vp9Decoder {
                 what: "vp9 decoder",
             });
         }
-        if params.pixel != PixelFormat::Yuv420p {
+        if !matches!(
+            params.pixel,
+            PixelFormat::Yuv420p
+                | PixelFormat::Yuv422p
+                | PixelFormat::Yuv440p
+                | PixelFormat::Yuv444p
+                | PixelFormat::Gbrp
+        ) {
             return Err(CodecError::Unsupported {
                 what: "vp9 pixel format",
             });
@@ -303,9 +319,20 @@ impl Vp9Decoder {
 }
 
 fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
-    let chroma_w = picture.width.div_ceil(2);
-    let chroma_h = picture.height.div_ceil(2);
-    VideoFrame::yuv420p(
+    let format = match (picture.ss_x, picture.ss_y, picture.color_space) {
+        (1, 1, _) => PixelFormat::Yuv420p,
+        (1, 0, _) => PixelFormat::Yuv422p,
+        (0, 1, _) => PixelFormat::Yuv440p,
+        (0, 0, 7) => PixelFormat::Gbrp,
+        (0, 0, _) => PixelFormat::Yuv444p,
+        _ => {
+            return Err(CodecError::Unsupported { what: "vp9 chroma" });
+        }
+    };
+    let chroma_w = picture.width.div_ceil(1u32 << picture.ss_x.min(1));
+    let chroma_h = picture.height.div_ceil(1u32 << picture.ss_y.min(1));
+    VideoFrame::planar(
+        format,
         picture.width,
         picture.height,
         Plane::tight(picture.width, picture.height, picture.y.clone())?,

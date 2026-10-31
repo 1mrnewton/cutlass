@@ -28,7 +28,7 @@ fn local_profile0_matches_ffmpeg_software() {
     let stream = read_ivf(&ivf);
     assert!(!stream.frames.is_empty(), "encoder produced no frames");
     let started = Instant::now();
-    let (ours, temporal) = decode_shown(&stream);
+    let (ours, temporal) = decode_shown(&stream, PixelFormat::Yuv420p);
     let elapsed = started.elapsed();
     let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
     assert_eq!(ours.len(), oracle.len(), "shown bytes differ");
@@ -84,7 +84,7 @@ fn segmentation_temporal_update_matches_ffmpeg() {
             ],
         );
         let stream = read_ivf(&ivf);
-        let (ours, temporal) = decode_shown(&stream);
+        let (ours, temporal) = decode_shown(&stream, PixelFormat::Yuv420p);
         if temporal == 0 {
             continue;
         }
@@ -110,13 +110,50 @@ fn segmentation_temporal_update_matches_ffmpeg() {
     );
 }
 
-fn decode_shown(stream: &Ivf) -> (Vec<u8>, u32) {
-    let params = CodecParams::with_format(
-        CodecId::Vp9,
-        stream.width,
-        stream.height,
-        PixelFormat::Yuv420p,
-    );
+#[test]
+fn profile1_chroma_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no profile 1 source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let cases = [
+        ("yuv422p", PixelFormat::Yuv422p),
+        ("yuv440p", PixelFormat::Yuv440p),
+        ("yuv444p", PixelFormat::Yuv444p),
+        ("gbrp", PixelFormat::Gbrp),
+    ];
+    for (pix_fmt, format) in cases {
+        let dir = temp_dir(pix_fmt);
+        let ivf = dir.join("in.ivf");
+        encode_profile1(&ffmpeg, &source, &ivf, pix_fmt);
+        let stream = read_ivf(&ivf);
+        assert!(!stream.frames.is_empty(), "{pix_fmt} produced no frames");
+        let (ours, _) = decode_shown(&stream, format);
+        let oracle = ffmpeg_yuv(&ffmpeg, &ivf, pix_fmt);
+        assert_eq!(
+            ours.len(),
+            oracle.len(),
+            "{pix_fmt} shown bytes differ {} vs {}",
+            ours.len(),
+            oracle.len()
+        );
+        let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{pix_fmt} first mismatch at {mismatch:?}");
+        eprintln!(
+            "profile 1 {pix_fmt} {} frames {} bytes",
+            stream.frames.len(),
+            ours.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
+    let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");
     let mut packed = Vec::new();
     for (index, frame) in stream.frames.iter().enumerate() {
@@ -179,6 +216,41 @@ fn encode_profile0(ffmpeg: &Path, source: &Path, ivf: &Path, extra: &[&str]) {
     assert!(
         status.status.success(),
         "encode {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn encode_profile1(ffmpeg: &Path, source: &Path, ivf: &Path, pix_fmt: &str) {
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-an",
+            "-frames:v",
+            "8",
+            "-vf",
+            "scale=320:240",
+            "-c:v",
+            "libvpx-vp9",
+            "-profile:v",
+            "1",
+            "-pix_fmt",
+            pix_fmt,
+            "-b:v",
+            "400k",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-f",
+            "ivf",
+        ])
+        .arg(ivf)
+        .output()
+        .expect("encode");
+    assert!(
+        status.status.success(),
+        "encode {pix_fmt} {}",
         String::from_utf8_lossy(&status.stderr)
     );
 }

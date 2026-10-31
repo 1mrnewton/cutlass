@@ -135,6 +135,53 @@ impl VideoFrame {
         })
     }
 
+    /// A planar picture whose chroma size follows `format`.
+    pub fn planar(
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+        y: Plane,
+        u: Plane,
+        v: Plane,
+    ) -> Result<Self, CodecError> {
+        if width == 0 || height == 0 {
+            return Err(CodecError::InvalidApi {
+                what: "empty picture",
+            });
+        }
+        let Some((chroma_w, chroma_h)) = format.chroma_wh(width, height) else {
+            return Err(CodecError::InvalidApi {
+                what: "picture format",
+            });
+        };
+        if y.width != width || y.height != height {
+            return Err(CodecError::InvalidApi {
+                what: "luma plane size",
+            });
+        }
+        if u.width != chroma_w
+            || u.height != chroma_h
+            || v.width != chroma_w
+            || v.height != chroma_h
+        {
+            return Err(CodecError::InvalidApi {
+                what: "chroma plane size",
+            });
+        }
+        Ok(Self {
+            format,
+            width,
+            height,
+            y,
+            u,
+            v,
+            range: ColorRange::Unspecified,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+            matrix: MatrixCoefficients::Unspecified,
+        })
+    }
+
     /// A black 4:2:0 picture with tight planes.
     pub fn blank_yuv420p(width: u32, height: u32) -> Result<Self, CodecError> {
         let chroma_w = width.div_ceil(2);

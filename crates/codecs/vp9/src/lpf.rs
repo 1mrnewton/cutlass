@@ -9,7 +9,7 @@
 
 use cutlass_decode::CodecError;
 
-use crate::geom::{self, uv_tx_420};
+use crate::geom::{self, TX_8X8, TX_16X16, uv_tx_420};
 use crate::header::Header;
 
 const LEFT_TX: [u64; 4] = [
@@ -239,16 +239,44 @@ pub fn filter_sb(
     levels: &Levels,
     planes: &mut Planes<'_>,
     origin: Origin,
+    chroma_420: bool,
 ) -> Result<(), CodecError> {
     mask.adjust(origin.mi_row, origin.mi_col, origin.mi_rows, origin.mi_cols);
     filter_luma(mask, levels, planes.y, planes.y_stride, &origin)?;
-    filter_chroma(mask, levels, planes.u, planes.uv_stride, &origin)?;
-    filter_chroma(mask, levels, planes.v, planes.uv_stride, &origin)?;
+    if chroma_420 {
+        filter_chroma(mask, levels, planes.u, planes.uv_stride, &origin)?;
+        filter_chroma(mask, levels, planes.v, planes.uv_stride, &origin)?;
+    }
     Ok(())
 }
 
+/// One chroma sample on a vertical or horizontal edge.
+pub(crate) struct ChromaSample {
+    pub x: usize,
+    pub y: usize,
+    pub vertical: bool,
+    pub filter_size: u8,
+    pub level: u8,
+}
+
+pub(crate) fn filter_chroma_sample(
+    plane: &mut [u8],
+    stride: usize,
+    levels: &Levels,
+    sample: ChromaSample,
+) -> Result<(), CodecError> {
+    let Some(thr) = levels.thresh(sample.level) else {
+        return Ok(());
+    };
+    if sample.vertical {
+        filter_one_vert(plane, stride, sample.x, sample.y, sample.filter_size, &thr)
+    } else {
+        filter_one_horiz(plane, stride, sample.x, sample.y, sample.filter_size, &thr)
+    }
+}
+
 impl Levels {
-    fn level(&self, seg: u8, reference: u8, mode: u8) -> Option<u8> {
+    pub(crate) fn level(&self, seg: u8, reference: u8, mode: u8) -> Option<u8> {
         let seg = usize::from(seg);
         let reference = usize::from(reference);
         if seg >= 8 || reference >= 4 {
@@ -722,6 +750,104 @@ fn uv_nibble(mask: u16, row: usize) -> u8 {
 
 fn chroma_levels(lfl: &[u8; 64], row: usize) -> [u8; 4] {
     std::array::from_fn(|col| lfl.get(row * 16 + col * 2).copied().unwrap_or(0))
+}
+
+fn filter_one_vert(
+    plane: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    filter_size: u8,
+    thr: &Thresh,
+) -> Result<(), CodecError> {
+    let (left, right) = if filter_size >= TX_16X16 {
+        (8, 8)
+    } else {
+        (4, 4)
+    };
+    let Ok(at) = index(plane, stride, x, y, left, right) else {
+        if filter_size >= TX_16X16 {
+            vert16_border(plane, stride, x, y, thr);
+        } else if filter_size >= TX_8X8 {
+            vert8_border(plane, stride, x, y, thr);
+        } else {
+            vert4_border(plane, stride, x, y, thr);
+        }
+        return Ok(());
+    };
+    if filter_size >= TX_16X16 {
+        let p = side(plane, at, 8);
+        let mut q = [0u8; 8];
+        q.copy_from_slice(&plane[at..at + 8]);
+        let wide = filter16(thr, &p, &q);
+        plane[at - 7..at].copy_from_slice(&wide[..7]);
+        plane[at..at + 7].copy_from_slice(&wide[7..]);
+    } else if filter_size >= TX_8X8 {
+        let p = side(plane, at, 4);
+        let q = [plane[at], plane[at + 1], plane[at + 2], plane[at + 3]];
+        let wide = filter8(thr, &p, &q);
+        plane[at - 3] = wide[0];
+        plane[at - 2] = wide[1];
+        plane[at - 1] = wide[2];
+        plane[at] = wide[3];
+        plane[at + 1] = wide[4];
+        plane[at + 2] = wide[5];
+    } else {
+        let p = side(plane, at, 4);
+        let q = [plane[at], plane[at + 1], plane[at + 2], plane[at + 3]];
+        let mask = filter_mask(thr, &p, &q);
+        let mut p1 = p[2];
+        let mut p0 = p[3];
+        let mut q0 = q[0];
+        let mut q1 = q[1];
+        filter4(mask, thr.hev, &mut p1, &mut p0, &mut q0, &mut q1);
+        plane[at - 2] = p1;
+        plane[at - 1] = p0;
+        plane[at] = q0;
+        plane[at + 1] = q1;
+    }
+    Ok(())
+}
+
+fn filter_one_horiz(
+    plane: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    filter_size: u8,
+    thr: &Thresh,
+) -> Result<(), CodecError> {
+    let (above, below) = if filter_size >= TX_16X16 {
+        (8, 8)
+    } else {
+        (4, 4)
+    };
+    let Ok(samples) = column(plane, stride, x, y, above, below) else {
+        if filter_size >= TX_16X16 {
+            horiz16_border(plane, stride, x, y, thr);
+        } else if filter_size >= TX_8X8 {
+            horiz8_border(plane, stride, x, y, thr);
+        } else {
+            horiz4_border(plane, stride, x, y, thr);
+        }
+        return Ok(());
+    };
+    if filter_size >= TX_16X16 {
+        let wide = filter16(thr, &samples[..8], &samples[8..]);
+        put_column(plane, stride, x, y, &wide, 7)?;
+    } else if filter_size >= TX_8X8 {
+        let wide = filter8(thr, &samples[..4], &samples[4..]);
+        put_column(plane, stride, x, y, &wide, 3)?;
+    } else {
+        let mask = filter_mask(thr, &samples[..4], &samples[4..]);
+        let mut p1 = samples[2];
+        let mut p0 = samples[3];
+        let mut q0 = samples[4];
+        let mut q1 = samples[5];
+        filter4(mask, thr.hev, &mut p1, &mut p0, &mut q0, &mut q1);
+        put_column(plane, stride, x, y, &[p1, p0, q0, q1], 2)?;
+    }
+    Ok(())
 }
 
 fn vert4(

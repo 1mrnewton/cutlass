@@ -943,18 +943,22 @@ impl<'a> Scratch<'a> {
         average: bool,
         scale: Option<mc::Scale>,
     ) -> Result<(), CodecError> {
-        let ss = u32::from(plane > 0);
-        let origin_x = (pos.mi_col << 3) >> ss;
-        let origin_y = (pos.mi_row << 3) >> ss;
+        let (ss_x, ss_y) = if plane == 0 {
+            (0, 0)
+        } else {
+            (self.header.ss_x.min(1), self.header.ss_y.min(1))
+        };
+        let origin_x = (pos.mi_col << 3) >> ss_x;
+        let origin_y = (pos.mi_row << 3) >> ss_y;
         let at_x = luma_px(pos.mi_col, 0);
         let at_y = luma_px(pos.mi_row, 0);
         if mi.bsize < BLOCK_8X8 {
-            let n4_w = (pos.bw << 1) >> ss;
-            let n4_h = (pos.bh << 1) >> ss;
+            let n4_w = (pos.bw << 1) >> ss_x;
+            let n4_h = (pos.bh << 1) >> ss_y;
             let mut block = 0usize;
             for row in 0..n4_h {
                 for col in 0..n4_w {
-                    let (mv_row, mv_col) = q4_mv(mi, plane, block, ref_i);
+                    let (mv_row, mv_col) = q4_mv(mi, plane, block, ref_i, ss_x, ss_y);
                     block += 1;
                     self.paint(Paint {
                         frame: mi.refs[ref_i],
@@ -975,14 +979,14 @@ impl<'a> Scratch<'a> {
             }
             return Ok(());
         }
-        let (mv_row, mv_col) = q4_mv(mi, plane, 0, ref_i);
+        let (mv_row, mv_col) = q4_mv(mi, plane, 0, ref_i, ss_x, ss_y);
         self.paint(Paint {
             frame: mi.refs[ref_i],
             plane,
             x: origin_x,
             y: origin_y,
-            w: (pos.bw << 3) >> ss,
-            h: (pos.bh << 3) >> ss,
+            w: (pos.bw << 3) >> ss_x,
+            h: (pos.bh << 3) >> ss_y,
             mv_row,
             mv_col,
             filter: mi.interp,
@@ -1070,12 +1074,17 @@ impl<'a> Scratch<'a> {
             return Err(super::bad("reference frame"));
         }
         let slot = usize::from(self.header.ref_index[usize::from(frame - 1)]);
-        self.slots
+        let reference = self
+            .slots
             .frames
             .get(slot)
             .copied()
             .flatten()
-            .ok_or(super::bad("reference picture"))
+            .ok_or(super::bad("reference picture"))?;
+        if reference.ss_x != self.header.ss_x || reference.ss_y != self.header.ss_y {
+            return Err(super::bad("reference subsampling"));
+        }
+        Ok(reference)
     }
 
     fn blit(&mut self, paint: &Paint, w: usize, h: usize, pred: &[u8]) -> Result<(), CodecError> {
@@ -1580,23 +1589,40 @@ fn luma_px(mi: usize, offset: usize) -> i32 {
     i32::try_from(mi.saturating_mul(8).saturating_add(offset)).unwrap_or(0)
 }
 
-fn q4_mv(mi: &Mi, plane: usize, block: usize, ref_i: usize) -> (i32, i32) {
-    if mi.bsize >= BLOCK_8X8 || plane == 0 {
+fn q4_mv(mi: &Mi, plane: usize, block: usize, ref_i: usize, ss_x: u32, ss_y: u32) -> (i32, i32) {
+    if plane == 0 || mi.bsize >= BLOCK_8X8 || (ss_x == 0 && ss_y == 0) {
         let mv = if mi.bsize >= BLOCK_8X8 {
             mi.mv[ref_i]
         } else {
             mi.sub_mv[block][ref_i]
         };
-        let scale = if plane == 0 { 2 } else { 1 };
-        return (i32::from(mv.row) * scale, i32::from(mv.col) * scale);
+        let row_scale = if plane == 0 { 2 } else { 2 >> ss_y };
+        let col_scale = if plane == 0 { 2 } else { 2 >> ss_x };
+        return (i32::from(mv.row) * row_scale, i32::from(mv.col) * col_scale);
     }
-    let mut row = 0i32;
-    let mut col = 0i32;
-    for sub in &mi.sub_mv {
-        row += i32::from(sub[ref_i].row);
-        col += i32::from(sub[ref_i].col);
+    if ss_x == 1 && ss_y == 1 {
+        let mut row = 0i32;
+        let mut col = 0i32;
+        for sub in &mi.sub_mv {
+            row += i32::from(sub[ref_i].row);
+            col += i32::from(sub[ref_i].col);
+        }
+        return (round_q4(row), round_q4(col));
     }
-    (round_q4(row), round_q4(col))
+    let other = if ss_y == 1 { block + 2 } else { block + 1 };
+    let Some(a) = mi.sub_mv.get(block) else {
+        return (0, 0);
+    };
+    let Some(b) = mi.sub_mv.get(other) else {
+        return (0, 0);
+    };
+    let row = round_q2(i32::from(a[ref_i].row) + i32::from(b[ref_i].row));
+    let col = round_q2(i32::from(a[ref_i].col) + i32::from(b[ref_i].col));
+    (row * (2 >> ss_y), col * (2 >> ss_x))
+}
+
+fn round_q2(value: i32) -> i32 {
+    (if value < 0 { value - 1 } else { value + 1 }) / 2
 }
 
 fn round_q4(value: i32) -> i32 {

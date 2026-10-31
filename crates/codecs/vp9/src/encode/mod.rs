@@ -111,6 +111,10 @@ impl VideoEncoder for Vp9Encoder {
             v: coded.v,
             width: self.width,
             height: self.height,
+            ss_x: 1,
+            ss_y: 1,
+            color_space: 0,
+            color_range: 0,
         };
         let reference = Reference::from_picture(&picture)?;
         self.reference = Some(reference);
@@ -717,7 +721,7 @@ mod tests {
         let mut decoder = Vp9Decoder::open(&params).expect("decoder");
         let empty = decoder.push(&Packet::video(Vec::new(), 0, 1, 30, true));
         assert!(matches!(empty, Err(CodecError::InvalidApi { .. })));
-        for marker in [0xa0, 0x90, 0xb0] {
+        for marker in [0x90, 0xb0] {
             let err = decoder
                 .push(&Packet::video(vec![marker], 0, 1, 30, true))
                 .expect_err("profile");

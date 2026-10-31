@@ -44,6 +44,10 @@ pub struct Reference {
     pub v: RefPlane,
     pub width: u32,
     pub height: u32,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub color_space: u8,
+    pub color_range: u8,
 }
 
 pub struct RefSlots<'a> {
@@ -60,12 +64,18 @@ impl Reference {
     pub fn from_picture(pic: &super::Picture) -> Result<Self, CodecError> {
         let width = usize::try_from(pic.width).unwrap_or(0);
         let height = usize::try_from(pic.height).unwrap_or(0);
+        let chroma_w = width.div_ceil(1usize << pic.ss_x.min(1));
+        let chroma_h = height.div_ceil(1usize << pic.ss_y.min(1));
         Ok(Self {
             y: RefPlane::tight(&pic.y, width, height)?,
-            u: RefPlane::tight(&pic.u, width.div_ceil(2), height.div_ceil(2))?,
-            v: RefPlane::tight(&pic.v, width.div_ceil(2), height.div_ceil(2))?,
+            u: RefPlane::tight(&pic.u, chroma_w, chroma_h)?,
+            v: RefPlane::tight(&pic.v, chroma_w, chroma_h)?,
             width: pic.width,
             height: pic.height,
+            ss_x: pic.ss_x,
+            ss_y: pic.ss_y,
+            color_space: pic.color_space,
+            color_range: pic.color_range,
         })
     }
 }

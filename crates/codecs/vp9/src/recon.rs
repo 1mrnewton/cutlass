@@ -56,6 +56,10 @@ pub struct Picture {
     pub v: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub color_space: u8,
+    pub color_range: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -95,6 +99,23 @@ struct BlockPos {
     bh: usize,
 }
 
+struct ChromaJob {
+    x: usize,
+    y: usize,
+    filter_size: u8,
+    level: u8,
+}
+
+struct ChromaSite {
+    pass: u32,
+    row: usize,
+    col: usize,
+    edge: u32,
+    along: u32,
+    ss_x: u32,
+    ss_y: u32,
+}
+
 struct BlockAt {
     mi_row: usize,
     mi_col: usize,
@@ -114,7 +135,8 @@ struct TxPos {
     row: usize,
     col: usize,
     n4_w: usize,
-    ss: u32,
+    ss_x: u32,
+    ss_y: u32,
     shift_w: usize,
     shift_h: usize,
 }
@@ -256,8 +278,10 @@ impl<'a> Scratch<'a> {
         let aligned = mi_cols.div_ceil(8) * 8;
         let coded_w = usize::try_from(align8(width)).unwrap_or(0);
         let coded_h = usize::try_from(align8(height)).unwrap_or(0);
-        let uv_w = coded_w / 2;
-        let uv_h = coded_h / 2;
+        let ss_x = header.ss_x.min(1);
+        let ss_y = header.ss_y.min(1);
+        let uv_w = coded_w >> ss_x;
+        let uv_h = coded_h >> ss_y;
         let y_stride = coded_w.saturating_add(FRAME_BORDER);
         let uv_stride = uv_w.saturating_add(FRAME_BORDER);
         let y_rows = coded_h.saturating_add(FRAME_BORDER);
@@ -289,13 +313,13 @@ impl<'a> Scratch<'a> {
             uv_plane_h: uv_h,
             crop_w: usize::try_from(width).unwrap_or(0),
             crop_h: usize::try_from(height).unwrap_or(0),
-            uv_w: usize::try_from(width.div_ceil(2)).unwrap_or(0),
-            uv_h: usize::try_from(height.div_ceil(2)).unwrap_or(0),
+            uv_w: usize::try_from(width.div_ceil(1u32 << ss_x)).unwrap_or(0),
+            uv_h: usize::try_from(height.div_ceil(1u32 << ss_y)).unwrap_or(0),
             above_part: vec![0u8; aligned],
             left_part: [0; 8],
             above_y: vec![0u8; aligned * 2],
-            above_u: vec![0u8; aligned],
-            above_v: vec![0u8; aligned],
+            above_u: vec![0u8; (aligned * 2) >> ss_x],
+            above_v: vec![0u8; (aligned * 2) >> ss_x],
             left_y: [0; 16],
             left_u: [0; 16],
             left_v: [0; 16],
@@ -931,8 +955,10 @@ impl<'a> Scratch<'a> {
         bh: usize,
     ) -> Result<(), CodecError> {
         self.zero_plane(0, mi_row, mi_col, bw << 1, bh << 1)?;
-        self.zero_plane(1, mi_row, mi_col, bw, bh)?;
-        self.zero_plane(2, mi_row, mi_col, bw, bh)
+        let chroma_w = (bw << 1) >> usize::try_from(self.header.ss_x).unwrap_or(1);
+        let chroma_h = (bh << 1) >> usize::try_from(self.header.ss_y).unwrap_or(1);
+        self.zero_plane(1, mi_row, mi_col, chroma_w, chroma_h)?;
+        self.zero_plane(2, mi_row, mi_col, chroma_w, chroma_h)
     }
 
     fn zero_plane(
@@ -943,9 +969,9 @@ impl<'a> Scratch<'a> {
         n4_w: usize,
         n4_h: usize,
     ) -> Result<(), CodecError> {
-        let ss = usize::from(plane > 0);
-        let above_at = (mi_col * 2) >> ss;
-        let left_at = ((mi_row * 2) & 15) >> ss;
+        let (ss_x, ss_y) = self.plane_ss(plane);
+        let above_at = (mi_col * 2) >> ss_x;
+        let left_at = ((mi_row * 2) & 15) >> ss_y;
         match plane {
             0 => {
                 paint_zero(&mut self.above_y, above_at, n4_w)?;
@@ -982,19 +1008,21 @@ impl<'a> Scratch<'a> {
         pos: BlockPos,
         inter: bool,
     ) -> Result<(), CodecError> {
-        let ss = u32::from(plane > 0);
+        let (ss_x, ss_y) = self.plane_ss(plane);
         let tx = if plane == 0 {
             mi.tx
-        } else {
+        } else if self.header.ss_x == 1 && self.header.ss_y == 1 {
             uv_tx_420(mi.bsize, mi.tx)
+        } else {
+            geom::uv_tx(mi.bsize, mi.tx, self.header.ss_x, self.header.ss_y)
         };
-        let n4_w = (pos.bw << 1) >> ss;
-        let n4_h = (pos.bh << 1) >> ss;
+        let n4_w = (pos.bw << 1) >> ss_x;
+        let n4_h = (pos.bh << 1) >> ss_y;
         let step = 1usize << tx;
         let right = edge_delta(self.mi_cols, pos.bw, pos.mi_col);
         let bottom = edge_delta(self.mi_rows, pos.bh, pos.mi_row);
-        let visit_w = limit_blocks(n4_w, right, ss);
-        let visit_h = limit_blocks(n4_h, bottom, ss);
+        let visit_w = limit_blocks(n4_w, right, u32::try_from(ss_x).unwrap_or(0));
+        let visit_h = limit_blocks(n4_h, bottom, u32::try_from(ss_y).unwrap_or(0));
         let shift_w = if right >= 0 { 0 } else { visit_w };
         let shift_h = if bottom >= 0 { 0 } else { visit_h };
         for row in (0..visit_h).step_by(step) {
@@ -1007,7 +1035,8 @@ impl<'a> Scratch<'a> {
                     row,
                     col,
                     n4_w,
-                    ss,
+                    ss_x: u32::try_from(ss_x).unwrap_or(0),
+                    ss_y: u32::try_from(ss_y).unwrap_or(0),
                     shift_w,
                     shift_h,
                 };
@@ -1025,8 +1054,8 @@ impl<'a> Scratch<'a> {
         inter: bool,
     ) -> Result<(), CodecError> {
         let mode = block_mode(mi, at.plane, at.row, at.col);
-        let x = ((at.mi_col << 3) >> at.ss) + (at.col << 2);
-        let y = ((at.mi_row << 3) >> at.ss) + (at.row << 2);
+        let x = ((at.mi_col << 3) >> at.ss_x) + (at.col << 2);
+        let y = ((at.mi_row << 3) >> at.ss_y) + (at.row << 2);
         if !inter {
             let have_above = at.row > 0 || at.mi_row > 0;
             let have_left = at.col > 0 || at.mi_col > self.tile_col;
@@ -1056,6 +1085,17 @@ impl<'a> Scratch<'a> {
         self.write_eob(at, eob)
     }
 
+    fn plane_ss(&self, plane: usize) -> (usize, usize) {
+        if plane == 0 {
+            (0, 0)
+        } else {
+            (
+                usize::try_from(self.header.ss_x).unwrap_or(1).min(1),
+                usize::try_from(self.header.ss_y).unwrap_or(1).min(1),
+            )
+        }
+    }
+
     fn plane_mut(&mut self, plane: usize) -> (usize, usize, usize, &mut [u8]) {
         // Intra edges use the aligned plane, libvpx `y_width` / `uv_width`,
         // not the stride. The stride includes the frame border.
@@ -1077,10 +1117,9 @@ impl<'a> Scratch<'a> {
     }
 
     fn coef_ctx(&self, at: &TxPos) -> Result<usize, CodecError> {
-        let ss = usize::from(at.plane > 0);
         let n = 1usize << at.tx;
-        let above_at = ((at.mi_col * 2) >> ss) + at.col;
-        let left_at = (((at.mi_row * 2) & 15) >> ss) + at.row;
+        let above_at = ((at.mi_col * 2) >> at.ss_x) + at.col;
+        let left_at = (((at.mi_row * 2) & 15) >> at.ss_y) + at.row;
         let above = plane_above(self, at.plane);
         let left = plane_left(self, at.plane);
         let above_nz = region_nz(above, above_at, n)?;
@@ -1147,10 +1186,9 @@ impl<'a> Scratch<'a> {
     }
 
     fn write_eob(&mut self, at: &TxPos, eob: usize) -> Result<(), CodecError> {
-        let ss = usize::from(at.plane > 0);
         let n = 1usize << at.tx;
-        let above_at = ((at.mi_col * 2) >> ss) + at.col;
-        let left_at = (((at.mi_row * 2) & 15) >> ss) + at.row;
+        let above_at = ((at.mi_col * 2) >> at.ss_x) + at.col;
+        let left_at = (((at.mi_row * 2) & 15) >> at.ss_y) + at.row;
         let shift_a = shift_blocks(at.shift_w, at.col, n);
         let shift_l = shift_blocks(at.shift_h, at.row, n);
         let (above, left): (&mut [u8], &mut [u8]) = match at.plane {
@@ -1229,10 +1267,158 @@ impl<'a> Scratch<'a> {
                         mi_rows: self.mi_rows,
                         mi_cols: self.mi_cols,
                     },
+                    self.header.ss_x == 1 && self.header.ss_y == 1,
                 )?;
             }
         }
+        if self.header.ss_x != 1 || self.header.ss_y != 1 {
+            self.filter_chroma_planes()?;
+        }
         Ok(())
+    }
+
+    fn filter_chroma_planes(&mut self) -> Result<(), CodecError> {
+        let ss_x = self.header.ss_x.min(1);
+        let ss_y = self.header.ss_y.min(1);
+        let sb_rows = self.mi_rows.div_ceil(8);
+        let sb_cols = self.sb_cols;
+        for sb_row in 0..sb_rows {
+            for sb_col in 0..sb_cols {
+                for plane in 1..3 {
+                    for pass in 0..2 {
+                        let (sub, edge_len) = if pass == 0 {
+                            (ss_x, 64 >> ss_y)
+                        } else {
+                            (ss_y, 64 >> ss_x)
+                        };
+                        let edges = 16 >> sub;
+                        let levels = self.levels;
+                        let stride = self.uv_stride;
+                        for edge in 0..edges {
+                            for along in 0..edge_len {
+                                let Some(job) = self.chroma_job(ChromaSite {
+                                    pass,
+                                    row: sb_row * 8,
+                                    col: sb_col * 8,
+                                    edge,
+                                    along,
+                                    ss_x,
+                                    ss_y,
+                                }) else {
+                                    continue;
+                                };
+                                let dest = if plane == 1 {
+                                    self.u.as_mut_slice()
+                                } else {
+                                    self.v.as_mut_slice()
+                                };
+                                lpf::filter_chroma_sample(
+                                    dest,
+                                    stride,
+                                    &levels,
+                                    lpf::ChromaSample {
+                                        x: job.x,
+                                        y: job.y,
+                                        vertical: pass == 0,
+                                        filter_size: job.filter_size,
+                                        level: job.level,
+                                    },
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn chroma_job(&self, site: ChromaSite) -> Option<ChromaJob> {
+        let ChromaSite {
+            pass,
+            row,
+            col,
+            edge,
+            along,
+            ss_x,
+            ss_y,
+        } = site;
+        let (x, y) = if pass == 0 {
+            (
+                col.saturating_mul(8)
+                    .saturating_add(usize::try_from(edge * (4 << ss_x)).unwrap_or(0)),
+                row.saturating_mul(8)
+                    .saturating_add(usize::try_from(along << ss_y).unwrap_or(0)),
+            )
+        } else {
+            (
+                col.saturating_mul(8)
+                    .saturating_add(usize::try_from(along << ss_x).unwrap_or(0)),
+                row.saturating_mul(8)
+                    .saturating_add(usize::try_from(edge * (4 << ss_y)).unwrap_or(0)),
+            )
+        };
+        let mi_cols = u32::try_from(self.mi_cols).unwrap_or(0);
+        let mi_rows = u32::try_from(self.mi_rows).unwrap_or(0);
+        let x_u = u32::try_from(x).unwrap_or(u32::MAX);
+        let y_u = u32::try_from(y).unwrap_or(u32::MAX);
+        if x_u >= mi_cols.saturating_mul(8) || y_u >= mi_rows.saturating_mul(8) {
+            return None;
+        }
+        if (pass == 0 && x_u == 0) || (pass == 1 && y_u == 0) {
+            return None;
+        }
+        let loop_col = usize::try_from(((x_u >> 3) >> ss_x) << ss_x).unwrap_or(0);
+        let loop_row = usize::try_from(((y_u >> 3) >> ss_y) << ss_y).unwrap_or(0);
+        let mi = self.grid.get(loop_row * self.mi_cols + loop_col)?;
+        let tx = geom::uv_tx(mi.bsize, mi.tx, ss_x, ss_y);
+        let sub = if pass == 0 { ss_x } else { ss_y };
+        let sb_size = if sub == 0 {
+            mi.bsize
+        } else {
+            mi.bsize.max(geom::BLOCK_16X16)
+        };
+        let (wide, high) = geom::mi_wh(sb_size);
+        let is_block = if pass == 0 {
+            wide > 0 && x_u.is_multiple_of(8 * u32::try_from(wide).unwrap_or(1))
+        } else {
+            high > 0 && y_u.is_multiple_of(8 * u32::try_from(high).unwrap_or(1))
+        };
+        let step = 1u32 << tx;
+        let is_tx = if pass == 1
+            && ss_x == 1
+            && !self.mi_cols.is_multiple_of(2)
+            && !edge.is_multiple_of(2)
+            && x_u.saturating_add(8) >= mi_cols.saturating_mul(8)
+        {
+            false
+        } else {
+            step > 0 && edge.is_multiple_of(step)
+        };
+        let intra = mi.refs[0] == INTRA_FRAME;
+        if !is_block && !(is_tx && (intra || !mi.skip)) {
+            return None;
+        }
+        let level = self.levels.level(mi.seg, mi.refs[0], mi.mode)?;
+        if level == 0 {
+            return None;
+        }
+        let is32 = edge.is_multiple_of(8);
+        let base = if tx == TX_4X4 && is32 {
+            TX_8X8
+        } else {
+            tx.min(TX_16X16)
+        };
+        let clipped = base == TX_16X16
+            && ((pass == 0 && ss_x == 1 && (x_u >> 3) + 1 == mi_cols)
+                || (pass == 1 && ss_y == 1 && (y_u >> 3) + 1 == mi_rows));
+        let filter_size = if clipped { TX_8X8 } else { base };
+        Some(ChromaJob {
+            x: usize::try_from(x_u >> ss_x).unwrap_or(0),
+            y: usize::try_from(y_u >> ss_y).unwrap_or(0),
+            filter_size,
+            level,
+        })
     }
 
     fn picture(&self) -> Result<Picture, CodecError> {
@@ -1242,6 +1428,10 @@ impl<'a> Scratch<'a> {
             v: crop_plane(&self.v, self.uv_stride, self.uv_w, self.uv_h)?,
             width: self.header.width,
             height: self.header.height,
+            ss_x: self.header.ss_x,
+            ss_y: self.header.ss_y,
+            color_space: self.header.color_space,
+            color_range: self.header.color_range,
         })
     }
 }

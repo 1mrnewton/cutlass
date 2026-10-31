@@ -6,8 +6,9 @@
 //! A rotation-zoom or affine model warps that block when the shear is valid.
 //! Interintra blends a single reference with an intra predictor.
 //! Compound prediction averages two references, weights them by order-hint
-//! distance, or blends them through a wedge or difference mask. Local warp
-//! and overlapped motion stay outside this path.
+//! distance, or blends them through a wedge or difference mask. A local warp
+//! fits an affine model to neighboring motion, and overlapped motion blends
+//! the neighboring predictors into the block.
 
 use cutlass_decode::CodecError;
 
@@ -42,6 +43,9 @@ pub const NONE_FRAME: i8 = -1;
 pub const INTRA_FRAME: i8 = 0;
 pub const GM_IDENTITY: u8 = 0;
 pub const GM_TRANSLATION: u8 = 1;
+pub const MOTION_SIMPLE: u8 = 0;
+pub const MOTION_OBMC: u8 = 1;
+pub const MOTION_LOCAL_WARP: u8 = 2;
 const REF_CAT_LEVEL: i32 = 640;
 const MV_BORDER: i32 = 128;
 const STACK: usize = 8;
@@ -913,6 +917,106 @@ pub struct InterSample<'a> {
 #[must_use]
 pub fn global_shear_valid(params: [i32; 6]) -> bool {
     shear(params).is_some()
+}
+
+/// Least-squares affine model for one block. Section 7.11.3.8.
+///
+/// `samples` are source and destination points in 1/8-pel luma units:
+/// `[sy, sx, dy, dx]`. `mid_x` and `mid_y` are the block center in luma samples.
+/// `None` means the fit is singular.
+#[must_use]
+pub fn local_warp_params(
+    samples: &[[i32; 4]],
+    mv: Motion,
+    mid_x: i32,
+    mid_y: i32,
+) -> Option<[i32; 6]> {
+    let mut a00 = 0i64;
+    let mut a01 = 0i64;
+    let mut a11 = 0i64;
+    let mut bx0 = 0i64;
+    let mut bx1 = 0i64;
+    let mut by0 = 0i64;
+    let mut by1 = 0i64;
+    let suy = i64::from(mid_y) * 8;
+    let sux = i64::from(mid_x) * 8;
+    let duy = suy + i64::from(mv.row);
+    let dux = sux + i64::from(mv.col);
+    for cand in samples {
+        let sy = i64::from(cand[0]) - suy;
+        let sx = i64::from(cand[1]) - sux;
+        let dy = i64::from(cand[2]) - duy;
+        let dx = i64::from(cand[3]) - dux;
+        if (sx - dx).abs() < 256 && (sy - dy).abs() < 256 {
+            a00 += ls_product(sx, sx) + 8;
+            a01 += ls_product(sx, sy) + 4;
+            a11 += ls_product(sy, sy) + 8;
+            bx0 += ls_product(sx, dx) + 8;
+            bx1 += ls_product(sy, dx) + 4;
+            by0 += ls_product(sx, dy) + 4;
+            by1 += ls_product(sy, dy) + 8;
+        }
+    }
+    let det = i128::from(a00) * i128::from(a11) - i128::from(a01) * i128::from(a01);
+    let det = i64::try_from(det).ok()?;
+    let (shift, mut factor) = resolve_divisor(det)?;
+    let mut shift_i = i32::try_from(shift).ok()? - 16;
+    if shift_i < 0 {
+        let bits = u32::try_from(-shift_i).ok()?;
+        if bits >= 63 {
+            return None;
+        }
+        factor = factor.wrapping_shl(bits);
+        shift_i = 0;
+    }
+    let shift_u = u32::try_from(shift_i).ok()?;
+    let p2 = warp_diag(
+        i128::from(a11) * i128::from(bx0) - i128::from(a01) * i128::from(bx1),
+        factor,
+        shift_u,
+    )?;
+    let p3 = warp_nondiag(
+        i128::from(a00) * i128::from(bx1) - i128::from(a01) * i128::from(bx0),
+        factor,
+        shift_u,
+    )?;
+    let p4 = warp_nondiag(
+        i128::from(a11) * i128::from(by0) - i128::from(a01) * i128::from(by1),
+        factor,
+        shift_u,
+    )?;
+    let p5 = warp_diag(
+        i128::from(a00) * i128::from(by1) - i128::from(a01) * i128::from(by0),
+        factor,
+        shift_u,
+    )?;
+    let one = 1i64 << 16;
+    let vx = i64::from(mv.col) * (1 << 13)
+        - (i64::from(mid_x) * (i64::from(p2) - one) + i64::from(mid_y) * i64::from(p3));
+    let vy = i64::from(mv.row) * (1 << 13)
+        - (i64::from(mid_x) * i64::from(p4) + i64::from(mid_y) * (i64::from(p5) - one));
+    Some([
+        i32::try_from(vx.clamp(-8_388_608, 8_388_607)).unwrap_or(0),
+        i32::try_from(vy.clamp(-8_388_608, 8_388_607)).unwrap_or(0),
+        p2,
+        p3,
+        p4,
+        p5,
+    ])
+}
+
+fn ls_product(a: i64, b: i64) -> i64 {
+    ((a * b) >> 2) + a + b
+}
+
+fn warp_diag(value: i128, factor: i64, shift: u32) -> Option<i32> {
+    let rounded = round2_signed_i128(value * i128::from(factor), shift);
+    i32::try_from(rounded.clamp(57_345, 73_727)).ok()
+}
+
+fn warp_nondiag(value: i128, factor: i64, shift: u32) -> Option<i32> {
+    let rounded = round2_signed_i128(value * i128::from(factor), shift);
+    i32::try_from(rounded.clamp(-8_191, 8_191)).ok()
 }
 
 fn shear(params: [i32; 6]) -> Option<(i32, i32, i32, i32)> {

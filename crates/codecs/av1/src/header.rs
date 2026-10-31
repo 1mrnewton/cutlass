@@ -879,11 +879,6 @@ fn uncompressed(
     } else {
         bits.read_bool()?
     };
-    if allow_warped {
-        return Err(CodecError::Unsupported {
-            what: "warped motion",
-        });
-    }
     let reduced_tx = bits.read_bool()?;
     let motion = read_global_motion(
         bits,
@@ -937,7 +932,7 @@ fn uncompressed(
         filter_switchable,
         motion_mode_switchable: motion_switchable,
         use_ref_frame_mvs: false,
-        allow_warped: false,
+        allow_warped,
         lf_level: lf,
         lf_sharpness: sharpness,
         lf_delta_enabled: lf_delta,

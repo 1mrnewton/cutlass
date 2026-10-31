@@ -22,11 +22,12 @@ use crate::idct::{InverseScratch, inverse_2d_into};
 use crate::inter::{
     ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, BlockPlace, Candidates, GLOBAL_GLOBALMV, GLOBALMV,
     GM_TRANSLATION, GOLDEN_FRAME, INTRA_FRAME, InterSample, LAST_FRAME, LAST2_FRAME, LAST3_FRAME,
-    Motion, MotionGrid, NEAREST_NEARESTMV, NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView,
-    SIZE_GROUP, average_compound, compound_mask_weight, difference_mask, distance_compound,
-    find_stack, global_shear_valid, has_near_mv, inter_set_allows, inter_tx_set, inter_tx_type,
-    interintra_weight, list_mode, mask_compound, predict, predict_precise, predict_warp,
-    project_global, wedge_bits, wedge_mask,
+    MOTION_LOCAL_WARP, MOTION_OBMC, MOTION_SIMPLE, Motion, MotionGrid, NEAREST_NEARESTMV,
+    NEARESTMV, NEARMV, NEWMV, NONE_FRAME, RefView, SIZE_GROUP, average_compound,
+    compound_mask_weight, difference_mask, distance_compound, find_stack, global_shear_valid,
+    has_near_mv, inter_set_allows, inter_tx_set, inter_tx_type, interintra_weight, list_mode,
+    local_warp_params, mask_compound, predict, predict_precise, predict_warp, project_global,
+    wedge_bits, wedge_mask,
 };
 use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
@@ -88,11 +89,6 @@ pub fn decode_with_refs(
     refs: &[Option<RefView<'_>>],
     carried: Option<&Cdfs>,
 ) -> Result<Reconstructed, CodecError> {
-    if frame.frame_type == INTER_FRAME && frame.motion_mode_switchable {
-        return Err(CodecError::Unsupported {
-            what: "overlapped motion",
-        });
-    }
     if frame.lossless {
         return Err(CodecError::Unsupported { what: "lossless" });
     }
@@ -605,6 +601,9 @@ struct Tile<'a, 'r> {
     skip_present: bool,
     skip_ref: [i8; 2],
     skip_modes: Vec<u8>,
+    motion_modes: Vec<u8>,
+    allow_warped: bool,
+    motion_switchable: bool,
     block_ref: Vec<i8>,
     block_ref1: Vec<i8>,
     inter_flag: Vec<u8>,
@@ -687,6 +686,8 @@ pub(crate) struct Cdfs {
     compound_type: Vec<u16>,
     wedge_index: Vec<u16>,
     skip_mode: Vec<u16>,
+    motion_mode: Vec<u16>,
+    obmc: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -822,6 +823,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             skip_present: frame.skip_mode,
             skip_ref: frame.skip_frames,
             skip_modes: vec![0; cells],
+            motion_modes: vec![MOTION_SIMPLE; cells],
+            allow_warped: frame.allow_warped,
+            motion_switchable: frame.motion_mode_switchable,
             block_ref: vec![0; cells],
             block_ref1: vec![NONE_FRAME; cells],
             inter_flag: vec![0; cells],
@@ -1162,6 +1166,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             compound_idx: 1,
             compound_mask: 0,
             skip_mode: false,
+            motion_mode: MOTION_SIMPLE,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)?;
@@ -1228,6 +1233,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             compound_idx: chosen.compound_idx,
             compound_mask: chosen.compound_mask,
             skip_mode,
+            motion_mode: chosen.motion_mode,
         };
         self.fill_grid(&coded);
         self.predict_and_residual(&coded)
@@ -1300,6 +1306,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             interp: [0, 0],
             compound_idx: 1,
             compound_mask: 0,
+            motion_mode: MOTION_SIMPLE,
         })
     }
 
@@ -1393,6 +1400,16 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.read_interintra(bsize)?
         };
+        let motion_mode = self.read_motion_mode(MotionQuery {
+            row,
+            col,
+            bsize,
+            mode: y_mode,
+            reference,
+            reference1: if ii >= 0 { INTRA_FRAME } else { reference1 },
+            mv,
+            skip_mode,
+        })?;
         let compound_choice = if skip_mode || !compound {
             CompoundChoice::average()
         } else {
@@ -1407,7 +1424,15 @@ impl<'a, 'r> Tile<'a, 'r> {
                 [self.interpolation, self.interpolation]
             }
         } else {
-            self.read_interp(row, col, bsize, y_mode, reference, reference1)?
+            self.read_interp(InterpQuery {
+                row,
+                col,
+                bsize,
+                mode: y_mode,
+                reference,
+                reference1,
+                motion_mode,
+            })?
         };
         Ok(Chosen {
             y_mode,
@@ -1422,6 +1447,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             interp,
             compound_idx: compound_choice.idx,
             compound_mask: compound_choice.pack(),
+            motion_mode,
         })
     }
 
@@ -2218,23 +2244,243 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok((1 << (class + 3)) + (((bits << 3) | ((fr as i32) << 1) | hp as i32) + 1))
     }
 
-    fn read_interp(
-        &mut self,
-        row: usize,
-        col: usize,
-        bsize: usize,
-        mode: u8,
-        reference: i8,
-        reference1: i8,
-    ) -> Result<[u8; 2], CodecError> {
+    /// `read_motion_mode`. A block that cannot warp reads the overlapped-motion bit.
+    fn read_motion_mode(&mut self, query: MotionQuery) -> Result<u8, CodecError> {
+        if query.skip_mode || !self.motion_switchable {
+            return Ok(MOTION_SIMPLE);
+        }
+        if block_width(query.bsize).min(block_height(query.bsize)) < 8 {
+            return Ok(MOTION_SIMPLE);
+        }
+        if !self.force_integer
+            && (query.mode == GLOBALMV || query.mode == GLOBAL_GLOBALMV)
+            && self.gm_kind(query.reference) > GM_TRANSLATION
+        {
+            return Ok(MOTION_SIMPLE);
+        }
+        let compound = query.reference1 > INTRA_FRAME;
+        if compound
+            || query.reference1 == INTRA_FRAME
+            || !self.overlappable(query.row, query.col, query.bsize)
+        {
+            return Ok(MOTION_SIMPLE);
+        }
+        let samples = self.warp_samples(&query);
+        let warp_ok = !self.force_integer
+            && samples.count > 0
+            && self.allow_warped
+            && !self.ref_is_scaled(query.reference);
+        if !warp_ok {
+            let use_obmc = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.obmc,
+                &[22, 3],
+                &[query.bsize],
+            )? == 1;
+            return Ok(if use_obmc { MOTION_OBMC } else { MOTION_SIMPLE });
+        }
+        let mode = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.motion_mode,
+            &[22, 4],
+            &[query.bsize],
+        )? as u8;
+        Ok(mode)
+    }
+
+    fn overlappable(&self, row: usize, col: usize, bsize: usize) -> bool {
+        let w4 = NUM_4X4_WIDE[bsize];
+        let h4 = NUM_4X4_HIGH[bsize];
+        if self.above_mi(row) {
+            let mut x4 = col;
+            let end = self.mi_cols.min(col + w4);
+            while x4 < end {
+                let cand = x4 | 1;
+                if cand < self.mi_cols {
+                    let at = (row - 1) * self.mi_cols + cand;
+                    if self.block_ref.get(at).copied().unwrap_or(INTRA_FRAME) > INTRA_FRAME {
+                        return true;
+                    }
+                }
+                x4 += 2;
+            }
+        }
+        if self.left_mi(col) {
+            let mut y4 = row;
+            let end = self.mi_rows.min(row + h4);
+            while y4 < end {
+                let cand = y4 | 1;
+                if cand < self.mi_rows {
+                    let at = cand * self.mi_cols + col - 1;
+                    if self.block_ref.get(at).copied().unwrap_or(INTRA_FRAME) > INTRA_FRAME {
+                        return true;
+                    }
+                }
+                y4 += 2;
+            }
+        }
+        false
+    }
+
+    fn ref_is_scaled(&self, reference: i8) -> bool {
+        let Ok(index) = usize::try_from(reference) else {
+            return false;
+        };
+        if !(1..=7).contains(&index) {
+            return false;
+        }
+        let slot = usize::from(self.frame_refs[index - 1]);
+        slot < 8
+            && self.ref_ok[slot]
+            && (self.ref_w[slot] != self.visible_w || self.ref_h[slot] != self.visible_h)
+    }
+
+    /// `find_warp_samples`. The count is zero when no neighbor shares this reference.
+    fn warp_samples(&self, query: &MotionQuery) -> WarpSamples {
+        let mut scan = WarpSamples::default();
+        let w4 = NUM_4X4_WIDE[query.bsize];
+        let h4 = NUM_4X4_HIGH[query.bsize];
+        let mut top_left = true;
+        let mut top_right = true;
+        let threshold = i32::try_from(
+            block_width(query.bsize)
+                .max(block_height(query.bsize))
+                .clamp(16, 112),
+        )
+        .unwrap_or(112);
+        if self.above_mi(query.row) {
+            let src_w = NUM_4X4_WIDE[self.bsize_at(query.row - 1, query.col)];
+            if w4 <= src_w {
+                let offset = -((query.col as isize) & (src_w as isize - 1));
+                if offset < 0 {
+                    top_left = false;
+                }
+                if offset + src_w as isize > w4 as isize {
+                    top_right = false;
+                }
+                self.add_warp_sample(&mut scan, query, -1, 0, threshold);
+            } else {
+                let mut along = 0;
+                let limit = w4.min(self.mi_cols.saturating_sub(query.col));
+                while along < limit {
+                    let src_w = NUM_4X4_WIDE[self.bsize_at(query.row - 1, query.col + along)];
+                    let step = w4.min(src_w).max(1);
+                    self.add_warp_sample(&mut scan, query, -1, along as isize, threshold);
+                    along += step;
+                }
+            }
+        }
+        if self.left_mi(query.col) {
+            let src_h = NUM_4X4_HIGH[self.bsize_at(query.row, query.col - 1)];
+            if h4 <= src_h {
+                let offset = -((query.row as isize) & (src_h as isize - 1));
+                if offset < 0 {
+                    top_left = false;
+                }
+                self.add_warp_sample(&mut scan, query, 0, -1, threshold);
+            } else {
+                let mut along = 0;
+                let limit = h4.min(self.mi_rows.saturating_sub(query.row));
+                while along < limit {
+                    let src_h = NUM_4X4_HIGH[self.bsize_at(query.row + along, query.col - 1)];
+                    let step = h4.min(src_h).max(1);
+                    self.add_warp_sample(&mut scan, query, along as isize, -1, threshold);
+                    along += step;
+                }
+            }
+        }
+        if top_left {
+            self.add_warp_sample(&mut scan, query, -1, -1, threshold);
+        }
+        if top_right && w4.max(h4) <= 16 {
+            self.add_warp_sample(&mut scan, query, -1, w4 as isize, threshold);
+        }
+        if scan.count == 0 && scan.scanned > 0 {
+            scan.count = 1;
+        }
+        scan
+    }
+
+    fn add_warp_sample(
+        &self,
+        scan: &mut WarpSamples,
+        query: &MotionQuery,
+        delta_row: isize,
+        delta_col: isize,
+        threshold: i32,
+    ) {
+        if scan.scanned >= 8 {
+            return;
+        }
+        let mv_row = query.row as isize + delta_row;
+        let mv_col = query.col as isize + delta_col;
+        if mv_row < 0
+            || mv_col < 0
+            || mv_row >= self.mi_rows as isize
+            || mv_col >= self.mi_cols as isize
+        {
+            return;
+        }
+        let at = mv_row as usize * self.mi_cols + mv_col as usize;
+        if self.block_ref.get(at).copied().unwrap_or(NONE_FRAME) != query.reference
+            || self.block_ref1.get(at).copied().unwrap_or(NONE_FRAME) != NONE_FRAME
+        {
+            return;
+        }
+        let cand_sz = usize::from(self.sizes.get(at).copied().unwrap_or(0));
+        if cand_sz >= NUM_4X4_WIDE.len() {
+            return;
+        }
+        let cand_w = NUM_4X4_WIDE[cand_sz];
+        let cand_h = NUM_4X4_HIGH[cand_sz];
+        if cand_w == 0 || cand_h == 0 {
+            return;
+        }
+        let cand_row = (mv_row as usize) & !(cand_h - 1);
+        let cand_col = (mv_col as usize) & !(cand_w - 1);
+        let origin = cand_row * self.mi_cols + cand_col;
+        let Some(neighbor) = self.mvs.get(origin).copied() else {
+            return;
+        };
+        let mid_y = (cand_row * 4 + cand_h * 2 - 1) as i32;
+        let mid_x = (cand_col * 4 + cand_w * 2 - 1) as i32;
+        let valid =
+            (neighbor.row - query.mv.row).abs() + (neighbor.col - query.mv.col).abs() <= threshold;
+        scan.scanned += 1;
+        if !valid && scan.scanned > 1 {
+            return;
+        }
+        if scan.count >= scan.list.len() {
+            return;
+        }
+        scan.list[scan.count] = [
+            mid_y.saturating_mul(8),
+            mid_x.saturating_mul(8),
+            mid_y.saturating_mul(8).saturating_add(neighbor.row),
+            mid_x.saturating_mul(8).saturating_add(neighbor.col),
+        ];
+        if valid {
+            scan.count += 1;
+        }
+    }
+
+    fn read_interp(&mut self, query: InterpQuery) -> Result<[u8; 2], CodecError> {
         if !self.filter_switchable {
             return Ok([self.interpolation, self.interpolation]);
         }
         let dirs = if self.dual_filter { 2 } else { 1 };
         let mut filter = [0u8; 2];
         for (dir, slot) in filter.iter_mut().enumerate().take(dirs) {
-            if self.needs_interp(bsize, mode, reference, reference1) {
-                let ctx = self.interp_ctx(row, col, dir, reference, reference1 > INTRA_FRAME);
+            if self.needs_interp(&query) {
+                let ctx = self.interp_ctx(
+                    query.row,
+                    query.col,
+                    dir,
+                    query.reference,
+                    query.reference1 > INTRA_FRAME,
+                );
                 *slot = read_sym(
                     &mut self.symbols,
                     self.update,
@@ -2250,14 +2496,17 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(filter)
     }
 
-    fn needs_interp(&self, bsize: usize, mode: u8, reference: i8, reference1: i8) -> bool {
-        let large = block_width(bsize).min(block_height(bsize)) >= 8;
-        if large && mode == GLOBALMV {
-            return self.gm_kind(reference) == GM_TRANSLATION;
+    fn needs_interp(&self, query: &InterpQuery) -> bool {
+        if query.motion_mode == MOTION_LOCAL_WARP {
+            return false;
         }
-        if large && mode == GLOBAL_GLOBALMV {
-            return self.gm_kind(reference) == GM_TRANSLATION
-                || self.gm_kind(reference1) == GM_TRANSLATION;
+        let large = block_width(query.bsize).min(block_height(query.bsize)) >= 8;
+        if large && query.mode == GLOBALMV {
+            return self.gm_kind(query.reference) == GM_TRANSLATION;
+        }
+        if large && query.mode == GLOBAL_GLOBALMV {
+            return self.gm_kind(query.reference) == GM_TRANSLATION
+                || self.gm_kind(query.reference1) == GM_TRANSLATION;
         }
         true
     }
@@ -2359,12 +2608,18 @@ impl<'a, 'r> Tile<'a, 'r> {
         let gm_index = usize::try_from(frame_ref).unwrap_or(0);
         let gm_kind = self.gm_type.get(gm_index).copied().unwrap_or(0);
         let gm_params = self.gm_params.get(gm_index).copied().unwrap_or([0; 6]);
-        let warp = block.y_mode == GLOBALMV
+        let local = if w >= 8 && h >= 8 && !self.force_integer {
+            self.local_model(block.row, block.col, block.bsize, frame_ref, mv)
+        } else {
+            None
+        };
+        let global = block.y_mode == GLOBALMV
             && gm_kind > GM_TRANSLATION
             && w >= 8
             && h >= 8
             && !self.force_integer
             && global_shear_valid(gm_params);
+        let warp_params = local.or(global.then_some(gm_params));
         if ii >= 0 {
             self.predict_block_intra(block, interintra_intra_mode(ii as u8), x, y, w, h)?;
             let mut packed = vec![0u8; w.saturating_mul(h)];
@@ -2391,8 +2646,8 @@ impl<'a, 'r> Tile<'a, 'r> {
                 write_x: 0,
                 write_y: 0,
             };
-            if warp {
-                predict_warp(&mut sample, gm_params)?;
+            if let Some(params) = warp_params {
+                predict_warp(&mut sample, params)?;
             } else {
                 predict(&mut sample)?;
             }
@@ -2409,6 +2664,226 @@ impl<'a, 'r> Tile<'a, 'r> {
             1 => self.ref_u[slot],
             _ => self.ref_v[slot],
         };
+        {
+            let dst: &mut [u8] = if block.plane == 0 {
+                &mut self.y
+            } else if block.plane == 1 {
+                &mut self.u
+            } else {
+                &mut self.v
+            };
+            let mut sample = InterSample {
+                dst,
+                stride,
+                x,
+                y,
+                w,
+                h,
+                sub_x,
+                sub_y,
+                mv,
+                filter,
+                reference,
+                ref_stride: plane_w,
+                plane_w,
+                plane_h,
+                frame_w,
+                frame_h,
+                ref_w,
+                ref_h,
+                write_x: x,
+                write_y: y,
+            };
+            if let Some(params) = warp_params {
+                predict_warp(&mut sample, params)?;
+            } else {
+                predict(&mut sample)?;
+            }
+        }
+        if self.motion_at(block.row, block.col) == MOTION_OBMC {
+            self.overlapped(block)?;
+        }
+        Ok(())
+    }
+
+    fn motion_at(&self, row: usize, col: usize) -> u8 {
+        self.mi_at(row, col)
+            .and_then(|at| self.motion_modes.get(at).copied())
+            .unwrap_or(MOTION_SIMPLE)
+    }
+
+    fn local_model(
+        &self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        reference: i8,
+        mv: Motion,
+    ) -> Option<[i32; 6]> {
+        if self.motion_at(row, col) != MOTION_LOCAL_WARP {
+            return None;
+        }
+        let query = MotionQuery {
+            row,
+            col,
+            bsize,
+            mode: MOTION_SIMPLE,
+            reference,
+            reference1: NONE_FRAME,
+            mv,
+            skip_mode: false,
+        };
+        let samples = self.warp_samples(&query);
+        if samples.count == 0 {
+            return None;
+        }
+        let mid_y = (row * 4 + NUM_4X4_HIGH[bsize] * 2 - 1) as i32;
+        let mid_x = (col * 4 + NUM_4X4_WIDE[bsize] * 2 - 1) as i32;
+        let params = local_warp_params(&samples.list[..samples.count], mv, mid_x, mid_y)?;
+        global_shear_valid(params).then_some(params)
+    }
+
+    /// Overlapped motion. Above runs only when the plane block is at least 8×8.
+    fn overlapped(&mut self, block: &Block) -> Result<(), CodecError> {
+        let sub_x = block.sub_x;
+        let sub_y = block.sub_y;
+        let w = block_width(block.bsize) >> block.sub_x;
+        let h = block_height(block.bsize) >> block.sub_y;
+        let plane_bsize = if block.plane == 0 {
+            block.bsize
+        } else {
+            subsampled_size(block.bsize, self.sub_x, self.sub_y)
+        };
+        if self.above_mi(block.row) && plane_bsize >= BLOCK_8X8 {
+            let w4 = NUM_4X4_WIDE[block.bsize];
+            let mut x4 = block.col;
+            let mut count = 0;
+            let limit = 4.min(MI_WIDTH_LOG2[block.bsize]);
+            let end = self.mi_cols.min(block.col + w4);
+            while count < limit && x4 < end {
+                let cand_col = x4 | 1;
+                let cand_row = block.row - 1;
+                let step4 = self.neighbor_step(cand_row, cand_col, true);
+                if self.neighbor_inter(cand_row, cand_col) {
+                    count += 1;
+                    let pred_w = w.min((step4 * 4) >> sub_x);
+                    let pred_h = (h / 2).min(32 >> sub_y);
+                    self.blend_overlap(
+                        block,
+                        Overlap {
+                            pass: 0,
+                            cand_row,
+                            cand_col,
+                            pred_w,
+                            pred_h,
+                            x4,
+                            y4: block.row,
+                        },
+                    )?;
+                }
+                x4 += step4;
+            }
+        }
+        if self.left_mi(block.col) {
+            let h4 = NUM_4X4_HIGH[block.bsize];
+            let mut y4 = block.row;
+            let mut count = 0;
+            let limit = 4.min(MI_HEIGHT_LOG2[block.bsize]);
+            let end = self.mi_rows.min(block.row + h4);
+            while count < limit && y4 < end {
+                let cand_row = y4 | 1;
+                let cand_col = block.col - 1;
+                let step4 = self.neighbor_step(cand_row, cand_col, false);
+                if self.neighbor_inter(cand_row, cand_col) {
+                    count += 1;
+                    let pred_w = (w / 2).min(32 >> sub_x);
+                    let pred_h = h.min((step4 * 4) >> sub_y);
+                    self.blend_overlap(
+                        block,
+                        Overlap {
+                            pass: 1,
+                            cand_row,
+                            cand_col,
+                            pred_w,
+                            pred_h,
+                            x4: block.col,
+                            y4,
+                        },
+                    )?;
+                }
+                y4 += step4;
+            }
+        }
+        Ok(())
+    }
+
+    fn neighbor_step(&self, row: usize, col: usize, wide: bool) -> usize {
+        let Some(at) = self.mi_at(row, col) else {
+            return 2;
+        };
+        let cand = usize::from(self.sizes.get(at).copied().unwrap_or(0));
+        let blocks = if wide {
+            NUM_4X4_WIDE.get(cand).copied().unwrap_or(1)
+        } else {
+            NUM_4X4_HIGH.get(cand).copied().unwrap_or(1)
+        };
+        blocks.clamp(2, 16)
+    }
+
+    fn neighbor_inter(&self, row: usize, col: usize) -> bool {
+        self.mi_at(row, col)
+            .is_some_and(|at| self.block_ref.get(at).copied().unwrap_or(INTRA_FRAME) > INTRA_FRAME)
+    }
+
+    fn blend_overlap(&mut self, block: &Block, overlap: Overlap) -> Result<(), CodecError> {
+        if overlap.pred_w == 0 || overlap.pred_h == 0 {
+            return Ok(());
+        }
+        let Some(at) = self.mi_at(overlap.cand_row, overlap.cand_col) else {
+            return Ok(());
+        };
+        let reference = self.block_ref.get(at).copied().unwrap_or(NONE_FRAME);
+        if reference < LAST_FRAME {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        }
+        let slot = usize::from(self.frame_refs[reference as usize - 1]);
+        if slot >= 8 || !self.ref_ok[slot] {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        }
+        let mv = self.mvs.get(at).copied().unwrap_or_default();
+        let filter = self.interp.get(at).copied().unwrap_or([0, 0]);
+        let sub_x = block.sub_x != 0;
+        let sub_y = block.sub_y != 0;
+        let pred_x = (overlap.x4 * 4) >> block.sub_x;
+        let pred_y = (overlap.y4 * 4) >> block.sub_y;
+        let packed = self.predict_neighbor(NeighborPred {
+            slot,
+            plane: block.plane,
+            mv,
+            filter,
+            x: pred_x,
+            y: pred_y,
+            w: overlap.pred_w,
+            h: overlap.pred_h,
+            sub_x,
+            sub_y,
+        })?;
+        let length = if overlap.pass == 0 {
+            overlap.pred_h
+        } else {
+            overlap.pred_w
+        };
+        let stride = if block.plane == 0 {
+            self.width
+        } else {
+            self.chroma_w
+        };
         let dst: &mut [u8] = if block.plane == 0 {
             &mut self.y
         } else if block.plane == 1 {
@@ -2416,33 +2891,66 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             &mut self.v
         };
+        for row in 0..overlap.pred_h {
+            for col in 0..overlap.pred_w {
+                let along = if overlap.pass == 0 { row } else { col };
+                let weight = u32::from(obmc_weight(length, along));
+                let dx = pred_x + col;
+                let dy = pred_y + row;
+                if dx >= stride {
+                    continue;
+                }
+                let dest = dy * stride + dx;
+                let Some(slot) = dst.get_mut(dest) else {
+                    continue;
+                };
+                let pred = u32::from(*packed.get(row * overlap.pred_w + col).unwrap_or(&0));
+                let curr = u32::from(*slot);
+                *slot = ((weight * curr + (64 - weight) * pred + 32) >> 6) as u8;
+            }
+        }
+        Ok(())
+    }
+
+    fn predict_neighbor(&self, pred: NeighborPred) -> Result<Vec<u8>, CodecError> {
+        let ref_w = self.ref_w[pred.slot];
+        let ref_h = self.ref_h[pred.slot];
+        let plane_w = if pred.plane == 0 {
+            ref_w
+        } else {
+            ref_w.div_ceil(2)
+        };
+        let plane_h = if pred.plane == 0 {
+            ref_h
+        } else {
+            ref_h.div_ceil(2)
+        };
+        let reference = self.ref_plane(pred.slot, pred.plane);
+        let mut packed = vec![0u8; pred.w.saturating_mul(pred.h)];
         let mut sample = InterSample {
-            dst,
-            stride,
-            x,
-            y,
-            w,
-            h,
-            sub_x,
-            sub_y,
-            mv,
-            filter,
+            dst: &mut packed,
+            stride: pred.w,
+            x: pred.x,
+            y: pred.y,
+            w: pred.w,
+            h: pred.h,
+            sub_x: pred.sub_x,
+            sub_y: pred.sub_y,
+            mv: pred.mv,
+            filter: pred.filter,
             reference,
             ref_stride: plane_w,
             plane_w,
             plane_h,
-            frame_w,
-            frame_h,
+            frame_w: self.visible_w,
+            frame_h: self.visible_h,
             ref_w,
             ref_h,
-            write_x: x,
-            write_y: y,
+            write_x: 0,
+            write_y: 0,
         };
-        if warp {
-            predict_warp(&mut sample, gm_params)
-        } else {
-            predict(&mut sample)
-        }
+        predict(&mut sample)?;
+        Ok(packed)
     }
 
     fn predict_compound(
@@ -3409,6 +3917,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.compound_idx[at] = coded.compound_idx;
                 self.compound_mask[at] = coded.compound_mask;
                 self.skip_modes[at] = u8::from(coded.skip_mode);
+                self.motion_modes[at] = coded.motion_mode;
             }
         }
     }
@@ -4346,6 +4855,7 @@ struct Chosen {
     /// 1 averages the two predictors. 0 uses distance weights.
     compound_idx: u8,
     compound_mask: u16,
+    motion_mode: u8,
 }
 
 struct CodedBlock {
@@ -4375,6 +4885,58 @@ struct CodedBlock {
     compound_idx: u8,
     compound_mask: u16,
     skip_mode: bool,
+    motion_mode: u8,
+}
+
+struct MotionQuery {
+    row: usize,
+    col: usize,
+    bsize: usize,
+    mode: u8,
+    reference: i8,
+    reference1: i8,
+    mv: Motion,
+    skip_mode: bool,
+}
+
+struct InterpQuery {
+    row: usize,
+    col: usize,
+    bsize: usize,
+    mode: u8,
+    reference: i8,
+    reference1: i8,
+    motion_mode: u8,
+}
+
+#[derive(Clone, Copy, Default)]
+struct WarpSamples {
+    count: usize,
+    scanned: usize,
+    list: [[i32; 4]; 8],
+}
+
+struct Overlap {
+    pass: u8,
+    cand_row: usize,
+    cand_col: usize,
+    pred_w: usize,
+    pred_h: usize,
+    x4: usize,
+    y4: usize,
+}
+
+struct NeighborPred {
+    slot: usize,
+    plane: usize,
+    mv: Motion,
+    filter: [u8; 2],
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    sub_x: bool,
+    sub_y: bool,
 }
 
 struct CoeffPlace {
@@ -4873,6 +5435,8 @@ impl Cdfs {
         zero_counters(&mut self.compound_type, 3);
         zero_counters(&mut self.wedge_index, 17);
         zero_counters(&mut self.skip_mode, 3);
+        zero_counters(&mut self.motion_mode, 4);
+        zero_counters(&mut self.obmc, 3);
     }
 
     fn load(q: usize) -> Self {
@@ -4952,9 +5516,50 @@ impl Cdfs {
             compound_type: COMPOUND_TYPE_CDF.to_vec(),
             wedge_index: WEDGE_INDEX_CDF.to_vec(),
             skip_mode: SKIP_MODE_CDF.to_vec(),
+            motion_mode: MOTION_MODE_CDF.to_vec(),
+            obmc: OBMC_CDF.to_vec(),
         }
     }
 }
+
+fn obmc_weight(length: usize, index: usize) -> u8 {
+    const MASK_2: [u8; 2] = [45, 64];
+    const MASK_4: [u8; 4] = [39, 50, 59, 64];
+    const MASK_8: [u8; 8] = [36, 42, 48, 53, 57, 61, 64, 64];
+    const MASK_16: [u8; 16] = [
+        34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64, 64, 64, 64,
+    ];
+    const MASK_32: [u8; 32] = [
+        33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 56, 57, 58, 59, 60, 60, 61,
+        62, 64, 64, 64, 64, 64, 64, 64, 64,
+    ];
+    let mask: &[u8] = match length {
+        2 => &MASK_2,
+        4 => &MASK_4,
+        8 => &MASK_8,
+        16 => &MASK_16,
+        _ => &MASK_32,
+    };
+    mask.get(index).copied().unwrap_or(64)
+}
+
+/// `Default_Motion_Mode_Cdf`. One row per block size: three modes, the end, and the counter.
+const MOTION_MODE_CDF: [u16; 88] = [
+    10923, 21845, 32768, 0, 10923, 21845, 32768, 0, 10923, 21845, 32768, 0, 7651, 24760, 32768, 0,
+    4738, 24765, 32768, 0, 5391, 25528, 32768, 0, 19419, 26810, 32768, 0, 5123, 23606, 32768, 0,
+    11606, 24308, 32768, 0, 26260, 29116, 32768, 0, 20360, 28062, 32768, 0, 21679, 26830, 32768, 0,
+    29516, 30701, 32768, 0, 28898, 30397, 32768, 0, 30878, 31335, 32768, 0, 32507, 32558, 32768, 0,
+    10923, 21845, 32768, 0, 10923, 21845, 32768, 0, 28799, 31390, 32768, 0, 26431, 30774, 32768, 0,
+    28973, 31594, 32768, 0, 29742, 31203, 32768, 0,
+];
+
+/// `Default_Use_Obmc_Cdf`. One probability, the end, and the counter, per block size.
+const OBMC_CDF: [u16; 66] = [
+    16384, 32768, 0, 16384, 32768, 0, 16384, 32768, 0, 10437, 32768, 0, 9371, 32768, 0, 9301,
+    32768, 0, 17432, 32768, 0, 14423, 32768, 0, 15142, 32768, 0, 25817, 32768, 0, 22823, 32768, 0,
+    22083, 32768, 0, 30128, 32768, 0, 31014, 32768, 0, 31560, 32768, 0, 32638, 32768, 0, 16384,
+    32768, 0, 16384, 32768, 0, 23664, 32768, 0, 20901, 32768, 0, 24008, 32768, 0, 26879, 32768, 0,
+];
 
 /// `Default_Inter_Intra_Cdf`. Three size groups, one probability, then the end and the counter.
 const INTER_INTRA_CDF: [u16; 9] = [26887, 32768, 0, 27597, 32768, 0, 30237, 32768, 0];

@@ -2364,4 +2364,98 @@ mod tests {
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }
+
+    #[test]
+    fn local_warp_matches_dav1d() {
+        // aomenc 64×64 rotating ramp. Local warp is on, overlapped motion and
+        // global motion are off. A block that selects local warp predicts
+        // through the neighbor fit. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/warp_0.obu"),
+            include_bytes!("../fixtures/warp_1.obu"),
+            include_bytes!("../fixtures/warp_2.obu"),
+            include_bytes!("../fixtures/warp_3.obu"),
+            include_bytes!("../fixtures/warp_4.obu"),
+            include_bytes!("../fixtures/warp_5.obu"),
+            include_bytes!("../fixtures/warp_6.obu"),
+            include_bytes!("../fixtures/warp_7.obu"),
+        ];
+        let expected = [
+            0xe7c3_cd2d_808b_176a,
+            0xc8a7_97da_0d6c_3034,
+            0xdf9e_2073_3cbd_7890,
+            0xf27b_d8a3_2653_7ead,
+            0x99d0_9e09_77f8_133c,
+            0xb181_1245_9630_1235,
+            0x7e61_2c3b_fe43_2419,
+            0xfc90_db15_e81e_065e,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(seq.enable_warped);
+            }
+            if index > 0 {
+                assert!(frame.allow_warped);
+                assert!(frame.motion_mode_switchable);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn overlapped_motion_matches_dav1d() {
+        // Same rotating ramp, with overlapped motion on and local warp off.
+        // A block blends the predictors of the neighboring motion vectors.
+        // Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 8] = [
+            include_bytes!("../fixtures/obmc_0.obu"),
+            include_bytes!("../fixtures/obmc_1.obu"),
+            include_bytes!("../fixtures/obmc_2.obu"),
+            include_bytes!("../fixtures/obmc_3.obu"),
+            include_bytes!("../fixtures/obmc_4.obu"),
+            include_bytes!("../fixtures/obmc_5.obu"),
+            include_bytes!("../fixtures/obmc_6.obu"),
+            include_bytes!("../fixtures/obmc_7.obu"),
+        ];
+        let expected = [
+            0xe7c3_cd2d_808b_176a,
+            0xcca6_568f_5899_0985,
+            0x245f_f039_e396_5c23,
+            0xdda6_2c5f_deb6_0bd0,
+            0xf8f5_8219_6e8f_1906,
+            0x1541_be60_1543_2419,
+            0x954e_f037_d8c8_5719,
+            0xd6de_133c_3aa1_697f,
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(!seq.enable_warped);
+            }
+            if index > 0 {
+                assert!(!frame.allow_warped);
+                assert!(frame.motion_mode_switchable);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
 }

@@ -68,7 +68,7 @@ The encoder emits keyframes only. Its quality and rate tests passed in `cargo te
 
 `a_production_av1_keyframe_matches_dav1d_when_present` passed. The bench below also printed `pixels: match` for that same 3840×2160 keyframe, compared with FFmpeg's libdav1d before either time was taken.
 
-`single_reference_frames_match_dav1d` matches dav1d on error-resilient frames that keep the largest transform and leave compound, warped, overlapped, reference-motion, order hint, CDEF, restoration, and film grain off. `rotzoom_global_motion_matches_dav1d` matches a rotation-zoom model with high-precision motion vectors and two filter directions. `smooth_interintra_matches_dav1d` matches a DC interintra blend. `average_compound_matches_dav1d` matches frames that average two references. `distance_compound_matches_dav1d` matches frames that weight two references by order-hint distance. `masked_compound_matches_dav1d` matches a wedge blend. `difference_compound_matches_dav1d` matches a difference-weight blend. `skip_mode_matches_dav1d` matches a pyramid where a skip-mode block uses the nearest compound pair. The other compound streams do not signal skip mode. `order_hint_frames_match_dav1d` matches with order hint on, each frame repeating the eight reference hints. `film_grain_stays_off_the_reference` predicts a second frame from the picture stored before grain. A later frame of the 2160p file is outside these checks.
+`single_reference_frames_match_dav1d` matches dav1d on error-resilient frames that keep the largest transform and leave compound, warped, overlapped, reference-motion, order hint, CDEF, restoration, and film grain off. `rotzoom_global_motion_matches_dav1d` matches a rotation-zoom model with high-precision motion vectors and two filter directions. `smooth_interintra_matches_dav1d` matches a DC interintra blend. `average_compound_matches_dav1d` matches frames that average two references. `distance_compound_matches_dav1d` matches frames that weight two references by order-hint distance. `masked_compound_matches_dav1d` matches a wedge blend. `difference_compound_matches_dav1d` matches a difference-weight blend. `skip_mode_matches_dav1d` matches a pyramid where a skip-mode block uses the nearest compound pair. `local_warp_matches_dav1d` matches a block that warps from its neighbors. `overlapped_motion_matches_dav1d` matches a block that blends the neighboring predictors. The other compound streams do not signal skip mode. `order_hint_frames_match_dav1d` matches with order hint on, each frame repeating the eight reference hints. `film_grain_stays_off_the_reference` predicts a second frame from the picture stored before grain. A later frame of the 2160p file is outside these checks.
 
 Hostile packets in the suite return an error and leave a stored reference usable. The 30-minute fuzz campaign was not run.
 
@@ -125,7 +125,7 @@ Refused with a typed error before a picture is published:
 - Lossless (`base_q_idx` 0).
 - Segmentation, a per-superblock loop-filter delta, and a loop-filter delta update.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
-- Compound prediction, local warped motion, overlapped motion, reference-frame motion vectors, and short reference signaling.
+- Reference-frame motion vectors and short reference signaling.
 - A scaled reference, and an interintra wedge.
 
 Super resolution on an inter frame is not proven.

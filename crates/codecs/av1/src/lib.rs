@@ -8,7 +8,8 @@
 //! Lossless and bit depths other than 8 are rejected. Two references may be
 //! averaged, weighted by order-hint distance, or blended with a wedge or a
 //! difference mask. A skip-mode block uses the nearest compound pair and
-//! writes no residual. Local warped motion and overlapped motion are rejected.
+//! writes no residual. A local warp fits the neighboring motion, and overlapped
+//! motion blends those neighboring predictors.
 
 #![forbid(unsafe_code)]
 

@@ -1,4 +1,5 @@
-//! Macroblock layer, clauses 7.3.5 and 8. Reconstruction is raster order inside the slice.
+//! Macroblock layer, clauses 7.3.5 and 8. One slice group is raster order.
+//! Several groups walk to the next macroblock of the same group.
 
 use cutlass_decode::CodecError;
 
@@ -375,20 +376,33 @@ pub(crate) fn decode_mbs<S: Sample>(
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
     let mbaff = slice.sps.mbaff && !pic.field;
-    let mut addr = *next_mb;
+    let next = slice.group_next.as_slice();
+    if !next.is_empty() && next.len() != total {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "slice group map",
+        });
+    }
+    let mut addr = if next.is_empty() {
+        *next_mb
+    } else {
+        slice.origin
+    };
+    let mut decoded = *next_mb;
     let mut qp = slice.qp;
     while addr < total {
         if slice.kind != 2 {
             match &mut entropy {
                 Entropy::Cavlc(bits) => {
                     let run = bits.ue()? as usize;
-                    if addr + run > total {
-                        return Err(bits.malformed("skip run"));
-                    }
                     for left in 0..run {
+                        if addr >= total {
+                            return Err(bits.malformed("skip run"));
+                        }
+                        fresh(pic, addr, mbaff, !next.is_empty())?;
                         let flag = skip_field_flag(pic, bits, slice_id, addr, mbaff, run - left)?;
                         skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
-                        addr += 1;
+                        addr = step(next, addr, &mut decoded, total)?;
                     }
                     if addr >= total || (run > 0 && !bits.more_rbsp()) {
                         break;
@@ -397,46 +411,86 @@ pub(crate) fn decode_mbs<S: Sample>(
                 Entropy::Cabac(cab) => {
                     let skipped = cabac_skip(pic, cab, slice.kind, slice_id, addr, mbaff)?;
                     if skipped {
+                        fresh(pic, addr, mbaff, !next.is_empty())?;
                         let flag = cabac_skip_field(pic, cab, slice_id, addr, mbaff)?;
                         skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
-                        if !mbaff || pair_bottom(pic, addr, true) {
-                            let end = cab.terminate()?;
-                            addr += 1;
-                            if end {
-                                break;
-                            }
+                        let end = if !mbaff || pair_bottom(pic, addr, true) {
+                            cab.terminate()?
                         } else {
-                            addr += 1;
+                            false
+                        };
+                        addr = step(next, addr, &mut decoded, total)?;
+                        if end {
+                            break;
                         }
                         continue;
                     }
                 }
             }
         }
+        if addr >= total {
+            break;
+        }
+        fresh(pic, addr, mbaff, !next.is_empty())?;
         qp = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
         let bottom = !mbaff || pair_bottom(pic, addr, mbaff);
-        match &mut entropy {
-            Entropy::Cavlc(bits) => {
-                addr += 1;
-                if bottom && !bits.more_rbsp() {
-                    break;
-                }
-            }
+        let end = match &mut entropy {
+            Entropy::Cavlc(bits) => bottom && !bits.more_rbsp(),
             Entropy::Cabac(cab) => {
                 if bottom {
-                    let end = cab.terminate()?;
-                    addr += 1;
-                    if end {
-                        break;
-                    }
+                    cab.terminate()?
                 } else {
-                    addr += 1;
+                    false
                 }
             }
+        };
+        addr = step(next, addr, &mut decoded, total)?;
+        if end {
+            break;
         }
     }
-    *next_mb = addr;
+    *next_mb = decoded;
     Ok(())
+}
+
+fn fresh<S: Sample>(
+    pic: &Frame<S>,
+    addr: usize,
+    mbaff: bool,
+    grouped: bool,
+) -> Result<(), CodecError> {
+    if !grouped {
+        return Ok(());
+    }
+    let (mx, my) = locate(pic, addr, mbaff);
+    let slot = my * pic.mb_w + mx;
+    if pic.mb.get(slot).is_some_and(|mb| mb.slice != u16::MAX) {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "first macroblock",
+        });
+    }
+    Ok(())
+}
+
+fn step(
+    next: &[usize],
+    addr: usize,
+    decoded: &mut usize,
+    total: usize,
+) -> Result<usize, CodecError> {
+    *decoded = decoded.saturating_add(1);
+    if *decoded > total {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "slice group map",
+        });
+    }
+    Ok(if next.is_empty() {
+        addr.saturating_add(1)
+    } else {
+        next.get(addr).copied().unwrap_or(total)
+    })
 }
 
 fn pair_bottom<S: Sample>(pic: &Frame<S>, addr: usize, mbaff: bool) -> bool {

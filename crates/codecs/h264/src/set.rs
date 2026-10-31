@@ -2,7 +2,7 @@
 //!
 //! Monochrome is refused. 4:2:0, 4:2:2, and 4:4:4 are accepted, including
 //! separate colour planes, field pictures, macroblock-adaptive frame-field,
-//! and QP′Y-zero transform bypass.
+//! QP′Y-zero transform bypass, and slice groups of every map type.
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
 //! is refused.
 
@@ -55,6 +55,35 @@ pub struct Sps {
     pub separate: bool,
 }
 
+/// `num_slice_groups_minus1` and the map parameters that follow it.
+/// `minus1` of zero is one group covering the picture.
+#[derive(Clone, Debug)]
+pub struct SliceGroups {
+    pub minus1: u8,
+    pub map_type: u8,
+    pub run: Vec<u32>,
+    pub top_left: Vec<u32>,
+    pub bottom_right: Vec<u32>,
+    pub direction: bool,
+    pub rate: u32,
+    pub explicit: Vec<u8>,
+}
+
+impl SliceGroups {
+    pub(crate) fn none() -> Self {
+        Self {
+            minus1: 0,
+            map_type: 0,
+            run: Vec::new(),
+            top_left: Vec::new(),
+            bottom_right: Vec::new(),
+            direction: false,
+            rate: 1,
+            explicit: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Pps {
     pub id: u8,
@@ -74,6 +103,7 @@ pub struct Pps {
     pub transform_8x8: bool,
     pub weight4: [[u8; 16]; 6],
     pub weight8: [[u8; 64]; 6],
+    pub groups: SliceGroups,
 }
 
 impl Sps {
@@ -414,12 +444,15 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
     };
     let cabac = bits.bit()?;
     let bottom = bits.bit()?;
-    let groups = bits.ue()?;
-    if groups != 0 {
-        return Err(CodecError::Unsupported {
-            what: "slice groups",
-        });
+    let group_count = bits.ue()?;
+    if group_count > 7 {
+        return Err(bits.malformed("slice groups"));
     }
+    let groups = if group_count == 0 {
+        SliceGroups::none()
+    } else {
+        read_groups(&mut bits, sps, group_count as u8)?
+    };
     let num_ref_idx_l0 = (bits.ue()? + 1) as u8;
     let num_ref_idx_l1 = (bits.ue()? + 1) as u8;
     if num_ref_idx_l0 > 16 || num_ref_idx_l1 > 16 {
@@ -470,7 +503,86 @@ pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError>
         transform_8x8,
         weight4,
         weight8,
+        groups,
     })
+}
+
+fn read_groups(bits: &mut Bits<'_>, sps: &Sps, minus1: u8) -> Result<SliceGroups, CodecError> {
+    let map_type = bits.ue()?;
+    if map_type > 6 {
+        return Err(bits.malformed("slice group map"));
+    }
+    let map_type = map_type as u8;
+    let units = crate::fmo::map_units(sps.mb_width, sps.mb_height, sps.frame_mbs_only);
+    if units == 0 {
+        return Err(bits.malformed("slice group map"));
+    }
+    let mut groups = SliceGroups::none();
+    groups.minus1 = minus1;
+    groups.map_type = map_type;
+    let count = usize::from(minus1) + 1;
+    match map_type {
+        0 => {
+            groups.run.reserve(count);
+            for _ in 0..count {
+                groups.run.push(bits.ue()?);
+            }
+        }
+        1 => {}
+        2 => {
+            let width = sps.mb_width as u32;
+            for _ in 0..usize::from(minus1) {
+                let top = bits.ue()?;
+                let bottom = bits.ue()?;
+                if !rectangle(top, bottom, width, units) {
+                    return Err(bits.malformed("slice group map"));
+                }
+                groups.top_left.push(top);
+                groups.bottom_right.push(bottom);
+            }
+        }
+        3..=5 => {
+            if minus1 != 1 {
+                return Err(bits.malformed("slice group map"));
+            }
+            groups.direction = bits.bit()?;
+            let rate_minus = bits.ue()?;
+            if rate_minus >= units {
+                return Err(bits.malformed("slice group change"));
+            }
+            groups.rate = rate_minus + 1;
+        }
+        6 => {
+            let declared = bits.ue()?;
+            if declared != units - 1 {
+                return Err(bits.malformed("slice group id"));
+            }
+            let width = crate::fmo::ceil_log2(u32::from(minus1) + 1);
+            groups.explicit.reserve(units as usize);
+            for _ in 0..units {
+                let id = bits.u(width)?;
+                if id > u32::from(minus1) {
+                    return Err(bits.malformed("slice group id"));
+                }
+                groups.explicit.push(id as u8);
+            }
+        }
+        _ => {
+            return Err(bits.malformed("slice group map"));
+        }
+    }
+    Ok(groups)
+}
+
+fn rectangle(top: u32, bottom: u32, width: u32, units: u32) -> bool {
+    if width == 0 || top >= units || bottom >= units {
+        return false;
+    }
+    let x0 = top % width;
+    let y0 = top / width;
+    let x1 = bottom % width;
+    let y1 = bottom / width;
+    x1 >= x0 && y1 >= y0
 }
 
 type Scaling = ([[u8; 16]; 6], [[u8; 64]; 6]);

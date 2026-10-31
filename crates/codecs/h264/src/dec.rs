@@ -1342,6 +1342,10 @@ pub(crate) struct Slice<'a> {
     num_ref_l0: usize,
     num_ref_l1: usize,
     spatial_direct: bool,
+    /// Macroblock address where this slice starts.
+    origin: usize,
+    /// Next address in the same slice group. Empty means the next address is one higher.
+    group_next: Vec<usize>,
 }
 
 struct SliceCursor<'a> {
@@ -1450,18 +1454,19 @@ fn decode_slice<S: Sample>(
             planes.seen |= bit;
         }
     }
-    let origin = if sps.mbaff && !header.field {
-        header.first_mb.saturating_mul(2)
-    } else {
-        header.first_mb
-    };
-    if origin != *next_mb {
-        return Err(bits.malformed("first macroblock"));
-    }
     let slice = make_slice(sets, dpb, &header, poc)?;
     let Some(pic) = picture.as_mut() else {
         return Err(bits.malformed("picture"));
     };
+    let total = pic.mb_w.saturating_mul(pic.h / 16);
+    let wrong_start = if slice.group_next.is_empty() {
+        slice.origin != *next_mb
+    } else {
+        slice.origin >= total
+    };
+    if wrong_start {
+        return Err(bits.malformed("first macroblock"));
+    }
     if slice.cabac {
         let mut cab = Cabac::start(&mut bits, slice.qp, cabac_init(&header))?;
         mb::decode_mbs(
@@ -1534,6 +1539,8 @@ struct Header {
     yo: [[i32; 32]; 2],
     cw: [[[i32; 2]; 32]; 2],
     co: [[[i32; 2]; 32]; 2],
+    /// `slice_group_change_cycle` for map types 3, 4, and 5. Otherwise 0.
+    group_cycle: u32,
 }
 
 struct Mod {
@@ -1751,6 +1758,12 @@ fn read_header(
             }
         }
     }
+    let mut group_cycle = 0u32;
+    if pps.groups.minus1 > 0 && (3..=5).contains(&pps.groups.map_type) {
+        let units = crate::fmo::map_units(sps.mb_width, sps.mb_height, sps.frame_mbs_only);
+        let width = crate::fmo::cycle_bits(units, pps.groups.rate)?;
+        group_cycle = bits.u(width)?;
+    }
     Ok(Header {
         first_mb,
         pps_id: pps_id as u8,
@@ -1785,6 +1798,7 @@ fn read_header(
         yo,
         cw,
         co,
+        group_cycle,
     })
 }
 
@@ -2051,6 +2065,22 @@ fn make_slice<'a, S: Sample>(
     let (ref0, ref1) = mb::reference_lists(dpb, header, poc, max_fn)?;
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
+    let origin = if sps.mbaff && !header.field {
+        header.first_mb.saturating_mul(2)
+    } else {
+        header.first_mb
+    };
+    let group_next = crate::fmo::links(
+        crate::fmo::Grid {
+            mb_w: sps.mb_width,
+            frame_mb_h: sps.mb_height,
+            frame_only: sps.frame_mbs_only,
+            mbaff: sps.mbaff,
+            field: header.field,
+        },
+        &pps.groups,
+        header.group_cycle,
+    )?;
     Ok(Slice {
         sps,
         pps,
@@ -2077,6 +2107,8 @@ fn make_slice<'a, S: Sample>(
         num_ref_l0: header.num_ref_l0,
         num_ref_l1: header.num_ref_l1,
         spatial_direct: header.spatial_direct,
+        origin,
+        group_next,
     })
 }
 
@@ -2353,6 +2385,7 @@ mod tests {
             yo: [[0; 32]; 2],
             cw: [[[0; 2]; 32]; 2],
             co: [[[0; 2]; 32]; 2],
+            group_cycle: 0,
         }
     }
 

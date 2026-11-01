@@ -62,6 +62,10 @@
 //! four are 100. The other three macroblocks stay eight columns of 100 and
 //! eight of 180. Chroma stays 90. The depth picture is chroma 40. A depth
 //! width that is not half the texture is an error.
+//! A 48×32 texture picture scales one macroblock from its neighbors. The
+//! reference is luma 100 and the neighbors are luma 80, so the top 16×8
+//! becomes 80. The bottom 16×8 meets the picture edge, so that half is luma 0.
+//! Chroma stays 90.
 //! A depth P slice copies a later texture header. That source is intra, so the
 //! slice uses the picture's one reference. Motion of eight pixels makes that
 //! picture luma 220 and chroma 50. The texture picture between them is luma 10

@@ -83,6 +83,10 @@ pub(crate) struct Mb {
     field_mb: bool,
     /// SI macroblock. Reconstruction is clause 8.6.2, not intra 8.5.
     si: bool,
+    /// `mb_alc_flag`. Luma weights come from the neighboring samples.
+    alc: bool,
+    /// Partition spec used to split an ALC macroblock. Zero when `alc` is clear.
+    alc_spec: u32,
 }
 
 impl Mb {
@@ -126,6 +130,8 @@ impl Mb {
             dc16: [false; 2],
             field_mb: false,
             si: false,
+            alc: false,
+            alc_spec: 0,
         }
     }
 }
@@ -2663,7 +2669,7 @@ fn read_header(
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
     // depth slice. The ranges scale list-0 luma. A texture P or B slice reads
     // `dmvp_flag`, then `slice_vsp_flag` when view synthesis is enabled.
-    // Both flags clear stays refused.
+    // Both flags clear stays refused unless adaptive luminance compensation is on.
     let mut depth_weight = false;
     let mut dps_id = 0u8;
     let mut dmvp = false;
@@ -2691,7 +2697,7 @@ fn read_header(
         if sps.view_synthesis {
             vsp = bits.bit()?;
         }
-        if !dmvp && !vsp {
+        if !dmvp && !vsp && !sps.alc {
             return Err(CodecError::Unsupported { what: "3d" });
         }
         if dmvp && sps.acquisition != 1 {
@@ -4248,6 +4254,7 @@ mod tests {
             depth_ver_mult: 2,
             depth_hor_rsh: 0,
             depth_ver_rsh: 0,
+            alc: false,
             interview: Vec::new(),
         }
     }

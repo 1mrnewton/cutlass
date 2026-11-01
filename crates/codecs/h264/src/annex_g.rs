@@ -1518,6 +1518,45 @@ fn a_wide_view_synthesis_picture_samples_each_macroblock() {
 }
 
 #[test]
+fn a_texture_partition_scales_luma_from_its_neighbors() {
+    let parsed = parse_subset_sps(&view_synthesis_mbs(0, 0, 0, 0, 3, 2, true)).expect("alc");
+    assert!(parsed.alc);
+    assert_eq!(parsed.mb_width, 3);
+    assert_eq!(parsed.mb_height, 2);
+    let base = alc_base();
+    let view = alc_view();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    pictures.extend(
+        decoder
+            .push(&Packet::video(base.clone(), 0, 1, 30, true))
+            .expect("base"),
+    );
+    pictures.extend(
+        decoder
+            .push(&Packet::video(view.clone(), 0, 1, 30, true))
+            .expect("view"),
+    );
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2, "picture count");
+    assert!(pictures.iter().any(alc_picture), "compensated view");
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        let frame = 48 * 32 + 24 * 16 * 2;
+        assert_eq!(raw.len(), frame, "ffmpeg picture count");
+        let decoded = pictures
+            .iter()
+            .find(|picture| picture.picture.y().len() == 48 * 32 && !alc_picture(picture))
+            .expect("base");
+        assert_eq!(raw, planes_of(decoded));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_half_resolution_depth_picture_selects_its_own_sample() {
     let parsed = parse_subset_sps(&reduced_view_sps(0)).expect("reduced");
     assert!(parsed.reduced_depth);
@@ -2849,7 +2888,7 @@ fn wide_base_slice() -> Vec<u8> {
 }
 
 fn wide_vsp_depth() -> Vec<u8> {
-    let mut out = annex_b_nal(3, 15, &view_synthesis_mbs(0, 0, 3968, 0, 2));
+    let mut out = annex_b_nal(3, 15, &view_synthesis_mbs(0, 0, 3968, 0, 2, 1, false));
     out.extend(annex_b_nal(3, 8, &pps()));
     out.extend(annex_b_extension(3, 21, &[0x80, 0x60], &wide_depth_slice()));
     out
@@ -3079,6 +3118,155 @@ fn reduced_shift(picture: &VideoOutput) -> bool {
             .all(|sample| *sample == 90)
 }
 
+fn alc_base_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(2);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn alc_base() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    for _ in 0..6 {
+        pcm_block(&mut w, &[100; 256], 90);
+    }
+    w.trailing();
+    let mut out = annex_b_nal(3, 7, &alc_base_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &w.bytes));
+    out
+}
+
+fn weighted_pps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bits(0, 2);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn p_pcm(w: &mut Writer, luma: u8, chroma: u8) {
+    w.ue(30);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(luma, 256));
+    w.bytes.extend(std::iter::repeat_n(chroma, 128));
+    w.bit = w.bytes.len() * 8;
+}
+
+fn plain_p(w: &mut Writer) {
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+}
+
+fn alc_view() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bits(0, 4);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    plain_p(&mut w);
+    w.ue(0);
+    p_pcm(&mut w, 80, 40);
+    plain_p(&mut w);
+    w.ue(0);
+    p_pcm(&mut w, 80, 40);
+    w.ue(0);
+    w.ue(1);
+    w.bit(true);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+    plain_p(&mut w);
+    w.trailing();
+    let mut out = annex_b_nal(3, 15, &view_synthesis_mbs(0, 0, 0, 0, 3, 2, true));
+    out.extend(annex_b_nal(3, 8, &weighted_pps()));
+    out.extend(annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes));
+    out
+}
+
+fn alc_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let luma = y.len() == 48 * 32
+        && (0..32).all(|row| {
+            let start = row * 48;
+            let (left, mid, right) = if row < 16 {
+                (100, 80, 100)
+            } else if row < 24 {
+                (80, 80, 100)
+            } else {
+                (80, 0, 100)
+            };
+            y[start..start + 16].iter().all(|sample| *sample == left)
+                && y[start + 16..start + 32]
+                    .iter()
+                    .all(|sample| *sample == mid)
+                && y[start + 32..start + 48]
+                    .iter()
+                    .all(|sample| *sample == right)
+        });
+    let chroma = |plane: &[u8]| {
+        plane.len() == 24 * 16
+            && (0..16).all(|row| {
+                let start = row * 24;
+                let (left, mid, right) = if row < 8 { (90, 40, 90) } else { (40, 90, 90) };
+                plane[start..start + 8].iter().all(|sample| *sample == left)
+                    && plane[start + 8..start + 16]
+                        .iter()
+                        .all(|sample| *sample == mid)
+                    && plane[start + 16..start + 24]
+                        .iter()
+                        .all(|sample| *sample == right)
+            })
+    };
+    luma && chroma(picture.picture.u()) && chroma(picture.picture.v())
+}
+
 fn wide_vsp_texture() -> Vec<u8> {
     annex_b_extension(2, 21, &[0x80, 0xA0], &wide_vsp_slice())
 }
@@ -3173,10 +3361,18 @@ fn view_synthesis_sps() -> Vec<u8> {
 
 /// `vsp_param` for the one depth-view pair. `wij` is the scale from view 1 to view 0.
 fn view_synthesis_pair(wji: u32, oji: u32, wij: u32, oij: u32) -> Vec<u8> {
-    view_synthesis_mbs(wji, oji, wij, oij, 1)
+    view_synthesis_mbs(wji, oji, wij, oij, 1, 1, false)
 }
 
-fn view_synthesis_mbs(wji: u32, oji: u32, wij: u32, oij: u32, mbs: u32) -> Vec<u8> {
+fn view_synthesis_mbs(
+    wji: u32,
+    oji: u32,
+    wij: u32,
+    oij: u32,
+    width_mbs: u32,
+    height_mbs: u32,
+    alc: bool,
+) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(139, 8);
     w.bits(0, 8);
@@ -3192,8 +3388,8 @@ fn view_synthesis_mbs(wji: u32, oji: u32, wij: u32, oij: u32, mbs: u32) -> Vec<u
     w.ue(0);
     w.ue(4);
     w.bit(false);
-    w.ue(mbs.saturating_sub(1));
-    w.ue(0);
+    w.ue(width_mbs.saturating_sub(1));
+    w.ue(height_mbs.saturating_sub(1));
     w.bit(true);
     w.bit(true);
     w.bit(false);
@@ -3242,7 +3438,7 @@ fn view_synthesis_mbs(wji: u32, oji: u32, wij: u32, oij: u32, mbs: u32) -> Vec<u
     w.ue(0);
     w.bit(false);
     w.bit(true);
-    w.bit(false);
+    w.bit(alc);
     w.bit(false);
     w.trailing();
     w.bytes

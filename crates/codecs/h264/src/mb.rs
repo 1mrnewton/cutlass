@@ -6572,6 +6572,12 @@ fn decode_inter<S: Sample>(
     if slice.vsp && !vsp_block {
         return Err(CodecError::Unsupported { what: "3d" });
     }
+    if slice.sps.alc && !pic.depth && super::syntax_kind(slice.kind) == 0 && matches!(spec, 0..=2) {
+        mb.alc = read_flag(entropy)?;
+        if mb.alc {
+            mb.alc_spec = spec;
+        }
+    }
     if (slice.adaptive_motion || slice.motion_pred) && (sub || (slice.kind == 1 && spec == 0)) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -6723,6 +6729,13 @@ fn read_parts<S: Sample>(
         if from_layer0[index] {
             let (_, reference) = layer_motion(layer, mx, my, part, 0)?;
             fill_ref(&mut mb.ref0, &mut mb.uses0, part, reference);
+        } else if mb.alc {
+            fill_ref(
+                &mut mb.ref0,
+                &mut mb.uses0,
+                part,
+                list0_interview(pic, dpb, slice)?,
+            );
         } else if slice.num_ref_l0 > 1 {
             let r = read_te(
                 entropy,
@@ -8075,6 +8088,146 @@ fn col_zero<S: Sample>(dpb: &[Frame<S>], slice: &Slice<'_>, addr: usize, index: 
     reference == 0 && (-1..=1).contains(&mv[0]) && (-1..=1).contains(&mv[1])
 }
 
+fn list0_interview<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+) -> Result<i8, CodecError> {
+    for (index, &slot) in slice.ref0.iter().enumerate().take(slice.num_ref_l0) {
+        if slot == NO_PICTURE {
+            continue;
+        }
+        let Some(frame) = dpb.get(slot) else {
+            continue;
+        };
+        if frame.view_id != pic.view_id {
+            return i8::try_from(index).map_err(|_| CodecError::Malformed {
+                at_bit: 0,
+                what: "3d",
+            });
+        }
+    }
+    Err(CodecError::Malformed {
+        at_bit: 0,
+        what: "3d",
+    })
+}
+
+/// J.8.2.4. A partition that touches the picture edge uses weight 1 and a shift of 15.
+/// Otherwise the weight is the ratio of the reconstructed neighbors to the reference neighbors.
+fn alc_luma<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    origin: (usize, usize),
+    size: (usize, usize),
+    reference: i8,
+    mv: [i16; 2],
+) -> Result<(i32, i32), CodecError> {
+    let frame = reference_frame(dpb, slice, 0, reference)?;
+    Ok(alc_weight(pic, frame, origin, size, mv))
+}
+
+fn alc_weight<S: Sample>(
+    pic: &Frame<S>,
+    frame: &Frame<S>,
+    origin: (usize, usize),
+    size: (usize, usize),
+    mv: [i16; 2],
+) -> (i32, i32) {
+    let (x_t, y_t) = origin;
+    let (width, height) = size;
+    let mvx = i32::from(mv[0]);
+    let mvy = i32::from(mv[1]);
+    let x_i = i32::try_from(x_t).unwrap_or(i32::MAX);
+    let y_i = i32::try_from(y_t).unwrap_or(i32::MAX);
+    let wide = i32::try_from(width).unwrap_or(i32::MAX);
+    let high = i32::try_from(height).unwrap_or(i32::MAX);
+    let pic_w = i32::try_from(pic.w).unwrap_or(i32::MAX);
+    let pic_h = i32::try_from(pic.h).unwrap_or(i32::MAX);
+    let left = i64::from(mvx) + (i64::from(x_i) - 1) * 4;
+    let top = i64::from(mvy) + (i64::from(y_i) - 1) * 4;
+    let right = i64::from(mvx) + i64::from(x_i.saturating_add(wide)) * 4;
+    let bottom = i64::from(mvy) + i64::from(y_i.saturating_add(high)) * 4;
+    if left < 0
+        || top < 0
+        || right >= i64::from(pic_w) * 4
+        || bottom >= i64::from(pic_h) * 4
+        || x_t == 0
+        || y_t == 0
+    {
+        return (1, 15);
+    }
+    let frac = (mvx & 3, mvy & 3);
+    let mut ref_sum = 1i64;
+    let mut sum = 1i64;
+    for row in 0..height {
+        let rec = constructed(pic, x_t - 1, y_t + row);
+        let sample = ref_luma(
+            frame,
+            x_i + (mvx >> 2) - 1,
+            y_i + (mvy >> 2) + i32::try_from(row).unwrap_or(0),
+            frac,
+        );
+        if (rec - sample).abs() < 31 {
+            ref_sum += i64::from(sample);
+            sum += i64::from(rec);
+        }
+    }
+    for col in 0..width {
+        let rec = constructed(pic, x_t + col, y_t - 1);
+        let sample = ref_luma(
+            frame,
+            x_i + (mvx >> 2) + i32::try_from(col).unwrap_or(0),
+            y_i + (mvy >> 2) - 1,
+            frac,
+        );
+        if (rec - sample).abs() < 31 {
+            ref_sum += i64::from(sample);
+            sum += i64::from(rec);
+        }
+    }
+    if (sum >> 4) == (ref_sum >> 4) {
+        return (1, 0);
+    }
+    let weight = ((1i64 << 15) * sum + (ref_sum >> 1)) / ref_sum;
+    (
+        i32::try_from(weight).unwrap_or(if weight < 0 { i32::MIN } else { i32::MAX }),
+        15,
+    )
+}
+
+fn constructed<S: Sample>(pic: &Frame<S>, x: usize, y: usize) -> i32 {
+    pic.y
+        .get(y.saturating_mul(pic.w).saturating_add(x))
+        .copied()
+        .map(Into::into)
+        .unwrap_or(0)
+}
+
+fn ref_luma<S: Sample>(frame: &Frame<S>, x: i32, y: i32, frac: (i32, i32)) -> i32 {
+    let mut sample = [S::default()];
+    recon::put_luma_block(
+        &mut sample,
+        1,
+        &frame.y,
+        frame.w,
+        (
+            i32::try_from(frame.w).unwrap_or(0),
+            i32::try_from(frame.h).unwrap_or(0),
+        ),
+        recon::BlockMc {
+            x,
+            y,
+            w: 1,
+            h: 1,
+            x_frac: frac.0,
+            y_frac: frac.1,
+        },
+    );
+    sample[0].into()
+}
+
 fn predict_inter<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -8083,6 +8236,38 @@ fn predict_inter<S: Sample>(
     my: usize,
     mb: &Mb,
 ) -> Result<(), CodecError> {
+    if mb.alc && slice.weighted {
+        for part in partitions(super::syntax_kind(slice.kind), mb.alc_spec) {
+            if !part.l0 {
+                continue;
+            }
+            let bx = part.x / 4;
+            let by = part.y / 4;
+            let r0 = ref_of(mb, bx, by, 0);
+            let mv0 = mb.mv0[by * 4 + bx];
+            let origin = (mx * 16 + part.x, my * 16 + part.y);
+            let (weight, denom) = alc_luma(pic, dpb, slice, origin, (part.w, part.h), r0, mv0)?;
+            mc_block(
+                pic,
+                dpb,
+                slice,
+                Block {
+                    x: origin.0,
+                    y: origin.1,
+                    w: part.w,
+                    h: part.h,
+                },
+                McMotion {
+                    r0,
+                    r1: -1,
+                    mv0,
+                    mv1: [0, 0],
+                },
+                Some(AlcWeight { weight, denom }),
+            )?;
+        }
+        return Ok(());
+    }
     let mut done = [false; 16];
     for by in 0..4 {
         for bx in 0..4 {
@@ -8125,6 +8310,7 @@ fn predict_inter<S: Sample>(
                     h: bh * 4,
                 },
                 McMotion { r0, r1, mv0, mv1 },
+                None,
             )?;
         }
     }
@@ -8161,12 +8347,18 @@ struct McMotion {
     mv1: [i16; 2],
 }
 
+struct AlcWeight {
+    weight: i32,
+    denom: i32,
+}
+
 fn mc_block<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
     block: Block,
     motion: McMotion,
+    alc: Option<AlcWeight>,
 ) -> Result<(), CodecError> {
     let Block { x, y, w, h } = block;
     let McMotion { r0, r1, mv0, mv1 } = motion;
@@ -8199,13 +8391,43 @@ fn mc_block<S: Sample>(
         let frame = reference_frame(dpb, slice, 1, r1)?;
         predict_chroma((&mut u1, &mut v1), frame, (x, y), (cw, ch), mv1);
     }
+    let luma_mix = if let Some(AlcWeight { weight, denom }) = alc {
+        Mix::Uni {
+            weight,
+            offset: 0,
+            denom,
+            from: 0,
+        }
+    } else {
+        mix(slice, r0, r1, -1)
+    };
+    let chroma_mix = if alc.is_some() {
+        Mix::Uni {
+            weight: 1,
+            offset: 0,
+            denom: 0,
+            from: 0,
+        }
+    } else {
+        mix(slice, r0, r1, 0)
+    };
+    let chroma_v = if alc.is_some() {
+        Mix::Uni {
+            weight: 1,
+            offset: 0,
+            denom: 0,
+            from: 0,
+        }
+    } else {
+        mix(slice, r0, r1, 1)
+    };
     store_block(
         &mut pic.y,
         pic.w,
         (x, y),
         (w, h),
         (&luma0, &luma1),
-        mix(slice, r0, r1, -1),
+        luma_mix,
         S::default(),
     );
     if !separate && cw > 0 && ch > 0 {
@@ -8222,7 +8444,7 @@ fn mc_block<S: Sample>(
             origin,
             size,
             (&u0, &u1),
-            mix(slice, r0, r1, 0),
+            chroma_mix,
             S::mid(),
         );
         store_block(
@@ -8231,7 +8453,7 @@ fn mc_block<S: Sample>(
             origin,
             size,
             (&v0, &v1),
-            mix(slice, r0, r1, 1),
+            chroma_v,
             S::mid(),
         );
     }

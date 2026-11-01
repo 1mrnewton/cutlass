@@ -4,7 +4,7 @@
 //! film grain are applied for 8-bit 4:2:0. A single-reference frame may carry
 //! an order hint. A frame may use a uniform or non-uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
-//! filter.
+//! filter. Filter intra reconstructs a luma block no larger than 32.
 //! A profile 1 sequence is published as 4:4:4 at 8-bit and at 10-bit. An 8-bit
 //! profile 2 sequence is published as 4:2:2 at 8-bit and at 10-bit. An 8-bit
 //! or 10-bit monochrome sequence is published as one gray

@@ -3624,6 +3624,44 @@ mod tests {
         assert_eq!(frame_digest(&packed), 0x9c5f_415c_3c06_47ed);
     }
     #[test]
+    fn a_filter_intra_mode_picture_matches_dav1d() {
+        // aomenc, 64×64 vertical gradient, max partition 16, other intra modes
+        // off. Twenty-five blocks select filter intra. CDEF, restoration, and
+        // super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/filter-intra.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.enable_filter_intra);
+        let expected = [0x6ab9_1134_1ed1_2065, 0x9dcc_ede2_e005_dee5];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn filter_intra_matches_dav1d() {
         // 64×64 keyframe. Two luma blocks use the recursive intra filter
         // (horizontal and Paeth). The shown picture matches dav1d.

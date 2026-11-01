@@ -122,7 +122,7 @@ Refused with a typed error before a picture is published:
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.
 
-Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run. `seq_level_idx` is stored. A 4352×64 level 3.0 picture matches dav1d. A picture past every defined level is `Limit` before the frame is allocated.
+Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run. `seq_level_idx` is stored. A 4352×64 level 3.0 picture matches dav1d. A picture past every defined level is `Limit` before the frame is allocated. A 64×64 keyframe and inter frame that select filter intra match dav1d.
 
 The encoder does not emit inter frames, CDEF, restoration, super resolution, or film grain. Its blocks stay DC-predicted 4×4 and 8×8.
 

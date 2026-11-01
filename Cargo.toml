@@ -60,6 +60,7 @@ members = [
     "crates/platform-apple",
     "crates/platform-windows",
     "crates/playback",
+    "crates/pool",
     "crates/renderer-android",
     "crates/renderer-metal",
     "crates/renderer-software",

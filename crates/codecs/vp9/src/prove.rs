@@ -471,6 +471,116 @@ fn parallel_inter_frames(stream: &Ivf) -> usize {
     count
 }
 
+/// An intra reference delta of -63 drives the intra filter level to 0.
+/// The magnitude and sign are fixed width, so the rest of the frame stays aligned.
+#[test]
+fn loop_filter_delta_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no loop-filter source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("lf-delta");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &["-frames:v", "4", "-vf", "scale=320:240", "-b:v", "80k"],
+    );
+    let stream = read_ivf(&ivf);
+    assert_eq!(stream.width, 320);
+    assert_eq!(stream.height, 240);
+    assert!(stream.frames.len() > 1, "deltas need an inter frame");
+    let rewritten: Vec<Vec<u8>> = stream
+        .frames
+        .iter()
+        .map(|frame| force_intra_delta(frame))
+        .collect();
+    assert!(
+        intra_delta_is_extreme(&rewritten),
+        "no frame applied an intra loop-filter delta of -63"
+    );
+    let (plain_pic, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let delta_ivf = dir.join("delta.ivf");
+    write_same_ivf(&ivf, &delta_ivf, &rewritten);
+    let delta_stream = read_ivf(&delta_ivf);
+    let (delta_pic, _) = decode_shown(&delta_stream, PixelFormat::Yuv420p);
+    assert_ne!(
+        plain_pic, delta_pic,
+        "intra delta -63 did not change a sample"
+    );
+    let oracle = ffmpeg_yuv(&ffmpeg, &delta_ivf, "yuv420p");
+    assert_eq!(delta_pic.len(), oracle.len());
+    let mismatch = delta_pic
+        .iter()
+        .zip(oracle.iter())
+        .position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "loop filter delta {}x{} {} frames {} bytes",
+        delta_stream.width,
+        delta_stream.height,
+        delta_stream.frames.len(),
+        delta_pic.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn intra_delta_is_extreme(frames: &[Vec<u8>]) -> bool {
+    let mut state = crate::header::Persist::new();
+    let mut active = false;
+    for (index, frame) in frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("delta frame {index} header: {err}"));
+        active |= parsed.header.ref_deltas[0] == -63 && parsed.header.filter_level > 0;
+        remember_header(&mut state, &parsed);
+    }
+    active
+}
+
+struct DeltaBits {
+    magnitude: usize,
+    sign: usize,
+}
+
+fn force_intra_delta(frame: &[u8]) -> Vec<u8> {
+    let Some(site) = intra_delta_bits(frame) else {
+        return frame.to_vec();
+    };
+    let mut out = frame.to_vec();
+    for shift in 0..6 {
+        set_msb_bit(&mut out, site.magnitude + shift, true);
+    }
+    set_msb_bit(&mut out, site.sign, true);
+    out
+}
+
+fn intra_delta_bits(frame: &[u8]) -> Option<DeltaBits> {
+    let sharp = sharpness_bit(frame)?;
+    let mut bits = crate::bits::BitReader::new(frame);
+    skip_bits(&mut bits, sharp.saturating_add(3))?;
+    if bits.read(1).ok()? == 0 || bits.read(1).ok()? == 0 || bits.read(1).ok()? == 0 {
+        return None;
+    }
+    let magnitude = bits.position();
+    bits.read(6).ok()?;
+    let sign = bits.position();
+    Some(DeltaBits { magnitude, sign })
+}
+
+fn skip_bits(bits: &mut crate::bits::BitReader<'_>, mut count: usize) -> Option<()> {
+    while count > 0 {
+        let take = count.min(32);
+        bits.read(u32::try_from(take).ok()?).ok()?;
+        count -= take;
+    }
+    Some(())
+}
+
 fn rewritten_sharpness_filters(frames: &[Vec<u8>]) -> bool {
     let mut state = crate::header::Persist::new();
     let mut active = false;

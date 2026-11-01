@@ -72,6 +72,7 @@ Recorded line:
 | Loop filter sharpness 7 | Pictures match | Sharpness 0 | `sharp_loop_filter_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Sharpness 7 at 10-bit, 12-bit, and 10-bit 4:2:2 | Pictures match | 8-bit sharpness 7 | `sharp_high_depth_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Frame parallel mode | Pictures match | Probability adaptation | `frame_parallel_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Intra loop-filter delta -63 | Pictures match | Encoded deltas | `loop_filter_delta_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |
 | libvpx-vp9, native vp9, and GStreamer vp9dec decode our bitstreams | n/a | All three | `independent_decoders_match_our_yuv` | Verified on this machine |

@@ -804,8 +804,8 @@ fn motion_base<S: Sample>(
     Ok(qp)
 }
 
-/// Inter-layer residual prediction. The reference layer moved by zero, so its
-/// residual is the difference from the co-located reference sample.
+/// Inter-layer residual prediction. The residual is the reference-layer
+/// reconstruction minus that layer's own list-0 prediction.
 fn add_layer_residual<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -834,48 +834,38 @@ fn add_layer_residual<S: Sample>(
     if reference_mb.intra
         || reference_mb.ref0.iter().any(|index| *index != 0)
         || reference_mb.ref1.iter().any(|index| *index >= 0)
-        || reference_mb.mv0.iter().any(|mv| *mv != [0, 0])
     {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
     }
-    let reference = reference_frame(dpb, slice, 0, 0)?;
-    add_diff(
-        &mut pic.y,
-        &layer.y,
-        &reference.y,
-        pic.w,
-        mx * 16,
-        my * 16,
-        16,
-    )?;
+    let motion = reference_mb.mv0;
+    let frame = reference_frame(dpb, slice, 0, 0)?;
     let chroma_stride = pic.w / 2;
-    add_diff(
-        &mut pic.u,
-        &layer.u,
-        &reference.u,
-        chroma_stride,
-        mx * 8,
-        my * 8,
-        8,
-    )?;
-    add_diff(
-        &mut pic.v,
-        &layer.v,
-        &reference.v,
-        chroma_stride,
-        mx * 8,
-        my * 8,
-        8,
-    )?;
+    for by in 0..4 {
+        for bx in 0..4 {
+            let mv = motion[by * 4 + bx];
+            let x = mx * 16 + bx * 4;
+            let y = my * 16 + by * 4;
+            let mut pred = [S::default(); 16];
+            predict_luma(&mut pred, frame, x, y, 4, 4, mv);
+            add_predicted(&mut pic.y, &layer.y, &pred, pic.w, x, y, 4)?;
+            let mut cu = [S::default(); 4];
+            let mut cv = [S::default(); 4];
+            predict_chroma((&mut cu, &mut cv), frame, (x, y), (2, 2), mv);
+            let cx = mx * 8 + bx * 2;
+            let cy = my * 8 + by * 2;
+            add_predicted(&mut pic.u, &layer.u, &cu, chroma_stride, cx, cy, 2)?;
+            add_predicted(&mut pic.v, &layer.v, &cv, chroma_stride, cx, cy, 2)?;
+        }
+    }
     Ok(())
 }
 
-fn add_diff<S: Sample>(
+fn add_predicted<S: Sample>(
     dst: &mut [S],
     layer: &[S],
-    reference: &[S],
+    predicted: &[S],
     stride: usize,
     x: usize,
     y: usize,
@@ -895,14 +885,14 @@ fn add_diff<S: Sample>(
                 what: "inter-layer prediction",
             });
         };
-        let Some(from_ref) = reference.get(at..at + n) else {
+        let Some(from_pred) = predicted.get(row * n..row * n + n) else {
             return Err(CodecError::Malformed {
                 at_bit: 0,
                 what: "inter-layer prediction",
             });
         };
         for i in 0..n {
-            let delta = Into::<i32>::into(from_layer[i]) - Into::<i32>::into(from_ref[i]);
+            let delta = Into::<i32>::into(from_layer[i]) - Into::<i32>::into(from_pred[i]);
             into[i] = S::clip(Into::<i32>::into(into[i]) + delta);
         }
     }

@@ -1727,7 +1727,7 @@ pub(crate) struct Slice<'a> {
     /// Base mode. Intra reference-layer macroblocks are copied. Inter ones
     /// inherit list-0 motion.
     base_mode: bool,
-    /// Add the reference layer's zero-motion residual after this slice's prediction.
+    /// Add the reference layer's list-0 residual after this slice's prediction.
     residual_pred: bool,
 }
 
@@ -2042,7 +2042,7 @@ struct Header {
     output: bool,
     /// Intra reference-layer macroblocks are copied. Inter ones inherit list-0 motion.
     base_mode: bool,
-    /// The reference layer's zero-motion residual is added after prediction.
+    /// The reference layer's list-0 residual is added after prediction.
     residual_pred: bool,
 }
 
@@ -2434,7 +2434,7 @@ fn read_header(
 }
 
 /// Slice-header fields that follow the Annex A tail when inter-layer prediction
-/// is used. Same-size intra base mode, list-0 motion, and a zero-motion
+/// is used. Same-size intra base mode, list-0 motion, and that layer's list-0
 /// residual are reconstructed. Using both tools at once, resampling, and
 /// coefficient prediction are refused.
 fn read_inter_layer(

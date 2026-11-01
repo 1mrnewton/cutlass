@@ -179,6 +179,30 @@ fn inter_layer_residual_adds_the_base_difference() {
 }
 
 #[test]
+fn inter_layer_residual_follows_the_base_motion() {
+    let idr = residual_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(split_luma(&first, 100, 180));
+    let base = decode_with(&mut decoder, &moving_base_packet());
+    assert!(shifted_residual_picture(&base));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &moving_residual_packet());
+    assert!(base_residual_picture(&picture));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(moving_residual_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_ne!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -589,6 +613,60 @@ fn residual_pcm() -> Vec<u8> {
     }
     w.bytes.extend(std::iter::repeat_n(90, 128));
     w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn moving_base_packet() -> Vec<u8> {
+    annex_b_nal(0, 1, &moving_base_slice())
+}
+
+fn moving_residual_packet() -> Vec<u8> {
+    let mut out = moving_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &still_enhancement(),
+    ));
+    out
+}
+
+fn moving_base_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(0);
+    w.se(32);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn still_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
     w.trailing();
     w.bytes
 }

@@ -17,7 +17,7 @@ use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Pointer, TimelineScale,
     TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category,
-    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, trim_gesture,
+    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, snap, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
@@ -226,7 +226,7 @@ pub struct Shell {
     blade: bool,
     clip_drag: Option<ClipDrag>,
     pending_trim: Option<PendingTrim>,
-    pending_move: Option<PendingMove>,
+    pending_moves: Vec<PendingMove>,
     notice: String,
     next_id: u64,
     pub chrome: Chrome,
@@ -266,7 +266,7 @@ impl Shell {
             blade: false,
             clip_drag: None,
             pending_trim: None,
-            pending_move: None,
+            pending_moves: Vec::new(),
             notice: String::new(),
             next_id: 0,
             chrome: Chrome::default(),
@@ -763,15 +763,23 @@ impl Shell {
         y: f64,
     ) -> Result<(), ShellError> {
         let plan = self.plan_move(segment_id, x, y)?;
-        self.pending_move = None;
-        if self.move_is_current(&plan) {
+        self.pending_moves.clear();
+        let plans = self.ordered_moves(self.group_plans(plan));
+        if plans.iter().all(|plan| self.move_is_current(plan)) {
             return Ok(());
         }
-        self.apply(Request::Move {
-            segment_id: plan.id,
-            track_id: plan.track_id,
-            start: plan.start,
-        })?;
+        for plan in &plans {
+            self.refuse_locked(&plan.id)?;
+        }
+        let requests: Vec<Request> = plans
+            .into_iter()
+            .map(|plan| Request::Move {
+                segment_id: plan.id,
+                track_id: plan.track_id,
+                start: plan.start,
+            })
+            .collect();
+        self.apply_requests(&requests)?;
         self.reveal_playhead();
         Ok(())
     }
@@ -781,7 +789,7 @@ impl Shell {
     /// `press` is the pointer where the drag began, in points.
     pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>, press: (f32, f32)) {
         self.pending_trim = None;
-        self.pending_move = None;
+        self.pending_moves.clear();
         if edge.is_some() {
             self.select(Some(id.clone()));
         }
@@ -815,7 +823,7 @@ impl Shell {
 
     /// Follow the pointer without writing the draft. The next paint uses this edge.
     pub fn preview_edge(&mut self, segment_id: SegmentId, edge: TrimEdge, x: f64) {
-        self.pending_move = None;
+        self.pending_moves.clear();
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
                 self.pending_trim = Some(PendingTrim {
@@ -839,18 +847,21 @@ impl Shell {
     }
 
     /// Follow a body drag without writing the draft. The next paint uses this span.
+    ///
+    /// When the dragged clip is one of several selected clips, each selected
+    /// clip keeps its gap and follows by the same amount.
     pub fn preview_move(&mut self, segment_id: SegmentId, x: f64, y: f64) {
         self.pending_trim = None;
-        match self.plan_move(segment_id, x, y) {
-            Ok(plan) => self.pending_move = Some(plan),
-            Err(_) => self.pending_move = None,
-        }
+        self.pending_moves = match self.plan_move(segment_id, x, y) {
+            Ok(plan) => self.group_plans(plan),
+            Err(_) => Vec::new(),
+        };
     }
 
-    /// The clip copy that follows the pointer.
+    /// The dragged clip's copy. A group drag still reports that clip here.
     #[must_use]
     pub fn move_preview(&self) -> Option<MovePreview> {
-        self.pending_move.as_ref().map(|pending| MovePreview {
+        self.pending_moves.first().map(|pending| MovePreview {
             id: pending.id.clone(),
             name: pending.name.clone(),
             start: pending.start,
@@ -859,12 +870,25 @@ impl Shell {
         })
     }
 
-    /// The original clip is the one being dragged.
+    /// Every copy following the pointer, including the dragged clip.
+    #[must_use]
+    pub fn move_previews(&self) -> Vec<MovePreview> {
+        self.pending_moves
+            .iter()
+            .map(|pending| MovePreview {
+                id: pending.id.clone(),
+                name: pending.name.clone(),
+                start: pending.start,
+                duration: pending.duration,
+                track_id: pending.track_id.clone(),
+            })
+            .collect()
+    }
+
+    /// The original clip is one of the clips being dragged.
     #[must_use]
     pub fn moving(&self, id: &SegmentId) -> bool {
-        self.pending_move
-            .as_ref()
-            .is_some_and(|pending| &pending.id == id)
+        self.pending_moves.iter().any(|pending| &pending.id == id)
     }
 
     /// A snap target the trim or move preview is holding.
@@ -875,8 +899,8 @@ impl Shell {
         {
             return Some(pending.time);
         }
-        self.pending_move
-            .as_ref()
+        self.pending_moves
+            .first()
             .filter(|pending| pending.snapped)
             .map(|pending| pending.start)
     }
@@ -884,7 +908,7 @@ impl Shell {
     pub fn cancel_clip_drag(&mut self) {
         self.clip_drag = None;
         self.pending_trim = None;
-        self.pending_move = None;
+        self.pending_moves.clear();
     }
 
     /// Finish the drag that `begin_clip_drag` started. An edge trims. The body moves.
@@ -900,7 +924,7 @@ impl Shell {
             .filter(|drag| drag.id == segment_id)
             .and_then(|drag| drag.edge);
         self.pending_trim = None;
-        self.pending_move = None;
+        self.pending_moves.clear();
         match edge {
             Some(edge) => self.trim_edge(segment_id, edge, x),
             None => self.drag_segment(segment_id, x, y),
@@ -920,7 +944,7 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let plan = self.plan_trim(segment_id, edge, x)?;
         self.pending_trim = None;
-        self.pending_move = None;
+        self.pending_moves.clear();
         let unchanged = self
             .draft()
             .is_some_and(|draft| trim_is_current(draft, &plan));
@@ -989,6 +1013,42 @@ impl Shell {
                 ));
             }
         };
+        if self.is_selected(&segment_id) && self.selection.len() > 1 {
+            let snapped = snap(
+                draft,
+                raw,
+                self.playhead,
+                snap_window(self.pixel_size),
+                Some(&segment_id),
+            );
+            let start = snapped.map(|target| target.time).unwrap_or(raw);
+            let start = Micros(start.0.max(0));
+            let (name, duration, track_id) = draft
+                .tracks
+                .iter()
+                .find_map(|track| {
+                    track.segments.iter().find_map(|segment| {
+                        (segment.id == segment_id).then(|| {
+                            (
+                                clip_name(draft, segment),
+                                segment.target.duration,
+                                track.id.clone(),
+                            )
+                        })
+                    })
+                })
+                .ok_or_else(|| {
+                    ShellError::Unavailable("the clip is not on the timeline".to_owned())
+                })?;
+            return Ok(PendingMove {
+                id: segment_id,
+                name,
+                start,
+                duration,
+                track_id,
+                snapped: start != raw,
+            });
+        }
         let outcome = move_gesture(draft, &gesture)
             .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
         let (segment_id, track_id, start) = match outcome {
@@ -1024,6 +1084,75 @@ impl Shell {
             track_id,
             snapped: start != raw,
         })
+    }
+
+    /// Selected clips travel with the dragged one. A clip already at the left
+    /// edge stops the whole group there, so the gaps stay.
+    fn group_plans(&self, dragged: PendingMove) -> Vec<PendingMove> {
+        let Some(draft) = self.draft() else {
+            return vec![dragged];
+        };
+        let Some((segment, _)) = locate(draft, &dragged.id) else {
+            return vec![dragged];
+        };
+        if !self.is_selected(&dragged.id) || self.selection.len() < 2 {
+            return vec![dragged];
+        }
+        let origin = segment.target.start.0;
+        let mut members = Vec::new();
+        let mut min_start = origin;
+        for track in &draft.tracks {
+            for segment in &track.segments {
+                if !self.is_selected(&segment.id) {
+                    continue;
+                }
+                min_start = min_start.min(segment.target.start.0);
+                members.push(PendingMove {
+                    id: segment.id.clone(),
+                    name: clip_name(draft, segment),
+                    start: segment.target.start,
+                    duration: segment.target.duration,
+                    track_id: track.id.clone(),
+                    snapped: false,
+                });
+            }
+        }
+        if members.len() < 2 {
+            return vec![dragged];
+        }
+        let mut delta = dragged.start.0.saturating_sub(origin);
+        if min_start.saturating_add(delta) < 0 {
+            delta = min_start.saturating_neg();
+        }
+        let dragged_id = dragged.id.clone();
+        let snapped_at = dragged.start;
+        let was_snapped = dragged.snapped;
+        for member in &mut members {
+            member.start = Micros(member.start.0.saturating_add(delta));
+            if member.id == dragged_id {
+                member.snapped = was_snapped && member.start == snapped_at;
+            }
+        }
+        let dragged_first = |member: &PendingMove| member.id != dragged_id;
+        members.sort_by_key(dragged_first);
+        members
+    }
+
+    /// Later clips move first when the group is heading right, so a clip does
+    /// not land on a selected clip that has not moved yet.
+    fn ordered_moves(&self, mut plans: Vec<PendingMove>) -> Vec<PendingMove> {
+        let later = self.draft().is_some_and(|draft| {
+            plans.iter().any(|plan| {
+                locate(draft, &plan.id)
+                    .is_some_and(|(segment, _)| plan.start.0 > segment.target.start.0)
+            })
+        });
+        if later {
+            plans.sort_by_key(|plan| std::cmp::Reverse(plan.start.0));
+        } else {
+            plans.sort_by_key(|plan| plan.start.0);
+        }
+        plans
     }
 
     fn move_is_current(&self, plan: &PendingMove) -> bool {
@@ -3770,6 +3899,91 @@ mod tests {
         assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_drag_moves_every_selected_clip_and_keeps_the_gap() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let ids: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.clone())
+            .collect();
+        desktop.select_box(ids.clone(), false);
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.preview_move(ids[1].clone(), lane_time(&desktop, 0.0), y);
+        let held = desktop.move_previews();
+        assert_eq!(held.len(), 2);
+        assert_eq!(held[0].id, ids[1]);
+        assert_eq!(
+            held.iter()
+                .find(|preview| preview.id == ids[0])
+                .unwrap()
+                .start,
+            Micros(0)
+        );
+        assert_eq!(
+            held.iter()
+                .find(|preview| preview.id == ids[1])
+                .unwrap()
+                .start,
+            Micros(3_000_000)
+        );
+        desktop.seek(Micros(2_000_000));
+        desktop.preview_move(ids[0].clone(), lane_time(&desktop, 2_001_000.0), y);
+        let moving = desktop.move_previews();
+        assert_eq!(
+            moving
+                .iter()
+                .find(|preview| preview.id == ids[0])
+                .unwrap()
+                .start,
+            Micros(2_000_000)
+        );
+        assert_eq!(
+            moving
+                .iter()
+                .find(|preview| preview.id == ids[1])
+                .unwrap()
+                .start,
+            Micros(5_000_000)
+        );
+        assert!(desktop.moving(&ids[0]) && desktop.moving(&ids[1]));
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+        desktop
+            .drag_segment(ids[0].clone(), lane_time(&desktop, 2_001_000.0), y)
+            .unwrap();
+        let starts: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.target.start)
+            .collect();
+        assert_eq!(starts, [Micros(2_000_000), Micros(5_000_000)]);
+        desktop.undo().unwrap();
+        let starts: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.target.start)
+            .collect();
+        assert_eq!(starts, [Micros(0), Micros(3_000_000)]);
+        let track = desktop.lanes()[0].track_id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let error = desktop
+            .drag_segment(ids[0].clone(), lane_time(&desktop, 500_000.0), y)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the track is locked");
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[1].target.start,
+            Micros(3_000_000)
+        );
     }
 
     #[test]

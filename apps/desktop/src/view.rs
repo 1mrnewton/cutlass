@@ -1867,14 +1867,16 @@ fn paint_lane(
     );
     lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
     lane_switches(shell, ui, lane, row, index);
-    let follower = shell
-        .move_preview()
-        .filter(|preview| preview.track_id == lane.track_id);
+    let followers: Vec<_> = shell
+        .move_previews()
+        .into_iter()
+        .filter(|preview| preview.track_id == lane.track_id)
+        .collect();
     for clip in &lane.clips {
         paint_clip(shell, ui, lane, clip, row, lanes_left, index);
     }
-    if let Some(preview) = follower {
-        paint_move_follower(shell, ui, lane, &preview, row, lanes_left);
+    for preview in &followers {
+        paint_move_follower(shell, ui, lane, preview, row, lanes_left);
     }
 }
 
@@ -2111,7 +2113,7 @@ fn paint_clip(
             && let Some(pos) = pointer_pos(ui, &response)
         {
             shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y));
-            if !ui.input(|input| input.modifiers.shift) {
+            if !ui.input(|input| input.modifiers.shift) && !shell.is_selected(&clip.id) {
                 shell.select(Some(clip.id.clone()));
             }
         }
@@ -3576,6 +3578,46 @@ mod tests {
         output.textures_delta.clear();
         assert_eq!(shell.selection().len(), 1);
         assert!(!shell.is_selected(&SegmentId::new(&names[0])));
+        let ids: Vec<_> = shell.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.clone())
+            .collect();
+        shell.select_box(ids, false);
+        let click = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::default()),
+                    egui::Event::PointerMoved(one),
+                    click(one, true),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert_eq!(shell.selection().len(), 2);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::default()),
+                    egui::Event::PointerMoved(one),
+                    click(one, false),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert_eq!(shell.selection().len(), 1);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

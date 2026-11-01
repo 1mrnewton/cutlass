@@ -21,6 +21,8 @@ const CHROMA_HEIGHT: usize = 38;
 pub struct Grain {
     pub apply: bool,
     pub seed: u16,
+    /// Reference slot whose parameters this frame uses. The seed stays this frame's.
+    pub copy_from: Option<u8>,
     num_y: u8,
     y_value: [u8; 14],
     y_scaling: [u8; 14],
@@ -53,6 +55,7 @@ impl Grain {
         Self {
             apply: false,
             seed: 0,
+            copy_from: None,
             num_y: 0,
             y_value: [0; 14],
             y_scaling: [0; 14],
@@ -102,10 +105,11 @@ pub fn read(
         true
     };
     if !update {
-        let _ = bits.read(3)?;
-        return Err(CodecError::Unsupported {
-            what: "film grain reference",
-        });
+        let mut grain = Grain::off();
+        grain.apply = true;
+        grain.seed = seed;
+        grain.copy_from = Some(bits.read(3)? as u8);
+        return Ok(grain);
     }
     let mut grain = Grain::off();
     grain.apply = true;

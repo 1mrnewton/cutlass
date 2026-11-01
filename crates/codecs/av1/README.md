@@ -56,7 +56,7 @@ Implemented for that scope, and matched against dav1d on the keyframe fixtures n
 - CDEF, uniform and non-uniform tiles, a quantizer matrix, and a superblock quantizer delta.
 - Super resolution on a keyframe: reconstruction uses the coded width, and the shown picture is the upscaled width.
 - Wiener, self-guided, and switchable loop restoration on a keyframe.
-- Film grain on the shown picture: luma, chroma, overlap, and chroma grain scaled from luma. The reference is stored before grain.
+- Film grain on the shown picture: luma, chroma, overlap, chroma grain scaled from luma, and parameters copied from a reference. The reference is stored before grain.
 
 Within-frame CDF adaptation is implemented. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.
 
@@ -119,7 +119,7 @@ Refused with a typed error before a picture is published:
 - 10-bit, 12-bit, monochrome, 4:2:2, and 4:4:4.
 - A profile other than 0, a second operating point, and the decoder model.
 - A tile group that does not follow a frame header. A large-scale tile anchor of 8 or more, or an empty reference slot.
-- Film grain copied from another frame. A show-existing frame does not re-apply grain.
+- A show-existing frame shows the stored picture and does not re-apply grain.
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.
 

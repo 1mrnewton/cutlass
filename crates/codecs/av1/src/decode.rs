@@ -23,6 +23,7 @@ struct Reference {
     lf: SavedLoopFilter,
     segmentation: Segmentation,
     segments: Arc<Vec<u8>>,
+    grain: crate::grain::Grain,
     mi_cols: u32,
     mi_rows: u32,
 }
@@ -320,6 +321,7 @@ impl Av1Decoder {
             &inherited,
         )?;
         self.attach_prev_segments(&mut frame);
+        self.resolve_grain(&mut frame)?;
         header_is_addressable(&sequence, &frame)?;
         Ok((sequence, frame))
     }
@@ -408,6 +410,32 @@ impl Av1Decoder {
         })
     }
 
+    /// `load_grain_params`. Every parameter comes from the named slot except `grain_seed`.
+    fn resolve_grain(&self, frame: &mut FrameInfo) -> Result<(), CodecError> {
+        let Some(slot) = frame.grain.copy_from else {
+            return Ok(());
+        };
+        let slot = usize::from(slot);
+        let named = u8::try_from(slot).unwrap_or(255);
+        if slot >= 8 || !frame.ref_frames.contains(&named) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "film grain",
+            });
+        }
+        let Some(reference) = self.refs[slot].as_ref() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        };
+        let seed = frame.grain.seed;
+        frame.grain = reference.grain;
+        frame.grain.seed = seed;
+        frame.grain.copy_from = None;
+        Ok(())
+    }
+
     fn attach_prev_segments(&self, frame: &mut FrameInfo) {
         if !frame.segmentation.enabled || frame.primary_ref >= 7 {
             return;
@@ -447,6 +475,7 @@ impl Av1Decoder {
                     },
                     segmentation: held.segmentation,
                     segments: Arc::clone(&held.segments),
+                    grain: frame.grain,
                     mi_cols: held.mi_cols,
                     mi_rows: held.mi_rows,
                 });
@@ -2256,6 +2285,64 @@ mod tests {
         assert_eq!(packed[64 * 64], 153);
         assert_eq!(frame_digest(&packed), 0xae59_b5fc_69f0_dd0e);
     }
+
+    #[test]
+    fn film_grain_copied_from_a_reference_matches_dav1d() {
+        // Three 64×64 frames. The inter frames name reference slot 0 for every
+        // grain parameter and carry their own seed. The shown pictures match
+        // dav1d. A show-existing frame shows the stored picture, which is the
+        // reconstruction from before grain.
+        let frames: [&[u8]; 3] = [
+            include_bytes!("../fixtures/fgref_0.obu"),
+            include_bytes!("../fixtures/fgref_1.obu"),
+            include_bytes!("../fixtures/fgref_2.obu"),
+        ];
+        let expected = [
+            0xe40f_dc7b_d200_6040,
+            0x2ef9_787f_853b_6707,
+            0xfedc_eacb_858d_ccf5,
+        ];
+        let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("key");
+        assert!(key.grain.apply);
+        assert!(key.grain.copy_from.is_none());
+        assert!(!sequence.frame_id_present);
+        for frame in &frames[1..] {
+            let (_sequence, info) =
+                crate::header::parse_unit(frame, Some(&sequence)).expect("inter");
+            assert_eq!(info.grain.copy_from, Some(0));
+            assert!(info.ref_frames.contains(&0));
+        }
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(frame_digest(&packed), expected[0]);
+        decoder.reset();
+        let missing = push_error(&mut decoder, frames[1], 1);
+        assert!(matches!(
+            missing,
+            cutlass_decode::CodecError::Malformed {
+                what: "missing reference",
+                ..
+            }
+        ));
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 64 * 64 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[0]);
+        // Frame-header OBU. show_existing_frame, slot 0, then the trailing bit.
+        let again = push_frame(&mut decoder, &[0x12, 0x00, 0x1a, 0x01, 0x88], 1);
+        assert_eq!(frame_digest(&again), 0x09b9_a1c6_19d6_bbb2);
+        assert_ne!(frame_digest(&again), expected[0]);
+        for (index, payload) in frames[1..].iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, (index + 2) as i64);
+            assert_eq!(
+                frame_digest(&packed),
+                expected[index + 1],
+                "frame {}",
+                index + 1
+            );
+        }
+    }
+
     #[test]
     fn order_hint_frames_match_dav1d() {
         // Error-resilient single-reference frames. Order hint is on, and each

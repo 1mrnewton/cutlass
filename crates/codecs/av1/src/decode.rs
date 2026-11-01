@@ -554,15 +554,15 @@ impl Av1Decoder {
         })
     }
 
-    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Film grain and
-    /// monochrome at this depth are still refused.
+    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Monochrome at this
+    /// depth is still refused. Film grain is added only to the shown picture.
     fn hold_wide(
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
         parts: Option<&[TilePart]>,
     ) -> Result<Held, CodecError> {
-        if frame.grain.apply || sequence.monochrome {
+        if sequence.monochrome {
             return Err(CodecError::Unsupported { what: "bit depth" });
         }
         if frame.show_existing {
@@ -994,7 +994,24 @@ fn publish_held(
     let width = u32::try_from(wide.width).map_err(|_| CodecError::Limit { what: "frame size" })?;
     let height =
         u32::try_from(wide.height).map_err(|_| CodecError::Limit { what: "frame size" })?;
-    wide_output(&wide.y, &wide.u, &wide.v, width, height, pts, timescale)
+    if !frame.grain.apply {
+        return wide_output(&wide.y, &wide.u, &wide.v, width, height, pts, timescale);
+    }
+    let Some((y, u, v)) = crate::grain::overlay(
+        &wide.y,
+        &wide.u,
+        &wide.v,
+        wide.width,
+        wide.height,
+        &frame.grain,
+        10,
+    ) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "film grain",
+        });
+    };
+    wide_output(&y, &u, &v, width, height, pts, timescale)
 }
 
 fn publish(
@@ -1023,6 +1040,7 @@ fn shown(picture: &Yuv420, frame: &FrameInfo) -> Result<Yuv420, CodecError> {
         width,
         height,
         &frame.grain,
+        8,
     ) else {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -4421,6 +4439,50 @@ mod tests {
             assert_eq!(bytes.len(), 64 * 64 * 3);
             assert_eq!(frame_digest(bytes), expected, "luma {luma}");
         }
+    }
+
+    #[test]
+    fn a_ten_bit_grain_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, 64×64, one keyframe and one inter frame.
+        // Film grain test vector 1 is on. Restoration and super resolution are
+        // off. The shown pictures include the grain. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let file = include_bytes!("../fixtures/ten-grain.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0xf5d3_1373_87c4_71e3, 0x5686_4b37_12f3_6d66];
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(frame.grain.apply);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
     }
 
     #[test]

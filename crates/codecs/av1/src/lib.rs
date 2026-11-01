@@ -7,9 +7,9 @@
 //! filter.
 //! An 8-bit monochrome sequence is published as one gray plane. A 10-bit
 //! 4:2:0 sequence is published as little-endian samples, including a frame
-//! that is upscaled after reconstruction and a keyframe restored by Wiener
-//! or self-guided filtering. 10-bit monochrome, 10-bit film grain, and
-//! 12-bit are rejected. A frame with `base_q_idx` 0 uses a
+//! that is upscaled after reconstruction, a keyframe restored by Wiener or
+//! self-guided filtering, and film grain on the shown picture. 10-bit
+//! monochrome and 12-bit are rejected. A frame with `base_q_idx` 0 uses a
 //! 4×4 Walsh-Hadamard transform. A palette block and an intra block copy are
 //! reconstructed, and an inter frame may be forced to integer motion vectors.
 //! Two references may be

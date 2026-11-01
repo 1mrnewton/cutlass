@@ -7,6 +7,7 @@ use cutlass_decode::CodecError;
 
 use crate::bits::BitReader;
 use crate::header::{INTER_FRAME, Sequence};
+use crate::sample::Pix;
 
 #[path = "grain_table.rs"]
 mod grain_table;
@@ -187,14 +188,15 @@ pub fn read(
     Ok(grain)
 }
 
-pub fn overlay(
-    y: &[u8],
-    u: &[u8],
-    v: &[u8],
+pub fn overlay<S: Pix>(
+    y: &[S],
+    u: &[S],
+    v: &[S],
     width: usize,
     height: usize,
     grain: &Grain,
-) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    bit_depth: u8,
+) -> Option<(Vec<S>, Vec<S>, Vec<S>)> {
     if width == 0 || height == 0 || y.len() < width * height {
         return None;
     }
@@ -206,8 +208,8 @@ pub fn overlay(
     let mut out_y = y[..width * height].to_vec();
     let mut out_u = u[..chroma_w * chroma_h].to_vec();
     let mut out_v = v[..chroma_w * chroma_h].to_vec();
-    let luma = generate_luma(grain);
-    let (cb, cr) = generate_chroma(grain, &luma);
+    let luma = generate_luma(grain, bit_depth);
+    let (cb, cr) = generate_chroma(grain, &luma, bit_depth);
     let scaling = scaling_luts(grain);
     add_noise(Noise {
         y: &mut out_y,
@@ -220,14 +222,15 @@ pub fn overlay(
         cb: &cb,
         cr: &cr,
         scaling: &scaling,
+        bit_depth,
     });
     Some((out_y, out_u, out_v))
 }
 
-struct Noise<'a> {
-    y: &'a mut [u8],
-    u: &'a mut [u8],
-    v: &'a mut [u8],
+struct Noise<'a, S: Pix> {
+    y: &'a mut [S],
+    u: &'a mut [S],
+    v: &'a mut [S],
     width: usize,
     height: usize,
     grain: &'a Grain,
@@ -235,9 +238,10 @@ struct Noise<'a> {
     cb: &'a [i32],
     cr: &'a [i32],
     scaling: &'a [[i32; 256]; 3],
+    bit_depth: u8,
 }
 
-fn add_noise(noise: Noise<'_>) {
+fn add_noise<S: Pix>(noise: Noise<'_, S>) {
     let Noise {
         y,
         u,
@@ -249,6 +253,7 @@ fn add_noise(noise: Noise<'_>) {
         cb,
         cr,
         scaling,
+        bit_depth,
     } = noise;
     let stripes = stripe_count(height);
     let luma_stride = width + 64;
@@ -279,6 +284,7 @@ fn add_noise(noise: Noise<'_>) {
                     grain_w: GRAIN_WIDTH,
                     overlap: grain.overlap && col > 0,
                     subsampled: false,
+                    bit_depth,
                 },
                 luma,
             );
@@ -294,6 +300,7 @@ fn add_noise(noise: Noise<'_>) {
                     grain_w: CHROMA_WIDTH,
                     overlap: grain.overlap && col > 0,
                     subsampled: true,
+                    bit_depth,
                 },
                 cb,
             );
@@ -309,6 +316,7 @@ fn add_noise(noise: Noise<'_>) {
                     grain_w: CHROMA_WIDTH,
                     overlap: grain.overlap && col > 0,
                     subsampled: true,
+                    bit_depth,
                 },
                 cr,
             );
@@ -317,11 +325,7 @@ fn add_noise(noise: Noise<'_>) {
         luma_num += 1;
         row += 16;
     }
-    let (min_value, max_luma, max_chroma) = if grain.clip_restricted {
-        (16, 235, 240)
-    } else {
-        (0, 255, 255)
-    };
+    let (min_value, max_luma, max_chroma) = output_limits(bit_depth, grain.clip_restricted);
     let shift = i32::from(grain.scaling_minus_8) + 8;
     let chroma_h = height.div_ceil(2);
     for sample_y in 0..chroma_h {
@@ -330,7 +334,7 @@ fn add_noise(noise: Noise<'_>) {
             let luma_x = sample_x * 2;
             let next_x = (luma_x + 1).min(width - 1);
             let average = round2(
-                i32::from(y[luma_y * width + luma_x]) + i32::from(y[luma_y * width + next_x]),
+                y[luma_y * width + luma_x].to_i32() + y[luma_y * width + next_x].to_i32(),
                 1,
             );
             if grain.num_cb > 0 || grain.chroma_from_luma {
@@ -346,15 +350,23 @@ fn add_noise(noise: Noise<'_>) {
                             sample_x,
                             chroma_stride,
                             17,
-                            grain.overlap,
-                            true,
+                            NoiseFlags {
+                                overlap: grain.overlap,
+                                sub_y: true,
+                                bit_depth,
+                            },
                         ),
-                        scale: scaling[1][merged_chroma(
-                            grain,
-                            average,
-                            u[sample_y * chroma_w + sample_x],
-                            true,
-                        ) as usize],
+                        scale: scale_at(
+                            &scaling[1],
+                            merged_chroma(
+                                grain,
+                                average,
+                                u[sample_y * chroma_w + sample_x].to_i32(),
+                                true,
+                                bit_depth,
+                            ),
+                            bit_depth,
+                        ),
                         shift,
                         min_value,
                         max_value: max_chroma,
@@ -374,15 +386,23 @@ fn add_noise(noise: Noise<'_>) {
                             sample_x,
                             chroma_stride,
                             17,
-                            grain.overlap,
-                            true,
+                            NoiseFlags {
+                                overlap: grain.overlap,
+                                sub_y: true,
+                                bit_depth,
+                            },
                         ),
-                        scale: scaling[2][merged_chroma(
-                            grain,
-                            average,
-                            v[sample_y * chroma_w + sample_x],
-                            false,
-                        ) as usize],
+                        scale: scale_at(
+                            &scaling[2],
+                            merged_chroma(
+                                grain,
+                                average,
+                                v[sample_y * chroma_w + sample_x].to_i32(),
+                                false,
+                                bit_depth,
+                            ),
+                            bit_depth,
+                        ),
                         shift,
                         min_value,
                         max_value: max_chroma,
@@ -396,18 +416,21 @@ fn add_noise(noise: Noise<'_>) {
             if grain.num_y == 0 {
                 continue;
             }
-            let orig = i32::from(y[sample_y * width + sample_x]);
+            let orig = y[sample_y * width + sample_x].to_i32();
             let sample = sample_noise(
                 &luma_stripes,
                 sample_y,
                 sample_x,
                 luma_stride,
                 34,
-                grain.overlap,
-                false,
+                NoiseFlags {
+                    overlap: grain.overlap,
+                    sub_y: false,
+                    bit_depth,
+                },
             );
-            let scaled = round2(scaling[0][orig as usize] * sample, shift);
-            y[sample_y * width + sample_x] = clip3(min_value, max_luma, orig + scaled) as u8;
+            let scaled = round2(scale_at(&scaling[0], orig, bit_depth) * sample, shift);
+            y[sample_y * width + sample_x] = S::from_i32(clip3(min_value, max_luma, orig + scaled));
         }
     }
 }
@@ -423,24 +446,32 @@ struct Chroma {
     max_value: i32,
 }
 
-fn blend_chroma(plane: &mut [u8], chroma: Chroma) {
+fn blend_chroma<S: Pix>(plane: &mut [S], chroma: Chroma) {
     let slot = chroma.y * chroma.stride + chroma.x;
-    let orig = i32::from(plane[slot]);
+    let orig = plane[slot].to_i32();
     let scaled = round2(chroma.scale * chroma.noise, chroma.shift);
-    plane[slot] = clip3(chroma.min_value, chroma.max_value, orig + scaled) as u8;
+    plane[slot] = S::from_i32(clip3(chroma.min_value, chroma.max_value, orig + scaled));
 }
 
-fn merged_chroma(grain: &Grain, average: i32, orig: u8, cb: bool) -> i32 {
+fn merged_chroma(grain: &Grain, average: i32, orig: i32, cb: bool, bit_depth: u8) -> i32 {
     if grain.chroma_from_luma {
-        return average.clamp(0, 255);
+        return average;
     }
     let (mult, luma_mult, offset) = if cb {
         (grain.cb_mult, grain.cb_luma_mult, grain.cb_offset)
     } else {
         (grain.cr_mult, grain.cr_luma_mult, grain.cr_offset)
     };
-    let combined = average * (luma_mult - 128) + i32::from(orig) * (mult - 128);
-    clip3(0, 255, (combined >> 6) + (offset - 256))
+    let combined = average * (luma_mult - 128) + orig * (mult - 128);
+    let shift = u32::from(bit_depth.saturating_sub(8));
+    let max = (1i32 << u32::from(bit_depth.min(16))) - 1;
+    clip3(0, max, (combined >> 6) + ((offset - 256) << shift))
+}
+
+struct NoiseFlags {
+    overlap: bool,
+    sub_y: bool,
+    bit_depth: u8,
 }
 
 fn sample_noise(
@@ -449,25 +480,25 @@ fn sample_noise(
     x: usize,
     stride: usize,
     rows: usize,
-    overlap: bool,
-    sub_y: bool,
+    flags: NoiseFlags,
 ) -> i32 {
-    let shift = if sub_y { 4 } else { 5 };
+    let shift = if flags.sub_y { 4 } else { 5 };
     let luma_num = y >> shift;
     let i = y - (luma_num << shift);
     let mut g = stripes[stripe_at(luma_num, i, x, stride, rows)];
-    let overlap_row = luma_num > 0 && overlap && if sub_y { i < 1 } else { i < 2 };
+    let overlap_row = luma_num > 0 && flags.overlap && if flags.sub_y { i < 1 } else { i < 2 };
     if overlap_row {
-        let old_row = if sub_y { i + 16 } else { i + 32 };
+        let old_row = if flags.sub_y { i + 16 } else { i + 32 };
         let old = stripes[stripe_at(luma_num - 1, old_row, x, stride, rows)];
-        let (old_w, new_w) = if sub_y {
+        let (old_w, new_w) = if flags.sub_y {
             (23, 22)
         } else if i == 0 {
             (27, 17)
         } else {
             (17, 27)
         };
-        g = clip3(-128, 127, round2(old * old_w + g * new_w, 5));
+        let (low, high) = grain_limits(flags.bit_depth);
+        g = clip3(low, high, round2(old * old_w + g * new_w, 5));
     }
     g
 }
@@ -490,6 +521,7 @@ struct Block {
     grain_w: usize,
     overlap: bool,
     subsampled: bool,
+    bit_depth: u8,
 }
 
 fn copy_block(dest: &mut [i32], block: Block, grain: &[i32]) {
@@ -517,10 +549,12 @@ fn copy_block(dest: &mut [i32], block: Block, grain: &[i32]) {
             if block.overlap && !block.subsampled && col < 2 {
                 let old = dest[at];
                 let (old_w, new_w) = if col == 0 { (27, 17) } else { (17, 27) };
-                g = clip3(-128, 127, round2(old * old_w + g * new_w, 5));
+                let (low, high) = grain_limits(block.bit_depth);
+                g = clip3(low, high, round2(old * old_w + g * new_w, 5));
             } else if block.overlap && block.subsampled && col == 0 {
                 let old = dest[at];
-                g = clip3(-128, 127, round2(old * 23 + g * 22, 5));
+                let (low, high) = grain_limits(block.bit_depth);
+                g = clip3(low, high, round2(old * 23 + g * 22, 5));
             }
             if at < dest.len() {
                 dest[at] = g;
@@ -529,9 +563,9 @@ fn copy_block(dest: &mut [i32], block: Block, grain: &[i32]) {
     }
 }
 
-fn generate_luma(grain: &Grain) -> Vec<i32> {
+fn generate_luma(grain: &Grain, bit_depth: u8) -> Vec<i32> {
     let mut plane = vec![0i32; GRAIN_HEIGHT * GRAIN_WIDTH];
-    let shift = 4 + i32::from(grain.grain_scale_shift);
+    let shift = gaussian_shift(bit_depth, grain.grain_scale_shift);
     let mut register = grain.seed;
     for slot in &mut plane {
         let g = if grain.num_y > 0 {
@@ -548,14 +582,15 @@ fn generate_luma(grain: &Grain) -> Vec<i32> {
         grain.ar_lag,
         &grain.ar_y,
         grain.ar_shift_minus_6,
+        bit_depth,
     );
     plane
 }
 
-fn generate_chroma(grain: &Grain, luma: &[i32]) -> (Vec<i32>, Vec<i32>) {
+fn generate_chroma(grain: &Grain, luma: &[i32], bit_depth: u8) -> (Vec<i32>, Vec<i32>) {
     let mut cb = vec![0i32; CHROMA_HEIGHT * CHROMA_WIDTH];
     let mut cr = vec![0i32; CHROMA_HEIGHT * CHROMA_WIDTH];
-    let shift = 4 + i32::from(grain.grain_scale_shift);
+    let shift = gaussian_shift(bit_depth, grain.grain_scale_shift);
     let mut register = grain.seed ^ 0xb524;
     for slot in &mut cb {
         let g = if grain.num_cb > 0 || grain.chroma_from_luma {
@@ -574,7 +609,7 @@ fn generate_chroma(grain: &Grain, luma: &[i32]) -> (Vec<i32>, Vec<i32>) {
         };
         *slot = round2(g, shift);
     }
-    chroma_autoregressive(&mut cb, &mut cr, grain, luma);
+    chroma_autoregressive(&mut cb, &mut cr, grain, luma, bit_depth);
     (cb, cr)
 }
 
@@ -585,6 +620,7 @@ fn autoregressive(
     lag: u8,
     coeffs: &[i16],
     shift_minus_6: u8,
+    bit_depth: u8,
 ) {
     let shift = i32::from(shift_minus_6) + 6;
     let lag = usize::from(lag);
@@ -607,12 +643,19 @@ fn autoregressive(
                 }
             }
             let value = plane[y * width + x] + round2(sum, shift);
-            plane[y * width + x] = clip3(-128, 127, value);
+            let (low, high) = grain_limits(bit_depth);
+            plane[y * width + x] = clip3(low, high, value);
         }
     }
 }
 
-fn chroma_autoregressive(cb: &mut [i32], cr: &mut [i32], grain: &Grain, luma: &[i32]) {
+fn chroma_autoregressive(
+    cb: &mut [i32],
+    cr: &mut [i32],
+    grain: &Grain,
+    luma: &[i32],
+    bit_depth: u8,
+) {
     let shift = i32::from(grain.ar_shift_minus_6) + 6;
     let lag = usize::from(grain.ar_lag);
     for y in 3..CHROMA_HEIGHT {
@@ -649,10 +692,11 @@ fn chroma_autoregressive(cb: &mut [i32], cr: &mut [i32], grain: &Grain, luma: &[
                     pos += 1;
                 }
             }
+            let (low, high) = grain_limits(bit_depth);
             cb[y * CHROMA_WIDTH + x] =
-                clip3(-128, 127, cb[y * CHROMA_WIDTH + x] + round2(s0, shift));
+                clip3(low, high, cb[y * CHROMA_WIDTH + x] + round2(s0, shift));
             cr[y * CHROMA_WIDTH + x] =
-                clip3(-128, 127, cr[y * CHROMA_WIDTH + x] + round2(s1, shift));
+                clip3(low, high, cr[y * CHROMA_WIDTH + x] + round2(s1, shift));
         }
     }
 }
@@ -726,6 +770,44 @@ fn round2(value: i32, bits: i32) -> i32 {
     }
 }
 
+/// `12 - BitDepth + grain_scale_shift`. At 8-bit this is `4 + grain_scale_shift`.
+fn gaussian_shift(bit_depth: u8, grain_scale_shift: u8) -> i32 {
+    12 - i32::from(bit_depth) + i32::from(grain_scale_shift)
+}
+
+/// Grain sample range. At 8-bit this is `-128..=127`.
+fn grain_limits(bit_depth: u8) -> (i32, i32) {
+    let shift = u32::from(bit_depth.saturating_sub(8));
+    let center = 128i32 << shift;
+    let high = (256i32 << shift) - 1 - center;
+    (-center, high)
+}
+
+/// Shown-sample limits. At 8-bit the unrestricted range is `0..=255` and the
+/// restricted range is `16..=235` for luma and `16..=240` for chroma.
+fn output_limits(bit_depth: u8, restricted: bool) -> (i32, i32, i32) {
+    let shift = u32::from(bit_depth.saturating_sub(8));
+    if restricted {
+        (16i32 << shift, 235i32 << shift, 240i32 << shift)
+    } else {
+        let max = (1i32 << u32::from(bit_depth.min(16))) - 1;
+        (0, max, max)
+    }
+}
+
+/// Scaling lookup. Above 8-bit the 256-entry table is interpolated.
+fn scale_at(lut: &[i32; 256], index: i32, bit_depth: u8) -> i32 {
+    let shift = u32::from(bit_depth.saturating_sub(8));
+    let x = (index >> shift).clamp(0, 255);
+    if bit_depth <= 8 || x == 255 {
+        return lut[x as usize];
+    }
+    let rem = index - (x << shift);
+    let start = lut[x as usize];
+    let end = lut[x as usize + 1];
+    start + round2((end - start) * rem, i32::try_from(shift).unwrap_or(0))
+}
+
 fn clip3(min: i32, max: i32, value: i32) -> i32 {
     if value < min {
         min
@@ -753,5 +835,27 @@ mod tests {
         assert_eq!(GAUSSIAN[0], 56);
         assert_eq!(GAUSSIAN[1], 568);
         assert_eq!(GAUSSIAN[2], -180);
+    }
+
+    #[test]
+    fn eight_bit_grain_limits_stay_in_a_byte() {
+        assert_eq!(super::grain_limits(8), (-128, 127));
+        assert_eq!(super::output_limits(8, false), (0, 255, 255));
+        assert_eq!(super::output_limits(8, true), (16, 235, 240));
+        assert_eq!(super::gaussian_shift(8, 0), 4);
+        let mut lut = [0i32; 256];
+        lut[10] = 7;
+        assert_eq!(super::scale_at(&lut, 10, 8), 7);
+    }
+
+    #[test]
+    fn ten_bit_grain_widens_the_range_and_interpolates() {
+        assert_eq!(super::grain_limits(10), (-512, 511));
+        assert_eq!(super::output_limits(10, false), (0, 1023, 1023));
+        assert_eq!(super::gaussian_shift(10, 1), 3);
+        let mut lut = [0i32; 256];
+        lut[1] = 0;
+        lut[2] = 40;
+        assert_eq!(super::scale_at(&lut, 6, 10), 20);
     }
 }

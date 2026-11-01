@@ -35,7 +35,7 @@ struct DesktopWindow {
 }
 
 impl eframe::App for DesktopWindow {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         if self.shell.playing()
             && let Some(last) = self.last_time
@@ -47,6 +47,6 @@ impl eframe::App for DesktopWindow {
             ui.ctx().request_repaint();
         }
         self.last_time = Some(now);
-        show(&mut self.shell, ui, &mut self.view);
+        show(&mut self.shell, ui, &mut self.view, Some(frame));
     }
 }

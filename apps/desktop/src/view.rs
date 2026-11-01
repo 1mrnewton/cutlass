@@ -5,7 +5,8 @@ use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Ui, Vec2,
 };
 
-use crate::shell::Shell;
+use crate::dialogs::{Dialogs, Finished, Picker};
+use crate::shell::{ExportRequest, Shell, ShellError};
 use crate::tokens;
 use crate::widgets::{self, HeaderFlags};
 
@@ -20,6 +21,7 @@ pub struct ViewState {
     text_for: String,
     volume_buffer: String,
     speed_buffer: String,
+    dialogs: Dialogs,
 }
 
 impl Default for ViewState {
@@ -35,6 +37,7 @@ impl Default for ViewState {
             text_for: String::new(),
             volume_buffer: String::new(),
             speed_buffer: String::new(),
+            dialogs: Dialogs::new(),
         }
     }
 }
@@ -45,14 +48,17 @@ impl ViewState {
     }
 }
 
-pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
+    if let Some(finished) = view.dialogs.poll(ui.ctx()) {
+        apply_dialog(shell, view, finished);
+    }
     style(ui);
     shell.chrome = crate::shell::Chrome::default();
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
     let sizes = sizes(shell, full.size());
-    project_bar(shell, ui, view, full, sizes.head);
+    project_bar(shell, ui, view, full, sizes.head, parent);
     let row = Rect::from_min_size(
         Pos2::new(full.min.x, full.min.y + sizes.head + tokens::SPLIT),
         Vec2::new(full.width(), sizes.row),
@@ -64,7 +70,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     );
     timeline_panel(shell, ui, timeline);
     if view.export_open {
-        export_dialog(shell, ui, view);
+        export_dialog(shell, ui, view, parent);
     }
     if !shell.notice().is_empty() {
         ui.painter().text(
@@ -76,6 +82,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         );
     }
     shortcuts(shell, ui);
+    if let Some(finished) = view.dialogs.poll(ui.ctx()) {
+        apply_dialog(shell, view, finished);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -133,13 +142,20 @@ fn style(ui: &mut Ui) {
     });
 }
 
-fn project_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, full: Rect, height: f32) {
+fn project_bar(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    full: Rect,
+    height: f32,
+    parent: Option<&eframe::Frame>,
+) {
     let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), height));
     ui.painter()
         .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
     shell.chrome.project_bar = true;
     window_buttons(shell, ui, bar);
-    menus(shell, ui, bar);
+    menus(shell, ui, view, bar, parent);
     ui.painter().text(
         bar.center(),
         Align2::CENTER_CENTER,
@@ -192,27 +208,29 @@ fn window_buttons(shell: &mut Shell, ui: &mut Ui, bar: Rect) {
     }
 }
 
-fn menus(shell: &mut Shell, ui: &mut Ui, bar: Rect) {
+fn menus(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    bar: Rect,
+    parent: Option<&eframe::Frame>,
+) {
     let menu = Rect::from_min_size(
         bar.min + Vec2::new(78.0, 0.0),
         Vec2::new(160.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
-            ui.menu_button("File", |ui| file_menu(shell, ui));
+            ui.menu_button("File", |ui| file_menu(shell, ui, view, parent));
             ui.menu_button("Edit", |ui| edit_menu(shell, ui));
         });
     });
 }
 
-fn file_menu(shell: &mut Shell, ui: &mut Ui) {
+fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
     if ui.button("Open…").clicked() {
         ui.close();
-        if let Some(path) = rfd::FileDialog::new().pick_folder()
-            && let Err(error) = shell.open_folder(&path)
-        {
-            shell.set_notice(error.to_string());
-        }
+        view.dialogs.open_project(parent);
     }
     if ui.button("Save").clicked() {
         ui.close();
@@ -222,11 +240,7 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui) {
     }
     if ui.button("Import…").clicked() {
         ui.close();
-        if let Some(path) = rfd::FileDialog::new().pick_file()
-            && let Err(error) = shell.import_file(&path)
-        {
-            shell.set_notice(error.to_string());
-        }
+        view.dialogs.import(parent);
     }
 }
 
@@ -668,7 +682,12 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     shell.set_lane_width((rect.width() - cover).max(1.0));
 }
 
-fn export_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+fn export_dialog(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    parent: Option<&eframe::Frame>,
+) {
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
         ui.label(RichText::new("Long side").color(tokens::MUTED));
         for side in crate::shell::LONG_SIDES {
@@ -683,23 +702,14 @@ fn export_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             ui.label("Replace the existing file?");
         }
         if ui.button("Export").clicked() {
-            let path = if view.export_path.is_empty() {
-                rfd::FileDialog::new()
-                    .save_file()
-                    .unwrap_or_else(|| std::path::PathBuf::from("export.png"))
+            if view.export_path.is_empty() {
+                view.dialogs.save_export(parent);
             } else {
-                std::path::PathBuf::from(&view.export_path)
-            };
-            view.export_path = path.display().to_string();
-            match shell.export(crate::shell::ExportRequest {
-                path,
-                long_side: view.export_side,
-                codec: view.export_codec,
-                replace: view.replace_prompt,
-            }) {
-                Ok(()) => view.export_open = false,
-                Err(crate::shell::ShellError::Overwrite(_)) => view.replace_prompt = true,
-                Err(error) => shell.set_notice(error.to_string()),
+                match write_export(shell, view) {
+                    Ok(()) => view.export_open = false,
+                    Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
+                    Err(error) => shell.set_notice(error.to_string()),
+                }
             }
         }
     });
@@ -707,6 +717,37 @@ fn export_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         view.export_open = false;
         view.replace_prompt = false;
     }
+}
+
+fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
+    let Some(path) = finished.path else {
+        return;
+    };
+    let result = match finished.picker {
+        Picker::OpenProject => shell.open_folder(&path),
+        Picker::Import => shell.import_file(&path),
+        Picker::SaveExport => {
+            view.export_path = path.display().to_string();
+            write_export(shell, view)
+        }
+    };
+    match result {
+        Ok(()) if finished.picker == Picker::SaveExport => view.export_open = false,
+        Ok(()) => {}
+        Err(ShellError::Overwrite(_)) if finished.picker == Picker::SaveExport => {
+            view.replace_prompt = true;
+        }
+        Err(error) => shell.set_notice(error.to_string()),
+    }
+}
+
+fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
+    shell.export(ExportRequest {
+        path: std::path::PathBuf::from(&view.export_path),
+        long_side: view.export_side,
+        codec: view.export_codec,
+        replace: view.replace_prompt,
+    })
 }
 
 fn shortcuts(shell: &mut Shell, ui: &Ui) {
@@ -802,7 +843,7 @@ mod tests {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
                 ..Default::default()
             },
-            |ui| show(&mut shell, ui, &mut view),
+            |ui| show(&mut shell, ui, &mut view, None),
         );
         assert!(shell.chrome.project_bar);
         assert!(shell.chrome.library);
@@ -814,6 +855,35 @@ mod tests {
         assert!(!shell.chrome.close_requested);
         assert!(!ctx.global_style().interaction.selectable_labels);
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_completed_import_dialog_places_the_file() {
+        let temp = std::env::temp_dir().join(format!("cutlass-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let main = shell.lanes().into_iter().find(|lane| lane.main).unwrap();
+        assert_eq!(main.clips.len(), 1);
+        assert!(temp.join("Resources").join("pattern.png").is_file());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

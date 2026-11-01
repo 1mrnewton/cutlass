@@ -5598,6 +5598,31 @@ mod tests {
     }
 
     #[test]
+    fn lag3_film_grain_matches_dav1d() {
+        // aomenc --film-grain-test=2, 128×128. The grain filter lag is 3, overlap
+        // is on, and samples are not clipped to the restricted range. Treating
+        // the lag as 2 changes the picture, and so does restricted clipping.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-lag3.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert_eq!(frame.grain.ar_lag, 3);
+        assert!(frame.grain.overlap);
+        assert!(!frame.grain.clip_restricted);
+        assert_eq!(frame.grain.grain_scale_shift, 0);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x9041_c406_f2e9_8581);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn full_still_picture_header_matches_dav1d() {
         // aomenc --limit=1 --full-still-picture-hdr, 128×128. The sequence is a
         // still picture and uses the full header, not the reduced one. Rejecting

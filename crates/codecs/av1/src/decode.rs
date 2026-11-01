@@ -1191,11 +1191,17 @@ fn publish_held(
             (pts, timescale),
         );
     }
-    let chroma_420 = wide
-        .width
-        .div_ceil(2)
-        .saturating_mul(wide.height.div_ceil(2));
-    if wide.u.len() != chroma_420 {
+    let chroma_w = if frame.grain.sub_x {
+        wide.width.div_ceil(2)
+    } else {
+        wide.width
+    };
+    let chroma_h = if frame.grain.sub_y {
+        wide.height.div_ceil(2)
+    } else {
+        wide.height
+    };
+    if wide.u.len() != chroma_w.saturating_mul(chroma_h) {
         return Err(CodecError::Unsupported { what: "film grain" });
     }
     let Some((y, u, v)) = crate::grain::overlay(
@@ -1233,13 +1239,21 @@ fn shown(picture: &Yuv420, frame: &FrameInfo) -> Result<Yuv420, CodecError> {
     if !frame.grain.apply {
         return Ok(picture.clone());
     }
-    if picture.u.width() != picture.y.width().div_ceil(2)
-        || picture.u.height() != picture.y.height().div_ceil(2)
-    {
-        return Err(CodecError::Unsupported { what: "film grain" });
-    }
     let width = picture.y.width() as usize;
     let height = picture.y.height() as usize;
+    let chroma_w = if frame.grain.sub_x {
+        picture.y.width().div_ceil(2)
+    } else {
+        picture.y.width()
+    };
+    let chroma_h = if frame.grain.sub_y {
+        picture.y.height().div_ceil(2)
+    } else {
+        picture.y.height()
+    };
+    if picture.u.width() != chroma_w || picture.u.height() != chroma_h {
+        return Err(CodecError::Unsupported { what: "film grain" });
+    }
     let Some((y, u, v)) = crate::grain::overlay(
         picture.y.samples(),
         picture.u.samples(),
@@ -1262,8 +1276,8 @@ fn shown(picture: &Yuv420, frame: &FrameInfo) -> Result<Yuv420, CodecError> {
             width,
             height,
         },
-        true,
-        true,
+        frame.grain.sub_x,
+        frame.grain.sub_y,
     )
 }
 
@@ -3875,6 +3889,79 @@ mod tests {
             assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
         }
         assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn film_grain_on_444_and_422_matches_dav1d() {
+        // aomenc --film-grain-test=1, 64×64, two frames. CDEF and restoration
+        // are off. One stream is profile 1 4:4:4 and one is profile 2 4:2:2.
+        // Chroma grain uses the full template when that axis is not subsampled.
+        // Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/grain-444.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                cutlass_decode::PixelFormat::Yuv444p,
+                64 * 64 * 3,
+                [0xc834_7b7a_6690_9501, 0x098c_8ff0_695d_0b65],
+            ),
+            (
+                include_bytes!("../fixtures/grain-422.ivf").as_slice(),
+                2,
+                true,
+                false,
+                cutlass_decode::PixelFormat::Yuv422p,
+                64 * 64 + 32 * 64 * 2,
+                [0xed8a_94d1_ac1f_64af, 0x32a1_2ff4_b5fe_4ad3],
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, pixel, length, expected) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 2);
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert!(key.grain.apply);
+            assert_eq!(key.grain.sub_x, sub_x);
+            assert_eq!(key.grain.sub_y, sub_y);
+            let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+            assert!(!inter.intra);
+            assert!(inter.grain.apply);
+            let params = CodecParams::video(CodecId::Av1, 64, 64);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            for (index, payload) in frames.iter().enumerate() {
+                let shown = decoder
+                    .push(&cutlass_decode::Packet {
+                        stream: 0,
+                        data: payload.to_vec(),
+                        pts: index as i64,
+                        duration: 1,
+                        timescale: 30,
+                        keyframe: index == 0,
+                        side: Vec::new(),
+                    })
+                    .unwrap_or_else(|error| panic!("profile {profile} frame {index}: {error:?}"));
+                assert_eq!(shown.len(), 1, "profile {profile} frame {index}");
+                let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                    panic!("picture");
+                };
+                let info = picture.info();
+                assert_eq!(info.pixel, pixel, "profile {profile} frame {index}");
+                let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("cpu");
+                };
+                assert_eq!(bytes.len(), length, "profile {profile} frame {index}");
+                assert_eq!(
+                    frame_digest(bytes),
+                    expected[index],
+                    "profile {profile} frame {index}"
+                );
+            }
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
     }
 
     #[test]

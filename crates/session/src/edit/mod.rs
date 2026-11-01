@@ -94,6 +94,20 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             time,
         } => trim(draft, segment_id, *edge, *time),
         Request::SetWords { material_id, words } => set_words(draft, material_id, words.clone()),
+        Request::AddCaption {
+            source_id,
+            track_id,
+            segment_id,
+            material_id,
+            words,
+        } => words::add_caption(
+            draft,
+            source_id,
+            track_id,
+            segment_id,
+            material_id,
+            words.clone(),
+        ),
         Request::SetTrackAttribute { track_id, bit, on } => {
             track::set_track_attribute(draft, track_id, *bit, *on)
         }

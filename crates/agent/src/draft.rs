@@ -425,6 +425,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Move { .. } => "move",
         Request::Trim { .. } => "trim",
         Request::SetWords { .. } => "set_words",
+        Request::AddCaption { .. } => "add_caption",
         Request::SetTrackAttribute { .. } => "set_track_attribute",
         Request::SetConstantSpeed { .. } => "set_constant_speed",
         Request::SetCurveSpeed { .. } => "set_curve_speed",

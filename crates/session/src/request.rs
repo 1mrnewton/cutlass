@@ -49,6 +49,17 @@ pub enum Request {
         material_id: MaterialId,
         words: WordColumns,
     },
+    /// Place one caption for `source_id` and store its words.
+    ///
+    /// The caption uses the source clip's timeline range. `track_id` is created
+    /// when it is missing. Word times are milliseconds on that range.
+    AddCaption {
+        source_id: SegmentId,
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        words: WordColumns,
+    },
     /// Turn one track-attribute bit on or off. Mute and solo are not gains.
     SetTrackAttribute {
         track_id: TrackId,

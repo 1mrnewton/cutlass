@@ -752,9 +752,25 @@ impl Shell {
             .clone();
         let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
         let main = folder.project.main_timeline_id.clone();
+        let name = draft.name.clone();
         folder.draft = draft.clone();
         if let Some(timeline) = folder.timelines.get_mut(&main) {
             *timeline = draft;
+        }
+        if let Some(entry) = folder
+            .project
+            .timelines
+            .iter_mut()
+            .find(|entry| entry.id == main)
+        {
+            entry.name.clone_from(&name);
+        }
+        for dock in &mut folder.layout.dock_items {
+            if let Some(index) = dock.timeline_ids.iter().position(|id| id == &main)
+                && let Some(slot) = dock.timeline_names.get_mut(index)
+            {
+                slot.clone_from(&name);
+            }
         }
         folder.set_linkage_enabled(enabled);
         folder.save(&path).map_err(ShellError::Store)?;
@@ -1848,6 +1864,20 @@ impl Shell {
     pub fn color_space_label(&self) -> String {
         let space = self.draft().map(|draft| draft.color_space).unwrap_or(0);
         color_space_name(space)
+    }
+
+    /// Store the project name. Surrounding whitespace is dropped. An empty
+    /// name stays empty, and the window shows Untitled. The same name is not
+    /// an undo step. The canvas stays.
+    pub fn set_project_name(&mut self, name: &str) -> Result<(), ShellError> {
+        let current = self.session_draft()?.name.clone();
+        let name = name.trim();
+        if current == name {
+            return Ok(());
+        }
+        self.apply(Request::SetProjectName {
+            name: name.to_owned(),
+        })
     }
 
     /// Step to the next project color space. One undo restores the previous
@@ -7299,6 +7329,56 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().letterbox, "");
+    }
+
+    #[test]
+    fn a_project_name_is_the_window_title_and_the_saved_draft() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.set_project_name("Cut").unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let root = Temp::new();
+        let path = Shell::create_project(&root.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&path).unwrap();
+        assert_eq!(desktop.project_name(), "Project");
+        let width = desktop.draft().unwrap().canvas_config.width;
+        let space = desktop.draft().unwrap().color_space;
+        let revision = desktop.revision();
+        desktop.set_project_name("Project").unwrap();
+        assert_eq!(desktop.revision(), revision);
+
+        desktop.set_project_name("  Cut  ").unwrap();
+        assert_eq!(desktop.project_name(), "Cut");
+        assert_eq!(desktop.draft().unwrap().canvas_config.width, width);
+        assert_eq!(desktop.draft().unwrap().color_space, space);
+        desktop.save().unwrap();
+        let saved = Folder::read(&path).unwrap();
+        assert_eq!(saved.draft.name, "Cut");
+        assert_eq!(saved.project.timelines[0].name, "Cut");
+        assert_eq!(saved.layout.dock_items[0].timeline_names, ["Cut"]);
+        assert_eq!(
+            Shell::list_projects(&root.path)
+                .into_iter()
+                .map(|project| project.name)
+                .collect::<Vec<_>>(),
+            ["Cut"]
+        );
+
+        desktop.undo().unwrap();
+        assert_eq!(desktop.project_name(), "Project");
+        desktop.set_project_name("   ").unwrap();
+        assert_eq!(desktop.draft().unwrap().name, "");
+        assert_eq!(desktop.project_name(), "Untitled");
+
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.set_project_name("Locked").unwrap();
+        assert_eq!(desktop.project_name(), "Locked");
     }
 
     #[test]

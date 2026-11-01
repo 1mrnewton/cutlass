@@ -129,6 +129,7 @@ pub struct ViewState {
     fade_out_buffer: String,
     speed_buffer: String,
     background_buffer: String,
+    name_buffer: String,
     dialogs: Dialogs,
     library_query: String,
     library_shelf: Shelf,
@@ -165,6 +166,7 @@ impl Default for ViewState {
             fade_out_buffer: String::new(),
             speed_buffer: String::new(),
             background_buffer: String::new(),
+            name_buffer: String::new(),
             dialogs: Dialogs::new(),
             library_query: String::new(),
             library_shelf: Shelf::Media,
@@ -1069,7 +1071,15 @@ fn section_title(ui: &mut Ui, title: &str) {
 }
 
 fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f32) {
-    fact(ui, "Name", &shell.project_name(), width);
+    if let Some(stored) = shell.draft().map(|draft| draft.name.clone()) {
+        if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
+            && let Err(error) = shell.set_project_name(&name)
+        {
+            shell.set_notice(error.to_string());
+        }
+    } else {
+        fact(ui, "Name", &shell.project_name(), width);
+    }
     let saved = shell
         .project_folder()
         .map(|path| path.display().to_string())
@@ -1144,6 +1154,26 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     {
         shell.set_notice(error.to_string());
     }
+}
+
+fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+    let mut edited = None;
+    ui.horizontal(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.add_sized(
+            [108.0, 18.0],
+            egui::Label::new(RichText::new("Name").size(13.0).color(tokens::MUTED)),
+        );
+        let response = widgets::field(ui, text).on_hover_text("Empty shows Untitled");
+        if response.lost_focus() {
+            edited = Some(text.clone());
+        }
+        if !response.has_focus() {
+            *text = stored.to_owned();
+        }
+    });
+    ui.add_space(4.0);
+    edited
 }
 
 fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {

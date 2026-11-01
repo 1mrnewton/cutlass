@@ -32,6 +32,8 @@
 //! picture is luma 180 and chroma 90. A missing base depth picture is an error.
 //! Scale 3968 and offset 0 read the depth sample 64 at the far corner, so the
 //! picture shifts four pixels: four columns stay 100 and the rest are 180.
+//! A B_L0_16×16 picture with the same flags and the offset disparity copies
+//! that texture as luma 180 and chroma 90.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

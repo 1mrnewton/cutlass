@@ -1222,6 +1222,47 @@ fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
 }
 
 #[test]
+fn a_b_slice_view_synthesis_copies_the_base_texture() {
+    let base = dmvp_base_idr();
+    let depth = vsp_depth();
+    let view = vsp_b_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| painted(picture, 180, 90))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| painted(picture, 128, 40))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn an_8x8_depth_motion_vector_cancels_the_base_motion() {
     let base_idr = dmvp_base_idr();
     let other_idr = dmvp_other_idr();
@@ -1520,6 +1561,37 @@ fn vsp_p_slice() -> Vec<u8> {
     w.bit(true);
     w.ue(0);
     w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn vsp_b_texture() -> Vec<u8> {
+    annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_b_slice())
+}
+
+fn vsp_b_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bits(0, 4);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
     w.bit(true);
     w.bit(true);
     w.ue(0);

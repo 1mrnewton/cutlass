@@ -676,6 +676,9 @@ fn skip_mb<S: Sample>(
             )?;
         }
     } else {
+        if slice.vsp {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
         direct_16(pic, dpb, slice, mx, my, &mut mb)?;
         predict_inter(pic, dpb, slice, mx, my, &mb)?;
     }
@@ -6462,7 +6465,8 @@ fn decode_inter<S: Sample>(
     } else {
         spec == 3 || spec == 4
     };
-    if slice.vsp && (slice.kind != 0 || sub || spec != 0) {
+    let vsp_block = (slice.kind == 0 && spec == 0) || (slice.kind == 1 && spec == 1);
+    if slice.vsp && (sub || !vsp_block) {
         return Err(CodecError::Unsupported { what: "3d" });
     }
     if (slice.adaptive_motion || slice.motion_pred) && (sub || (slice.kind == 1 && spec == 0)) {

@@ -2686,9 +2686,6 @@ fn read_header(
         if sps.view_synthesis {
             vsp = bits.bit()?;
         }
-        if vsp && kind != 0 {
-            return Err(CodecError::Unsupported { what: "3d" });
-        }
         if !dmvp && !vsp {
             return Err(CodecError::Unsupported { what: "3d" });
         }

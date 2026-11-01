@@ -1163,6 +1163,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     );
     let body = Rect::from_min_max(toolbar.left_bottom(), rect.max);
     ruler_and_lanes(shell, ui, view, body);
+    paint_clip_menu(shell, ui);
     let handle = Rect::from_min_size(
         Pos2::new(rect.min.x, rect.min.y - tokens::SPLIT),
         Vec2::new(rect.width(), tokens::SPLIT),
@@ -1420,6 +1421,88 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
     pan_timeline(shell, ui, lane_area);
+}
+
+fn secondary_click(ui: &Ui) -> Option<Pos2> {
+    ui.input(|input| {
+        if input.pointer.button_clicked(egui::PointerButton::Secondary) {
+            input.pointer.interact_pos()
+        } else {
+            None
+        }
+    })
+}
+
+fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
+    let Some(menu) = shell.clip_menu() else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && (pos.x, pos.y) != (menu.x, menu.y)
+    {
+        shell.close_clip_menu();
+        return;
+    }
+    let width = 132.0;
+    let row_height = 28.0;
+    let labels = ["Copy", "Cut", "Delete", "Paste"];
+    let rect = Rect::from_min_size(
+        Pos2::new(menu.x, menu.y),
+        Vec2::new(width, row_height * labels.len() as f32),
+    );
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(8), tokens::PANEL);
+    ui.painter().rect_stroke(
+        rect,
+        CornerRadius::same(8),
+        egui::Stroke::new(1.0, tokens::LANE_LINE),
+        egui::StrokeKind::Inside,
+    );
+    let mut acted = false;
+    for (index, label) in labels.iter().enumerate() {
+        let item = Rect::from_min_size(
+            Pos2::new(rect.left(), rect.top() + index as f32 * row_height),
+            Vec2::new(width, row_height),
+        );
+        let response = ui.interact(
+            item,
+            ui.scope_id().with(("clip-menu", *label)),
+            Sense::click(),
+        );
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(item, CornerRadius::same(6), tokens::ICON_BUTTON);
+        }
+        ui.painter().text(
+            item.left_center() + Vec2::new(12.0, 0.0),
+            Align2::LEFT_CENTER,
+            *label,
+            FontId::proportional(12.0),
+            tokens::TEXT,
+        );
+        if response.clicked() {
+            let result = match *label {
+                "Copy" => shell.copy_selected(),
+                "Cut" => shell.cut_selected(),
+                "Paste" => shell.paste(),
+                _ => shell.remove_selected(),
+            };
+            if let Err(error) = result {
+                shell.set_notice(error.to_string());
+            }
+            acted = true;
+        }
+    }
+    let outside = ui.input(|input| {
+        input.pointer.primary_clicked()
+            && input
+                .pointer
+                .interact_pos()
+                .is_none_or(|pos| !rect.contains(pos))
+    });
+    if acted || outside {
+        shell.close_clip_menu();
+    }
 }
 
 fn scroll_with_drag(shell: &mut Shell, ui: &Ui, x_in_view: f64) {
@@ -2042,6 +2125,14 @@ fn paint_clip(
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
     }
+    if let Some(pos) = secondary_click(ui)
+        && clip_rect.contains(pos)
+    {
+        if !shell.is_selected(&clip.id) {
+            shell.select(Some(clip.id.clone()));
+        }
+        shell.open_clip_menu(pos.x, pos.y);
+    }
     let selected = shell.is_selected(&clip.id);
     let ghost = shell.moving(&clip.id);
     let painter = ui.painter().with_clip_rect(row);
@@ -2534,6 +2625,9 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::ArrowRight => "right",
         egui::Key::Delete | egui::Key::Backspace => "delete",
         egui::Key::S => "s",
+        egui::Key::C => "c",
+        egui::Key::X => "x",
+        egui::Key::V => "v",
         _ => return None,
     };
     if matches!(name, "space" | "left" | "right" | "delete" | "s")
@@ -3618,6 +3712,65 @@ mod tests {
         );
         output.textures_delta.clear();
         assert_eq!(shell.selection().len(), 1);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_right_click_copies_the_clip() {
+        let (mut shell, temp) = open_span("menu", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        let click =
+            |pos: Pos2, button: egui::PointerButton, pressed: bool| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::PointerMoved(text),
+                    click(text, egui::PointerButton::Secondary, true),
+                    click(text, egui::PointerButton::Secondary, false),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.clip_menu().is_some());
+        let copy = Pos2::new(text.x + 24.0, text.y + 10.0);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::PointerMoved(copy),
+                    click(copy, egui::PointerButton::Primary, true),
+                    click(copy, egui::PointerButton::Primary, false),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.has_clipboard(), "notice {}", shell.notice());
+        assert!(shell.clip_menu().is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

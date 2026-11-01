@@ -67,6 +67,7 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::TransitionWindow) => {
                 formatter.write_str("a transition cannot be split")
             }
+            Self::Edit(EditError::Overlap) => formatter.write_str("the clips overlap"),
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -187,6 +188,21 @@ struct PendingMove {
     snapped: bool,
 }
 
+/// A clip kept for paste. `offset` is its start relative to the earliest copied clip.
+#[derive(Clone)]
+struct CopiedClip {
+    track_id: TrackId,
+    offset: i64,
+    segment: Segment,
+}
+
+/// The open clip menu, in window points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipMenu {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// Where a clip drag is showing, before the draft is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovePreview {
@@ -222,6 +238,8 @@ pub struct Shell {
     timeline_height: f32,
     /// Clips the user has picked. The last one is the inspector clip.
     selection: Vec<SegmentId>,
+    clipboard: Vec<CopiedClip>,
+    clip_menu: Option<ClipMenu>,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
     clip_drag: Option<ClipDrag>,
@@ -241,6 +259,9 @@ impl Shell {
         ensure_shortcut(&mut settings, "frame_forward", "right");
         ensure_shortcut(&mut settings, "delete", "delete");
         ensure_shortcut(&mut settings, "split", "s");
+        ensure_shortcut(&mut settings, "copy", "primary+c");
+        ensure_shortcut(&mut settings, "cut", "primary+x");
+        ensure_shortcut(&mut settings, "paste", "primary+v");
         Self {
             decoders,
             encoders,
@@ -263,6 +284,8 @@ impl Shell {
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
             selection: Vec::new(),
+            clipboard: Vec::new(),
+            clip_menu: None,
             blade: false,
             clip_drag: None,
             pending_trim: None,
@@ -386,6 +409,8 @@ impl Shell {
         self.playing = false;
         self.view_origin = 0;
         self.selection.clear();
+        self.clipboard.clear();
+        self.clip_menu = None;
         self.blade = false;
         self.cancel_clip_drag();
         self.fit_on_layout = false;
@@ -479,6 +504,8 @@ impl Shell {
         self.playing = false;
         self.view_origin = 0;
         self.selection.clear();
+        self.clipboard.clear();
+        self.clip_menu = None;
         self.blade = false;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
@@ -736,6 +763,9 @@ impl Shell {
                 self.remove_selected()
             }
             Some("split") => self.split_playhead(),
+            Some("copy") => self.copy_selected(),
+            Some("cut") => self.cut_selected(),
+            Some("paste") => self.paste(),
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -1417,6 +1447,106 @@ impl Shell {
             self.blade = false;
         }
         Ok(())
+    }
+
+    /// Remember the selection for paste. The draft stays as it is.
+    pub fn copy_selected(&mut self) -> Result<(), ShellError> {
+        if self.selection.is_empty() {
+            return Err(ShellError::Unavailable("nothing is selected".to_owned()));
+        }
+        let draft = self.session_draft()?;
+        let mut copies = Vec::new();
+        for track in &draft.tracks {
+            for segment in &track.segments {
+                if !self.is_selected(&segment.id) {
+                    continue;
+                }
+                if bit(track.attribute, TrackAttribute::LOCK) {
+                    return Err(ShellError::Locked);
+                }
+                copies.push(CopiedClip {
+                    track_id: track.id.clone(),
+                    offset: segment.target.start.0,
+                    segment: segment.clone(),
+                });
+            }
+        }
+        if copies.is_empty() {
+            return Err(ShellError::Unavailable("nothing is selected".to_owned()));
+        }
+        let earliest = copies.iter().map(|item| item.offset).min().unwrap_or(0);
+        for item in &mut copies {
+            item.offset = item.offset.saturating_sub(earliest);
+        }
+        self.clipboard = copies;
+        Ok(())
+    }
+
+    /// Copy the selection, then remove it. One undo puts the clips back.
+    pub fn cut_selected(&mut self) -> Result<(), ShellError> {
+        self.copy_selected()?;
+        self.remove_selected()?;
+        self.clip_menu = None;
+        Ok(())
+    }
+
+    /// Place the copied clips at the playhead, keeping the gaps between them.
+    pub fn paste(&mut self) -> Result<(), ShellError> {
+        if self.clipboard.is_empty() {
+            return Err(ShellError::Unavailable("nothing to paste".to_owned()));
+        }
+        {
+            let draft = self.session_draft()?;
+            for item in &self.clipboard {
+                let Some(track) = draft.tracks.iter().find(|track| track.id == item.track_id)
+                else {
+                    return Err(ShellError::Unavailable("the lane is gone".to_owned()));
+                };
+                if bit(track.attribute, TrackAttribute::LOCK) {
+                    return Err(ShellError::Locked);
+                }
+            }
+        }
+        let playhead = self.playhead.0.max(0);
+        let copies = self.clipboard.clone();
+        let mut requests = Vec::new();
+        let mut ids = Vec::new();
+        for item in copies {
+            let mut segment = item.segment.clone();
+            let id = SegmentId::new(self.fresh("seg"));
+            segment.id = id.clone();
+            segment.target = TimeRange::new(
+                playhead.saturating_add(item.offset),
+                segment.target.duration.0,
+            );
+            requests.push(Request::Place {
+                track_id: item.track_id.clone(),
+                segment: Box::new(segment),
+            });
+            ids.push(id);
+        }
+        self.apply_requests(&requests)?;
+        self.selection = ids;
+        self.clip_menu = None;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn has_clipboard(&self) -> bool {
+        !self.clipboard.is_empty()
+    }
+
+    pub fn open_clip_menu(&mut self, x: f32, y: f32) {
+        self.clip_menu = Some(ClipMenu { x, y });
+    }
+
+    pub fn close_clip_menu(&mut self) {
+        self.clip_menu = None;
+    }
+
+    #[must_use]
+    pub fn clip_menu(&self) -> Option<ClipMenu> {
+        self.clip_menu
     }
 
     /// The split tool is armed. A click on a clip cuts it at that time.
@@ -3984,6 +4114,83 @@ mod tests {
             desktop.draft().unwrap().tracks[0].segments[1].target.start,
             Micros(3_000_000)
         );
+    }
+
+    #[test]
+    fn paste_lands_at_the_playhead_and_keeps_the_gap() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert_eq!(
+            desktop.copy_selected().unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        let ids: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.clone())
+            .collect();
+        desktop.select_box(ids, false);
+        desktop.copy_selected().unwrap();
+        assert!(desktop.has_clipboard());
+        assert_eq!(
+            desktop.paste().unwrap_err().to_string(),
+            "the clips overlap"
+        );
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        desktop.seek(Micros(4_000_000));
+        desktop.paste().unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks[0].segments.len(), 4);
+        assert_eq!(
+            draft.tracks[0].segments[2].target,
+            TimeRange::new(4_000_000, 1_000_000)
+        );
+        assert_eq!(
+            draft.tracks[0].segments[3].target,
+            TimeRange::new(7_000_000, 500_000)
+        );
+        assert_eq!(desktop.selection().len(), 2);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        let ids: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.clone())
+            .collect();
+        desktop.select_box(ids, false);
+        desktop.run_shortcut("primary+x").unwrap();
+        assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
+        desktop.seek(Micros(0));
+        desktop.run_shortcut("primary+v").unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[1].target.start,
+            Micros(3_000_000)
+        );
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        let ids: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.clone())
+            .collect();
+        desktop.select_box(ids, false);
+        let track = desktop.lanes()[0].track_id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.copy_selected().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert!(desktop.has_clipboard());
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
     }
 
     #[test]

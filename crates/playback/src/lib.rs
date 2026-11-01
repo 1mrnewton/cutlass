@@ -10,7 +10,8 @@
 //! silence is not a missing build, and it is not a failed open. Pictures
 //! still present. A missing device is [`AudioGap`], not a panic.
 //!
-//! WASAPI and AAudio are not in this pass.
+//! Apple plays through Core Audio. Windows plays through WASAPI. Android
+//! plays through AAudio.
 
 #![forbid(unsafe_code)]
 

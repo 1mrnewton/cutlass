@@ -1,9 +1,10 @@
 //! Preview audio.
 //!
-//! The mix at the playhead is one interleaved stereo slice. On Apple the
-//! callback walks that slice. Linux has no output device, so playback stays
-//! silent until one exists. That silence is not a missing build, and opening
-//! the preview is not a failed open. WASAPI and AAudio are not in this pass.
+//! The mix at the playhead is one interleaved stereo slice. The host callback
+//! walks that slice: Core Audio on Apple, WASAPI on Windows, and AAudio on
+//! Android. Linux has no output device, so playback stays silent until one
+//! exists. That silence is not a missing build, and opening the preview is
+//! not a failed open.
 //!
 //! [`copy_pipeline_sample`](crate::Player::copy_pipeline_sample) still copies
 //! the sample the caller passes. The queued mix is a separate buffer.
@@ -31,8 +32,7 @@ pub enum AudioGap {
     /// Linux has no output device. Playback stays silent until one exists.
     /// This names silence. It is not a missing build, and it is not a failed open.
     Linux,
-    /// The host has no output device. WASAPI and AAudio are not in this pass,
-    /// and a Core Audio queue that cannot be opened is the same result.
+    /// This host has no output device, or the device did not open.
     NoDevice,
 }
 
@@ -55,9 +55,13 @@ pub enum AudioHost {
     Software,
     /// Core Audio queue.
     Apple,
+    /// WASAPI shared-mode output.
+    Windows,
+    /// AAudio shared-mode output.
+    Android,
     /// No output device yet.
     Linux,
-    /// WASAPI and AAudio are not in this pass.
+    /// An operating system this build does not open.
     Unnamed,
 }
 
@@ -68,11 +72,24 @@ impl AudioHost {
         {
             Self::Apple
         }
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(target_os = "android")]
+        {
+            Self::Android
+        }
         #[cfg(target_os = "linux")]
         {
             Self::Linux
         }
-        #[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "linux",
+        )))]
         {
             Self::Unnamed
         }
@@ -88,12 +105,16 @@ pub enum CopyOutcome {
     Silent(AudioGap),
 }
 
-/// The bytes the callback last copied, and the Apple queue when one is open.
+/// The bytes the callback last copied, and the live device when one is open.
 struct SampleBuffer {
     copied: Vec<u8>,
     queued: Vec<u8>,
     #[cfg(target_vendor = "apple")]
     live: Option<cutlass_platform_apple::OutputQueue>,
+    #[cfg(target_os = "windows")]
+    live: Option<cutlass_platform_windows::OutputQueue>,
+    #[cfg(target_os = "android")]
+    live: Option<cutlass_platform_android::OutputQueue>,
 }
 
 impl SampleBuffer {
@@ -103,11 +124,33 @@ impl SampleBuffer {
             queued: Vec::new(),
             #[cfg(target_vendor = "apple")]
             live: None,
+            #[cfg(target_os = "windows")]
+            live: None,
+            #[cfg(target_os = "android")]
+            live: None,
         }
     }
 
     #[cfg(target_vendor = "apple")]
     fn core_audio(queue: cutlass_platform_apple::OutputQueue) -> Self {
+        Self {
+            copied: Vec::new(),
+            queued: Vec::new(),
+            live: Some(queue),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn wasapi(queue: cutlass_platform_windows::OutputQueue) -> Self {
+        Self {
+            copied: Vec::new(),
+            queued: Vec::new(),
+            live: Some(queue),
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn aaudio(queue: cutlass_platform_android::OutputQueue) -> Self {
         Self {
             copied: Vec::new(),
             queued: Vec::new(),
@@ -146,6 +189,14 @@ impl SampleBuffer {
         if let Some(queue) = &self.live {
             return queue.set_sample(sample).map_err(map_queue_error);
         }
+        #[cfg(target_os = "windows")]
+        if let Some(queue) = &self.live {
+            return queue.set_sample(sample).map_err(map_windows);
+        }
+        #[cfg(target_os = "android")]
+        if let Some(queue) = &self.live {
+            return queue.set_sample(sample).map_err(map_android);
+        }
         let _ = (self, sample);
         Ok(())
     }
@@ -180,6 +231,8 @@ impl AudioOutput {
                 kind: OutputKind::Silent(AudioGap::Linux),
             },
             AudioHost::Apple => open_apple(),
+            AudioHost::Windows => open_windows(),
+            AudioHost::Android => open_android(),
             AudioHost::Unnamed => Self {
                 kind: OutputKind::Silent(AudioGap::NoDevice),
             },
@@ -243,6 +296,46 @@ fn open_apple() -> AudioOutput {
     }
 }
 
+fn open_windows() -> AudioOutput {
+    #[cfg(target_os = "windows")]
+    {
+        match cutlass_platform_windows::OutputQueue::open(RATE, CHANNELS) {
+            Ok(queue) => AudioOutput {
+                kind: OutputKind::Buffer(SampleBuffer::wasapi(queue)),
+            },
+            Err(_) => AudioOutput {
+                kind: OutputKind::Silent(AudioGap::NoDevice),
+            },
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        AudioOutput {
+            kind: OutputKind::Silent(AudioGap::NoDevice),
+        }
+    }
+}
+
+fn open_android() -> AudioOutput {
+    #[cfg(target_os = "android")]
+    {
+        match cutlass_platform_android::OutputQueue::open(RATE, CHANNELS) {
+            Ok(queue) => AudioOutput {
+                kind: OutputKind::Buffer(SampleBuffer::aaudio(queue)),
+            },
+            Err(_) => AudioOutput {
+                kind: OutputKind::Silent(AudioGap::NoDevice),
+            },
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        AudioOutput {
+            kind: OutputKind::Silent(AudioGap::NoDevice),
+        }
+    }
+}
+
 #[cfg(target_vendor = "apple")]
 fn map_queue_error(error: cutlass_platform_apple::QueueError) -> PlayheadError {
     match error {
@@ -250,6 +343,26 @@ fn map_queue_error(error: cutlass_platform_apple::QueueError) -> PlayheadError {
         cutlass_platform_apple::QueueError::Hostile => PlayheadError::Hostile,
         cutlass_platform_apple::QueueError::NoDevice
         | cutlass_platform_apple::QueueError::Format => PlayheadError::Hostile,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn map_windows(error: cutlass_platform_windows::QueueError) -> PlayheadError {
+    match error {
+        cutlass_platform_windows::QueueError::Truncated => PlayheadError::Truncated,
+        cutlass_platform_windows::QueueError::Hostile => PlayheadError::Hostile,
+        cutlass_platform_windows::QueueError::NoDevice
+        | cutlass_platform_windows::QueueError::Format => PlayheadError::Hostile,
+    }
+}
+
+#[cfg(target_os = "android")]
+fn map_android(error: cutlass_platform_android::QueueError) -> PlayheadError {
+    match error {
+        cutlass_platform_android::QueueError::Truncated => PlayheadError::Truncated,
+        cutlass_platform_android::QueueError::Hostile => PlayheadError::Hostile,
+        cutlass_platform_android::QueueError::NoDevice
+        | cutlass_platform_android::QueueError::Format => PlayheadError::Hostile,
     }
 }
 
@@ -386,6 +499,20 @@ mod tests {
             let apple = AudioOutput::open(AudioHost::Apple);
             assert_eq!(apple.gap(), Some(AudioGap::NoDevice));
         }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut windows = AudioOutput::open(AudioHost::Windows);
+            assert_eq!(windows.gap(), Some(AudioGap::NoDevice));
+            windows.queue(&[0_u8; 8]);
+            assert!(windows.queued().is_empty());
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut android = AudioOutput::open(AudioHost::Android);
+            assert_eq!(android.gap(), Some(AudioGap::NoDevice));
+            android.queue(&[0_u8; 8]);
+            assert!(android.queued().is_empty());
+        }
     }
 
     #[cfg(target_vendor = "apple")]
@@ -399,13 +526,44 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "opens the default WASAPI output"]
+    fn opening_wasapi_names_a_queue_or_a_missing_device() {
+        let output = AudioOutput::open(AudioHost::Windows);
+        assert!(
+            output.gap().is_none() || output.gap() == Some(AudioGap::NoDevice),
+            "wasapi open must name the queue or the missing device"
+        );
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    #[ignore = "opens the default AAudio output"]
+    fn opening_aaudio_names_a_queue_or_a_missing_device() {
+        let output = AudioOutput::open(AudioHost::Android);
+        assert!(
+            output.gap().is_none() || output.gap() == Some(AudioGap::NoDevice),
+            "aaudio open must name the queue or the missing device"
+        );
+    }
+
     #[test]
     fn the_current_host_matches_this_process() {
         #[cfg(target_vendor = "apple")]
         assert_eq!(AudioHost::current(), AudioHost::Apple);
+        #[cfg(target_os = "windows")]
+        assert_eq!(AudioHost::current(), AudioHost::Windows);
+        #[cfg(target_os = "android")]
+        assert_eq!(AudioHost::current(), AudioHost::Android);
         #[cfg(target_os = "linux")]
         assert_eq!(AudioHost::current(), AudioHost::Linux);
-        #[cfg(all(not(target_vendor = "apple"), not(target_os = "linux")))]
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "windows",
+            target_os = "android",
+            target_os = "linux",
+        )))]
         assert_eq!(AudioHost::current(), AudioHost::Unnamed);
     }
 }

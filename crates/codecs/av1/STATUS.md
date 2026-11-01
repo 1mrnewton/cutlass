@@ -55,7 +55,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - The embedded 64×64 constrained keyframe in the crate.
 - An embedded 64×64 three-frame `aomenc` stream: one keyframe and two single-reference inter frames. That stream is error resilient, keeps the largest transform, uses identity global motion, turns CDF updates off, and leaves compound, warped, overlapped, reference-motion, order-hint, CDEF, restoration, and film grain off. The second frame's luma is the first frame shifted by 8 samples.
 - An embedded 64×64 three-frame `aomenc` stream with order hint on. Each error-resilient frame repeats the eight reference hints. The pictures match dav1d. Changing one signaled hint makes the frame fail, and the stored reference is still usable.
-- Two embedded `aomenc` keyframes with CDEF on and the loop filter off: a 64×64 step, and a 64×128 ramp that crosses a 64-sample stripe. Both match dav1d with the filter applied.
+- Two embedded `aomenc` keyframes with CDEF on and the loop filter off: a 64×64 step, and a 64×128 ramp that crosses a 64-sample stripe. Both match dav1d with the filter applied. A 128×128 frame uses damping 6 and a luma primary strength of 14. Treating the damping as 3 changes that picture.
 - One 128×128 keyframe whose only block is 128×128. That block reads one CDEF index and the index covers all four 64×64 units. The picture matches dav1d.
 - One embedded `aomenc` keyframe that codes a 64×64 horizontal ramp at width 43 and upscales it. The shown picture matches dav1d. Inter frames that use super resolution are not in that stream.
 - One embedded `aomenc` keyframe whose luma uses the self-guided restoration filter. Chroma selects no restoration. The shown picture matches dav1d.

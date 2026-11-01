@@ -5621,6 +5621,27 @@ mod tests {
     }
 
     #[test]
+    fn cdef_damping_matches_dav1d() {
+        // aomenc --cq-level=63 --enable-cdef=1, 128×128. The CDEF damping is 6
+        // and the luma primary strength is 14. Treating the damping as 3 changes
+        // the picture. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/cdef-damp.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.enable_cdef);
+        assert_eq!(frame.cdef.damping, 6);
+        assert_eq!(frame.cdef.y_pri[0], 14);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x6a6b_de20_9fce_d99b);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn lag3_film_grain_matches_dav1d() {
         // aomenc --film-grain-test=2, 128×128. The grain filter lag is 3, overlap
         // is on, and samples are not clipped to the restricted range. Treating

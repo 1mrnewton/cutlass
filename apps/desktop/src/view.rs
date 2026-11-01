@@ -1215,6 +1215,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "freeze" => shell.frozen(),
                                 "reverse" => shell.reversed(),
                                 "mirror" => shell.mirrored(),
+                                "rotate" => shell.rotated(),
                                 _ => false,
                             };
                             let tip = match *name {
@@ -1230,6 +1231,8 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "reverse" => "Reverse",
                                 "mirror" if shell.mirrored() => "Mirrored",
                                 "mirror" => "Mirror",
+                                "rotate" if shell.rotated() => "Rotated",
+                                "rotate" => "Rotate",
                                 _ => tip,
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
@@ -1292,6 +1295,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
         "freeze" => shell.freeze_enabled(),
         "reverse" => shell.reverse_enabled(),
         "mirror" => shell.mirror_enabled(),
+        "rotate" => shell.rotate_enabled(),
         _ => false,
     }
 }
@@ -1342,6 +1346,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "freeze" => shell.toggle_freeze(),
         "reverse" => shell.toggle_reverse(),
         "mirror" => shell.toggle_mirror(),
+        "rotate" => shell.turn_clockwise(),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -1573,6 +1578,9 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     let width = 132.0;
     let row_height = 28.0;
     let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
+    if shell.rotate_enabled() {
+        labels.insert(0, "Rotate");
+    }
     if shell.mirror_enabled() {
         labels.insert(0, "Mirror");
     }
@@ -1624,6 +1632,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
                 "Freeze" => shell.toggle_freeze(),
                 "Reverse" => shell.toggle_reverse(),
                 "Mirror" => shell.toggle_mirror(),
+                "Rotate" => shell.turn_clockwise(),
                 _ => shell.remove_selected(),
             };
             if let Err(error) = result {

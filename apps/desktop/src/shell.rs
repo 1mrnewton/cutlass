@@ -113,6 +113,9 @@ impl std::fmt::Display for ShellError {
             }
             Self::Edit(EditError::DuplicateBeat) => formatter.write_str("a beat is already there"),
             Self::Edit(EditError::NotAudio) => formatter.write_str("a beat belongs on audio"),
+            Self::Edit(EditError::Angle) => {
+                formatter.write_str("the rotation is not a finite number of degrees")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -2026,16 +2029,7 @@ impl Shell {
     /// The selected clip is a picture that can flip left to right.
     #[must_use]
     pub fn mirror_enabled(&self) -> bool {
-        let Some(draft) = self.draft() else {
-            return false;
-        };
-        let Some(id) = self.selected() else {
-            return false;
-        };
-        let Some((segment, kind)) = placed(draft, id) else {
-            return false;
-        };
-        mirrorable(draft, segment, kind)
+        self.selection_can_turn()
     }
 
     /// The selected picture is flipped left to right.
@@ -2064,7 +2058,7 @@ impl Shell {
                     "the clip is not on the timeline".to_owned(),
                 ));
             };
-            if !mirrorable(draft, segment, kind) {
+            if !can_turn(draft, segment, kind) {
                 return Err(ShellError::Unavailable(
                     "a mirror belongs on a picture".to_owned(),
                 ));
@@ -2076,6 +2070,65 @@ impl Shell {
             segment_id,
             horizontal,
         })
+    }
+
+    /// The selected clip is a picture that can turn.
+    #[must_use]
+    pub fn rotate_enabled(&self) -> bool {
+        self.selection_can_turn()
+    }
+
+    /// The selected picture is turned away from its stored upright angle.
+    #[must_use]
+    pub fn rotated(&self) -> bool {
+        self.rotate_enabled()
+            && self
+                .selected_segment()
+                .is_some_and(|segment| segment.clip.rotation.rem_euclid(360.0) != 0.0)
+    }
+
+    /// Turn the selected picture clockwise by a quarter turn. Four clicks
+    /// bring it upright. The clip stays where it is. One undo restores the angle.
+    pub fn turn_clockwise(&mut self) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let degrees = {
+            let draft = self.session_draft()?;
+            let Some((segment, kind)) = placed(draft, &segment_id) else {
+                return Err(ShellError::Unavailable(
+                    "the clip is not on the timeline".to_owned(),
+                ));
+            };
+            if !can_turn(draft, segment, kind) {
+                return Err(ShellError::Unavailable(
+                    "a rotate belongs on a picture".to_owned(),
+                ));
+            }
+            clockwise_quarter(segment.clip.rotation)
+        };
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetRotation {
+            segment_id,
+            degrees,
+        })
+    }
+
+    fn selection_can_turn(&self) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        let Some(id) = self.selected() else {
+            return false;
+        };
+        let Some((segment, kind)) = placed(draft, id) else {
+            return false;
+        };
+        can_turn(draft, segment, kind)
     }
 
     fn selected_segment(&self) -> Option<&Segment> {
@@ -3325,8 +3378,8 @@ fn placed<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, &'a Trac
     None
 }
 
-/// A video, a text, a sticker, or a composition can flip. A sound cannot.
-fn mirrorable(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
+/// A video, a text, a sticker, or a composition can flip or turn. A sound cannot.
+fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
     match draft.materials.get(segment.material_id.as_str()) {
         Some(MaterialRef::Video(_) | MaterialRef::Text(_) | MaterialRef::Draft(_)) => true,
         Some(MaterialRef::Other(_))
@@ -3347,6 +3400,12 @@ fn mirrorable(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
                 | TrackType::Composition
         ),
     }
+}
+
+/// One clockwise quarter turn. The preview's positive angle is the other way.
+fn clockwise_quarter(degrees: f64) -> f64 {
+    let current = if degrees.is_finite() { degrees } else { 0.0 };
+    (current - 90.0).rem_euclid(360.0)
 }
 
 fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
@@ -5692,6 +5751,163 @@ mod tests {
                 .duration,
             Micros(1_000_000)
         );
+    }
+
+    #[test]
+    fn rotate_turns_a_picture_clockwise_by_a_quarter() {
+        let mut bare = shell();
+        assert!(!bare.rotate_enabled());
+        assert_eq!(
+            bare.turn_clockwise().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(2_000_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.clip.rotation = 15.0;
+        picture.clip.flip.horizontal = true;
+        draft.tracks[0].segments.push(picture);
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(3_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        draft.materials.stickers.push(RawMaterial {
+            id: MaterialId::new("badge"),
+            kind: "sticker".to_owned(),
+            ..RawMaterial::default()
+        });
+        let mut stickers = Track::main("stickers");
+        stickers.kind = TrackType::Sticker;
+        stickers
+            .segments
+            .push(Segment::new("badge", "badge", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(stickers);
+        draft.materials.drafts.push(MaterialDraft {
+            id: MaterialId::new("compound"),
+            ..MaterialDraft::default()
+        });
+        let mut compound = Track::main("compound");
+        compound.kind = TrackType::Composition;
+        compound.segments.push(Segment::new(
+            "compound",
+            "compound",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(compound);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.rotate_enabled());
+        assert_eq!(
+            desktop.turn_clockwise().unwrap_err().to_string(),
+            "a rotate belongs on a picture"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.rotate_enabled());
+        assert!(desktop.reverse_enabled());
+        assert_eq!(
+            desktop.turn_clockwise().unwrap_err().to_string(),
+            "a rotate belongs on a picture"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.rotate_enabled());
+        assert!(desktop.rotated());
+        desktop.turn_clockwise().unwrap();
+        assert_eq!(picture_rotation(&desktop, "picture"), 285.0);
+        assert!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .clip
+                .flip
+                .horizontal
+        );
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        desktop.undo().unwrap();
+        assert_eq!(picture_rotation(&desktop, "picture"), 15.0);
+        desktop.redo().unwrap();
+        desktop.turn_clockwise().unwrap();
+        desktop.turn_clockwise().unwrap();
+        desktop.turn_clockwise().unwrap();
+        assert_eq!(picture_rotation(&desktop, "picture"), 15.0);
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop.turn_clockwise().unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        assert_eq!(picture_rotation(&desktop, "picture"), 15.0);
+
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(desktop.rotate_enabled());
+        assert!(!desktop.freeze_enabled());
+        assert!(!desktop.reverse_enabled());
+        assert!(!desktop.rotated());
+        desktop.turn_clockwise().unwrap();
+        assert_eq!(picture_rotation(&desktop, "caption"), 270.0);
+        assert!(desktop.rotated());
+        desktop.turn_clockwise().unwrap();
+        desktop.turn_clockwise().unwrap();
+        desktop.turn_clockwise().unwrap();
+        assert_eq!(picture_rotation(&desktop, "caption"), 0.0);
+        assert!(!desktop.rotated());
+        desktop.select(Some(SegmentId::new("badge")));
+        assert!(desktop.rotate_enabled());
+        desktop.select(Some(SegmentId::new("compound")));
+        assert!(desktop.rotate_enabled());
+        assert!(!desktop.rotated());
+    }
+
+    fn picture_rotation(desktop: &Shell, id: &str) -> f64 {
+        desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter())
+            .find(|segment| segment.id.as_str() == id)
+            .expect("clip")
+            .clip
+            .rotation
     }
 
     #[test]

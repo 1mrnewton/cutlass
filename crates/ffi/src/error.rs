@@ -128,6 +128,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),
         EditError::Letterbox => "a letterbox belongs on a picture".to_owned(),
         EditError::FrameRate => "the frame rate is not a project rate".to_owned(),
+        EditError::ColorSpace => "the color space is not a project color space".to_owned(),
     }
 }
 
@@ -231,6 +232,10 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::FrameRate).to_string(),
             "the frame rate is not a project rate"
+        );
+        assert_eq!(
+            FfiError::from(EditError::ColorSpace).to_string(),
+            "the color space is not a project color space"
         );
     }
 

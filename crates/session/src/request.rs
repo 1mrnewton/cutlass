@@ -237,4 +237,6 @@ pub enum Request {
     SetFrameRate { fps: f64, drop_frame: bool },
     /// Store the drop-frame timecode label. The frame rate stays.
     SetDropFrame { on: bool },
+    /// Store the project color space. The preview is not retinted.
+    SetColorSpace { space: i32 },
 }

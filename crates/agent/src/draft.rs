@@ -464,6 +464,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetLetterbox { .. } => "set_letterbox",
         Request::SetFrameRate { .. } => "set_frame_rate",
         Request::SetDropFrame { .. } => "set_drop_frame",
+        Request::SetColorSpace { .. } => "set_color_space",
     }
 }
 

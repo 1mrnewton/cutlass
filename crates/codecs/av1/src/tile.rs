@@ -651,6 +651,7 @@ struct Tile<'a, 'r> {
     max_luma_h: usize,
     sub_x: bool,
     sub_y: bool,
+    monochrome: bool,
     inter_frame: bool,
     force_integer: bool,
     allow_hp: bool,
@@ -916,6 +917,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             max_luma_h: 0,
             sub_x: sequence.subsampling_x,
             sub_y: sequence.subsampling_y,
+            monochrome: sequence.monochrome,
             inter_frame: !frame.intra,
             force_integer: frame.force_integer_mv,
             allow_hp: frame.allow_high_precision_mv,
@@ -3958,7 +3960,11 @@ impl<'a, 'r> Tile<'a, 'r> {
                 self.current_q = next.clamp(1, 255) as u8;
             }
             if self.delta_lf_present {
-                let count = if self.delta_lf_multi { 4 } else { 1 };
+                let count = if self.delta_lf_multi {
+                    if self.monochrome { 2 } else { 4 }
+                } else {
+                    1
+                };
                 for index in 0..count {
                     let reduced = read_coded_delta(
                         &mut self.symbols,
@@ -4970,6 +4976,9 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 
     fn has_chroma(&self, row: usize, col: usize, bw4: usize, bh4: usize) -> bool {
+        if self.monochrome {
+            return false;
+        }
         if bh4 == 1 && self.sub_y && row.is_multiple_of(2) {
             return false;
         }

@@ -6,7 +6,10 @@ pub enum PixelFormat {
     #[default]
     None,
     Rgba8,
+    /// Tightly packed 8-bit 4:2:0. A full-size Y plane, then U, then V.
     Yuv420p,
+    /// One tightly packed 8-bit plane, `width` by `height`.
+    Gray8,
 }
 
 /// Color primaries named on a video stream.

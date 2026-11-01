@@ -236,6 +236,7 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
                 .checked_mul(3)
                 .ok_or(CodecError::Limit { what: "frame size" })
         }
+        PixelFormat::Gray8 => Ok(pixels),
     }
 }
 

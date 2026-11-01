@@ -5,7 +5,8 @@
 //! an order hint. A frame may use a uniform or non-uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
-//! Bit depths other than 8 are rejected. A frame with `base_q_idx` 0 uses a
+//! An 8-bit monochrome sequence is published as one gray plane. 10-bit and
+//! 12-bit are rejected. A frame with `base_q_idx` 0 uses a
 //! 4×4 Walsh-Hadamard transform. A palette block and an intra block copy are
 //! reconstructed, and an inter frame may be forced to integer motion vectors.
 //! Two references may be

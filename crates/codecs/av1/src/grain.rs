@@ -122,8 +122,12 @@ pub fn read(
         grain.y_value[index] = bits.read(8)? as u8;
         grain.y_scaling[index] = bits.read(8)? as u8;
     }
-    grain.chroma_from_luma = bits.read_bool()?;
-    let skip_chroma = grain.chroma_from_luma || grain.num_y == 0;
+    grain.chroma_from_luma = if sequence.monochrome {
+        false
+    } else {
+        bits.read_bool()?
+    };
+    let skip_chroma = sequence.monochrome || grain.chroma_from_luma || grain.num_y == 0;
     if !skip_chroma {
         grain.num_cb = bits.read(4)? as u8;
         if grain.num_cb > 10 {

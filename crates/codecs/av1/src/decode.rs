@@ -4,7 +4,7 @@ use cutlass_decode::{
     CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput, PixelFormat,
 };
 
-use crate::yuv::{Plane, Yuv420, picture_output};
+use crate::yuv::{Plane, Yuv420, gray_output, picture_output};
 
 use crate::header::{
     FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
@@ -70,7 +70,10 @@ impl Av1Decoder {
         if params.codec != CodecId::Av1 {
             return Err(CodecError::Unsupported { what: "codec" });
         }
-        if params.pixel != PixelFormat::None && params.pixel != PixelFormat::Yuv420p {
+        if params.pixel != PixelFormat::None
+            && params.pixel != PixelFormat::Yuv420p
+            && params.pixel != PixelFormat::Gray8
+        {
             return Err(CodecError::Unsupported {
                 what: "pixel format",
             });
@@ -342,12 +345,13 @@ impl Av1Decoder {
             }
         };
         let stored = self.store(&frame, &held);
+        let monochrome = sequence.monochrome;
         self.sequence = Some(sequence);
         if !frame.show_frame {
             return Ok((None, FrameUndo { stored, stale }));
         }
         let picture = match shown(&held.picture, &frame)
-            .and_then(|picture| picture_output(&picture, packet.pts, packet.timescale))
+            .and_then(|picture| publish(&picture, monochrome, packet.pts, packet.timescale))
         {
             Ok(picture) => picture,
             Err(error) => {
@@ -682,7 +686,12 @@ impl Av1Decoder {
             height: out_h,
         })?;
         let shown = if frame.show_frame {
-            Some(picture_output(&picture, packet.pts, packet.timescale)?)
+            Some(publish(
+                &picture,
+                sequence.monochrome,
+                packet.pts,
+                packet.timescale,
+            )?)
         } else {
             None
         };
@@ -836,6 +845,19 @@ fn record(
     undo.push(frame_undo);
     if let Some(picture) = picture {
         shown.push(Output::Picture(picture));
+    }
+}
+
+fn publish(
+    picture: &Yuv420,
+    monochrome: bool,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    if monochrome {
+        gray_output(picture, pts, timescale)
+    } else {
+        picture_output(picture, pts, timescale)
     }
 }
 
@@ -4102,6 +4124,55 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_monochrome_picture_matches_dav1d() {
+        // aomenc --monochrome, 128×128, three frames. Filter intra and an
+        // interintra wedge are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gray`.
+        let file = include_bytes!("../fixtures/mono.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [
+            0x1df5_4802_6a88_f184,
+            0xe533_b05b_9f50_a964,
+            0x4d6f_93f9_0895_ca96,
+        ];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.monochrome);
+        assert_eq!(sequence.bit_depth, 8);
+        let gray =
+            CodecParams::with_format(CodecId::Av1, 128, 128, cutlass_decode::PixelFormat::Gray8);
+        assert!(Av1Decoder::open(&gray).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Gray8);
+            assert_eq!((info.width, info.height), (128, 128));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 128 * 128, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
     }
 
     #[test]

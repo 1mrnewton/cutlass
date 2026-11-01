@@ -678,10 +678,9 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     if high {
         return Err(CodecError::Unsupported { what: "bit depth" });
     }
+    // Profile 0 with `mono_chrome` has one plane. Chroma sample position and
+    // `separate_uv_delta_q` are not present. A three-plane header still reads both.
     let monochrome = bits.read_bool()?;
-    if monochrome {
-        return Err(CodecError::Unsupported { what: "monochrome" });
-    }
     let described = bits.read_bool()?;
     if described {
         let _ = bits.read(8)?;
@@ -689,9 +688,13 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         let _ = bits.read(8)?;
     }
     let color_range_full = bits.read_bool()?;
-    let chroma_pos = bits.read(2)?;
-    let _ = chroma_pos;
-    let separate_uv_delta_q = bits.read_bool()?;
+    let separate_uv_delta_q = if monochrome {
+        false
+    } else {
+        let chroma_pos = bits.read(2)?;
+        let _ = chroma_pos;
+        bits.read_bool()?
+    };
     let film_grain = bits.read_bool()?;
     Ok(Sequence {
         profile,
@@ -719,7 +722,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         force_screen,
         force_integer,
         bit_depth: 8,
-        monochrome: false,
+        monochrome,
         subsampling_x: true,
         subsampling_y: true,
         color_range_full,
@@ -1006,17 +1009,22 @@ fn uncompressed(
     }
     let base_q = bits.read(8)? as u8;
     let delta_y_dc = read_delta_q(bits)?;
-    let diff_uv = if sequence.separate_uv_delta_q {
-        bits.read_bool()?
+    let (diff_uv, delta_u_dc, delta_u_ac, delta_v_dc, delta_v_ac) = if sequence.monochrome {
+        (false, 0, 0, 0, 0)
     } else {
-        false
-    };
-    let delta_u_dc = read_delta_q(bits)?;
-    let delta_u_ac = read_delta_q(bits)?;
-    let (delta_v_dc, delta_v_ac) = if diff_uv {
-        (read_delta_q(bits)?, read_delta_q(bits)?)
-    } else {
-        (delta_u_dc, delta_u_ac)
+        let diff_uv = if sequence.separate_uv_delta_q {
+            bits.read_bool()?
+        } else {
+            false
+        };
+        let delta_u_dc = read_delta_q(bits)?;
+        let delta_u_ac = read_delta_q(bits)?;
+        let (delta_v_dc, delta_v_ac) = if diff_uv {
+            (read_delta_q(bits)?, read_delta_q(bits)?)
+        } else {
+            (delta_u_dc, delta_u_ac)
+        };
+        (diff_uv, delta_u_dc, delta_u_ac, delta_v_dc, delta_v_ac)
     };
     let using_qmatrix = bits.read_bool()?;
     let qm = if using_qmatrix {
@@ -1057,7 +1065,7 @@ fn uncompressed(
     } else {
         lf[0] = bits.read(6)? as u8;
         lf[1] = bits.read(6)? as u8;
-        if lf[0] != 0 || lf[1] != 0 {
+        if !sequence.monochrome && (lf[0] != 0 || lf[1] != 0) {
             lf[2] = bits.read(6)? as u8;
             lf[3] = bits.read(6)? as u8;
         }
@@ -1279,8 +1287,10 @@ fn read_cdef_params(
     for index in 0..count {
         params.y_pri[index] = bits.read(4)? as u8;
         params.y_sec[index] = read_cdef_sec(bits)?;
-        params.uv_pri[index] = bits.read(4)? as u8;
-        params.uv_sec[index] = read_cdef_sec(bits)?;
+        if !sequence.monochrome {
+            params.uv_pri[index] = bits.read(4)? as u8;
+            params.uv_sec[index] = read_cdef_sec(bits)?;
+        }
     }
     Ok(params)
 }
@@ -1304,7 +1314,8 @@ fn read_lr_params(
     let mut plane = [RESTORE_NONE; 3];
     let mut uses = false;
     let mut chroma = false;
-    for (index, slot) in plane.iter_mut().enumerate() {
+    let plane_count = if sequence.monochrome { 1 } else { 3 };
+    for (index, slot) in plane.iter_mut().enumerate().take(plane_count) {
         let raw = bits.read(2)? as usize;
         *slot = REMAP_LR[raw];
         if *slot != RESTORE_NONE {

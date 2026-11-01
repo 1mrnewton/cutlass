@@ -1,7 +1,8 @@
 //! Tightly packed 8-bit 4:2:0 used inside this codec.
 //!
 //! Chroma edges are the luma edges rounded up, then halved, so an odd luma
-//! size stays representable. The shared picture output is even 4:2:0 only.
+//! size stays representable. The shared picture output is even 4:2:0, or one
+//! gray plane when the sequence is monochrome.
 //! Conversion happens at the trait boundary.
 
 use cutlass_decode::{
@@ -147,6 +148,26 @@ impl AsView for Output {
         .ok()?;
         Some(View { picture })
     }
+}
+
+/// Pack the luma plane. A monochrome sequence has no chroma samples to publish.
+pub fn gray_output(
+    picture: &Yuv420,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    PictureOutput::cpu(
+        PictureInfo {
+            width: picture.y.width(),
+            height: picture.y.height(),
+            pixel: PixelFormat::Gray8,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+        },
+        picture.y.samples().to_vec(),
+        pts,
+        timescale,
+    )
 }
 
 /// Pack even 4:2:0 into the shared picture output.

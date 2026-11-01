@@ -76,7 +76,8 @@ pub struct AudioOutput {
 /// `width` and `height` are the buffer that [`PictureOutput`] stores, tightly
 /// packed, with no stride gap and no display crop. Color conversion stays
 /// outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
-/// then U, then V, each `width / 2` by `height / 2`.
+/// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Gray8`] is
+/// one 8-bit plane, `width` by `height`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PictureInfo {
     pub width: u32,
@@ -157,6 +158,9 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
                     what: "picture bytes",
                 })
         }
+        PixelFormat::Gray8 => width.checked_mul(height).ok_or(CodecError::Limit {
+            what: "picture bytes",
+        }),
     }
 }
 
@@ -828,6 +832,7 @@ mod tests {
             picture_byte_len(3, 2, PixelFormat::Yuv420p).expect_err("odd"),
             CodecError::InvalidApi { what: "4:2:0 size" }
         );
+        assert_eq!(picture_byte_len(3, 2, PixelFormat::Gray8).expect("gray"), 6);
     }
 
     #[test]

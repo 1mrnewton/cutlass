@@ -17,7 +17,8 @@ pub use frame::{FrameError, Plane, VideoFrame, Yuv420p};
 pub use packet::{Packet, SideData};
 pub use params::CodecParams;
 pub use pixel::{
-    ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat, Transfer,
+    ChromaSamplePosition, ColorMatrix, ColorPrimaries, ColorRange, MatrixCoefficients, PixelFormat,
+    Transfer,
 };
 pub use sample::{Channel, ChannelLayout, Pcm, SampleFormat};
 pub use still::{

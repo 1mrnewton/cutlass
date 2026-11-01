@@ -98,6 +98,26 @@ pub struct Sequence {
     pub operating_points: u8,
     /// `operating_point_idc` for each point. A zero mask means every layer.
     pub operating_idc: [u16; 32],
+    /// Present when `timing_info_present_flag` is 1.
+    pub timing: Option<Timing>,
+    /// CICP `colour_primaries`. 2 is the inferred unspecified value.
+    pub color_primaries: u8,
+    /// CICP `transfer_characteristics`. 2 is the inferred unspecified value.
+    pub transfer_characteristics: u8,
+    /// CICP `matrix_coefficients`. 2 is the inferred unspecified value.
+    pub matrix_coefficients: u8,
+    /// `chroma_sample_position`. 0 is unknown, including when the field is absent.
+    pub chroma_sample_position: u8,
+}
+
+/// `timing_info`. The decoder does not schedule from these values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timing {
+    pub num_units_in_display_tick: u32,
+    pub time_scale: u32,
+    pub equal_picture_interval: bool,
+    /// Present when [`Timing::equal_picture_interval`] is set.
+    pub num_ticks_per_picture_minus_1: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +136,9 @@ pub struct FrameInfo {
     pub width: u32,
     pub height: u32,
     pub upscaled_width: u32,
+    /// Display size. Equal to the upscaled frame size when the header does not override it.
+    pub render_width: u32,
+    pub render_height: u32,
     pub order_hint: u32,
     /// Order hint stored in each reference slot when this frame was parsed.
     pub slot_hints: [u32; 8],
@@ -218,7 +241,7 @@ pub fn parse_with_motion(
     sequence: Option<&Sequence>,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
-    ref_sizes: &[Option<(u32, u32)>; 8],
+    ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
 ) -> Result<(Sequence, FrameInfo), CodecError> {
     let mut bits = BitReader::new(bytes);
@@ -600,17 +623,28 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let mut delta_id = 0u8;
     let mut operating_points = 0u8;
     let mut operating_idc = [0u16; 32];
+    let mut timing = None;
     if reduced {
         let _level = bits.read(5)?;
     } else {
-        let timing = bits.read_bool()?;
-        if timing {
-            let _ = bits.read(32)?;
-            let _ = bits.read(32)?;
-            let equal = bits.read_bool()?;
-            if equal {
-                let _ = read_uvlc(bits)?;
+        if bits.read_bool()? {
+            let num_units_in_display_tick = bits.read(32)?;
+            let time_scale = bits.read(32)?;
+            if num_units_in_display_tick == 0 || time_scale == 0 {
+                return Err(malformed(bits, "timing"));
             }
+            let equal_picture_interval = bits.read_bool()?;
+            let num_ticks_per_picture_minus_1 = if equal_picture_interval {
+                Some(read_uvlc(bits)?)
+            } else {
+                None
+            };
+            timing = Some(Timing {
+                num_units_in_display_tick,
+                time_scale,
+                equal_picture_interval,
+                num_ticks_per_picture_minus_1,
+            });
             if bits.read_bool()? {
                 return Err(CodecError::Unsupported {
                     what: "decoder model",
@@ -681,14 +715,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let enable_superres = bits.read_bool()?;
     let enable_cdef = bits.read_bool()?;
     let enable_restoration = bits.read_bool()?;
-    let (
-        bit_depth,
-        monochrome,
-        subsampling_x,
-        subsampling_y,
-        color_range_full,
-        separate_uv_delta_q,
-    ) = if profile == 0 {
+    let color = if profile == 0 {
         read_profile0_color(bits)?
     } else if profile == 1 {
         read_profile1_color(bits)?
@@ -721,12 +748,12 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         force_integer_select,
         force_screen,
         force_integer,
-        bit_depth,
-        monochrome,
-        subsampling_x,
-        subsampling_y,
-        color_range_full,
-        separate_uv_delta_q,
+        bit_depth: color.bit_depth,
+        monochrome: color.monochrome,
+        subsampling_x: color.subsampling_x,
+        subsampling_y: color.subsampling_y,
+        color_range_full: color.color_range_full,
+        separate_uv_delta_q: color.separate_uv_delta_q,
         film_grain,
         frame_id_present,
         id_len,
@@ -734,7 +761,76 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         use_128,
         operating_points,
         operating_idc,
+        timing,
+        color_primaries: color.color_primaries,
+        transfer_characteristics: color.transfer_characteristics,
+        matrix_coefficients: color.matrix_coefficients,
+        chroma_sample_position: color.chroma_sample_position,
     })
+}
+
+struct ColorConfig {
+    bit_depth: u8,
+    monochrome: bool,
+    subsampling_x: bool,
+    subsampling_y: bool,
+    color_range_full: bool,
+    separate_uv_delta_q: bool,
+    color_primaries: u8,
+    transfer_characteristics: u8,
+    matrix_coefficients: u8,
+    chroma_sample_position: u8,
+}
+
+impl ColorConfig {
+    fn planes(
+        bit_depth: u8,
+        monochrome: bool,
+        subsampling_x: bool,
+        subsampling_y: bool,
+        color_range_full: bool,
+        separate_uv_delta_q: bool,
+    ) -> Self {
+        Self {
+            bit_depth,
+            monochrome,
+            subsampling_x,
+            subsampling_y,
+            color_range_full,
+            separate_uv_delta_q,
+            color_primaries: 2,
+            transfer_characteristics: 2,
+            matrix_coefficients: 2,
+            chroma_sample_position: 0,
+        }
+    }
+
+    fn described(mut self, primaries: u8, transfer: u8, matrix: u8) -> Self {
+        self.color_primaries = primaries;
+        self.transfer_characteristics = transfer;
+        self.matrix_coefficients = matrix;
+        self
+    }
+
+    fn chroma(mut self, position: u8) -> Self {
+        self.chroma_sample_position = position;
+        self
+    }
+}
+
+fn read_color_description(
+    bits: &mut BitReader<'_>,
+    described: bool,
+) -> Result<(u8, u8, u8), CodecError> {
+    if described {
+        Ok((
+            bits.read(8)? as u8,
+            bits.read(8)? as u8,
+            bits.read(8)? as u8,
+        ))
+    } else {
+        Ok((2, 2, 2))
+    }
 }
 
 /// Sequence header payload, including its trailing bit.
@@ -747,73 +843,56 @@ pub(crate) fn sequence_obu(bytes: &[u8]) -> Result<Sequence, CodecError> {
 }
 
 /// Profile 0 is 4:2:0. `high_bitdepth` selects 10-bit. There is no `twelve_bit`.
-fn read_profile0_color(
-    bits: &mut BitReader<'_>,
-) -> Result<(u8, bool, bool, bool, bool, bool), CodecError> {
+fn read_profile0_color(bits: &mut BitReader<'_>) -> Result<ColorConfig, CodecError> {
     let high = bits.read_bool()?;
     let bit_depth = if high { 10 } else { 8 };
     // `mono_chrome` removes the chroma sample position and `separate_uv_delta_q`.
     let monochrome = bits.read_bool()?;
     let described = bits.read_bool()?;
-    if described {
-        let _ = bits.read(8)?;
-        let _ = bits.read(8)?;
-        let _ = bits.read(8)?;
-    }
+    let (primaries, transfer, matrix) = read_color_description(bits, described)?;
     let color_range_full = bits.read_bool()?;
-    let separate_uv_delta_q = if monochrome {
-        false
+    let (chroma, separate_uv_delta_q) = if monochrome {
+        (0, false)
     } else {
-        let chroma_pos = bits.read(2)?;
-        let _ = chroma_pos;
-        bits.read_bool()?
+        (bits.read(2)? as u8, bits.read_bool()?)
     };
-    Ok((
+    Ok(ColorConfig::planes(
         bit_depth,
         monochrome,
         true,
         true,
         color_range_full,
         separate_uv_delta_q,
-    ))
+    )
+    .described(primaries, transfer, matrix)
+    .chroma(chroma))
 }
 
 /// Profile 1 is 4:4:4. `mono_chrome` is not present. Chroma sample position is
 /// not present, because both subsampling flags are zero.
-fn read_profile1_color(
-    bits: &mut BitReader<'_>,
-) -> Result<(u8, bool, bool, bool, bool, bool), CodecError> {
+fn read_profile1_color(bits: &mut BitReader<'_>) -> Result<ColorConfig, CodecError> {
     let high = bits.read_bool()?;
     let bit_depth = if high { 10 } else { 8 };
     let described = bits.read_bool()?;
-    let (primaries, transfer, matrix) = if described {
-        (
-            bits.read(8)? as u8,
-            bits.read(8)? as u8,
-            bits.read(8)? as u8,
-        )
-    } else {
-        (2, 2, 2)
-    };
+    let (primaries, transfer, matrix) = read_color_description(bits, described)?;
     // BT.709 + sRGB + identity infers full range and does not read `color_range`.
     let identity = primaries == 1 && transfer == 13 && matrix == 0;
     let color_range_full = if identity { true } else { bits.read_bool()? };
     let separate_uv_delta_q = bits.read_bool()?;
-    Ok((
+    Ok(ColorConfig::planes(
         bit_depth,
         false,
         false,
         false,
         color_range_full,
         separate_uv_delta_q,
-    ))
+    )
+    .described(primaries, transfer, matrix))
 }
 
 /// Profile 2 at 8-bit and 10-bit is 4:2:2. `twelve_bit` selects 12-bit and then
 /// reads the subsampling flags. Chroma sample position is present only for 4:2:0.
-fn read_profile2_color(
-    bits: &mut BitReader<'_>,
-) -> Result<(u8, bool, bool, bool, bool, bool), CodecError> {
+fn read_profile2_color(bits: &mut BitReader<'_>) -> Result<ColorConfig, CodecError> {
     let high = bits.read_bool()?;
     let bit_depth = if high {
         if bits.read_bool()? { 12 } else { 10 }
@@ -822,18 +901,13 @@ fn read_profile2_color(
     };
     let monochrome = bits.read_bool()?;
     let described = bits.read_bool()?;
-    let (primaries, transfer, matrix) = if described {
-        (
-            bits.read(8)? as u8,
-            bits.read(8)? as u8,
-            bits.read(8)? as u8,
-        )
-    } else {
-        (2, 2, 2)
-    };
+    let (primaries, transfer, matrix) = read_color_description(bits, described)?;
     if monochrome {
         let color_range_full = bits.read_bool()?;
-        return Ok((bit_depth, true, true, true, color_range_full, false));
+        return Ok(
+            ColorConfig::planes(bit_depth, true, true, true, color_range_full, false)
+                .described(primaries, transfer, matrix),
+        );
     }
     let identity = primaries == 1 && transfer == 13 && matrix == 0;
     if identity {
@@ -841,7 +915,10 @@ fn read_profile2_color(
             return Err(malformed(bits, "color config"));
         }
         let separate_uv_delta_q = bits.read_bool()?;
-        return Ok((bit_depth, false, false, false, true, separate_uv_delta_q));
+        return Ok(
+            ColorConfig::planes(bit_depth, false, false, false, true, separate_uv_delta_q)
+                .described(primaries, transfer, matrix),
+        );
     }
     let color_range_full = bits.read_bool()?;
     let (subsampling_x, subsampling_y) = if bit_depth == 12 {
@@ -855,18 +932,22 @@ fn read_profile2_color(
     } else {
         (true, false)
     };
-    if subsampling_x && subsampling_y {
-        let _ = bits.read(2)?;
-    }
+    let chroma = if subsampling_x && subsampling_y {
+        bits.read(2)? as u8
+    } else {
+        0
+    };
     let separate_uv_delta_q = bits.read_bool()?;
-    Ok((
+    Ok(ColorConfig::planes(
         bit_depth,
         false,
         subsampling_x,
         subsampling_y,
         color_range_full,
         separate_uv_delta_q,
-    ))
+    )
+    .described(primaries, transfer, matrix)
+    .chroma(chroma))
 }
 
 fn parse_frame(
@@ -875,7 +956,7 @@ fn parse_frame(
     payload_end: usize,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
-    ref_sizes: &[Option<(u32, u32)>; 8],
+    ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
@@ -916,7 +997,7 @@ fn parse_frame_header_only(
     payload_end: usize,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
-    ref_sizes: &[Option<(u32, u32)>; 8],
+    ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
     let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, inherited)?;
@@ -931,7 +1012,7 @@ fn uncompressed(
     sequence: &Sequence,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
-    ref_sizes: &[Option<(u32, u32)>; 8],
+    ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
@@ -1029,16 +1110,14 @@ fn uncompressed(
     let mut motion_switchable = false;
     let mut use_ref_mvs = false;
     let mut allow_intrabc = false;
-    let (width, upscaled_width, height) = if intra {
-        let size = frame_size(bits, sequence, size_override)?;
-        // The sample picture stays the frame size. The display size is only
-        // consumed so the rest of the header stays aligned.
-        read_render_size(bits)?;
+    let (width, upscaled_width, height, render_width, render_height) = if intra {
+        let (coded, upscaled, height) = frame_size(bits, sequence, size_override)?;
+        let (render_width, render_height) = read_render_size(bits, upscaled, height)?;
         // Intra block copy is only present when the coded width is the upscaled width.
-        if allow_screen && size.0 == size.1 {
+        if allow_screen && coded == upscaled {
             allow_intrabc = bits.read_bool()?;
         }
-        size
+        (coded, upscaled, height, render_width, render_height)
     } else {
         if sequence.enable_order_hint && bits.read_bool()? {
             return Err(CodecError::Unsupported {
@@ -1055,9 +1134,9 @@ fn uncompressed(
         let size = if size_override && !error_resilient {
             frame_size_with_refs(bits, sequence, &ref_frames, ref_sizes)?
         } else {
-            let size = frame_size(bits, sequence, size_override)?;
-            read_render_size(bits)?;
-            size
+            let (coded, upscaled, height) = frame_size(bits, sequence, size_override)?;
+            let (render_width, render_height) = read_render_size(bits, upscaled, height)?;
+            (coded, upscaled, height, render_width, render_height)
         };
         if !force_integer {
             allow_high_precision = bits.read_bool()?;
@@ -1273,6 +1352,8 @@ fn uncompressed(
         width,
         height,
         upscaled_width,
+        render_width,
+        render_height,
         order_hint,
         slot_hints: *order_hints,
         signaled_order_hints,
@@ -1370,8 +1451,8 @@ fn frame_size_with_refs(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
     ref_frames: &[u8; 7],
-    ref_sizes: &[Option<(u32, u32)>; 8],
-) -> Result<(u32, u32, u32), CodecError> {
+    ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
+) -> Result<(u32, u32, u32, u32, u32), CodecError> {
     let mut copied = None;
     for slot in ref_frames {
         if bits.read_bool()? {
@@ -1383,22 +1464,28 @@ fn frame_size_with_refs(
             break;
         }
     }
-    if let Some((upscaled, height)) = copied {
+    // The stored geometry is upscaled width, frame height, then render size.
+    if let Some((upscaled, height, render_width, render_height)) = copied {
         let coded = coded_size(bits, sequence, upscaled)?;
-        return Ok((coded, upscaled, height));
+        return Ok((coded, upscaled, height, render_width, render_height));
     }
-    let size = frame_size(bits, sequence, true)?;
-    read_render_size(bits)?;
-    Ok(size)
+    let (coded, upscaled, height) = frame_size(bits, sequence, true)?;
+    let (render_width, render_height) = read_render_size(bits, upscaled, height)?;
+    Ok((coded, upscaled, height, render_width, render_height))
 }
 
-/// Reads the display size. The sample picture stays the frame size.
-fn read_render_size(bits: &mut BitReader<'_>) -> Result<(), CodecError> {
+/// Display size. When the flag is clear this is the upscaled frame size.
+/// The sample picture stays that frame size either way.
+fn read_render_size(
+    bits: &mut BitReader<'_>,
+    upscaled: u32,
+    height: u32,
+) -> Result<(u32, u32), CodecError> {
     if bits.read_bool()? {
-        let _ = bits.read(16)?;
-        let _ = bits.read(16)?;
+        Ok((bits.read(16)? + 1, bits.read(16)? + 1))
+    } else {
+        Ok((upscaled, height))
     }
-    Ok(())
 }
 
 fn floor_bits(stored: u32) -> u32 {
@@ -2066,6 +2153,8 @@ fn empty_frame(sequence: &Sequence) -> FrameInfo {
         width: sequence.width,
         height: sequence.height,
         upscaled_width: sequence.width,
+        render_width: sequence.width,
+        render_height: sequence.height,
         order_hint: 0,
         slot_hints: [0; 8],
         signaled_order_hints: None,

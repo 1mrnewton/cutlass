@@ -62,6 +62,19 @@ pub enum ColorMatrix {
     Bt2020,
 }
 
+/// Where a 4:2:0 chroma sample sits relative to luma.
+///
+/// The values are the AV1 `chroma_sample_position` codes. A sequence that does
+/// not carry the field uses [`ChromaSamplePosition::Unknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ChromaSamplePosition {
+    #[default]
+    Unknown,
+    Vertical,
+    Colocated,
+    Reserved,
+}
+
 /// Sample range of an 8-bit picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum ColorRange {

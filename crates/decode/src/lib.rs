@@ -32,10 +32,10 @@ pub mod video;
 
 pub use cutlass_codec::CodecId;
 pub use cutlass_codec::access::{
-    BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
-    ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
-    PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
-    VideoFrame, Yuv420p,
+    BitDepth, Channel, ChannelLayout, ChromaSamplePosition, CodecError, CodecParams, ColorMatrix,
+    ColorPrimaries, ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm,
+    PhysicalPixel, PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem,
+    Transfer, Transparency, VideoFrame, Yuv420p,
 };
 pub use video::VideoDecodeFactory;
 
@@ -74,8 +74,9 @@ pub struct AudioOutput {
 /// Coded size and color of one decoded picture.
 ///
 /// `width` and `height` are the buffer that [`PictureOutput`] stores, tightly
-/// packed, with no stride gap and no display crop. Color conversion stays
-/// outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
+/// packed, with no stride gap and no display crop. `render_width` and
+/// `render_height` are the display size and do not change that buffer. Color
+/// conversion stays outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
 /// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Yuv422p`]
 /// is 4:2:2: U and V are `width / 2` by `height`. [`PixelFormat::Yuv422p10`]
 /// is that layout with a little-endian `u16` per sample. [`PixelFormat::Yuv420p10`]
@@ -91,6 +92,78 @@ pub struct PictureInfo {
     pub pixel: PixelFormat,
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
+    pub matrix: ColorMatrix,
+    pub chroma_position: ChromaSamplePosition,
+    /// Display size. This is the sample size when the frame does not override it.
+    /// The sample buffer stays `width` by `height`.
+    pub render_width: u32,
+    pub render_height: u32,
+    /// CICP `colour_primaries`. 2 means unspecified.
+    pub cicp_primaries: u8,
+    /// CICP `transfer_characteristics`. 2 means unspecified.
+    pub cicp_transfer: u8,
+    /// CICP `matrix_coefficients`. 2 means unspecified. 0 is identity.
+    pub cicp_matrix: u8,
+    /// `num_units_in_display_tick`. Zero when the sequence has no timing info.
+    pub num_units_in_display_tick: u32,
+    /// `time_scale`. Zero when the sequence has no timing info.
+    pub time_scale: u32,
+    /// `equal_picture_interval`.
+    pub equal_picture_interval: bool,
+    /// `num_ticks_per_picture_minus_1` when the picture interval is equal.
+    pub num_ticks_per_picture_minus_1: Option<u32>,
+}
+
+impl PictureInfo {
+    /// A picture whose display size is the sample size.
+    ///
+    /// The CICP bytes follow the named primaries and transfer. The matrix stays
+    /// unspecified. A decoder that read a header sets the bytes from that header.
+    #[must_use]
+    pub fn new(
+        width: u32,
+        height: u32,
+        pixel: PixelFormat,
+        primaries: ColorPrimaries,
+        transfer: Transfer,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixel,
+            primaries,
+            transfer,
+            matrix: ColorMatrix::Unspecified,
+            chroma_position: ChromaSamplePosition::Unknown,
+            render_width: width,
+            render_height: height,
+            cicp_primaries: cicp_primaries(primaries),
+            cicp_transfer: cicp_transfer(transfer),
+            cicp_matrix: 2,
+            num_units_in_display_tick: 0,
+            time_scale: 0,
+            equal_picture_interval: false,
+            num_ticks_per_picture_minus_1: None,
+        }
+    }
+}
+
+fn cicp_primaries(primaries: ColorPrimaries) -> u8 {
+    match primaries {
+        ColorPrimaries::Bt709 => 1,
+        ColorPrimaries::Unspecified => 2,
+        ColorPrimaries::Bt601 => 6,
+        ColorPrimaries::Bt2020 => 9,
+    }
+}
+
+fn cicp_transfer(transfer: Transfer) -> u8 {
+    match transfer {
+        Transfer::Bt709 => 1,
+        Transfer::Unspecified => 2,
+        Transfer::Bt601 => 6,
+        Transfer::Bt2020 => 14,
+    }
 }
 
 /// One decoded picture, either CPU bytes or a platform buffer.
@@ -460,13 +533,13 @@ mod tests {
     }
 
     fn rgba(width: u32, height: u32) -> PictureInfo {
-        PictureInfo {
+        PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Bt709,
-        }
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Bt709,
+        )
     }
 
     fn jpeg(width: u32, height: u32, pixel: PixelFormat) -> CodecParams {
@@ -540,13 +613,13 @@ mod tests {
     fn open_raw_rust(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
         OPEN_RUST.with(|count| count.set(count.get() + 1));
         Ok(Box::new(Raw {
-            info: PictureInfo {
-                width: params.width,
-                height: params.height,
-                pixel: params.pixel,
-                primaries: params.primaries,
-                transfer: params.transfer,
-            },
+            info: PictureInfo::new(
+                params.width,
+                params.height,
+                params.pixel,
+                params.primaries,
+                params.transfer,
+            ),
             mark: 2,
         }))
     }
@@ -862,13 +935,13 @@ mod tests {
             picture_byte_len(2, 2, PixelFormat::Yuv420p).expect("len"),
             6
         );
-        let info = PictureInfo {
-            width: 2,
-            height: 2,
-            pixel: PixelFormat::Yuv420p,
-            primaries: ColorPrimaries::Unspecified,
-            transfer: Transfer::Unspecified,
-        };
+        let info = PictureInfo::new(
+            2,
+            2,
+            PixelFormat::Yuv420p,
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+        );
         let picture = PictureOutput::cpu(info, vec![1, 2, 3, 4, 5, 6], 0, 1).expect("yuv");
         assert_eq!(picture.samples(), PictureSamples::Cpu(&[1, 2, 3, 4, 5, 6]));
         assert_eq!(
@@ -946,13 +1019,13 @@ mod tests {
             }
         );
         let err = PictureOutput::platform(
-            PictureInfo {
-                width: 1,
-                height: 1,
-                pixel: PixelFormat::None,
-                primaries: ColorPrimaries::Unspecified,
-                transfer: Transfer::Unspecified,
-            },
+            PictureInfo::new(
+                1,
+                1,
+                PixelFormat::None,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+            ),
             1,
             0,
             1,

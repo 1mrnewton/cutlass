@@ -827,13 +827,13 @@ fn gpu_picture(
     limits::picture_ok(width, height)?;
     let token = publish_buffer(image)?;
     match PictureOutput::platform(
-        PictureInfo {
+        PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Unspecified,
-        },
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Unspecified,
+        ),
         token,
         pts,
         timescale,
@@ -918,13 +918,13 @@ fn copy_rgba(
         }
     }
     PictureOutput::cpu(
-        PictureInfo {
+        PictureInfo::new(
             width,
             height,
-            pixel: PixelFormat::Rgba8,
-            primaries: ColorPrimaries::Bt709,
-            transfer: Transfer::Unspecified,
-        },
+            PixelFormat::Rgba8,
+            ColorPrimaries::Bt709,
+            Transfer::Unspecified,
+        ),
         rgba,
         pts,
         timescale,

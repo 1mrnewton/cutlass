@@ -34,7 +34,9 @@
 //! reference, and the stored picture is the one from before grain. Every shown
 //! frame of one real 8-bit 4:2:0 file matches an independent decoder. A packet
 //! may be one Annex B temporal unit. A segment may change the quantizer, and a
-//! later frame may keep that segment map.
+//! later frame may keep that segment map. Colour primaries, transfer, matrix,
+//! chroma sample position, and the display size are published on the picture.
+//! The sample buffer stays the frame size. Timing info is kept.
 
 #![forbid(unsafe_code)]
 

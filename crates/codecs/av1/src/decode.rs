@@ -4,7 +4,7 @@ use cutlass_decode::{
     CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput, PixelFormat,
 };
 
-use crate::yuv::{Plane, Yuv420, gray_output, gray_wide, picture_output, wide_output};
+use crate::yuv::{Plane, ShownTags, Yuv420, gray_output, gray_wide, picture_output, wide_output};
 
 use crate::header::{
     FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
@@ -28,6 +28,8 @@ struct Reference {
     picture: Yuv420,
     /// Native samples when the sequence is 10-bit. Eight-bit slots leave this empty.
     wide: Option<Arc<WidePlanes>>,
+    render_width: u32,
+    render_height: u32,
     cdfs: Arc<Cdfs>,
     gm: [[i32; 6]; 8],
     field: Arc<SavedMotion>,
@@ -402,9 +404,15 @@ impl Av1Decoder {
         let saved_motion =
             std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
         let ref_sizes = std::array::from_fn(|slot| {
-            self.refs[slot]
-                .as_ref()
-                .map(|reference| reference.coded_size())
+            self.refs[slot].as_ref().map(|reference| {
+                let (width, height) = reference.coded_size();
+                (
+                    width,
+                    height,
+                    reference.render_width,
+                    reference.render_height,
+                )
+            })
         });
         let inherited = std::array::from_fn(|slot| {
             self.refs[slot]
@@ -433,7 +441,7 @@ impl Av1Decoder {
         &mut self,
         packet: &Packet,
         sequence: Sequence,
-        frame: FrameInfo,
+        mut frame: FrameInfo,
         parts: Option<&[TilePart]>,
     ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
         let stale = self.take_stale_refs(&frame);
@@ -444,9 +452,15 @@ impl Av1Decoder {
                 return Err(error);
             }
         };
+        if let Some(reference) = self.refs[usize::from(frame.frame_to_show)].as_ref()
+            && frame.show_existing
+        {
+            frame.render_width = reference.render_width;
+            frame.render_height = reference.render_height;
+        }
         let stored = self.store(&frame, &held);
+        let tags = shown_tags(&sequence, &frame);
         let monochrome = sequence.monochrome;
-        let bit_depth = sequence.bit_depth;
         self.sequence = Some(sequence);
         if !frame.show_frame {
             return Ok((None, FrameUndo { stored, stale }));
@@ -455,7 +469,7 @@ impl Av1Decoder {
             &held,
             &frame,
             monochrome,
-            bit_depth,
+            &tags,
             packet.pts,
             packet.timescale,
         ) {
@@ -577,6 +591,8 @@ impl Av1Decoder {
                 self.refs[slot] = Some(Reference {
                     picture: held.picture.clone(),
                     wide: held.wide.clone(),
+                    render_width: frame.render_width,
+                    render_height: frame.render_height,
                     cdfs: Arc::clone(&held.cdfs),
                     gm: frame.gm_params,
                     field: Arc::clone(&held.motion),
@@ -900,10 +916,12 @@ impl Av1Decoder {
             true,
             true,
         )?;
+        let tags = shown_tags(&sequence, &frame);
         let shown = if frame.show_frame {
             Some(publish(
                 &picture,
                 sequence.monochrome,
+                &tags,
                 packet.pts,
                 packet.timescale,
             )?)
@@ -1084,27 +1102,57 @@ fn placeholder_picture() -> Result<Yuv420, CodecError> {
     )
 }
 
+fn shown_tags(sequence: &Sequence, frame: &FrameInfo) -> ShownTags {
+    let (
+        num_units_in_display_tick,
+        time_scale,
+        equal_picture_interval,
+        num_ticks_per_picture_minus_1,
+    ) = match sequence.timing {
+        Some(timing) => (
+            timing.num_units_in_display_tick,
+            timing.time_scale,
+            timing.equal_picture_interval,
+            timing.num_ticks_per_picture_minus_1,
+        ),
+        None => (0, 0, false, None),
+    };
+    ShownTags {
+        bit_depth: sequence.bit_depth,
+        render_width: frame.render_width,
+        render_height: frame.render_height,
+        primaries: sequence.color_primaries,
+        transfer: sequence.transfer_characteristics,
+        matrix: sequence.matrix_coefficients,
+        chroma_position: sequence.chroma_sample_position,
+        num_units_in_display_tick,
+        time_scale,
+        equal_picture_interval,
+        num_ticks_per_picture_minus_1,
+    }
+}
+
 fn publish_held(
     held: &Held,
     frame: &FrameInfo,
     monochrome: bool,
-    bit_depth: u8,
+    tags: &ShownTags,
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
     let Some(wide) = &held.wide else {
         let picture = shown(&held.picture, frame)?;
-        return publish(&picture, monochrome, pts, timescale);
+        return publish(&picture, monochrome, tags, pts, timescale);
     };
     let width = u32::try_from(wide.width).map_err(|_| CodecError::Limit { what: "frame size" })?;
     let height =
         u32::try_from(wide.height).map_err(|_| CodecError::Limit { what: "frame size" })?;
     if monochrome {
-        if bit_depth != 10 {
+        if tags.bit_depth != 10 {
             return Err(CodecError::Unsupported { what: "bit depth" });
         }
         if !frame.grain.apply {
-            return gray_wide(&wide.y, width, height, pts, timescale);
+            return gray_wide(&wide.y, width, height, tags, pts, timescale);
         }
         let Some((y, _, _)) = crate::grain::overlay(
             &wide.y,
@@ -1120,9 +1168,9 @@ fn publish_held(
                 what: "film grain",
             });
         };
-        return gray_wide(&y, width, height, pts, timescale);
+        return gray_wide(&y, width, height, tags, pts, timescale);
     }
-    if frame.grain.apply && bit_depth != 10 {
+    if frame.grain.apply && tags.bit_depth != 10 {
         return Err(CodecError::Unsupported { what: "film grain" });
     }
     if !frame.grain.apply {
@@ -1132,7 +1180,7 @@ fn publish_held(
             &wide.v,
             width,
             height,
-            bit_depth,
+            tags,
             (pts, timescale),
         );
     }
@@ -1157,19 +1205,20 @@ fn publish_held(
             what: "film grain",
         });
     };
-    wide_output(&y, &u, &v, width, height, bit_depth, (pts, timescale))
+    wide_output(&y, &u, &v, width, height, tags, (pts, timescale))
 }
 
 fn publish(
     picture: &Yuv420,
     monochrome: bool,
+    tags: &ShownTags,
     pts: i64,
     timescale: u32,
 ) -> Result<PictureOutput, CodecError> {
     if monochrome {
-        gray_output(picture, pts, timescale)
+        gray_output(picture, tags, pts, timescale)
     } else {
-        picture_output(picture, pts, timescale)
+        picture_output(picture, tags, pts, timescale)
     }
 }
 
@@ -4348,7 +4397,7 @@ mod tests {
             0x4814_1f75_474a_da47,
             0x7c8f_46f6_4e71_07c6,
         ];
-        let sizes = [Some((128, 128)); 8];
+        let sizes = [Some((128, 128, 128, 128)); 8];
         let saved = [None; 8];
         let hints = [0; 8];
         let inherited = [crate::header::Inherited::defaults(); 8];
@@ -4636,6 +4685,75 @@ mod tests {
                 what: "operating point",
             }
         );
+    }
+
+    #[test]
+    fn colour_timing_and_render_size_stay_on_the_picture() {
+        // aomenc 64×64, one keyframe and one inter frame, with BT.709 colour,
+        // colocated chroma, and a constant 30 Hz timing_info. The keyframe's
+        // display size is 80×40. The sample picture stays 64×64. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/color.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.color_primaries, 1);
+        assert_eq!(sequence.transfer_characteristics, 1);
+        assert_eq!(sequence.matrix_coefficients, 1);
+        assert_eq!(sequence.chroma_sample_position, 2);
+        let timing = sequence.timing.expect("timing");
+        assert_eq!(timing.num_units_in_display_tick, 1);
+        assert_eq!(timing.time_scale, 30);
+        assert!(timing.equal_picture_interval);
+        assert_eq!(timing.num_ticks_per_picture_minus_1, Some(0));
+        assert_eq!((frame.render_width, frame.render_height), (80, 40));
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert_eq!((inter.render_width, inter.render_height), (64, 64));
+        let expected = [0x1b33_c4d2_4867_47f8, 0x7963_d39f_992f_c21f];
+        let renders = [(80, 40), (64, 64)];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p);
+            assert_eq!((info.width, info.height), (64, 64));
+            assert_eq!((info.render_width, info.render_height), renders[index]);
+            assert_eq!(info.primaries, cutlass_decode::ColorPrimaries::Bt709);
+            assert_eq!(info.transfer, cutlass_decode::Transfer::Bt709);
+            assert_eq!(info.matrix, cutlass_decode::ColorMatrix::Bt709);
+            assert_eq!(
+                info.chroma_position,
+                cutlass_decode::ChromaSamplePosition::Colocated
+            );
+            assert_eq!(
+                (info.cicp_primaries, info.cicp_transfer, info.cicp_matrix),
+                (1, 1, 1)
+            );
+            assert_eq!(info.num_units_in_display_tick, 1);
+            assert_eq!(info.time_scale, 30);
+            assert!(info.equal_picture_interval);
+            assert_eq!(info.num_ticks_per_picture_minus_1, Some(0));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
     }
 
     #[test]

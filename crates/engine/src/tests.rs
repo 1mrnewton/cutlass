@@ -125,13 +125,13 @@ impl Decoder for Planar {
         bytes.push(128);
         bytes.push(128);
         let picture = PictureOutput::cpu(
-            PictureInfo {
-                width: 2,
-                height: 2,
-                pixel: PixelFormat::Yuv420p,
-                primaries: ColorPrimaries::Bt709,
-                transfer: Transfer::Bt709,
-            },
+            PictureInfo::new(
+                2,
+                2,
+                PixelFormat::Yuv420p,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+            ),
             bytes,
             packet.pts,
             packet.timescale,
@@ -164,13 +164,13 @@ impl Decoder for Token {
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         let picture = PictureOutput::platform(
-            PictureInfo {
-                width: 1,
-                height: 1,
-                pixel: PixelFormat::Rgba8,
-                primaries: ColorPrimaries::Bt709,
-                transfer: Transfer::Bt709,
-            },
+            PictureInfo::new(
+                1,
+                1,
+                PixelFormat::Rgba8,
+                ColorPrimaries::Bt709,
+                Transfer::Bt709,
+            ),
             7,
             packet.pts,
             packet.timescale,

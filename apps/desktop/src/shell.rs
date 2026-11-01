@@ -24,9 +24,9 @@ use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
     Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
     MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
-    TrackAttribute, TrackId, TrackType, beat_timeline_time, linkage_from_biz, segment_beats,
-    segment_time_mark, source_time_at, time_mark_items, track_holds_beats, user_beats,
-    visible_beats, visible_marks,
+    TrackAttribute, TrackId, TrackType, WordColumns, beat_timeline_time, linkage_from_biz,
+    segment_beats, segment_time_mark, source_time_at, time_mark_items, track_holds_beats,
+    user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -35,6 +35,9 @@ use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
 use cutlass_store::{Folder, Hold, StoreError};
+use cutlass_transcription::{
+    FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
+};
 
 use crate::probe::{self, Probed};
 use crate::tokens;
@@ -179,7 +182,7 @@ pub struct Inspection {
     pub transform_y: f64,
     pub material: String,
     pub text: Option<String>,
-    pub words: cutlass_model::WordColumns,
+    pub words: WordColumns,
     pub locked: bool,
 }
 
@@ -356,6 +359,8 @@ pub struct Shell {
     pending_moves: Vec<PendingMove>,
     notice: String,
     next_id: u64,
+    /// The local speech model, loaded on the first transcript that can hear a clip.
+    speech: RefCell<Option<ParakeetUnified>>,
     pub chrome: Chrome,
 }
 
@@ -413,6 +418,7 @@ impl Shell {
             pending_moves: Vec::new(),
             notice: String::new(),
             next_id: 0,
+            speech: RefCell::new(None),
             chrome: Chrome::default(),
         }
     }
@@ -2177,6 +2183,139 @@ impl Shell {
         self.apply(Request::SetCrop { segment_id, crop })
     }
 
+    /// The selected clip is a picture or a sound, so Transcribe can hear it.
+    #[must_use]
+    pub fn transcribe_enabled(&self) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        let Some(segment) = self.selected_segment() else {
+            return false;
+        };
+        matches!(
+            draft.materials.get(segment.material_id.as_str()),
+            Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
+        )
+    }
+
+    /// Hear the selected clip and place the words on a text track, lined up
+    /// with that clip. One undo removes the caption. The window waits while
+    /// the local speech model runs.
+    pub fn transcribe(&mut self) -> Result<(), ShellError> {
+        let clip = self.selected_speech()?;
+        self.ensure_speech()?;
+        let mut source = FileSource::new(&clip.path);
+        let words = {
+            let cell = self.speech.borrow();
+            let Some(recognizer) = cell.as_ref() else {
+                return Err(ShellError::Unavailable(
+                    "the speech model is not on this machine".to_owned(),
+                ));
+            };
+            heard_words(recognizer, &mut source, &clip)?
+        };
+        self.write_caption(&clip, words)
+    }
+
+    /// Hear `source` with `recognizer` and place the caption. Tests pass a
+    /// stand-in so they do not load the speech model.
+    #[cfg(test)]
+    fn transcribe_with(
+        &mut self,
+        recognizer: &dyn Recognizer,
+        source: &mut dyn PcmSource,
+    ) -> Result<(), ShellError> {
+        let clip = self.selected_speech()?;
+        let words = heard_words(recognizer, source, &clip)?;
+        self.write_caption(&clip, words)
+    }
+
+    fn selected_speech(&self) -> Result<HeardClip, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = locate(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        let path = match draft.materials.get(segment.material_id.as_str()) {
+            Some(MaterialRef::Video(video)) => video.path.clone(),
+            Some(MaterialRef::Audio(audio)) => audio.path.clone(),
+            _ => {
+                return Err(ShellError::Unavailable(
+                    "a transcript belongs on a picture or a sound".to_owned(),
+                ));
+            }
+        };
+        if path.is_empty() {
+            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
+        }
+        let range = segment
+            .source_range
+            .clone()
+            .filter(|range| range.duration.0 > 0 && range.start.0 >= 0)
+            .unwrap_or_else(|| TimeRange::new(0, segment.target.duration.0));
+        if range.duration.0 <= 0 || segment.target.duration.0 <= 0 {
+            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
+        }
+        let source_us = range.duration.0;
+        let target_us = segment.target.duration.0;
+        Ok(HeardClip {
+            source_id: segment_id,
+            path,
+            range,
+            source_us,
+            target_us,
+            reverse: segment.reverse,
+            speed_holds: segment.speed.is_finite() && segment.speed > 0.0,
+            target: segment.target.clone(),
+        })
+    }
+
+    fn ensure_speech(&self) -> Result<(), ShellError> {
+        if self.speech.borrow().is_some() {
+            return Ok(());
+        }
+        let dir = speech_model_dir();
+        if !dir.join("parakeet-unified-en-0.6b.nemo").is_file() {
+            return Err(ShellError::Unavailable(
+                "the speech model is not on this machine".to_owned(),
+            ));
+        }
+        let model = ParakeetUnified::cpu(&dir).map_err(|_| {
+            ShellError::Unavailable("the speech model could not be loaded".to_owned())
+        })?;
+        *self.speech.borrow_mut() = Some(model);
+        Ok(())
+    }
+
+    fn write_caption(&mut self, clip: &HeardClip, words: WordColumns) -> Result<(), ShellError> {
+        if words.text.is_empty() {
+            return Err(ShellError::Unavailable("nothing was heard".to_owned()));
+        }
+        let existing = {
+            let draft = self.session_draft()?;
+            caption_track(draft, &clip.target)
+        };
+        let track_id = existing.unwrap_or_else(|| TrackId::new(self.fresh("captions")));
+        let segment_id = SegmentId::new(self.fresh("caption"));
+        let material_id = MaterialId::new(self.fresh("caption"));
+        self.apply(Request::AddCaption {
+            source_id: clip.source_id.clone(),
+            track_id,
+            segment_id,
+            material_id,
+            words,
+        })
+    }
+
     fn selection_can_turn(&self) -> bool {
         let Some(draft) = self.draft() else {
             return false;
@@ -3428,6 +3567,139 @@ fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId
         .map(|segment| segment.id.clone())
 }
 
+struct HeardClip {
+    source_id: SegmentId,
+    path: String,
+    range: TimeRange,
+    source_us: i64,
+    target_us: i64,
+    reverse: bool,
+    speed_holds: bool,
+    target: TimeRange,
+}
+
+fn speech_model_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/parakeet-unified-en-0.6b")
+}
+
+fn heard_words(
+    recognizer: &dyn Recognizer,
+    source: &mut dyn PcmSource,
+    clip: &HeardClip,
+) -> Result<WordColumns, ShellError> {
+    let pcm = source.read(&clip.range).map_err(prepare_message)?;
+    let pcm = fit(pcm, recognizer.sample_rate()).map_err(prepare_message)?;
+    let utterances = recognizer.recognize(&pcm).map_err(recognize_message)?;
+    let words = columns(&utterances)
+        .map_err(|_| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))?;
+    map_words(words, clip)
+}
+
+fn map_words(words: WordColumns, clip: &HeardClip) -> Result<WordColumns, ShellError> {
+    if words.text.is_empty() {
+        return Err(ShellError::Unavailable("nothing was heard".to_owned()));
+    }
+    let mut start_time = Vec::with_capacity(words.text.len());
+    let mut end_time = Vec::with_capacity(words.text.len());
+    for (start_ms, end_ms) in words.start_time.iter().zip(&words.end_time) {
+        let (start, end) = timeline_millis(*start_ms, *end_ms, clip)?;
+        start_time.push(start);
+        end_time.push(end);
+    }
+    Ok(WordColumns {
+        start_time,
+        end_time,
+        text: words.text,
+        rest: words.rest,
+    })
+}
+
+fn timeline_millis(start_ms: i64, end_ms: i64, clip: &HeardClip) -> Result<(i64, i64), ShellError> {
+    let start_us = millis_to_us(start_ms)?;
+    let end_us = millis_to_us(end_ms)?;
+    let (start_us, end_us) = if clip.reverse {
+        let flipped_start = clip.source_us.checked_sub(end_us).ok_or_else(|| {
+            ShellError::Unavailable("a word clock does not fit the clip".to_owned())
+        })?;
+        let flipped_end = clip.source_us.checked_sub(start_us).ok_or_else(|| {
+            ShellError::Unavailable("a word clock does not fit the clip".to_owned())
+        })?;
+        (flipped_start, flipped_end)
+    } else {
+        (start_us, end_us)
+    };
+    let (start_us, end_us) = if clip.speed_holds {
+        (
+            scale_us(start_us, clip.source_us, clip.target_us)?,
+            scale_us(end_us, clip.source_us, clip.target_us)?,
+        )
+    } else {
+        (start_us, end_us)
+    };
+    let start_ms = start_us / 1_000;
+    let end_ms = (end_us / 1_000).max(start_ms);
+    Ok((start_ms, end_ms))
+}
+
+fn millis_to_us(millis: i64) -> Result<i64, ShellError> {
+    millis
+        .checked_mul(1_000)
+        .ok_or_else(|| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))
+}
+
+fn scale_us(value: i64, source_us: i64, target_us: i64) -> Result<i64, ShellError> {
+    if source_us <= 0 {
+        return Err(ShellError::Unavailable(
+            "a word clock does not fit the clip".to_owned(),
+        ));
+    }
+    let scaled = i128::from(value)
+        .checked_mul(i128::from(target_us))
+        .ok_or_else(|| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))?;
+    i64::try_from(scaled / i128::from(source_us))
+        .map_err(|_| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))
+}
+
+fn caption_track(draft: &Draft, range: &TimeRange) -> Option<TrackId> {
+    draft
+        .tracks
+        .iter()
+        .find(|track| {
+            matches!(track.kind, TrackType::Text | TrackType::TextToVideoText)
+                && !bit(track.attribute, TrackAttribute::LOCK)
+                && track.segments.iter().all(|segment| {
+                    segment
+                        .target
+                        .overlaps(range)
+                        .is_ok_and(|overlaps| !overlaps)
+                })
+        })
+        .map(|track| track.id.clone())
+}
+
+fn prepare_message(error: PrepareError) -> ShellError {
+    let message = match error {
+        PrepareError::Open => "the clip has no sound to hear",
+        PrepareError::Decode => "the clip's sound could not be read",
+        PrepareError::Range
+        | PrepareError::SampleRate
+        | PrepareError::Samples
+        | PrepareError::TooLong
+        | PrepareError::NoAudio => "the clip has no sound",
+    };
+    ShellError::Unavailable(message.to_owned())
+}
+
+fn recognize_message(error: RecognizeError) -> ShellError {
+    let message = match error {
+        RecognizeError::Model | RecognizeError::Search => {
+            "the speech model could not hear the clip"
+        }
+        RecognizeError::SampleRate { .. } | RecognizeError::WordTime => "the clip has no sound",
+    };
+    ShellError::Unavailable(message.to_owned())
+}
+
 fn placed<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, &'a TrackType)> {
     for track in &draft.tracks {
         if let Some(segment) = track.segments.iter().find(|segment| &segment.id == id) {
@@ -3507,10 +3779,7 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
     }
 }
 
-fn material_label(
-    draft: &Draft,
-    id: &MaterialId,
-) -> (String, Option<String>, cutlass_model::WordColumns) {
+fn material_label(draft: &Draft, id: &MaterialId) -> (String, Option<String>, WordColumns) {
     match draft.materials.get(id.as_str()) {
         Some(MaterialRef::Video(video)) => (video.path.clone(), None, Default::default()),
         Some(MaterialRef::Audio(audio)) => (audio.path.clone(), None, Default::default()),
@@ -3676,6 +3945,9 @@ mod tests {
     use cutlass_session::{EditError, TrimEdge};
     use cutlass_settings::{SeekDuringPlayback, Settings};
     use cutlass_store::Folder;
+    use cutlass_transcription::{
+        Pcm, PcmSource, PrepareError, RecognizeError, RecognizedWord, Recognizer, Utterance,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -5969,6 +6241,380 @@ mod tests {
         assert_eq!(
             desktop.draft().unwrap().materials.drafts[0].crop,
             Crop::default()
+        );
+    }
+
+    struct CaptionStandIn {
+        words: Vec<RecognizedWord>,
+    }
+
+    impl Recognizer for CaptionStandIn {
+        fn sample_rate(&self) -> u32 {
+            16_000
+        }
+
+        fn recognize(&self, pcm: &Pcm) -> Result<Vec<Utterance>, RecognizeError> {
+            if pcm.sample_rate != self.sample_rate() || pcm.samples.is_empty() {
+                return Err(RecognizeError::SampleRate {
+                    expected: self.sample_rate(),
+                    actual: pcm.sample_rate,
+                });
+            }
+            Ok(vec![Utterance {
+                words: self.words.clone(),
+            }])
+        }
+    }
+
+    struct CaptionTone;
+
+    impl PcmSource for CaptionTone {
+        fn read(&mut self, range: &TimeRange) -> Result<Pcm, PrepareError> {
+            if range.duration.0 <= 0 || range.start.0 < 0 {
+                return Err(PrepareError::Range);
+            }
+            Ok(Pcm {
+                sample_rate: 16_000,
+                samples: vec![0.0; 16],
+            })
+        }
+    }
+
+    #[test]
+    fn transcribe_places_words_on_a_text_track() {
+        let mut bare = shell();
+        assert!(!bare.transcribe_enabled());
+        assert_eq!(
+            bare.transcribe().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(2_000_000);
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 2_000_000),
+        ));
+        let mut fast = Segment::new("fast", "picture", TimeRange::new(3_000_000, 1_000_000));
+        fast.speed = 2.0;
+        fast.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(fast);
+        let mut backward =
+            Segment::new("backward", "picture", TimeRange::new(5_000_000, 2_000_000));
+        backward.reverse = true;
+        backward.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(backward);
+        let mut odd = Segment::new("odd", "picture", TimeRange::new(8_000_000, 1_000_000));
+        odd.speed = 0.0;
+        odd.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(odd);
+        let mut silent = MaterialVideo::new("silent");
+        silent.duration = Micros(1_000_000);
+        draft.materials.videos.push(silent);
+        draft.tracks[0].segments.push(Segment::new(
+            "silent",
+            "silent",
+            TimeRange::new(10_000_000, 1_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(12_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone.wav".to_owned(),
+            duration: Micros(1_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound.segments.push(Segment::new(
+            "tone",
+            "tone",
+            TimeRange::new(14_000_000, 1_000_000),
+        ));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        draft.materials.drafts.push(MaterialDraft {
+            id: MaterialId::new("compound"),
+            ..MaterialDraft::default()
+        });
+        let mut compound = Track::main("compound");
+        compound.kind = TrackType::Composition;
+        compound.segments.push(Segment::new(
+            "compound",
+            "compound",
+            TimeRange::new(16_000_000, 1_000_000),
+        ));
+        draft.tracks.push(compound);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        assert!(!desktop.transcribe_enabled());
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.transcribe_enabled());
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "a transcript belongs on a picture or a sound"
+        );
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.transcribe_enabled());
+        desktop.select(Some(SegmentId::new("compound")));
+        assert!(!desktop.transcribe_enabled());
+
+        desktop.select(Some(SegmentId::new("silent")));
+        assert!(desktop.transcribe_enabled());
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        assert_eq!(desktop.draft().unwrap().materials.texts.len(), 1);
+
+        let main = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(main.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.transcribe().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        desktop
+            .toggle_attribute(main, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(desktop.draft().unwrap().materials.texts.len(), 1);
+
+        let mut tone = CaptionTone;
+        let quiet = CaptionStandIn { words: Vec::new() };
+        assert_eq!(
+            desktop
+                .transcribe_with(&quiet, &mut tone)
+                .unwrap_err()
+                .to_string(),
+            "nothing was heard"
+        );
+        assert_eq!(desktop.draft().unwrap().materials.texts.len(), 1);
+
+        let heard = CaptionStandIn {
+            words: vec![
+                RecognizedWord {
+                    text: "hi".to_owned(),
+                    start_ms: 0,
+                    end_ms: 400,
+                },
+                RecognizedWord {
+                    text: "there".to_owned(),
+                    start_ms: 400,
+                    end_ms: 900,
+                },
+            ],
+        };
+        desktop.transcribe_with(&heard, &mut tone).unwrap();
+        let draft = desktop.draft().unwrap();
+        let caption_track = draft
+            .tracks
+            .iter()
+            .find(|track| {
+                track.kind == TrackType::Text
+                    && track.id.as_str() != "words"
+                    && track.segments.len() == 1
+            })
+            .expect("caption track");
+        assert_eq!(
+            caption_track.segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        let material = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "hi there")
+            .expect("words");
+        assert_eq!(material.words.start_time, [0, 400]);
+        assert_eq!(material.words.end_time, [400, 900]);
+        assert_eq!(material.current_words.text, ["hi", "there"]);
+        let pair = draft
+            .relationships
+            .iter()
+            .find(|item| item.kind == "linkage")
+            .expect("link")
+            .id_to_id
+            .iter()
+            .find(|pair| pair.owner.as_str() == "picture")
+            .expect("pair");
+        assert_eq!(pair.dependent, caption_track.segments[0].id);
+
+        let fast_words = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "quick".to_owned(),
+                start_ms: 0,
+                end_ms: 1_000,
+            }],
+        };
+        desktop.select(Some(SegmentId::new("fast")));
+        desktop.transcribe_with(&fast_words, &mut tone).unwrap();
+        let draft = desktop.draft().unwrap();
+        let reused = draft
+            .tracks
+            .iter()
+            .find(|track| {
+                track.kind == TrackType::Text
+                    && track
+                        .segments
+                        .iter()
+                        .any(|segment| segment.target == TimeRange::new(3_000_000, 1_000_000))
+            })
+            .expect("reused");
+        assert_eq!(reused.segments.len(), 2);
+        assert_eq!(
+            draft
+                .tracks
+                .iter()
+                .find(|track| track.id.as_str() == "words")
+                .expect("words")
+                .segments
+                .len(),
+            1
+        );
+        let quick = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "quick")
+            .expect("quick");
+        assert_eq!(quick.words.start_time, [0]);
+        assert_eq!(quick.words.end_time, [500]);
+
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackType::Text && track.id.as_str() != "words")
+                .all(|track| track.segments.len() == 1)
+        );
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .all(|track| track.id.as_str() == "words" || track.kind != TrackType::Text)
+        );
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.content == "hi")
+        );
+
+        let backward_words = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "back".to_owned(),
+                start_ms: 0,
+                end_ms: 1_000,
+            }],
+        };
+        desktop.select(Some(SegmentId::new("backward")));
+        desktop.transcribe_with(&backward_words, &mut tone).unwrap();
+        let back = desktop
+            .draft()
+            .unwrap()
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "back")
+            .expect("back")
+            .clone();
+        assert_eq!(back.words.start_time, [1_000]);
+        assert_eq!(back.words.end_time, [2_000]);
+
+        let odd_words = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "odd".to_owned(),
+                start_ms: 0,
+                end_ms: 400,
+            }],
+        };
+        desktop.select(Some(SegmentId::new("odd")));
+        desktop.transcribe_with(&odd_words, &mut tone).unwrap();
+        let odd = desktop
+            .draft()
+            .unwrap()
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "odd")
+            .expect("odd");
+        assert_eq!(odd.words.start_time, [0]);
+        assert_eq!(odd.words.end_time, [400]);
+
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(desktop.transcribe_enabled());
+        assert!(!desktop.crop_enabled());
+        let sound_words = CaptionStandIn {
+            words: vec![RecognizedWord {
+                text: "sound".to_owned(),
+                start_ms: 0,
+                end_ms: 200,
+            }],
+        };
+        desktop.transcribe_with(&sound_words, &mut tone).unwrap();
+        let draft = desktop.draft().unwrap();
+        let sound_text = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.content == "sound")
+            .expect("sound");
+        assert_eq!(sound_text.words.end_time, [200]);
+        let sound_segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter())
+            .find(|segment| segment.material_id == sound_text.id)
+            .expect("sound clip");
+        assert_eq!(sound_segment.target, TimeRange::new(14_000_000, 1_000_000));
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .materials
+                .texts
+                .iter()
+                .all(|text| text.content != "sound")
         );
     }
 

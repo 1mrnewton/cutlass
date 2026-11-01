@@ -8,7 +8,8 @@ use crate::yuv::{Plane, Yuv420, gray_output, gray_wide, picture_output, wide_out
 
 use crate::header::{
     FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
-    header_is_addressable, obu_payload, parse_with_motion, tile_list, tile_span, unit_obus,
+    header_is_addressable, obu_payload, parse_with_motion, sequence_obu, tile_list, tile_span,
+    unit_obus,
 };
 use crate::inter::{RefView, SavedMotion};
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_tile_parts, decode_with_refs};
@@ -74,6 +75,8 @@ pub struct Av1Decoder {
     sequence: Option<Sequence>,
     refs: [Option<Reference>; 8],
     order_hints: [u32; 8],
+    /// `choose_operating_point`. Point 0 is the first point in the sequence.
+    operating_point: u8,
 }
 
 impl Av1Decoder {
@@ -112,7 +115,28 @@ impl Av1Decoder {
             sequence: None,
             refs: std::array::from_fn(|_| None),
             order_hints: [0; 8],
+            operating_point: 0,
         })
+    }
+
+    /// Select the operating point from section 6.4.1. The default is point 0.
+    ///
+    /// An index past the sequence's last point is refused once that sequence is known.
+    pub fn select_operating_point(&mut self, index: u8) -> Result<(), CodecError> {
+        if index > 31 {
+            return Err(CodecError::Unsupported {
+                what: "operating point",
+            });
+        }
+        if let Some(sequence) = &self.sequence
+            && usize::from(index) > usize::from(sequence.operating_points)
+        {
+            return Err(CodecError::Unsupported {
+                what: "operating point",
+            });
+        }
+        self.operating_point = index;
+        Ok(())
     }
 }
 
@@ -168,8 +192,13 @@ impl Av1Decoder {
         let mut prefix = Vec::new();
         let mut shown = Vec::new();
         let mut saw_frame = false;
+        let mut dropped = false;
         let mut pending: Option<PendingTiles> = None;
         for obu in obus {
+            if obu.kind != 1 && obu.kind != 2 && !self.keeps_layer(obu.bytes)? {
+                dropped = true;
+                continue;
+            }
             match obu.kind {
                 // Padding, metadata, and a reserved type carry no frame.
                 // A reserved payload is not inspected.
@@ -183,6 +212,13 @@ impl Av1Decoder {
                     if pending.is_some() {
                         return Err(unfinished_tiles());
                     }
+                    let sequence = sequence_obu(obu.bytes)?;
+                    if usize::from(self.operating_point) > usize::from(sequence.operating_points) {
+                        return Err(CodecError::Unsupported {
+                            what: "operating point",
+                        });
+                    }
+                    self.sequence = Some(sequence);
                     prefix.extend_from_slice(obu.bytes);
                 }
                 6 => {
@@ -297,11 +333,55 @@ impl Av1Decoder {
             return Err(unfinished_tiles());
         }
         if !saw_frame {
+            if dropped {
+                return Ok(shown);
+            }
             return Err(CodecError::InvalidApi {
                 what: "missing frame",
             });
         }
         Ok(shown)
+    }
+
+    /// Section 5.3.1. A sequence header and a temporal delimiter stay.
+    /// Any other OBU is dropped when its layer is outside the selected point.
+    fn keeps_layer(&self, obu: &[u8]) -> Result<bool, CodecError> {
+        let Some(sequence) = &self.sequence else {
+            return Ok(true);
+        };
+        let idc = sequence
+            .operating_idc
+            .get(usize::from(self.operating_point))
+            .copied()
+            .ok_or(CodecError::Unsupported {
+                what: "operating point",
+            })?;
+        if idc == 0 {
+            return Ok(true);
+        }
+        let (extension, temporal, spatial) = Self::obu_layer(obu)?;
+        if !extension {
+            return Ok(true);
+        }
+        let in_temporal = (idc >> u16::from(temporal)) & 1 == 1;
+        let in_spatial = (idc >> (u16::from(spatial) + 8)) & 1 == 1;
+        Ok(in_temporal && in_spatial)
+    }
+
+    /// `temporal_id` and `spatial_id` from an OBU extension header.
+    fn obu_layer(bytes: &[u8]) -> Result<(bool, u8, u8), CodecError> {
+        let header = bytes.first().copied().ok_or(CodecError::Truncated {
+            at_bit: 0,
+            what: "obu",
+        })?;
+        if header & 0x04 == 0 {
+            return Ok((false, 0, 0));
+        }
+        let extension = bytes.get(1).copied().ok_or(CodecError::Truncated {
+            at_bit: 8,
+            what: "obu",
+        })?;
+        Ok((true, extension >> 5, (extension >> 3) & 0x3))
     }
 
     /// Decode one frame OBU. A hidden frame updates reference slots and shows nothing.
@@ -4467,6 +4547,95 @@ mod tests {
             assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
         }
         assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn an_operating_point_keeps_its_temporal_layer() {
+        // Two operating points. Point 0 is temporal layer 0. Point 1 also
+        // includes temporal layer 1, a second copy of the keyframe. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1` and the same command with `-oppoint 1`.
+        let file = include_bytes!("../fixtures/operating-point.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 3);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.operating_points, 1);
+        assert_eq!(sequence.operating_idc[0], 0x101);
+        assert_eq!(sequence.operating_idc[1], 0x103);
+        let base = [0xf021_b9cb_b654_3518, 0x21e9_8a09_7459_161c];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("point 0 frame {index}: {error:?}"));
+            if index == 2 {
+                assert!(shown.is_empty(), "temporal layer");
+                continue;
+            }
+            assert_eq!(shown.len(), 1, "point 0 frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(frame_digest(bytes), base[index], "point 0 frame {index}");
+        }
+        let mut layered = Av1Decoder::open(&params).expect("open");
+        layered.select_operating_point(1).expect("point 1");
+        let layered_digest = [base[0], base[1], base[0]];
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = layered
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index != 1,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("point 1 frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "point 1 frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(
+                frame_digest(bytes),
+                layered_digest[index],
+                "point 1 frame {index}"
+            );
+        }
+        let mut refused = Av1Decoder::open(&params).expect("open");
+        refused.select_operating_point(2).expect("stored");
+        let error = refused
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect_err("past the last point");
+        assert_eq!(
+            error,
+            cutlass_decode::CodecError::Unsupported {
+                what: "operating point",
+            }
+        );
     }
 
     #[test]

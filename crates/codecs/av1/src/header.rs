@@ -94,6 +94,10 @@ pub struct Sequence {
     pub id_len: u8,
     pub delta_frame_id_len: u8,
     pub use_128: bool,
+    /// `operating_points_cnt_minus_1`. Valid points are `0..=operating_points`.
+    pub operating_points: u8,
+    /// `operating_point_idc` for each point. A zero mask means every layer.
+    pub operating_idc: [u16; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -594,6 +598,8 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let mut force_integer = SELECT_TOOLS;
     let mut id_len = 0u8;
     let mut delta_id = 0u8;
+    let mut operating_points = 0u8;
+    let mut operating_idc = [0u16; 32];
     if reduced {
         let _level = bits.read(5)?;
     } else {
@@ -612,19 +618,20 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
             }
         }
         let delay_present = bits.read_bool()?;
-        let points = bits.read(5)?;
-        if points != 0 {
-            return Err(CodecError::Unsupported {
-                what: "operating point",
-            });
-        }
-        let _idc = bits.read(12)?;
-        let level = bits.read(5)?;
-        if level > 7 {
-            let _tier = bits.read(1)?;
-        }
-        if delay_present && bits.read_bool()? {
-            let _ = bits.read(4)?;
+        operating_points = bits.read(5)? as u8;
+        for index in 0..=operating_points {
+            let idc = bits.read(12)? as u16;
+            if operating_idc[..usize::from(index)].contains(&idc) {
+                return Err(malformed(bits, "operating point"));
+            }
+            operating_idc[usize::from(index)] = idc;
+            let level = bits.read(5)?;
+            if level > 7 {
+                let _tier = bits.read(1)?;
+            }
+            if delay_present && bits.read_bool()? {
+                let _ = bits.read(4)?;
+            }
         }
     }
     let width_bits = bits.read(4)? + 1;
@@ -725,7 +732,18 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         id_len,
         delta_frame_id_len: delta_id,
         use_128,
+        operating_points,
+        operating_idc,
     })
+}
+
+/// Sequence header payload, including its trailing bit.
+pub(crate) fn sequence_obu(bytes: &[u8]) -> Result<Sequence, CodecError> {
+    let payload = obu_payload(bytes)?;
+    let mut bits = BitReader::new(payload);
+    let sequence = parse_sequence(&mut bits)?;
+    trailing(&mut bits, payload.len().saturating_mul(8))?;
+    Ok(sequence)
 }
 
 /// Profile 0 is 4:2:0. `high_bitdepth` selects 10-bit. There is no `twelve_bit`.

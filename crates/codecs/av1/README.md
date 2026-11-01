@@ -44,7 +44,7 @@ fn shown_size(bytes: &[u8]) -> Result<(u32, u32), CodecError> {
 
 ## Support
 
-The decoder's scope is progressive 8-bit 4:2:0, 8-bit monochrome, and 10-bit 4:2:0, `seq_profile` 0, one operating point, and dimensions up to 4096×2304. An edge above 4096 is `Limit`. Monochrome output is one gray plane. 10-bit output is little-endian 4:2:0.
+The decoder's scope is progressive 8-bit 4:2:0, 8-bit monochrome, and 10-bit 4:2:0, `seq_profile` 0, the selected operating point, and dimensions up to 4096×2304. An edge above 4096 is `Limit`. Monochrome output is one gray plane. 10-bit output is little-endian 4:2:0.
 
 Implemented for that scope, and matched against dav1d on the keyframe fixtures named in `STATUS.md`:
 
@@ -117,7 +117,7 @@ If ffmpeg is missing, the example prints `skip: ffmpeg is not installed` and exi
 Refused with a typed error before a picture is published:
 
 - Film grain at 12-bit, and 12-bit monochrome. 12-bit 4:2:0, 4:2:2, and 4:4:4 match. 8-bit and 10-bit 4:2:2 match. 8-bit and 10-bit 4:4:4 match. Film grain on 4:4:4 and on 4:2:2 is refused. Monochrome 8-bit and 10-bit are one gray plane. The 10-bit monochrome pair leaves film grain off. 10-bit 4:2:0 is little-endian samples, including super resolution, Wiener or self-guided restoration, and film grain.
-- A second operating point, and the decoder model.
+- The decoder model. More than one operating point is decoded. The default is point 0, and a temporal layer outside the selected point is dropped.
 - A tile group that does not follow a frame header. A large-scale tile anchor of 8 or more, or an empty reference slot.
 - A show-existing frame shows the stored picture and does not re-apply grain.
 - Short reference signaling.

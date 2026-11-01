@@ -5621,6 +5621,54 @@ mod tests {
     }
 
     #[test]
+    fn identity_matrix_grain_clip_matches_dav1d() {
+        // aomenc --i444 --matrix-coefficients=identity --film-grain-test=1, 128×128.
+        // The matrix is identity and grain clips to the restricted range, so chroma
+        // uses the luma limit. Using the studio chroma limit changes the picture.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gbrp`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-identity.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 1);
+        assert_eq!(sequence.matrix_coefficients, 0);
+        assert!(!sequence.color_range_full);
+        assert!(!sequence.subsampling_x && !sequence.subsampling_y);
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert!(frame.grain.clip_restricted);
+        assert!(frame.grain.identity_matrix);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("push");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv444p);
+        assert_eq!(
+            (info.cicp_primaries, info.cicp_transfer, info.cicp_matrix),
+            (1, 1, 0)
+        );
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 128 * 128 * 3);
+        assert_eq!(frame_digest(bytes), 0xb4c1_cb35_9263_7630);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn cdef_damping_matches_dav1d() {
         // aomenc --cq-level=63 --enable-cdef=1, 128×128. The CDEF damping is 6
         // and the luma primary strength is 14. Treating the damping as 3 changes

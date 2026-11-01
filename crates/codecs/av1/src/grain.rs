@@ -49,6 +49,8 @@ pub struct Grain {
     cr_offset: i32,
     pub(crate) overlap: bool,
     pub(crate) clip_restricted: bool,
+    /// `matrix_coefficients` is identity, so a restricted clip uses the luma limit for chroma.
+    pub(crate) identity_matrix: bool,
     /// Chroma subsampling of the sequence. The grain arrays follow section 7.18.3.3.
     pub(crate) sub_x: bool,
     pub(crate) sub_y: bool,
@@ -85,6 +87,7 @@ impl Grain {
             cr_offset: 0,
             overlap: false,
             clip_restricted: false,
+            identity_matrix: false,
             sub_x: true,
             sub_y: true,
         }
@@ -117,6 +120,7 @@ pub fn read(
         grain.copy_from = Some(bits.read(3)? as u8);
         grain.sub_x = sequence.subsampling_x;
         grain.sub_y = sequence.subsampling_y;
+        grain.identity_matrix = sequence.matrix_coefficients == 0;
         return Ok(grain);
     }
     let mut grain = Grain::off();
@@ -194,6 +198,7 @@ pub fn read(
     grain.clip_restricted = bits.read_bool()?;
     grain.sub_x = sequence.subsampling_x;
     grain.sub_y = sequence.subsampling_y;
+    grain.identity_matrix = sequence.matrix_coefficients == 0;
     Ok(grain)
 }
 
@@ -331,7 +336,8 @@ fn add_noise<S: Pix>(noise: Noise<'_, S>) {
         luma_num += 1;
         row += 16;
     }
-    let (min_value, max_luma, max_chroma) = output_limits(bit_depth, grain.clip_restricted);
+    let (min_value, max_luma, max_chroma) =
+        output_limits(bit_depth, grain.clip_restricted, grain.identity_matrix);
     let shift = i32::from(grain.scaling_minus_8) + 8;
     for sample_y in 0..chroma_h {
         let luma_y = sample_y << usize::from(grain.sub_y);
@@ -809,10 +815,12 @@ fn grain_limits(bit_depth: u8) -> (i32, i32) {
 
 /// Shown-sample limits. At 8-bit the unrestricted range is `0..=255` and the
 /// restricted range is `16..=235` for luma and `16..=240` for chroma.
-fn output_limits(bit_depth: u8, restricted: bool) -> (i32, i32, i32) {
+fn output_limits(bit_depth: u8, restricted: bool, identity: bool) -> (i32, i32, i32) {
     let shift = u32::from(bit_depth.saturating_sub(8));
     if restricted {
-        (16i32 << shift, 235i32 << shift, 240i32 << shift)
+        let max_luma = 235i32 << shift;
+        let max_chroma = if identity { max_luma } else { 240i32 << shift };
+        (16i32 << shift, max_luma, max_chroma)
     } else {
         let max = (1i32 << u32::from(bit_depth.min(16))) - 1;
         (0, max, max)
@@ -864,8 +872,9 @@ mod tests {
     #[test]
     fn eight_bit_grain_limits_stay_in_a_byte() {
         assert_eq!(super::grain_limits(8), (-128, 127));
-        assert_eq!(super::output_limits(8, false), (0, 255, 255));
-        assert_eq!(super::output_limits(8, true), (16, 235, 240));
+        assert_eq!(super::output_limits(8, false, false), (0, 255, 255));
+        assert_eq!(super::output_limits(8, true, false), (16, 235, 240));
+        assert_eq!(super::output_limits(8, true, true), (16, 235, 235));
         assert_eq!(super::gaussian_shift(8, 0), 4);
         let mut lut = [0i32; 256];
         lut[10] = 7;
@@ -875,7 +884,8 @@ mod tests {
     #[test]
     fn ten_bit_grain_widens_the_range_and_interpolates() {
         assert_eq!(super::grain_limits(10), (-512, 511));
-        assert_eq!(super::output_limits(10, false), (0, 1023, 1023));
+        assert_eq!(super::output_limits(10, false, false), (0, 1023, 1023));
+        assert_eq!(super::output_limits(10, true, true), (64, 940, 940));
         assert_eq!(super::gaussian_shift(10, 1), 3);
         let mut lut = [0i32; 256];
         lut[1] = 0;

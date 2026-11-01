@@ -2139,6 +2139,12 @@ impl<'a> std::ops::DerefMut for Cavlc<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Mod {
+    idc: u32,
+    arg: u32,
+}
+
 #[derive(Clone)]
 struct Mark {
     op: u8,
@@ -2228,11 +2234,6 @@ struct Header {
     /// Crop of this slice. Picture-level scalability copies the sequence crop.
     /// Macroblock-level scalability reads it from the slice header.
     scale: set::SvcScale,
-}
-
-struct Mod {
-    idc: u32,
-    arg: u32,
 }
 
 enum Layer {
@@ -2795,6 +2796,12 @@ struct HeaderCopy {
     long_term_ref: bool,
     adaptive: bool,
     mmco: Vec<Mark>,
+    /// The source slice carried reference-list syntax. An intra source did not.
+    has_ref_lists: bool,
+    num_ref_l0: usize,
+    num_ref_l1: usize,
+    ref_mod_l0: Vec<Mod>,
+    ref_mod_l1: Vec<Mod>,
 }
 
 fn remember(sets: &mut Sets, header: &Header, depth: bool) {
@@ -2822,6 +2829,11 @@ fn remember(sets: &mut Sets, header: &Header, depth: bool) {
         long_term_ref: header.long_term_ref,
         adaptive: header.adaptive,
         mmco: header.mmco.clone(),
+        has_ref_lists: !intra_slice(header.kind),
+        num_ref_l0: header.num_ref_l0,
+        num_ref_l1: header.num_ref_l1,
+        ref_mod_l0: header.ref_mod_l0.clone(),
+        ref_mod_l1: header.ref_mod_l1.clone(),
     };
     if let Some(slot) = sets
         .copies
@@ -2835,8 +2847,10 @@ fn remember(sets: &mut Sets, header: &Header, depth: bool) {
 }
 
 /// `slice_header_in_3davc_extension` when `slice_header_prediction_flag` is 1.
-/// An intra depth slice copies the texture slice of the same view. Inter
-/// slices and the other sources stay refused.
+/// A depth slice copies the texture slice of the same view. A P or B slice also
+/// takes `pre_ref_lists_src` 2: an inter source supplies its lists, and an intra
+/// source leaves the picture defaults. Sources 1 and 3, a texture inter slice,
+/// and a weighted table stay refused.
 fn predicted_header(
     bits: &mut Bits<'_>,
     sets: &Sets,
@@ -2845,7 +2859,7 @@ fn predicted_header(
     three: nal::ThreeDHeader,
     ids: PredictedIds,
 ) -> Result<Header, CodecError> {
-    if !intra_slice(ids.kind) || !three.depth {
+    if !three.depth || !(intra_slice(ids.kind) || matches!(ids.kind, 0 | 1)) {
         return Err(CodecError::Unsupported { what: "3d" });
     }
     let src = bits.u(2)?;
@@ -2862,6 +2876,17 @@ fn predicted_header(
     let depth_view = sps.depth_views.get(index).copied().unwrap_or(false);
     if !depth_view {
         return Err(bits.malformed("view id"));
+    }
+    if matches!(ids.kind, 0 | 1) {
+        let lists = bits.u(2)?;
+        if lists != 2 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        let weighted = (pps.weighted_pred && syntax_kind(ids.kind) == 0)
+            || (pps.weighted_bipred == 1 && ids.kind == 1);
+        if weighted {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
     }
     let mut copied_marking = true;
     let mut no_output = false;
@@ -2910,8 +2935,20 @@ fn predicted_header(
         off_b: source.off_b,
         cabac_init: source.cabac_init,
         spatial_direct: source.spatial_direct,
-        num_ref_l0: 0,
-        num_ref_l1: 0,
+        num_ref_l0: if !matches!(ids.kind, 0 | 1) {
+            0
+        } else if source.has_ref_lists {
+            source.num_ref_l0
+        } else {
+            usize::from(pps.num_ref_idx_l0)
+        },
+        num_ref_l1: if ids.kind != 1 {
+            0
+        } else if source.has_ref_lists {
+            source.num_ref_l1
+        } else {
+            usize::from(pps.num_ref_idx_l1)
+        },
         nal_ref: ids.nal_ref,
         redundant: source.redundant,
         no_output_prior: if copied_marking {
@@ -2934,8 +2971,16 @@ fn predicted_header(
         } else {
             Vec::new()
         },
-        ref_mod_l0: Vec::new(),
-        ref_mod_l1: Vec::new(),
+        ref_mod_l0: if matches!(ids.kind, 0 | 1) && source.has_ref_lists {
+            source.ref_mod_l0.clone()
+        } else {
+            Vec::new()
+        },
+        ref_mod_l1: if ids.kind == 1 && source.has_ref_lists {
+            source.ref_mod_l1.clone()
+        } else {
+            Vec::new()
+        },
         weights: false,
         luma_denom: 0,
         chroma_denom: 0,

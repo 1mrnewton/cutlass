@@ -54,6 +54,11 @@
 //! A 32×16 skipped texture picture copies each base macroblock: the left
 //! vector is zero, so that half stays 40 and 220, and the right vector of
 //! eight pixels makes that half 220.
+//! A depth P slice copies a later texture header. That source is intra, so the
+//! slice uses the picture's one reference. Motion of eight pixels makes that
+//! picture luma 220 and chroma 50. The texture picture between them is luma 10
+//! and chroma 20.
+//! Sources 1 and 3, and a texture inter slice, stay refused.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

@@ -958,6 +958,7 @@ fn a_predicted_3d_header_copies_the_texture_slice() {
     inter.ue(0);
     inter.ue(0);
     inter.ue(0);
+    inter.bits(1, 2);
     inter.trailing();
     let err = decoder
         .push(&Packet::video(
@@ -967,11 +968,84 @@ fn a_predicted_3d_header_copies_the_texture_slice() {
             30,
             false,
         ))
-        .expect_err("inter");
+        .expect_err("source");
     assert!(
         matches!(err, CodecError::Unsupported { what: "3d" }),
         "{err:?}"
     );
+    let mut texture = Writer::new();
+    texture.ue(0);
+    texture.ue(0);
+    texture.ue(0);
+    texture.bits(2, 2);
+    texture.trailing();
+    let err = decoder
+        .push(&Packet::video(
+            annex_b_extension(1, 21, &[0x80, 0x20], &texture.bytes),
+            0,
+            1,
+            30,
+            false,
+        ))
+        .expect_err("texture");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn an_inter_depth_slice_copies_the_texture_header() {
+    let base = base_idr();
+    let depth = predicted_depth_annex();
+    let texture = texture_pcm();
+    let predicted = predicted_depth_p();
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &base);
+    pictures.extend(push_pictures(&mut decoder, &depth));
+    pictures.extend(push_pictures(&mut decoder, &texture));
+    pictures.extend(push_pictures(&mut decoder, &predicted));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert_eq!(pictures.iter().filter(|picture| flat(picture)).count(), 1);
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| copied_depth(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| painted(picture, 10, 20))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| painted(picture, 220, 50))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = base.clone();
+        annex.extend(&texture);
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        assert_eq!(&raw[..frame], &paint(16, 128, 128));
+        assert_eq!(&raw[frame..], &paint(16, 10, 20));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &depth).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &predicted).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
 }
 
 #[test]
@@ -2986,6 +3060,42 @@ fn copied_depth(picture: &VideoOutput) -> bool {
         .iter()
         .chain(picture.picture.v())
         .all(|sample| *sample == 50)
+}
+
+fn texture_pcm() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(1, 4);
+    w.bits(1, 4);
+    w.se(0);
+    w.ue(1);
+    w.ue(25);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(10, 256));
+    w.bytes.extend(std::iter::repeat_n(20, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    annex_b_nal(0, 1, &w.bytes)
+}
+
+fn predicted_depth_p() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(2, 2);
+    w.bits(2, 2);
+    w.bits(2, 2);
+    w.se(0);
+    w.ue(0);
+    w.ue(0);
+    w.se(32);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    annex_b_extension(1, 21, &[0x80, 0x60], &w.bytes)
 }
 
 fn predicted_depth_annex() -> Vec<u8> {

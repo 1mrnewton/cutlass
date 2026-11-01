@@ -9,6 +9,7 @@ use egui::{
 };
 
 use cutlass_model::{FrameRate, Micros};
+use cutlass_session::TrimEdge;
 
 use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
@@ -19,6 +20,7 @@ use crate::widgets;
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
 const CARD_GAP: f32 = 8.0;
+const TRIM_EDGE: f32 = 6.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shelf {
@@ -1313,6 +1315,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         rate,
         drop_frame,
     );
+    let snap_at = shell.snap_line();
     let rows = shell.lanes();
     let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
     let boxes = lane_rects(flags, lane_area);
@@ -1331,6 +1334,21 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         shell.view_origin().0,
         shell.playhead().0,
     );
+    if let Some(time) = snap_at {
+        let x = lane_x(
+            lanes_left,
+            shell.pixel_size(),
+            shell.view_origin().0,
+            time.0,
+        );
+        if (lanes_left..=tracks.right()).contains(&x) {
+            ui.painter().vline(
+                x,
+                ruler.top()..=tracks.bottom(),
+                egui::Stroke::new(1.0, tokens::SELECTED),
+            );
+        }
+    }
     if (lanes_left..=tracks.right()).contains(&playhead_x) {
         let mark = Rect::from_center_size(
             Pos2::new(playhead_x, ruler.bottom() - 6.0),
@@ -1853,13 +1871,14 @@ fn paint_clip(
     index: usize,
 ) {
     let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let (start, duration) = preview_bounds(shell, clip);
     let x = lane_x(
         lanes_left,
         shell.pixel_size(),
         shell.view_origin().0,
-        clip.start.0,
+        start.0,
     );
-    let width = (clip.duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
+    let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
     let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
@@ -1894,22 +1913,83 @@ fn paint_clip(
     let span = format!(
         "{} · {}–{}",
         clip.name,
-        shell.timecode_at(clip.start),
-        shell.timecode_at(Micros(clip.start.0.saturating_add(clip.duration.0)))
+        shell.timecode_at(start),
+        shell.timecode_at(Micros(start.0.saturating_add(duration.0)))
     );
     response.clone().on_hover_text(span);
+    let hovering_edge = response
+        .hover_pos()
+        .and_then(|pos| trim_edge_at(clip_rect, pos))
+        .is_some();
+    if (response.hovered() && hovering_edge) || shell.clip_edge(&clip.id).is_some() {
+        ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
     if response.clicked() {
         shell.select(Some(clip.id.clone()));
     }
-    if response.drag_stopped()
+    if response.drag_started() {
+        let edge = ui
+            .input(|input| input.pointer.press_origin())
+            .and_then(|pos| trim_edge_at(clip_rect, pos));
+        shell.begin_clip_drag(clip.id.clone(), edge);
+    }
+    if response.dragged()
+        && let Some(edge) = shell.clip_edge(&clip.id)
         && let Some(pos) = response.interact_pointer_pos()
     {
         let x = f64::from(pos.x - lanes_left).max(0.0);
-        let y = f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT
-            + tokens::LANE_HEIGHT / 2.0;
-        if let Err(error) = shell.drag_segment(clip.id.clone(), x, y) {
-            shell.set_notice(error.to_string());
+        shell.preview_edge(clip.id.clone(), edge, x);
+    }
+    if response.drag_stopped() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let x = f64::from(pos.x - lanes_left).max(0.0);
+            let y = f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT
+                + tokens::LANE_HEIGHT / 2.0;
+            if let Err(error) = shell.finish_clip_drag(clip.id.clone(), x, y) {
+                shell.set_notice(error.to_string());
+            }
+        } else {
+            shell.cancel_clip_drag();
         }
+    }
+}
+
+fn preview_bounds(shell: &Shell, clip: &crate::shell::ClipSpan) -> (Micros, Micros) {
+    let Some((edge, time)) = shell.preview_span(&clip.id) else {
+        return (clip.start, clip.duration);
+    };
+    let end = clip.start.0.saturating_add(clip.duration.0);
+    match edge {
+        TrimEdge::Start => {
+            let start = time.0.clamp(0, end.saturating_sub(1));
+            (Micros(start), Micros(end.saturating_sub(start)))
+        }
+        TrimEdge::End => {
+            let duration = time.0.saturating_sub(clip.start.0).max(1);
+            (clip.start, Micros(duration))
+        }
+    }
+}
+
+fn trim_edge_at(clip: Rect, pos: Pos2) -> Option<TrimEdge> {
+    let width = clip.width();
+    if width <= 0.0 {
+        return None;
+    }
+    let edge = TRIM_EDGE.min(width * 0.25);
+    if edge < 1.0 {
+        return None;
+    }
+    let local = pos.x - clip.left();
+    if !(0.0..=width).contains(&local) {
+        return None;
+    }
+    if local <= edge {
+        Some(TrimEdge::Start)
+    } else if local >= width - edge {
+        Some(TrimEdge::End)
+    } else {
+        None
     }
 }
 
@@ -2758,6 +2838,132 @@ mod tests {
             shell.playhead().0
         );
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    fn drag(ctx: &egui::Context, from: Pos2, to: Pos2, shell: &mut Shell, view: &mut ViewState) {
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(from), press(from, true)],
+                ..Default::default()
+            },
+            |ui| show(shell, ui, view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(to)],
+                ..Default::default()
+            },
+            |ui| show(shell, ui, view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(to), press(to, false)],
+                ..Default::default()
+            },
+            |ui| show(shell, ui, view, None),
+        );
+        output.textures_delta.clear();
+    }
+
+    fn open_span(name: &str, duration: i64) -> (Shell, std::path::PathBuf) {
+        let temp =
+            std::env::temp_dir().join(format!("cutlass-trim-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "segment",
+            "color",
+            cutlass_model::TimeRange::new(0, duration),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        (shell, temp)
+    }
+
+    #[test]
+    fn dragging_a_clip_edge_trims_it_and_the_body_moves_it() {
+        let (mut shell, temp) = open_span("edge", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        let width = (2_000_000_f32 * shell.pixel_size() as f32).max(8.0);
+        let edge = Pos2::new(text.x - 8.0 + width - 3.0, text.y);
+        drag(
+            &ctx,
+            edge,
+            edge - Vec2::new(120.0, 0.0),
+            &mut shell,
+            &mut view,
+        );
+        let segment = &shell.draft().unwrap().tracks[0].segments[0];
+        assert_eq!(segment.target.start, Micros(0));
+        assert!(
+            segment.target.duration.0 < 2_000_000,
+            "the edge drag did not trim, duration {}",
+            segment.target.duration.0
+        );
+        assert!(segment.target.duration.0 > 0);
+
+        let (mut shell, temp_move) = open_span("body", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        drag(
+            &ctx,
+            text,
+            text + Vec2::new(80.0, 0.0),
+            &mut shell,
+            &mut view,
+        );
+        let segment = &shell.draft().unwrap().tracks[0].segments[0];
+        assert!(
+            segment.target.start.0 > 0,
+            "the body drag did not move the clip"
+        );
+        assert_eq!(segment.target.duration.0, 2_000_000);
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&temp_move);
     }
 
     #[test]

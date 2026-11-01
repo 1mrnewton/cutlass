@@ -15,9 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    DropGesture, DropOutcome, GestureOutcome, MoveGesture, Pointer, TimelineScale, Zoom,
-    ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category, lanes, last_accuracy_step,
-    minimum_pixel_size, move_gesture,
+    DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Pointer, TimelineScale,
+    TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category,
+    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
@@ -29,7 +29,7 @@ use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
 };
 use cutlass_renderer_software::SoftwareDevice;
-use cutlass_session::{EditError, ImportedMedium, Request, Session};
+use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
 use cutlass_store::{Folder, Hold, StoreError};
 
@@ -161,6 +161,18 @@ pub struct ListedProject {
     pub modified: SystemTime,
 }
 
+struct ClipDrag {
+    id: SegmentId,
+    edge: Option<TrimEdge>,
+}
+
+struct PendingTrim {
+    id: SegmentId,
+    edge: TrimEdge,
+    time: Micros,
+    snapped: bool,
+}
+
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
@@ -185,6 +197,8 @@ pub struct Shell {
     inspector_width: f32,
     timeline_height: f32,
     selected: Option<SegmentId>,
+    clip_drag: Option<ClipDrag>,
+    pending_trim: Option<PendingTrim>,
     notice: String,
     next_id: u64,
     pub chrome: Chrome,
@@ -220,6 +234,8 @@ impl Shell {
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
             selected: None,
+            clip_drag: None,
+            pending_trim: None,
             notice: String::new(),
             next_id: 0,
             chrome: Chrome::default(),
@@ -339,6 +355,7 @@ impl Shell {
         self.playing = false;
         self.view_origin = 0;
         self.selected = None;
+        self.cancel_clip_drag();
         self.fit_on_layout = false;
         self.notice.clear();
         self.heard.clear();
@@ -430,6 +447,7 @@ impl Shell {
         self.playing = false;
         self.view_origin = 0;
         self.selected = None;
+        self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fit_on_layout = self.cut_duration().0 > 0;
         self.notice.clear();
@@ -730,6 +748,132 @@ impl Shell {
                 "a new lane is not available".to_owned(),
             )),
         }
+    }
+
+    /// Remember which edge a clip drag started on. A body drag clears a trim preview.
+    pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>) {
+        self.pending_trim = None;
+        if edge.is_some() {
+            self.selected = Some(id.clone());
+        }
+        self.clip_drag = Some(ClipDrag { id, edge });
+    }
+
+    /// The edge this clip's current drag is trimming.
+    #[must_use]
+    pub fn clip_edge(&self, id: &SegmentId) -> Option<TrimEdge> {
+        self.clip_drag
+            .as_ref()
+            .filter(|drag| &drag.id == id)
+            .and_then(|drag| drag.edge)
+    }
+
+    /// Follow the pointer without writing the draft. The next paint uses this edge.
+    pub fn preview_edge(&mut self, segment_id: SegmentId, edge: TrimEdge, x: f64) {
+        match self.plan_trim(segment_id, edge, x) {
+            Ok(plan) => {
+                self.pending_trim = Some(PendingTrim {
+                    id: plan.segment_id,
+                    edge: plan.edge,
+                    time: plan.time,
+                    snapped: plan.snapped,
+                });
+            }
+            Err(_) => self.pending_trim = None,
+        }
+    }
+
+    /// The preview edge for this clip, as a timeline time.
+    #[must_use]
+    pub fn preview_span(&self, id: &SegmentId) -> Option<(TrimEdge, Micros)> {
+        self.pending_trim
+            .as_ref()
+            .filter(|pending| &pending.id == id)
+            .map(|pending| (pending.edge, pending.time))
+    }
+
+    /// A snap target the trim preview is holding.
+    #[must_use]
+    pub fn snap_line(&self) -> Option<Micros> {
+        self.pending_trim
+            .as_ref()
+            .filter(|pending| pending.snapped)
+            .map(|pending| pending.time)
+    }
+
+    pub fn cancel_clip_drag(&mut self) {
+        self.clip_drag = None;
+        self.pending_trim = None;
+    }
+
+    /// Finish the drag that `begin_clip_drag` started. An edge trims. The body moves.
+    pub fn finish_clip_drag(
+        &mut self,
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    ) -> Result<(), ShellError> {
+        let edge = self
+            .clip_drag
+            .take()
+            .filter(|drag| drag.id == segment_id)
+            .and_then(|drag| drag.edge);
+        self.pending_trim = None;
+        match edge {
+            Some(edge) => self.trim_edge(segment_id, edge, x),
+            None => self.drag_segment(segment_id, x, y),
+        }
+    }
+
+    /// Move one edge. `x` is pixels from the left of the lanes.
+    ///
+    /// The source follows the timeline through the segment speed. The edge
+    /// stops at the media and at the next clip. An edge that does not move
+    /// does not push an undo step.
+    pub fn trim_edge(
+        &mut self,
+        segment_id: SegmentId,
+        edge: TrimEdge,
+        x: f64,
+    ) -> Result<(), ShellError> {
+        let plan = self.plan_trim(segment_id, edge, x)?;
+        self.pending_trim = None;
+        let unchanged = self
+            .draft()
+            .is_some_and(|draft| trim_is_current(draft, &plan));
+        if unchanged {
+            return Ok(());
+        }
+        self.apply(plan.request())?;
+        self.reveal_playhead();
+        Ok(())
+    }
+
+    fn plan_trim(
+        &self,
+        segment_id: SegmentId,
+        edge: TrimEdge,
+        x: f64,
+    ) -> Result<TrimPlan, ShellError> {
+        self.refuse_locked(&segment_id)?;
+        let x = self.time_zero_x(x);
+        let gesture = TrimGesture {
+            segment_id,
+            edge,
+            pointer: Pointer { x, y: 0.0 },
+            scale: self.scale(),
+            playhead: self.playhead,
+            snap_threshold: snap_window(self.pixel_size),
+        };
+        let draft = self.session_draft()?;
+        trim_gesture(draft, &gesture).map_err(|error| match error {
+            GestureError::UnknownSegment => {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            }
+            GestureError::BadScale | GestureError::EmptyDuration => {
+                ShellError::Unavailable("the drag could not be read".to_owned())
+            }
+        })
     }
 
     /// Place one library material at the timeline point.
@@ -1394,6 +1538,16 @@ fn snap_window(pixel_size: f64) -> Micros {
     Micros(micros.round() as i64)
 }
 
+fn trim_is_current(draft: &Draft, plan: &TrimPlan) -> bool {
+    let Some((segment, _)) = locate(draft, &plan.segment_id) else {
+        return false;
+    };
+    match plan.edge {
+        TrimEdge::Start => segment.target.start == plan.time,
+        TrimEdge::End => segment.target.end() == plan.time,
+    }
+}
+
 fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
     for track in &draft.tracks {
         if let Some(segment) = track.segments.iter().find(|segment| &segment.id == id) {
@@ -1577,7 +1731,7 @@ mod tests {
         Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
     use cutlass_playback::AudioHost;
-    use cutlass_session::EditError;
+    use cutlass_session::{EditError, TrimEdge};
     use cutlass_settings::{SeekDuringPlayback, Settings};
     use cutlass_store::Folder;
     use std::path::{Path, PathBuf};
@@ -2942,6 +3096,86 @@ mod tests {
             }
         }
         best.map(|(_, path)| path)
+    }
+
+    fn trim_project(dir: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut video = MaterialVideo::new("media");
+        video.duration = Micros(10_000_000);
+        draft.materials.videos.push(video);
+        let mut first = Segment::new("clip", "media", TimeRange::new(0, 1_000_000));
+        first.source_range = Some(TimeRange::new(0, 1_000_000));
+        let mut second = Segment::new("next", "media", TimeRange::new(3_000_000, 500_000));
+        second.source_range = Some(TimeRange::new(0, 500_000));
+        draft.tracks[0].segments.push(first);
+        draft.tracks[0].segments.push(second);
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    fn lane_time(desktop: &Shell, time: f64) -> f64 {
+        let origin = desktop.view_origin().0 as f64;
+        (time - origin) * desktop.pixel_size()
+    }
+
+    #[test]
+    fn trimming_an_edge_updates_the_source_and_a_locked_lane_refuses() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        let revision = desktop.revision();
+        desktop
+            .trim_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_000_000.0))
+            .unwrap();
+        assert_eq!(desktop.revision(), revision);
+        desktop
+            .trim_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 2_000_000.0))
+            .unwrap();
+        let segment = &desktop.draft().unwrap().tracks[0].segments[0];
+        assert_eq!(segment.target, TimeRange::new(0, 2_000_000));
+        assert_eq!(segment.source_range, Some(TimeRange::new(0, 2_000_000)));
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(1_000_000)
+        );
+        desktop
+            .trim_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 4_000_000.0))
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.end(),
+            Micros(3_000_000)
+        );
+        desktop.undo().unwrap();
+        desktop.seek(Micros(1_500_000));
+        desktop.preview_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_500_500.0));
+        assert_eq!(desktop.snap_line(), Some(Micros(1_500_000)));
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(1_000_000)
+        );
+        desktop.cancel_clip_drag();
+        let track = desktop.lanes()[0].track_id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let error = desktop
+            .trim_edge(id, TrimEdge::End, lane_time(&desktop, 2_000_000.0))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the track is locked");
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(1_000_000)
+        );
     }
 
     #[test]

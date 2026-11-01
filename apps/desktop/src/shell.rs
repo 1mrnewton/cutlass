@@ -6,6 +6,7 @@
 //! device. Video segments open through the shell's reader factory. A repeated
 //! playhead reuses the stored picture. A new playhead seeks the open file.
 //! This shell does not composite, and it does not open an audio device.
+//! Export asks eval for the frame at the playhead and writes that PNG.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -632,6 +633,12 @@ impl Shell {
         self.notice = format!("{control} is not available");
     }
 
+    /// Writes a PNG of the frame at the playhead.
+    ///
+    /// The long side is one of [`LONG_SIDES`]. A PNG is one picture, so the
+    /// export range is that frame. The software encoder writes it, and the
+    /// still mux checks the file before it replaces `request.path`. A codec
+    /// this shell cannot mux is refused after the encoder probe.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
         if !LONG_SIDES.contains(&request.long_side) {
             return Err(ShellError::Unavailable(
@@ -641,12 +648,56 @@ impl Shell {
         if request.path.exists() && !request.replace {
             return Err(ShellError::Overwrite(request.path));
         }
+        let draft = self.session_draft()?;
         let (width, height) = self.scaled_canvas(request.long_side);
         let params = CodecParams::video(request.codec, width, height);
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
         }
-        Err(ShellError::ExportUnavailable)
+        if request.codec != CodecId::Png {
+            return Err(ShellError::ExportUnavailable);
+        }
+        let Ok(long_side) = u32::try_from(request.long_side) else {
+            return Err(ShellError::Unavailable(
+                "the long side is not one of the steps".to_owned(),
+            ));
+        };
+        let rate = draft.frame_rate().unwrap_or(FrameRate::FPS_30);
+        let range = playhead_frame(rate, self.playhead)?;
+        let export_request = cutlass_export::ExportRequest {
+            range,
+            long_side,
+            codec: CodecId::Png,
+            bitrate: 0,
+            frame_rate: rate,
+            container: cutlass_codec::ContainerId::Still,
+            audio: None,
+            sidecar: None,
+            late_by: 0,
+        };
+        let mut encoders = EncodeFactory::new();
+        cutlass_png::register_encoders(&mut encoders);
+        let mut mux = cutlass_still::StillMux::new();
+        let mut device = SoftwareDevice::new();
+        cutlass_export::export(
+            cutlass_export::ExportRun {
+                draft,
+                device: &mut device,
+                request: &export_request,
+                factory: &encoders,
+                readers: &self.readers,
+                mux: &mut mux,
+                destination: None,
+            },
+            |_, _, _| Ok(cutlass_eval::ClipPcm::Missing),
+        )
+        .map_err(export_failure)?;
+        let Some(bytes) = mux.bytes() else {
+            return Err(ShellError::Unavailable(
+                "export did not finish a file".to_owned(),
+            ));
+        };
+        write_replaced(&request.path, bytes)
     }
 
     pub fn drag_timeline(&mut self, delta_y: f32, window_height: f32) {
@@ -876,6 +927,65 @@ impl Shell {
     fn stored_zoom(&self) -> Result<Zoom, ShellError> {
         Zoom::new(self.pixel_size).ok_or(ShellError::Zoom)
     }
+}
+
+fn playhead_frame(rate: FrameRate, playhead: Micros) -> Result<TimeRange, ShellError> {
+    let index = rate
+        .frame_index(Micros(playhead.0.max(0)))
+        .ok_or_else(|| ShellError::Unavailable("the playhead is not a frame".to_owned()))?;
+    let start = rate
+        .frame_start(index)
+        .ok_or_else(|| ShellError::Unavailable("the playhead is not a frame".to_owned()))?;
+    let next = index
+        .checked_add(1)
+        .ok_or_else(|| ShellError::Unavailable("the playhead is not a frame".to_owned()))?;
+    let end = rate
+        .frame_start(next)
+        .ok_or_else(|| ShellError::Unavailable("the playhead is not a frame".to_owned()))?;
+    let duration = end
+        .0
+        .checked_sub(start.0)
+        .filter(|span| *span > 0)
+        .ok_or_else(|| ShellError::Unavailable("the playhead is not a frame".to_owned()))?;
+    Ok(TimeRange::new(start.0, duration))
+}
+
+fn export_failure(error: cutlass_export::ExportError) -> ShellError {
+    match error {
+        cutlass_export::ExportError::Encoder(error) => ShellError::CodecDeclined(error.to_string()),
+        error => ShellError::Eval(error.to_string()),
+    }
+}
+
+fn write_replaced(path: &Path, bytes: &[u8]) -> Result<(), ShellError> {
+    if path.is_dir() {
+        return Err(ShellError::Io("the export path is a folder".to_owned()));
+    }
+    let parent = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => {
+            return Err(ShellError::Io("the export path has no folder".to_owned()));
+        }
+    };
+    if !parent.is_dir() {
+        return Err(ShellError::MissingFolder(parent.to_path_buf()));
+    }
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| ShellError::Io("the export path has no name".to_owned()))?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(".part");
+    let temp = parent.join(temp_name);
+    if let Err(error) = std::fs::write(&temp, bytes) {
+        return Err(ShellError::Io(error.to_string()));
+    }
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(ShellError::Io(error.to_string()));
+    }
+    Ok(())
 }
 
 fn opening_pixel_size(rate: FrameRate) -> f64 {
@@ -1751,39 +1861,194 @@ mod tests {
     }
 
     #[test]
-    fn export_asks_before_replacing_and_writes_nothing_when_encode_is_unavailable() {
+    fn export_writes_the_playhead_png_and_refuses_a_codec_it_cannot_mux() {
         let temp = Temp::new();
-        empty_project(&temp.path);
+        let missing = shell().export(ExportRequest {
+            path: temp.path.join("missing.png"),
+            long_side: 480,
+            codec: CodecId::Png,
+            replace: false,
+        });
+        assert!(matches!(missing, Err(ShellError::NoProject)));
+        assert!(!temp.path.join("missing.png").exists());
+
+        color_project(&temp.path);
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
+        let before = desktop.draft().unwrap().clone();
         let destination = temp.path.join("out.png");
         let declined = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 1080,
+            long_side: 480,
             codec: CodecId::Vp8,
             replace: false,
         });
         assert!(matches!(declined, Err(ShellError::CodecDeclined(_))));
         assert!(!destination.exists());
+        assert_eq!(desktop.draft().unwrap(), &before);
 
-        let unavailable = desktop.export(ExportRequest {
-            path: destination.clone(),
-            long_side: 1080,
-            codec: CodecId::Png,
-            replace: false,
-        });
-        assert!(matches!(unavailable, Err(ShellError::ExportUnavailable)));
-        assert!(!destination.exists());
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                long_side: 480,
+                codec: CodecId::Png,
+                replace: false,
+            })
+            .unwrap();
+        let written = std::fs::read(&destination).unwrap();
+        let (width, height, samples) = png_samples(&written);
+        assert_eq!((width, height), (480, 240));
+        assert!(
+            samples
+                .chunks(4)
+                .all(|pixel| pixel == [0x33, 0x66, 0x99, 0xFF])
+        );
+        assert_eq!(desktop.draft().unwrap(), &before);
 
-        std::fs::write(&destination, b"keep").unwrap();
+        let kept = std::fs::read(&destination).unwrap();
         let overwrite = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 720,
+            long_side: 480,
             codec: CodecId::Png,
             replace: false,
         });
         assert!(matches!(overwrite, Err(ShellError::Overwrite(_))));
-        assert_eq!(std::fs::read(&destination).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&destination).unwrap(), kept);
+
+        desktop.seek(Micros(2_000_000));
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                long_side: 480,
+                codec: CodecId::Png,
+                replace: true,
+            })
+            .unwrap();
+        let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
+        assert_eq!((width, height), (480, 240));
+        assert!(samples.iter().all(|sample| *sample == 0));
+        assert_eq!(desktop.draft().unwrap(), &before);
+        let clear = std::fs::read(&destination).unwrap();
+        let movie = desktop.export(ExportRequest {
+            path: destination.clone(),
+            long_side: 480,
+            codec: CodecId::H264,
+            replace: true,
+        });
+        assert!(matches!(
+            movie,
+            Err(ShellError::CodecDeclined(_) | ShellError::ExportUnavailable)
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), clear);
+
+        let step = desktop.export(ExportRequest {
+            path: destination.clone(),
+            long_side: 1000,
+            codec: CodecId::Png,
+            replace: true,
+        });
+        assert!(matches!(step, Err(ShellError::Unavailable(_))));
         assert_eq!(LONG_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
+    }
+
+    #[test]
+    fn export_writes_a_placed_still() {
+        let temp = Temp::new();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        export_still(&temp.path, &picture);
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let Some(local) = smallest_png(&root) else {
+            return;
+        };
+        let local_dir = Temp::new();
+        export_still(&local_dir.path, &local);
+    }
+
+    fn png_samples(bytes: &[u8]) -> (u32, u32, Vec<u16>) {
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]));
+        let mut decoder = cutlass_png::PngDecoder::open(&CodecParams::video(CodecId::Png, 1, 1))
+            .expect("decoder");
+        let picture = decoder
+            .decode_picture(&Packet::video(bytes.to_vec(), 0, 1, 30, true))
+            .expect("png");
+        let image = &picture[0].image;
+        assert_eq!(image.color, cutlass_decode::ColorType::Rgba);
+        (image.width, image.height, image.samples.clone())
+    }
+
+    fn export_still(dir: &Path, media: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 16;
+        let mut video = MaterialVideo::new("still");
+        video.path = media.display().to_string();
+        video.duration = Micros(1_000_000);
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(dir).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(dir).unwrap();
+        let preview = desktop.preview_bytes().unwrap();
+        assert!(
+            preview.rgba.iter().any(|byte| *byte != 0),
+            "the still did not open"
+        );
+        let destination = dir.join("out.png");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                long_side: 480,
+                codec: CodecId::Png,
+                replace: false,
+            })
+            .unwrap();
+        let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
+        assert_eq!((width, height), (preview.width * 30, preview.height * 30));
+        for y in 0..height {
+            for x in 0..width {
+                let sx = x * preview.width / width;
+                let sy = y * preview.height / height;
+                let from = usize::try_from((sy * preview.width + sx) * 4).unwrap();
+                let to = usize::try_from((y * width + x) * 4).unwrap();
+                let pixel = &preview.rgba[from..from + 4];
+                assert_eq!(
+                    samples[to..to + 4],
+                    [
+                        u16::from(pixel[0]),
+                        u16::from(pixel[1]),
+                        u16::from(pixel[2]),
+                        u16::from(pixel[3]),
+                    ]
+                );
+            }
+        }
+    }
+
+    fn smallest_png(root: &Path) -> Option<PathBuf> {
+        let entries = root.read_dir().ok()?;
+        let mut best: Option<(u64, PathBuf)> = None;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+            {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() == 0 || meta.len() > 8_000_000 {
+                continue;
+            }
+            if best.as_ref().is_none_or(|current| meta.len() < current.0) {
+                best = Some((meta.len(), path));
+            }
+        }
+        best.map(|(_, path)| path)
     }
 }

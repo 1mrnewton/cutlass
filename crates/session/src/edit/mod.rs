@@ -7,6 +7,7 @@ mod keyframe;
 mod linkage;
 mod magnet;
 mod mark;
+mod mirror;
 mod move_segment;
 mod place;
 mod reverse;
@@ -120,6 +121,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetFreeze { segment_id, freeze } => {
             freeze::set_freeze(draft, segment_id, freeze.clone())
         }
+        Request::SetMirror {
+            segment_id,
+            horizontal,
+        } => mirror::set_mirror(draft, segment_id, *horizontal),
         Request::SetVolume { segment_id, volume } => volume::set_volume(draft, segment_id, *volume),
         Request::SetFade {
             segment_id,

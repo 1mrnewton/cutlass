@@ -92,6 +92,11 @@ pub enum Request {
         segment_id: SegmentId,
         freeze: Option<FreezeInfo>,
     },
+    /// Store a horizontal mirror on the segment. The clip stays where it is.
+    SetMirror {
+        segment_id: SegmentId,
+        horizontal: bool,
+    },
     /// Set the segment gain. This is not mute, solo, or a fade.
     SetVolume { segment_id: SegmentId, volume: f64 },
     /// Store fade-in and fade-out durations. The segment volume stays.

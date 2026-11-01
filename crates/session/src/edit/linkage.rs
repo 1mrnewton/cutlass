@@ -120,6 +120,29 @@ fn on_edit(
     Ok(())
 }
 
+/// Shift followers by the extra distance a packed main clip moved.
+///
+/// The clip itself is already at its packed start. Group mates are left
+/// where the edit put them.
+pub(super) fn follow_pack_shift(
+    draft: &mut Draft,
+    owner: &SegmentId,
+    delta: i64,
+    settings: &LinkageSettings,
+) -> Result<(), EditError> {
+    if delta == 0 || !settings.enabled {
+        return Ok(());
+    }
+    let dependents = following(draft, owner, settings);
+    for dependent_id in dependents {
+        if track_of(draft, &dependent_id).is_some_and(|index| draft.tracks[index].is_main()) {
+            continue;
+        }
+        shift_start(draft, &dependent_id, delta)?;
+    }
+    reap(draft, owner, settings)
+}
+
 fn on_move(
     draft: &mut Draft,
     old: &Segment,
@@ -524,6 +547,7 @@ mod tests {
 
     fn open() -> (Session, TrackId, TrackId) {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         let mut overlay = Track::main("over");
         overlay.flag = TrackFlag::SubVideo;
@@ -747,6 +771,7 @@ mod tests {
     #[test]
     fn trim_and_duration_scale_the_dependent_and_leave_the_child_draft() {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         let mut overlay = Track::main("over");
         overlay.flag = TrackFlag::SubVideo;

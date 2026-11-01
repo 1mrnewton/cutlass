@@ -5,6 +5,7 @@ mod freeze;
 mod import;
 mod keyframe;
 mod linkage;
+mod magnet;
 mod mark;
 mod move_segment;
 mod place;
@@ -152,6 +153,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
         } => beat::add_beat(draft, segment_id, *source, material_id),
         Request::RemoveBeat { segment_id, source } => beat::remove_beat(draft, segment_id, *source),
+        Request::SetMagnet { on } => magnet::set_magnet(draft, *on),
     }
 }
 
@@ -164,6 +166,7 @@ pub fn apply_all(
         let before = draft.clone();
         apply_request(draft, request)?;
         linkage::after_request(draft, &before, linkage)?;
+        magnet::pack(draft, linkage)?;
     }
     sync_duration(draft);
     Ok(())

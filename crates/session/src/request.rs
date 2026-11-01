@@ -143,4 +143,6 @@ pub enum Request {
         segment_id: SegmentId,
         source: Micros,
     },
+    /// Turn main-track packing on or off. Turning it on closes gaps.
+    SetMagnet { on: bool },
 }

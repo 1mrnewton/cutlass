@@ -1,5 +1,6 @@
 use cutlass_model::{
-    Draft, MaterialRef, Micros, Segment, SegmentId, SpeedMode, Track, TrackId, TrackType,
+    Draft, MaterialRef, Micros, Segment, SegmentId, SpeedMode, Track, TrackAttribute, TrackId,
+    TrackType,
 };
 use cutlass_session::{Request, TrimEdge};
 
@@ -240,15 +241,16 @@ fn clamp_trim(
             TrimEdge::End => time = time.min(latest),
         }
     }
+    let packed = magnet_packs(draft, track);
     match edge {
         TrimEdge::Start => {
-            if let Some(limit) = previous_end(track, segment) {
+            if !packed && let Some(limit) = previous_end(track, segment) {
                 time = time.max(limit);
             }
             time = time.max(0).min(end.saturating_sub(1));
         }
         TrimEdge::End => {
-            if let Some(limit) = next_start(track, segment) {
+            if !packed && let Some(limit) = next_start(track, segment) {
                 time = time.min(limit);
             }
             time = time.max(start.saturating_add(1));
@@ -462,11 +464,17 @@ fn open_lane(
         .tracks
         .iter()
         .find(|track| track.id == lane.track_id)?;
-    if blocked(track, start, duration, ignore) {
-        None
-    } else {
+    if magnet_packs(draft, track) || !blocked(track, start, duration, ignore) {
         Some(lane.track_id.clone())
+    } else {
+        None
     }
+}
+
+fn magnet_packs(draft: &Draft, track: &Track) -> bool {
+    draft.config.maintrack_adsorb
+        && track.is_main()
+        && !track.attribute.contains(TrackAttribute::LOCK)
 }
 
 fn blocked(track: &Track, start: Micros, duration: Micros, ignore: &SegmentId) -> bool {
@@ -538,6 +546,7 @@ mod tests {
     #[test]
     fn a_move_becomes_one_request_and_the_draft_matches() {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         let track = TrackId::new("main");
         draft.tracks[0].id = track.clone();
         let mut session = Session::open(draft);
@@ -650,6 +659,7 @@ mod tests {
     #[test]
     fn placement_tries_the_pointer_then_the_upper_lane_then_a_new_lane() {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -726,6 +736,7 @@ mod tests {
     #[test]
     fn an_upper_lane_move_is_one_request() {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -896,6 +907,7 @@ mod tests {
     #[test]
     fn a_blocked_video_lane_asks_for_a_new_lane() {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         draft.tracks[0].id = TrackId::new("main");
         draft.tracks[0]
             .segments
@@ -909,6 +921,27 @@ mod tests {
             outcome,
             DropOutcome::NewLane {
                 kind: TrackType::Video,
+                start: Micros(0),
+            }
+        );
+    }
+
+    #[test]
+    fn a_magnet_drop_on_a_taken_main_lane_stays_on_that_lane() {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "media", TimeRange::new(0, 1_000_000)));
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Video, 1_000_000, 0.0, 8.0, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DropOutcome::Place {
+                track_id: TrackId::new("main"),
                 start: Micros(0),
             }
         );
@@ -991,6 +1024,7 @@ mod tests {
     #[test]
     fn trimming_the_start_stays_inside_the_source_and_the_previous_clip() {
         let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
         draft.materials.audios.push(MaterialAudio {
             id: "sound".into(),
             duration: Micros(2_000_000),
@@ -1022,6 +1056,20 @@ mod tests {
             segment.source_range,
             Some(TimeRange::new(300_000, 1_200_000))
         );
+    }
+
+    #[test]
+    fn a_magnet_end_trim_can_pass_the_next_main_clip() {
+        let mut draft = Draft::empty("D");
+        draft.materials.videos.push(video("media", 10_000_000));
+        let mut first = Segment::new("a", "media", TimeRange::new(0, 1_000_000));
+        first.source_range = Some(TimeRange::new(0, 1_000_000));
+        let mut second = Segment::new("b", "media", TimeRange::new(2_000_000, 1_000_000));
+        second.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(first);
+        draft.tracks[0].segments.push(second);
+        let plan = trim_gesture(&draft, &trim_at("a", TrimEdge::End, 2_500_000.0, 0)).unwrap();
+        assert_eq!(plan.time, Micros(2_500_000));
     }
 
     #[test]

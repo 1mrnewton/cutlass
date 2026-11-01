@@ -345,7 +345,9 @@ mod tests {
 
     #[test]
     fn a_ruler_mark_stays_a_time_and_a_clip_mark_is_an_offset() {
-        let mut session = Session::open(Draft::empty("D"));
+        let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
+        let mut session = Session::open(draft);
         session.apply(0, &[place_clip()]).unwrap();
         session.apply(1, &[mark(None, 250_000, "ruler")]).unwrap();
         session

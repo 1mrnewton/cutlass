@@ -445,6 +445,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::RemoveTimeMark { .. } => "remove_time_mark",
         Request::AddBeat { .. } => "add_beat",
         Request::RemoveBeat { .. } => "remove_beat",
+        Request::SetMagnet { .. } => "set_magnet",
     }
 }
 

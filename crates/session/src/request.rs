@@ -221,6 +221,12 @@ pub enum Request {
     SetMagnet { on: bool },
     /// Store the project canvas color. An empty string clears it.
     SetCanvasBackground { color: String },
+    /// Store the project canvas size and ratio. A side is from 1 through 7680.
+    SetCanvasSize {
+        width: i32,
+        height: i32,
+        ratio: String,
+    },
     /// Store the project frame rate. `drop_frame` is a timecode label.
     SetFrameRate { fps: f64, drop_frame: bool },
     /// Store the drop-frame timecode label. The frame rate stays.

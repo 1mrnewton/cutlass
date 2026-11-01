@@ -460,6 +460,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::RemoveBeat { .. } => "remove_beat",
         Request::SetMagnet { .. } => "set_magnet",
         Request::SetCanvasBackground { .. } => "set_canvas_background",
+        Request::SetCanvasSize { .. } => "set_canvas_size",
         Request::SetFrameRate { .. } => "set_frame_rate",
         Request::SetDropFrame { .. } => "set_drop_frame",
     }

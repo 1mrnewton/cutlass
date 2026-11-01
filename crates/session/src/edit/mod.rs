@@ -112,6 +112,10 @@ pub enum EditError {
     LineWidth,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
+    /// A canvas side is outside 1 through 7680.
+    CanvasSize,
+    /// The canvas ratio is not one of the project shapes.
+    CanvasRatio,
     /// The frame rate is not a clock the draft can step.
     FrameRate,
 }
@@ -262,6 +266,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::RemoveBeat { segment_id, source } => beat::remove_beat(draft, segment_id, *source),
         Request::SetMagnet { on } => magnet::set_magnet(draft, *on),
         Request::SetCanvasBackground { color } => canvas::set_background(draft, color),
+        Request::SetCanvasSize {
+            width,
+            height,
+            ratio,
+        } => canvas::set_size(draft, *width, *height, ratio),
         Request::SetFrameRate { fps, drop_frame } => rate::set_frame_rate(draft, *fps, *drop_frame),
         Request::SetDropFrame { on } => rate::set_drop_frame(draft, *on),
     }

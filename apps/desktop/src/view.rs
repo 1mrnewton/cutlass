@@ -118,6 +118,8 @@ pub struct ViewState {
     y_buffer: String,
     scale_buffer: String,
     volume_buffer: String,
+    fade_in_buffer: String,
+    fade_out_buffer: String,
     speed_buffer: String,
     dialogs: Dialogs,
     library_query: String,
@@ -144,6 +146,8 @@ impl Default for ViewState {
             y_buffer: String::new(),
             scale_buffer: String::new(),
             volume_buffer: String::new(),
+            fade_in_buffer: String::new(),
+            fade_out_buffer: String::new(),
             speed_buffer: String::new(),
             dialogs: Dialogs::new(),
             library_query: String::new(),
@@ -1166,6 +1170,22 @@ fn clip_fields(
     {
         shell.set_notice(error.to_string());
     }
+    if shell.fade_enabled() {
+        let fade_in = fade_seconds(inspection.fade_in);
+        let fade_out = fade_seconds(inspection.fade_out);
+        if let Some(seconds) = number_field(ui, "Fade in", &mut view.fade_in_buffer, fade_in)
+            && !inspection.locked
+            && let Err(error) = shell.set_fade_in(seconds)
+        {
+            shell.set_notice(error.to_string());
+        }
+        if let Some(seconds) = number_field(ui, "Fade out", &mut view.fade_out_buffer, fade_out)
+            && !inspection.locked
+            && let Err(error) = shell.set_fade_out(seconds)
+        {
+            shell.set_notice(error.to_string());
+        }
+    }
     if let Some(speed) = number_field(ui, "Speed", &mut view.speed_buffer, inspection.speed)
         && !inspection.locked
         && let Err(error) = shell.set_speed(speed)
@@ -1195,10 +1215,16 @@ fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Opt
             response.on_hover_text("Up is positive");
         } else if label == "Scale" {
             response.on_hover_text("1 is the fitted picture");
+        } else if label.starts_with("Fade") {
+            response.on_hover_text("Seconds");
         }
     });
     ui.add_space(4.0);
     edited.filter(|value| *value != stored)
+}
+
+fn fade_seconds(microseconds: i64) -> f64 {
+    microseconds as f64 / 1_000_000.0
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {

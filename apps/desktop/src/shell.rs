@@ -133,6 +133,7 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Scale) => {
                 formatter.write_str("the scale must be greater than zero")
             }
+            Self::Edit(EditError::Fade) => formatter.write_str("a fade cannot be negative"),
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -194,6 +195,10 @@ pub struct Inspection {
     pub rotation: f64,
     pub transform_x: f64,
     pub transform_y: f64,
+    /// Fade-in duration, microseconds.
+    pub fade_in: i64,
+    /// Fade-out duration, microseconds.
+    pub fade_out: i64,
     pub material: String,
     pub text: Option<String>,
     pub words: WordColumns,
@@ -1904,6 +1909,8 @@ impl Shell {
             rotation: segment.clip.rotation,
             transform_x: segment.clip.transform.x,
             transform_y: segment.clip.transform.y,
+            fade_in: fade_durations(draft, segment).0,
+            fade_out: fade_durations(draft, segment).1,
             material,
             text,
             words,
@@ -2638,6 +2645,77 @@ impl Shell {
         let segment_id = self.picture_segment()?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetScale { segment_id, scale })
+    }
+
+    /// The selected clip is a picture or a sound, so its fade can change.
+    #[must_use]
+    pub fn fade_enabled(&self) -> bool {
+        self.reverse_enabled()
+    }
+
+    /// Fade the selected clip in. `seconds` is the duration, and the fade-out
+    /// stays. One undo restores the previous fade-in.
+    pub fn set_fade_in(&mut self, seconds: f64) -> Result<(), ShellError> {
+        let fade_out = self.stored_fade()?.1;
+        self.write_fade(fade_micros(seconds)?, fade_out)
+    }
+
+    /// Fade the selected clip out. `seconds` is the duration, and the fade-in
+    /// stays. One undo restores the previous fade-out.
+    pub fn set_fade_out(&mut self, seconds: f64) -> Result<(), ShellError> {
+        let fade_in = self.stored_fade()?.0;
+        self.write_fade(fade_in, fade_micros(seconds)?)
+    }
+
+    fn stored_fade(&self) -> Result<(Micros, Micros), ShellError> {
+        let segment_id = self.sound_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = placed(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        let (fade_in, fade_out) = fade_durations(draft, segment);
+        Ok((Micros(fade_in), Micros(fade_out)))
+    }
+
+    fn write_fade(&mut self, fade_in: Micros, fade_out: Micros) -> Result<(), ShellError> {
+        let segment_id = self.sound_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let fade_id = MaterialId::new(self.fresh("fade"));
+        self.apply(Request::SetFade {
+            segment_id,
+            fade_id,
+            fade_in,
+            fade_out,
+        })
+    }
+
+    fn sound_segment(&self) -> Result<SegmentId, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = placed(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        let sound = matches!(
+            draft.materials.get(segment.material_id.as_str()),
+            Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
+        );
+        if !sound {
+            return Err(ShellError::Unavailable(
+                "a fade belongs on a picture or a sound".to_owned(),
+            ));
+        }
+        Ok(segment_id)
     }
 
     fn picture_segment(&self) -> Result<SegmentId, ShellError> {
@@ -4113,6 +4191,28 @@ fn picture_scale(segment: &Segment) -> (f64, f64) {
     } else {
         (segment.clip.scale.x, segment.clip.scale.y)
     }
+}
+
+fn fade_durations(draft: &Draft, segment: &Segment) -> (i64, i64) {
+    for id in &segment.extra_material_refs {
+        if let Some(MaterialRef::Fade(fade)) = draft.materials.get(id.as_str()) {
+            return (fade.fade_in_duration.0, fade.fade_out_duration.0);
+        }
+    }
+    (0, 0)
+}
+
+fn fade_micros(seconds: f64) -> Result<Micros, ShellError> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(ShellError::Unavailable(
+            "a fade cannot be negative".to_owned(),
+        ));
+    }
+    let microseconds = (seconds * 1_000_000.0).round();
+    if microseconds > i64::MAX as f64 {
+        return Err(ShellError::Unavailable("a fade is too long".to_owned()));
+    }
+    Ok(Micros(microseconds as i64))
 }
 
 fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
@@ -6196,6 +6296,107 @@ mod tests {
         assert!(desktop.place_enabled());
         desktop.set_position(0.1, 0.2).unwrap();
         assert_eq!(desktop.inspection().unwrap().transform_y, 0.2);
+    }
+
+    #[test]
+    fn a_clip_fades_in_and_out() {
+        let mut bare = shell();
+        assert!(!bare.fade_enabled());
+        assert_eq!(
+            bare.set_fade_in(0.5).unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("tone");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 500_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 500_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        assert_eq!(
+            desktop.set_fade_out(0.1).unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.fade_enabled());
+        assert_eq!(
+            desktop.set_fade_in(0.1).unwrap_err().to_string(),
+            "a fade belongs on a picture or a sound"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.fade_enabled());
+        assert_eq!(desktop.inspection().unwrap().fade_in, 0);
+        desktop.set_fade_in(0.5).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.fade_in, 500_000);
+        assert_eq!(inspection.fade_out, 0);
+        assert_eq!(
+            desktop.draft().unwrap().materials.audio_fades[0].fade_type,
+            2
+        );
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments[0].volume, 1.0);
+        desktop.set_fade_out(0.25).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.fade_in, 500_000);
+        assert_eq!(inspection.fade_out, 250_000);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().fade_out, 0);
+        assert_eq!(desktop.inspection().unwrap().fade_in, 500_000);
+        assert_eq!(
+            desktop.set_fade_in(-1.0).unwrap_err().to_string(),
+            "a fade cannot be negative"
+        );
+        assert_eq!(desktop.inspection().unwrap().fade_in, 500_000);
+
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(desktop.fade_enabled());
+        desktop.set_fade_out(1.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().fade_out, 1_000_000);
+        assert_eq!(desktop.inspection().unwrap().fade_in, 0);
+        assert_eq!(desktop.draft().unwrap().materials.audio_fades.len(), 2);
+        let sound_track = desktop.draft().unwrap().tracks[1].id.clone();
+        desktop
+            .toggle_attribute(sound_track, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.set_fade_in(0.2).unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.inspection().unwrap().fade_out, 1_000_000);
     }
 
     #[test]

@@ -22,7 +22,9 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, 
 use crate::cache::FrameWindow;
 use crate::clock::{ClockKind, MediaClock};
 use crate::error::EngineError;
+use crate::filmstrip::{self, StripCell};
 use crate::map::{self, TimelineMap};
+use crate::preload::Preload;
 use crate::reader::{DecodedFrame, Media, MediaInfo, ReaderFactory};
 
 /// Decoded pictures for one segment.
@@ -32,6 +34,7 @@ pub struct VideoSource {
     map: TimelineMap,
     cache: RefCell<FrameWindow<DecodedFrame>>,
     clock: RefCell<MediaClock>,
+    preload: RefCell<Preload>,
     decodes: Cell<u32>,
     display: DisplayQuarter,
 }
@@ -105,6 +108,32 @@ impl VideoSource {
         }
     }
 
+    /// The filmstrip cell for `time`, if a fill already stored one.
+    ///
+    /// A miss is [`EngineError::NotReady`] and does not decode. A time outside
+    /// the segment is [`EngineError::Outside`].
+    pub fn strip_at(&self, time: Micros) -> Result<StripCell, EngineError> {
+        let source = map::map_timeline(&self.map, time)?;
+        self.preload.borrow().strip(source)
+    }
+
+    /// Decode `time` and store one filmstrip cell.
+    ///
+    /// The cell's long side is at most [`crate::MAX_EDGE`]. A platform buffer is
+    /// [`EngineError::NotReady`] and is not stored. This does not wait on the
+    /// audio clock and does not fill the playback window.
+    pub fn fill_strip(&self, time: Micros) -> Result<(), EngineError> {
+        let source = map::map_timeline(&self.map, time)?;
+        let held = self.decode(source)?;
+        let picture = decoded_picture(&held.frame)?;
+        let Picture::Cpu(bytes) = picture else {
+            return Err(EngineError::NotReady);
+        };
+        let cell = filmstrip::fit(held.start, bytes.width(), bytes.height(), bytes.rgba())?;
+        self.preload.borrow_mut().store_picture(cell);
+        Ok(())
+    }
+
     fn decode(&self, source: Micros) -> Result<crate::reader::HeldFrame, EngineError> {
         self.decodes.set(self.decodes.get().saturating_add(1));
         self.media.borrow_mut().decode_at(source, &self.map.source)
@@ -155,6 +184,7 @@ pub fn open_segment(
         map,
         cache: RefCell::new(FrameWindow::new(window)?),
         clock: RefCell::new(MediaClock::new(clock)),
+        preload: RefCell::new(Preload::new()),
         decodes: Cell::new(0),
         display,
     })

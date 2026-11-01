@@ -18,10 +18,11 @@ use cutlass_decode::{
 };
 use cutlass_jpeg::JpegDecoder;
 use cutlass_model::{Draft, MaterialVideo, Micros, Segment, SegmentId, TimeRange, TrackType};
-use cutlass_picture::{Picture, PictureSource, Sample};
+use cutlass_picture::{Picture, PictureSource, Sample, rgba_len};
 use cutlass_png::PngDecoder;
 use cutlass_still::{StillDemux, StillProbe, still_limits};
 
+use crate::MAX_EDGE;
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
@@ -820,4 +821,137 @@ fn an_eight_bit_wav_is_not_a_pcm_layout_this_decoder_opens() {
     };
     assert_eq!(error, EngineError::Layout);
     std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
+fn a_filmstrip_ask_does_not_decode_and_a_fill_stores_the_still() {
+    let factory = factory();
+    let path = fixture("pattern.png");
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 4).expect("export");
+    assert_eq!(
+        source.strip_at(Micros(5_000_000)).expect_err("outside"),
+        EngineError::Outside
+    );
+    assert_eq!(
+        source
+            .fill_strip(Micros(5_000_000))
+            .expect_err("outside fill"),
+        EngineError::Outside
+    );
+    assert_eq!(source.decodes(), 0);
+    assert_eq!(
+        source.strip_at(Micros(0)).expect_err("miss"),
+        EngineError::NotReady
+    );
+    assert_eq!(source.decodes(), 0);
+    source.fill_strip(Micros(0)).expect("fill");
+    assert_eq!(source.decodes(), 1);
+    assert_eq!(source.cached(), 0);
+    let cell = source.strip_at(Micros(100)).expect("cell");
+    assert_eq!(source.decodes(), 1);
+    assert_eq!(cell.width(), 16);
+    assert_eq!(cell.height(), 16);
+    assert!(cell.width().max(cell.height()) <= MAX_EDGE);
+    assert_eq!(
+        cell.rgba().len(),
+        rgba_len(cell.width(), cell.height()).expect("bytes")
+    );
+    let picture = source.picture_at(Micros(0)).expect("picture");
+    let Picture::Cpu(bytes) = picture else {
+        panic!("cpu picture");
+    };
+    assert_eq!(cell.rgba(), bytes.rgba());
+    assert_eq!(source.decodes(), 2);
+    let again = source.strip_at(Micros(0)).expect("cached cell");
+    assert_eq!(again.rgba(), cell.rgba());
+    assert_eq!(source.decodes(), 2);
+}
+
+#[test]
+fn playback_fills_a_filmstrip_without_filling_the_preview_window() {
+    let factory = factory();
+    let path = fixture("pattern.png");
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&factory, &draft, &id, ClockKind::Playback, 4).expect("play");
+    assert_eq!(
+        source.picture_at(Micros(0)).expect_err("playback"),
+        EngineError::NotReady
+    );
+    assert_eq!(
+        source.strip_at(Micros(0)).expect_err("strip"),
+        EngineError::NotReady
+    );
+    assert_eq!(source.decodes(), 0);
+    let audio = source.advance_audio(48, 48_000).expect("clock");
+    assert_eq!(audio, Micros(1_000));
+    source.fill_strip(Micros(0)).expect("strip fill");
+    assert_eq!(source.decodes(), 1);
+    assert_eq!(source.cached(), 0);
+    let cell = source.strip_at(Micros(0)).expect("cell");
+    assert_eq!(cell.width(), 16);
+    assert_eq!(cell.height(), 16);
+    assert_eq!(source.fill(Micros(0)).expect("late"), Sample::Miss);
+    assert_eq!(source.cached(), 0);
+    assert_eq!(
+        source.strip_at(Micros(0)).expect("kept").rgba(),
+        cell.rgba()
+    );
+    assert_eq!(source.decodes(), 2);
+}
+
+#[test]
+fn a_platform_buffer_is_not_a_filmstrip_cell() {
+    let mut factory = ReaderFactory::new();
+    factory.register_container(probe_still, open_still);
+    factory.decoders_mut().register(CodecId::Jpeg, open_token);
+    let path = fixture("pattern.jpg");
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("source");
+    assert_eq!(
+        source.fill_strip(Micros(0)).expect_err("platform"),
+        EngineError::NotReady
+    );
+    assert_eq!(source.decodes(), 1);
+    assert_eq!(
+        source.strip_at(Micros(0)).expect_err("empty"),
+        EngineError::NotReady
+    );
+    assert_eq!(source.decodes(), 1);
+}
+
+#[test]
+fn a_real_still_fills_a_filmstrip_when_the_folder_is_present() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    if !root.is_dir() {
+        eprintln!("skipped: ../local-files is missing");
+        return;
+    }
+    let path = root.join("04-motion-graphics.png");
+    if !path.is_file() {
+        eprintln!("skipped: 04-motion-graphics.png is not in ../local-files");
+        return;
+    }
+    let factory = factory();
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&factory, &draft, &id, ClockKind::Playback, 2).expect("still");
+    assert_eq!(
+        source.strip_at(Micros(0)).expect_err("miss"),
+        EngineError::NotReady
+    );
+    assert_eq!(source.decodes(), 0);
+    source.fill_strip(Micros(0)).expect("fill");
+    let cell = source.strip_at(Micros(0)).expect("cell");
+    assert_eq!(source.decodes(), 1);
+    assert!(cell.width() >= 1 && cell.height() >= 1);
+    assert!(cell.width() <= MAX_EDGE && cell.height() <= MAX_EDGE);
+    assert_eq!(
+        cell.rgba().len(),
+        rgba_len(cell.width(), cell.height()).expect("bytes")
+    );
+    assert_eq!(
+        source.strip_at(Micros(0)).expect("again").rgba(),
+        cell.rgba()
+    );
+    assert_eq!(source.decodes(), 1);
 }

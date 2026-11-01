@@ -855,8 +855,7 @@ fn read_color(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), Codec
 fn read_frame_size(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
     let width = bits.read(16)?.saturating_add(1);
     let height = bits.read(16)?.saturating_add(1);
-    check_edge(width)?;
-    check_edge(height)?;
+    check_picture(width, height)?;
     header.width = width;
     header.height = height;
     header.show_width = width;
@@ -891,8 +890,7 @@ fn read_size_with_refs(bits: &mut BitReader<'_>, header: &mut Header) -> Result<
         header.width = width;
         header.height = height;
     }
-    check_edge(header.width)?;
-    check_edge(header.height)?;
+    check_picture(header.width, header.height)?;
     let mut valid = false;
     for size in header.ref_size {
         valid |= valid_ref_size(size.0, size.1, header.width, header.height);
@@ -930,8 +928,18 @@ fn valid_ref_size(ref_w: u32, ref_h: u32, width: u32, height: u32) -> bool {
         && height <= ref_h.saturating_mul(16)
 }
 
+fn check_picture(width: u32, height: u32) -> Result<(), CodecError> {
+    if geom::level_picture(width, height) {
+        Ok(())
+    } else {
+        Err(CodecError::Limit {
+            what: "vp9 frame edge",
+        })
+    }
+}
+
 fn check_edge(edge: u32) -> Result<(), CodecError> {
-    if edge == 0 || edge > geom::MAX_EDGE {
+    if edge == 0 || edge > geom::LEVEL_MAX_EDGE {
         Err(CodecError::Limit {
             what: "vp9 frame edge",
         })

@@ -238,6 +238,67 @@ fn profile3_chroma_matches_ffmpeg_software() {
     }
 }
 
+#[test]
+fn level_width_above_4096_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no level source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("level-4128");
+    let ivf = dir.join("in.ivf");
+    let status = Command::new(&ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(&source)
+        .args([
+            "-an",
+            "-frames:v",
+            "2",
+            "-vf",
+            "scale=4128:16",
+            "-c:v",
+            "libvpx-vp9",
+            "-profile:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            "200k",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-f",
+            "ivf",
+        ])
+        .arg(&ivf)
+        .output()
+        .expect("encode");
+    assert!(
+        status.status.success(),
+        "encode {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stream = read_ivf(&ivf);
+    assert!(stream.width > 4096, "coded width {}", stream.width);
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "level width {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
     let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");

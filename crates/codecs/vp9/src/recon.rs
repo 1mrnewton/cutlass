@@ -272,7 +272,7 @@ impl<'a, P: Pix> Scratch<'a, P> {
     ) -> Result<Self, CodecError> {
         let width = header.width;
         let height = header.height;
-        if width == 0 || height == 0 || width > geom::MAX_EDGE || height > geom::MAX_EDGE {
+        if !geom::level_picture(width, height) {
             return Err(CodecError::Limit {
                 what: "vp9 frame edge",
             });

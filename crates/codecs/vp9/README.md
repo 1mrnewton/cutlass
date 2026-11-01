@@ -22,7 +22,7 @@ The crate exports `Vp9Decoder`, `Vp9Encoder`, `Decoder`, `register_decoders`, an
 
 ## Support
 
-The decoder accepts profile 0 (8-bit 4:2:0), profile 1 (8-bit 4:2:2, 4:4:0, 4:4:4, and sRGB), profile 2 (10-bit and 12-bit 4:2:0), and profile 3 (10-bit and 12-bit 4:2:2, 4:4:0, 4:4:4, and sRGB). `open` accepts those pixel formats. A coded edge outside 1..=4096 is `CodecError::Limit`. Profile 0 or profile 2 with the RGB color space is malformed. sRGB is 4:4:4 and full range, and its reserved bit must be 0. A reference scale this decoder cannot use is `CodecError::Unsupported`. The output picture carries the frame’s colour space, range, and render size. The samples stay the coded width and height. The encoder still emits profile 0 only.
+The decoder accepts profile 0 (8-bit 4:2:0), profile 1 (8-bit 4:2:2, 4:4:0, 4:4:4, and sRGB), profile 2 (10-bit and 12-bit 4:2:0), and profile 3 (10-bit and 12-bit 4:2:2, 4:4:0, 4:4:4, and sRGB). `open` accepts those pixel formats. A coded side above 16832, or a luma area above 35,651,584, is `CodecError::Limit`. The encoder still refuses a side above 4096. Profile 0 or profile 2 with the RGB color space is malformed. sRGB is 4:4:4 and full range, and its reserved bit must be 0. A reference scale this decoder cannot use is `CodecError::Unsupported`. The output picture carries the frame’s colour space, range, and render size. The samples stay the coded width and height. The encoder still emits profile 0 only.
 
 | Frame | Decoder | Encoder |
 | --- | --- | --- |
@@ -87,5 +87,5 @@ cargo run --release -p cutlass-vp9 --example roundtrip
 
 - The encoder does not emit show-existing frames, hidden frames, more than one tile, a loop filter, segmentation, compound prediction, or sub-pixel motion. Intra blocks are DC. Inter motion is an integer LAST vector. Transforms are no larger than 8×8. Quantizer 0 uses a 4×4 Walsh-Hadamard transform.
 - The encoder refuses a size that is not a multiple of 8. The decoder can reconstruct those sizes.
-- An edge above 4096 is refused.
+- The encoder refuses a side above 4096. The decoder refuses a side above 16832 and a luma area above 35,651,584.
 - Playback and a WebM container are outside this crate.

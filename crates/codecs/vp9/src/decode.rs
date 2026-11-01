@@ -558,7 +558,7 @@ fn check_open_size(width: u32, height: u32) -> Result<(), CodecError> {
             what: "empty picture",
         });
     }
-    if width > geom::MAX_EDGE || height > geom::MAX_EDGE {
+    if !geom::level_picture(width, height) {
         return Err(CodecError::Limit {
             what: "vp9 frame edge",
         });
@@ -798,8 +798,7 @@ mod tests {
         let chroma_h = height.div_ceil(2);
         picture.width > 0
             && picture.height > 0
-            && picture.width <= crate::geom::MAX_EDGE
-            && picture.height <= crate::geom::MAX_EDGE
+            && crate::geom::level_picture(picture.width, picture.height)
             && picture.y.len() == width.saturating_mul(height)
             && picture.u.len() == chroma_w.saturating_mul(chroma_h)
             && picture.v.len() == picture.u.len()

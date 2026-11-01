@@ -72,8 +72,22 @@ pub const DCT_ADST: u8 = 2;
 pub const ADST_ADST: u8 = 3;
 
 pub const MI_SIZE: usize = 8;
+/// Encoder size cap. The decoder uses the level limits below.
 pub const MAX_EDGE: u32 = 4096;
+/// Level 6.2 maximum side. A larger side is past every defined level.
+pub const LEVEL_MAX_EDGE: u32 = 16_832;
+/// Level 6.2 maximum luma samples. The frame header does not carry a level.
+pub const LEVEL_MAX_LUMA: u32 = 35_651_584;
 pub const BORDER: usize = 32;
+
+/// A coded picture some defined level allows. Eight reference slots stay available.
+pub fn level_picture(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= LEVEL_MAX_EDGE
+        && height <= LEVEL_MAX_EDGE
+        && width.saturating_mul(height) <= LEVEL_MAX_LUMA
+}
 
 const BLOCK_W: [u32; 13] = [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64];
 const BLOCK_H: [u32; 13] = [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64];

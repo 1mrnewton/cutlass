@@ -874,9 +874,16 @@ mod tests {
             Vp9Encoder::open(&rgba),
             Err(CodecError::Unsupported { .. })
         ));
-        let huge = CodecParams::with_format(CodecId::Vp9, 4097, 8, PixelFormat::Yuv420p);
+        let wide = CodecParams::with_format(CodecId::Vp9, 4097, 8, PixelFormat::Yuv420p);
+        assert!(Vp9Decoder::open(&wide).is_ok());
+        let past_edge = CodecParams::with_format(CodecId::Vp9, 16_833, 8, PixelFormat::Yuv420p);
         assert!(matches!(
-            Vp9Decoder::open(&huge),
+            Vp9Decoder::open(&past_edge),
+            Err(CodecError::Limit { .. })
+        ));
+        let past_area = CodecParams::with_format(CodecId::Vp9, 16_832, 2_119, PixelFormat::Yuv420p);
+        assert!(matches!(
+            Vp9Decoder::open(&past_area),
             Err(CodecError::Limit { .. })
         ));
         let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
@@ -894,6 +901,11 @@ mod tests {
         let err = match Decoder::new().decode(&oversized_edge()) {
             Err(err) => err,
             Ok(_) => panic!("oversized edge was accepted"),
+        };
+        assert!(matches!(err, CodecError::Limit { .. }), "{err}");
+        let err = match Decoder::new().decode(&oversized_area()) {
+            Err(err) => err,
+            Ok(_) => panic!("oversized area was accepted"),
         };
         assert!(matches!(err, CodecError::Limit { .. }), "{err}");
         assert!(decoder.drain().expect("drain").is_empty());
@@ -1065,8 +1077,26 @@ mod tests {
         bits.write(0x42, 8);
         bits.write(1, 3);
         bits.write_bit(false);
-        bits.write(4096, 16);
+        bits.write(16_832, 16);
         bits.write(7, 16);
+        bits.finish()
+    }
+
+    fn oversized_area() -> Vec<u8> {
+        let mut bits = BitWriter::new();
+        bits.write(2, 2);
+        bits.write(0, 2);
+        bits.write_bit(false);
+        bits.write_bit(false);
+        bits.write_bit(true);
+        bits.write_bit(true);
+        bits.write(0x49, 8);
+        bits.write(0x83, 8);
+        bits.write(0x42, 8);
+        bits.write(1, 3);
+        bits.write_bit(false);
+        bits.write(16_831, 16);
+        bits.write(2_118, 16);
         bits.finish()
     }
 

@@ -4,7 +4,7 @@ use cutlass_decode::{
     CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput, PixelFormat,
 };
 
-use crate::yuv::{Plane, Yuv420, gray_output, picture_output};
+use crate::yuv::{Plane, Yuv420, gray_output, picture_output, wide_output};
 
 use crate::header::{
     FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
@@ -15,8 +15,18 @@ use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_tile_parts, decode
 
 use std::sync::Arc;
 
+struct WidePlanes {
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+    width: usize,
+    height: usize,
+}
+
 struct Reference {
     picture: Yuv420,
+    /// Native samples when the sequence is 10-bit. Eight-bit slots leave this empty.
+    wide: Option<Arc<WidePlanes>>,
     cdfs: Arc<Cdfs>,
     gm: [[i32; 6]; 8],
     field: Arc<SavedMotion>,
@@ -30,6 +40,7 @@ struct Reference {
 
 struct Held {
     picture: Yuv420,
+    wide: Option<Arc<WidePlanes>>,
     cdfs: Arc<Cdfs>,
     motion: Arc<SavedMotion>,
     segmentation: Segmentation,
@@ -72,6 +83,7 @@ impl Av1Decoder {
         }
         if params.pixel != PixelFormat::None
             && params.pixel != PixelFormat::Yuv420p
+            && params.pixel != PixelFormat::Yuv420p10
             && params.pixel != PixelFormat::Gray8
         {
             return Err(CodecError::Unsupported {
@@ -304,7 +316,7 @@ impl Av1Decoder {
         let ref_sizes = std::array::from_fn(|slot| {
             self.refs[slot]
                 .as_ref()
-                .map(|reference| (reference.picture.y.width(), reference.picture.y.height()))
+                .map(|reference| reference.coded_size())
         });
         let inherited = std::array::from_fn(|slot| {
             self.refs[slot]
@@ -350,9 +362,7 @@ impl Av1Decoder {
         if !frame.show_frame {
             return Ok((None, FrameUndo { stored, stale }));
         }
-        let picture = match shown(&held.picture, &frame)
-            .and_then(|picture| publish(&picture, monochrome, packet.pts, packet.timescale))
-        {
+        let picture = match publish_held(&held, &frame, monochrome, packet.pts, packet.timescale) {
             Ok(picture) => picture,
             Err(error) => {
                 self.undo_store(stored);
@@ -470,6 +480,7 @@ impl Av1Decoder {
                 });
                 self.refs[slot] = Some(Reference {
                     picture: held.picture.clone(),
+                    wide: held.wide.clone(),
                     cdfs: Arc::clone(&held.cdfs),
                     gm: frame.gm_params,
                     field: Arc::clone(&held.motion),
@@ -509,6 +520,9 @@ impl Av1Decoder {
         frame: &FrameInfo,
         parts: Option<&[TilePart]>,
     ) -> Result<Held, CodecError> {
+        if sequence.bit_depth == 10 {
+            return self.hold_wide(sequence, frame, parts);
+        }
         if frame.show_existing {
             let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
                 return Err(CodecError::Malformed {
@@ -518,6 +532,7 @@ impl Av1Decoder {
             };
             return Ok(Held {
                 picture: stored.picture.clone(),
+                wide: None,
                 cdfs: Arc::clone(&stored.cdfs),
                 motion: Arc::clone(&stored.field),
                 segmentation: stored.segmentation,
@@ -529,12 +544,105 @@ impl Av1Decoder {
         let reconstructed = self.decode_picture(sequence, frame, parts)?;
         Ok(Held {
             picture: owned(reconstructed.picture)?,
+            wide: None,
             cdfs: Arc::new(reconstructed.cdfs),
             motion: Arc::new(reconstructed.motion),
             segmentation: frame.segmentation,
             segments: Arc::new(reconstructed.segments),
             mi_cols: frame.mi_cols,
             mi_rows: frame.mi_rows,
+        })
+    }
+
+    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Super resolution, restoration,
+    /// film grain, and monochrome at this depth are still refused.
+    fn hold_wide(
+        &self,
+        sequence: &Sequence,
+        frame: &FrameInfo,
+        parts: Option<&[TilePart]>,
+    ) -> Result<Held, CodecError> {
+        if frame.grain.apply || sequence.monochrome {
+            return Err(CodecError::Unsupported { what: "bit depth" });
+        }
+        if frame.show_existing {
+            let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "missing reference",
+                });
+            };
+            let Some(wide) = stored.wide.clone() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "missing reference",
+                });
+            };
+            return Ok(Held {
+                picture: stored.picture.clone(),
+                wide: Some(wide),
+                cdfs: Arc::clone(&stored.cdfs),
+                motion: Arc::clone(&stored.field),
+                segmentation: stored.segmentation,
+                segments: Arc::clone(&stored.segments),
+                mi_cols: stored.mi_cols,
+                mi_rows: stored.mi_rows,
+            });
+        }
+        let carried = self.carried_cdf(frame)?;
+        let views = self.wide_views();
+        let reconstructed = match parts {
+            Some(parts) => {
+                decode_tile_parts(sequence, frame, &views, carried.as_deref(), parts, true)
+            }
+            None => {
+                let generated = crate::header::tile_parts(frame)?;
+                decode_tile_parts(
+                    sequence,
+                    frame,
+                    &views,
+                    carried.as_deref(),
+                    &generated,
+                    true,
+                )
+            }
+        }?;
+        let picture = reconstructed.picture;
+        Ok(Held {
+            picture: placeholder_picture()?,
+            wide: Some(Arc::new(WidePlanes {
+                width: picture.width,
+                height: picture.height,
+                y: picture.y,
+                u: picture.u,
+                v: picture.v,
+            })),
+            cdfs: Arc::new(reconstructed.cdfs),
+            motion: Arc::new(reconstructed.motion),
+            segmentation: frame.segmentation,
+            segments: Arc::new(reconstructed.segments),
+            mi_cols: frame.mi_cols,
+            mi_rows: frame.mi_rows,
+        })
+    }
+
+    fn wide_views(&self) -> [Option<RefView<'_, u16>>; 8] {
+        std::array::from_fn(|slot| {
+            let reference = self.refs[slot].as_ref()?;
+            let wide = reference.wide.as_ref()?;
+            Some(RefView {
+                y: wide.y.as_slice(),
+                u: wide.u.as_slice(),
+                v: wide.v.as_slice(),
+                width: wide.width,
+                height: wide.height,
+                frame_type: reference.field.frame_type,
+                mi_cols: reference.field.mi_cols,
+                mi_rows: reference.field.mi_rows,
+                saved_hints: reference.field.saved_hints,
+                mf_refs: &reference.field.refs,
+                mf_mvs: &reference.field.mvs,
+            })
         })
     }
 
@@ -846,6 +954,47 @@ fn record(
     if let Some(picture) = picture {
         shown.push(Output::Picture(picture));
     }
+}
+
+impl Reference {
+    fn coded_size(&self) -> (u32, u32) {
+        if let Some(wide) = &self.wide {
+            (
+                u32::try_from(wide.width).unwrap_or(0),
+                u32::try_from(wide.height).unwrap_or(0),
+            )
+        } else {
+            (self.picture.y.width(), self.picture.y.height())
+        }
+    }
+}
+
+fn placeholder_picture() -> Result<Yuv420, CodecError> {
+    Yuv420::new(
+        Plane::new(2, 2, vec![0; 4])?,
+        Plane::new(1, 1, vec![128])?,
+        Plane::new(1, 1, vec![128])?,
+    )
+}
+
+fn publish_held(
+    held: &Held,
+    frame: &FrameInfo,
+    monochrome: bool,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let Some(wide) = &held.wide else {
+        let picture = shown(&held.picture, frame)?;
+        return publish(&picture, monochrome, pts, timescale);
+    };
+    if monochrome {
+        return Err(CodecError::Unsupported { what: "bit depth" });
+    }
+    let width = u32::try_from(wide.width).map_err(|_| CodecError::Limit { what: "frame size" })?;
+    let height =
+        u32::try_from(wide.height).map_err(|_| CodecError::Limit { what: "frame size" })?;
+    wide_output(&wide.y, &wide.u, &wide.v, width, height, pts, timescale)
 }
 
 fn publish(
@@ -4170,6 +4319,52 @@ mod tests {
                 panic!("cpu");
             };
             assert_eq!(bytes.len(), 128 * 128, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, film grain, filter intra, and an
+        // interintra wedge are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let file = include_bytes!("../fixtures/ten.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x20d1_bb0c_7997_8616, 0xb811_99a4_24e0_cf92];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(!sequence.monochrome);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv420p10);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
             assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
         }
         assert!(decoder.drain().expect("drain").is_empty());

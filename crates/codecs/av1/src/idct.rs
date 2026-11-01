@@ -463,6 +463,7 @@ pub fn inverse_2d(
     height: usize,
     tx_type: u8,
     row_shift: u32,
+    bit_depth: u8,
 ) -> Vec<i32> {
     let n = width.saturating_mul(height);
     let mut residual = vec![0i64; n];
@@ -479,6 +480,7 @@ pub fn inverse_2d(
         height,
         tx_type,
         row_shift,
+        bit_depth,
     );
     out
 }
@@ -491,6 +493,7 @@ pub fn inverse_2d_into(
     height: usize,
     tx_type: u8,
     row_shift: u32,
+    bit_depth: u8,
 ) {
     let n = width.saturating_mul(height);
     let row_n = width.max(height);
@@ -529,19 +532,27 @@ pub fn inverse_2d_into(
             }
             continue;
         }
-        apply_1d(&mut scratch.row[..row_n], log_w, kind_row, 16);
+        let row_range = i32::from(bit_depth) + 8;
+        apply_1d(&mut scratch.row[..row_n], log_w, kind_row, row_range);
         for j in 0..width {
             scratch.residual[dest + j] = round2(scratch.row[j], row_shift);
         }
     }
+    let col_range = (i32::from(bit_depth) + 6).max(16);
+    let col_limit = 1i64 << (col_range - 1);
     for sample in &mut scratch.residual[..n] {
-        *sample = (*sample).clamp(-(1 << 15), (1 << 15) - 1);
+        *sample = (*sample).clamp(-col_limit, col_limit - 1);
     }
     for j in 0..width {
         for i in 0..height {
             scratch.row[i] = scratch.residual[i * width + j];
         }
-        apply_1d(&mut scratch.row[..row_n], log_h, col_kind(tx_type), 16);
+        apply_1d(
+            &mut scratch.row[..row_n],
+            log_h,
+            col_kind(tx_type),
+            col_range,
+        );
         for i in 0..height {
             scratch.residual[i * width + j] = round2(scratch.row[i], 4);
         }

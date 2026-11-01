@@ -259,6 +259,7 @@ fn pixel_layout(pixel: PixelFormat) -> &'static str {
     match pixel {
         PixelFormat::Rgba8 => "rgba8",
         PixelFormat::Yuv420p => "yuv420p",
+        PixelFormat::Yuv420p10 => "yuv420p10le",
         PixelFormat::Gray8 => "gray8",
         PixelFormat::None => "none",
     }

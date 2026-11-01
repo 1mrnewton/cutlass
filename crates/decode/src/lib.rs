@@ -76,8 +76,9 @@ pub struct AudioOutput {
 /// `width` and `height` are the buffer that [`PictureOutput`] stores, tightly
 /// packed, with no stride gap and no display crop. Color conversion stays
 /// outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
-/// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Gray8`] is
-/// one 8-bit plane, `width` by `height`.
+/// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Yuv420p10`]
+/// is that layout with a little-endian `u16` per sample. [`PixelFormat::Gray8`]
+/// is one 8-bit plane, `width` by `height`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PictureInfo {
     pub width: u32,
@@ -146,22 +147,26 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
             .ok_or(CodecError::Limit {
                 what: "picture bytes",
             }),
-        PixelFormat::Yuv420p => {
-            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-                return Err(CodecError::InvalidApi { what: "4:2:0 size" });
-            }
-            width
-                .checked_mul(height)
-                .and_then(|pixels| pixels.checked_mul(3))
-                .and_then(|bytes| bytes.checked_div(2))
-                .ok_or(CodecError::Limit {
-                    what: "picture bytes",
-                })
-        }
+        PixelFormat::Yuv420p => yuv420_bytes(width, height, 1),
+        PixelFormat::Yuv420p10 => yuv420_bytes(width, height, 2),
         PixelFormat::Gray8 => width.checked_mul(height).ok_or(CodecError::Limit {
             what: "picture bytes",
         }),
     }
+}
+
+fn yuv420_bytes(width: usize, height: usize, sample_bytes: usize) -> Result<usize, CodecError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(CodecError::InvalidApi { what: "4:2:0 size" });
+    }
+    width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|bytes| bytes.checked_div(2))
+        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+        .ok_or(CodecError::Limit {
+            what: "picture bytes",
+        })
 }
 
 impl PictureOutput {
@@ -833,6 +838,10 @@ mod tests {
             CodecError::InvalidApi { what: "4:2:0 size" }
         );
         assert_eq!(picture_byte_len(3, 2, PixelFormat::Gray8).expect("gray"), 6);
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv420p10).expect("10-bit"),
+            12
+        );
     }
 
     #[test]

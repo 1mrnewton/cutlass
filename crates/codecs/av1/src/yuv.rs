@@ -170,6 +170,41 @@ pub fn gray_output(
     )
 }
 
+/// Pack 10-bit 4:2:0. Each sample is a little-endian `u16` in the low 10 bits.
+pub fn wide_output(
+    y: &[u16],
+    u: &[u16],
+    v: &[u16],
+    width: u32,
+    height: u32,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let mut bytes = Vec::new();
+    pack_le(y, &mut bytes);
+    pack_le(u, &mut bytes);
+    pack_le(v, &mut bytes);
+    PictureOutput::cpu(
+        PictureInfo {
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p10,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+        },
+        bytes,
+        pts,
+        timescale,
+    )
+}
+
+fn pack_le(samples: &[u16], out: &mut Vec<u8>) {
+    out.reserve(samples.len().saturating_mul(2));
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+}
+
 /// Pack even 4:2:0 into the shared picture output.
 pub fn picture_output(
     picture: &Yuv420,

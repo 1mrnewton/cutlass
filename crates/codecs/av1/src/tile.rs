@@ -34,6 +34,7 @@ use crate::inter::{
 };
 use crate::predict::{ChromaFromLuma, IntraPred, PredictScratch, chroma_from_luma, predict_intra};
 use crate::restore;
+use crate::sample::{Pix, clip_sample, sample_mid};
 use crate::superres;
 use crate::symbol::SymbolDecoder;
 use crate::tables::{
@@ -65,17 +66,17 @@ const SB4: usize = 16;
 /// `MAX_VARTX_DEPTH`. A selected inter transform splits at most twice.
 const MAX_VARTX_DEPTH: usize = 2;
 
-pub struct DecodedPicture {
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+pub struct DecodedPicture<S: Pix = u8> {
+    pub y: Vec<S>,
+    pub u: Vec<S>,
+    pub v: Vec<S>,
     pub width: usize,
     pub height: usize,
 }
 
 /// A reconstructed picture and the CDF context stored with its reference slots.
-pub struct Reconstructed {
-    pub picture: DecodedPicture,
+pub struct Reconstructed<S: Pix = u8> {
+    pub picture: DecodedPicture<S>,
     pub cdfs: Cdfs,
     pub motion: crate::inter::SavedMotion,
     pub segments: Vec<u8>,
@@ -98,14 +99,23 @@ pub fn decode_with_refs(
     decode_tile_parts(sequence, frame, refs, carried, &parts, true)
 }
 
-pub(crate) fn decode_tile_parts(
+pub(crate) fn decode_tile_parts<S: FinishPlane>(
     sequence: &Sequence,
     frame: &FrameInfo,
-    refs: &[Option<RefView<'_>>],
+    refs: &[Option<RefView<'_, S>>],
     carried: Option<&Cdfs>,
     parts: &[TilePart],
     postprocess: bool,
-) -> Result<Reconstructed, CodecError> {
+) -> Result<Reconstructed<S>, CodecError> {
+    if sequence.bit_depth != 8 && sequence.bit_depth != 10 {
+        return Err(CodecError::Unsupported { what: "bit depth" });
+    }
+    if sequence.bit_depth == 10 && size_of::<S>() != 2 {
+        return Err(CodecError::Unsupported { what: "bit depth" });
+    }
+    if sequence.bit_depth == 8 && size_of::<S>() != 1 {
+        return Err(CodecError::Unsupported { what: "bit depth" });
+    }
     if frame.width > 4096 || frame.height > 4096 {
         return Err(CodecError::Limit { what: "frame size" });
     }
@@ -180,6 +190,7 @@ pub(crate) fn decode_tile_parts(
             sub_x: tile.sub_x,
             sub_y: tile.sub_y,
             frame,
+            bit_depth: tile.bit_depth,
         };
         deblock_picture(
             Picture {
@@ -211,15 +222,19 @@ pub(crate) fn decode_tile_parts(
             skips: &tile.skips,
             index: &tile.cdef_idx,
             params: tile.cdef,
+            bit_depth: tile.bit_depth,
         });
     }
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
     let up_w = frame.upscaled_width as usize;
+    if sequence.bit_depth != 8 && postprocess && (up_w > visible_w || lr.active()) {
+        return Err(CodecError::Unsupported { what: "bit depth" });
+    }
     let (y, u, v, out_w) = if postprocess && up_w > visible_w {
         let up_chroma = up_w.div_ceil(2);
         (
-            superres::upscale(
+            S::upscale(
                 &tile.y,
                 buf_w,
                 visible_w,
@@ -227,7 +242,7 @@ pub(crate) fn decode_tile_parts(
                 visible_h,
                 buf_w.saturating_sub(1),
             ),
-            superres::upscale(
+            S::upscale(
                 &tile.u,
                 tile.chroma_w,
                 chroma_w,
@@ -235,7 +250,7 @@ pub(crate) fn decode_tile_parts(
                 chroma_h,
                 tile.chroma_w.saturating_sub(1),
             ),
-            superres::upscale(
+            S::upscale(
                 &tile.v,
                 tile.chroma_w,
                 chroma_w,
@@ -257,7 +272,7 @@ pub(crate) fn decode_tile_parts(
         let (before_y, before_u, before_v) = if up_w > visible_w {
             let up_chroma = up_w.div_ceil(2);
             (
-                superres::upscale(
+                S::upscale(
                     &pre_y,
                     buf_w,
                     visible_w,
@@ -265,7 +280,7 @@ pub(crate) fn decode_tile_parts(
                     visible_h,
                     buf_w.saturating_sub(1),
                 ),
-                superres::upscale(
+                S::upscale(
                     &pre_u,
                     tile.chroma_w,
                     chroma_w,
@@ -273,7 +288,7 @@ pub(crate) fn decode_tile_parts(
                     chroma_h,
                     tile.chroma_w.saturating_sub(1),
                 ),
-                superres::upscale(
+                S::upscale(
                     &pre_v,
                     tile.chroma_w,
                     chroma_w,
@@ -290,9 +305,9 @@ pub(crate) fn decode_tile_parts(
             )
         };
         (
-            restore_plane(&y, &before_y, out_w, visible_h, &lr, 0, frame),
-            restore_plane(&u, &before_u, out_w.div_ceil(2), chroma_h, &lr, 1, frame),
-            restore_plane(&v, &before_v, out_w.div_ceil(2), chroma_h, &lr, 2, frame),
+            S::restore_plane(&y, &before_y, out_w, visible_h, &lr, 0, frame),
+            S::restore_plane(&u, &before_u, out_w.div_ceil(2), chroma_h, &lr, 1, frame),
+            S::restore_plane(&v, &before_v, out_w.div_ceil(2), chroma_h, &lr, 2, frame),
         )
     } else {
         (y, u, v)
@@ -337,7 +352,80 @@ pub(crate) fn decode_tile_parts(
     })
 }
 
-fn restore_plane(
+pub(crate) trait FinishPlane: Pix {
+    fn upscale(
+        src: &[Self],
+        stride: usize,
+        down_w: usize,
+        up_w: usize,
+        height: usize,
+        max_x: usize,
+    ) -> Vec<Self>;
+
+    fn restore_plane(
+        cdef: &[Self],
+        before: &[Self],
+        width: usize,
+        height: usize,
+        lr: &restore::Grid,
+        plane: usize,
+        frame: &FrameInfo,
+    ) -> Vec<Self>;
+}
+
+impl FinishPlane for u8 {
+    fn upscale(
+        src: &[Self],
+        stride: usize,
+        down_w: usize,
+        up_w: usize,
+        height: usize,
+        max_x: usize,
+    ) -> Vec<Self> {
+        superres::upscale(src, stride, down_w, up_w, height, max_x)
+    }
+
+    fn restore_plane(
+        cdef: &[Self],
+        before: &[Self],
+        width: usize,
+        height: usize,
+        lr: &restore::Grid,
+        plane: usize,
+        frame: &FrameInfo,
+    ) -> Vec<Self> {
+        restore_eight(cdef, before, width, height, lr, plane, frame)
+    }
+}
+
+impl FinishPlane for u16 {
+    fn upscale(
+        src: &[Self],
+        stride: usize,
+        down_w: usize,
+        up_w: usize,
+        height: usize,
+        max_x: usize,
+    ) -> Vec<Self> {
+        let _ = (src, stride, down_w, up_w, height, max_x);
+        Vec::new()
+    }
+
+    fn restore_plane(
+        cdef: &[Self],
+        before: &[Self],
+        width: usize,
+        height: usize,
+        lr: &restore::Grid,
+        plane: usize,
+        frame: &FrameInfo,
+    ) -> Vec<Self> {
+        let _ = (before, width, height, lr, plane, frame);
+        cdef.to_vec()
+    }
+}
+
+fn restore_eight(
     cdef: &[u8],
     before: &[u8],
     width: usize,
@@ -410,15 +498,15 @@ fn part_tile_num(frame: &FrameInfo, part: &TilePart) -> Result<usize, CodecError
 }
 
 /// Tiles reconstruct independently. Loop-filter rows then share the remaining cores.
-fn decode_tiles<'a, 'r>(
+fn decode_tiles<'a, 'r, S: Pix>(
     sequence: &Sequence,
     frame: &FrameInfo,
     parts: &'a [TilePart],
     buf_w: usize,
     buf_h: usize,
-    refs: &[Option<RefView<'r>>],
+    refs: &[Option<RefView<'r, S>>],
     initial: &Cdfs,
-) -> Result<(Tile<'a, 'r>, Option<Cdfs>), CodecError> {
+) -> Result<(Tile<'a, 'r, S>, Option<Cdfs>), CodecError> {
     let sb = if sequence.use_128 { 32 } else { SB4 };
     let decoded = std::thread::scope(|scope| {
         let mut joins = Vec::with_capacity(parts.len());
@@ -468,7 +556,7 @@ fn decode_tiles<'a, 'r>(
     Ok((base, end_cdfs))
 }
 
-fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
+fn copy_tile_region<S: Pix>(dst: &mut Tile<'_, '_, S>, src: &Tile<'_, '_, S>) {
     let y0 = src.tile_row.saturating_mul(4);
     let y1 = src.tile_row_end.saturating_mul(4);
     let x0 = src.tile_col.saturating_mul(4);
@@ -516,9 +604,9 @@ fn copy_tile_region(dst: &mut Tile<'_, '_>, src: &Tile<'_, '_>) {
     }
 }
 
-fn copy_plane(
-    dst: &mut [u8],
-    src: &[u8],
+fn copy_plane<S: Copy>(
+    dst: &mut [S],
+    src: &[S],
     stride: usize,
     x0: usize,
     x1: usize,
@@ -551,8 +639,8 @@ fn copy_cells<T: Copy>(dst: &mut [T], src: &[T], start: usize, n: usize) {
     into.copy_from_slice(from);
 }
 
-fn crop(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
-    let mut out = vec![0u8; width.saturating_mul(height)];
+fn crop<S: Copy + Default>(src: &[S], stride: usize, width: usize, height: usize) -> Vec<S> {
+    let mut out = vec![S::default(); width.saturating_mul(height)];
     if stride == 0 || width == 0 || height == 0 {
         return out;
     }
@@ -577,12 +665,12 @@ struct PlaneRect {
     sub_y: bool,
 }
 
-struct Tile<'a, 'r> {
+struct Tile<'a, 'r, S: Pix = u8> {
     symbols: SymbolDecoder<'a>,
     update: bool,
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
+    y: Vec<S>,
+    u: Vec<S>,
+    v: Vec<S>,
     width: usize,
     height: usize,
     chroma_w: usize,
@@ -652,6 +740,7 @@ struct Tile<'a, 'r> {
     sub_x: bool,
     sub_y: bool,
     monochrome: bool,
+    bit_depth: u8,
     inter_frame: bool,
     force_integer: bool,
     allow_hp: bool,
@@ -664,9 +753,9 @@ struct Tile<'a, 'r> {
     frame_refs: [u8; 7],
     visible_w: usize,
     visible_h: usize,
-    ref_y: [&'r [u8]; 8],
-    ref_u: [&'r [u8]; 8],
-    ref_v: [&'r [u8]; 8],
+    ref_y: [&'r [S]; 8],
+    ref_u: [&'r [S]; 8],
+    ref_v: [&'r [S]; 8],
     ref_w: [usize; 8],
     ref_h: [usize; 8],
     ref_ok: [bool; 8],
@@ -789,14 +878,14 @@ pub(crate) struct Cdfs {
     intrabc: Vec<u16>,
 }
 
-impl<'a, 'r> Tile<'a, 'r> {
+impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
     fn new(
         sequence: &Sequence,
         frame: &FrameInfo,
         bytes: &'a [u8],
         width: usize,
         height: usize,
-        refs: &[Option<RefView<'r>>],
+        refs: &[Option<RefView<'r, S>>],
         initial: &Cdfs,
     ) -> Result<Self, CodecError> {
         let mi_cols = frame.mi_cols as usize;
@@ -818,9 +907,9 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             height
         };
-        let mut ref_y: [&'r [u8]; 8] = [&[]; 8];
-        let mut ref_u: [&'r [u8]; 8] = [&[]; 8];
-        let mut ref_v: [&'r [u8]; 8] = [&[]; 8];
+        let mut ref_y: [&'r [S]; 8] = [&[]; 8];
+        let mut ref_u: [&'r [S]; 8] = [&[]; 8];
+        let mut ref_v: [&'r [S]; 8] = [&[]; 8];
         let mut ref_w = [0usize; 8];
         let mut ref_h = [0usize; 8];
         let mut ref_ok = [false; 8];
@@ -837,9 +926,9 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(Self {
             symbols: SymbolDecoder::new(bytes)?,
             update: !frame.disable_cdf_update,
-            y: vec![0; width * height],
-            u: vec![128; chroma_w * chroma_h],
-            v: vec![128; chroma_w * chroma_h],
+            y: vec![S::default(); width * height],
+            u: vec![S::from_i32(sample_mid(sequence.bit_depth)); chroma_w * chroma_h],
+            v: vec![S::from_i32(sample_mid(sequence.bit_depth)); chroma_w * chroma_h],
             width,
             height,
             chroma_w,
@@ -918,6 +1007,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             sub_x: sequence.subsampling_x,
             sub_y: sequence.subsampling_y,
             monochrome: sequence.monochrome,
+            bit_depth: sequence.bit_depth,
             inter_frame: !frame.intra,
             force_integer: frame.force_integer_mv,
             allow_hp: frame.allow_high_precision_mv,
@@ -3008,7 +3098,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let warp_params = local.or(global.then_some(gm_params));
         if ii >= 0 {
             self.predict_block_intra(block, interintra_intra_mode(ii as u8), x, y, w, h)?;
-            let mut packed = vec![0u8; w.saturating_mul(h)];
+            let mut packed = vec![S::default(); w.saturating_mul(h)];
             let reference = self.ref_plane(slot, block.plane);
             let mut sample = InterSample {
                 dst: &mut packed,
@@ -3031,6 +3121,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 ref_h,
                 write_x: 0,
                 write_y: 0,
+                bit_depth: self.bit_depth,
             };
             if let Some(params) = warp_params {
                 predict_warp(&mut sample, params)?;
@@ -3048,13 +3139,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.chroma_w
         };
-        let reference: &[u8] = match block.plane {
+        let reference: &[S] = match block.plane {
             0 => self.ref_y[slot],
             1 => self.ref_u[slot],
             _ => self.ref_v[slot],
         };
         {
-            let dst: &mut [u8] = if block.plane == 0 {
+            let dst: &mut [S] = if block.plane == 0 {
                 &mut self.y
             } else if block.plane == 1 {
                 &mut self.u
@@ -3082,6 +3173,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 ref_h,
                 write_x: x,
                 write_y: y,
+                bit_depth: self.bit_depth,
             };
             if let Some(params) = warp_params {
                 predict_warp(&mut sample, params)?;
@@ -3197,12 +3289,12 @@ impl<'a, 'r> Tile<'a, 'r> {
         let plane_w = ref_w.div_ceil(2);
         let plane_h = ref_h.div_ceil(2);
         let stride = self.chroma_w;
-        let reference: &[u8] = if block.plane == 1 {
+        let reference: &[S] = if block.plane == 1 {
             self.ref_u[slot]
         } else {
             self.ref_v[slot]
         };
-        let dst: &mut [u8] = if block.plane == 1 {
+        let dst: &mut [S] = if block.plane == 1 {
             &mut self.u
         } else {
             &mut self.v
@@ -3236,6 +3328,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref_h,
             write_x: x,
             write_y: y,
+            bit_depth: self.bit_depth,
         };
         predict(&mut sample)
     }
@@ -3417,7 +3510,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.chroma_w
         };
-        let dst: &mut [u8] = if block.plane == 0 {
+        let dst: &mut [S] = if block.plane == 0 {
             &mut self.y
         } else if block.plane == 1 {
             &mut self.u
@@ -3437,15 +3530,21 @@ impl<'a, 'r> Tile<'a, 'r> {
                 let Some(slot) = dst.get_mut(dest) else {
                     continue;
                 };
-                let pred = u32::from(*packed.get(row * overlap.pred_w + col).unwrap_or(&0));
-                let curr = u32::from(*slot);
-                *slot = ((weight * curr + (64 - weight) * pred + 32) >> 6) as u8;
+                let pred = packed
+                    .get(row * overlap.pred_w + col)
+                    .copied()
+                    .unwrap_or(S::default())
+                    .to_i32();
+                let curr = slot.to_i32();
+                let weight = i32::try_from(weight).unwrap_or(0);
+                let mixed = (weight * curr + (64 - weight) * pred + 32) >> 6;
+                *slot = S::from_i32(clip_sample(mixed, self.bit_depth));
             }
         }
         Ok(())
     }
 
-    fn predict_neighbor(&self, pred: NeighborPred) -> Result<Vec<u8>, CodecError> {
+    fn predict_neighbor(&self, pred: NeighborPred) -> Result<Vec<S>, CodecError> {
         let ref_w = self.ref_w[pred.slot];
         let ref_h = self.ref_h[pred.slot];
         let plane_w = if pred.plane == 0 {
@@ -3459,7 +3558,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref_h.div_ceil(2)
         };
         let reference = self.ref_plane(pred.slot, pred.plane);
-        let mut packed = vec![0u8; pred.w.saturating_mul(pred.h)];
+        let mut packed = vec![S::default(); pred.w.saturating_mul(pred.h)];
         let mut sample = InterSample {
             dst: &mut packed,
             stride: pred.w,
@@ -3481,6 +3580,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref_h,
             write_x: 0,
             write_y: 0,
+            bit_depth: self.bit_depth,
         };
         predict(&mut sample)?;
         Ok(packed)
@@ -3521,21 +3621,22 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.blend_w
         };
-        let mut blended = vec![0u8; n];
+        let mut blended = vec![S::default(); n];
         for row in 0..h {
             for col in 0..w {
                 let sample = row * w + col;
-                blended[sample] = if kind == 0 {
+                let value = if kind == 0 {
                     if let Some((fwd, bck)) = weights {
-                        distance_compound(first[sample], second[sample], fwd, bck)
+                        distance_compound(first[sample], second[sample], fwd, bck, self.bit_depth)
                     } else {
-                        average_compound(first[sample], second[sample])
+                        average_compound(first[sample], second[sample], self.bit_depth)
                     }
                 } else {
                     let weight =
                         compound_mask_weight(&self.blend_mask, luma_w, col, row, sub_x, sub_y);
-                    mask_compound(first[sample], second[sample], weight)
+                    mask_compound(first[sample], second[sample], weight, self.bit_depth)
                 };
+                blended[sample] = S::from_i32(value);
             }
         }
         let stride = if block.plane == 0 {
@@ -3543,7 +3644,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             self.chroma_w
         };
-        let dst: &mut [u8] = if block.plane == 0 {
+        let dst: &mut [S] = if block.plane == 0 {
             &mut self.y
         } else if block.plane == 1 {
             &mut self.u
@@ -3577,7 +3678,15 @@ impl<'a, 'r> Tile<'a, 'r> {
                 &mut self.blend_mask,
             );
         } else {
-            difference_mask(first, second, w, h, mask_type(packed), &mut self.blend_mask);
+            difference_mask(
+                first,
+                second,
+                w,
+                h,
+                mask_type(packed),
+                self.bit_depth,
+                &mut self.blend_mask,
+            );
         }
         self.blend_w = w;
         self.blend_ready = true;
@@ -3689,7 +3798,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             && global_shear_valid(gm_params);
         let reference_plane = self.ref_plane(slot, block.plane);
         if warp {
-            let mut packed = vec![0u8; w.saturating_mul(h)];
+            let mut packed = vec![S::default(); w.saturating_mul(h)];
             let mut sample = InterSample {
                 dst: &mut packed,
                 stride: w,
@@ -3711,10 +3820,11 @@ impl<'a, 'r> Tile<'a, 'r> {
                 ref_h,
                 write_x: 0,
                 write_y: 0,
+                bit_depth: self.bit_depth,
             };
             predict_warp(&mut sample, gm_params)?;
             for (slot, pixel) in dst.iter_mut().zip(packed) {
-                *slot = i32::from(pixel) << 4;
+                *slot = pixel.to_i32() << 4;
             }
             return Ok(());
         }
@@ -3740,11 +3850,12 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref_h,
             write_x: 0,
             write_y: 0,
+            bit_depth: self.bit_depth,
         };
         predict_precise(&sample, dst)
     }
 
-    fn ref_plane(&self, slot: usize, plane: usize) -> &'r [u8] {
+    fn ref_plane(&self, slot: usize, plane: usize) -> &'r [S] {
         match plane {
             0 => self.ref_y[slot],
             1 => self.ref_u[slot],
@@ -3806,6 +3917,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             max_x: plane_w.saturating_sub(1),
             max_y: plane_h.saturating_sub(1),
             filter: None,
+            bit_depth: self.bit_depth,
         };
         let plane = if block.plane == 0 {
             &mut self.y
@@ -3823,7 +3935,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         plane: usize,
         mode: u8,
         place: (usize, usize, usize, usize),
-        inter: &[u8],
+        inter: &[S],
     ) {
         let (x, y, w, h) = place;
         let stride = if plane == 0 {
@@ -3849,9 +3961,9 @@ impl<'a, 'r> Tile<'a, 'r> {
                     continue;
                 };
                 let weight = interintra_weight(mode, row, col, scale);
-                let intra = i32::from(*slot);
-                let mixed = weight * intra + (64 - weight) * i32::from(sample);
-                *slot = ((mixed + 32) >> 6).clamp(0, 255) as u8;
+                let intra = slot.to_i32();
+                let mixed = weight * intra + (64 - weight) * sample.to_i32();
+                *slot = S::from_i32(clip_sample((mixed + 32) >> 6, self.bit_depth));
             }
         }
     }
@@ -4178,6 +4290,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             ref_h: self.visible_h,
             write_x: x,
             write_y: y,
+            bit_depth: self.bit_depth,
         })
     }
 
@@ -4283,7 +4396,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             cache_i += 1;
         }
         if idx < size {
-            colors[idx] = self.symbols.read_literal(8)? as u16;
+            colors[idx] = self.symbols.read_literal(u32::from(self.bit_depth))? as u16;
             idx += 1;
         }
         if idx < size {
@@ -4314,7 +4427,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let mut colors = [0u16; 8];
         if self.symbols.read_bool()? {
             let bits = 4 + self.symbols.read_literal(2)?;
-            colors[0] = self.symbols.read_literal(8)? as u16;
+            colors[0] = self.symbols.read_literal(u32::from(self.bit_depth))? as u16;
             for idx in 1..size {
                 let magnitude = self.symbols.read_literal(bits)? as i32;
                 let delta = if magnitude == 0 {
@@ -4331,11 +4444,11 @@ impl<'a, 'r> Tile<'a, 'r> {
                 if val >= 256 {
                     val -= 256;
                 }
-                colors[idx] = val.clamp(0, 255) as u16;
+                colors[idx] = clip_sample(val, self.bit_depth) as u16;
             }
         } else {
             for color in colors.iter_mut().take(size) {
-                *color = self.symbols.read_literal(8)? as u16;
+                *color = self.symbols.read_literal(u32::from(self.bit_depth))? as u16;
             }
         }
         self.pal_colors_v = colors;
@@ -4590,7 +4703,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 let color = colors.get(usize::from(index)).copied().unwrap_or(0);
                 let at = y * stride + x;
                 if let Some(sample) = dst.get_mut(at) {
-                    *sample = color as u8;
+                    *sample = S::from_i32(clip_sample(i32::from(color), self.bit_depth));
                 }
             }
         }
@@ -5365,6 +5478,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             } else {
                 None
             },
+            bit_depth: self.bit_depth,
         };
         if block.plane == 0 {
             predict_intra(&mut self.y, stride, &pred, &mut self.predict)?;
@@ -5388,6 +5502,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                         alpha: self.cfl_u,
                         max_luma_w: self.max_luma_w,
                         max_luma_h: self.max_luma_h,
+                        bit_depth: self.bit_depth,
                     },
                     self.predict.ac(),
                 )?;
@@ -5410,6 +5525,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                         alpha: self.cfl_v,
                         max_luma_w: self.max_luma_w,
                         max_luma_h: self.max_luma_h,
+                        bit_depth: self.bit_depth,
                     },
                     self.predict.ac(),
                 )?;
@@ -5989,8 +6105,9 @@ impl<'a, 'r> Tile<'a, 'r> {
                 let dq = level * i64::from(q);
                 let signed = if dq < 0 { -1 } else { 1 };
                 let value = signed * ((dq.abs() & 0x00ff_ffff) / i64::from(denom));
+                let lim = 1i64 << (7 + u32::from(self.bit_depth));
                 self.coeff_buf[row * w + col] =
-                    i32::try_from(value.clamp(-32768, 32767)).unwrap_or(0);
+                    i32::try_from(value.clamp(-lim, lim - 1)).unwrap_or(0);
             }
         }
         if self.lossless {
@@ -6007,6 +6124,7 @@ impl<'a, 'r> Tile<'a, 'r> {
                 h,
                 tx_type,
                 TRANSFORM_ROW_SHIFT[tx],
+                self.bit_depth,
             );
         }
         let flip_ud = matches!(
@@ -6038,8 +6156,8 @@ impl<'a, 'r> Tile<'a, 'r> {
                 let Some(slot) = samples.get_mut(at) else {
                     continue;
                 };
-                let sum = i32::from(*slot) + residual[row * w + col];
-                *slot = sum.clamp(0, 255) as u8;
+                let sum = slot.to_i32() + residual[row * w + col];
+                *slot = S::from_i32(clip_sample(sum, self.bit_depth));
             }
         }
         Ok(())
@@ -6069,7 +6187,10 @@ impl<'a, 'r> Tile<'a, 'r> {
             }
         };
         let q = (self.qindex() + delta).clamp(0, 255) as usize;
-        i32::from(if dc { DC_QLOOKUP[q] } else { AC_QLOOKUP[q] })
+        let row = usize::from(self.bit_depth.saturating_sub(8) / 2);
+        let index = row * 256 + q;
+        let table = if dc { &DC_QLOOKUP } else { &AC_QLOOKUP };
+        i32::from(table.get(index).copied().unwrap_or(0))
     }
 }
 

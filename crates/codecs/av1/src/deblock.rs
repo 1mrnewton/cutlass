@@ -9,6 +9,7 @@ use crate::dims::{
 };
 use crate::header::{FrameInfo, SEG_ALT_LF_Y_V};
 use crate::inter::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV};
+use crate::sample::{Pix, clip_sample, depth_shift};
 
 const MAX_LOOP_FILTER: i32 = 63;
 
@@ -26,16 +27,37 @@ pub struct Edges<'a> {
     pub sub_x: bool,
     pub sub_y: bool,
     pub frame: &'a FrameInfo,
+    pub bit_depth: u8,
 }
 
-pub struct Picture<'a> {
-    pub y: &'a mut [u8],
+pub struct Picture<'a, S> {
+    pub y: &'a mut [S],
     pub y_w: usize,
     pub y_h: usize,
-    pub u: &'a mut [u8],
-    pub v: &'a mut [u8],
+    pub u: &'a mut [S],
+    pub v: &'a mut [S],
     pub c_w: usize,
     pub c_h: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Depth {
+    shift: u32,
+    off: i32,
+    half: i32,
+    flat: i32,
+    bit_depth: u8,
+}
+
+fn depth_of(bit_depth: u8) -> Depth {
+    let shift = depth_shift(bit_depth);
+    Depth {
+        shift,
+        off: 128 << shift,
+        half: 128 << shift,
+        flat: 1 << shift,
+        bit_depth,
+    }
 }
 
 /// Loop-filter every plane on a shared set of workers.
@@ -43,7 +65,7 @@ pub struct Picture<'a> {
 /// Vertical edges finish before horizontal edges inside each plane. Row bands
 /// of one plane run together, and the chroma planes run beside luma, so the
 /// cores that finished a tile pick up filter rows instead of waiting.
-pub fn deblock_picture(picture: Picture<'_>, edges: &Edges<'_>) {
+pub fn deblock_picture<S: Pix>(picture: Picture<'_, S>, edges: &Edges<'_>) {
     if edges.frame.lf_level[0] == 0 && edges.frame.lf_level[1] == 0 {
         return;
     }
@@ -66,8 +88,8 @@ pub fn deblock_picture(picture: Picture<'_>, edges: &Edges<'_>) {
     });
 }
 
-fn filter_plane(
-    samples: &mut [u8],
+fn filter_plane<S: Pix>(
+    samples: &mut [S],
     width: usize,
     height: usize,
     plane: usize,
@@ -99,6 +121,7 @@ fn filter_plane(
             sub_x,
             sub_y,
             col_step,
+            depth: depth_of(edges.bit_depth),
         };
         if pass == 0 {
             run_bands(
@@ -128,6 +151,7 @@ struct Job<'a> {
     sub_x: usize,
     sub_y: usize,
     col_step: usize,
+    depth: Depth,
 }
 
 #[derive(Clone, Copy)]
@@ -230,7 +254,7 @@ fn horizontal_bands(
     bands
 }
 
-fn run_bands(samples: &mut [u8], bands: &[Band], job: &Job<'_>) {
+fn run_bands<S: Pix>(samples: &mut [S], bands: &[Band], job: &Job<'_>) {
     if bands.is_empty() {
         return;
     }
@@ -291,7 +315,13 @@ fn disjoint(bands: &[Band]) -> bool {
     true
 }
 
-fn filter_rows(samples: &mut [u8], band_y: usize, band_h: usize, band: &Band, job: &Job<'_>) {
+fn filter_rows<S: Pix>(
+    samples: &mut [S],
+    band_y: usize,
+    band_h: usize,
+    band: &Band,
+    job: &Job<'_>,
+) {
     let mut row = band.row0;
     while row < band.row1 && row < job.edges.mi_rows {
         let mut col = 0;
@@ -348,9 +378,10 @@ struct Strength {
     limit: i32,
     blimit: i32,
     thresh: i32,
+    depth: Depth,
 }
 
-fn filter_edge(samples: &mut [u8], job: &Job<'_>, band_y: usize, band_h: usize, mi: Mi) {
+fn filter_edge<S: Pix>(samples: &mut [S], job: &Job<'_>, band_y: usize, band_h: usize, mi: Mi) {
     let Mi {
         mut row,
         mut col,
@@ -395,10 +426,12 @@ fn filter_edge(samples: &mut [u8], job: &Job<'_>, band_y: usize, band_h: usize, 
         return;
     }
     let (limit, blimit, thresh) = limits(lvl, job.edges.frame.lf_sharpness);
+    let shift = job.depth.shift;
     let strength = Strength {
-        limit,
-        blimit,
-        thresh,
+        limit: limit << shift,
+        blimit: blimit << shift,
+        thresh: thresh << shift,
+        depth: job.depth,
     };
     let y_base = band_y as i32;
     for i in 0..4 {
@@ -597,8 +630,8 @@ fn limits(lvl: i32, sharpness: u8) -> (i32, i32, i32) {
     (limit, blimit, thresh)
 }
 
-fn filter_sample(
-    samples: &mut [u8],
+fn filter_sample<S: Pix>(
+    samples: &mut [S],
     width: usize,
     height: usize,
     axis: Axis,
@@ -610,18 +643,19 @@ fn filter_sample(
     let Some(mut line) = load_line(samples, width, height, axis, radius) else {
         return;
     };
-    let mask = masks(&line, strength, filter_size, plane);
+    let depth = strength.depth;
+    let mask = masks(&line, strength, filter_size, plane, depth.flat);
     if !mask.filter {
         return;
     }
     if filter_size == 4 || !mask.flat {
-        narrow(&mut line, mask.hev);
+        narrow(&mut line, mask.hev, depth);
     } else if filter_size == 8 || !mask.flat2 {
         wide(&mut line, 3, plane);
     } else {
         wide(&mut line, 4, plane);
     }
-    store_line(samples, width, axis, &line);
+    store_line(samples, width, axis, &line, depth);
 }
 
 struct Mask {
@@ -631,7 +665,13 @@ struct Mask {
     flat2: bool,
 }
 
-fn load_line(samples: &[u8], width: usize, height: usize, axis: Axis, radius: i32) -> Option<Line> {
+fn load_line<S: Pix>(
+    samples: &[S],
+    width: usize,
+    height: usize,
+    axis: Axis,
+    radius: i32,
+) -> Option<Line> {
     let origin = radius;
     let count = (radius * 2) as usize;
     if count > 16 || radius <= 0 {
@@ -667,8 +707,8 @@ fn load_line(samples: &[u8], width: usize, height: usize, axis: Axis, radius: i3
 
 /// Copy a window that sits fully inside the plane. The edge filter is the hot
 /// path, and the per-sample bounds check is the same answer for every tap.
-fn load_window(
-    samples: &[u8],
+fn load_window<S: Pix>(
+    samples: &[S],
     width: usize,
     height: usize,
     axis: Axis,
@@ -685,7 +725,7 @@ fn load_window(
         let row = samples.get(start..start + count)?;
         let mut values = [0i32; 16];
         for (slot, sample) in values.iter_mut().zip(row) {
-            *slot = i32::from(*sample);
+            *slot = sample.to_i32();
         }
         return Some(values);
     }
@@ -698,16 +738,16 @@ fn load_window(
         let mut values = [0i32; 16];
         for (i, slot) in values.iter_mut().take(count).enumerate() {
             let at = (y0 + i).saturating_mul(width).saturating_add(x);
-            *slot = i32::from(*samples.get(at)?);
+            *slot = samples.get(at)?.to_i32();
         }
         return Some(values);
     }
     None
 }
 
-fn store_line(samples: &mut [u8], width: usize, axis: Axis, line: &Line) {
+fn store_line<S: Pix>(samples: &mut [S], width: usize, axis: Axis, line: &Line, depth: Depth) {
     let count = (line.to - line.from) as usize;
-    if store_window(samples, width, axis, line, count) {
+    if store_window(samples, width, axis, line, count, depth) {
         return;
     }
     let mut p = line.from;
@@ -718,12 +758,20 @@ fn store_line(samples: &mut [u8], width: usize, axis: Axis, line: &Line) {
             axis.x + p * axis.dx,
             axis.y + p * axis.dy,
             line.values[(line.origin + p) as usize],
+            depth,
         );
         p += 1;
     }
 }
 
-fn store_window(samples: &mut [u8], width: usize, axis: Axis, line: &Line, count: usize) -> bool {
+fn store_window<S: Pix>(
+    samples: &mut [S],
+    width: usize,
+    axis: Axis,
+    line: &Line,
+    count: usize,
+    depth: Depth,
+) -> bool {
     if count > 16 {
         return false;
     }
@@ -740,7 +788,7 @@ fn store_window(samples: &mut [u8], width: usize, axis: Axis, line: &Line, count
         };
         for (slot, p) in row.iter_mut().zip(line.from..line.to) {
             let value = line.values[(line.origin + p) as usize];
-            *slot = value.clamp(0, 255) as u8;
+            *slot = S::from_i32(clip_sample(value, depth.bit_depth));
         }
         return true;
     }
@@ -760,7 +808,7 @@ fn store_window(samples: &mut [u8], width: usize, axis: Axis, line: &Line, count
                 return false;
             };
             let value = line.values[(line.origin + p) as usize];
-            *slot = value.clamp(0, 255) as u8;
+            *slot = S::from_i32(clip_sample(value, depth.bit_depth));
         }
         return true;
     }
@@ -780,11 +828,18 @@ fn put(line: &mut Line, p: i32, value: i32) {
     }
 }
 
-fn masks(line: &Line, strength: Strength, filter_size: usize, plane: usize) -> Mask {
+fn masks(
+    line: &Line,
+    strength: Strength,
+    filter_size: usize,
+    plane: usize,
+    flat_thresh: i32,
+) -> Mask {
     let Strength {
         limit,
         blimit,
         thresh,
+        depth: _,
     } = strength;
     let q0 = at(line, 0);
     let q1 = at(line, 1);
@@ -817,12 +872,12 @@ fn masks(line: &Line, strength: Strength, filter_size: usize, plane: usize) -> M
     let flat = if filter_size >= 8 {
         let p2 = at(line, -3);
         let q2 = at(line, 2);
-        let mut flat_mask = (p1 - p0).abs() > 1 || (q1 - q0).abs() > 1;
-        flat_mask |= (p2 - p0).abs() > 1 || (q2 - q0).abs() > 1;
+        let mut flat_mask = (p1 - p0).abs() > flat_thresh || (q1 - q0).abs() > flat_thresh;
+        flat_mask |= (p2 - p0).abs() > flat_thresh || (q2 - q0).abs() > flat_thresh;
         if filter_len >= 8 {
             let p3 = at(line, -4);
             let q3 = at(line, 3);
-            flat_mask |= (p3 - p0).abs() > 1 || (q3 - q0).abs() > 1;
+            flat_mask |= (p3 - p0).abs() > flat_thresh || (q3 - q0).abs() > flat_thresh;
         }
         !flat_mask
     } else {
@@ -831,7 +886,8 @@ fn masks(line: &Line, strength: Strength, filter_size: usize, plane: usize) -> M
     let flat2 = if filter_size >= 16 {
         let mut flat_mask = false;
         for p in [4, 5, 6] {
-            flat_mask |= (at(line, -1 - p) - p0).abs() > 1 || (at(line, p) - q0).abs() > 1;
+            flat_mask |= (at(line, -1 - p) - p0).abs() > flat_thresh
+                || (at(line, p) - q0).abs() > flat_thresh;
         }
         !flat_mask
     } else {
@@ -845,25 +901,33 @@ fn masks(line: &Line, strength: Strength, filter_size: usize, plane: usize) -> M
     }
 }
 
-fn narrow(line: &mut Line, hev: bool) {
+fn narrow(line: &mut Line, hev: bool, depth: Depth) {
     let q0 = at(line, 0);
     let q1 = at(line, 1);
     let p0 = at(line, -1);
     let p1 = at(line, -2);
-    let ps1 = p1 - 128;
-    let ps0 = p0 - 128;
-    let qs0 = q0 - 128;
-    let qs1 = q1 - 128;
-    let mut filter = if hev { clamp4(ps1 - qs1) } else { 0 };
-    filter = clamp4(filter + 3 * (qs0 - ps0));
-    let filter1 = clamp4(filter + 4) >> 3;
-    let filter2 = clamp4(filter + 3) >> 3;
-    put(line, 0, clamp4(qs0 - filter1) + 128);
-    put(line, -1, clamp4(ps0 + filter2) + 128);
+    let ps1 = p1 - depth.off;
+    let ps0 = p0 - depth.off;
+    let qs0 = q0 - depth.off;
+    let qs1 = q1 - depth.off;
+    let mut filter = if hev {
+        clamp_signed(ps1 - qs1, depth.half)
+    } else {
+        0
+    };
+    filter = clamp_signed(filter + 3 * (qs0 - ps0), depth.half);
+    let filter1 = clamp_signed(filter + 4, depth.half) >> 3;
+    let filter2 = clamp_signed(filter + 3, depth.half) >> 3;
+    put(line, 0, clamp_signed(qs0 - filter1, depth.half) + depth.off);
+    put(
+        line,
+        -1,
+        clamp_signed(ps0 + filter2, depth.half) + depth.off,
+    );
     if !hev {
         let filter = round2(filter1, 1);
-        put(line, 1, clamp4(qs1 - filter) + 128);
-        put(line, -2, clamp4(ps1 + filter) + 128);
+        put(line, 1, clamp_signed(qs1 - filter, depth.half) + depth.off);
+        put(line, -2, clamp_signed(ps1 + filter, depth.half) + depth.off);
     }
 }
 
@@ -890,7 +954,7 @@ fn wide(line: &mut Line, log2_size: u32, plane: usize) {
     }
 }
 
-fn sample(samples: &[u8], width: usize, height: usize, x: i32, y: i32) -> Option<i32> {
+fn sample<S: Pix>(samples: &[S], width: usize, height: usize, x: i32, y: i32) -> Option<i32> {
     if x < 0 || y < 0 {
         return None;
     }
@@ -898,10 +962,10 @@ fn sample(samples: &[u8], width: usize, height: usize, x: i32, y: i32) -> Option
     if x >= width || y >= height {
         return None;
     }
-    samples.get(y * width + x).copied().map(i32::from)
+    samples.get(y * width + x).copied().map(Pix::to_i32)
 }
 
-fn store(samples: &mut [u8], width: usize, x: i32, y: i32, value: i32) {
+fn store<S: Pix>(samples: &mut [S], width: usize, x: i32, y: i32, value: i32, depth: Depth) {
     if x < 0 || y < 0 {
         return;
     }
@@ -910,12 +974,12 @@ fn store(samples: &mut [u8], width: usize, x: i32, y: i32, value: i32) {
         return;
     }
     if let Some(slot) = samples.get_mut(y * width + x) {
-        *slot = value.clamp(0, 255) as u8;
+        *slot = S::from_i32(clip_sample(value, depth.bit_depth));
     }
 }
 
-fn clamp4(value: i32) -> i32 {
-    value.clamp(-128, 127)
+fn clamp_signed(value: i32, half: i32) -> i32 {
+    value.clamp(-half, half - 1)
 }
 
 fn round2(x: i32, n: u32) -> i32 {

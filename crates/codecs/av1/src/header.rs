@@ -675,9 +675,8 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let enable_cdef = bits.read_bool()?;
     let enable_restoration = bits.read_bool()?;
     let high = bits.read_bool()?;
-    if high {
-        return Err(CodecError::Unsupported { what: "bit depth" });
-    }
+    // Profile 0 has no `twelve_bit`. `high_bitdepth` selects 10-bit samples.
+    let bit_depth = if high { 10 } else { 8 };
     // Profile 0 with `mono_chrome` has one plane. Chroma sample position and
     // `separate_uv_delta_q` are not present. A three-plane header still reads both.
     let monochrome = bits.read_bool()?;
@@ -721,7 +720,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         force_integer_select,
         force_screen,
         force_integer,
-        bit_depth: 8,
+        bit_depth,
         monochrome,
         subsampling_x: true,
         subsampling_y: true,

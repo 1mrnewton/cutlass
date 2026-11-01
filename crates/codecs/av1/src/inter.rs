@@ -13,6 +13,8 @@
 
 use cutlass_decode::CodecError;
 
+use crate::sample::{Pix, clip_sample, depth_shift};
+
 use crate::dims::{
     ADST_ADST, ADST_DCT, ADST_FLIPADST, DCT_ADST, DCT_DCT, DCT_FLIPADST, FLIPADST_ADST,
     FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT, H_FLIPADST, IDTX, NUM_4X4_HIGH, NUM_4X4_WIDE,
@@ -96,10 +98,10 @@ pub struct Motion {
     pub col: i32,
 }
 
-pub struct RefView<'a> {
-    pub y: &'a [u8],
-    pub u: &'a [u8],
-    pub v: &'a [u8],
+pub struct RefView<'a, S: Pix = u8> {
+    pub y: &'a [S],
+    pub u: &'a [S],
+    pub v: &'a [S],
     pub width: usize,
     pub height: usize,
     pub frame_type: u8,
@@ -1082,7 +1084,7 @@ pub struct FieldSource<'a> {
     pub saved: &'a [Option<SavedView<'a>>; 8],
 }
 
-pub fn saved_views<'a>(refs: &[Option<RefView<'a>>]) -> [Option<SavedView<'a>>; 8] {
+pub fn saved_views<'a, S: Pix>(refs: &[Option<RefView<'a, S>>]) -> [Option<SavedView<'a>>; 8] {
     let mut saved = std::array::from_fn(|_| None);
     for (slot, view) in refs.iter().enumerate().take(8) {
         if let Some(view) = view {
@@ -1431,8 +1433,8 @@ fn lower_comp(value: i32, integer: bool) -> i32 {
     }
 }
 
-pub struct InterSample<'a> {
-    pub dst: &'a mut [u8],
+pub struct InterSample<'a, S: Pix = u8> {
+    pub dst: &'a mut [S],
     pub stride: usize,
     pub x: usize,
     pub y: usize,
@@ -1442,7 +1444,7 @@ pub struct InterSample<'a> {
     pub sub_y: bool,
     pub mv: Motion,
     pub filter: [u8; 2],
-    pub reference: &'a [u8],
+    pub reference: &'a [S],
     pub ref_stride: usize,
     pub plane_w: usize,
     pub plane_h: usize,
@@ -1453,6 +1455,7 @@ pub struct InterSample<'a> {
     /// Where the predicted samples are stored. The motion vector still uses `x` and `y`.
     pub write_x: usize,
     pub write_y: usize,
+    pub bit_depth: u8,
 }
 
 /// Shear of a rotation-zoom or affine model. Section 7.11.3.6.
@@ -1622,7 +1625,10 @@ fn round2_signed_i128(value: i128, bits: u32) -> i64 {
 }
 
 /// Warp one plane from a global rotation-zoom or affine model. Section 7.11.3.5.
-pub fn predict_warp(sample: &mut InterSample<'_>, params: [i32; 6]) -> Result<(), CodecError> {
+pub fn predict_warp<S: Pix>(
+    sample: &mut InterSample<'_, S>,
+    params: [i32; 6],
+) -> Result<(), CodecError> {
     let x_scale = scale(sample.ref_w, sample.frame_w);
     let y_scale = scale(sample.ref_h, sample.frame_h);
     if x_scale != NO_SCALE || y_scale != NO_SCALE {
@@ -1659,8 +1665,8 @@ pub fn predict_warp(sample: &mut InterSample<'_>, params: [i32; 6]) -> Result<()
     Ok(())
 }
 
-fn warp_section(
-    sample: &mut InterSample<'_>,
+fn warp_section<S: Pix>(
+    sample: &mut InterSample<'_, S>,
     params: [i32; 6],
     shear: (i32, i32, i32, i32),
     sub: (i32, i32),
@@ -1712,7 +1718,7 @@ fn warp_section(
                 let col = (i2 + 4) as usize;
                 sum += i32::from(*coeff) * intermediate[row][col];
             }
-            let pred = round2(sum, 11).clamp(0, 255) as u8;
+            let pred = S::from_i32(clip_sample(round2(sum, 11), sample.bit_depth));
             let y = sample.write_y + (i8 * 8 + i1 + 4) as usize;
             let x = sample.write_x + (j8 * 8 + i2 + 4) as usize;
             if x < sample.stride {
@@ -1750,7 +1756,7 @@ const WARP_PARAM_REDUCE_BITS: u32 = 6;
 const DIV_LUT_BITS: u32 = 8;
 const DIV_LUT_PREC_BITS: u32 = 14;
 
-pub fn predict(sample: &mut InterSample<'_>) -> Result<(), CodecError> {
+pub fn predict<S: Pix>(sample: &mut InterSample<'_, S>) -> Result<(), CodecError> {
     let Some(pass) = prepare(sample)? else {
         return Ok(());
     };
@@ -1759,7 +1765,10 @@ pub fn predict(sample: &mut InterSample<'_>) -> Result<(), CodecError> {
 }
 
 /// One compound reference, still shifted by `InterPostRound` (4 for 8-bit).
-pub fn predict_precise(sample: &InterSample<'_>, out: &mut [i32]) -> Result<(), CodecError> {
+pub fn predict_precise<S: Pix>(
+    sample: &InterSample<'_, S>,
+    out: &mut [i32],
+) -> Result<(), CodecError> {
     let Some(pass) = prepare(sample)? else {
         return Ok(());
     };
@@ -1775,20 +1784,21 @@ struct VerticalPass {
 }
 
 /// `COMPOUND_AVERAGE`: `Clip1(Round2(a + b, 1 + InterPostRound))` with `InterPostRound` 4.
-pub fn average_compound(a: i32, b: i32) -> u8 {
-    round2(a.saturating_add(b), 5).clamp(0, 255) as u8
+pub fn average_compound(a: i32, b: i32, depth: u8) -> i32 {
+    clip_sample(round2(a.saturating_add(b), 5), depth)
 }
 
 /// `COMPOUND_DISTANCE`: `Clip1(Round2(fwd * a + bck * b, 4 + InterPostRound))`.
-pub fn distance_compound(a: i32, b: i32, fwd: i32, bck: i32) -> u8 {
+pub fn distance_compound(a: i32, b: i32, fwd: i32, bck: i32, depth: u8) -> i32 {
     let sum = a.saturating_mul(fwd).saturating_add(b.saturating_mul(bck));
-    round2(sum, 8).clamp(0, 255) as u8
+    clip_sample(round2(sum, 8), depth)
 }
 
 /// `COMPOUND_WEDGE` and `COMPOUND_DIFFWTD`: `Clip1(Round2(m * a + (64 - m) * b, 6 + InterPostRound))`.
-pub fn mask_compound(a: i32, b: i32, weight: i32) -> u8 {
+pub fn mask_compound(a: i32, b: i32, weight: i32, depth: u8) -> i32 {
     let sum = i64::from(weight) * i64::from(a) + i64::from(64 - weight) * i64::from(b);
-    ((sum + 512) >> 10).clamp(0, 255) as u8
+    let mixed = i32::try_from((sum + 512) >> 10).unwrap_or(i32::MAX);
+    clip_sample(mixed, depth)
 }
 
 /// `Wedge_Bits`. Sizes with a zero have no wedge index; the mask is difference-weighted.
@@ -1846,12 +1856,21 @@ pub fn wedge_mask(w: usize, h: usize, index: usize, sign: u8, out: &mut [u8]) {
 }
 
 /// Difference-weight mask from the two luma predictors, still at `InterPostRound`.
-pub fn difference_mask(a: &[i32], b: &[i32], w: usize, h: usize, mask_type: u8, out: &mut [u8]) {
+pub fn difference_mask(
+    a: &[i32],
+    b: &[i32],
+    w: usize,
+    h: usize,
+    mask_type: u8,
+    depth: u8,
+    out: &mut [u8],
+) {
     let n = w.saturating_mul(h);
+    let shift = depth_shift(depth) + 4;
     for index in 0..n.min(out.len()).min(a.len()).min(b.len()) {
         let diff = (i64::from(a[index]) - i64::from(b[index])).unsigned_abs();
         let rounded = i32::try_from(diff).unwrap_or(i32::MAX);
-        let scaled = rounded.saturating_add(8) >> 4;
+        let scaled = round2(rounded, shift);
         let weight = (38 + scaled / 16).clamp(0, 64) as u8;
         out[index] = if mask_type == 0 { weight } else { 64 - weight };
     }
@@ -2037,8 +2056,8 @@ fn small_filter(filter: u8, edge: usize) -> u8 {
     }
 }
 
-fn horizontal(
-    sample: &InterSample<'_>,
+fn horizontal<S: Pix>(
+    sample: &InterSample<'_, S>,
     intermediate: &mut [i32],
     rows: usize,
     start_x: i64,
@@ -2064,7 +2083,7 @@ fn horizontal(
     }
 }
 
-fn prepare(sample: &InterSample<'_>) -> Result<Option<VerticalPass>, CodecError> {
+fn prepare<S: Pix>(sample: &InterSample<'_, S>) -> Result<Option<VerticalPass>, CodecError> {
     if sample.w == 0 || sample.h == 0 || sample.frame_w == 0 || sample.frame_h == 0 {
         return Ok(None);
     }
@@ -2108,12 +2127,12 @@ fn prepare(sample: &InterSample<'_>) -> Result<Option<VerticalPass>, CodecError>
     }))
 }
 
-fn vertical_pixels(sample: &mut InterSample<'_>, pass: &VerticalPass) {
+fn vertical_pixels<S: Pix>(sample: &mut InterSample<'_, S>, pass: &VerticalPass) {
     let frac = pass.start_y & 1023;
     for row in 0..sample.h {
         for col in 0..sample.w {
             let sum = vertical_sum(sample, pass, frac, row, col);
-            let pred = round2(sum, 11).clamp(0, 255) as u8;
+            let pred = S::from_i32(clip_sample(round2(sum, 11), sample.bit_depth));
             let y = sample.write_y + row;
             let x = sample.write_x + col;
             if x < sample.stride {
@@ -2126,7 +2145,12 @@ fn vertical_pixels(sample: &mut InterSample<'_>, pass: &VerticalPass) {
     }
 }
 
-fn vertical_precise(sample: &InterSample<'_>, pass: &VerticalPass, round1: u32, out: &mut [i32]) {
+fn vertical_precise<S: Pix>(
+    sample: &InterSample<'_, S>,
+    pass: &VerticalPass,
+    round1: u32,
+    out: &mut [i32],
+) {
     let frac = pass.start_y & 1023;
     for row in 0..sample.h {
         for col in 0..sample.w {
@@ -2139,8 +2163,8 @@ fn vertical_precise(sample: &InterSample<'_>, pass: &VerticalPass, round1: u32, 
     }
 }
 
-fn vertical_sum(
-    sample: &InterSample<'_>,
+fn vertical_sum<S: Pix>(
+    sample: &InterSample<'_, S>,
     pass: &VerticalPass,
     frac: i64,
     row: usize,
@@ -2163,14 +2187,25 @@ fn plane_last(luma: usize, sub: bool, plane: usize) -> i32 {
     i32::try_from(last).unwrap_or(0)
 }
 
-fn ref_sample(sample: &InterSample<'_>, last_x: i32, last_y: i32, x: i32, y: i32) -> i32 {
+fn ref_sample<S: Pix>(
+    sample: &InterSample<'_, S>,
+    last_x: i32,
+    last_y: i32,
+    x: i32,
+    y: i32,
+) -> i32 {
     if sample.ref_stride == 0 || sample.reference.is_empty() {
         return 0;
     }
     let yy = clip3(0, last_y, y) as usize;
     let xx = clip3(0, last_x, x) as usize;
     let at = yy * sample.ref_stride + xx;
-    i32::from(sample.reference.get(at).copied().unwrap_or(0))
+    sample
+        .reference
+        .get(at)
+        .copied()
+        .map(Pix::to_i32)
+        .unwrap_or(0)
 }
 
 fn filter_taps(filter: u8, phase: usize) -> &'static [i16] {
@@ -2245,11 +2280,11 @@ mod tests {
     #[test]
     fn difference_mask_uses_the_predictor_gap() {
         let mut out = [0u8; 4];
-        difference_mask(&[0; 4], &[0; 4], 2, 2, 0, &mut out);
+        difference_mask(&[0; 4], &[0; 4], 2, 2, 0, 8, &mut out);
         assert_eq!(out, [38, 38, 38, 38]);
-        difference_mask(&[0; 4], &[0; 4], 2, 2, 1, &mut out);
+        difference_mask(&[0; 4], &[0; 4], 2, 2, 1, 8, &mut out);
         assert_eq!(out, [26, 26, 26, 26]);
-        assert_eq!(mask_compound(16, 0, 64), 1);
-        assert_eq!(mask_compound(16, 0, 0), 0);
+        assert_eq!(mask_compound(16, 0, 64, 8), 1);
+        assert_eq!(mask_compound(16, 0, 0, 8), 0);
     }
 }

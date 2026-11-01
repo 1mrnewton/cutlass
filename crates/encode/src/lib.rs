@@ -225,19 +225,28 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
         PixelFormat::Rgba8 => pixels
             .checked_mul(4)
             .ok_or(CodecError::Limit { what: "frame size" }),
-        PixelFormat::Yuv420p => {
-            if width % 2 != 0 || height % 2 != 0 {
-                return Err(CodecError::InvalidApi {
-                    what: "chroma size",
-                });
-            }
-            let samples = pixels / 2;
-            samples
-                .checked_mul(3)
-                .ok_or(CodecError::Limit { what: "frame size" })
-        }
+        PixelFormat::Yuv420p => yuv420_len(width, height, pixels, 1),
+        PixelFormat::Yuv420p10 => yuv420_len(width, height, pixels, 2),
         PixelFormat::Gray8 => Ok(pixels),
     }
+}
+
+fn yuv420_len(
+    width: usize,
+    height: usize,
+    pixels: usize,
+    sample_bytes: usize,
+) -> Result<usize, CodecError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(CodecError::InvalidApi {
+            what: "chroma size",
+        });
+    }
+    let samples = pixels / 2;
+    samples
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+        .ok_or(CodecError::Limit { what: "frame size" })
 }
 
 pub trait Encoder: Send {

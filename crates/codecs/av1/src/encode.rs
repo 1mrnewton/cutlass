@@ -964,6 +964,7 @@ fn predict_dc(plane: &mut [u8], stride: usize, rows: usize, at: DcAt) -> Result<
         filter: None,
         max_x: stride.saturating_sub(1),
         max_y: rows.saturating_sub(1),
+        bit_depth: 8,
     };
     let mut scratch = crate::predict::PredictScratch::new();
     predict_intra(plane, stride, &block, &mut scratch)
@@ -1102,7 +1103,7 @@ fn build_basis(n: usize, tx: usize) -> Basis {
     for k in 0..count {
         let mut coeff = vec![0i32; count];
         coeff[k] = scale;
-        let response = inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx]);
+        let response = inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx], 8);
         let mut norm = 0i64;
         for (i, sample) in response.iter().enumerate().take(count) {
             vectors[k * count + i] = *sample;
@@ -1207,7 +1208,7 @@ fn inverse_levels(levels: &[i32], n: usize, tx: usize, dc_q: i32, ac_q: i32) -> 
             coeff[row * n + col] = i32::try_from(value.clamp(-32768, 32767)).unwrap_or(0);
         }
     }
-    inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx])
+    inverse_2d(&coeff, n, n, DCT_DCT, TRANSFORM_ROW_SHIFT[tx], 8)
 }
 
 fn sse(left: &[i32], right: &[i32]) -> i64 {

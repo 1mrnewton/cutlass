@@ -3772,8 +3772,16 @@ impl<'a, 'r> Tile<'a, 'r> {
             y,
             w,
             h,
-            have_left: block.avail_l && x > 0,
-            have_above: block.avail_u && y > 0,
+            have_left: (if block.plane == 0 {
+                block.avail_l
+            } else {
+                self.chroma_left(block.plane, block.col, NUM_4X4_WIDE[block.bsize])
+            }) && x > 0,
+            have_above: (if block.plane == 0 {
+                block.avail_u
+            } else {
+                self.chroma_above(block.plane, block.row, NUM_4X4_HIGH[block.bsize])
+            }) && y > 0,
             have_above_right: above_right,
             have_below_left: below_left,
             mode,
@@ -5285,8 +5293,22 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             block.angle_uv
         };
-        let have_left = block.avail_l || block.x4 > 0;
-        let have_above = block.avail_u || block.y4 > 0;
+        let bw4 = NUM_4X4_WIDE[block.bsize];
+        let bh4 = NUM_4X4_HIGH[block.bsize];
+        // A 4-sample chroma block looks two luma rows or columns back.
+        // That neighbor can fall outside the tile while the luma neighbor does not.
+        let avail_l = if block.plane == 0 {
+            block.avail_l
+        } else {
+            self.chroma_left(block.plane, block.col, bw4)
+        };
+        let avail_u = if block.plane == 0 {
+            block.avail_u
+        } else {
+            self.chroma_above(block.plane, block.row, bh4)
+        };
+        let have_left = avail_l || block.x4 > 0;
+        let have_above = avail_u || block.y4 > 0;
         // local_row and local_col are already in this plane's 4×4 units.
         let above_right =
             self.decoded_at(block.plane, local_row - 1, local_col + block.step_x as i32);

@@ -2,7 +2,7 @@
 //!
 //! The support record is `STATUS.md` next to this crate. Loop restoration and
 //! film grain are applied for 8-bit 4:2:0. A single-reference frame may carry
-//! an order hint. A frame may use a uniform tile grid, a quantizer matrix,
+//! an order hint. A frame may use a uniform or non-uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
 //! Bit depths other than 8 are rejected. A frame with `base_q_idx` 0 uses a

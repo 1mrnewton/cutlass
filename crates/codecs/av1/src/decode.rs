@@ -1851,6 +1851,33 @@ mod tests {
         assert_eq!(frame_digest(&packed), digests[1]);
     }
     #[test]
+    fn nonuniform_tiles_match_dav1d() {
+        // 320×192 keyframes. Superblocks are 64 pixels, so the grid is five by
+        // three. The signaled widths are 2, 2, 1 and the heights are 2, 1.
+        // A 4-row chroma block just inside the shorter row must not read the
+        // tile above: that neighbor is two luma rows back, outside this tile.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/nu_0.obu"),
+            include_bytes!("../fixtures/nu_1.obu"),
+        ];
+        let expected = [0xf2df_1c82_2f33_5300, 0x6878_5ee4_efd0_358f];
+        let (_sequence, frame) = crate::header::parse_unit(frames[0], None).expect("header");
+        assert_eq!(frame.width, 320);
+        assert_eq!(frame.height, 192);
+        assert_eq!(frame.tile_cols, 3);
+        assert_eq!(frame.tile_rows, 2);
+        assert_eq!(frame.mi_col_starts, vec![0, 32, 64, 80]);
+        assert_eq!(frame.mi_row_starts, vec![0, 32, 48]);
+        let params = CodecParams::video(CodecId::Av1, 320, 192);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 320 * 192 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
     fn four_uniform_tiles_match_dav1d() {
         // 128×128 keyframe split into a 2×2 uniform grid. Each tile has its own
         // entropy stream, and prediction does not cross a tile edge.

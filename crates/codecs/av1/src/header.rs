@@ -750,24 +750,24 @@ fn uncompressed(
     } else {
         bits.read_bool()?
     };
-    // One superblock each way can use non-uniform spacing: ns(1) reads no bits.
     // A 128 superblock covers 32 mode-info units. A 64 superblock covers 16.
+    // `ns(1)` reads no bits, so a 1×1 grid is the same in either spacing mode.
     let sb_px = if sequence.use_128 { 128 } else { 64 };
     let sb_shift = if sequence.use_128 { 5 } else { 4 };
     let sb_cols = width.div_ceil(sb_px);
     let sb_rows = height.div_ceil(sb_px);
     let max_tile_width_sb = 4096 / sb_px;
     let max_tile_area_sb = (4096 / sb_px) * (2304 / sb_px);
+    let min_tile_cols_log = tile_log2(max_tile_width_sb, sb_cols);
+    let min_tiles_log =
+        tile_log2(max_tile_area_sb, sb_rows.saturating_mul(sb_cols)).max(min_tile_cols_log);
+    let mi_cols_now = 2 * ((width + 7) >> 3);
+    let mi_rows_now = 2 * ((height + 7) >> 3);
     let uniform = bits.read_bool()?;
-    let mut tile_cols_log = 0u32;
-    let mut tile_rows_log = 0u32;
     let mut context_update = 0u32;
     let mut tile_size_bytes = 0u32;
-    let mut mi_col_starts = vec![0, 2 * ((width + 7) >> 3)];
-    let mut mi_row_starts = vec![0, 2 * ((height + 7) >> 3)];
-    if uniform {
-        let max_tile_cols_log = tile_log2(1, sb_cols.min(64));
-        let min_tile_cols_log = tile_log2(max_tile_width_sb, sb_cols);
+    let (mi_col_starts, mi_row_starts, tile_cols_log, tile_rows_log) = if uniform {
+        let max_tile_cols_log = tile_log2(1, sb_cols.min(MAX_TILES));
         let mut cols_log = min_tile_cols_log;
         while cols_log < max_tile_cols_log {
             if !bits.read_bool()? {
@@ -775,29 +775,44 @@ fn uncompressed(
             }
             cols_log += 1;
         }
-        let min_tiles_log = tile_log2(max_tile_area_sb, sb_rows * sb_cols).max(min_tile_cols_log);
         let mut rows_log = min_tiles_log.saturating_sub(cols_log);
-        let max_tile_rows_log = tile_log2(1, sb_rows.min(64));
+        let max_tile_rows_log = tile_log2(1, sb_rows.min(MAX_TILES));
         while rows_log < max_tile_rows_log {
             if !bits.read_bool()? {
                 break;
             }
             rows_log += 1;
         }
-        tile_cols_log = cols_log;
-        tile_rows_log = rows_log;
-        let mi_cols_now = 2 * ((width + 7) >> 3);
-        let mi_rows_now = 2 * ((height + 7) >> 3);
-        mi_col_starts = mi_starts(sb_cols, cols_log, mi_cols_now, sb_shift);
-        mi_row_starts = mi_starts(sb_rows, rows_log, mi_rows_now, sb_shift);
-        if cols_log > 0 || rows_log > 0 {
-            context_update = bits.read(rows_log + cols_log)?;
-            tile_size_bytes = bits.read(2)? + 1;
+        (
+            mi_starts(sb_cols, cols_log, mi_cols_now, sb_shift),
+            mi_starts(sb_rows, rows_log, mi_rows_now, sb_shift),
+            cols_log,
+            rows_log,
+        )
+    } else {
+        let (cols, widest) =
+            read_tile_sizes(bits, sb_cols, max_tile_width_sb, mi_cols_now, sb_shift)?;
+        let cols_log = tile_log2(1, tile_count(&cols));
+        let area = if min_tiles_log > 0 {
+            sb_rows.saturating_mul(sb_cols) >> (min_tiles_log + 1)
+        } else {
+            sb_rows.saturating_mul(sb_cols)
+        };
+        if widest == 0 {
+            return Err(malformed(bits, "tile grid"));
         }
-    } else if sb_cols != 1 || sb_rows != 1 {
-        return Err(CodecError::Unsupported {
-            what: "non-uniform tiles",
-        });
+        let max_tile_height_sb = (area / widest).max(1);
+        let (rows, _) = read_tile_sizes(bits, sb_rows, max_tile_height_sb, mi_rows_now, sb_shift)?;
+        let rows_log = tile_log2(1, tile_count(&rows));
+        (cols, rows, cols_log, rows_log)
+    };
+    if tile_cols_log > 0 || tile_rows_log > 0 {
+        let tiles = tile_count(&mi_col_starts).saturating_mul(tile_count(&mi_row_starts));
+        context_update = bits.read(tile_rows_log + tile_cols_log)?;
+        if context_update >= tiles {
+            return Err(malformed(bits, "tile"));
+        }
+        tile_size_bytes = bits.read(2)? + 1;
     }
     let base_q = bits.read(8)? as u8;
     let delta_y_dc = read_delta_q(bits)?;
@@ -1378,6 +1393,55 @@ fn read_delta_q(bits: &mut BitReader<'_>) -> Result<i32, CodecError> {
     } else {
         Ok(0)
     }
+}
+
+const MAX_TILES: u32 = 64;
+
+fn tile_count(starts: &[u32]) -> u32 {
+    u32::try_from(starts.len().saturating_sub(1)).unwrap_or(u32::MAX)
+}
+
+/// Read one axis of a non-uniform tile grid. Each size is `ns(n) + 1` superblocks.
+fn read_tile_sizes(
+    bits: &mut BitReader<'_>,
+    sb_count: u32,
+    max_sb: u32,
+    mi_total: u32,
+    sb_shift: u32,
+) -> Result<(Vec<u32>, u32), CodecError> {
+    let mut starts = Vec::new();
+    let mut start_sb = 0u32;
+    let mut widest = 0u32;
+    while start_sb < sb_count {
+        if starts.len() >= MAX_TILES as usize {
+            return Err(malformed(bits, "tile grid"));
+        }
+        starts.push(start_sb << sb_shift);
+        let max_width = (sb_count - start_sb).min(max_sb);
+        let Some(coded_max) = i32::try_from(max_width).ok() else {
+            return Err(malformed(bits, "tile grid"));
+        };
+        let coded = ns(bits, coded_max)?;
+        let Some(size_sb) = u32::try_from(coded)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+        else {
+            return Err(malformed(bits, "tile grid"));
+        };
+        let Some(next) = start_sb.checked_add(size_sb) else {
+            return Err(malformed(bits, "tile grid"));
+        };
+        if next > sb_count {
+            return Err(malformed(bits, "tile grid"));
+        }
+        widest = widest.max(size_sb);
+        start_sb = next;
+    }
+    if starts.is_empty() {
+        return Err(malformed(bits, "tile grid"));
+    }
+    starts.push(mi_total);
+    Ok((starts, widest))
 }
 
 fn mi_starts(sb_count: u32, log: u32, mi_total: u32, sb_shift: u32) -> Vec<u32> {

@@ -4860,7 +4860,10 @@ mod tests {
     #[test]
     fn scaled_reference_matches_dav1d() {
         // The key is 32×32. The next frame is 64×64 and samples that smaller
-        // reference. Digests are `ffmpeg -c:v libdav1d -threads 1 -noautoscale`.
+        // reference with the eight-tap smooth filter. Treating that filter as
+        // eight-tap regular changes the picture. The frame after it uses the
+        // eight-tap sharp filter, and treating that as regular changes the
+        // picture too. Digests are `ffmpeg -c:v libdav1d -threads 1 -noautoscale`.
         let frames: [&[u8]; 4] = [
             include_bytes!("../fixtures/scale_0.obu"),
             include_bytes!("../fixtures/scale_1.obu"),
@@ -4881,7 +4884,21 @@ mod tests {
         ];
         let params = CodecParams::video(CodecId::Av1, 64, 64);
         let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut sequence = None;
         for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 1 {
+                assert!(!frame.intra);
+                assert!(!frame.filter_switchable);
+                assert_eq!(frame.interpolation, 1);
+            }
+            if index == 2 {
+                assert!(!frame.intra);
+                assert!(!frame.filter_switchable);
+                assert_eq!(frame.interpolation, 2);
+            }
+            sequence = Some(seq);
             let packed = push_frame(&mut decoder, payload, index as i64);
             assert_eq!(packed.len(), lengths[index], "frame {index}");
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");

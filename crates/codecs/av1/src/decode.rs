@@ -1117,6 +1117,10 @@ fn shown_tags(sequence: &Sequence, frame: &FrameInfo) -> ShownTags {
         ),
         None => (0, 0, false, None),
     };
+    let num_units_in_decoding_tick = sequence
+        .decoder_model
+        .map(|model| model.num_units_in_decoding_tick)
+        .unwrap_or(0);
     ShownTags {
         bit_depth: sequence.bit_depth,
         render_width: frame.render_width,
@@ -1129,6 +1133,7 @@ fn shown_tags(sequence: &Sequence, frame: &FrameInfo) -> ShownTags {
         time_scale,
         equal_picture_interval,
         num_ticks_per_picture_minus_1,
+        num_units_in_decoding_tick,
     }
 }
 
@@ -4752,6 +4757,55 @@ mod tests {
             };
             assert_eq!(bytes.len(), 64 * 64 * 3 / 2, "frame {index}");
             assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn decoder_model_info_is_parsed_and_the_picture_matches_dav1d() {
+        // aomenc --timing-info=model, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, filter intra, and an interintra wedge
+        // are off. The model is parsed and not scheduled. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/model.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        let model = sequence.decoder_model.expect("decoder model");
+        assert_eq!(model.buffer_delay_length_minus_1, 15);
+        assert_eq!(model.num_units_in_decoding_tick, 1);
+        assert_eq!(model.buffer_removal_time_length_minus_1, 9);
+        assert_eq!(model.frame_presentation_time_length_minus_1, 9);
+        assert!(model.present[0]);
+        assert!(!model.present[1]);
+        let timing = sequence.timing.expect("timing");
+        assert_eq!(timing.num_units_in_display_tick, 1);
+        assert_eq!(timing.time_scale, 30);
+        assert!(!timing.equal_picture_interval);
+        assert_eq!(timing.num_ticks_per_picture_minus_1, None);
+        let expected = [0x1b33_c4d2_4867_47f8, 0x7963_d39f_992f_c21f];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+            assert_eq!(picture.info().num_units_in_decoding_tick, 1);
         }
         assert!(decoder.drain().expect("drain").is_empty());
     }

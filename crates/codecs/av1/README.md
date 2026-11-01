@@ -117,13 +117,12 @@ If ffmpeg is missing, the example prints `skip: ffmpeg is not installed` and exi
 Refused with a typed error before a picture is published:
 
 - Film grain at 12-bit, and 12-bit monochrome. 12-bit 4:2:0, 4:2:2, and 4:4:4 match. 8-bit and 10-bit 4:2:2 match. 8-bit and 10-bit 4:4:4 match. Film grain on 4:4:4 and on 4:2:2 is refused. Monochrome 8-bit and 10-bit are one gray plane. The 10-bit monochrome pair leaves film grain off. 10-bit 4:2:0 is little-endian samples, including super resolution, Wiener or self-guided restoration, and film grain.
-- The decoder model.
 - A tile group that does not follow a frame header. A large-scale tile anchor of 8 or more, or an empty reference slot.
 - A show-existing frame shows the stored picture and does not re-apply grain.
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.
 
-Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept.
+Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run.
 
 The encoder does not emit inter frames, CDEF, restoration, super resolution, or film grain. Its blocks stay DC-predicted 4×4 and 8×8.
 

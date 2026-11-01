@@ -24,6 +24,7 @@ pub(crate) struct ShownTags {
     pub time_scale: u32,
     pub equal_picture_interval: bool,
     pub num_ticks_per_picture_minus_1: Option<u32>,
+    pub num_units_in_decoding_tick: u32,
 }
 
 /// One tightly packed sample plane. `samples.len()` is `width * height`.
@@ -327,6 +328,7 @@ fn described(width: u32, height: u32, pixel: PixelFormat, tags: &ShownTags) -> P
         time_scale: tags.time_scale,
         equal_picture_interval: tags.equal_picture_interval,
         num_ticks_per_picture_minus_1: tags.num_ticks_per_picture_minus_1,
+        num_units_in_decoding_tick: tags.num_units_in_decoding_tick,
     }
 }
 

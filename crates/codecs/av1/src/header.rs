@@ -100,6 +100,8 @@ pub struct Sequence {
     pub operating_idc: [u16; 32],
     /// Present when `timing_info_present_flag` is 1.
     pub timing: Option<Timing>,
+    /// Present when `decoder_model_info_present_flag` is 1.
+    pub decoder_model: Option<DecoderModel>,
     /// CICP `colour_primaries`. 2 is the inferred unspecified value.
     pub color_primaries: u8,
     /// CICP `transfer_characteristics`. 2 is the inferred unspecified value.
@@ -108,6 +110,18 @@ pub struct Sequence {
     pub matrix_coefficients: u8,
     /// `chroma_sample_position`. 0 is unknown, including when the field is absent.
     pub chroma_sample_position: u8,
+}
+
+/// `decoder_model_info`. The lengths let later frame headers skip the
+/// removal and presentation times. The schedule itself is not run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecoderModel {
+    pub buffer_delay_length_minus_1: u8,
+    pub num_units_in_decoding_tick: u32,
+    pub buffer_removal_time_length_minus_1: u8,
+    pub frame_presentation_time_length_minus_1: u8,
+    /// `decoder_model_present_for_this_op` for each operating point.
+    pub present: [bool; 32],
 }
 
 /// `timing_info`. The decoder does not schedule from these values.
@@ -256,10 +270,19 @@ pub fn parse_with_motion(
         let obu_type = ((header >> 3) & 0xf) as u8;
         let extension = (header >> 2) & 1 == 1;
         let has_size = (header >> 1) & 1 == 1;
+        let mut temporal_id = 0u8;
+        let mut spatial_id = 0u8;
         if extension {
-            let _ = bits.read(8)?;
+            let ext = bits.read(8)?;
+            temporal_id = (ext >> 5) as u8;
+            spatial_id = ((ext >> 3) & 3) as u8;
         }
         let payload_end = obu_payload_end(&mut bits, bytes, has_size)?;
+        let layer = FrameLayer {
+            end: payload_end,
+            temporal_id,
+            spatial_id,
+        };
         match obu_type {
             1 => {
                 seq = Some(parse_sequence(&mut bits)?);
@@ -273,7 +296,7 @@ pub fn parse_with_motion(
                 frame = Some(parse_frame(
                     &mut bits,
                     sequence,
-                    payload_end,
+                    layer,
                     saved,
                     order_hints,
                     ref_sizes,
@@ -287,7 +310,7 @@ pub fn parse_with_motion(
                 frame = Some(parse_frame_header_only(
                     &mut bits,
                     sequence,
-                    payload_end,
+                    layer,
                     saved,
                     order_hints,
                     ref_sizes,
@@ -624,6 +647,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let mut operating_points = 0u8;
     let mut operating_idc = [0u16; 32];
     let mut timing = None;
+    let mut decoder_model = None;
     if reduced {
         let _level = bits.read(5)?;
     } else {
@@ -646,8 +670,17 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
                 num_ticks_per_picture_minus_1,
             });
             if bits.read_bool()? {
-                return Err(CodecError::Unsupported {
-                    what: "decoder model",
+                let buffer_delay_length_minus_1 = bits.read(5)? as u8;
+                let num_units_in_decoding_tick = bits.read(32)?;
+                if num_units_in_decoding_tick == 0 {
+                    return Err(malformed(bits, "decoder model"));
+                }
+                decoder_model = Some(DecoderModel {
+                    buffer_delay_length_minus_1,
+                    num_units_in_decoding_tick,
+                    buffer_removal_time_length_minus_1: bits.read(5)? as u8,
+                    frame_presentation_time_length_minus_1: bits.read(5)? as u8,
+                    present: [false; 32],
                 });
             }
         }
@@ -662,6 +695,16 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
             let level = bits.read(5)?;
             if level > 7 {
                 let _tier = bits.read(1)?;
+            }
+            if let Some(model) = decoder_model.as_mut() {
+                let present = bits.read_bool()?;
+                model.present[usize::from(index)] = present;
+                if present {
+                    let n = u32::from(model.buffer_delay_length_minus_1) + 1;
+                    let _ = bits.read(n)?;
+                    let _ = bits.read(n)?;
+                    let _ = bits.read_bool()?;
+                }
             }
             if delay_present && bits.read_bool()? {
                 let _ = bits.read(4)?;
@@ -762,6 +805,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         operating_points,
         operating_idc,
         timing,
+        decoder_model,
         color_primaries: color.color_primaries,
         transfer_characteristics: color.transfer_characteristics,
         matrix_coefficients: color.matrix_coefficients,
@@ -950,20 +994,78 @@ fn read_profile2_color(bits: &mut BitReader<'_>) -> Result<ColorConfig, CodecErr
     .chroma(chroma))
 }
 
+struct FrameLayer {
+    end: usize,
+    temporal_id: u8,
+    spatial_id: u8,
+}
+
+/// `temporal_point_info`. Absent when the picture interval is constant.
+fn read_presentation_time(bits: &mut BitReader<'_>, sequence: &Sequence) -> Result<(), CodecError> {
+    let Some(model) = sequence.decoder_model else {
+        return Ok(());
+    };
+    let equal = sequence
+        .timing
+        .is_some_and(|timing| timing.equal_picture_interval);
+    if equal {
+        return Ok(());
+    }
+    let n = u32::from(model.frame_presentation_time_length_minus_1) + 1;
+    let _ = bits.read(n)?;
+    Ok(())
+}
+
+/// `buffer_removal_time` for each operating point that includes this frame's layer.
+fn read_buffer_removal(
+    bits: &mut BitReader<'_>,
+    sequence: &Sequence,
+    temporal_id: u8,
+    spatial_id: u8,
+) -> Result<(), CodecError> {
+    let Some(model) = sequence.decoder_model else {
+        return Ok(());
+    };
+    if !bits.read_bool()? {
+        return Ok(());
+    }
+    let n = u32::from(model.buffer_removal_time_length_minus_1) + 1;
+    for index in 0..=usize::from(sequence.operating_points) {
+        if !model.present[index] {
+            continue;
+        }
+        let idc = u32::from(sequence.operating_idc[index]);
+        let in_temporal = (idc >> u32::from(temporal_id)) & 1 == 1;
+        let in_spatial = (idc >> (u32::from(spatial_id) + 8)) & 1 == 1;
+        if idc == 0 || (in_temporal && in_spatial) {
+            let _ = bits.read(n)?;
+        }
+    }
+    Ok(())
+}
+
 fn parse_frame(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
-    payload_end: usize,
+    layer: FrameLayer,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
     let header_start = bits.position();
-    let mut frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, inherited)?;
+    let mut frame = uncompressed(
+        bits,
+        sequence,
+        saved,
+        order_hints,
+        ref_sizes,
+        inherited,
+        (layer.temporal_id, layer.spatial_id),
+    )?;
     bits.byte_align();
     let header_bytes = (bits.position() - header_start) / 8;
-    let obu_bytes = (payload_end - header_start) / 8;
+    let obu_bytes = (layer.end - header_start) / 8;
     if header_bytes > obu_bytes {
         return Err(malformed(bits, "frame header"));
     }
@@ -983,7 +1085,7 @@ fn parse_frame(
     if frame.show_existing {
         frame.tile.clear();
         // consume the rest so the caller stays aligned
-        bits.skip(payload_end - bits.position())?;
+        bits.skip(layer.end - bits.position())?;
         return Ok(frame);
     }
     frame.tile = data[..tile_bytes].to_vec();
@@ -994,14 +1096,22 @@ fn parse_frame(
 fn parse_frame_header_only(
     bits: &mut BitReader<'_>,
     sequence: &Sequence,
-    payload_end: usize,
+    layer: FrameLayer,
     saved: &[Option<[[i32; 6]; 8]>; 8],
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
 ) -> Result<FrameInfo, CodecError> {
-    let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, inherited)?;
-    trailing(bits, payload_end)?;
+    let frame = uncompressed(
+        bits,
+        sequence,
+        saved,
+        order_hints,
+        ref_sizes,
+        inherited,
+        (layer.temporal_id, layer.spatial_id),
+    )?;
+    trailing(bits, layer.end)?;
     // The tile bytes live in the tile-group OBUs that follow this header.
     // A show-existing header has no tiles either.
     Ok(frame)
@@ -1014,6 +1124,7 @@ fn uncompressed(
     order_hints: &[u32; 8],
     ref_sizes: &[Option<(u32, u32, u32, u32)>; 8],
     inherited: &[Inherited; 8],
+    layer: (u8, u8),
 ) -> Result<FrameInfo, CodecError> {
     let mut show_existing = false;
     let mut frame_to_show = 0u8;
@@ -1028,6 +1139,10 @@ fn uncompressed(
         show_existing = bits.read_bool()?;
         if show_existing {
             frame_to_show = bits.read(3)? as u8;
+            read_presentation_time(bits, sequence)?;
+            if sequence.frame_id_present {
+                let _ = bits.read(u32::from(sequence.id_len))?;
+            }
             let mut info = empty_frame(sequence);
             info.show_existing = true;
             info.frame_to_show = frame_to_show;
@@ -1038,6 +1153,7 @@ fn uncompressed(
         frame_type = bits.read(2)? as u8;
         show_frame = bits.read_bool()?;
         if show_frame {
+            read_presentation_time(bits, sequence)?;
             showable = frame_type != KEY_FRAME;
         } else {
             showable = bits.read_bool()?;
@@ -1087,6 +1203,7 @@ fn uncompressed(
     } else {
         bits.read(3)? as u8
     };
+    read_buffer_removal(bits, sequence, layer.0, layer.1)?;
     let refresh = if frame_type == SWITCH_FRAME || (frame_type == KEY_FRAME && show_frame) {
         0xff
     } else {

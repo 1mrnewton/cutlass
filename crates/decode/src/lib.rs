@@ -112,6 +112,8 @@ pub struct PictureInfo {
     pub equal_picture_interval: bool,
     /// `num_ticks_per_picture_minus_1` when the picture interval is equal.
     pub num_ticks_per_picture_minus_1: Option<u32>,
+    /// `num_units_in_decoding_tick`. Zero when the sequence has no decoder model.
+    pub num_units_in_decoding_tick: u32,
 }
 
 impl PictureInfo {
@@ -144,6 +146,7 @@ impl PictureInfo {
             time_scale: 0,
             equal_picture_interval: false,
             num_ticks_per_picture_minus_1: None,
+            num_units_in_decoding_tick: 0,
         }
     }
 }

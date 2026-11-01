@@ -36,7 +36,8 @@
 //! may be one Annex B temporal unit. A segment may change the quantizer, and a
 //! later frame may keep that segment map. Colour primaries, transfer, matrix,
 //! chroma sample position, and the display size are published on the picture.
-//! The sample buffer stays the frame size. Timing info is kept.
+//! The sample buffer stays the frame size. Timing info is kept. Decoder-model
+//! info is parsed and the samples still decode. The schedule is not run.
 
 #![forbid(unsafe_code)]
 

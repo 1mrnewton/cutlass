@@ -1905,52 +1905,131 @@ fn paint_clip(
         FontId::proportional(11.0),
         Color32::WHITE,
     );
-    let response = ui.interact(
-        visible,
-        ui.scope_id().with(("clip", index, clip.id.as_str())),
-        Sense::click_and_drag(),
-    );
     let span = format!(
         "{} · {}–{}",
         clip.name,
         shell.timecode_at(start),
         shell.timecode_at(Micros(start.0.saturating_add(duration.0)))
     );
-    response.clone().on_hover_text(span);
-    let hovering_edge = response
-        .hover_pos()
-        .and_then(|pos| trim_edge_at(clip_rect, pos))
-        .is_some();
-    if (response.hovered() && hovering_edge) || shell.clip_edge(&clip.id).is_some() {
+    let (left_edge, right_edge) = edge_strips(visible);
+    let body = Rect::from_min_max(
+        Pos2::new(left_edge.right(), visible.top()),
+        Pos2::new(right_edge.left(), visible.bottom()),
+    );
+    if body.width() > 0.0 {
+        let response = ui.interact(
+            body,
+            ui.scope_id().with(("clip", index, clip.id.as_str())),
+            Sense::click_and_drag(),
+        );
+        response.clone().on_hover_text(span.clone());
+        if response.clicked() {
+            shell.select(Some(clip.id.clone()));
+        }
+        if response.drag_started() {
+            shell.begin_clip_drag(clip.id.clone(), None);
+        }
+        finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, index, None);
+    }
+    drag_clip_edge(
+        shell,
+        ui,
+        clip,
+        left_edge,
+        TrimEdge::Start,
+        lanes_left,
+        index,
+    );
+    drag_clip_edge(
+        shell,
+        ui,
+        clip,
+        right_edge,
+        TrimEdge::End,
+        lanes_left,
+        index,
+    );
+}
+
+fn drag_clip_edge(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    rect: Rect,
+    edge: TrimEdge,
+    lanes_left: f32,
+    index: usize,
+) {
+    if rect.width() < 1.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let response = ui.interact(
+        rect,
+        ui.scope_id()
+            .with(("clip-edge", index, clip.id.as_str(), edge_name(edge))),
+        Sense::drag(),
+    );
+    response.clone().on_hover_text(&clip.name);
+    if response.hovered() || response.dragged() {
         ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
-    if response.clicked() {
-        shell.select(Some(clip.id.clone()));
-    }
     if response.drag_started() {
-        let edge = ui
-            .input(|input| input.pointer.press_origin())
-            .and_then(|pos| trim_edge_at(clip_rect, pos));
-        shell.begin_clip_drag(clip.id.clone(), edge);
+        shell.begin_clip_drag(clip.id.clone(), Some(edge));
     }
     if response.dragged()
-        && let Some(edge) = shell.clip_edge(&clip.id)
-        && let Some(pos) = response.interact_pointer_pos()
+        && let Some(pos) = pointer_pos(ui, &response)
     {
         let x = f64::from(pos.x - lanes_left).max(0.0);
         shell.preview_edge(clip.id.clone(), edge, x);
     }
-    if response.drag_stopped() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            let x = f64::from(pos.x - lanes_left).max(0.0);
-            let y = f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT
-                + tokens::LANE_HEIGHT / 2.0;
-            if let Err(error) = shell.finish_clip_drag(clip.id.clone(), x, y) {
-                shell.set_notice(error.to_string());
-            }
-        } else {
-            shell.cancel_clip_drag();
-        }
+    finish_clip_pointer(
+        shell,
+        ui,
+        &response,
+        &clip.id,
+        lanes_left,
+        index,
+        Some(edge),
+    );
+}
+
+fn finish_clip_pointer(
+    shell: &mut Shell,
+    ui: &Ui,
+    response: &egui::Response,
+    id: &cutlass_model::SegmentId,
+    lanes_left: f32,
+    index: usize,
+    edge: Option<TrimEdge>,
+) {
+    if !response.drag_stopped() {
+        return;
+    }
+    let Some(pos) = pointer_pos(ui, response) else {
+        shell.cancel_clip_drag();
+        return;
+    };
+    let x = f64::from(pos.x - lanes_left).max(0.0);
+    let y = f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT
+        + tokens::LANE_HEIGHT / 2.0;
+    if edge.is_some() && shell.clip_edge(id).is_none() {
+        shell.begin_clip_drag(id.clone(), edge);
+    }
+    if let Err(error) = shell.finish_clip_drag(id.clone(), x, y) {
+        shell.set_notice(error.to_string());
+    }
+}
+
+fn pointer_pos(ui: &Ui, response: &egui::Response) -> Option<Pos2> {
+    response
+        .interact_pointer_pos()
+        .or_else(|| ui.input(|input| input.pointer.interact_pos()))
+}
+
+fn edge_name(edge: TrimEdge) -> &'static str {
+    match edge {
+        TrimEdge::Start => "start",
+        TrimEdge::End => "end",
     }
 }
 
@@ -1971,26 +2050,20 @@ fn preview_bounds(shell: &Shell, clip: &crate::shell::ClipSpan) -> (Micros, Micr
     }
 }
 
-fn trim_edge_at(clip: Rect, pos: Pos2) -> Option<TrimEdge> {
-    let width = clip.width();
-    if width <= 0.0 {
-        return None;
-    }
-    let edge = TRIM_EDGE.min(width * 0.25);
-    if edge < 1.0 {
-        return None;
-    }
-    let local = pos.x - clip.left();
-    if !(0.0..=width).contains(&local) {
-        return None;
-    }
-    if local <= edge {
-        Some(TrimEdge::Start)
-    } else if local >= width - edge {
-        Some(TrimEdge::End)
-    } else {
-        None
-    }
+fn edge_strips(visible: Rect) -> (Rect, Rect) {
+    let edge = TRIM_EDGE.min(visible.width() * 0.25).max(0.0);
+    let left = Rect::from_min_max(
+        visible.left_top(),
+        Pos2::new(
+            (visible.left() + edge).min(visible.right()),
+            visible.bottom(),
+        ),
+    );
+    let right = Rect::from_min_max(
+        Pos2::new((visible.right() - edge).max(visible.left()), visible.top()),
+        visible.right_bottom(),
+    );
+    (left, right)
 }
 
 fn lane_rects(main_flags: Vec<bool>, area: Rect) -> Vec<Rect> {

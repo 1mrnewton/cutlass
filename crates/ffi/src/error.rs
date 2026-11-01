@@ -126,6 +126,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
         EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),
+        EditError::Letterbox => "a letterbox belongs on a picture".to_owned(),
         EditError::FrameRate => "the frame rate is not a project rate".to_owned(),
     }
 }
@@ -222,6 +223,10 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::CanvasRatio).to_string(),
             "the canvas ratio is not a project ratio"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Letterbox).to_string(),
+            "a letterbox belongs on a picture"
         );
         assert_eq!(
             FfiError::from(EditError::FrameRate).to_string(),

@@ -227,6 +227,12 @@ pub enum Request {
         height: i32,
         ratio: String,
     },
+    /// Store the color around a fitted picture. An empty string clears it.
+    SetLetterbox {
+        segment_id: SegmentId,
+        color: String,
+        canvas_id: MaterialId,
+    },
     /// Store the project frame rate. `drop_frame` is a timecode label.
     SetFrameRate { fps: f64, drop_frame: bool },
     /// Store the drop-frame timecode label. The frame rate stays.

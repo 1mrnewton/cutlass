@@ -116,6 +116,8 @@ pub enum EditError {
     CanvasSize,
     /// The canvas ratio is not one of the project shapes.
     CanvasRatio,
+    /// A letterbox color belongs on a video or a composition.
+    Letterbox,
     /// The frame rate is not a clock the draft can step.
     FrameRate,
 }
@@ -271,6 +273,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             height,
             ratio,
         } => canvas::set_size(draft, *width, *height, ratio),
+        Request::SetLetterbox {
+            segment_id,
+            color,
+            canvas_id,
+        } => canvas::set_letterbox(draft, segment_id, color, canvas_id),
         Request::SetFrameRate { fps, drop_frame } => rate::set_frame_rate(draft, *fps, *drop_frame),
         Request::SetDropFrame { on } => rate::set_drop_frame(draft, *on),
     }

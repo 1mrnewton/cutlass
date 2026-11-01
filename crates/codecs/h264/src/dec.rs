@@ -2436,7 +2436,7 @@ fn read_header(
 /// Slice-header fields that follow the Annex A tail when inter-layer prediction
 /// is used. Same-size intra base mode, list-0 motion, and that layer's list-0
 /// residual are reconstructed, including both tools on one macroblock and a
-/// list-0 index other than 0.
+/// list-0 index other than 0. A reference macroblock can use list 1.
 /// Resampling and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,

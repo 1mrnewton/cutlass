@@ -780,21 +780,23 @@ fn motion_base<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if reference.ref0.iter().any(|index| *index < 0)
-        || reference.ref1.iter().any(|index| *index >= 0)
-    {
+    if !single_list(reference) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
     }
-    let motion = reference.mv0;
-    let refs = reference.ref0;
+    let motion0 = reference.mv0;
+    let motion1 = reference.mv1;
+    let refs0 = reference.ref0;
+    let refs1 = reference.ref1;
     let mut mb = Mb::new(slice_id);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    mb.ref0 = refs;
-    mb.mv0 = motion;
+    mb.ref0 = refs0;
+    mb.ref1 = refs1;
+    mb.mv0 = motion0;
+    mb.mv1 = motion1;
     bind_refs(&mut mb, slice);
     pic.mb[slot] = mb.clone();
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
@@ -890,22 +892,28 @@ fn add_layer_residual<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if reference_mb.intra
-        || reference_mb.ref0.iter().any(|index| *index < 0)
-        || reference_mb.ref1.iter().any(|index| *index >= 0)
-    {
+    if reference_mb.intra || !single_list(reference_mb) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
     }
-    let motion = reference_mb.mv0;
-    let slots = reference_mb.slot0;
+    let motion0 = reference_mb.mv0;
+    let motion1 = reference_mb.mv1;
+    let refs0 = reference_mb.ref0;
+    let slots0 = reference_mb.slot0;
+    let slots1 = reference_mb.slot1;
     let chroma_stride = pic.w / 2;
     for by in 0..4 {
         for bx in 0..4 {
-            let mv = motion[by * 4 + bx];
+            let index = by * 4 + bx;
             let part = (by / 2) * 2 + (bx / 2);
-            let frame = dpb_slot(dpb, slots[part])?;
+            let list1 = refs0[part] < 0;
+            let mv = if list1 {
+                motion1[index]
+            } else {
+                motion0[index]
+            };
+            let frame = dpb_slot(dpb, if list1 { slots1[part] } else { slots0[part] })?;
             let x = mx * 16 + bx * 4;
             let y = my * 16 + by * 4;
             let mut pred = [S::default(); 16];
@@ -921,6 +929,10 @@ fn add_layer_residual<S: Sample>(
         }
     }
     Ok(())
+}
+
+fn single_list(mb: &Mb) -> bool {
+    (0..4).all(|index| (mb.ref0[index] >= 0) != (mb.ref1[index] >= 0))
 }
 
 fn dpb_slot<S: Sample>(dpb: &[Frame<S>], slot: i8) -> Result<&Frame<S>, CodecError> {

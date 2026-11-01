@@ -12,6 +12,8 @@ pub enum PixelFormat {
     Yuv420p10,
     /// One tightly packed 8-bit plane, `width` by `height`.
     Gray8,
+    /// One 10-bit plane. Each sample is a little-endian `u16` in the low 10 bits.
+    Gray10,
 }
 
 /// Color primaries named on a video stream.

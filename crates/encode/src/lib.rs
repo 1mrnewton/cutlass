@@ -228,6 +228,9 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
         PixelFormat::Yuv420p => yuv420_len(width, height, pixels, 1),
         PixelFormat::Yuv420p10 => yuv420_len(width, height, pixels, 2),
         PixelFormat::Gray8 => Ok(pixels),
+        PixelFormat::Gray10 => pixels
+            .checked_mul(2)
+            .ok_or(CodecError::Limit { what: "frame size" }),
     }
 }
 

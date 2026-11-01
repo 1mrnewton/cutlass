@@ -4,7 +4,7 @@ use cutlass_decode::{
     CodecError, CodecId, CodecParams, Decoder, Output, Packet, PictureOutput, PixelFormat,
 };
 
-use crate::yuv::{Plane, Yuv420, gray_output, picture_output, wide_output};
+use crate::yuv::{Plane, Yuv420, gray_output, gray_wide, picture_output, wide_output};
 
 use crate::header::{
     FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
@@ -85,6 +85,7 @@ impl Av1Decoder {
             && params.pixel != PixelFormat::Yuv420p
             && params.pixel != PixelFormat::Yuv420p10
             && params.pixel != PixelFormat::Gray8
+            && params.pixel != PixelFormat::Gray10
         {
             return Err(CodecError::Unsupported {
                 what: "pixel format",
@@ -554,17 +555,14 @@ impl Av1Decoder {
         })
     }
 
-    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Monochrome at this
-    /// depth is still refused. Film grain is added only to the shown picture.
+    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. A monochrome sequence
+    /// publishes the luma plane. Film grain is added only to the shown picture.
     fn hold_wide(
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
         parts: Option<&[TilePart]>,
     ) -> Result<Held, CodecError> {
-        if sequence.monochrome {
-            return Err(CodecError::Unsupported { what: "bit depth" });
-        }
         if frame.show_existing {
             let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
                 return Err(CodecError::Malformed {
@@ -988,12 +986,29 @@ fn publish_held(
         let picture = shown(&held.picture, frame)?;
         return publish(&picture, monochrome, pts, timescale);
     };
-    if monochrome {
-        return Err(CodecError::Unsupported { what: "bit depth" });
-    }
     let width = u32::try_from(wide.width).map_err(|_| CodecError::Limit { what: "frame size" })?;
     let height =
         u32::try_from(wide.height).map_err(|_| CodecError::Limit { what: "frame size" })?;
+    if monochrome {
+        if !frame.grain.apply {
+            return gray_wide(&wide.y, width, height, pts, timescale);
+        }
+        let Some((y, _, _)) = crate::grain::overlay(
+            &wide.y,
+            &wide.u,
+            &wide.v,
+            wide.width,
+            wide.height,
+            &frame.grain,
+            10,
+        ) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "film grain",
+            });
+        };
+        return gray_wide(&y, width, height, pts, timescale);
+    }
     if !frame.grain.apply {
         return wide_output(&wide.y, &wide.u, &wide.v, width, height, pts, timescale);
     }
@@ -4337,6 +4352,54 @@ mod tests {
                 panic!("cpu");
             };
             assert_eq!(bytes.len(), 128 * 128, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_monochrome_picture_matches_dav1d() {
+        // aomenc --monochrome --bit-depth=10, 128×128, one keyframe and one
+        // inter frame. Filter intra, an interintra wedge, restoration, and
+        // super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt gray10le`.
+        let file = include_bytes!("../fixtures/mono10.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x86ae_d48a_6970_1217, 0x15dc_062f_948b_bdbe];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.monochrome);
+        assert_eq!(sequence.bit_depth, 10);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let gray =
+            CodecParams::with_format(CodecId::Av1, 128, 128, cutlass_decode::PixelFormat::Gray10);
+        assert!(Av1Decoder::open(&gray).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Gray10);
+            assert_eq!((info.width, info.height), (128, 128));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 128 * 128 * 2, "frame {index}");
             assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
         }
         assert!(decoder.drain().expect("drain").is_empty());

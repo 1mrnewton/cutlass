@@ -170,6 +170,30 @@ pub fn gray_output(
     )
 }
 
+/// Pack one 10-bit luma plane. A monochrome sequence has no chroma samples.
+pub fn gray_wide(
+    y: &[u16],
+    width: u32,
+    height: u32,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let mut bytes = Vec::new();
+    pack_le(y, &mut bytes);
+    PictureOutput::cpu(
+        PictureInfo {
+            width,
+            height,
+            pixel: PixelFormat::Gray10,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+        },
+        bytes,
+        pts,
+        timescale,
+    )
+}
+
 /// Pack 10-bit 4:2:0. Each sample is a little-endian `u16` in the low 10 bits.
 pub fn wide_output(
     y: &[u16],

@@ -4873,7 +4873,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
     fn read_uv_mode(&mut self, bsize: usize, y_mode: u8) -> Result<u8, CodecError> {
         // Chroma-from-luma is allowed on a lossless block only when the chroma
         // residual is 4×4. A lossy block allows it up to 32 on a side.
-        let cfl = if self.lossless {
+        let cfl = if self.block_lossless() {
             subsampled_size(bsize, self.sub_x, self.sub_y) == 0
         } else {
             block_width(bsize).max(block_height(bsize)) <= 32
@@ -4962,7 +4962,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         skip: bool,
         is_inter: bool,
     ) -> Result<usize, CodecError> {
-        if self.lossless {
+        if self.block_lossless() {
             return Ok(TX_4X4);
         }
         let max_rect = MAX_TX_SIZE_RECT[bsize];
@@ -5004,7 +5004,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         inter: bool,
     ) -> Result<(usize, bool), CodecError> {
         self.tx_origins.clear();
-        let variable = self.tx_select && bsize > 0 && inter && !skip && !self.lossless;
+        let variable = self.tx_select && bsize > 0 && inter && !skip && !self.block_lossless();
         if !variable {
             let tx = self.read_tx_size(row, col, bsize, skip, inter)?;
             return Ok((tx, false));
@@ -5390,7 +5390,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
 
     fn plane_tx(&self, plane: usize, bsize: usize, tx: usize) -> usize {
         // A lossless block is 4×4 on every plane, including chroma.
-        if self.lossless || plane == 0 {
+        if self.block_lossless() || plane == 0 {
             return tx;
         }
         let uv = MAX_TX_SIZE_RECT[subsampled_size(bsize, self.sub_x, self.sub_y)];
@@ -5841,7 +5841,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         y_mode: u8,
         uv_mode: u8,
     ) -> Result<u8, CodecError> {
-        if self.lossless || TX_SIZE_SQR_UP[tx] > TX_32X32 {
+        if self.block_lossless() || TX_SIZE_SQR_UP[tx] > TX_32X32 {
             return self.remember_tx(plane, tx, DCT_DCT);
         }
         if self.coding_inter {
@@ -6135,12 +6135,6 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         tx_type: u8,
         quant: &[i32],
     ) -> Result<(), CodecError> {
-        // A lossless segment inside a lossy frame still reads a lossy transform
-        // size. That path stays refused. A frame with `base_q_idx` 0 is 4×4.
-        let segment_lossless = self.qindex() == 0 && self.deltas.iter().all(|delta| *delta == 0);
-        if segment_lossless && !self.lossless {
-            return Err(CodecError::Unsupported { what: "lossless" });
-        }
         let w = TX_WIDTH[tx];
         let h = TX_HEIGHT[tx];
         let tw = w.min(32);
@@ -6154,7 +6148,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         let ac = self.quantizer(plane, false);
         // A lossless block ignores the quantizer matrix. The lookup at index 0 is 4,
         // and the Walsh-Hadamard row shift of 2 brings that scale back to 1.
-        let qm_level = if self.lossless || tx_type >= IDTX {
+        let qm_level = if self.block_lossless() || tx_type >= IDTX {
             15
         } else {
             self.qm[plane]
@@ -6187,7 +6181,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
                     i32::try_from(value.clamp(-lim, lim - 1)).unwrap_or(0);
             }
         }
-        if self.lossless {
+        if self.block_lossless() {
             inverse_wht4(&self.coeff_buf, &mut self.idct_out);
         } else {
             inverse_2d_into(
@@ -6238,6 +6232,18 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             }
         }
         Ok(())
+    }
+
+    /// `LosslessArray[segment_id]`. `get_qindex(1, segment)` ignores the
+    /// superblock delta. A frame with `base_q_idx` 0 is lossless on every block.
+    fn block_lossless(&self) -> bool {
+        let q = i32::from(self.base_q);
+        let q = if self.seg_on(SEG_ALT_Q) {
+            (q + self.seg_value(SEG_ALT_Q)).clamp(0, 255)
+        } else {
+            q
+        };
+        q == 0 && self.deltas.iter().all(|delta| *delta == 0)
     }
 
     fn qindex(&self) -> i32 {

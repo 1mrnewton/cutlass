@@ -3816,6 +3816,56 @@ mod tests {
     }
 
     #[test]
+    fn a_lossless_segment_picture_matches_dav1d() {
+        // aomenc --lossless=1, 64×64, two frames. CDEF, restoration, and super
+        // resolution are off. The inter frame header is rewritten so base_q_idx
+        // is 8, segmentation is on, the map is not updated, and segment 0's
+        // quantizer delta is -8. The other segments stay at 8, so the frame is
+        // not coded lossless. Every block keeps segment 0 from the key and is a
+        // 4×4 Walsh-Hadamard transform. The tile bytes are the original lossless
+        // inter frame. Digests are `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/lossless-segment.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 2);
+        let mut sequence = None;
+        let mut headers = Vec::new();
+        for payload in &frames {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            headers.push(frame);
+            sequence = Some(seq);
+        }
+        assert!(headers[0].lossless);
+        assert_eq!(headers[0].base_q, 0);
+        assert!(!headers[0].segmentation.enabled);
+        assert_eq!(headers[0].width, 64);
+        assert_eq!(headers[0].height, 64);
+        assert!(!headers[1].lossless);
+        assert_eq!(headers[1].base_q, 8);
+        assert!(headers[1].segmentation.enabled);
+        assert!(!headers[1].segmentation.update_map);
+        assert!(headers[1].segmentation.active(0, crate::header::SEG_ALT_Q));
+        assert_eq!(
+            i32::from(headers[1].base_q)
+                + headers[1].segmentation.value(0, crate::header::SEG_ALT_Q),
+            0
+        );
+        assert!(!headers[1].segmentation.active(1, crate::header::SEG_ALT_Q));
+        let expected = [
+            (64 * 64 * 3 / 2, 0xd4e1_7006_4dfa_ae30),
+            (64 * 64 * 3 / 2, 0xc473_19cf_f33e_95bf),
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), expected[index].0, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn a_scaled_reference_global_motion_picture_matches_dav1d() {
         // aomenc, error resilient, 64×64 superblocks. The key is 64×64 and the
         // inter frames are 128×128, so the reference is scaled. The first inter

@@ -6,7 +6,7 @@
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
 //! is refused.
 
-use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
 
 use crate::bits::Bits;
 
@@ -59,6 +59,10 @@ pub struct Sps {
     pub num_units: u32,
     /// `time_scale`. Zero when timing is absent.
     pub time_scale: u32,
+    /// `fixed_frame_rate_flag`. False when timing is absent.
+    pub fixed_frame_rate: bool,
+    /// Annex E sample aspect. Unspecified is width 0, height 1.
+    pub sample_aspect: SampleAspect,
     /// Bit length of `cpb_removal_delay`. Zero when the HRD is absent.
     pub cpb_delay_bits: u8,
     /// Bit length of `dpb_output_delay`. Zero when the HRD is absent.
@@ -319,6 +323,8 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         pic_struct_present: vui.pic_struct_present,
         num_units: vui.num_units,
         time_scale: vui.time_scale,
+        fixed_frame_rate: vui.fixed_frame_rate,
+        sample_aspect: vui.sample_aspect,
         cpb_delay_bits: vui.cpb_delay_bits,
         dpb_delay_bits: vui.dpb_delay_bits,
         time_offset_bits: vui.time_offset_bits,
@@ -336,6 +342,8 @@ struct Vui {
     pic_struct_present: bool,
     num_units: u32,
     time_scale: u32,
+    fixed_frame_rate: bool,
+    sample_aspect: SampleAspect,
     cpb_delay_bits: u8,
     dpb_delay_bits: u8,
     time_offset_bits: u8,
@@ -352,6 +360,8 @@ impl Vui {
             pic_struct_present: false,
             num_units: 0,
             time_scale: 0,
+            fixed_frame_rate: false,
+            sample_aspect: SampleAspect::UNSPECIFIED,
             cpb_delay_bits: 0,
             dpb_delay_bits: 0,
             time_offset_bits: 0,
@@ -362,11 +372,7 @@ impl Vui {
 fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
     let mut vui = Vui::unspecified(max_reorder);
     if bits.bit()? {
-        let aspect = bits.u(8)?;
-        if aspect == 255 {
-            let _ = bits.u(16)?;
-            let _ = bits.u(16)?;
-        }
+        vui.sample_aspect = sample_aspect(bits)?;
     }
     if bits.bit()? {
         let _ = bits.bit()?;
@@ -391,7 +397,7 @@ fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
     if bits.bit()? {
         vui.num_units = bits.u(32)?;
         vui.time_scale = bits.u(32)?;
-        let _ = bits.bit()?;
+        vui.fixed_frame_rate = bits.bit()?;
     }
     let nal_hrd = bits.bit()?;
     if nal_hrd {
@@ -446,11 +452,102 @@ fn hrd(bits: &mut Bits<'_>) -> Result<(u8, u8, u8), CodecError> {
     Ok((cpb_bits as u8, dpb_bits as u8, offset_bits as u8))
 }
 
+const ASPECT: [SampleAspect; 17] = [
+    SampleAspect::UNSPECIFIED,
+    SampleAspect {
+        width: 1,
+        height: 1,
+    },
+    SampleAspect {
+        width: 12,
+        height: 11,
+    },
+    SampleAspect {
+        width: 10,
+        height: 11,
+    },
+    SampleAspect {
+        width: 16,
+        height: 11,
+    },
+    SampleAspect {
+        width: 40,
+        height: 33,
+    },
+    SampleAspect {
+        width: 24,
+        height: 11,
+    },
+    SampleAspect {
+        width: 20,
+        height: 11,
+    },
+    SampleAspect {
+        width: 32,
+        height: 11,
+    },
+    SampleAspect {
+        width: 80,
+        height: 33,
+    },
+    SampleAspect {
+        width: 18,
+        height: 11,
+    },
+    SampleAspect {
+        width: 15,
+        height: 11,
+    },
+    SampleAspect {
+        width: 64,
+        height: 33,
+    },
+    SampleAspect {
+        width: 160,
+        height: 99,
+    },
+    SampleAspect {
+        width: 4,
+        height: 3,
+    },
+    SampleAspect {
+        width: 3,
+        height: 2,
+    },
+    SampleAspect {
+        width: 2,
+        height: 1,
+    },
+];
+
+fn sample_aspect(bits: &mut Bits<'_>) -> Result<SampleAspect, CodecError> {
+    let idc = bits.u(8)?;
+    if idc == 255 {
+        let width = bits.u(16)?;
+        let height = bits.u(16)?;
+        return Ok(SampleAspect::ratio(width, height));
+    }
+    let Some(index) = usize::try_from(idc).ok() else {
+        return Ok(SampleAspect::UNSPECIFIED);
+    };
+    Ok(ASPECT
+        .get(index)
+        .copied()
+        .unwrap_or(SampleAspect::UNSPECIFIED))
+}
+
 fn colour(idc: u32) -> ColorPrimaries {
     match idc {
         1 => ColorPrimaries::Bt709,
+        4 => ColorPrimaries::Bt470m,
         5 | 6 => ColorPrimaries::Bt601,
+        7 => ColorPrimaries::Smpte240m,
+        8 => ColorPrimaries::Film,
         9 => ColorPrimaries::Bt2020,
+        10 => ColorPrimaries::Smpte428,
+        11 => ColorPrimaries::Smpte431,
+        12 => ColorPrimaries::Smpte432,
+        22 => ColorPrimaries::Ebu3213,
         _ => ColorPrimaries::Unspecified,
     }
 }
@@ -459,16 +556,37 @@ fn transfer_of(idc: u32) -> Transfer {
     match idc {
         1 | 6 => Transfer::Bt709,
         4 | 5 => Transfer::Bt601,
-        14..=16 => Transfer::Bt2020,
+        7 => Transfer::Smpte240m,
+        8 => Transfer::Linear,
+        9 => Transfer::Log100,
+        10 => Transfer::LogSqrt,
+        11 => Transfer::Iec61966_2_4,
+        12 => Transfer::Bt1361,
+        13 => Transfer::Srgb,
+        14 | 15 => Transfer::Bt2020,
+        16 => Transfer::Pq,
+        17 => Transfer::Smpte428,
+        18 => Transfer::Hlg,
         _ => Transfer::Unspecified,
     }
 }
 
 fn matrix_of(idc: u32) -> ColorMatrix {
     match idc {
+        0 => ColorMatrix::Identity,
         1 => ColorMatrix::Bt709,
+        4 => ColorMatrix::Fcc,
         5 | 6 => ColorMatrix::Bt601,
+        7 => ColorMatrix::Smpte240m,
+        8 => ColorMatrix::Ycgco,
         9 | 10 => ColorMatrix::Bt2020,
+        11 => ColorMatrix::Smpte2085,
+        12 => ColorMatrix::ChromaDerived,
+        13 => ColorMatrix::ChromaDerivedConstant,
+        14 => ColorMatrix::Ictcp,
+        15 => ColorMatrix::IptC2,
+        16 => ColorMatrix::YcgcoRe,
+        17 => ColorMatrix::YcgcoRo,
         _ => ColorMatrix::Unspecified,
     }
 }

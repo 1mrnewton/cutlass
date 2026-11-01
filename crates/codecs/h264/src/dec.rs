@@ -2,8 +2,8 @@
 
 use cutlass_decode::{
     CodecError, CodecId, CodecParams, ColorMatrix, ColorPrimaries, ColorRange, DecodeFactory,
-    Packet, Transfer, VideoDecoder, VideoOutput, Yuv420High, Yuv420p, Yuv420p10, Yuv422High,
-    Yuv422p, Yuv444High, Yuv444p,
+    Packet, SampleAspect, SequenceTiming, Transfer, VideoDecoder, VideoOutput, Yuv420High, Yuv420p,
+    Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 
 use crate::bits::Bits;
@@ -157,6 +157,10 @@ pub(crate) struct Frame<S: Sample = u8> {
     primaries: ColorPrimaries,
     transfer: Transfer,
     matrix: ColorMatrix,
+    sample_aspect: SampleAspect,
+    num_units: u32,
+    time_scale: u32,
+    fixed_rate: bool,
     nonexisting: bool,
     /// The picture is three monochrome colour planes. Reconstruction swaps one
     /// plane into `y` and the same plane of every reference.
@@ -1140,6 +1144,10 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         primaries: sps.primaries,
         transfer: sps.transfer,
         matrix: sps.matrix,
+        sample_aspect: sps.sample_aspect,
+        num_units: sps.num_units,
+        time_scale: sps.time_scale,
+        fixed_rate: sps.fixed_frame_rate,
         nonexisting: true,
         separate_plane: sps.separate,
         field: false,
@@ -1298,6 +1306,12 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
         primaries: frame.primaries,
         transfer: frame.transfer,
         matrix: frame.matrix,
+        sample_aspect: frame.sample_aspect,
+        timing: SequenceTiming {
+            num_units: frame.num_units,
+            time_scale: frame.time_scale,
+            fixed: frame.fixed_rate,
+        },
     })
 }
 
@@ -1467,6 +1481,12 @@ fn output_of<S: Sample>(
         primaries: frame.primaries,
         transfer: frame.transfer,
         matrix: frame.matrix,
+        sample_aspect: frame.sample_aspect,
+        timing: SequenceTiming {
+            num_units: frame.num_units,
+            time_scale: frame.time_scale,
+            fixed: frame.fixed_rate,
+        },
     }
 }
 
@@ -2301,6 +2321,10 @@ fn new_frame<S: Sample>(
         primaries: sps.primaries,
         transfer: sps.transfer,
         matrix: sps.matrix,
+        sample_aspect: sps.sample_aspect,
+        num_units: sps.num_units,
+        time_scale: sps.time_scale,
+        fixed_rate: sps.fixed_frame_rate,
         nonexisting: false,
         separate_plane: sps.separate,
         field: header.field,
@@ -2790,7 +2814,7 @@ mod tests {
     }
 
     fn held(frame_num: u32) -> super::Frame {
-        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
         super::Frame {
             y: Vec::new(),
             u: Vec::new(),
@@ -2817,6 +2841,10 @@ mod tests {
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
             matrix: ColorMatrix::Unspecified,
+            sample_aspect: SampleAspect::UNSPECIFIED,
+            num_units: 0,
+            time_scale: 0,
+            fixed_rate: false,
             nonexisting: false,
             separate_plane: false,
             field: false,
@@ -2832,7 +2860,7 @@ mod tests {
     }
 
     fn type1_sps(offsets: &[i32], non_ref: i32, top_bottom: i32) -> super::Sps {
-        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, Transfer};
+        use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
         super::Sps {
             id: 0,
             log2_max_frame_num: 4,
@@ -2869,6 +2897,8 @@ mod tests {
             pic_struct_present: false,
             num_units: 0,
             time_scale: 0,
+            fixed_frame_rate: false,
+            sample_aspect: SampleAspect::UNSPECIFIED,
             cpb_delay_bits: 0,
             dpb_delay_bits: 0,
             time_offset_bits: 0,

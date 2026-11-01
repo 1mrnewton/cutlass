@@ -1,33 +1,23 @@
-use cutlass_model::{Draft, MaterialId, Segment, Track, TrackFlag, TrackId, TrackType};
+use cutlass_model::{Draft, MaterialId};
 
 use crate::request::ImportedMedium;
 
-use super::{EditError, ensure_unlocked, place::place};
+use super::EditError;
 
-/// Insert the material and the segment. A missing track is created first.
-pub fn import(
-    draft: &mut Draft,
-    track_id: &TrackId,
-    kind: &TrackType,
-    medium: ImportedMedium,
-    segment: Segment,
-) -> Result<(), EditError> {
+/// Store the material in the library. The timeline is left as it is.
+pub fn import(draft: &mut Draft, medium: ImportedMedium) -> Result<(), EditError> {
     let material_id = medium_id(&medium);
-    if material_id.is_empty() || material_id != segment.material_id {
+    if material_id.is_empty() {
         return Err(EditError::MissingMaterial);
     }
     if draft.materials.get(material_id.as_str()).is_some() {
         return Err(EditError::DuplicateMaterial);
     }
-    ensure_track(draft, track_id, kind)?;
-    if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
-        ensure_unlocked(track.attribute)?;
-    }
     match medium {
         ImportedMedium::Video(video) => draft.materials.videos.push(*video),
         ImportedMedium::Audio(audio) => draft.materials.audios.push(*audio),
     }
-    place(draft, track_id, segment)
+    Ok(())
 }
 
 fn medium_id(medium: &ImportedMedium) -> MaterialId {
@@ -37,67 +27,46 @@ fn medium_id(medium: &ImportedMedium) -> MaterialId {
     }
 }
 
-fn ensure_track(draft: &mut Draft, track_id: &TrackId, kind: &TrackType) -> Result<(), EditError> {
-    if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
-        if &track.kind == kind {
-            Ok(())
-        } else {
-            Err(EditError::TrackKind)
-        }
-    } else {
-        let mut track = Track::main(track_id.clone());
-        track.kind = kind.clone();
-        let main_exists = draft.tracks.iter().any(Track::is_main);
-        if main_exists && matches!(kind, TrackType::Video | TrackType::Mixed) {
-            track.flag = TrackFlag::SubVideo;
-        }
-        draft.tracks.push(track);
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
-        Draft, MaterialAudio, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute, TrackId,
-        TrackType,
+        Draft, MaterialAudio, MaterialVideo, Micros, TrackAttribute, TrackId, TrackType,
     };
 
     use super::*;
     use crate::request::{ImportedMedium, Request};
     use crate::session::Session;
 
-    fn video_request(track: &str, id: &str) -> Request {
+    fn video_request(id: &str) -> Request {
         let mut material = MaterialVideo::new(id);
         material.kind = "video".to_owned();
         material.path = format!("{id}.mp4");
         material.duration = Micros(1_000_000);
         Request::Import {
-            track_id: TrackId::new(track),
-            kind: TrackType::Video,
             medium: ImportedMedium::Video(Box::new(material)),
-            segment: Box::new(Segment::new(id, id, TimeRange::new(0, 1_000_000))),
         }
     }
 
     #[test]
-    fn an_import_lands_the_material_and_undoes_in_one_step() {
+    fn an_import_lands_in_the_library_and_undoes_in_one_step() {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
-        session.apply(0, &[video_request("main", "clip")]).unwrap();
+        session.apply(0, &[video_request("clip")]).unwrap();
         assert_eq!(session.draft().materials.videos[0].path, "clip.mp4");
-        assert_eq!(session.draft().tracks[0].segments.len(), 1);
-        assert_eq!(session.draft().duration, Micros(1_000_000));
+        assert!(session.draft().tracks[0].segments.is_empty());
+        assert_eq!(session.draft().tracks.len(), 1);
+        assert_eq!(session.draft().duration, Micros(0));
         session.undo().unwrap();
         assert!(session.draft().materials.videos.is_empty());
         assert!(session.draft().tracks[0].segments.is_empty());
     }
 
     #[test]
-    fn audio_creates_its_own_track_and_a_locked_track_leaves_the_draft() {
+    fn audio_stays_off_the_timeline_and_a_locked_track_still_accepts_it() {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0].attribute = TrackAttribute(TrackAttribute::LOCK);
         let mut session = Session::open(draft);
         let material = MaterialAudio {
             id: "tone".into(),
@@ -110,64 +79,40 @@ mod tests {
             .apply(
                 0,
                 &[Request::Import {
-                    track_id: TrackId::new("audio"),
-                    kind: TrackType::Audio,
                     medium: ImportedMedium::Audio(Box::new(material)),
-                    segment: Box::new(Segment::new("tone", "tone", TimeRange::new(0, 500_000))),
                 }],
             )
             .unwrap();
-        assert_eq!(session.draft().tracks.len(), 2);
-        assert_eq!(session.draft().tracks[1].kind, TrackType::Audio);
-        assert!(!session.draft().tracks[1].is_main());
+        assert_eq!(session.draft().tracks.len(), 1);
+        assert_eq!(session.draft().tracks[0].kind, TrackType::Video);
+        assert!(session.draft().tracks[0].segments.is_empty());
+        assert!(
+            session.draft().tracks[0]
+                .attribute
+                .contains(TrackAttribute::LOCK)
+        );
         assert_eq!(session.draft().materials.audios[0].path, "tone.wav");
-
-        session
-            .apply(
-                1,
-                &[Request::SetTrackAttribute {
-                    track_id: TrackId::new("main"),
-                    bit: TrackAttribute::LOCK,
-                    on: true,
-                }],
-            )
-            .unwrap();
-        let before = session.draft().clone();
-        let error = session
-            .apply(2, &[video_request("main", "other")])
-            .unwrap_err();
-        assert_eq!(error, EditError::LockedTrack);
-        assert_eq!(session.draft(), &before);
     }
 
     #[test]
-    fn a_duplicate_material_or_the_wrong_track_type_leaves_the_draft() {
+    fn a_duplicate_or_empty_material_leaves_the_draft() {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
         let mut session = Session::open(draft);
-        session.apply(0, &[video_request("main", "clip")]).unwrap();
+        session.apply(0, &[video_request("clip")]).unwrap();
         let before = session.draft().clone();
-        let error = session
-            .apply(1, &[video_request("main", "clip")])
-            .unwrap_err();
+        let error = session.apply(1, &[video_request("clip")]).unwrap_err();
         assert_eq!(error, EditError::DuplicateMaterial);
         assert_eq!(session.draft(), &before);
         let error = session
             .apply(
                 1,
                 &[Request::Import {
-                    track_id: TrackId::new("main"),
-                    kind: TrackType::Audio,
-                    medium: ImportedMedium::Audio(Box::new(MaterialAudio {
-                        id: "tone".into(),
-                        duration: Micros(100),
-                        ..MaterialAudio::default()
-                    })),
-                    segment: Box::new(Segment::new("tone", "tone", TimeRange::new(0, 100))),
+                    medium: ImportedMedium::Video(Box::new(MaterialVideo::new(""))),
                 }],
             )
             .unwrap_err();
-        assert_eq!(error, EditError::TrackKind);
+        assert_eq!(error, EditError::MissingMaterial);
         assert_eq!(session.draft(), &before);
     }
 }

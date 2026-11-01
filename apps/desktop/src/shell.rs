@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     GestureOutcome, MoveGesture, Pointer, TimelineScale, Zoom, ZoomBounds, fit_pixel_size,
-    hit_test, lane_category, lanes, last_accuracy_step, minimum_pixel_size, move_gesture,
+    hit_test, lanes, last_accuracy_step, minimum_pixel_size, move_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
@@ -900,31 +900,19 @@ impl Shell {
                 height,
                 duration,
             } => {
-                let kind = lane_category(meta)
-                    .ok_or_else(|| ShellError::Unavailable("the picture has no lane".to_owned()))?;
-                let track_id = self.main_track()?;
-                let end = self.track_end(&track_id);
                 let material_id = self.fresh("mat");
-                let segment_id = self.fresh("seg");
                 let mut material = MaterialVideo::new(material_id.as_str());
                 material.kind = meta.as_str().to_owned();
                 material.path = stored;
                 material.duration = Micros(duration);
                 material.width = width;
                 material.height = height;
-                let segment = placed(&segment_id, &material_id, end, duration);
                 self.apply(Request::Import {
-                    track_id,
-                    kind,
                     medium: ImportedMedium::Video(Box::new(material)),
-                    segment: Box::new(segment),
                 })
             }
             Probed::Audio { duration } => {
-                let track_id = self.audio_track();
-                let end = self.track_end(&track_id);
                 let material_id = self.fresh("mat");
-                let segment_id = self.fresh("seg");
                 let material = MaterialAudio {
                     id: MaterialId::new(&material_id),
                     kind: MetaType::Music.as_str().to_owned(),
@@ -932,12 +920,8 @@ impl Shell {
                     duration: Micros(duration),
                     ..MaterialAudio::default()
                 };
-                let segment = placed(&segment_id, &material_id, end, duration);
                 self.apply(Request::Import {
-                    track_id,
-                    kind: TrackType::Audio,
                     medium: ImportedMedium::Audio(Box::new(material)),
-                    segment: Box::new(segment),
                 })
             }
         }
@@ -954,40 +938,6 @@ impl Shell {
 
     fn session_draft(&self) -> Result<&Draft, ShellError> {
         self.draft().ok_or(ShellError::NoProject)
-    }
-
-    fn main_track(&self) -> Result<TrackId, ShellError> {
-        self.session_draft()?
-            .main_track()
-            .map(|track| track.id.clone())
-            .ok_or(ShellError::Unavailable(
-                "the project has no main lane".to_owned(),
-            ))
-    }
-
-    fn audio_track(&self) -> TrackId {
-        self.draft()
-            .and_then(|draft| {
-                draft
-                    .tracks
-                    .iter()
-                    .find(|track| track.kind == TrackType::Audio)
-                    .map(|track| track.id.clone())
-            })
-            .unwrap_or_else(|| TrackId::new("audio-1"))
-    }
-
-    fn track_end(&self, track_id: &TrackId) -> i64 {
-        self.draft()
-            .and_then(|draft| draft.tracks.iter().find(|track| &track.id == track_id))
-            .and_then(|track| {
-                track
-                    .segments
-                    .iter()
-                    .map(|segment| segment.target.end().0)
-                    .max()
-            })
-            .unwrap_or(0)
     }
 
     fn fresh(&mut self, prefix: &str) -> String {
@@ -1166,12 +1116,6 @@ fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
 
 fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
-}
-
-fn placed(segment_id: &str, material_id: &str, start: i64, duration: i64) -> Segment {
-    let mut segment = Segment::new(segment_id, material_id, TimeRange::new(start, duration));
-    segment.source_range = Some(TimeRange::new(0, duration));
-    segment
 }
 
 fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
@@ -1658,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn import_places_a_still_a_movie_and_a_sound_and_refuses_the_rest() {
+    fn import_stores_a_still_and_a_sound_without_a_timeline_clip() {
         let temp = Temp::new();
         empty_project(&temp.path);
         let mut desktop = shell();
@@ -1666,8 +1610,8 @@ mod tests {
         let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         desktop.import_file(&picture).unwrap();
-        let main = desktop.lanes().into_iter().find(|lane| lane.main).unwrap();
-        assert_eq!(main.clips.len(), 1);
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
         assert!(temp.path.join("Resources").join("pattern.png").is_file());
         assert!(
             desktop.draft().unwrap().materials.videos[0]
@@ -1678,23 +1622,12 @@ mod tests {
         let sound = temp.path.join("tone.wav");
         write_wav(&sound);
         desktop.import_file(&sound).unwrap();
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
         assert!(
-            desktop
-                .lanes()
-                .iter()
-                .any(|lane| !lane.main && lane.clips.len() == 1)
-        );
-        let audio = desktop.lanes().into_iter().find(|lane| !lane.main).unwrap();
-        desktop
-            .toggle_attribute(audio.track_id, TrackAttribute::SOLO)
-            .unwrap();
-        assert!(
-            desktop
-                .lanes()
-                .iter()
-                .find(|lane| lane.main)
-                .unwrap()
-                .mute_by_solo
+            desktop.draft().unwrap().materials.audios[0]
+                .path
+                .ends_with("tone.wav")
         );
 
         let junk = temp.path.join("notes.txt");
@@ -1736,7 +1669,7 @@ mod tests {
             ("snaptik_7282700172428086530_v3.mp4", true),
         ];
         let mut imported = 0;
-        for (name, on_main) in samples {
+        for (name, video) in samples {
             let path = root.join(name);
             if !path.is_file() {
                 eprintln!("skipped: {name} is not in ../local-files");
@@ -1744,14 +1677,22 @@ mod tests {
             }
             desktop.import_file(&path).unwrap();
             imported += 1;
-            let lane = desktop
-                .lanes()
-                .into_iter()
-                .find(|lane| {
-                    lane.main == on_main && lane.clips.iter().any(|clip| clip.name == name)
-                })
-                .unwrap_or_else(|| panic!("{name}"));
-            assert!(lane.clips.iter().any(|clip| clip.name == name));
+            let draft = desktop.draft().unwrap();
+            let stored = if video {
+                draft
+                    .materials
+                    .videos
+                    .iter()
+                    .any(|item| item.path.ends_with(name))
+            } else {
+                draft
+                    .materials
+                    .audios
+                    .iter()
+                    .any(|item| item.path.ends_with(name))
+            };
+            assert!(stored, "{name}");
+            assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
             assert!(temp.path.join("Resources").join(name).is_file());
         }
         if imported == 0 {

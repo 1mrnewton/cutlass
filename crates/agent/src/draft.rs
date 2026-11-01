@@ -645,7 +645,6 @@ fn map_redo(error: EditError) -> DraftError {
 mod tests {
     use cutlass_model::{
         Draft, MaterialId, MaterialVideo, Micros, Segment, SegmentId, TimeRange, Track, TrackId,
-        TrackType,
     };
     use cutlass_session::{EditError, ImportedMedium, Request, Session};
 
@@ -671,10 +670,7 @@ mod tests {
     #[test]
     fn import_is_named() {
         let request = Request::Import {
-            track_id: TrackId::new("main"),
-            kind: TrackType::Video,
             medium: ImportedMedium::Video(Box::new(MaterialVideo::new("clip"))),
-            segment: Box::new(Segment::new("s", "clip", TimeRange::new(0, 1))),
         };
         assert_eq!(request_name(&request), "import");
     }

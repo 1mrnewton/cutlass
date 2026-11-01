@@ -127,12 +127,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
-        Request::Import {
-            track_id,
-            kind,
-            medium,
-            segment,
-        } => import::import(draft, track_id, kind, medium.clone(), (**segment).clone()),
+        Request::Import { medium } => import::import(draft, medium.clone()),
     }
 }
 

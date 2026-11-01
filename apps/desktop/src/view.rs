@@ -1989,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_import_dialog_places_the_file() {
+    fn a_completed_import_dialog_keeps_the_file_in_the_library() {
         let temp = std::env::temp_dir().join(format!("cutlass-import-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
@@ -2012,13 +2012,13 @@ mod tests {
         );
         let painted = painted_text(&output);
         output.textures_delta.clear();
-        let main = shell.lanes().into_iter().find(|lane| lane.main).unwrap();
-        assert_eq!(main.clips.len(), 1);
+        assert!(shell.lanes().iter().all(|lane| lane.clips.is_empty()));
         assert!(temp.join("Resources").join("pattern.png").is_file());
         assert_eq!(shell.draft().unwrap().materials.videos.len(), 1);
         assert!(painted.contains("pattern.png"), "{painted}");
         assert!(painted.contains("Imported pattern.png"), "{painted}");
-        let card = text_pos(&output, "On timeline").expect("library card");
+        assert!(!painted.contains("On timeline"), "{painted}");
+        let card = text_pos(&output, "pattern.png").expect("library card");
         assert!((80.0..tokens::LIBRARY_WIDTH).contains(&card.x), "{card:?}");
         assert!((40.0..500.0).contains(&card.y), "{card:?}");
         let _ = std::fs::remove_dir_all(&temp);

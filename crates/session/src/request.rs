@@ -1,9 +1,9 @@
 use cutlass_model::{
     CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, WordColumns,
 };
 
-/// A media record an import places beside its segment.
+/// A media record stored in the library. A segment places it later.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImportedMedium {
     /// A picture, including a still stored as a video material.
@@ -113,11 +113,6 @@ pub enum Request {
         segment_id: SegmentId,
         keyframes: Vec<CommonKeyframeGroup>,
     },
-    /// Add a material and place its segment. A missing track of `kind` is created.
-    Import {
-        track_id: TrackId,
-        kind: TrackType,
-        medium: ImportedMedium,
-        segment: Box<Segment>,
-    },
+    /// Add a material to the library. This does not place a segment.
+    Import { medium: ImportedMedium },
 }

@@ -1210,16 +1210,15 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "guides" => shell.guides_shown(),
                                 "lock" => shell.guides_locked(),
                                 "linkage" => shell.linkage_enabled(),
+                                "magnet" => shell.magnet_enabled(),
                                 _ => false,
                             };
-                            let tip = if *name == "linkage" {
-                                if shell.linkage_enabled() {
-                                    "Linkage on"
-                                } else {
-                                    "Linkage off"
-                                }
-                            } else {
-                                tip
+                            let tip = match *name {
+                                "linkage" if shell.linkage_enabled() => "Linkage on",
+                                "linkage" => "Linkage off",
+                                "magnet" if shell.magnet_enabled() => "Magnet on",
+                                "magnet" => "Magnet off",
+                                _ => tip,
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
                                 tool_clicked(shell, name);
@@ -1276,7 +1275,7 @@ fn toolbar_button(
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
         "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
-        | "lock" | "linkage" => true,
+        | "lock" | "linkage" | "magnet" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
         _ => false,
     }
@@ -1320,6 +1319,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             Ok(())
         }
         "linkage" => shell.toggle_linkage(),
+        "magnet" => shell.toggle_magnet(),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -3869,6 +3869,7 @@ mod tests {
             std::env::temp_dir().join(format!("cutlass-trim-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&temp);
         let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
         draft.tracks[0].segments.push(cutlass_model::Segment::new(

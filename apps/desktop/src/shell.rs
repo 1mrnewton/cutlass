@@ -1647,6 +1647,34 @@ impl Shell {
             .is_some_and(|session| session.linkage().enabled)
     }
 
+    /// The main-track magnet. A new project starts on, and the choice is saved.
+    #[must_use]
+    pub fn magnet_enabled(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.draft().config.maintrack_adsorb)
+    }
+
+    /// Turn packing on or off. Turning it on closes gaps on the main lane.
+    ///
+    /// A locked main lane refuses the switch. One undo restores the clips and the switch.
+    pub fn toggle_magnet(&mut self) -> Result<(), ShellError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(ShellError::NoProject);
+        };
+        if session
+            .draft()
+            .main_track()
+            .is_some_and(|track| track.attribute.contains(TrackAttribute::LOCK))
+        {
+            return Err(ShellError::Unavailable(
+                "the main track is locked".to_owned(),
+            ));
+        }
+        let on = !session.draft().config.maintrack_adsorb;
+        self.apply(Request::SetMagnet { on })
+    }
+
     /// Turn follow on or off. Stored pairs stay either way. This is not an undo step.
     pub fn toggle_linkage(&mut self) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
@@ -3441,7 +3469,9 @@ mod tests {
     }
 
     fn empty_project(dir: &Path) {
-        Folder::new(Draft::empty("draft")).save(dir).unwrap();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        Folder::new(draft).save(dir).unwrap();
     }
 
     fn draft_only(dir: &Path) {
@@ -3688,6 +3718,83 @@ mod tests {
     }
 
     #[test]
+    fn the_magnet_packs_the_main_lane_and_a_lock_refuses_the_switch() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.toggle_magnet().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "media", TimeRange::new(500_000, 100_000)));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("b", "media", TimeRange::new(800_000, 100_000)));
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound.segments.push(Segment::new(
+            "tone",
+            "tone",
+            TimeRange::new(400_000, 100_000),
+        ));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.magnet_enabled());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(500_000)
+        );
+
+        desktop.toggle_magnet().unwrap();
+        assert!(!desktop.magnet_enabled());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(500_000)
+        );
+
+        desktop.toggle_magnet().unwrap();
+        assert!(desktop.magnet_enabled());
+        let packed = desktop.draft().unwrap();
+        assert_eq!(packed.tracks[0].segments[0].id, SegmentId::new("a"));
+        assert_eq!(
+            packed.tracks[0].segments[0].target,
+            TimeRange::new(0, 100_000)
+        );
+        assert_eq!(
+            packed.tracks[0].segments[1].target,
+            TimeRange::new(100_000, 100_000)
+        );
+        assert_eq!(packed.tracks[1].segments[0].target.start, Micros(400_000));
+        desktop.undo().unwrap();
+        assert!(!desktop.magnet_enabled());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(500_000)
+        );
+        desktop.redo().unwrap();
+        assert!(desktop.magnet_enabled());
+
+        let track_id = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track_id, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop.toggle_magnet().unwrap_err();
+        assert_eq!(locked.to_string(), "the main track is locked");
+        assert!(desktop.magnet_enabled());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+    }
+
+    #[test]
     fn a_new_project_starts_with_linkage_on_and_keeps_the_switch() {
         let root = Temp::new();
         let path = Shell::create_project(&root.path).unwrap();
@@ -3805,6 +3912,7 @@ mod tests {
     fn a_clip_on_two_main_clips_is_not_linked() {
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
         let mut video = MaterialVideo::new("wide");
@@ -3837,6 +3945,7 @@ mod tests {
 
         let temp = Temp::new();
         let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
         draft.tracks[0]
@@ -4723,6 +4832,7 @@ mod tests {
         let movie = temp.path.join("clip.bin");
         std::fs::write(&movie, b"12345678").unwrap();
         let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 2;
         draft.materials.material_colors.push(MaterialColorConfig {
@@ -5151,6 +5261,7 @@ mod tests {
 
     fn trim_project(dir: &Path) {
         let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
         let mut video = MaterialVideo::new("media");

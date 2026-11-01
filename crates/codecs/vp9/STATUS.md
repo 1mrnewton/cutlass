@@ -67,6 +67,7 @@ Recorded line:
 | Four tile rows | Pictures match | One tile | `four_tile_rows_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Switchable, smooth, regular, sharp, and bilinear interpolation | Pictures match | Regular only | `interpolation_filters_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | 52×52 loop filter in 4:2:2, 4:4:0, 4:4:4, 10-bit and 12-bit 4:2:0, and 10-bit 4:2:2 | Pictures match | n/a | `odd_chroma_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| 53×53, subsampled chroma edge 27 | Pictures match | Even coded size | `odd_edge_chroma_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |
 | libvpx-vp9, native vp9, and GStreamer vp9dec decode our bitstreams | n/a | All three | `independent_decoders_match_our_yuv` | Verified on this machine |

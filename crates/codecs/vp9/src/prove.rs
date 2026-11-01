@@ -282,6 +282,51 @@ fn odd_chroma_matches_ffmpeg_software() {
     }
 }
 
+/// 53 is odd, so a subsampled chroma plane is 27 samples on that axis.
+#[test]
+fn odd_edge_chroma_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no odd-size source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let cases = [
+        ("0", "yuv420p", PixelFormat::Yuv420p),
+        ("1", "yuv422p", PixelFormat::Yuv422p),
+        ("1", "yuv440p", PixelFormat::Yuv440p),
+        ("1", "yuv444p", PixelFormat::Yuv444p),
+        ("2", "yuv420p10le", PixelFormat::Yuv420p10),
+        ("2", "yuv420p12le", PixelFormat::Yuv420p12),
+        ("3", "yuv422p10le", PixelFormat::Yuv422p10),
+        ("3", "yuv422p12le", PixelFormat::Yuv422p12),
+    ];
+    for (profile, pix_fmt, format) in cases {
+        let dir = temp_dir(pix_fmt);
+        let ivf = dir.join("in.ivf");
+        encode_scaled(&ffmpeg, &source, &ivf, profile, pix_fmt, "53:53");
+        let stream = read_ivf(&ivf);
+        assert_eq!(stream.width, 53, "{pix_fmt} width");
+        assert_eq!(stream.height, 53, "{pix_fmt} height");
+        assert!(stream.frames.len() > 1, "{pix_fmt} needs an inter frame");
+        let (ours, _) = decode_shown(&stream, format);
+        let oracle = ffmpeg_yuv(&ffmpeg, &ivf, pix_fmt);
+        assert_eq!(ours.len(), oracle.len(), "{pix_fmt} shown bytes differ");
+        let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{pix_fmt} first mismatch at {mismatch:?}");
+        eprintln!(
+            "odd edge {pix_fmt} {}x{} {} frames {} bytes",
+            stream.width,
+            stream.height,
+            stream.frames.len(),
+            ours.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[test]
 fn level_width_above_4096_matches_ffmpeg_software() {
     let Some(source) = local_video() else {

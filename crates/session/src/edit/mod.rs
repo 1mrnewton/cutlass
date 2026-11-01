@@ -112,6 +112,8 @@ pub enum EditError {
     LineSpacing,
     /// The wrap width is negative or past the picture edge.
     LineWidth,
+    /// The face is empty or is not a file name.
+    TextFont,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
     /// A canvas side is outside 1 through 7680.
@@ -249,6 +251,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             width,
             face,
         } => text::set_line_width(draft, segment_id, *width, face),
+        Request::SetTextFont { segment_id, face } => text::set_text_font(draft, segment_id, face),
         Request::SetKeyframes {
             segment_id,
             keyframes,

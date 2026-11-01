@@ -153,6 +153,25 @@ pub fn set_line_width(
     Ok(())
 }
 
+/// Store the face file name. The string, the size, and the word columns stay.
+pub fn set_text_font(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    let face = face.trim();
+    if !face_file(face) {
+        return Err(EditError::TextFont);
+    }
+    draft.materials.texts[index].font_path = face.to_owned();
+    Ok(())
+}
+
+fn face_file(face: &str) -> bool {
+    !face.is_empty() && face.len() <= 255 && !face.contains(['/', '\\', '\0'])
+}
+
 fn text_index(draft: &Draft, segment_id: &SegmentId) -> Result<usize, EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
@@ -498,5 +517,64 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LineWidth);
         assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_face_name_stays_on_the_text_and_a_path_is_refused() {
+        let mut session = open();
+        session
+            .apply(
+                0,
+                &[Request::SetTextFont {
+                    segment_id: "a".into(),
+                    face: "  sample.ttf  ".to_owned(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.font_path, "sample.ttf");
+        assert_eq!(text.font_size, 0.0);
+        assert_eq!(text.content, "A");
+        assert_eq!(text.words.text, ["A"]);
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].font_path, "");
+
+        let before = session.draft().clone();
+        for face in ["", "faces/sample.ttf", "faces\\sample.ttf"] {
+            let error = session
+                .apply(
+                    2,
+                    &[Request::SetTextFont {
+                        segment_id: "a".into(),
+                        face: face.to_owned(),
+                    }],
+                )
+                .unwrap_err();
+            assert_eq!(error, EditError::TextFont);
+        }
+        assert_eq!(session.draft(), &before);
+
+        let lane = session.draft().tracks[0].id.clone();
+        session
+            .apply(
+                2,
+                &[Request::SetTrackAttribute {
+                    track_id: lane,
+                    bit: TrackAttribute::LOCK,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        let error = session
+            .apply(
+                3,
+                &[Request::SetTextFont {
+                    segment_id: "a".into(),
+                    face: "sample.ttf".to_owned(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LockedTrack);
+        assert_eq!(session.draft().materials.texts[0].font_path, "");
     }
 }

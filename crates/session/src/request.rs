@@ -182,6 +182,8 @@ pub enum Request {
         width: f64,
         face: String,
     },
+    /// Store the face file name on a text clip.
+    SetTextFont { segment_id: SegmentId, face: String },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

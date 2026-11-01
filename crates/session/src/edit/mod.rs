@@ -11,6 +11,7 @@ mod mark;
 mod mirror;
 mod move_segment;
 mod place;
+mod placement;
 mod reverse;
 mod rotate;
 mod speed;
@@ -85,6 +86,10 @@ pub enum EditError {
     TrackKind,
     /// The rotation is not a finite number of degrees.
     Angle,
+    /// Position is not a finite number.
+    Position,
+    /// Scale is not finite and greater than zero.
+    Scale,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -159,6 +164,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             degrees,
         } => rotate::set_rotation(draft, segment_id, *degrees),
+        Request::SetPosition { segment_id, x, y } => {
+            placement::set_position(draft, segment_id, *x, *y)
+        }
+        Request::SetScale { segment_id, scale } => placement::set_scale(draft, segment_id, *scale),
         Request::SetVolume { segment_id, volume } => volume::set_volume(draft, segment_id, *volume),
         Request::SetFade {
             segment_id,

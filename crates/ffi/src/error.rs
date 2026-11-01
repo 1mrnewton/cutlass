@@ -112,6 +112,8 @@ fn edit_cause(error: EditError) -> String {
         EditError::NoSound => "the clip has no sound".to_owned(),
         EditError::AlreadyExtracted => "the sound is already on its own clip".to_owned(),
         EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
+        EditError::Position => "the position is not a finite number".to_owned(),
+        EditError::Scale => "the scale must be greater than zero".to_owned(),
     }
 }
 
@@ -151,6 +153,14 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::AlreadyExtracted).to_string(),
             "the sound is already on its own clip"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Position).to_string(),
+            "the position is not a finite number"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Scale).to_string(),
+            "the scale must be greater than zero"
         );
     }
 

@@ -119,6 +119,14 @@ pub enum Request {
     },
     /// Store the clip rotation in degrees. The clip stays where it is.
     SetRotation { segment_id: SegmentId, degrees: f64 },
+    /// Store the picture position. `x` and `y` are fractions of half the canvas.
+    SetPosition {
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    },
+    /// Store the picture scale on the uniform value and on both axes.
+    SetScale { segment_id: SegmentId, scale: f64 },
     /// Set the segment gain. This is not mute, solo, or a fade.
     SetVolume { segment_id: SegmentId, volume: f64 },
     /// Store fade-in and fade-out durations. The segment volume stays.

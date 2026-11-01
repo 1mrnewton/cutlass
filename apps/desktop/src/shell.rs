@@ -1154,12 +1154,12 @@ impl Shell {
     /// `x` is pixels from the left of the lanes. Hit testing counts from time zero.
     /// The picture at the cut's end is the last included microsecond.
     ///
-    /// A segment covers `[start, end)`. Stopping on the end would sample past
-    /// the clip. The playhead stays on the end so the timecode still reads it.
+    /// A segment covers `[start, end)`. Playback stops on that end, which would
+    /// sample past the clip. A time past the end stays past it.
     fn sample_time(&self) -> Micros {
         let time = self.playhead.0.max(0);
         let end = self.cut_duration().0;
-        if end > 0 && time >= end {
+        if end > 0 && time == end {
             Micros(end - 1)
         } else {
             Micros(time)

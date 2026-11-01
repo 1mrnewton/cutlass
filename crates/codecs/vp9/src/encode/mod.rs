@@ -494,6 +494,48 @@ mod tests {
         assert_eq!(colored.range, ColorRange::Full);
         assert_eq!(colored.y.samples, shown.y.samples);
 
+        assert_color_space(
+            &params,
+            &packets[0].data,
+            &shown.y.samples,
+            3,
+            ColorPrimaries::Bt601,
+            Transfer::Bt601,
+            MatrixCoefficients::Bt601,
+        );
+        assert_color_space(
+            &params,
+            &packets[0].data,
+            &shown.y.samples,
+            5,
+            ColorPrimaries::Bt2020,
+            Transfer::Bt2020,
+            MatrixCoefficients::Bt2020,
+        );
+        for space in [0u8, 4, 6] {
+            assert_color_space(
+                &params,
+                &packets[0].data,
+                &shown.y.samples,
+                space,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                MatrixCoefficients::Unspecified,
+            );
+        }
+        let mut rgb = bits_of(&packets[0].data);
+        rgb[32] = 1;
+        rgb[33] = 1;
+        rgb[34] = 1;
+        let err = Vp9Decoder::open(&params)
+            .expect("decoder")
+            .push(&Packet::video(bytes_of(&rgb), 0, 1, 30, true))
+            .expect_err("profile 0 rgb");
+        assert!(
+            err.to_string().contains("profile 0 rgb"),
+            "profile 0 rgb was {err}"
+        );
+
         let original = super::parsed_header(&packets[0].data).expect("header");
         let mut intra = BitWriter::new();
         intra.write(2, 2);
@@ -538,6 +580,37 @@ mod tests {
         assert_eq!(kept.primaries, ColorPrimaries::Bt601);
         assert_eq!(kept.transfer, Transfer::Bt601);
         assert_eq!(kept.matrix, MatrixCoefficients::Bt601);
+    }
+
+    fn assert_color_space(
+        params: &CodecParams,
+        frame: &[u8],
+        samples: &[u8],
+        space: u8,
+        primaries: cutlass_decode::ColorPrimaries,
+        transfer: cutlass_decode::Transfer,
+        matrix: cutlass_decode::MatrixCoefficients,
+    ) {
+        let mut bits = bits_of(frame);
+        bits[32] = (space >> 2) & 1;
+        bits[33] = (space >> 1) & 1;
+        bits[34] = space & 1;
+        let shown = Vp9Decoder::open(params)
+            .expect("decoder")
+            .push(&Packet::video(bytes_of(&bits), 0, 1, 30, true))
+            .unwrap_or_else(|err| panic!("space {space}: {err}"))
+            .pop()
+            .unwrap_or_else(|| panic!("space {space} showed nothing"))
+            .frame;
+        assert_eq!(shown.primaries, primaries, "space {space}");
+        assert_eq!(shown.transfer, transfer, "space {space}");
+        assert_eq!(shown.matrix, matrix, "space {space}");
+        assert_eq!(
+            shown.range,
+            cutlass_decode::ColorRange::Studio,
+            "space {space}"
+        );
+        assert_eq!(shown.y.samples, samples, "space {space}");
     }
 
     fn bits_of(frame: &[u8]) -> Vec<u8> {

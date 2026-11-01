@@ -196,6 +196,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             horizontal,
         } => mirror::set_mirror(draft, segment_id, *horizontal),
+        Request::SetVerticalFlip {
+            segment_id,
+            vertical,
+        } => mirror::set_vertical(draft, segment_id, *vertical),
         Request::SetRotation {
             segment_id,
             degrees,

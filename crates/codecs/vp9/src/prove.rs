@@ -238,6 +238,102 @@ fn profile3_chroma_matches_ffmpeg_software() {
     }
 }
 
+/// Quantizer 0 uses the Walsh-Hadamard transform. Profile 0 already matches.
+/// These pictures are 10-bit, 12-bit, or 4:4:4.
+#[test]
+fn lossless_high_depth_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no lossless source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let cases = [
+        ("1", "yuv444p", PixelFormat::Yuv444p, 8u8),
+        ("2", "yuv420p10le", PixelFormat::Yuv420p10, 10),
+        ("2", "yuv420p12le", PixelFormat::Yuv420p12, 12),
+        ("3", "yuv444p12le", PixelFormat::Yuv444p12, 12),
+    ];
+    for (profile, pix_fmt, format, depth) in cases {
+        let dir = temp_dir(pix_fmt);
+        let ivf = dir.join("in.ivf");
+        encode_lossless(&ffmpeg, &source, &ivf, profile, pix_fmt, "96:64");
+        let stream = read_ivf(&ivf);
+        assert_eq!(stream.width, 96, "{pix_fmt} width");
+        assert_eq!(stream.height, 64, "{pix_fmt} height");
+        assert!(stream.frames.len() > 1, "{pix_fmt} needs an inter frame");
+        assert_lossless(&stream, depth, pix_fmt);
+        let (ours, _) = decode_shown(&stream, format);
+        let oracle = ffmpeg_yuv(&ffmpeg, &ivf, pix_fmt);
+        assert_eq!(ours.len(), oracle.len(), "{pix_fmt} shown bytes differ");
+        let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{pix_fmt} first mismatch at {mismatch:?}");
+        assert!(
+            ours.iter().any(|sample| *sample != ours[0]),
+            "{pix_fmt} picture is a single sample"
+        );
+        eprintln!(
+            "lossless {pix_fmt} {}x{} {} frames {} bytes",
+            stream.width,
+            stream.height,
+            stream.frames.len(),
+            ours.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn assert_lossless(stream: &Ivf, depth: u8, pix_fmt: &str) {
+    let mut state = crate::header::Persist::new();
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame).unwrap_or_else(|err| {
+            panic!("{pix_fmt} frame {index} header: {err}");
+        });
+        assert!(
+            parsed.header.lossless,
+            "{pix_fmt} frame {index} is not lossless"
+        );
+        assert_eq!(parsed.header.bit_depth, depth, "{pix_fmt} bit depth");
+        remember_header(&mut state, &parsed);
+    }
+}
+
+fn remember_header(state: &mut crate::header::Persist, parsed: &crate::header::Parsed<'_>) {
+    state.contexts = parsed.contexts.clone();
+    if parsed.header.refresh_context {
+        let index = usize::from(parsed.header.context_idx);
+        if let Some(slot) = state.contexts.get_mut(index) {
+            *slot = parsed.fc.clone();
+        }
+    }
+    state.key_frame = parsed.header.key_frame;
+    state.intra_only = parsed.header.intra_only;
+    state.width = parsed.header.width;
+    state.height = parsed.header.height;
+    state.last_show_frame = parsed.header.show_frame;
+    state.last_width = parsed.header.width;
+    state.last_height = parsed.header.height;
+    state.need_resync = parsed.header.need_resync;
+    state.seg = parsed.header.seg.clone();
+    state.ref_deltas = parsed.header.ref_deltas;
+    state.mode_deltas = parsed.header.mode_deltas;
+    state.sign_bias = parsed.header.sign_bias;
+    state.ss_x = parsed.header.ss_x;
+    state.ss_y = parsed.header.ss_y;
+    state.bit_depth = parsed.header.bit_depth;
+    state.color_space = parsed.header.color_space;
+    state.color_range = parsed.header.color_range;
+    for slot in 0..state.ref_ok.len() {
+        if parsed.header.refresh_flags & (1 << slot) != 0 {
+            state.ref_ok[slot] = true;
+            state.ref_w[slot] = parsed.header.width;
+            state.ref_h[slot] = parsed.header.height;
+        }
+    }
+}
+
 /// 52 is not a multiple of 8, so the loop filter runs on a partial superblock.
 /// 4:2:2, 4:4:0, and 10-bit change the chroma and sample width of that edge.
 #[test]
@@ -1082,6 +1178,45 @@ fn encode_scaled(
             "realtime",
             "-cpu-used",
             "8",
+            "-f",
+            "ivf",
+        ])
+        .arg(ivf)
+        .output()
+        .expect("encode");
+    assert!(
+        status.status.success(),
+        "encode {pix_fmt} {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn encode_lossless(
+    ffmpeg: &Path,
+    source: &Path,
+    ivf: &Path,
+    profile: &str,
+    pix_fmt: &str,
+    scale: &str,
+) {
+    let vf = format!("scale={scale}");
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-an",
+            "-frames:v",
+            "4",
+            "-vf",
+            &vf,
+            "-c:v",
+            "libvpx-vp9",
+            "-profile:v",
+            profile,
+            "-pix_fmt",
+            pix_fmt,
+            "-lossless",
+            "1",
             "-f",
             "ivf",
         ])

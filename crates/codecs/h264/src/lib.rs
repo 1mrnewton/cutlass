@@ -41,7 +41,7 @@
 //! A P_8×8 picture reads a depth sample only its top-left block includes, so
 //! that block shifts four pixels and the other three stay still.
 //! An 8×4 sub-partition of that block uses the 8×8 corners, so both halves
-//! shift.
+//! shift. A 4×8 sub-partition uses that same 8×8, so both columns shift.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

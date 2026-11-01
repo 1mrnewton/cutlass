@@ -7483,7 +7483,9 @@ fn read_sub<S: Sample>(
     if slice.vsp {
         for kind in kinds {
             let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
-            if w != 8 || (h != 8 && h != 4) {
+            let wide = w == 8 && (h == 8 || h == 4);
+            let tall = w == 4 && h == 8;
+            if !wide && !tall {
                 return Err(CodecError::Unsupported { what: "3d" });
             }
         }

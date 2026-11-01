@@ -1169,6 +1169,65 @@ fn a_wide_skip_copies_each_base_macroblock_vector() {
 }
 
 #[test]
+fn a_wide_coded_picture_uses_each_base_macroblock_vector() {
+    let base_idr = wide_base();
+    let other_idr = wide_other_view();
+    let base_p = wide_base_motion();
+    let coded = wide_dmvp_coded();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base_idr, &other_idr, &base_p, &coded] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_split(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_copied(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_right_motion(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| right_half_shifts(picture))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = base_idr.clone();
+        annex.extend(&base_p);
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 32 * 16 + 16 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let predicted = pictures
+            .iter()
+            .find(|picture| wide_right_motion(picture))
+            .expect("base motion");
+        assert_eq!(&raw[frame..], &planes_of(predicted));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &coded).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_coded_depth_motion_vector_cancels_the_base_motion() {
     let base_idr = dmvp_base_idr();
     let other_idr = dmvp_other_idr();
@@ -2065,6 +2124,22 @@ fn wide_base_motion() -> Vec<u8> {
     w.bit(true);
     w.trailing();
     annex_b_nal(2, 1, &w.bytes)
+}
+
+fn wide_dmvp_coded() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(true);
+    w.ue(0);
+    for _mb in 0..2 {
+        w.ue(0);
+        w.ue(0);
+        w.se(0);
+        w.se(0);
+        w.ue(0);
+    }
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
 }
 
 fn wide_dmvp_skip() -> Vec<u8> {

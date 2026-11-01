@@ -54,6 +54,8 @@
 //! A 32×16 skipped texture picture copies each base macroblock: the left
 //! vector is zero, so that half stays 40 and 220, and the right vector of
 //! eight pixels makes that half 220.
+//! A 32×16 coded texture picture adds a zero difference to each of those
+//! vectors, so the left half stays 40 and 220 and the right half is 220.
 //! A depth P slice copies a later texture header. That source is intra, so the
 //! slice uses the picture's one reference. Motion of eight pixels makes that
 //! picture luma 220 and chroma 50. The texture picture between them is luma 10

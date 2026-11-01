@@ -1213,6 +1213,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "magnet" => shell.magnet_enabled(),
                                 "snap" => shell.snap_enabled(),
                                 "freeze" => shell.frozen(),
+                                "reverse" => shell.reversed(),
                                 _ => false,
                             };
                             let tip = match *name {
@@ -1224,6 +1225,8 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "snap" => "Snap off",
                                 "freeze" if shell.frozen() => "Frozen",
                                 "freeze" => "Freeze",
+                                "reverse" if shell.reversed() => "Reversed",
+                                "reverse" => "Reverse",
                                 _ => tip,
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
@@ -1284,6 +1287,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
         | "lock" | "linkage" | "magnet" | "snap" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
         "freeze" => shell.freeze_enabled(),
+        "reverse" => shell.reverse_enabled(),
         _ => false,
     }
 }
@@ -1332,6 +1336,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             Ok(())
         }
         "freeze" => shell.toggle_freeze(),
+        "reverse" => shell.toggle_reverse(),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -1563,6 +1568,9 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     let width = 132.0;
     let row_height = 28.0;
     let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
+    if shell.reverse_enabled() {
+        labels.insert(0, "Reverse");
+    }
     if shell.freeze_enabled() {
         labels.insert(0, "Freeze");
     }
@@ -1606,6 +1614,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
                 "Cut" => shell.cut_selected(),
                 "Paste" => shell.paste(),
                 "Freeze" => shell.toggle_freeze(),
+                "Reverse" => shell.toggle_reverse(),
                 _ => shell.remove_selected(),
             };
             if let Err(error) = result {

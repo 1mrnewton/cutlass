@@ -1965,6 +1965,70 @@ impl Shell {
         self.apply(Request::SetFreeze { segment_id, freeze })
     }
 
+    /// The selected clip is a picture or a sound, so Reverse can flip it.
+    #[must_use]
+    pub fn reverse_enabled(&self) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        let Some(segment) = self.selected_segment() else {
+            return false;
+        };
+        matches!(
+            draft.materials.get(segment.material_id.as_str()),
+            Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
+        )
+    }
+
+    /// The selected picture or sound plays backward.
+    #[must_use]
+    pub fn reversed(&self) -> bool {
+        self.reverse_enabled()
+            && self
+                .selected_segment()
+                .is_some_and(|segment| segment.reverse)
+    }
+
+    /// Play the selected clip backward through its own file. A second click
+    /// plays it forward. The clip stays where it is. One undo restores the direction.
+    pub fn toggle_reverse(&mut self) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let reverse = {
+            let draft = self.session_draft()?;
+            let (segment, _) = locate(draft, &segment_id).ok_or_else(|| {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            })?;
+            let reversible = matches!(
+                draft.materials.get(segment.material_id.as_str()),
+                Some(MaterialRef::Video(_) | MaterialRef::Audio(_))
+            );
+            if !reversible {
+                return Err(ShellError::Unavailable(
+                    "reverse belongs on a picture or a sound".to_owned(),
+                ));
+            }
+            !segment.reverse
+        };
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetReverse {
+            segment_id,
+            reverse,
+            path: String::new(),
+        })
+    }
+
+    fn selected_segment(&self) -> Option<&Segment> {
+        let draft = self.draft()?;
+        let id = self.selected()?;
+        locate(draft, id).map(|(segment, _)| segment)
+    }
+
     pub fn set_text(&mut self, content: String) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
@@ -5539,6 +5603,109 @@ mod tests {
                 .duration,
             Micros(1_000_000)
         );
+    }
+
+    #[test]
+    fn reverse_plays_a_picture_or_a_sound_backward() {
+        let mut bare = shell();
+        assert!(!bare.reverse_enabled());
+        assert_eq!(
+            bare.toggle_reverse().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(2_000_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(picture);
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(3_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        let mut tone = Segment::new("tone", "tone", TimeRange::new(0, 2_000_000));
+        tone.source_range = Some(TimeRange::new(0, 2_000_000));
+        sound.segments.push(tone);
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.reverse_enabled());
+        assert_eq!(
+            desktop.toggle_reverse().unwrap_err().to_string(),
+            "reverse belongs on a picture or a sound"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.reverse_enabled());
+        assert!(!desktop.reversed());
+        desktop.toggle_reverse().unwrap();
+        assert!(desktop.reversed());
+        assert_eq!(
+            desktop.draft().unwrap().materials.videos[0].reverse_path,
+            ""
+        );
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        assert_eq!(source_at_start(&desktop, "picture"), 1_999_999);
+        desktop.undo().unwrap();
+        assert!(!desktop.reversed());
+        assert_eq!(source_at_start(&desktop, "picture"), 0);
+        desktop.redo().unwrap();
+        desktop.toggle_reverse().unwrap();
+        assert!(!desktop.reversed());
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop.toggle_reverse().unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        assert!(!desktop.reversed());
+
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(desktop.reverse_enabled());
+        assert!(!desktop.freeze_enabled());
+        desktop.toggle_reverse().unwrap();
+        assert!(desktop.reversed());
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+        assert_eq!(source_at_start(&desktop, "tone"), 1_999_999);
+        desktop.toggle_reverse().unwrap();
+        assert_eq!(source_at_start(&desktop, "tone"), 0);
+    }
+
+    fn source_at_start(desktop: &Shell, id: &str) -> i64 {
+        let draft = desktop.draft().unwrap();
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter())
+            .find(|segment| segment.id.as_str() == id)
+            .expect("clip");
+        let map = cutlass_engine::placement_of(draft, segment).expect("map");
+        cutlass_engine::map_timeline(&map, segment.target.start)
+            .expect("source")
+            .0
     }
 
     #[test]

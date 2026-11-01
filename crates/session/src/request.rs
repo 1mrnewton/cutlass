@@ -118,4 +118,18 @@ pub enum Request {
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
+    /// Store a marker. `None` is the ruler, at a timeline time. `Some` is a clip,
+    /// and the mark is an offset from that clip's target start.
+    AddTimeMark {
+        segment_id: Option<SegmentId>,
+        at: Micros,
+        color: String,
+        material_id: MaterialId,
+    },
+    /// Remove one marker. `start` is the timeline time on the ruler, or the
+    /// offset stored on a clip.
+    RemoveTimeMark {
+        segment_id: Option<SegmentId>,
+        start: Micros,
+    },
 }

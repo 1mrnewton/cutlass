@@ -4,6 +4,7 @@ mod freeze;
 mod import;
 mod keyframe;
 mod linkage;
+mod mark;
 mod move_segment;
 mod place;
 mod reverse;
@@ -63,6 +64,8 @@ pub enum EditError {
     TransitionWindow,
     /// The dependent already has an owner, or it is an owner itself.
     AlreadyLinked,
+    /// A marker is already stored at that time.
+    DuplicateMark,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
 }
@@ -129,6 +132,15 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
         Request::Import { medium } => import::import(draft, medium.clone()),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
+        Request::AddTimeMark {
+            segment_id,
+            at,
+            color,
+            material_id,
+        } => mark::add_time_mark(draft, segment_id.as_ref(), *at, color, material_id),
+        Request::RemoveTimeMark { segment_id, start } => {
+            mark::remove_time_mark(draft, segment_id.as_ref(), *start)
+        }
     }
 }
 

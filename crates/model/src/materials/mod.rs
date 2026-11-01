@@ -8,6 +8,7 @@ mod audio;
 mod color;
 mod draft;
 mod effect;
+mod mark;
 mod shape;
 mod speed;
 mod text;
@@ -21,6 +22,10 @@ pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{
     MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideoEffect, StickerAnimation,
+};
+pub use mark::{
+    TimeMarkItem, VisibleMark, clip_mark_time, new_time_mark, referenced_time_marks,
+    segment_time_mark, set_time_mark_items, time_mark_items, visible_marks,
 };
 pub use shape::MaterialShape;
 pub use speed::{

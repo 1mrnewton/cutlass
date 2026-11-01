@@ -50,6 +50,7 @@ pub fn split(
     right.target.start = at;
     right.target.duration = Micros(right_duration);
     split_source(&mut left, &mut right, &current, speed)?;
+    super::mark::split_time_marks(draft, &mut left, &mut right, left_duration, right_id)?;
     let transitions = transition_ids(draft, &current);
     left.extra_material_refs
         .retain(|material_id| !transitions.iter().any(|id| id == material_id));

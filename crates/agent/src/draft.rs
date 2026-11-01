@@ -441,6 +441,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::Import { .. } => "import",
         Request::InsertTrack { .. } => "insert_track",
+        Request::AddTimeMark { .. } => "add_time_mark",
+        Request::RemoveTimeMark { .. } => "remove_time_mark",
     }
 }
 

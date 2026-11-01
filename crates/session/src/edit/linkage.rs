@@ -396,7 +396,12 @@ fn set_duration(draft: &mut Draft, segment_id: &SegmentId, duration: i64) -> Res
 fn remove_segment(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let mark_ids = super::mark::time_mark_ids(
+        &draft.materials,
+        &draft.tracks[track_index].segments[segment_index],
+    );
     draft.tracks[track_index].segments.remove(segment_index);
+    super::mark::drop_unreferenced_time_marks(draft, &mark_ids);
     Ok(())
 }
 

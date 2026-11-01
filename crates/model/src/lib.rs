@@ -39,8 +39,10 @@ pub use materials::{
     MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialEffect,
     MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef, MaterialShape,
     MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo, MaterialVideoEffect, Materials,
-    RawMaterial, SpeedPoint, StickerAnimation, WordColumns, blend_extents, blend_window,
-    constant_target_duration, curve_speed_factor, curve_target_duration,
+    RawMaterial, SpeedPoint, StickerAnimation, TimeMarkItem, VisibleMark, WordColumns,
+    blend_extents, blend_window, clip_mark_time, constant_target_duration, curve_speed_factor,
+    curve_target_duration, new_time_mark, referenced_time_marks, segment_time_mark,
+    set_time_mark_items, time_mark_items, visible_marks,
 };
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};

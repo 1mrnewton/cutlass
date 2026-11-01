@@ -1,5 +1,6 @@
 use cutlass_model::{
-    Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange,
+    Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange, clip_mark_time,
+    referenced_time_marks, segment_time_mark, time_mark_items,
 };
 
 /// What a drag lined up with. The time is on the timeline, in microseconds.
@@ -156,6 +157,7 @@ fn collect_segment(
         note(Micros(end), SnapKind::SegmentEdge);
         collect_keyframes(segment, &mut note);
         collect_beats(draft, segment, &mut note);
+        collect_clip_marks(draft, segment, &mut note);
         collect_transition(draft, segment, Micros(end), &mut note);
     }
 }
@@ -209,10 +211,27 @@ fn collect_transition(
     }
 }
 
+fn collect_clip_marks(draft: &Draft, segment: &Segment, note: &mut impl FnMut(Micros, SnapKind)) {
+    let Some(raw) = segment_time_mark(&draft.materials, segment) else {
+        return;
+    };
+    for item in time_mark_items(raw) {
+        if let Some(time) = clip_mark_time(segment, &item) {
+            note(time, SnapKind::Marker);
+        }
+    }
+}
+
 fn collect_markers(draft: &Draft, best: &mut Option<Best>, query: i64, limit: u64) {
     let mut note = |time: Micros| consider(best, time, SnapKind::Marker, query, limit);
+    let owned = referenced_time_marks(&draft.materials, &draft.tracks);
     for material in &draft.materials.time_marks {
-        mark_items(material.fields.get("mark_items"), &mut note);
+        if owned.iter().any(|id| id == &material.id) {
+            continue;
+        }
+        for item in time_mark_items(material) {
+            note(item.start);
+        }
     }
     let Some(root) = draft.rest.get("time_marks") else {
         return;
@@ -311,7 +330,7 @@ fn positive_end(range: &TimeRange) -> Option<i64> {
 mod tests {
     use cutlass_model::{
         CommonKeyframe, CommonKeyframeGroup, Draft, MaterialId, MaterialTransition, RawMaterial,
-        Segment, TimeRange, TrackId,
+        Segment, SegmentId, TimeRange, TrackId,
     };
 
     use super::*;
@@ -470,6 +489,34 @@ mod tests {
         let beat = snap(&draft, Micros(1_200_000), Micros(0), Micros(0), None).unwrap();
         assert_eq!(beat.time, Micros(1_200_000));
         assert_eq!(beat.kind, SnapKind::Beat);
+    }
+
+    #[test]
+    fn a_clip_marker_snaps_from_the_clip_start() {
+        use cutlass_model::{TimeMarkItem, new_time_mark};
+
+        let mark = new_time_mark(
+            MaterialId::new("marks"),
+            TimeMarkItem::point(Micros(250_000), "#ffffff"),
+        );
+        let mut clip = segment("clip", 1_000_000, 1_000_000);
+        clip.extra_material_refs.push(mark.id.clone());
+        let mut draft = main_with(clip);
+        draft.materials.time_marks.push(mark);
+        let hit = snap(&draft, Micros(1_250_000), Micros(0), Micros(0), None).unwrap();
+        assert_eq!(hit.time, Micros(1_250_000));
+        assert_eq!(hit.kind, SnapKind::Marker);
+        assert!(snap(&draft, Micros(250_000), Micros(0), Micros(0), None).is_none());
+        assert!(
+            snap(
+                &draft,
+                Micros(1_250_000),
+                Micros(0),
+                Micros(0),
+                Some(&SegmentId::new("clip")),
+            )
+            .is_none()
+        );
     }
 
     #[test]

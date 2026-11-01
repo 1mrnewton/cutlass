@@ -3262,6 +3262,7 @@ mod intra8 {
             adaptive: false,
             mmco: Vec::new(),
             max_fn: 16,
+            shown: super::super::Shown::plain(0, 0),
         }
     }
 

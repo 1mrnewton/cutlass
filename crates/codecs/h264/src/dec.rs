@@ -172,6 +172,45 @@ pub(crate) struct Frame<S: Sample = u8> {
     adaptive: bool,
     mmco: Vec<Mark>,
     max_fn: u32,
+    /// Display time and film grain. Reconstruction keeps `pts` and the planes.
+    shown: Shown,
+}
+
+/// Output time and the grain blended at emit. `pts` on the frame stays the
+/// packet time so a held picture can still be found.
+#[derive(Clone, Debug)]
+struct Shown {
+    pts: i64,
+    duration: i64,
+    grain: Option<crate::grain::FilmGrain>,
+    clock: crate::sei::TimingClock,
+}
+
+impl Shown {
+    fn plain(pts: i64, duration: i64) -> Self {
+        Self {
+            pts,
+            duration,
+            grain: None,
+            clock: crate::sei::TimingClock::absent(),
+        }
+    }
+
+    fn from_sps(pts: i64, duration: i64, sps: &Sps) -> Self {
+        Self {
+            pts,
+            duration,
+            grain: None,
+            clock: crate::sei::TimingClock {
+                pic_struct: sps.pic_struct_present,
+                cpb_bits: sps.cpb_delay_bits,
+                dpb_bits: sps.dpb_delay_bits,
+                offset_bits: sps.time_offset_bits,
+                num_units: sps.num_units,
+                time_scale: sps.time_scale,
+            },
+        }
+    }
 }
 
 impl<S: Sample> Frame<S> {
@@ -284,7 +323,7 @@ impl Store {
 }
 
 macro_rules! decode_depth {
-    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $variant:ident, $sample:ty) => {{
+    ($self:ident, $sets:ident, $poc:ident, $packet:ident, $grain:ident, $variant:ident, $sample:ty) => {{
         let mut dpb = match &$self.dpb {
             Store::$variant(held) => held.clone(),
             _ => Vec::new(),
@@ -296,6 +335,7 @@ macro_rules! decode_depth {
             &$packet.data,
             $self.length_size,
             $packet,
+            &mut $grain,
         )?;
         $self.dpb = Store::$variant(dpb);
         decoded
@@ -309,6 +349,7 @@ pub struct H264Decoder {
     poc: Poc,
     drained: bool,
     extra: Vec<u8>,
+    grain: crate::sei::GrainHold,
 }
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -335,6 +376,7 @@ impl H264Decoder {
             poc: Poc::new(),
             drained: false,
             extra: params.extra.clone(),
+            grain: crate::sei::GrainHold::default(),
         };
         if !params.extra.is_empty() {
             dec.apply_extra(&params.extra)?;
@@ -402,28 +444,31 @@ impl VideoDecoder for H264Decoder {
         }
         let mut sets = self.sets.clone();
         let mut poc = self.poc.clone();
+        let mut grain = self.grain.clone();
         let depth = au_depth(&self.sets, &packet.data, self.length_size, self.dpb.depth())?;
         let mut prior = if depth == self.dpb.depth() {
             Vec::new()
         } else {
             poc = Poc::new();
+            grain = crate::sei::GrainHold::default();
             let mut old = self.dpb.clone();
             old.release(0)
         };
         let out = match depth {
-            8 => decode_depth!(self, sets, poc, packet, Eight, u8),
-            9 => decode_depth!(self, sets, poc, packet, Nine, recon::Depth<9>),
-            10 => decode_depth!(self, sets, poc, packet, Ten, recon::Ten),
-            11 => decode_depth!(self, sets, poc, packet, Eleven, recon::Depth<11>),
-            12 => decode_depth!(self, sets, poc, packet, Twelve, recon::Depth<12>),
-            13 => decode_depth!(self, sets, poc, packet, Thirteen, recon::Depth<13>),
-            14 => decode_depth!(self, sets, poc, packet, Fourteen, recon::Depth<14>),
+            8 => decode_depth!(self, sets, poc, packet, grain, Eight, u8),
+            9 => decode_depth!(self, sets, poc, packet, grain, Nine, recon::Depth<9>),
+            10 => decode_depth!(self, sets, poc, packet, grain, Ten, recon::Ten),
+            11 => decode_depth!(self, sets, poc, packet, grain, Eleven, recon::Depth<11>),
+            12 => decode_depth!(self, sets, poc, packet, grain, Twelve, recon::Depth<12>),
+            13 => decode_depth!(self, sets, poc, packet, grain, Thirteen, recon::Depth<13>),
+            14 => decode_depth!(self, sets, poc, packet, grain, Fourteen, recon::Depth<14>),
             _ => return Err(CodecError::Unsupported { what: "bit depth" }),
         };
         prior.extend(out);
         let out = prior;
         self.sets = sets;
         self.poc = poc;
+        self.grain = grain;
         self.drained = false;
         Ok(out)
     }
@@ -441,6 +486,7 @@ impl VideoDecoder for H264Decoder {
         self.poc = Poc::new();
         self.drained = false;
         self.sets = Sets::new();
+        self.grain = crate::sei::GrainHold::default();
         if !self.extra.is_empty() {
             let extra = self.extra.clone();
             let _ = self.apply_extra(&extra);
@@ -495,6 +541,7 @@ fn decode_au<S: Sample>(
     data: &[u8],
     length_size: u8,
     packet: &Packet,
+    grain: &mut crate::sei::GrainHold,
 ) -> Result<Vec<VideoOutput>, CodecError> {
     let nals = nal::access_unit(data, length_size)?;
     let mut picture: Option<Frame<S>> = None;
@@ -503,6 +550,8 @@ fn decode_au<S: Sample>(
     let mut next_mb = 0usize;
     let mut planes = ColourPlanes { active: 0, seen: 0 };
     let mut held_field: Option<Frame<S>> = None;
+    let mut messages = Vec::new();
+    let mut idr_pic = false;
     let mut index = 0usize;
     while index < nals.len() {
         let kind = nals[index].kind;
@@ -530,6 +579,9 @@ fn decode_au<S: Sample>(
                     }
                 };
                 let idr = kind == 5;
+                if idr {
+                    idr_pic = true;
+                }
                 let built = decode_slice(
                     sets,
                     poc,
@@ -561,7 +613,11 @@ fn decode_au<S: Sample>(
                     what: "partition",
                 });
             }
-            6 | 9 | 10 | 11 | 12 => index += 1,
+            6 => {
+                messages.extend(crate::sei::payloads(&nals[index].rbsp)?);
+                index += 1;
+            }
+            9..=12 => index += 1,
             _ => {
                 return Err(CodecError::Unsupported {
                     what: "nal unit type",
@@ -587,7 +643,8 @@ fn decode_au<S: Sample>(
                 what: "field pair",
             });
         };
-        let pic = weave(other, pic)?;
+        let mut pic = weave(other, pic)?;
+        present(&mut pic, &messages, grain, idr_pic)?;
         let mut pictures = prior;
         pictures.extend(finish_picture(poc, dpb, pic)?);
         return Ok(pictures);
@@ -610,9 +667,59 @@ fn decode_au<S: Sample>(
     } else {
         mb::deblock(&mut pic);
     }
+    present(&mut pic, &messages, grain, idr_pic)?;
     let mut pictures = prior;
     pictures.extend(finish_picture(poc, dpb, pic)?);
     Ok(pictures)
+}
+
+fn present<S: Sample>(
+    pic: &mut Frame<S>,
+    messages: &[crate::sei::Payload],
+    hold: &mut crate::sei::GrainHold,
+    idr: bool,
+) -> Result<(), CodecError> {
+    if idr {
+        hold.clear();
+    }
+    let mut explicit = false;
+    let mut chosen = None;
+    for message in messages {
+        if message.kind == 1 {
+            let (pts, duration) = crate::sei::picture_timing(
+                &message.data,
+                &pic.shown.clock,
+                pic.pts,
+                pic.duration,
+                pic.timescale,
+            )?;
+            pic.shown.pts = pts;
+            pic.shown.duration = duration;
+        } else if message.kind == 19 {
+            match crate::sei::film_grain(&message.data, S::BITS)? {
+                crate::sei::GrainChoice::Cancel => {
+                    hold.clear();
+                    explicit = true;
+                    chosen = None;
+                }
+                crate::sei::GrainChoice::Ignore => {}
+                crate::sei::GrainChoice::Apply(grain, period) => {
+                    explicit = true;
+                    if period == 0 {
+                        hold.clear();
+                    } else {
+                        hold.store(grain.clone(), pic.poc, period);
+                    }
+                    chosen = Some(grain);
+                }
+            }
+        }
+    }
+    if !explicit {
+        chosen = hold.for_picture(pic.poc);
+    }
+    pic.shown.grain = chosen;
+    Ok(())
 }
 
 struct ColourPlanes {
@@ -1043,6 +1150,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         adaptive: false,
         mmco: Vec::new(),
         max_fn: 1u32 << sps.log2_max_frame_num,
+        shown: Shown::plain(0, 0),
     }
 }
 
@@ -1109,6 +1217,28 @@ fn emit<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     if frame.nonexisting {
         return None;
     }
+    if frame.shown.grain.is_some() {
+        let mut copy = frame.clone();
+        if let Some(grain) = copy.shown.grain.take() {
+            let chroma = copy.chroma();
+            let width = copy.w;
+            let height = copy.h;
+            crate::grain::apply(
+                &mut copy.y,
+                &mut copy.u,
+                &mut copy.v,
+                width,
+                height,
+                chroma,
+                &grain,
+            );
+        }
+        return emit_picture(&copy);
+    }
+    emit_picture(frame)
+}
+
+fn emit_picture<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
     match frame.chroma() {
         2 => emit_422(frame),
         3 => emit_444(frame),
@@ -1160,8 +1290,8 @@ fn emit_420<S: Sample>(frame: &Frame<S>) -> Option<VideoOutput> {
         yuv422_high: None,
         yuv444: None,
         yuv444_high: None,
-        pts: frame.pts,
-        duration: frame.duration,
+        pts: frame.shown.pts,
+        duration: frame.shown.duration,
         timescale: frame.timescale,
         keyframe: frame.key,
         range: frame.range,
@@ -1329,8 +1459,8 @@ fn output_of<S: Sample>(
         yuv422_high,
         yuv444,
         yuv444_high,
-        pts: frame.pts,
-        duration: frame.duration,
+        pts: frame.shown.pts,
+        duration: frame.shown.duration,
         timescale: frame.timescale,
         keyframe: frame.key,
         range: frame.range,
@@ -2181,6 +2311,7 @@ fn new_frame<S: Sample>(
         adaptive: header.adaptive,
         mmco: header.mmco.clone(),
         max_fn: 1u32 << sps.log2_max_frame_num,
+        shown: Shown::from_sps(packet.pts, packet.duration, sps),
     })
 }
 
@@ -2696,6 +2827,7 @@ mod tests {
             adaptive: true,
             mmco: Vec::new(),
             max_fn: 16,
+            shown: super::Shown::plain(0, 1),
         }
     }
 
@@ -2734,6 +2866,12 @@ mod tests {
             chroma: 1,
             bypass: false,
             separate: false,
+            pic_struct_present: false,
+            num_units: 0,
+            time_scale: 0,
+            cpb_delay_bits: 0,
+            dpb_delay_bits: 0,
+            time_offset_bits: 0,
         }
     }
 

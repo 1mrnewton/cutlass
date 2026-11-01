@@ -53,6 +53,18 @@ pub struct Sps {
     pub bypass: bool,
     /// `separate_colour_plane_flag`. Each plane is coded with monochrome syntax.
     pub separate: bool,
+    /// `pic_struct_present_flag`.
+    pub pic_struct_present: bool,
+    /// `num_units_in_tick`. Zero when timing is absent.
+    pub num_units: u32,
+    /// `time_scale`. Zero when timing is absent.
+    pub time_scale: u32,
+    /// Bit length of `cpb_removal_delay`. Zero when the HRD is absent.
+    pub cpb_delay_bits: u8,
+    /// Bit length of `dpb_output_delay`. Zero when the HRD is absent.
+    pub dpb_delay_bits: u8,
+    /// `time_offset_length`.
+    pub time_offset_bits: u8,
 }
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
@@ -304,6 +316,12 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         chroma: chroma_format,
         bypass,
         separate,
+        pic_struct_present: vui.pic_struct_present,
+        num_units: vui.num_units,
+        time_scale: vui.time_scale,
+        cpb_delay_bits: vui.cpb_delay_bits,
+        dpb_delay_bits: vui.dpb_delay_bits,
+        time_offset_bits: vui.time_offset_bits,
     };
     sps.visible()?;
     Ok(sps)
@@ -315,6 +333,12 @@ struct Vui {
     transfer: Transfer,
     matrix: ColorMatrix,
     max_reorder: u32,
+    pic_struct_present: bool,
+    num_units: u32,
+    time_scale: u32,
+    cpb_delay_bits: u8,
+    dpb_delay_bits: u8,
+    time_offset_bits: u8,
 }
 
 impl Vui {
@@ -325,6 +349,12 @@ impl Vui {
             transfer: Transfer::Unspecified,
             matrix: ColorMatrix::Unspecified,
             max_reorder,
+            pic_struct_present: false,
+            num_units: 0,
+            time_scale: 0,
+            cpb_delay_bits: 0,
+            dpb_delay_bits: 0,
+            time_offset_bits: 0,
         }
     }
 }
@@ -359,22 +389,31 @@ fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
         let _ = bits.ue()?;
     }
     if bits.bit()? {
-        let _num_units = bits.u(32)?;
-        let _time_scale = bits.u(32)?;
+        vui.num_units = bits.u(32)?;
+        vui.time_scale = bits.u(32)?;
         let _ = bits.bit()?;
     }
     let nal_hrd = bits.bit()?;
     if nal_hrd {
-        hrd(bits)?;
+        let lengths = hrd(bits)?;
+        vui.cpb_delay_bits = lengths.0;
+        vui.dpb_delay_bits = lengths.1;
+        vui.time_offset_bits = lengths.2;
     }
     let vcl_hrd = bits.bit()?;
     if vcl_hrd {
-        hrd(bits)?;
+        let lengths = hrd(bits)?;
+        if nal_hrd && (vui.cpb_delay_bits, vui.dpb_delay_bits, vui.time_offset_bits) != lengths {
+            return Err(bits.malformed("hrd"));
+        }
+        vui.cpb_delay_bits = lengths.0;
+        vui.dpb_delay_bits = lengths.1;
+        vui.time_offset_bits = lengths.2;
     }
     if nal_hrd || vcl_hrd {
         let _ = bits.bit()?;
     }
-    let _ = bits.bit()?;
+    vui.pic_struct_present = bits.bit()?;
     if bits.bit()? {
         let _ = bits.bit()?;
         let _ = bits.ue()?;
@@ -387,7 +426,7 @@ fn parse_vui(bits: &mut Bits<'_>, max_reorder: u32) -> Result<Vui, CodecError> {
     Ok(vui)
 }
 
-fn hrd(bits: &mut Bits<'_>) -> Result<(), CodecError> {
+fn hrd(bits: &mut Bits<'_>) -> Result<(u8, u8, u8), CodecError> {
     let cpb = bits.ue()? + 1;
     if cpb > 32 {
         return Err(CodecError::Limit { what: "cpb count" });
@@ -400,11 +439,11 @@ fn hrd(bits: &mut Bits<'_>) -> Result<(), CodecError> {
         let _ = bits.ue()?;
         let _ = bits.bit()?;
     }
-    let _ = bits.u(5)?;
-    let _ = bits.u(5)?;
-    let _ = bits.u(5)?;
-    let _ = bits.u(5)?;
-    Ok(())
+    let _initial = bits.u(5)?;
+    let cpb_bits = bits.u(5)? + 1;
+    let dpb_bits = bits.u(5)? + 1;
+    let offset_bits = bits.u(5)?;
+    Ok((cpb_bits as u8, dpb_bits as u8, offset_bits as u8))
 }
 
 fn colour(idc: u32) -> ColorPrimaries {

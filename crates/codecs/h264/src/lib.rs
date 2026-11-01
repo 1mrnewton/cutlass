@@ -1,6 +1,6 @@
 //! H.264 / AVC, 4:2:0, 4:2:2, and 4:4:4 at 8 through 14 bits, including
 //! separate colour planes, field pictures, macroblock-adaptive frames, slice groups,
-//! data partitions, and SP and SI slices.
+//! data partitions, SP and SI slices, picture timing, and film grain.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is
@@ -14,8 +14,10 @@ mod cavlc;
 mod dec;
 mod enc;
 mod fmo;
+mod grain;
 mod nal;
 mod recon;
+mod sei;
 mod set;
 mod sp;
 mod tables;
@@ -37,5 +39,7 @@ mod lossless;
 mod part;
 #[cfg(test)]
 mod planes;
+#[cfg(test)]
+mod sei_pic;
 #[cfg(test)]
 mod uhd420;

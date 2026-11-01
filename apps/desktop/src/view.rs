@@ -8,6 +8,8 @@ use egui::{
     Ui, Vec2,
 };
 
+use cutlass_model::{FrameRate, Micros};
+
 use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
 use crate::shell::{ExportRequest, ListedProject, Shell, ShellError};
@@ -257,7 +259,7 @@ fn projects_home(
             });
         });
     if !shell.notice().is_empty() {
-        paint_notice(ui, bar, shell.notice());
+        paint_notice(ui, bar.center().x, bar.bottom() + 12.0, shell.notice());
     }
 }
 
@@ -958,7 +960,7 @@ fn duration_label(shell: &Shell) -> String {
     let end = shell
         .draft()
         .map(|draft| draft.duration)
-        .unwrap_or(cutlass_model::Micros(0));
+        .unwrap_or(Micros(0));
     shell.timecode_at(end)
 }
 
@@ -966,21 +968,32 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let padded = rect.shrink2(Vec2::new(16.0, 0.0));
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
+    let content_width = padded.width();
     ScrollArea::vertical()
         .id_salt("inspector")
         .show(&mut details, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_width(content_width);
             ui.add_space(14.0);
             if let Some(inspection) = shell.inspection() {
                 section_title(ui, "Clip");
-                fact(ui, "Name", &inspection.material);
-                fact(ui, "Start", &shell.timecode_at(inspection.start));
-                fact(ui, "Duration", &card_meta(inspection.duration.0));
+                fact(ui, "Name", &inspection.material, content_width);
+                fact(
+                    ui,
+                    "Start",
+                    &shell.timecode_at(inspection.start),
+                    content_width,
+                );
+                fact(
+                    ui,
+                    "Duration",
+                    &card_meta(inspection.duration.0),
+                    content_width,
+                );
                 ui.add_space(12.0);
                 clip_fields(shell, ui, view, &inspection);
             } else {
                 section_title(ui, "Details");
-                project_facts(shell, ui);
+                project_facts(shell, ui, content_width);
             }
         });
 }
@@ -995,13 +1008,13 @@ fn section_title(ui: &mut Ui, title: &str) {
     ui.add_space(14.0);
 }
 
-fn project_facts(shell: &Shell, ui: &mut Ui) {
-    fact(ui, "Name", &shell.project_name());
+fn project_facts(shell: &Shell, ui: &mut Ui, width: f32) {
+    fact(ui, "Name", &shell.project_name(), width);
     let saved = shell
         .project_folder()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "No project".to_owned());
-    fact(ui, "Saved", &saved);
+    fact(ui, "Saved", &saved, width);
     let Some(draft) = shell.draft() else {
         return;
     };
@@ -1014,7 +1027,7 @@ fn project_facts(shell: &Shell, ui: &mut Ui) {
         egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
     );
     ui.add_space(16.0);
-    fact(ui, "Ratio", &ratio_label(&draft.canvas_config.ratio));
+    fact(ui, "Ratio", &ratio_label(&draft.canvas_config.ratio), width);
     fact(
         ui,
         "Resolution",
@@ -1022,23 +1035,35 @@ fn project_facts(shell: &Shell, ui: &mut Ui) {
             "{}×{}",
             draft.canvas_config.width, draft.canvas_config.height
         ),
+        width,
     );
-    fact(ui, "Frame rate", &format!("{:.2}fps", draft.fps));
+    fact(ui, "Frame rate", &format!("{:.2}fps", draft.fps), width);
 }
 
-fn fact(ui: &mut Ui, label: &str, value: &str) {
-    let width = ui.available_width();
+fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {
+    let value_width = (row_width - 120.0).max(40.0);
     ui.horizontal(|ui| {
-        ui.set_max_width(width);
+        ui.set_max_width(row_width);
         ui.spacing_mut().item_spacing.x = 12.0;
         ui.add_sized(
             [108.0, 18.0],
             egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
-        ui.vertical(|ui| {
-            ui.set_width((width - 120.0).max(40.0));
-            ui.add(egui::Label::new(RichText::new(value).size(13.0).color(tokens::TEXT)).wrap());
-        });
+        let mut job = egui::text::LayoutJob::simple(
+            value.to_owned(),
+            FontId::proportional(13.0),
+            tokens::TEXT,
+            value_width,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(value_width);
+        let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(value_width, 18.0), Sense::hover());
+        ui.painter().galley(
+            rect.left_center() + Vec2::new(0.0, -galley.size().y / 2.0),
+            galley,
+            tokens::TEXT,
+        );
+        response.on_hover_text(value);
     });
     ui.add_space(4.0);
 }
@@ -1102,7 +1127,12 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::TOOLBAR_HEIGHT));
     paint_toolbar(shell, ui, toolbar);
     if !shell.notice().is_empty() {
-        paint_notice(ui, toolbar, shell.notice());
+        paint_notice(
+            ui,
+            toolbar.center().x,
+            toolbar.bottom() + tokens::RULER_HEIGHT + 8.0,
+            shell.notice(),
+        );
     }
     ui.painter().hline(
         toolbar.x_range(),
@@ -1232,7 +1262,7 @@ const TOOLS: &[Option<(&str, &str)>] = &[
     Some(("zoomIn", "Zoom in")),
 ];
 
-fn paint_notice(ui: &Ui, toolbar: Rect, notice: &str) {
+fn paint_notice(ui: &Ui, center_x: f32, top: f32, notice: &str) {
     let galley = ui.ctx().fonts_mut(|fonts| {
         fonts.layout_no_wrap(
             notice.to_owned(),
@@ -1241,10 +1271,7 @@ fn paint_notice(ui: &Ui, toolbar: Rect, notice: &str) {
         )
     });
     let size = galley.size() + Vec2::new(24.0, 12.0);
-    let rect = Rect::from_center_size(
-        Pos2::new(toolbar.center().x, toolbar.bottom() + 18.0 + size.y / 2.0),
-        size,
-    );
+    let rect = Rect::from_min_size(Pos2::new(center_x - size.x / 2.0, top), size);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(99), Color32::WHITE);
     ui.painter().galley(
@@ -1259,7 +1286,8 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let tracks = Rect::from_min_max(ruler.left_bottom(), rect.max);
     let lanes_left = tracks.left() + tokens::TRACK_HEAD + tokens::COVER_WIDTH;
     let lane_area = Rect::from_min_max(Pos2::new(lanes_left, tracks.top()), tracks.max);
-    paint_ticks(ui, ruler, lanes_left, shell.pixel_size());
+    let (rate, drop_frame) = ruler_rate(shell);
+    paint_ticks(ui, ruler, lanes_left, shell.pixel_size(), rate, drop_frame);
     let rows = shell.lanes();
     let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
     let boxes = lane_rects(flags, lane_area);
@@ -1316,36 +1344,33 @@ fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
     Rect::from_min_max(Pos2::new(lanes_left, ruler.top()), ruler.max)
 }
 
-fn paint_ticks(ui: &Ui, ruler: Rect, lanes_left: f32, pixel_size: f64) {
+fn paint_ticks(
+    ui: &Ui,
+    ruler: Rect,
+    lanes_left: f32,
+    pixel_size: f64,
+    rate: FrameRate,
+    drop_frame: bool,
+) {
     if !pixel_size.is_finite() || pixel_size <= 0.0 {
         return;
     }
-    let step = tick_step(pixel_size);
-    let width = f64::from(ruler.right() - lanes_left);
+    let grid = TickGrid {
+        ui,
+        ruler,
+        lanes_left,
+        pixel_size,
+        width: f64::from(ruler.right() - lanes_left),
+    };
+    if let Some(stride) = frame_stride(pixel_size, rate) {
+        paint_frame_ticks(&grid, rate, drop_frame, stride);
+        return;
+    }
+    let step = second_step(pixel_size);
     let mut time = 0.0;
-    while time * pixel_size <= width {
-        let x = lanes_left + (time * pixel_size) as f32;
-        ui.painter().vline(
-            x,
-            (ruler.bottom() - 12.0)..=ruler.bottom(),
-            egui::Stroke::new(1.0, tokens::MUTED),
-        );
-        ui.painter().text(
-            Pos2::new(x + 4.0, ruler.bottom() - 14.0),
-            Align2::LEFT_BOTTOM,
-            ruler_label(time),
-            FontId::proportional(10.0),
-            tokens::FAINT,
-        );
-        let minor = time + step / 2.0;
-        let minor_x = lanes_left + (minor * pixel_size) as f32;
-        if minor * pixel_size <= width && minor_x - x >= 8.0 {
-            ui.painter().vline(
-                minor_x,
-                (ruler.bottom() - 6.0)..=ruler.bottom(),
-                egui::Stroke::new(1.0, tokens::MUTED),
-            );
-        }
+    while time * pixel_size <= grid.width {
+        paint_major(&grid, time, second_label(time));
+        paint_minor(&grid, time, time + step / 2.0);
         time += step;
         if step <= 0.0 {
             break;
@@ -1353,11 +1378,53 @@ fn paint_ticks(ui: &Ui, ruler: Rect, lanes_left: f32, pixel_size: f64) {
     }
 }
 
-fn tick_step(pixel_size: f64) -> f64 {
-    const STEPS: [f64; 12] = [
-        1_000_000.0 / 30.0,
-        1_000_000.0 / 15.0,
-        1_000_000.0 / 6.0,
+struct TickGrid<'a> {
+    ui: &'a Ui,
+    ruler: Rect,
+    lanes_left: f32,
+    pixel_size: f64,
+    width: f64,
+}
+
+/// One, two, or five frames, when that gap is wide enough to read. Otherwise the
+/// ruler stays on whole seconds.
+fn frame_stride(pixel_size: f64, rate: FrameRate) -> Option<i64> {
+    let frame = rate.frame_start(1)?;
+    let width = frame.0 as f64 * pixel_size;
+    if frame.0 <= 0 || !width.is_finite() || width <= 0.0 {
+        return None;
+    }
+    [1, 2, 5]
+        .into_iter()
+        .find(|stride| *stride as f64 * width >= 72.0)
+}
+
+fn paint_frame_ticks(grid: &TickGrid<'_>, rate: FrameRate, drop_frame: bool, stride: i64) {
+    let mut index = 0_i64;
+    for _ in 0..10_000 {
+        let Some(start) = rate.frame_start(index) else {
+            return;
+        };
+        let time = start.0 as f64;
+        if time * grid.pixel_size > grid.width {
+            return;
+        }
+        paint_major(grid, time, ruler_label(time, 1.0, rate, drop_frame));
+        let next = index.saturating_add(stride);
+        let Some(next_start) = rate.frame_start(next) else {
+            return;
+        };
+        if next <= index {
+            return;
+        }
+        let minor = (time + next_start.0 as f64) / 2.0;
+        paint_minor(grid, time, minor);
+        index = next;
+    }
+}
+
+fn second_step(pixel_size: f64) -> f64 {
+    const STEPS: [f64; 9] = [
         1_000_000.0,
         2_000_000.0,
         5_000_000.0,
@@ -1374,7 +1441,78 @@ fn tick_step(pixel_size: f64) -> f64 {
         .unwrap_or(STEPS[STEPS.len() - 1])
 }
 
-fn ruler_label(micros: f64) -> String {
+fn paint_major(grid: &TickGrid<'_>, time: f64, label: String) {
+    let x = grid.lanes_left + (time * grid.pixel_size) as f32;
+    grid.ui.painter().vline(
+        x,
+        (grid.ruler.bottom() - 12.0)..=grid.ruler.bottom(),
+        egui::Stroke::new(1.0, tokens::MUTED),
+    );
+    grid.ui.painter().text(
+        Pos2::new(x + 4.0, grid.ruler.bottom() - 14.0),
+        Align2::LEFT_BOTTOM,
+        label,
+        FontId::proportional(10.0),
+        tokens::FAINT,
+    );
+}
+
+fn paint_minor(grid: &TickGrid<'_>, major: f64, minor: f64) {
+    let x = grid.lanes_left + (major * grid.pixel_size) as f32;
+    let minor_x = grid.lanes_left + (minor * grid.pixel_size) as f32;
+    if minor * grid.pixel_size <= grid.width && minor_x - x >= 8.0 {
+        grid.ui.painter().vline(
+            minor_x,
+            (grid.ruler.bottom() - 6.0)..=grid.ruler.bottom(),
+            egui::Stroke::new(1.0, tokens::MUTED),
+        );
+    }
+}
+
+fn ruler_rate(shell: &Shell) -> (FrameRate, bool) {
+    match shell.draft() {
+        Some(draft) => (
+            draft.frame_rate().unwrap_or(FrameRate::FPS_30),
+            draft.is_drop_frame_timecode,
+        ),
+        None => (FrameRate::FPS_30, false),
+    }
+}
+
+/// A step shorter than one second names the frame. A longer step stays on the second.
+fn ruler_label(micros: f64, step: f64, rate: FrameRate, drop_frame: bool) -> String {
+    if step < 1_000_000.0
+        && let Some(label) = sub_second_label(micros, rate, drop_frame)
+    {
+        return label;
+    }
+    second_label(micros)
+}
+
+fn sub_second_label(micros: f64, rate: FrameRate, drop_frame: bool) -> Option<String> {
+    if !micros.is_finite() || micros < 0.0 {
+        return None;
+    }
+    let rounded = micros.round();
+    if rounded > i64::MAX as f64 {
+        return None;
+    }
+    let label = rate.label(Micros(rounded as i64), drop_frame)?;
+    let separator = if label.drop_frame { ';' } else { ':' };
+    if label.hours > 0 {
+        Some(format!(
+            "{:02}:{:02}:{:02}{separator}{:02}",
+            label.hours, label.minutes, label.seconds, label.frames
+        ))
+    } else {
+        Some(format!(
+            "{:02}:{:02}{separator}{:02}",
+            label.minutes, label.seconds, label.frames
+        ))
+    }
+}
+
+fn second_label(micros: f64) -> String {
     let total = (micros / 1_000_000.0).floor();
     if !total.is_finite() || total < 0.0 {
         return String::new();
@@ -1407,7 +1545,7 @@ fn paint_empty_main(ui: &Ui, area: Rect) {
     ui.painter().text(
         lane.left_center() + Vec2::new(14.0, 0.0),
         Align2::LEFT_CENTER,
-        "Import a file",
+        "No clips",
         FontId::proportional(12.0),
         tokens::MUTED,
     );
@@ -1438,7 +1576,7 @@ fn paint_lane(
         ui.painter().text(
             row.left_center() + Vec2::new(14.0, 0.0),
             Align2::LEFT_CENTER,
-            "Import a file",
+            "No clips",
             FontId::proportional(12.0),
             tokens::MUTED,
         );
@@ -1569,9 +1707,7 @@ fn paint_clip(
         "{} · {}–{}",
         clip.name,
         shell.timecode_at(clip.start),
-        shell.timecode_at(cutlass_model::Micros(
-            clip.start.0.saturating_add(clip.duration.0)
-        ))
+        shell.timecode_at(Micros(clip.start.0.saturating_add(clip.duration.0)))
     );
     response.clone().on_hover_text(span);
     if response.clicked() {
@@ -1933,6 +2069,9 @@ mod tests {
             "{painted}"
         );
         assert!(painted.contains("Projects"), "{painted}");
+        assert!(painted.contains("00:00:01"), "{painted}");
+        assert!(painted.contains("No clips"), "{painted}");
+        assert!(!painted.contains("Import a file"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -1961,6 +2100,32 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_second_tick_names_the_frame() {
+        let step = 1_000_000.0 / 30.0;
+        let rate = FrameRate::FPS_30;
+        let frame = rate.frame_start(1).expect("frame").0 as f64;
+        assert_eq!(ruler_label(0.0, step, rate, false), "00:00:00");
+        assert_eq!(ruler_label(frame, step, rate, false), "00:00:01");
+        assert_eq!(ruler_label(1_000_000.0, step, rate, false), "00:01:00");
+        assert_eq!(
+            ruler_label(3_600_000_000.0, step, rate, false),
+            "01:00:00:00"
+        );
+        assert_eq!(frame_stride(0.006, rate), Some(1));
+        assert_eq!(frame_stride(72.0 / 1_000_000.0, rate), None);
+        assert_eq!(ruler_label(1_000_000.0, 1_000_000.0, rate, false), "00:01");
+        assert_eq!(
+            ruler_label(3_661_000_000.0, 1_000_000.0, rate, false),
+            "01:01:01"
+        );
+        assert_eq!(ruler_label(-1.0, step, rate, false), "");
+        assert_eq!(
+            ruler_label(0.0, step, FrameRate::FPS_29_97, true),
+            "00:00;00"
+        );
+    }
+
+    #[test]
     fn a_utc_date_is_the_civil_day() {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(86_400), "1970-01-02");
@@ -1972,7 +2137,7 @@ mod tests {
         let mut draft = cutlass_model::Draft::empty("draft");
         let mut video = cutlass_model::MaterialVideo::new("mat");
         video.path = "Resources/clip.mp4".into();
-        video.duration = cutlass_model::Micros(2_500_000);
+        video.duration = Micros(2_500_000);
         draft.materials.videos.push(video);
         draft.tracks[0].segments.push(cutlass_model::Segment::new(
             "seg",
@@ -2021,6 +2186,40 @@ mod tests {
         let card = text_pos(&output, "pattern.png").expect("library card");
         assert!((80.0..tokens::LIBRARY_WIDTH).contains(&card.x), "{card:?}");
         assert!((40.0..500.0).contains(&card.y), "{card:?}");
+        let notice = text_pos(&output, "Imported pattern.png").expect("notice");
+        let tick = text_pos(&output, "00:00:00").expect("frame tick");
+        assert!(
+            notice.y > tick.y,
+            "notice {notice:?} overlaps tick {tick:?}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_long_saved_path_stays_on_one_line() {
+        let temp = std::env::temp_dir().join(format!("cutlass-path-{}", "p".repeat(80)));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let lines = galleys(&output);
+        output.textures_delta.clear();
+        let full = temp.display().to_string();
+        assert!(lines.iter().any(|line| line.contains('…')), "{lines:?}");
+        assert!(lines.iter().all(|line| line != &full), "{lines:?}");
+        assert!(lines.iter().all(|line| !line.contains('\n')));
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -2066,6 +2265,35 @@ mod tests {
             append_shape(&clipped.shape, &mut text);
         }
         text
+    }
+
+    fn galleys(output: &egui::FullOutput) -> Vec<String> {
+        let mut lines = Vec::new();
+        for clipped in &output.shapes {
+            collect_galleys(&clipped.shape, &mut lines);
+        }
+        lines
+    }
+
+    fn collect_galleys(shape: &egui::Shape, lines: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(shape) => {
+                let shown = shape
+                    .galley
+                    .rows
+                    .iter()
+                    .map(|row| row.row.text())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                lines.push(shown);
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_galleys(shape, lines);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn text_pos(output: &egui::FullOutput, wanted: &str) -> Option<Pos2> {

@@ -203,6 +203,14 @@ pub struct ClipMenu {
     pub y: f32,
 }
 
+/// The guide Delete will remove. A time is a vertical line. A row is a
+/// horizontal line, in thousandths of the track-sheet height.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuideMark {
+    Time(i64),
+    Row(i32),
+}
+
 /// Where a clip drag is showing, before the draft is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MovePreview {
@@ -243,7 +251,10 @@ pub struct Shell {
     /// Vertical guides for this session. They are not stored in the draft.
     guides: Vec<Micros>,
     guide_preview: Option<Micros>,
-    selected_guide: Option<i64>,
+    /// Horizontal guides, in thousandths of the track-sheet height.
+    horizontal: Vec<i32>,
+    horizontal_preview: Option<i32>,
+    selected_mark: Option<GuideMark>,
     guides_shown: bool,
     guides_locked: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
@@ -294,7 +305,9 @@ impl Shell {
             clip_menu: None,
             guides: Vec::new(),
             guide_preview: None,
-            selected_guide: None,
+            horizontal: Vec::new(),
+            horizontal_preview: None,
+            selected_mark: None,
             guides_shown: true,
             guides_locked: false,
             blade: false,
@@ -1347,7 +1360,7 @@ impl Shell {
     }
 
     pub fn select(&mut self, id: Option<SegmentId>) {
-        self.selected_guide = None;
+        self.selected_mark = None;
         self.selection.clear();
         if let Some(id) = id {
             self.selection.push(id);
@@ -1356,7 +1369,7 @@ impl Shell {
 
     /// Add `id` to the selection, or drop it when it is already there.
     pub fn toggle_selected(&mut self, id: SegmentId) {
-        self.selected_guide = None;
+        self.selected_mark = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
             self.selection.remove(index);
         } else {
@@ -1366,7 +1379,7 @@ impl Shell {
 
     /// Replace the selection with `ids`. `keep` adds them to the clips already selected.
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
-        self.selected_guide = None;
+        self.selected_mark = None;
         if !keep {
             self.selection.clear();
         }
@@ -1393,7 +1406,7 @@ impl Shell {
     /// Remove the selected clips, or the selected guide when no clip is selected.
     pub fn delete_target(&mut self) -> Result<(), ShellError> {
         if self.selection.is_empty() {
-            if self.selected_guide.is_some() {
+            if self.selected_mark.is_some() {
                 return self.remove_selected_guide();
             }
             return Ok(());
@@ -1455,31 +1468,96 @@ impl Shell {
             self.guides.push(time);
             self.guides.sort_by_key(|guide| guide.0);
         }
-        self.selected_guide = Some(time.0);
+        self.selected_mark = Some(GuideMark::Time(time.0));
         Ok(())
     }
 
     pub fn select_guide(&mut self, time: Micros) {
         if self.guides.iter().any(|guide| guide.0 == time.0) {
-            self.selected_guide = Some(time.0);
+            self.selected_mark = Some(GuideMark::Time(time.0));
             self.selection.clear();
         }
     }
 
     #[must_use]
     pub fn selected_guide(&self) -> Option<Micros> {
-        self.selected_guide.map(Micros)
+        match self.selected_mark {
+            Some(GuideMark::Time(time)) => Some(Micros(time)),
+            _ => None,
+        }
+    }
+
+    /// Leave a horizontal guide. `row` is thousandths of the track-sheet height.
+    /// A row already present is selected again.
+    pub fn add_horizontal(&mut self, row: i32) -> Result<(), ShellError> {
+        if self.session.is_none() {
+            return Err(ShellError::NoProject);
+        }
+        if self.guides_locked {
+            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
+        }
+        let row = row.clamp(0, 1_000);
+        if !self.horizontal.contains(&row) {
+            self.horizontal.push(row);
+            self.horizontal.sort_unstable();
+        }
+        self.selected_mark = Some(GuideMark::Row(row));
+        Ok(())
+    }
+
+    pub fn preview_horizontal(&mut self, row: i32) {
+        self.horizontal_preview = Some(row.clamp(0, 1_000));
+    }
+
+    pub fn clear_horizontal_preview(&mut self) {
+        self.horizontal_preview = None;
+    }
+
+    pub fn take_horizontal_preview(&mut self) -> Option<i32> {
+        self.horizontal_preview.take()
+    }
+
+    #[must_use]
+    pub fn horizontal_preview(&self) -> Option<i32> {
+        self.horizontal_preview
+    }
+
+    /// Horizontal guides currently drawn, in thousandths of the track-sheet height.
+    /// A hidden list is empty here.
+    #[must_use]
+    pub fn horizontal_guides(&self) -> &[i32] {
+        if self.guides_shown {
+            &self.horizontal
+        } else {
+            &[]
+        }
+    }
+
+    pub fn select_horizontal(&mut self, row: i32) {
+        if self.horizontal.contains(&row) {
+            self.selected_mark = Some(GuideMark::Row(row));
+            self.selection.clear();
+        }
+    }
+
+    #[must_use]
+    pub fn selected_horizontal(&self) -> Option<i32> {
+        match self.selected_mark {
+            Some(GuideMark::Row(row)) => Some(row),
+            _ => None,
+        }
     }
 
     pub fn remove_selected_guide(&mut self) -> Result<(), ShellError> {
         if self.guides_locked {
             return Err(ShellError::Unavailable("the guides are locked".to_owned()));
         }
-        let Some(time) = self.selected_guide else {
-            return Ok(());
-        };
-        self.guides.retain(|guide| guide.0 != time);
-        self.selected_guide = None;
+        match self.selected_mark {
+            Some(GuideMark::Time(time)) => self.guides.retain(|guide| guide.0 != time),
+            Some(GuideMark::Row(row)) => self.horizontal.retain(|guide| *guide != row),
+            None => return Ok(()),
+        }
+        self.selected_mark = None;
         Ok(())
     }
 
@@ -1508,7 +1586,9 @@ impl Shell {
     fn clear_guides(&mut self) {
         self.guides.clear();
         self.guide_preview = None;
-        self.selected_guide = None;
+        self.horizontal.clear();
+        self.horizontal_preview = None;
+        self.selected_mark = None;
         self.guides_shown = true;
         self.guides_locked = false;
     }
@@ -3995,6 +4075,41 @@ mod tests {
         );
         desktop.close_project().unwrap();
         desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.guides().is_empty());
+    }
+
+    #[test]
+    fn a_horizontal_guide_stays_until_delete() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_horizontal(400).unwrap();
+        desktop.add_horizontal(400).unwrap();
+        assert_eq!(desktop.horizontal_guides(), &[400]);
+        desktop.add_guide(Micros(1_000_000)).unwrap();
+        assert!(desktop.selected_horizontal().is_none());
+        desktop.select_horizontal(400);
+        assert!(desktop.selected_guide().is_none());
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        desktop.select(Some(id));
+        desktop.select_horizontal(400);
+        assert!(desktop.selection().is_empty());
+        desktop.run_shortcut("delete").unwrap();
+        assert!(desktop.horizontal_guides().is_empty());
+        assert_eq!(desktop.guides(), &[Micros(1_000_000)]);
+        desktop.add_horizontal(250).unwrap();
+        desktop.toggle_guide_lock();
+        let locked = desktop.add_horizontal(500).unwrap_err();
+        assert_eq!(locked.to_string(), "the guides are locked");
+        desktop.toggle_guide_lock();
+        desktop.toggle_guides();
+        assert!(desktop.horizontal_guides().is_empty());
+        desktop.toggle_guides();
+        assert_eq!(desktop.horizontal_guides(), &[250]);
+        desktop.close_project().unwrap();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.horizontal_guides().is_empty());
         assert!(desktop.guides().is_empty());
     }
 

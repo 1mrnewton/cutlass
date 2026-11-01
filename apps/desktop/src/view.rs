@@ -1421,6 +1421,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         response.on_hover_text("Playhead");
     }
     paint_guides(shell, ui, lanes_left, tracks);
+    paint_horizontal_guides(shell, ui, tracks);
     let ruler_hit = ui.interact(
         lane_ruler(ruler, lanes_left),
         ui.scope_id().with("ruler"),
@@ -1455,6 +1456,32 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         if let Err(error) = shell.seek_ruler(x) {
             shell.set_notice(error.to_string());
         }
+    }
+    let corner = Rect::from_min_max(
+        Pos2::new(tracks.left(), ruler.top()),
+        Pos2::new((lanes_left - 1.0).max(tracks.left()), ruler.bottom()),
+    );
+    let corner_hit = ui.interact(
+        corner,
+        ui.scope_id().with("guide-corner"),
+        Sense::click_and_drag(),
+    );
+    if corner_hit.dragged()
+        && let Some(pointer) = corner_hit.interact_pointer_pos()
+    {
+        if pointer.y > below_ruler {
+            if let Some(row) = sheet_row(tracks, pointer.y) {
+                shell.preview_horizontal(row);
+            }
+        } else {
+            shell.clear_horizontal_preview();
+        }
+    }
+    if corner_hit.drag_stopped()
+        && let Some(row) = shell.take_horizontal_preview()
+        && let Err(error) = shell.add_horizontal(row)
+    {
+        shell.set_notice(error.to_string());
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
     pan_timeline(shell, ui, lane_area);
@@ -1737,6 +1764,47 @@ fn paint_guides(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, tracks: Rect) {
             );
         }
     }
+}
+
+fn paint_horizontal_guides(shell: &mut Shell, ui: &mut Ui, tracks: Rect) {
+    let selected = shell.selected_horizontal();
+    let rows: Vec<i32> = shell.horizontal_guides().to_vec();
+    let height = tracks.height().max(1.0);
+    for row in rows {
+        let y = tracks.top() + row as f32 / 1000.0 * height;
+        let hit = Rect::from_center_size(
+            Pos2::new(tracks.center().x, y),
+            Vec2::new(tracks.width(), 8.0),
+        );
+        let response = ui.interact(hit, ui.scope_id().with(("hguide", row)), Sense::click());
+        if response.clicked() {
+            shell.select_horizontal(row);
+        }
+        let color = if selected == Some(row) {
+            tokens::SELECTED
+        } else {
+            tokens::EXPORT
+        };
+        ui.painter()
+            .hline(tracks.x_range(), y, egui::Stroke::new(1.0, color));
+    }
+    if let Some(row) = shell.horizontal_preview() {
+        let y = tracks.top() + row as f32 / 1000.0 * height;
+        ui.painter().hline(
+            tracks.x_range(),
+            y,
+            egui::Stroke::new(1.0, tokens::EXPORT.gamma_multiply(0.55)),
+        );
+    }
+}
+
+fn sheet_row(tracks: Rect, y: f32) -> Option<i32> {
+    let height = tracks.height();
+    if height <= 0.0 || !y.is_finite() {
+        return None;
+    }
+    let fraction = ((y - tracks.top()) / height).clamp(0.0, 1.0);
+    Some((fraction * 1000.0).round() as i32)
 }
 
 fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
@@ -3404,6 +3472,55 @@ mod tests {
         );
         output.textures_delta.clear();
         assert!(shell.guides().is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_drag_down_from_the_names_leaves_a_horizontal_guide() {
+        let (mut shell, temp) = open_span("row", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let names = text_pos(&output, "Main").expect("track names");
+        let ruler = text_pos(&output, "00:00:00")
+            .or_else(|| text_pos(&output, "00:00"))
+            .expect("ruler");
+        output.textures_delta.clear();
+        let corner = Pos2::new(names.x, ruler.y);
+        drag(
+            &ctx,
+            corner,
+            corner + Vec2::new(0.0, 90.0),
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.horizontal_guides().len(), 1);
+        assert!(shell.selected_horizontal().is_some());
+        assert!(shell.guides().is_empty());
+        let key = |pressed: bool| egui::Event::Key {
+            key: egui::Key::Delete,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![key(true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.horizontal_guides().is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

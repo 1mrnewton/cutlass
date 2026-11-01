@@ -182,6 +182,11 @@ pub(crate) struct Frame<S: Sample = u8> {
     inter_view: bool,
     /// Display time and film grain. Reconstruction keeps `pts` and the planes.
     shown: Shown,
+    /// Scaled-window offsets in luma samples. A picture without that window stores zero.
+    svc_left: i32,
+    svc_top: i32,
+    svc_right: i32,
+    svc_bottom: i32,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -1385,6 +1390,10 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         view_id: 0,
         inter_view: false,
         shown: Shown::plain(0, 0),
+        svc_left: 0,
+        svc_top: 0,
+        svc_right: 0,
+        svc_bottom: 0,
     }
 }
 
@@ -2552,8 +2561,8 @@ fn read_header(
 /// with the transform-block residual filter. A non-negative crop insets that
 /// window, and motion inside it uses the window size. Residual resampling uses
 /// that window. A negative offset shifts it. A crop that differs on the reference
-/// picture, macroblock-level spatial scalability, and coefficient prediction
-/// are refused.
+/// picture adds that difference to the scaled vector. Macroblock-level spatial
+/// scalability and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
@@ -2881,6 +2890,10 @@ fn new_frame<S: Sample>(
         view_id: header.view_id,
         inter_view: header.inter_view,
         shown: Shown::from_sps(packet.pts, packet.duration, sps),
+        svc_left: mb::sample_offset(sps.svc_scale.left)?,
+        svc_top: mb::sample_offset(sps.svc_scale.top)?,
+        svc_right: mb::sample_offset(sps.svc_scale.right)?,
+        svc_bottom: mb::sample_offset(sps.svc_scale.bottom)?,
     })
 }
 
@@ -3430,6 +3443,10 @@ mod tests {
             view_id: 0,
             inter_view: true,
             shown: super::Shown::plain(0, 1),
+            svc_left: 0,
+            svc_top: 0,
+            svc_right: 0,
+            svc_bottom: 0,
         }
     }
 

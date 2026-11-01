@@ -892,7 +892,7 @@ fn motion_base<S: Sample>(
         mb.ref0 = reference.ref0;
         mb.ref1 = reference.ref1;
     } else if slice.sps.svc_spatial == 1 {
-        scaled_layer_motion(&mut mb, layer, slice, mx, my)?;
+        scaled_layer_motion(&mut mb, layer, dpb, slice, mx, my)?;
     } else {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -987,6 +987,7 @@ fn motion_base<S: Sample>(
 fn scaled_layer_motion<S: Sample>(
     mb: &mut Mb,
     layer: &Frame<S>,
+    dpb: &[Frame<S>],
     slice: &Slice<'_>,
     mx: usize,
     my: usize,
@@ -1079,13 +1080,44 @@ fn scaled_layer_motion<S: Sample>(
             let index = by * 4 + bx;
             let source0 = reference.mv0[blk];
             let source1 = reference.mv1[blk];
+            let current = (left, top, right, bottom);
+            let crop0 = stored_crop(dpb, &slice.ref0, reference.ref0[part], current)?;
+            let crop1 = stored_crop(dpb, &slice.ref1, reference.ref1[part], current)?;
             mb.mv0[index] = [
-                scale_vector(source0[0], base_w, scaled_w)?,
-                scale_vector(source0[1], base_h, scaled_h)?,
+                crop_vector(
+                    source0[0],
+                    curr_x,
+                    (left, right),
+                    (crop0.0, crop0.2),
+                    base_w,
+                    scaled_w,
+                )?,
+                crop_vector(
+                    source0[1],
+                    curr_y,
+                    (top, bottom),
+                    (crop0.1, crop0.3),
+                    base_h,
+                    scaled_h,
+                )?,
             ];
             mb.mv1[index] = [
-                scale_vector(source1[0], base_w, scaled_w)?,
-                scale_vector(source1[1], base_h, scaled_h)?,
+                crop_vector(
+                    source1[0],
+                    curr_x,
+                    (left, right),
+                    (crop1.0, crop1.2),
+                    base_w,
+                    scaled_w,
+                )?,
+                crop_vector(
+                    source1[1],
+                    curr_y,
+                    (top, bottom),
+                    (crop1.1, crop1.3),
+                    base_h,
+                    scaled_h,
+                )?,
             ];
             let enh = (by / 2) * 2 + (bx / 2);
             if !seen[enh] {
@@ -1171,6 +1203,91 @@ fn base_sample(curr: i32, axis: MotionAxis) -> Result<i32, CodecError> {
         });
     }
     Ok(pos.clamp(0, axis.limit - 1))
+}
+
+fn stored_crop<S: Sample>(
+    dpb: &[Frame<S>],
+    list: &[usize],
+    index: i8,
+    current: (i32, i32, i32, i32),
+) -> Result<(i32, i32, i32, i32), CodecError> {
+    if index < 0 {
+        return Ok(current);
+    }
+    let Some(slot) = usize::try_from(index)
+        .ok()
+        .and_then(|at| list.get(at))
+        .copied()
+    else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    let Some(frame) = dpb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    Ok((
+        frame.svc_left,
+        frame.svc_top,
+        frame.svc_right,
+        frame.svc_bottom,
+    ))
+}
+
+/// Scale a reference-layer vector, then add the crop difference of its picture.
+fn crop_vector(
+    mv: i16,
+    sample: i32,
+    current: (i32, i32),
+    reference: (i32, i32),
+    base: i32,
+    scaled: i32,
+) -> Result<i16, CodecError> {
+    let id_near = i64::from(current.0) - i64::from(reference.0);
+    let id_span = i64::from(current.1) - i64::from(reference.1) + id_near;
+    if id_near == 0 && id_span == 0 {
+        return scale_vector(mv, base, scaled);
+    }
+    if base <= 0 || scaled <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let span = i64::from(scaled) + id_span;
+    if span <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let ratio = ((span << 16) + i64::from(base >> 1)) / i64::from(base);
+    let mut value = i64::from(mv)
+        .checked_mul(ratio)
+        .and_then(|product| product.checked_add(32_768))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    value >>= 16;
+    let corr = ((id_span * 4) << 16) + i64::from(scaled >> 1);
+    let corr = corr / i64::from(scaled);
+    let at = i64::from(sample) - i64::from(current.0);
+    let shift = at
+        .checked_mul(corr)
+        .and_then(|product| product.checked_add(32_768))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    value = value
+        .checked_add(shift >> 16)
+        .and_then(|sum| sum.checked_sub(4 * id_near))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    i16::try_from(value).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })
 }
 
 fn scale_vector(mv: i16, reference: i32, scaled: i32) -> Result<i16, CodecError> {
@@ -4636,6 +4753,10 @@ mod intra8 {
             view_id: 0,
             inter_view: true,
             shown: super::super::Shown::plain(0, 0),
+            svc_left: 0,
+            svc_top: 0,
+            svc_right: 0,
+            svc_bottom: 0,
         }
     }
 
@@ -8682,7 +8803,7 @@ fn resample_axis(
     Ok((scale, add, shift - 4, delta))
 }
 
-fn sample_offset(coded: i32) -> Result<i32, CodecError> {
+pub(crate) fn sample_offset(coded: i32) -> Result<i32, CodecError> {
     i32::try_from(i64::from(coded) * 2).map_err(|_| CodecError::Unsupported {
         what: "inter-layer prediction",
     })

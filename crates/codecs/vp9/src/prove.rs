@@ -530,6 +530,46 @@ fn loop_filter_delta_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Segment 1 is skip: those blocks have no residual and a zero motion vector.
+#[test]
+fn segment_skip_matches_ffmpeg_software() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let Some(flags) = vpx_compile_flags() else {
+        eprintln!("skipped: libvpx headers were not found");
+        return;
+    };
+    let dir = temp_dir("seg-skip");
+    let ivf = dir.join("in.ivf");
+    if !encode_roi_map(&dir, &ivf, &flags, Some("skip")) {
+        eprintln!("skipped: the segment-map encoder did not build");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let stream = read_ivf(&ivf);
+    assert_eq!((stream.width, stream.height), (160, 96));
+    assert!(
+        segment_skip_is_set(&stream),
+        "no inter frame marked segment 1 as skip"
+    );
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    assert_eq!(ours.len(), 160 * 96 * 3 / 2 * 4);
+    eprintln!(
+        "segment skip {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A segment loop-filter step of -63 and a segment reference of the last frame.
 #[test]
 fn segment_tools_match_ffmpeg_software() {
@@ -543,7 +583,7 @@ fn segment_tools_match_ffmpeg_software() {
     };
     let dir = temp_dir("seg-tools");
     let ivf = dir.join("in.ivf");
-    if !encode_roi_map(&dir, &ivf, &flags) {
+    if !encode_roi_map(&dir, &ivf, &flags, None) {
         eprintln!("skipped: the segment-map encoder did not build");
         let _ = std::fs::remove_dir_all(&dir);
         return;
@@ -583,7 +623,7 @@ fn vpx_compile_flags() -> Option<Vec<String>> {
     (!flags.is_empty()).then_some(flags)
 }
 
-fn encode_roi_map(dir: &Path, ivf: &Path, flags: &[String]) -> bool {
+fn encode_roi_map(dir: &Path, ivf: &Path, flags: &[String], mode: Option<&str>) -> bool {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/roi_map.c");
     let bin = dir.join("roi_map");
     let Ok(built) = Command::new("cc")
@@ -599,13 +639,32 @@ fn encode_roi_map(dir: &Path, ivf: &Path, flags: &[String]) -> bool {
     if !built.status.success() {
         return false;
     }
-    let encoded = Command::new(&bin).arg(ivf).output().expect("roi map");
+    let mut command = Command::new(&bin);
+    command.arg(ivf);
+    if let Some(mode) = mode {
+        command.arg(mode);
+    }
+    let encoded = command.output().expect("roi map");
     assert!(
         encoded.status.success(),
         "roi map {}",
         String::from_utf8_lossy(&encoded.stderr)
     );
     true
+}
+
+fn segment_skip_is_set(stream: &Ivf) -> bool {
+    let mut state = crate::header::Persist::new();
+    let mut found = false;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("segment skip frame {index} header: {err}"));
+        let header = &parsed.header;
+        let seg = &header.seg;
+        found |= !header.key_frame && seg.enabled && seg.feature_on[1][3] && !seg.feature_on[1][1];
+        remember_header(&mut state, &parsed);
+    }
+    found
 }
 
 fn segment_tools_are_set(stream: &Ivf) -> bool {

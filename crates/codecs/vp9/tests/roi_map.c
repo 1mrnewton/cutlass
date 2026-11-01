@@ -1,7 +1,8 @@
-/* Builds one IVF whose inter frames carry a segment loop-filter step and a
-   segment reference. libvpx applies this map only in realtime mode at speed 5
-   or higher, and only on an inter frame. Skip is left off so the map is used
-   on the first inter frame. */
+/* Builds one IVF whose inter frames carry segment features. libvpx applies
+   this map only in realtime mode at speed 5 or higher, and only on an inter
+   frame. The default map is a loop-filter step and a reference. Passing
+   "skip" marks segment 1 as skip instead. Segment 3 is left alone: libvpx
+   withholds that id for 20 frames after a key. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,13 +70,14 @@ int main(int argc, char **argv) {
     vpx_codec_ctx_t codec;
     vpx_codec_enc_cfg_t cfg;
     vpx_codec_iface_t *iface = vpx_codec_vp9_cx();
-    int cols, rows, n, count, y, x;
+    int cols, rows, n, count, y, x, skip_only;
     unsigned char *map;
     vpx_roi_map_t roi;
     vpx_image_t img;
     unsigned char *stored[4];
     size_t stored_sz[4];
-    if (argc != 2) return 1;
+    skip_only = argc == 3 && strcmp(argv[2], "skip") == 0;
+    if (argc != 2 && !skip_only) return 1;
     if (vpx_codec_enc_config_default(iface, &cfg, 0)) return 1;
     cfg.g_w = (unsigned)w;
     cfg.g_h = (unsigned)h;
@@ -105,8 +107,12 @@ int main(int argc, char **argv) {
     roi.rows = (unsigned)rows;
     roi.cols = (unsigned)cols;
     for (n = 0; n < 8; n++) roi.ref_frame[n] = -1;
-    roi.delta_lf[1] = -63;
-    roi.ref_frame[2] = 1;
+    if (skip_only) {
+        roi.skip[1] = 1;
+    } else {
+        roi.delta_lf[1] = -63;
+        roi.ref_frame[2] = 1;
+    }
     if (vpx_codec_control(&codec, VP9E_SET_ROI_MAP, &roi)) die(&codec, "roi");
 
     if (!vpx_img_alloc(&img, VPX_IMG_FMT_I420, (unsigned)w, (unsigned)h, 1)) return 1;

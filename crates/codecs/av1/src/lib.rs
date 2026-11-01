@@ -37,7 +37,8 @@
 //! tile groups. A large-scale tile list copies tiles from the eight stored
 //! references and does not refresh them. Film grain may be copied from a
 //! reference, and the stored picture is the one from before grain. Every shown
-//! frame of one real 8-bit 4:2:0 file matches an independent decoder. A packet
+//! frame of one real 8-bit 4:2:0 file matches an independent decoder. A second
+//! 3840×2160 file shows 5326 frames and matches the same decoder. A packet
 //! may be one Annex B temporal unit. A segment may change the quantizer, and a
 //! later frame may keep that segment map. Colour primaries, transfer, matrix,
 //! chroma sample position, and the display size are published on the picture. A 128×128 frame publishes a vertical chroma position.

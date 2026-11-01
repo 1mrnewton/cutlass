@@ -6722,11 +6722,35 @@ mod tests {
         if !ffmpeg_installed() {
             return;
         }
-        let ivf_path =
-            std::env::temp_dir().join(format!("cutlass-av1-real-{}.ivf", std::process::id()));
+        let (shown, _, _) = match_every_shown_frame(&input, "av1");
+        assert!(shown > 1, "only the first shown frame was compared");
+    }
+
+    #[test]
+    fn every_shown_frame_of_a_second_2160p_file_matches_dav1d() {
+        // A second 3840×2160 file in ../local-files. Its name does not contain
+        // "av1", so the other real-file test does not open it. CI skips when
+        // the folder or the file is absent.
+        let Some(input) = real_remux_file() else {
+            return;
+        };
+        if !ffmpeg_installed() {
+            return;
+        }
+        let (shown, width, height) = match_every_shown_frame(&input, "second");
+        assert_eq!((width, height), (3840, 2160));
+        assert_eq!(shown, 5326);
+    }
+
+    /// Shown pictures of one file, compared with `ffmpeg -c:v libdav1d -threads 1`.
+    fn match_every_shown_frame(input: &std::path::Path, label: &str) -> (usize, u32, u32) {
+        let ivf_path = std::env::temp_dir().join(format!(
+            "cutlass-av1-real-{label}-{}.ivf",
+            std::process::id()
+        ));
         let extracted = std::process::Command::new("ffmpeg")
             .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&input)
+            .arg(input)
             .args(["-map", "0:v:0", "-c:v", "copy", "-f", "ivf"])
             .arg(&ivf_path)
             .output()
@@ -6772,6 +6796,7 @@ mod tests {
         let mut decoder = Av1Decoder::open(&params).expect("decoder");
         let mut oracle = Vec::new();
         let mut shown = 0usize;
+        let mut size = (0u32, 0u32);
         for (index, payload) in frames.iter().enumerate() {
             let packet = cutlass_decode::Packet {
                 stream: 0,
@@ -6792,6 +6817,9 @@ mod tests {
                 let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
                     panic!("shown {shown} is not cpu samples");
                 };
+                if shown == 0 {
+                    size = (picture.info().width, picture.info().height);
+                }
                 if oracle.len() != bytes.len() {
                     oracle.resize(bytes.len(), 0);
                 }
@@ -6826,7 +6854,7 @@ mod tests {
         assert_eq!(trailing, 0, "dav1d returned another frame");
         let status = child.wait().expect("wait");
         assert!(status.success(), "{}", oracle_note(&mut logged));
-        assert!(shown > 1, "only the first shown frame was compared");
+        (shown, size.0, size.1)
     }
 
     struct TempFile(std::path::PathBuf);
@@ -6863,6 +6891,30 @@ mod tests {
             let name = name.to_ascii_lowercase();
             let video = name.ends_with(".mp4") || name.ends_with(".webm") || name.ends_with(".mov");
             if video && name.contains("av1") {
+                found.push(path);
+            }
+        }
+        found.sort();
+        found.into_iter().next()
+    }
+
+    fn real_remux_file() -> Option<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
+        if !root.is_dir() {
+            return None;
+        }
+        let mut found = Vec::new();
+        let entries = std::fs::read_dir(root).ok()?;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            if name.starts_with("remux_") && name.ends_with(".mp4") {
                 found.push(path);
             }
         }

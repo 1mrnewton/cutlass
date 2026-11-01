@@ -12,6 +12,7 @@ mod magnet;
 mod mark;
 mod mirror;
 mod move_segment;
+mod name;
 mod place;
 mod placement;
 mod rate;
@@ -284,6 +285,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetFrameRate { fps, drop_frame } => rate::set_frame_rate(draft, *fps, *drop_frame),
         Request::SetDropFrame { on } => rate::set_drop_frame(draft, *on),
         Request::SetColorSpace { space } => color::set_color_space(draft, *space),
+        Request::SetProjectName { name } => {
+            name::set_project_name(draft, name);
+            Ok(())
+        }
     }
 }
 

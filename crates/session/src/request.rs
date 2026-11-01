@@ -239,4 +239,6 @@ pub enum Request {
     SetDropFrame { on: bool },
     /// Store the project color space. The preview is not retinted.
     SetColorSpace { space: i32 },
+    /// Store the project name. Surrounding whitespace is dropped.
+    SetProjectName { name: String },
 }

@@ -6465,7 +6465,7 @@ fn decode_inter<S: Sample>(
     } else {
         spec == 3 || spec == 4
     };
-    let vsp_block = (slice.kind == 0 && spec == 0) || (slice.kind == 1 && spec == 1);
+    let vsp_block = (slice.kind == 0 && matches!(spec, 0 | 1)) || (slice.kind == 1 && spec == 1);
     if slice.vsp && (sub || !vsp_block) {
         return Err(CodecError::Unsupported { what: "3d" });
     }

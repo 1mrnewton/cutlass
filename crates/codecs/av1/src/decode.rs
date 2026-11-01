@@ -5598,6 +5598,37 @@ mod tests {
     }
 
     #[test]
+    fn reduced_transform_set_matches_dav1d() {
+        // aomenc --reduced-tx-type-set=1, 256×256, two frames. Both headers
+        // select the transform size and the reduced set. Reading the full set
+        // desyncs the keyframe. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/reduced-tx.ivf"));
+        assert_eq!(frames.len(), 2);
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (parsed, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("frame");
+            assert!(frame.reduced_tx, "frame {index}");
+            assert!(frame.tx_select, "frame {index}");
+            assert_eq!(frame.width, 256);
+            assert_eq!(frame.height, 256);
+            if index == 1 {
+                assert!(!frame.intra);
+            }
+            sequence = Some(parsed);
+        }
+        let expected = [0x9b2e_a288_67f4_9030, 0x4b47_c93f_209b_1e03];
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 256 * 256 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn loop_filter_sharpness_matches_dav1d() {
         // aomenc --usage=2 --sharpness=7, 128×128. The frame header sets
         // sharpness to 7 and keeps non-zero luma and chroma filter levels.

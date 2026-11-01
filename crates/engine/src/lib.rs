@@ -16,6 +16,7 @@ mod map;
 mod mix;
 mod preload;
 mod reader;
+mod scene;
 mod source;
 mod waveform;
 
@@ -26,7 +27,7 @@ pub use error::EngineError;
 pub use filmstrip::{MAX_EDGE, MAX_STRIP, StripCell};
 pub use map::{
     MapError, MapSpeed, TimelineMap, is_graphic, map_timeline, media_path, micros_to_ticks,
-    placement_of, speed_at, ticks_to_micros,
+    placement_of, speed_at, ticks_to_micros, timeline_for_source,
 };
 pub use mix::{
     AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, mix_inputs, render, volume_at,
@@ -34,6 +35,7 @@ pub use mix::{
 pub use reader::{
     DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, StreamReport,
 };
+pub use scene::{SCENE_CELLS, SCENE_SCORE, SceneError, cut_times, scene_cuts};
 pub use source::{VideoSource, decoded_picture, media_in_project, open_segment, open_segment_in};
 pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 

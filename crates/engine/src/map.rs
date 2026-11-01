@@ -94,6 +94,53 @@ pub fn map_timeline(map: &TimelineMap, time: Micros) -> Result<Micros, MapError>
     Ok(Micros(position))
 }
 
+/// Timeline time whose picture is `source`.
+///
+/// The search follows [`map_timeline`], so speed, a curve, and reverse land
+/// on the same frame playback would show. `None` when no timeline time in
+/// the clip maps within a millisecond of `source`.
+#[must_use]
+pub fn timeline_for_source(map: &TimelineMap, source: Micros) -> Option<Micros> {
+    let start = map.target.start.0;
+    let end = start.checked_add(map.target.duration.0)?;
+    if end <= start {
+        return None;
+    }
+    let mut lo = start;
+    let mut hi = end - 1;
+    let mut best: Option<(u64, i64)> = None;
+    for _ in 0..64 {
+        if lo > hi {
+            break;
+        }
+        let mid = lo + (hi - lo) / 2;
+        let Ok(mapped) = map_timeline(map, Micros(mid)) else {
+            break;
+        };
+        let distance = mapped.0.abs_diff(source.0);
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, mid));
+        }
+        if mapped.0 == source.0 {
+            return Some(Micros(mid));
+        }
+        let later = if map.reverse {
+            mapped.0 > source.0
+        } else {
+            mapped.0 < source.0
+        };
+        if later {
+            lo = mid.saturating_add(1);
+        } else if mid == start {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let (distance, time) = best?;
+    (distance <= 1_000).then_some(Micros(time))
+}
+
 /// The map stored on `segment`. A curve with fewer than two points keeps the constant speed.
 pub fn placement_of(draft: &Draft, segment: &Segment) -> Result<TimelineMap, MapError> {
     let Some(source) = segment.source_range.clone() else {
@@ -729,5 +776,30 @@ mod tests {
         let segment = Segment::new("s", "t", TimeRange::new(0, 1));
         draft.tracks[0].segments.push(segment);
         assert!(is_graphic(&draft, &draft.tracks[0].segments[0]));
+    }
+
+    #[test]
+    fn a_source_time_lands_on_the_timeline_frame_that_shows_it() {
+        let constant = TimelineMap {
+            target: TimeRange::new(0, 1_000_000),
+            source: TimeRange::new(0, 2_000_000),
+            freeze: None,
+            speed: MapSpeed::Constant(2.0),
+            reverse: false,
+        };
+        let landed = timeline_for_source(&constant, Micros(800_000)).expect("time");
+        assert!(landed.0.abs_diff(400_000) <= 1);
+
+        let reversed = TimelineMap {
+            target: TimeRange::new(0, 1_000_000),
+            source: TimeRange::new(0, 1_000_000),
+            freeze: None,
+            speed: MapSpeed::Constant(1.0),
+            reverse: true,
+        };
+        let at_end = timeline_for_source(&reversed, Micros(999_999)).expect("start");
+        assert!(at_end.0.abs_diff(0) <= 1);
+        let at_start = timeline_for_source(&reversed, Micros(0)).expect("end");
+        assert!(at_start.0.abs_diff(999_999) <= 1);
     }
 }

@@ -26,6 +26,8 @@ use crate::map::{micros_to_ticks, ticks_to_micros};
 const HEADER_LIMIT: usize = 4096;
 /// Picture or audio packets one seek may decode before giving up.
 const DECODE_PACKETS: u32 = 64;
+/// Pictures one forward scene scan will decode. A longer file is read from its start.
+const MAX_SCAN_PICTURES: u32 = 4_000;
 /// Samples from another stream that may sit ahead of the wanted one.
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
@@ -208,6 +210,70 @@ impl Media {
             pipe.decoder.reset();
             (pipe.track, pipe.timescale)
         };
+        self.seek_picture(source, track, timescale)?;
+        self.pull_picture(cover)?.ok_or(EngineError::NotReady)
+    }
+
+    /// Pictures from `range`, at least `gap` microseconds apart, at most `limit`.
+    ///
+    /// One seek starts the read. Later pictures stay in file order. The stream
+    /// ending is an empty or short list, not an error.
+    pub fn pictures_across(
+        &mut self,
+        range: &TimeRange,
+        gap: i64,
+        limit: usize,
+    ) -> Result<Vec<HeldFrame>, EngineError> {
+        if limit == 0 || range.duration.0 <= 0 {
+            return Err(EngineError::Window);
+        }
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_mut() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            pipe.decoder.reset();
+            (pipe.track, pipe.timescale)
+        };
+        self.seek_picture(range.start, track, timescale)?;
+        let end = range.start.0.saturating_add(range.duration.0);
+        let mut kept = Vec::new();
+        let mut last = None;
+        let mut decoded = 0_u32;
+        while kept.len() < limit {
+            if decoded == MAX_SCAN_PICTURES {
+                break;
+            }
+            decoded = decoded.saturating_add(1);
+            let held = match self.pull_picture(range) {
+                Ok(Some(held)) => held,
+                Ok(None) => break,
+                Err(_) if !kept.is_empty() => break,
+                Err(error) => return Err(error),
+            };
+            if held.start.0 >= end {
+                break;
+            }
+            if held.end.0 <= range.start.0 {
+                continue;
+            }
+            if last.is_some_and(|previous: i64| held.start.0 < previous.saturating_add(gap.max(0)))
+            {
+                continue;
+            }
+            last = Some(held.start.0);
+            kept.push(held);
+        }
+        Ok(kept)
+    }
+
+    fn seek_picture(
+        &mut self,
+        source: Micros,
+        track: u32,
+        timescale: Timescale,
+    ) -> Result<(), EngineError> {
         if timescale.is_clock() {
             let ticks = micros_to_ticks(source, timescale)?;
             self.demux
@@ -224,6 +290,18 @@ impl Media {
                 end: None,
             });
         }
+        Ok(())
+    }
+
+    fn pull_picture(&mut self, cover: &TimeRange) -> Result<Option<HeldFrame>, EngineError> {
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_ref() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            (pipe.track, pipe.timescale)
+        };
         let mut pictures = 0_u32;
         let mut others = 0_u32;
         loop {
@@ -231,7 +309,7 @@ impl Media {
                 return Err(EngineError::DecodeLimit);
             }
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
-                return Err(EngineError::NotReady);
+                return Ok(None);
             };
             if packet.stream() != track {
                 if others == OTHER_STREAM_PACKETS {
@@ -251,7 +329,7 @@ impl Media {
                 continue;
             };
             let (start, end) = coverage(&packet, timescale, cover)?;
-            return Ok(HeldFrame { start, end, frame });
+            return Ok(Some(HeldFrame { start, end, frame }));
         }
     }
 

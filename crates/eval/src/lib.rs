@@ -29,7 +29,9 @@ mod transition;
 
 pub use audio::{AudioError, MixWindow, audio_slice};
 pub use cutlass_compositor::{Device, Frame};
-pub use cutlass_engine::{ClipPcm, ClockKind, MixResult, ReaderFactory};
+pub use cutlass_engine::{
+    ClipPcm, ClockKind, MixResult, ReaderFactory, SceneError, scene_cuts, timeline_for_source,
+};
 pub use cutlass_model::Micros;
 pub use frame::{EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, wait_export_frame};
 pub use heard::{ClipAsk, Heard};
@@ -50,6 +52,20 @@ pub fn freeze_timestamp(
     map.freeze = None;
     map.reverse = false;
     cutlass_engine::map_timeline(&map, time).ok()
+}
+
+/// Timeline time that shows `source` on `segment`.
+///
+/// Speed, a curve, and reverse follow the playback map. `None` when the
+/// segment has no source range, or no frame in the clip is that source time.
+#[must_use]
+pub fn source_on_timeline(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    source: Micros,
+) -> Option<Micros> {
+    let map = cutlass_engine::placement_of(draft, segment).ok()?;
+    timeline_for_source(&map, source)
 }
 
 #[cfg(test)]

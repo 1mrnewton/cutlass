@@ -2023,6 +2023,61 @@ impl Shell {
         })
     }
 
+    /// The selected clip is a picture that can flip left to right.
+    #[must_use]
+    pub fn mirror_enabled(&self) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        let Some(id) = self.selected() else {
+            return false;
+        };
+        let Some((segment, kind)) = placed(draft, id) else {
+            return false;
+        };
+        mirrorable(draft, segment, kind)
+    }
+
+    /// The selected picture is flipped left to right.
+    #[must_use]
+    pub fn mirrored(&self) -> bool {
+        self.mirror_enabled()
+            && self
+                .selected_segment()
+                .is_some_and(|segment| segment.clip.flip.horizontal)
+    }
+
+    /// Flip the selected picture left to right. A second click restores it.
+    /// The clip stays where it is. One undo restores the previous direction.
+    pub fn toggle_mirror(&mut self) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let horizontal = {
+            let draft = self.session_draft()?;
+            let Some((segment, kind)) = placed(draft, &segment_id) else {
+                return Err(ShellError::Unavailable(
+                    "the clip is not on the timeline".to_owned(),
+                ));
+            };
+            if !mirrorable(draft, segment, kind) {
+                return Err(ShellError::Unavailable(
+                    "a mirror belongs on a picture".to_owned(),
+                ));
+            }
+            !segment.clip.flip.horizontal
+        };
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetMirror {
+            segment_id,
+            horizontal,
+        })
+    }
+
     fn selected_segment(&self) -> Option<&Segment> {
         let draft = self.draft()?;
         let id = self.selected()?;
@@ -3261,6 +3316,39 @@ fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId
         .map(|segment| segment.id.clone())
 }
 
+fn placed<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, &'a TrackType)> {
+    for track in &draft.tracks {
+        if let Some(segment) = track.segments.iter().find(|segment| &segment.id == id) {
+            return Some((segment, &track.kind));
+        }
+    }
+    None
+}
+
+/// A video, a text, a sticker, or a composition can flip. A sound cannot.
+fn mirrorable(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
+    match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(_) | MaterialRef::Text(_) | MaterialRef::Draft(_)) => true,
+        Some(MaterialRef::Other(_))
+            if draft
+                .materials
+                .stickers
+                .iter()
+                .any(|item| item.id == segment.material_id) =>
+        {
+            true
+        }
+        Some(_) => false,
+        None => matches!(
+            kind,
+            TrackType::Text
+                | TrackType::TextToVideoText
+                | TrackType::Sticker
+                | TrackType::Composition
+        ),
+    }
+}
+
 fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
     for track in &draft.tracks {
         if let Some(segment) = track.segments.iter().find(|segment| &segment.id == id) {
@@ -3440,8 +3528,9 @@ mod tests {
     };
     use cutlass_eval::ReaderFactory;
     use cutlass_model::{
-        Draft, FrameRate, MaterialAudio, MaterialColorConfig, MaterialId, MaterialVideo, Micros,
-        Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
+        Draft, FrameRate, MaterialAudio, MaterialColorConfig, MaterialDraft, MaterialId,
+        MaterialText, MaterialVideo, Micros, RawMaterial, Segment, SegmentId, TimeRange, Track,
+        TrackAttribute, TrackType,
     };
     use cutlass_playback::AudioHost;
     use cutlass_session::{EditError, TrimEdge};
@@ -5199,7 +5288,7 @@ mod tests {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;
         draft.canvas_config.height = 1;
-        let mut text = cutlass_model::MaterialText::new("caption");
+        let mut text = MaterialText::new("caption");
         text.content = "Hello".to_owned();
         text.words.text = vec!["Hello".to_owned()];
         text.words.start_time = vec![0];
@@ -5603,6 +5692,137 @@ mod tests {
                 .duration,
             Micros(1_000_000)
         );
+    }
+
+    #[test]
+    fn mirror_flips_a_picture_left_to_right() {
+        let mut bare = shell();
+        assert!(!bare.mirror_enabled());
+        assert_eq!(
+            bare.toggle_mirror().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(2_000_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.clip.flip.vertical = true;
+        draft.tracks[0].segments.push(picture);
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(3_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            duration: Micros(2_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        draft.materials.stickers.push(RawMaterial {
+            id: MaterialId::new("badge"),
+            kind: "sticker".to_owned(),
+            ..RawMaterial::default()
+        });
+        let mut stickers = Track::main("stickers");
+        stickers.kind = TrackType::Sticker;
+        stickers
+            .segments
+            .push(Segment::new("badge", "badge", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(stickers);
+        draft.materials.drafts.push(MaterialDraft {
+            id: MaterialId::new("compound"),
+            ..MaterialDraft::default()
+        });
+        let mut compound = Track::main("compound");
+        compound.kind = TrackType::Composition;
+        compound.segments.push(Segment::new(
+            "compound",
+            "compound",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(compound);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.mirror_enabled());
+        assert_eq!(
+            desktop.toggle_mirror().unwrap_err().to_string(),
+            "a mirror belongs on a picture"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.mirror_enabled());
+        assert!(desktop.reverse_enabled());
+        assert_eq!(
+            desktop.toggle_mirror().unwrap_err().to_string(),
+            "a mirror belongs on a picture"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.mirror_enabled());
+        assert!(!desktop.mirrored());
+        desktop.toggle_mirror().unwrap();
+        assert!(desktop.mirrored());
+        let clip = &desktop.draft().unwrap().tracks[0].segments[0].clip;
+        assert!(clip.flip.horizontal);
+        assert!(clip.flip.vertical);
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        desktop.undo().unwrap();
+        assert!(!desktop.mirrored());
+        desktop.redo().unwrap();
+        desktop.toggle_mirror().unwrap();
+        assert!(!desktop.mirrored());
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop.toggle_mirror().unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        assert!(!desktop.mirrored());
+
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(desktop.mirror_enabled());
+        assert!(!desktop.freeze_enabled());
+        assert!(!desktop.reverse_enabled());
+        desktop.toggle_mirror().unwrap();
+        assert!(desktop.mirrored());
+        desktop.select(Some(SegmentId::new("badge")));
+        assert!(desktop.mirror_enabled());
+        desktop.select(Some(SegmentId::new("compound")));
+        assert!(desktop.mirror_enabled());
+        assert!(!desktop.mirrored());
     }
 
     #[test]

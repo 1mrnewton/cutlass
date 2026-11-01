@@ -2435,8 +2435,8 @@ fn read_header(
 
 /// Slice-header fields that follow the Annex A tail when inter-layer prediction
 /// is used. Same-size intra base mode, list-0 motion, and that layer's list-0
-/// residual are reconstructed. Using both tools at once, resampling, and
-/// coefficient prediction are refused.
+/// residual are reconstructed, including both tools on one macroblock.
+/// Resampling and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
@@ -2480,8 +2480,8 @@ fn read_inter_layer(
     } else {
         bits.bit()?
     };
-    // One tool at a time. Both, or neither, stays out of this reconstruction.
-    if adaptive_base || adaptive_residual || default_base == default_residual {
+    // Neither tool is not a prediction. Adaptive flags stay out.
+    if adaptive_base || adaptive_residual || !(default_base || default_residual) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });

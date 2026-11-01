@@ -203,6 +203,34 @@ fn inter_layer_residual_follows_the_base_motion() {
 }
 
 #[test]
+fn inter_layer_base_mode_adds_the_residual_and_its_own() {
+    let idr = residual_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(split_luma(&first, 100, 180));
+    let base = decode_with(&mut decoder, &moving_base_packet());
+    assert!(shifted_residual_picture(&base));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &both_tools_packet());
+    assert!(
+        both_tools_picture(&picture),
+        "row {:?}",
+        &picture.picture.y()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(both_tools_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_ne!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -785,6 +813,56 @@ fn motion_p_slice() -> Vec<u8> {
     w.bit(true);
     w.trailing();
     w.bytes
+}
+
+fn both_tools_packet() -> Vec<u8> {
+    let mut out = moving_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &both_tools_enhancement(),
+    ));
+    out
+}
+
+fn both_tools_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(2);
+    w.se(0);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn both_tools_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let want = if row < 4 && col < 8 { 183 } else { 180 };
+            y[row * 16 + col] == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
 }
 
 fn motion_enhancement() -> Vec<u8> {

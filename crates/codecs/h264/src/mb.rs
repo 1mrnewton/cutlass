@@ -446,7 +446,11 @@ pub(crate) fn decode_mbs<S: Sample>(
                     what: "inter-layer prediction",
                 });
             };
-            inferred_base(pic, dpb, layer, slice, &mut entropy, addr, (slice_id, qp))?
+            let qp = inferred_base(pic, dpb, layer, slice, &mut entropy, addr, (slice_id, qp))?;
+            if slice.residual_pred {
+                add_layer_residual(pic, dpb, layer, slice, addr)?;
+            }
+            qp
         } else {
             let qp = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
             if slice.residual_pred {
@@ -783,20 +787,74 @@ fn motion_base<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
-    if luma_cbp != 0 || chroma_cbp != 0 {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
+    let motion = reference.mv0;
     let mut mb = Mb::new(slice_id);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
     mb.ref0 = [0; 4];
-    mb.mv0 = reference.mv0;
+    mb.mv0 = motion;
     bind_refs(&mut mb, slice);
+    pic.mb[slot] = mb.clone();
+    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
+    if luma_cbp > 0 && slice.pps.transform_8x8 && transform8_flag(pic, entropy, mx, my, slice_id)? {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let mut qp = qp;
+    if luma_cbp > 0 || chroma_cbp > 0 {
+        let delta = qp_delta(entropy, prev_qpd(pic, mx, my, slice_id))?;
+        qp = next_qp::<S>(qp, delta);
+        mb.qpd = delta as i8;
+    }
+    mb.cbp = luma_cbp | (chroma_cbp << 4);
     predict_inter(pic, dpb, slice, mx, my, &mb)?;
+    for i in 0..16 {
+        let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
+        if luma_cbp & bit == 0 {
+            continue;
+        }
+        let block = read_block(
+            pic,
+            entropy,
+            (2, 16, false),
+            Place { mx, my },
+            Cell {
+                bx: blk_x(i),
+                by: blk_y(i),
+            },
+            &mut mb,
+            0,
+        )?;
+        let span = luma_span(my, false);
+        super::add_scaled(
+            &mut pic.y,
+            pic.w,
+            (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
+            &block,
+            (qp, qp_bypass::<S>(slice, qp)),
+            &slice.pps.weight4[3],
+            4,
+        );
+    }
+    let chroma = read_chroma(pic, entropy, mx, my, chroma_cbp, &mut mb)?;
+    if chroma_cbp != 0 {
+        recon_chroma(
+            pic,
+            slice,
+            Place { mx, my },
+            0,
+            ChromaPaint {
+                cb_dc: &chroma.cb_dc,
+                cr_dc: &chroma.cr_dc,
+                cb_ac: &chroma.cb_ac,
+                cr_ac: &chroma.cr_ac,
+            },
+            (qp, false, slice_id),
+            false,
+        );
+    }
     mb.qp = qp as i8;
     mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
     mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);

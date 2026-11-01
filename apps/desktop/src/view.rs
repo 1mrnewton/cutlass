@@ -2,13 +2,102 @@
 //! the evaluated frame. This pass does not composite.
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, Ui, Vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense,
+    Ui, Vec2,
 };
 
 use crate::dialogs::{Dialogs, Finished, Picker};
+use crate::icons;
 use crate::shell::{ExportRequest, Shell, ShellError};
 use crate::tokens;
 use crate::widgets::{self, HeaderFlags};
+
+const CARD_W: f32 = 144.0;
+const CARD_H: f32 = 96.0;
+const CARD_GAP: f32 = 8.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shelf {
+    Media,
+    Audio,
+    Text,
+    Stickers,
+    Effects,
+    Transitions,
+    Filters,
+    Adjustments,
+    Templates,
+}
+
+impl Shelf {
+    const ALL: [Self; 9] = [
+        Self::Media,
+        Self::Audio,
+        Self::Text,
+        Self::Stickers,
+        Self::Effects,
+        Self::Transitions,
+        Self::Filters,
+        Self::Adjustments,
+        Self::Templates,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Media => "Media",
+            Self::Audio => "Audio",
+            Self::Text => "Text",
+            Self::Stickers => "Stickers",
+            Self::Effects => "Effects",
+            Self::Transitions => "Transitions",
+            Self::Filters => "Filters",
+            Self::Adjustments => "Adjustments",
+            Self::Templates => "Templates",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Media => "Search media",
+            Self::Audio => "Search audio",
+            Self::Text => "Search text",
+            Self::Stickers => "Search stickers",
+            Self::Effects => "Search effects",
+            Self::Transitions => "Search transitions",
+            Self::Filters => "Search filters",
+            Self::Adjustments => "Search adjustments",
+            Self::Templates => "Search templates",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Media => "media",
+            Self::Audio => "audio",
+            Self::Text => "text",
+            Self::Stickers => "stickers",
+            Self::Effects => "effects",
+            Self::Transitions => "transitions",
+            Self::Filters => "filters",
+            Self::Adjustments => "adjustments",
+            Self::Templates => "templates",
+        }
+    }
+
+    fn empty(self) -> &'static str {
+        match self {
+            Self::Media => "No media yet. Use File → Import.",
+            Self::Audio => "No audio yet. Use File → Import.",
+            Self::Text => "No text in this project.",
+            Self::Stickers => "No stickers in this project.",
+            Self::Effects => "No effects in this project.",
+            Self::Transitions => "No transitions in this project.",
+            Self::Filters => "No filters in this project.",
+            Self::Adjustments => "No adjustments in this project.",
+            Self::Templates => "No templates in this project.",
+        }
+    }
+}
 
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
@@ -22,6 +111,8 @@ pub struct ViewState {
     volume_buffer: String,
     speed_buffer: String,
     dialogs: Dialogs,
+    library_query: String,
+    library_shelf: Shelf,
 }
 
 impl Default for ViewState {
@@ -38,6 +129,8 @@ impl Default for ViewState {
             volume_buffer: String::new(),
             speed_buffer: String::new(),
             dialogs: Dialogs::new(),
+            library_query: String::new(),
+            library_shelf: Shelf::Media,
         }
     }
 }
@@ -73,12 +166,15 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         export_dialog(shell, ui, view, parent);
     }
     if !shell.notice().is_empty() {
+        let bar = Rect::from_min_max(Pos2::new(full.min.x, full.max.y - 32.0), full.max);
+        ui.painter()
+            .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
         ui.painter().text(
-            full.left_bottom() + Vec2::new(12.0, -8.0),
-            Align2::LEFT_BOTTOM,
+            bar.left_center() + Vec2::new(12.0, 0.0),
+            Align2::LEFT_CENTER,
             shell.notice(),
             FontId::proportional(tokens::TYPE_SIZE),
-            tokens::MUTED,
+            tokens::TEXT,
         );
     }
     shortcuts(shell, ui);
@@ -240,7 +336,11 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     }
     if ui.button("Import…").clicked() {
         ui.close();
-        view.dialogs.import(parent);
+        if shell.draft().is_none() {
+            shell.set_notice(ShellError::NoProject.to_string());
+        } else {
+            view.dialogs.import(parent);
+        }
     }
 }
 
@@ -262,7 +362,7 @@ fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
 fn regions(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, row: Rect, sizes: Sizes) {
     let library = Rect::from_min_size(row.min, Vec2::new(sizes.library, row.height()));
     panel(ui, library);
-    library_panel(shell, ui, library);
+    library_panel(shell, ui, view, library);
     shell.chrome.library = true;
     let gap = Rect::from_min_size(
         Pos2::new(library.max.x, row.min.y),
@@ -290,52 +390,251 @@ fn regions(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, row: Rect, size
     shell.chrome.inspector = true;
 }
 
-fn library_panel(shell: &Shell, ui: &mut Ui, rect: Rect) {
+fn library_panel(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let rail = Rect::from_min_size(rect.min, Vec2::new(tokens::RAIL_WIDTH, rect.height()));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rail.shrink(4.0)), |ui| {
-        ui.vertical(|ui| {
-            for (name, tip) in [
-                ("media", "Media"),
-                ("audio", "Audio"),
-                ("text", "Text"),
-                ("stickers", "Stickers"),
-                ("effects", "Effects"),
-                ("transitions", "Transitions"),
-                ("filters", "Filters"),
-            ] {
-                widgets::icon_button(ui, name, tip);
-            }
-        });
-    });
+    shelf_rail(ui, view, rail);
     let hairline = Rect::from_min_size(
         Pos2::new(rail.max.x, rect.min.y),
         Vec2::new(tokens::HAIRLINE, rect.height()),
     );
     ui.painter()
         .rect_filled(hairline, CornerRadius::ZERO, tokens::GAP);
-    let assets = Rect::from_min_max(Pos2::new(hairline.max.x + 8.0, rect.min.y + 8.0), rect.max);
-    ui.scope_builder(egui::UiBuilder::new().max_rect(assets), |ui| {
-        if let Some(draft) = shell.draft() {
-            for video in &draft.materials.videos {
-                card(ui, &file_label(&video.path));
+    let assets = Rect::from_min_max(hairline.right_top(), rect.max).shrink(12.0);
+    asset_column(shell, ui, view, assets);
+}
+
+fn shelf_rail(ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    let inner = Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.top()),
+        Pos2::new(rect.right() - 8.0, rect.bottom()),
+    );
+    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+    ScrollArea::vertical()
+        .id_salt("library-rail")
+        .show(&mut column, |ui| {
+            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for shelf in Shelf::ALL {
+                if shelf_button(ui, shelf, view.library_shelf == shelf).clicked() {
+                    view.library_shelf = shelf;
+                }
             }
-            for audio in &draft.materials.audios {
-                card(ui, &file_label(&audio.path));
+        });
+}
+
+fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    if active {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(10), tokens::ACTIVE);
+    }
+    let color = if active { tokens::TEXT } else { tokens::FAINT };
+    let mark = Rect::from_center_size(rect.center(), Vec2::splat(20.0));
+    if let Err(error) = icons::paint(ui.painter(), mark, shelf.icon(), color) {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            error.to_string(),
+            FontId::proportional(9.0),
+            tokens::FAINT,
+        );
+    }
+    response.on_hover_text(shelf.label())
+}
+
+fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    column.add(
+        egui::TextEdit::singleline(&mut view.library_query)
+            .hint_text(view.library_shelf.hint())
+            .desired_width(f32::INFINITY)
+            .text_color(tokens::TEXT)
+            .background_color(tokens::PROJECT_BAR)
+            .margin(egui::Margin::symmetric(8, 6)),
+    );
+    column.add_space(12.0);
+    let grid = column.available_rect_before_wrap();
+    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
+    let shelf = view.library_shelf;
+    let query = view.library_query.clone();
+    ScrollArea::vertical()
+        .id_salt("library-cards")
+        .auto_shrink([false, false])
+        .show(&mut grid_ui, |ui| {
+            let cards = shell
+                .draft()
+                .map(|draft| bin_cards(draft, shelf, &query))
+                .unwrap_or_default();
+            if cards.is_empty() {
+                let message = if !query.trim().is_empty() {
+                    "No matches."
+                } else if shell.draft().is_some() {
+                    shelf.empty()
+                } else {
+                    "Open a project, then import a file."
+                };
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(message)
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::MUTED),
+                );
+            } else {
+                card_grid(ui, &cards);
+            }
+        });
+}
+
+fn card_grid(ui: &mut Ui, cards: &[BinCard]) {
+    let width = ui.available_width().max(CARD_W);
+    ui.set_min_width(width);
+    let cols = ((width + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
+    let cols = cols.max(1);
+    let rows = cards.len().div_ceil(cols);
+    let height = rows as f32 * (CARD_H + CARD_GAP);
+    let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    for (index, card) in cards.iter().enumerate() {
+        let origin = area.min
+            + Vec2::new(
+                (index % cols) as f32 * (CARD_W + CARD_GAP),
+                (index / cols) as f32 * (CARD_H + CARD_GAP),
+            );
+        let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H));
+        paint_bin_card(ui, rect, card);
+        ui.interact(rect, ui.scope_id().with(&card.id), Sense::hover())
+            .on_hover_text(&card.name);
+    }
+}
+
+fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard) {
+    let swatch = swatch_color(&card.name);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, CornerRadius::same(12), swatch);
+    painter.text(
+        rect.left_bottom() + Vec2::new(8.0, -22.0),
+        Align2::LEFT_BOTTOM,
+        &card.name,
+        FontId::proportional(12.0),
+        Color32::WHITE,
+    );
+    painter.text(
+        rect.left_bottom() + Vec2::new(8.0, -8.0),
+        Align2::LEFT_BOTTOM,
+        &card.meta,
+        FontId::proportional(11.0),
+        Color32::from_white_alpha(220),
+    );
+    if card.on_timeline {
+        painter.text(
+            rect.left_top() + Vec2::new(8.0, 8.0),
+            Align2::LEFT_TOP,
+            "On timeline",
+            FontId::proportional(10.0),
+            Color32::WHITE,
+        );
+    }
+}
+
+struct BinCard {
+    id: String,
+    name: String,
+    meta: String,
+    on_timeline: bool,
+}
+
+fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
+    let used: std::collections::HashSet<&str> = draft
+        .tracks
+        .iter()
+        .flat_map(|track| track.segments.iter())
+        .map(|segment| segment.material_id.as_str())
+        .collect();
+    let query = query.trim().to_lowercase();
+    let mut cards = Vec::new();
+    match shelf {
+        Shelf::Media => {
+            for video in &draft.materials.videos {
+                push_card(
+                    &mut cards,
+                    &used,
+                    &query,
+                    video.id.as_str(),
+                    &video.path,
+                    video.duration.0,
+                );
             }
         }
+        Shelf::Audio => {
+            for audio in &draft.materials.audios {
+                push_card(
+                    &mut cards,
+                    &used,
+                    &query,
+                    audio.id.as_str(),
+                    &audio.path,
+                    audio.duration.0,
+                );
+            }
+        }
+        Shelf::Text
+        | Shelf::Stickers
+        | Shelf::Effects
+        | Shelf::Transitions
+        | Shelf::Filters
+        | Shelf::Adjustments
+        | Shelf::Templates => {}
+    }
+    cards
+}
+
+fn push_card(
+    cards: &mut Vec<BinCard>,
+    used: &std::collections::HashSet<&str>,
+    query: &str,
+    id: &str,
+    path: &str,
+    duration: i64,
+) {
+    let name = file_label(path);
+    if !query.is_empty() && !name.to_lowercase().contains(query) {
+        return;
+    }
+    cards.push(BinCard {
+        id: id.to_owned(),
+        name,
+        meta: card_meta(duration),
+        on_timeline: used.contains(id),
     });
 }
 
-fn card(ui: &mut Ui, name: &str) {
-    let response = ui.add(
-        egui::Button::new(
-            RichText::new(name)
-                .size(tokens::TYPE_SIZE)
-                .color(tokens::TEXT),
-        )
-        .fill(tokens::ICON_BUTTON),
-    );
-    response.on_hover_text(name);
+fn card_meta(micros: i64) -> String {
+    if micros <= 0 {
+        return "0.0s".to_owned();
+    }
+    let millis = micros / 1_000;
+    let minutes = millis / 60_000;
+    let seconds = millis % 60_000;
+    let whole = seconds / 1_000;
+    let tenth = (seconds % 1_000) / 100;
+    if minutes > 0 {
+        format!("{minutes}:{whole:02}.{tenth}")
+    } else {
+        format!("{whole}.{tenth}s")
+    }
+}
+
+fn swatch_color(name: &str) -> Color32 {
+    let mut hash = 2_166_136_261_u32;
+    for byte in name.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    Color32::from_rgb(channel(hash, 0), channel(hash, 6), channel(hash, 12))
+}
+
+fn channel(hash: u32, shift: u32) -> u8 {
+    u8::try_from(48 + ((hash >> shift) & 0x3f)).unwrap_or(48)
 }
 
 fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -725,7 +1024,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     };
     let result = match finished.picker {
         Picker::OpenProject => shell.open_folder(&path),
-        Picker::Import => shell.import_file(&path),
+        Picker::Import => import_chosen(shell, view, &path),
         Picker::SaveExport => {
             view.export_path = path.display().to_string();
             write_export(shell, view)
@@ -739,6 +1038,35 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
         }
         Err(error) => shell.set_notice(error.to_string()),
     }
+}
+
+fn import_chosen(
+    shell: &mut Shell,
+    view: &mut ViewState,
+    path: &std::path::Path,
+) -> Result<(), ShellError> {
+    let (videos, audios) = shell.draft().map_or((0, 0), |draft| {
+        (draft.materials.videos.len(), draft.materials.audios.len())
+    });
+    shell.import_file(path)?;
+    let added_video = shell
+        .draft()
+        .is_some_and(|draft| draft.materials.videos.len() > videos);
+    let added_audio = shell
+        .draft()
+        .is_some_and(|draft| draft.materials.audios.len() > audios);
+    if added_video {
+        view.library_shelf = Shelf::Media;
+    } else if added_audio {
+        view.library_shelf = Shelf::Audio;
+    }
+    view.library_query.clear();
+    let label = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_owned());
+    shell.set_notice(format!("Imported {label}"));
+    Ok(())
 }
 
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
@@ -854,7 +1182,52 @@ mod tests {
         assert!(shell.chrome.export);
         assert!(!shell.chrome.close_requested);
         assert!(!ctx.global_style().interaction.selectable_labels);
+        let painted = painted_text(&output);
+        assert!(
+            painted.contains("Open a project, then import a file."),
+            "{painted}"
+        );
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_notice_is_painted_on_a_bar() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.set_notice("no project is open");
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let painted = painted_text(&output);
+        assert!(painted.contains("no project is open"), "{painted}");
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_video_on_the_main_lane_is_a_media_card() {
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut video = cutlass_model::MaterialVideo::new("mat");
+        video.path = "Resources/clip.mp4".into();
+        video.duration = cutlass_model::Micros(2_500_000);
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "seg",
+            "mat",
+            cutlass_model::TimeRange::new(0, 2_500_000),
+        ));
+        let cards = bin_cards(&draft, Shelf::Media, "");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].name, "clip.mp4");
+        assert_eq!(cards[0].meta, "2.5s");
+        assert!(cards[0].on_timeline);
+        assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
+        assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
     }
 
     #[test]
@@ -879,10 +1252,17 @@ mod tests {
             },
             |ui| show(&mut shell, ui, &mut view, None),
         );
+        let painted = painted_text(&output);
         output.textures_delta.clear();
         let main = shell.lanes().into_iter().find(|lane| lane.main).unwrap();
         assert_eq!(main.clips.len(), 1);
         assert!(temp.join("Resources").join("pattern.png").is_file());
+        assert_eq!(shell.draft().unwrap().materials.videos.len(), 1);
+        assert!(painted.contains("pattern.png"), "{painted}");
+        assert!(painted.contains("Imported pattern.png"), "{painted}");
+        let card = text_pos(&output, "On timeline").expect("library card");
+        assert!((80.0..tokens::LIBRARY_WIDTH).contains(&card.x), "{card:?}");
+        assert!((40.0..500.0).contains(&card.y), "{card:?}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -920,6 +1300,46 @@ mod tests {
             Color32::from_rgba_unmultiplied(0x33, 0x66, 0x99, 0xFF)
         );
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    fn painted_text(output: &egui::FullOutput) -> String {
+        let mut text = String::new();
+        for clipped in &output.shapes {
+            append_shape(&clipped.shape, &mut text);
+        }
+        text
+    }
+
+    fn text_pos(output: &egui::FullOutput, wanted: &str) -> Option<Pos2> {
+        for clipped in &output.shapes {
+            if let Some(pos) = shape_pos(&clipped.shape, wanted) {
+                return Some(pos);
+            }
+        }
+        None
+    }
+
+    fn shape_pos(shape: &egui::Shape, wanted: &str) -> Option<Pos2> {
+        match shape {
+            egui::Shape::Text(shape) if shape.galley.text() == wanted => Some(shape.pos),
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| shape_pos(shape, wanted)),
+            _ => None,
+        }
+    }
+
+    fn append_shape(shape: &egui::Shape, text: &mut String) {
+        match shape {
+            egui::Shape::Text(shape) => {
+                text.push_str(shape.galley.text());
+                text.push('\n');
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    append_shape(shape, text);
+                }
+            }
+            _ => {}
+        }
     }
 
     #[test]

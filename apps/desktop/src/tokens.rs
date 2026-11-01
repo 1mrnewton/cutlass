@@ -24,6 +24,8 @@ pub const FAINT: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
 pub const PLAYHEAD: Color32 = Color32::WHITE;
 /// An icon button.
 pub const ICON_BUTTON: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+/// The active library shelf.
+pub const ACTIVE: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 /// A selected clip edge.
 pub const SELECTED: Color32 = Color32::WHITE;
 /// The dialog title row.
@@ -50,7 +52,7 @@ pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;
 pub const TOOLBAR_HEIGHT: f32 = 36.0;
 pub const RULER_HEIGHT: f32 = 44.0;
-pub const RAIL_WIDTH: f32 = 44.0;
+pub const RAIL_WIDTH: f32 = 76.0;
 pub const COVER_WIDTH: f32 = 72.0;
 pub const TRANSPORT_HEIGHT: f32 = 40.0;
 pub const ICON_BUTTON_SIZE: f32 = 28.0;
@@ -59,7 +61,7 @@ pub const WINDOW_BUTTON: f32 = 12.0;
 pub const LIBRARY_WIDTH: f32 = 280.0;
 pub const INSPECTOR_WIDTH: f32 = 300.0;
 pub const TIMELINE_HEIGHT: f32 = 280.0;
-pub const LIBRARY_MIN: f32 = 160.0;
+pub const LIBRARY_MIN: f32 = 248.0;
 pub const INSPECTOR_MIN: f32 = 200.0;
 pub const TIMELINE_MIN: f32 = 160.0;
 pub const PREVIEW_MIN_WIDTH: f32 = 320.0;
@@ -86,6 +88,7 @@ mod tests {
         assert_eq!(FAINT, Color32::from_rgb(0x73, 0x73, 0x73));
         assert_eq!(PLAYHEAD, Color32::WHITE);
         assert_eq!(ICON_BUTTON, Color32::from_rgb(0x2a, 0x2a, 0x2a));
+        assert_eq!(ACTIVE, Color32::from_rgb(0x33, 0x33, 0x33));
         assert_eq!(SELECTED, Color32::WHITE);
         assert_eq!(TYPE_SIZE, 13.0);
         assert_eq!(TIMECODE_SIZE, 12.0);

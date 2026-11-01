@@ -30,6 +30,8 @@
 //! A one-macroblock texture P picture copies the base texture at a disparity of 32 when
 //! `slice_vsp_flag` and `bvsp_flag` are 1. The scale is 0 and the offset is 2016, so that
 //! picture is luma 180 and chroma 90. A missing base depth picture is an error.
+//! Scale 3968 and offset 0 read the depth sample 64 at the far corner, so the
+//! picture shifts four pixels: four columns stay 100 and the rest are 180.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

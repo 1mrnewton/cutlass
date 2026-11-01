@@ -1172,6 +1172,56 @@ fn a_view_synthesis_disparity_shifts_the_base_texture() {
 }
 
 #[test]
+fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
+    let base = dmvp_base_idr();
+    let depth = vsp_scaled_depth();
+    let view = vsp_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| four_pixel_shift(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| depth_corner(picture))
+            .count(),
+        1
+    );
+    assert!(pictures.iter().all(|picture| !painted(picture, 180, 90)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame, "ffmpeg picture count");
+        let decoded = pictures
+            .iter()
+            .find(|picture| split_luma(picture, 100, 180))
+            .expect("base");
+        assert_eq!(raw, planes_of(decoded));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn an_8x8_depth_motion_vector_cancels_the_base_motion() {
     let base_idr = dmvp_base_idr();
     let other_idr = dmvp_other_idr();
@@ -1385,9 +1435,24 @@ fn dmvp_b_header(w: &mut Writer, frame_num: u32, poc: u32) {
 }
 
 fn vsp_depth() -> Vec<u8> {
-    let mut out = annex_b_nal(3, 15, &view_synthesis_sps());
+    vsp_depth_annex(&view_synthesis_sps(), &vec![128; 256])
+}
+
+fn vsp_scaled_depth() -> Vec<u8> {
+    let mut luma = vec![0; 256];
+    luma[255] = 64;
+    vsp_depth_annex(&view_synthesis_pair(0, 0, 3968, 0), &luma)
+}
+
+fn vsp_depth_annex(sps: &[u8], luma: &[u8]) -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, sps);
     out.extend(annex_b_nal(3, 8, &pps()));
-    out.extend(annex_b_extension(3, 21, &[0x80, 0x60], &vsp_depth_slice()));
+    out.extend(annex_b_extension(
+        3,
+        21,
+        &[0x80, 0x60],
+        &vsp_depth_slice(luma),
+    ));
     out
 }
 
@@ -1402,7 +1467,7 @@ fn vsp_without_depth() -> Vec<u8> {
     out
 }
 
-fn vsp_depth_slice() -> Vec<u8> {
+fn vsp_depth_slice(luma: &[u8]) -> Vec<u8> {
     let mut w = Writer::new();
     w.ue(0);
     w.ue(2);
@@ -1414,11 +1479,38 @@ fn vsp_depth_slice() -> Vec<u8> {
     w.ue(1);
     w.ue(25);
     w.align_zeros();
-    w.bytes.extend(std::iter::repeat_n(128, 256));
+    w.bytes.extend(luma);
     w.bytes.extend(std::iter::repeat_n(40, 128));
     w.bit = w.bytes.len() * 8;
     w.trailing();
     w.bytes
+}
+
+fn four_pixel_shift(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        let start = row * 16;
+        y[start..start + 4].iter().all(|sample| *sample == 100)
+            && y[start + 4..start + 16].iter().all(|sample| *sample == 180)
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
+}
+
+fn depth_corner(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 256
+        && y[255] == 64
+        && y[..255].iter().all(|sample| *sample == 0)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 40)
 }
 
 fn vsp_p_slice() -> Vec<u8> {
@@ -1437,6 +1529,11 @@ fn vsp_p_slice() -> Vec<u8> {
 
 /// Two paired views. List 0 names view 0. Scale 0 and offset 2016 make disparity 32.
 fn view_synthesis_sps() -> Vec<u8> {
+    view_synthesis_pair(0, 0, 0, 2016)
+}
+
+/// `vsp_param` for the one depth-view pair. `wij` is the scale from view 1 to view 0.
+fn view_synthesis_pair(wji: u32, oji: u32, wij: u32, oij: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(139, 8);
     w.bits(0, 8);
@@ -1493,10 +1590,10 @@ fn view_synthesis_sps() -> Vec<u8> {
     write_depth_value(&mut w, 31);
     w.bit(true);
     write_depth_value(&mut w, 32);
-    w.ue(0);
-    w.ue(0);
-    w.ue(0);
-    w.ue(2016);
+    w.ue(wji);
+    w.ue(oji);
+    w.ue(wij);
+    w.ue(oij);
     w.bit(false);
     w.bit(false);
     w.ue(0);

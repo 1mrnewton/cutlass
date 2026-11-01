@@ -11,7 +11,7 @@
 use cutlass_compositor::Device;
 use cutlass_effects::PackageStore;
 use cutlass_engine::{DisplayQuarter, ReaderFactory, map_timeline, placement_of};
-use cutlass_model::{Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute};
+use cutlass_model::{Draft, DraftId, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 
 use crate::canvas::over_backdrop;
@@ -88,64 +88,98 @@ pub(crate) fn nest_layers<D: Device>(
             ) {
                 continue;
             }
-            let Some(MaterialRef::Draft(material)) =
-                draft.materials.get(segment.material_id.as_str())
-            else {
+            let Some(placed) = place_child(draft, segment, pass.time, pass)? else {
                 continue;
             };
-            let Some(child) = material.draft.as_deref() else {
-                continue;
-            };
-            if skips_child(draft, child, pass.ancestors) {
-                continue;
-            }
-            let Some((clip, uniform)) = segment_clip(segment, pass.time) else {
-                continue;
-            };
-            let Some(transform) = picture_transform(&clip, &uniform, pass.width, pass.height)
-            else {
-                continue;
-            };
-            if transform.omitted() {
-                continue;
-            }
-            let Ok(map) = placement_of(draft, segment) else {
-                continue;
-            };
-            let Ok(mapped) = map_timeline(&map, pass.time) else {
-                continue;
-            };
-            let Some(rendered) = child_frame(draft, child, &segment.id, mapped, pass)? else {
-                continue;
-            };
-            let Ok(bytes) =
-                CpuBytes::new(rendered.extent.width, rendered.extent.height, rendered.rgba)
-            else {
-                continue;
-            };
-            let backdrop = backdrop_for(
-                draft,
-                segment,
-                pass.media,
-                pass.clips,
-                pass.width,
-                pass.height,
-            );
             layers.push(NestedLayer {
                 render_index: segment.render_index,
                 track_index,
                 segment_index,
-                placed: NestedPicture {
-                    bytes,
-                    canvas_w: pass.width,
-                    canvas_h: pass.height,
-                    transform,
-                    backdrop,
-                },
+                placed,
             });
         }
     }
     Ok(layers)
+}
+
+/// The compound picture at `time`, placed on the parent canvas.
+///
+/// `time` must fall inside the segment. A segment that is not a compound,
+/// a skipped child, or a child that does not draw returns nothing.
+pub(crate) fn picture_at<D: Device>(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    pass: &mut NestPass<'_, D>,
+) -> Result<Option<CpuBytes>, EvalError<D::Error>> {
+    let Some(placed) = place_child(draft, segment, time, pass)? else {
+        return Ok(None);
+    };
+    match placed.sample(time) {
+        Sample::Ready(Picture::Cpu(bytes)) => Ok(Some(bytes)),
+        Sample::Ready(Picture::Platform(_)) | Sample::Miss => Ok(None),
+    }
+}
+
+fn place_child<D: Device>(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    pass: &mut NestPass<'_, D>,
+) -> Result<Option<NestedPicture>, EvalError<D::Error>> {
+    if !segment.visible || segment.source_range.is_none() {
+        return Ok(None);
+    }
+    if !covers(segment.target.start.0, segment.target.duration.0, time.0) {
+        return Ok(None);
+    }
+    let Some(MaterialRef::Draft(material)) = draft.materials.get(segment.material_id.as_str())
+    else {
+        return Ok(None);
+    };
+    let Some(child) = material.draft.as_deref() else {
+        return Ok(None);
+    };
+    if skips_child(draft, child, pass.ancestors) {
+        return Ok(None);
+    }
+    let Some((clip, uniform)) = segment_clip(segment, time) else {
+        return Ok(None);
+    };
+    let Some(transform) = picture_transform(&clip, &uniform, pass.width, pass.height) else {
+        return Ok(None);
+    };
+    if transform.omitted() {
+        return Ok(None);
+    }
+    let Ok(map) = placement_of(draft, segment) else {
+        return Ok(None);
+    };
+    let Ok(mapped) = map_timeline(&map, time) else {
+        return Ok(None);
+    };
+    let Some(rendered) = child_frame(draft, child, &segment.id, mapped, pass)? else {
+        return Ok(None);
+    };
+    let Ok(bytes) = CpuBytes::new(rendered.extent.width, rendered.extent.height, rendered.rgba)
+    else {
+        return Ok(None);
+    };
+    let backdrop = backdrop_for(
+        draft,
+        segment,
+        pass.media,
+        pass.clips,
+        pass.width,
+        pass.height,
+    );
+    Ok(Some(NestedPicture {
+        bytes,
+        canvas_w: pass.width,
+        canvas_h: pass.height,
+        transform,
+        backdrop,
+    }))
 }
 
 fn child_frame<D: Device>(

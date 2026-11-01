@@ -12,8 +12,8 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 use cutlass_model::{
-    Draft, MaterialEffect, MaterialPluginEffect, MaterialRef, MaterialVideoEffect, Segment,
-    StickerAnimation,
+    Draft, MaterialEffect, MaterialPluginEffect, MaterialRef, MaterialTransition,
+    MaterialVideoEffect, Segment, StickerAnimation,
 };
 use cutlass_storage::{ResourceId, StorageError};
 
@@ -167,6 +167,31 @@ pub fn animation_package_id(animation: &StickerAnimation) -> Option<&str> {
 #[must_use]
 pub fn plugin_package_id(effect: &MaterialPluginEffect) -> Option<&str> {
     published(&effect.plugin_id)
+}
+
+/// The package id on a transition.
+///
+/// The first non-empty value of `effect_id`, otherwise `resource_id`.
+/// The material row id and `path` are not package ids.
+#[must_use]
+pub fn transition_package_id(transition: &MaterialTransition) -> Option<&str> {
+    first_published(&transition.effect_id, &transition.resource_id)
+}
+
+/// Load the package named by `transition`.
+///
+/// A transition with no package id is [`PackageError::Missing`] for the
+/// material row. The returned [`Package::id`] is the package id.
+pub fn load_transition(
+    store: &dyn PackageStore,
+    transition: &MaterialTransition,
+) -> Result<Package, PackageError> {
+    let Some(id) = transition_package_id(transition) else {
+        return Err(PackageError::Missing {
+            id: transition.id.as_str().to_owned(),
+        });
+    };
+    finish(store, id)
 }
 
 /// The first package id on the segment's material, then each extra material.
@@ -644,15 +669,16 @@ mod tests {
     use std::path::PathBuf;
 
     use cutlass_model::{
-        Draft, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideo,
-        MaterialVideoEffect, Micros, Segment, StickerAnimation, TimeRange,
+        Draft, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialTransition,
+        MaterialVideo, MaterialVideoEffect, Micros, Segment, StickerAnimation, TimeRange,
     };
     use cutlass_storage::{ResourceId, StorageError};
 
     use super::{
         Located, MAX_PACKAGE_BYTES, MissingPackages, PackageError, PackageStore,
-        animation_package_id, hex_encode, load, load_segment, map_storage_error, package_id,
-        plugin_package_id, segment_package_id, sha256, sha256_file, video_package_id,
+        animation_package_id, hex_encode, load, load_segment, load_transition, map_storage_error,
+        package_id, plugin_package_id, segment_package_id, sha256, sha256_file,
+        transition_package_id, video_package_id,
     };
 
     const EMPTY_HEX: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -961,6 +987,20 @@ mod tests {
         assert_eq!(package_id(&effect), Some("from-resource"));
         assert_eq!(video_package_id(&video), Some("from-resource"));
         assert_eq!(animation_package_id(&animation), Some("from-resource"));
+        let mut transition = MaterialTransition {
+            effect_id: "from-effect".to_owned(),
+            resource_id: "from-resource".to_owned(),
+            ..MaterialTransition::default()
+        };
+        assert_eq!(transition_package_id(&transition), Some("from-effect"));
+        transition.effect_id.clear();
+        assert_eq!(transition_package_id(&transition), Some("from-resource"));
+        transition.resource_id.clear();
+        assert_eq!(transition_package_id(&transition), None);
+        assert!(matches!(
+            load_transition(&Store::new(), &transition),
+            Err(PackageError::Missing { .. })
+        ));
         let error = load(&store, &effect).unwrap_err();
         assert_eq!(
             error,

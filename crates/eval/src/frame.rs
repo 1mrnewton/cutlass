@@ -5,6 +5,7 @@ use cutlass_effects::{MissingPackages, PackageStore};
 use cutlass_engine::ReaderFactory;
 use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
+use cutlass_picture::{CpuBytes, Picture, Sample};
 
 use crate::effect::{StackLayer, present};
 use crate::media::{OpenClips, Placed, video_layers};
@@ -129,7 +130,9 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 /// order: `render_index`, then track, then segment. A video the factory
 /// cannot open is skipped. A text segment whose face the snapshot does not
 /// supply is skipped. An effect whose package the snapshot does not supply
-/// is skipped. The project canvas color is under every layer. An open file
+/// is skipped. A transition package fades the pictures that meet at its cut.
+/// A missing package stays a hard cut. The project canvas color is under
+/// every layer. An open file
 /// in `clips` is seeked when `time` changes.
 /// `revision` drops those files when the draft changes.
 pub fn frame<D: Device>(
@@ -168,7 +171,15 @@ pub(crate) fn compose<D: Device>(
         ancestors,
     };
     let nests = nest_layers(draft, &mut pass)?;
-    let layers = ordered(
+    let prepared = crate::transition::prepare(
+        draft,
+        snapshot.packages(),
+        pass.time,
+        extent.width,
+        extent.height,
+        &mut pass,
+    )?;
+    let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
         text_layers(draft, pass.fonts, extent.width, extent.height, pass.time),
         video_layers(
@@ -180,6 +191,15 @@ pub(crate) fn compose<D: Device>(
             pass.clips,
         ),
         nests,
+    );
+    apply_transitions(
+        draft,
+        snapshot.packages(),
+        &mut layers,
+        &prepared,
+        extent.width,
+        extent.height,
+        pass.time,
     );
     let stack = stack_of(&layers);
     present(
@@ -204,6 +224,15 @@ enum Paint<'a> {
     Text(crate::text::PlacedText),
     Video(Placed<'a>),
     Nest(NestedPicture),
+    Mixed(Mixed),
+}
+
+struct Mixed(CpuBytes);
+
+impl PictureSource for Mixed {
+    fn sample(&self, _time: Micros) -> Sample {
+        Sample::Ready(Picture::Cpu(self.0.clone()))
+    }
 }
 
 struct Ordered<'a> {
@@ -218,7 +247,74 @@ impl Ordered<'_> {
             Paint::Text(text) => text,
             Paint::Video(video) => video,
             Paint::Nest(nested) => nested,
+            Paint::Mixed(mixed) => mixed,
         }
+    }
+}
+
+fn apply_transitions(
+    draft: &Draft,
+    store: &dyn PackageStore,
+    layers: &mut [Ordered<'_>],
+    prepared: &crate::transition::Prepared,
+    width: u32,
+    height: u32,
+    time: Micros,
+) {
+    for cut in prepared.cuts() {
+        let (cover_track, cover_segment) = cut.cover();
+        let Some(index) = layers
+            .iter()
+            .position(|layer| layer.key.1 == cover_track && layer.key.2 == cover_segment)
+        else {
+            continue;
+        };
+        let Some(covering) = cpu_at(layers[index].source(), time) else {
+            continue;
+        };
+        let (partner_track, partner_segment, partner_time) = cut.partner();
+        let Some(partner) = partner_picture(
+            layers,
+            prepared,
+            partner_track,
+            partner_segment,
+            partner_time,
+        ) else {
+            continue;
+        };
+        let (outgoing, incoming) = cut.ordered(covering.rgba(), partner.rgba());
+        let Some(mixed) =
+            crate::transition::fade(store, draft, cut, outgoing, incoming, width, height)
+        else {
+            continue;
+        };
+        layers[index].paint = Paint::Mixed(Mixed(mixed));
+    }
+}
+
+fn partner_picture(
+    layers: &[Ordered<'_>],
+    prepared: &crate::transition::Prepared,
+    track: usize,
+    segment: usize,
+    time: Micros,
+) -> Option<CpuBytes> {
+    if let Some(bytes) = prepared.picture(track, segment) {
+        return Some(bytes.clone());
+    }
+    let layer = layers
+        .iter()
+        .find(|layer| layer.key.1 == track && layer.key.2 == segment)?;
+    match &layer.paint {
+        Paint::Solid(solid) => cpu_at(solid, time),
+        Paint::Text(_) | Paint::Video(_) | Paint::Nest(_) | Paint::Mixed(_) => None,
+    }
+}
+
+fn cpu_at(source: &dyn PictureSource, time: Micros) -> Option<CpuBytes> {
+    match source.sample(time) {
+        Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
+        Sample::Ready(Picture::Platform(_)) | Sample::Miss => None,
     }
 }
 

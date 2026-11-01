@@ -315,6 +315,7 @@ fn clip_filter(draft: &Draft, track_index: usize, segment_index: usize) -> ClipF
     };
     match entry(id).map(|row| row.kind) {
         Some(PackageKind::Blend(_)) => ClipFilter::Blend,
+        Some(PackageKind::Transition(_)) => ClipFilter::None,
         Some(PackageKind::Distort(_) | PackageKind::TextAnim(_)) | None => ClipFilter::Unary,
     }
 }

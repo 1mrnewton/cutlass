@@ -11,7 +11,8 @@
 //! snapshot supplies the package store. A missing package stays off the frame.
 //! The project canvas color is drawn under every layer. An absent or
 //! unreadable color leaves the clear frame. A segment canvas is drawn
-//! behind that segment's picture.
+//! behind that segment's picture. A transition package fades the two
+//! pictures that meet at its cut. A missing package stays a hard cut.
 
 #![forbid(unsafe_code)]
 
@@ -23,6 +24,7 @@ mod media;
 mod nest;
 mod sources;
 mod text;
+mod transition;
 
 pub use audio::{AudioError, MixWindow, audio_slice};
 pub use cutlass_compositor::{Device, Frame};

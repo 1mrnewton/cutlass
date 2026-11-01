@@ -305,6 +305,53 @@ pub(crate) fn video_layers<'a>(
     layers
 }
 
+/// The placed picture of one video segment at `time`.
+///
+/// `time` must fall inside the target. A failed open is not kept. The draft
+/// is not changed.
+pub(crate) fn video_picture(
+    draft: &Draft,
+    segment: &Segment,
+    media: &ReaderFactory,
+    width: u32,
+    height: u32,
+    time: Micros,
+    clips: &mut OpenClips,
+) -> Option<CpuBytes> {
+    if !segment.visible || segment.source_range.is_none() {
+        return None;
+    }
+    let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
+        return None;
+    };
+    let crop = video.crop;
+    let crop_scale = video.crop_scale;
+    let (clip, uniform) = segment_clip(segment, time)?;
+    let transform = picture_transform(&clip, &uniform, width, height)?;
+    if transform.omitted() {
+        return None;
+    }
+    if !clips.sources.contains_key(&segment.id) {
+        let source = open_segment(media, draft, &segment.id, ClockKind::Export, 1).ok()?;
+        clips.sources.insert(segment.id.clone(), source);
+    }
+    let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+    let source = clips.sources.get(&segment.id)?;
+    let placed = Placed {
+        source,
+        width,
+        height,
+        transform,
+        crop,
+        crop_scale,
+        backdrop,
+    };
+    match placed.sample(time) {
+        Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
+        Sample::Ready(Picture::Platform(_)) | Sample::Miss => None,
+    }
+}
+
 pub(crate) fn backdrop_for(
     draft: &Draft,
     segment: &Segment,

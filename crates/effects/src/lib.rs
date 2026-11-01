@@ -18,11 +18,12 @@ pub mod source;
 
 pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,
-    INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, entries, entry,
+    INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,
+    Transition, entries, entry,
 };
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,
-    animation_package_id, load, load_segment, map_storage_error, package_id, plugin_package_id,
-    segment_package_id, video_package_id,
+    animation_package_id, load, load_segment, load_transition, map_storage_error, package_id,
+    plugin_package_id, segment_package_id, transition_package_id, video_package_id,
 };
 pub use source::{AnimSpan, EffectSource, Progress, progress};

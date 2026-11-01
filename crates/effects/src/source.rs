@@ -207,6 +207,7 @@ impl EffectSource {
                 fade(anim, ratio)
             }
             PackageKind::Blend(_) | PackageKind::Distort(_) => Some(Scale::Keep),
+            PackageKind::Transition(_) => None,
         }
     }
 }
@@ -230,6 +231,7 @@ impl PictureSource for EffectSource {
                 sample_unary(self.input.as_ref(), paint_of(distort), scale)
             }
             PackageKind::TextAnim(_) => sample_unary(self.input.as_ref(), Paint::Keep, scale),
+            PackageKind::Transition(_) => Sample::Miss,
         }
     }
 }
@@ -264,7 +266,9 @@ fn retain(
             }
             Ok((source, destination))
         }
-        PackageKind::Distort(_) | PackageKind::TextAnim(_) => Ok((copied_cpu(input), None)),
+        PackageKind::Distort(_) | PackageKind::TextAnim(_) | PackageKind::Transition(_) => {
+            Ok((copied_cpu(input), None))
+        }
     }
 }
 

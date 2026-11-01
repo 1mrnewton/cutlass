@@ -21,8 +21,8 @@ pub use catalog::{
     INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, entries, entry,
 };
 pub use package::{
-    Located, MAX_PACKAGE_BYTES, Package, PackageError, PackageStore, animation_package_id, load,
-    load_segment, map_storage_error, package_id, plugin_package_id, segment_package_id,
-    video_package_id,
+    Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,
+    animation_package_id, load, load_segment, map_storage_error, package_id, plugin_package_id,
+    segment_package_id, video_package_id,
 };
 pub use source::{AnimSpan, EffectSource, Progress, progress};

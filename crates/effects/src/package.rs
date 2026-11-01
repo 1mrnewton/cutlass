@@ -122,6 +122,20 @@ pub trait PackageStore {
     fn locate(&self, id: &ResourceId) -> Result<Located, PackageError>;
 }
 
+/// A store with no published packages.
+///
+/// [`PackageStore::locate`] is [`PackageError::Missing`]. It does not read a file.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MissingPackages;
+
+impl PackageStore for MissingPackages {
+    fn locate(&self, id: &ResourceId) -> Result<Located, PackageError> {
+        Err(PackageError::Missing {
+            id: id.as_str().to_owned(),
+        })
+    }
+}
+
 /// The package id on an effect material.
 ///
 /// The first non-empty value of `effect_id`, otherwise `resource_id`.
@@ -211,7 +225,7 @@ pub fn map_storage_error(id: &str, error: &StorageError) -> PackageError {
 /// An effect with no package id is [`PackageError::Missing`] for the material
 /// row. An id that is not a resource id is [`PackageError::InvalidId`] and the
 /// store is not asked. The returned [`Package::id`] is the package id.
-pub fn load<S: PackageStore>(store: &S, effect: &MaterialEffect) -> Result<Package, PackageError> {
+pub fn load(store: &dyn PackageStore, effect: &MaterialEffect) -> Result<Package, PackageError> {
     let Some(id) = package_id(effect) else {
         return Err(PackageError::Missing {
             id: effect.id.as_str().to_owned(),
@@ -224,8 +238,8 @@ pub fn load<S: PackageStore>(store: &S, effect: &MaterialEffect) -> Result<Packa
 ///
 /// `draft` and `segment` are not changed. A segment with no package id is
 /// [`PackageError::Missing`] for `segment.material_id`.
-pub fn load_segment<S: PackageStore>(
-    store: &S,
+pub fn load_segment(
+    store: &dyn PackageStore,
     draft: &Draft,
     segment: &Segment,
 ) -> Result<Package, PackageError> {
@@ -255,7 +269,7 @@ fn package_from_ref<'a>(material: Option<MaterialRef<'a>>) -> Option<&'a str> {
     }
 }
 
-fn finish<S: PackageStore>(store: &S, package_id: &str) -> Result<Package, PackageError> {
+fn finish(store: &dyn PackageStore, package_id: &str) -> Result<Package, PackageError> {
     let resource = match ResourceId::new(package_id) {
         Ok(resource) => resource,
         Err(error) => return Err(invalid_package_id(package_id, &error)),
@@ -636,9 +650,9 @@ mod tests {
     use cutlass_storage::{ResourceId, StorageError};
 
     use super::{
-        Located, MAX_PACKAGE_BYTES, PackageError, PackageStore, animation_package_id, hex_encode,
-        load, load_segment, map_storage_error, package_id, plugin_package_id, segment_package_id,
-        sha256, sha256_file, video_package_id,
+        Located, MAX_PACKAGE_BYTES, MissingPackages, PackageError, PackageStore,
+        animation_package_id, hex_encode, load, load_segment, map_storage_error, package_id,
+        plugin_package_id, segment_package_id, sha256, sha256_file, video_package_id,
     };
 
     const EMPTY_HEX: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -1396,6 +1410,18 @@ mod tests {
                 message: "a fetch has no URL".to_owned(),
             },
             "glow: a fetch has no URL",
+        );
+    }
+
+    #[test]
+    fn an_empty_store_names_the_missing_package() {
+        let id = ResourceId::new("distort-invert").unwrap();
+        let error = MissingPackages.locate(&id).unwrap_err();
+        assert_eq!(
+            error,
+            PackageError::Missing {
+                id: "distort-invert".to_owned(),
+            }
         );
     }
 }

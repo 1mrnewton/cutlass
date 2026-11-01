@@ -119,8 +119,8 @@ impl EffectSource {
     /// pictures whose width, height, or byte length differ are
     /// [`PackageError::Pixels`]. A platform buffer is not copied; sampling it
     /// is a miss. `effect.value` is not read, and `effect` is not changed.
-    pub fn open<S: PackageStore>(
-        store: &S,
+    pub fn open(
+        store: &dyn PackageStore,
         effect: &MaterialEffect,
         input: &Picture,
         backdrop: Option<&Picture>,
@@ -138,8 +138,8 @@ impl EffectSource {
     ///
     /// The draft and the segment are not changed. A segment with no package,
     /// or a package the store does not have, is an absent source.
-    pub fn open_segment<S: PackageStore>(
-        store: &S,
+    pub fn open_segment(
+        store: &dyn PackageStore,
         draft: &Draft,
         segment: &Segment,
         input: &Picture,

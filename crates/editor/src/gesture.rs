@@ -12,6 +12,8 @@ pub enum GestureError {
     UnknownSegment,
     /// The pixel size or the lane height cannot map the pointer.
     BadScale,
+    /// The media duration is zero or negative, so it cannot occupy a lane.
+    EmptyDuration,
 }
 
 /// What the drag became. A miss and a new lane do not rewrite the draft.
@@ -31,6 +33,30 @@ pub enum GestureOutcome {
 pub enum Placement {
     Lane { track_id: TrackId },
     NewLane { kind: TrackType },
+}
+
+/// Where a library drop lands. The draft's tracks are not changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DropOutcome {
+    /// `start` is the target start, in microseconds, after snap.
+    Place { track_id: TrackId, start: Micros },
+    /// The lane under the pointer and the upper lane of this type are taken.
+    /// `start` is the target start the new lane would use.
+    NewLane { kind: TrackType, start: Micros },
+    /// The pointer is outside every lane.
+    Miss,
+}
+
+/// A drop of library media onto the timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropGesture {
+    pub kind: TrackType,
+    pub duration: Micros,
+    pub pointer: Pointer,
+    pub scale: TimelineScale,
+    pub playhead: Micros,
+    /// How far, in microseconds, a snap target may sit from the pointer time.
+    pub snap_threshold: Micros,
 }
 
 /// A drag of a segment that is already on the draft.
@@ -83,6 +109,47 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
             start,
         }),
         Placement::NewLane { kind } => GestureOutcome::NewLane { kind },
+    })
+}
+
+/// Turn a library drop into a lane and a start time.
+///
+/// Placement tries the lane under the pointer, then the nearest upper lane
+/// of `kind`, then a new lane. Snap may replace the pointer time. A negative
+/// time becomes the start of the timeline. This does not write the draft
+/// and does not build the segment.
+pub fn drop_gesture(draft: &Draft, gesture: &DropGesture) -> Result<DropOutcome, GestureError> {
+    if gesture.duration.0 <= 0 {
+        return Err(GestureError::EmptyDuration);
+    }
+    let hit = match hit_test(draft, gesture.scale, gesture.pointer) {
+        Ok(Some(hit)) => hit,
+        Ok(None) => return Ok(DropOutcome::Miss),
+        Err(BadScale) => return Err(GestureError::BadScale),
+    };
+    let snapped = snap(
+        draft,
+        hit.time,
+        gesture.playhead,
+        gesture.snap_threshold,
+        None,
+    )
+    .map(|target| target.time)
+    .unwrap_or(hit.time);
+    let start = Micros(snapped.0.max(0));
+    let rows = lanes(draft);
+    let placed = placement(
+        draft,
+        &rows,
+        hit.lane.row,
+        &gesture.kind,
+        start,
+        gesture.duration,
+        &SegmentId::new(""),
+    );
+    Ok(match placed {
+        Placement::Lane { track_id } => DropOutcome::Place { track_id, start },
+        Placement::NewLane { kind } => DropOutcome::NewLane { kind, start },
     })
 }
 
@@ -462,5 +529,138 @@ mod tests {
         let error = move_gesture(&draft, &gesture("missing", 0.0, 8.0, 0)).unwrap_err();
         assert_eq!(error, GestureError::UnknownSegment);
         assert_eq!(draft.tracks.len(), 1);
+    }
+
+    fn drop_at(
+        kind: TrackType,
+        duration: i64,
+        x: f64,
+        y: f64,
+        playhead: i64,
+        threshold: i64,
+    ) -> DropGesture {
+        DropGesture {
+            kind,
+            duration: Micros(duration),
+            pointer: Pointer { x, y },
+            scale: scale(),
+            playhead: Micros(playhead),
+            snap_threshold: Micros(threshold),
+        }
+    }
+
+    #[test]
+    fn a_drop_on_the_main_lane_names_that_lane_and_the_snapped_time() {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Video, 1_000_000, 50.0, 8.0, 0, 100),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DropOutcome::Place {
+                track_id: TrackId::new("main"),
+                start: Micros(0),
+            }
+        );
+        assert!(draft.tracks[0].segments.is_empty());
+    }
+
+    #[test]
+    fn a_drop_keeps_a_time_outside_the_snap_window() {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Video, 1_000_000, 2_000_000.0, 8.0, 9_000_000, 0),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DropOutcome::Place {
+                track_id: TrackId::new("main"),
+                start: Micros(2_000_000),
+            }
+        );
+    }
+
+    #[test]
+    fn a_drop_before_the_origin_starts_at_zero() {
+        let draft = Draft::empty("D");
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Video, 1_000_000, -10.0, 8.0, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DropOutcome::Place {
+                track_id: draft.tracks[0].id.clone(),
+                start: Micros(0),
+            }
+        );
+    }
+
+    #[test]
+    fn an_audio_drop_on_a_video_lane_asks_for_a_new_lane() {
+        let draft = Draft::empty("D");
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Audio, 1_000_000, 2_000_000.0, 8.0, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DropOutcome::NewLane {
+                kind: TrackType::Audio,
+                start: Micros(2_000_000),
+            }
+        );
+        assert_eq!(draft.tracks.len(), 1);
+    }
+
+    #[test]
+    fn a_blocked_video_lane_asks_for_a_new_lane() {
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "media", TimeRange::new(0, 1_000_000)));
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Video, 1_000_000, 0.0, 8.0, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            DropOutcome::NewLane {
+                kind: TrackType::Video,
+                start: Micros(0),
+            }
+        );
+    }
+
+    #[test]
+    fn a_drop_below_the_lanes_is_a_miss() {
+        let draft = Draft::empty("D");
+        let before = draft.clone();
+        let outcome = drop_gesture(
+            &draft,
+            &drop_at(TrackType::Video, 1_000_000, 10.0, 80.0, 0, 0),
+        )
+        .unwrap();
+        assert_eq!(outcome, DropOutcome::Miss);
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_drop_with_no_duration_is_refused() {
+        let draft = Draft::empty("D");
+        let error =
+            drop_gesture(&draft, &drop_at(TrackType::Video, 0, 0.0, 8.0, 0, 0)).unwrap_err();
+        assert_eq!(error, GestureError::EmptyDuration);
+        assert!(draft.tracks[0].segments.is_empty());
     }
 }

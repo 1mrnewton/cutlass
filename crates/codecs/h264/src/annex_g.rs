@@ -1222,6 +1222,55 @@ fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
 }
 
 #[test]
+fn a_wide_view_synthesis_picture_samples_each_macroblock() {
+    let base = wide_base();
+    let depth = wide_vsp_depth();
+    let view = wide_vsp_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| left_block_shifts(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_split(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_depth_column(picture))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        let frame = 32 * 16 + 16 * 8 * 2;
+        assert_eq!(raw.len(), frame, "ffmpeg picture count");
+        let decoded = pictures
+            .iter()
+            .find(|picture| wide_split(picture))
+            .expect("base");
+        assert_eq!(raw, planes_of(decoded));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_skipped_b_view_synthesis_macroblock_uses_four_8x8_disparities() {
     let base = dmvp_base_idr();
     let depth = vsp_block_depth();
@@ -2224,6 +2273,143 @@ fn depth_corner(picture: &VideoOutput) -> bool {
             .all(|sample| *sample == 40)
 }
 
+fn left_block_shifts(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 32 * 16
+        && (0..16).all(|row| {
+            let start = row * 32;
+            let samples = &y[start..start + 32];
+            samples[..4].iter().all(|sample| *sample == 100)
+                && samples[4..12].iter().all(|sample| *sample == 180)
+                && samples[12..24].iter().all(|sample| *sample == 100)
+                && samples[24..].iter().all(|sample| *sample == 180)
+        })
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
+}
+
+fn wide_split(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 32 * 16
+        && (0..16).all(|row| {
+            let start = row * 32;
+            let samples = &y[start..start + 32];
+            samples[..8].iter().all(|sample| *sample == 100)
+                && samples[8..16].iter().all(|sample| *sample == 180)
+                && samples[16..24].iter().all(|sample| *sample == 100)
+                && samples[24..].iter().all(|sample| *sample == 180)
+        })
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
+}
+
+fn wide_depth_column(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let at = 15 * 32 + 30;
+    y.len() == 32 * 16
+        && y[at] == 64
+        && y.iter()
+            .enumerate()
+            .all(|(index, sample)| index == at || *sample == 0)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 40)
+}
+
+fn wide_base() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &wide_ref_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &wide_base_slice()));
+    out
+}
+
+fn wide_base_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    split_pcm(&mut w, 90);
+    split_pcm(&mut w, 90);
+    w.trailing();
+    w.bytes
+}
+
+fn wide_vsp_depth() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &view_synthesis_mbs(0, 0, 3968, 0, 2));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0x60], &wide_depth_slice()));
+    out
+}
+
+fn wide_depth_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bits(0, 4);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+    zero_pcm(&mut w);
+    let mut right = vec![0u8; 256];
+    right[15 * 16 + 14] = 64;
+    pcm_block(&mut w, &right, 40);
+    w.trailing();
+    w.bytes
+}
+
+fn wide_vsp_texture() -> Vec<u8> {
+    annex_b_extension(2, 21, &[0x80, 0xA0], &wide_vsp_slice())
+}
+
+fn wide_vsp_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(false);
+    w.bit(true);
+    for _ in 0..2 {
+        w.ue(0);
+        w.ue(0);
+        w.bit(true);
+        w.bit(true);
+        w.ue(0);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn split_pcm(w: &mut Writer, chroma: u8) {
+    let mut luma = Vec::with_capacity(256);
+    for _row in 0..16 {
+        for col in 0..16 {
+            luma.push(if col < 8 { 100 } else { 180 });
+        }
+    }
+    pcm_block(w, &luma, chroma);
+}
+
+fn zero_pcm(w: &mut Writer) {
+    pcm_block(w, &[0; 256], 40);
+}
+
+fn pcm_block(w: &mut Writer, luma: &[u8], chroma: u8) {
+    w.ue(25);
+    w.align_zeros();
+    w.bytes.extend(luma);
+    w.bytes.extend(std::iter::repeat_n(chroma, 128));
+    w.bit = w.bytes.len() * 8;
+}
+
 fn vsp_p_slice() -> Vec<u8> {
     let mut w = Writer::new();
     ref_p_header(&mut w, 0, 0, true, true);
@@ -2276,6 +2462,10 @@ fn view_synthesis_sps() -> Vec<u8> {
 
 /// `vsp_param` for the one depth-view pair. `wij` is the scale from view 1 to view 0.
 fn view_synthesis_pair(wji: u32, oji: u32, wij: u32, oij: u32) -> Vec<u8> {
+    view_synthesis_mbs(wji, oji, wij, oij, 1)
+}
+
+fn view_synthesis_mbs(wji: u32, oji: u32, wij: u32, oij: u32, mbs: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(139, 8);
     w.bits(0, 8);
@@ -2291,7 +2481,7 @@ fn view_synthesis_pair(wji: u32, oji: u32, wij: u32, oij: u32) -> Vec<u8> {
     w.ue(0);
     w.ue(4);
     w.bit(false);
-    w.ue(0);
+    w.ue(mbs.saturating_sub(1));
     w.ue(0);
     w.bit(true);
     w.bit(true);
@@ -4096,6 +4286,27 @@ fn paint(edge: usize, luma: u8, chroma: u8) -> Vec<u8> {
     let mut raw = vec![luma; edge * edge];
     raw.extend(std::iter::repeat_n(chroma, (edge / 2) * (edge / 2) * 2));
     raw
+}
+
+fn wide_ref_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(1);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
 }
 
 fn four_ref_sps() -> Vec<u8> {

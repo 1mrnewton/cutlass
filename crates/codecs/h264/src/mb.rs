@@ -422,7 +422,7 @@ pub(crate) fn decode_mbs<S: Sample>(
     layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
-    if (slice.dmvp || slice.vsp) && total != 1 {
+    if slice.dmvp && total != 1 {
         return Err(CodecError::Unsupported { what: "3d" });
     }
     let mbaff = slice.sps.mbaff && !pic.field;
@@ -752,7 +752,7 @@ fn vsp_skip_mb<S: Sample>(
             l0: true,
             l1: false,
         };
-        let motion = synthesis_motion(pic, dpb, slice, &part)?;
+        let motion = synthesis_motion(pic, dpb, slice, (mx * 16, my * 16), &part)?;
         fill_ref(&mut mb.ref0, &mut mb.uses0, &part, reference);
         store_mv(&mut mb, &part, motion, 0);
         if let Some(reference1) = reference1 {
@@ -6763,7 +6763,12 @@ fn read_parts<S: Sample>(
     }
     for (index, part) in parts.iter().enumerate() {
         if part.l0 && synthesis0[index] {
-            store_mv(mb, part, synthesis_motion(pic, dpb, slice, part)?, 0);
+            store_mv(
+                mb,
+                part,
+                synthesis_motion(pic, dpb, slice, (mx * 16, my * 16), part)?,
+                0,
+            );
             continue;
         }
         if part.l0 {
@@ -6797,7 +6802,12 @@ fn read_parts<S: Sample>(
     }
     for (index, part) in parts.iter().enumerate() {
         if part.l1 && synthesis1[index] {
-            store_mv(mb, part, synthesis_motion(pic, dpb, slice, part)?, 1);
+            store_mv(
+                mb,
+                part,
+                synthesis_motion(pic, dpb, slice, (mx * 16, my * 16), part)?,
+                1,
+            );
             continue;
         }
         if part.l1 {
@@ -6873,6 +6883,7 @@ fn synthesis_motion<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
+    origin: (usize, usize),
     part: &Part,
 ) -> Result<[i16; 2], CodecError> {
     if slice.dps_id != 0 {
@@ -6913,25 +6924,25 @@ fn synthesis_motion<S: Sample>(
     };
     let scale = disparity_term(&slice.sps.disparity_scale, src, reference, views);
     let offset = disparity_term(&slice.sps.disparity_offset, src, reference, views);
-    let max_depth = max_depth(depth, part);
+    let max_depth = max_depth(depth, origin, part);
     Ok([disparity_value(max_depth, scale, offset), 0])
 }
 
 /// J.8.2.1.1 corners. Reduced resolution is refused, so the inferred multipliers are 2
-/// and the shifts are 0. A full-frame block clips to the depth picture corners.
-fn max_depth<S: Sample>(depth: &Frame<S>, part: &Part) -> i32 {
+/// and the shifts are 0. `origin` is the macroblock's luma sample.
+fn max_depth<S: Sample>(depth: &Frame<S>, origin: (usize, usize), part: &Part) -> i32 {
     let right = depth.w.saturating_sub(1);
     let bottom = depth.h.saturating_sub(1);
-    let x0 = (part.x.saturating_mul(2)).min(right);
-    let y0 = (part.y.saturating_mul(2)).min(bottom);
-    let x1 = part
-        .x
+    let x = origin.0.saturating_add(part.x);
+    let y = origin.1.saturating_add(part.y);
+    let x0 = x.saturating_mul(2).min(right);
+    let y0 = y.saturating_mul(2).min(bottom);
+    let x1 = x
         .saturating_add(part.w)
         .saturating_sub(1)
         .saturating_mul(2)
         .min(right);
-    let y1 = part
-        .y
+    let y1 = y
         .saturating_add(part.h)
         .saturating_sub(1)
         .saturating_mul(2)
@@ -7697,7 +7708,12 @@ fn read_sub<S: Sample>(
                         l0: list == 0,
                         l1: list == 1,
                     };
-                    store_mv(mb, &part, synthesis_motion(pic, dpb, slice, &parent)?, list);
+                    store_mv(
+                        mb,
+                        &part,
+                        synthesis_motion(pic, dpb, slice, (mx * 16, my * 16), &parent)?,
+                        list,
+                    );
                     continue;
                 }
                 let predicted = if slice.dmvp && list == 0 {

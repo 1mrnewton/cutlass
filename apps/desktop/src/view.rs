@@ -1421,6 +1421,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
     pan_timeline(shell, ui, lane_area);
+    zoom_timeline(shell, ui, lane_area);
 }
 
 fn secondary_click(ui: &Ui) -> Option<Pos2> {
@@ -1535,6 +1536,24 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
         delta.y
     };
     shell.pan_pixels(-f64::from(pixels));
+}
+
+/// A pinch, or a wheel with the zoom modifier, scales the lanes around the pointer.
+fn zoom_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
+    let (factor, pos) = ui.input(|input| (input.zoom_delta(), input.pointer.hover_pos()));
+    if (factor - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    let Some(pos) = pos else {
+        return;
+    };
+    if !lane_area.contains(pos) {
+        return;
+    }
+    let x = f64::from(pos.x - lane_area.left()).max(0.0);
+    if let Err(error) = shell.zoom_at(f64::from(factor), x) {
+        shell.set_notice(error.to_string());
+    }
 }
 
 fn release_library_drop(
@@ -3771,6 +3790,44 @@ mod tests {
         output.textures_delta.clear();
         assert!(shell.has_clipboard(), "notice {}", shell.notice());
         assert!(shell.clip_menu().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_pinch_over_the_lanes_zooms_them() {
+        let (mut shell, temp) = open_span("pinch", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        let before = shell.pixel_size();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(text), egui::Event::Zoom(2.0)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(
+            shell.pixel_size() > before,
+            "notice {} size {}",
+            shell.notice(),
+            shell.pixel_size()
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

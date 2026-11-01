@@ -1293,6 +1293,27 @@ impl Shell {
         Ok(())
     }
 
+    /// Scale the lanes by a pinch. The timeline time under `x_in_view` stays put.
+    ///
+    /// `x_in_view` is pixels from the left of the lanes. A factor of one does
+    /// nothing. The scale still stops at the two-frame step and the quarter lane.
+    pub fn zoom_at(&mut self, factor: f64, x_in_view: f64) -> Result<(), ShellError> {
+        if !factor.is_finite() || factor <= 0.0 || !x_in_view.is_finite() {
+            return Err(ShellError::Zoom);
+        }
+        if (factor - 1.0).abs() < 1.0e-4 {
+            return Ok(());
+        }
+        let old = self.pixel_size;
+        self.pixel_size = self
+            .stored_zoom()?
+            .scale(factor, self.zoom_bounds())
+            .ok_or(ShellError::Zoom)?
+            .pixel_size();
+        self.hold_under_pointer(x_in_view, old);
+        Ok(())
+    }
+
     pub fn zoom_fit(&mut self) -> Result<(), ShellError> {
         let bounds = self.zoom_bounds();
         if bounds.duration.0 <= 0 || fit_pixel_size(bounds.lane_width, bounds.duration).is_none() {
@@ -1913,6 +1934,28 @@ impl Shell {
             origin = max_origin;
         }
         self.view_origin = origin.max(0);
+    }
+
+    /// Keep the timeline time under a lane pixel while the pixel size changes.
+    fn hold_under_pointer(&mut self, x_in_view: f64, old_pixel_size: f64) {
+        if !old_pixel_size.is_finite() || old_pixel_size <= 0.0 {
+            return;
+        }
+        let time = self.view_origin.max(0) as f64 + x_in_view / old_pixel_size;
+        if !self.pixel_size.is_finite() || self.pixel_size <= 0.0 || !time.is_finite() {
+            return;
+        }
+        let mut origin = (time - x_in_view / self.pixel_size).round() as i64;
+        if origin < 0 {
+            origin = 0;
+        }
+        let Some(visible) = self.visible_micros() else {
+            self.view_origin = origin;
+            return;
+        };
+        let end = self.cut_duration().0.max(0);
+        let max_origin = end.saturating_sub(visible).max(0);
+        self.view_origin = origin.clamp(0, max_origin);
     }
 
     /// Scroll while a drag sits against the side of the lanes.
@@ -4191,6 +4234,37 @@ mod tests {
         );
         assert!(desktop.has_clipboard());
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_pinch_keeps_the_time_under_the_pointer() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.set_lane_width(800.0);
+        let pixel = desktop.pixel_size();
+        assert!(desktop.pan_pixels(400.0));
+        let x = 200.0;
+        let time = desktop.view_origin().0 as f64 + x / pixel;
+        desktop.zoom_at(0.5, x).unwrap();
+        assert!((desktop.pixel_size() - pixel * 0.5).abs() < 1.0e-9);
+        let after = desktop.view_origin().0 as f64 + x / desktop.pixel_size();
+        assert!(
+            (after - time).abs() <= 1.0,
+            "the time moved from {time} to {after}"
+        );
+        desktop.zoom_at(2.0, x).unwrap();
+        assert!((desktop.pixel_size() - pixel).abs() < 1.0e-9);
+        let back = desktop.view_origin().0 as f64 + x / desktop.pixel_size();
+        assert!((back - time).abs() <= 1.0);
+        let size = desktop.pixel_size();
+        let origin = desktop.view_origin();
+        desktop.zoom_at(2.0, x).unwrap();
+        assert_eq!(desktop.pixel_size(), size);
+        assert_eq!(desktop.view_origin(), origin);
+        desktop.zoom_at(1.0, x).unwrap();
+        assert_eq!(desktop.pixel_size(), size);
     }
 
     #[test]

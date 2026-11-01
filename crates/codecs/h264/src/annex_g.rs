@@ -610,6 +610,43 @@ fn residual_resampling_upsamples_the_base_difference() {
     }
 }
 
+#[test]
+fn a_crop_scales_motion_inside_the_window() {
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &crop_idr());
+    pictures.extend(push_pictures(&mut decoder, &crop_p()));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    let reference = &pictures[0];
+    assert_eq!(reference.picture.width(), 48);
+    assert_eq!(reference.picture.height(), 16);
+    assert!(
+        cropped_reference(reference),
+        "row {:?} chroma {:?}",
+        &reference.picture.y()[..48],
+        &reference.picture.u()[..24]
+    );
+    let picture = &pictures[1];
+    assert!(
+        cropped_motion(picture),
+        "row {:?} chroma {:?}",
+        &picture.picture.y()[..48],
+        &picture.picture.u()[..24]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = crop_idr();
+        annex.extend(crop_p());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let base = decode(&resample_base());
+        let mut flat = vec![200u8; 16 * 16];
+        flat.extend(std::iter::repeat_n(200, 8 * 8 * 2));
+        let mut want = planes_of(&base);
+        want.extend(flat);
+        assert_eq!(raw, want);
+        assert_ne!(planes_of(picture), &raw[raw.len() / 2..]);
+    }
+}
+
 fn push_pictures(decoder: &mut H264Decoder, annex: &[u8]) -> Vec<VideoOutput> {
     decoder
         .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
@@ -2512,6 +2549,145 @@ fn resample_base_picture(picture: &VideoOutput) -> bool {
                 .all(|sample| *sample == 200)
     }) && chroma(picture.picture.u())
         && chroma(picture.picture.v())
+}
+
+fn crop_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &cropped_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &resample_pcm()));
+    out.extend(annex_b_extension(3, 20, &ilp_header(), &crop_intra()));
+    out
+}
+
+fn cropped_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(86, 8);
+    high_body_size(&mut w, 2, 0);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.se(0);
+    w.se(0);
+    w.se(8);
+    w.se(0);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn crop_intra() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    for _ in 0..3 {
+        w.ue(3);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn crop_p() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &motion_scale_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &crop_enhancement(),
+    ));
+    out
+}
+
+fn crop_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    for _ in 0..2 {
+        w.ue(0);
+        w.bit(true);
+        w.ue(0);
+    }
+    w.ue(0);
+    w.bit(false);
+    w.ue(30);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(50, 256));
+    w.bytes.extend(std::iter::repeat_n(50, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn cropped_reference(picture: &VideoOutput) -> bool {
+    let luma = upsampled_luma();
+    let chroma = upsampled_chroma();
+    let y = picture.picture.y();
+    let luma_ok = (0..16).all(|row| {
+        y[row * 48..row * 48 + 32] == luma
+            && y[row * 48 + 32..row * 48 + 48]
+                .iter()
+                .all(|sample| *sample == 128)
+    });
+    let chroma_ok = |plane: &[u8]| {
+        (0..8).all(|row| {
+            plane[row * 24..row * 24 + 16] == chroma
+                && plane[row * 24 + 16..row * 24 + 24]
+                    .iter()
+                    .all(|sample| *sample == 128)
+        })
+    };
+    luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
+}
+
+fn cropped_motion(picture: &VideoOutput) -> bool {
+    let luma = [
+        165, 215, 205, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
+    ];
+    let y = picture.picture.y();
+    let luma_ok = (0..16).all(|row| {
+        y[row * 48..row * 48 + 16] == luma
+            && y[row * 48 + 16..row * 48 + 32]
+                .iter()
+                .all(|sample| *sample == 128)
+            && y[row * 48 + 32..row * 48 + 48]
+                .iter()
+                .all(|sample| *sample == 50)
+    });
+    let chroma_ok = |plane: &[u8]| {
+        (0..8).all(|row| {
+            plane[row * 24] == 160
+                && plane[row * 24 + 1..row * 24 + 8]
+                    .iter()
+                    .all(|sample| *sample == 200)
+                && plane[row * 24 + 8..row * 24 + 16]
+                    .iter()
+                    .all(|sample| *sample == 128)
+                && plane[row * 24 + 16..row * 24 + 24]
+                    .iter()
+                    .all(|sample| *sample == 50)
+        })
+    };
+    luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
 }
 
 fn motion_scale_idr() -> Vec<u8> {

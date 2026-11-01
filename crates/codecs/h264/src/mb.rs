@@ -848,8 +848,7 @@ fn intra_base<S: Sample>(
 
 /// Inter base mode. Motion is the reference layer's vectors. The samples come
 /// from the decoded picture buffer. A coded residual is a 4×4 or an 8×8.
-/// A smaller reference layer scales those vectors onto this picture when the
-/// spatial offsets are zero.
+/// A smaller reference layer scales those vectors onto the cropped window.
 fn motion_base<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -984,7 +983,7 @@ fn motion_base<S: Sample>(
     Ok(qp)
 }
 
-/// A zero-offset reference-layer vector scaled by the picture-size ratio.
+/// A reference-layer vector scaled onto the cropped enhancement window.
 fn scaled_layer_motion<S: Sample>(
     mb: &mut Mb,
     layer: &Frame<S>,
@@ -998,17 +997,45 @@ fn scaled_layer_motion<S: Sample>(
         });
     }
     let crop = &slice.sps.svc_scale;
-    if crop.left != 0 || crop.top != 0 || crop.right != 0 || crop.bottom != 0 {
+    if crop.left < 0 || crop.top < 0 || crop.right < 0 || crop.bottom < 0 {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
     }
-    let (Ok(base_w), Ok(base_h), Ok(scaled_w), Ok(scaled_h)) = (
-        i32::try_from(layer.w),
-        i32::try_from(layer.h),
-        i32::try_from(slice.sps.width),
-        i32::try_from(slice.sps.height),
-    ) else {
+    let left = sample_offset(crop.left)?;
+    let top = sample_offset(crop.top)?;
+    let right = sample_offset(crop.right)?;
+    let bottom = sample_offset(crop.bottom)?;
+    let scaled_w =
+        i64::from(
+            i32::try_from(slice.sps.width).map_err(|_| CodecError::Unsupported {
+                what: "inter-layer prediction",
+            })?,
+        ) - i64::from(left)
+            - i64::from(right);
+    let scaled_h =
+        i64::from(
+            i32::try_from(slice.sps.height).map_err(|_| CodecError::Unsupported {
+                what: "inter-layer prediction",
+            })?,
+        ) - i64::from(top)
+            - i64::from(bottom);
+    let (Ok(scaled_w), Ok(scaled_h)) = (i32::try_from(scaled_w), i32::try_from(scaled_h)) else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    if scaled_w <= 0 || scaled_h <= 0 || scaled_w % 2 != 0 || scaled_h % 2 != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    if !crop_covers(mx, my, left, top, scaled_w, scaled_h) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (Ok(base_w), Ok(base_h)) = (i32::try_from(layer.w), i32::try_from(layer.h)) else {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -1024,8 +1051,18 @@ fn scaled_layer_motion<S: Sample>(
         for bx in 0..4 {
             let curr_x = sample_index(mx, bx)?;
             let curr_y = sample_index(my, by)?;
-            let pos_x = base_sample(curr_x, x_axis)?;
-            let pos_y = base_sample(curr_y, y_axis)?;
+            let pos_x = base_sample(
+                curr_x.checked_sub(left).ok_or(CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                })?,
+                x_axis,
+            )?;
+            let pos_y = base_sample(
+                curr_y.checked_sub(top).ok_or(CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                })?,
+                y_axis,
+            )?;
             let mb_x = (pos_x as usize) / 16;
             let mb_y = (pos_y as usize) / 16;
             let slot = mb_y.saturating_mul(layer.mb_w).saturating_add(mb_x);
@@ -1073,6 +1110,17 @@ fn scaled_layer_motion<S: Sample>(
         });
     }
     Ok(())
+}
+
+fn crop_covers(mx: usize, my: usize, left: i32, top: i32, scaled_w: i32, scaled_h: i32) -> bool {
+    let (Ok(mx), Ok(my)) = (i32::try_from(mx), i32::try_from(my)) else {
+        return false;
+    };
+    let x0 = (left + 15) / 16;
+    let y0 = (top + 15) / 16;
+    let x1 = (left + scaled_w) / 16;
+    let y1 = (top + scaled_h) / 16;
+    mx >= x0 && mx < x1 && my >= y0 && my < y1
 }
 
 fn sample_index(mb: usize, block: usize) -> Result<i32, CodecError> {

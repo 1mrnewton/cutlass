@@ -18,7 +18,8 @@
 //! Picture-level intra resampling upsamples the reference layer with the 16-phase intra filter.
 //! A zero-offset inter base layer scales its motion onto the enhancement.
 //! Its residual is resampled with the transform-block residual filter.
-//! A crop change, macroblock-level spatial scalability, and a 3D-AVC extension header are refused.
+//! A non-negative crop insets that window, and motion inside it uses the window size.
+//! A negative offset, a crop that differs on the reference picture, residual resampling with a non-zero offset, macroblock-level spatial scalability, and a 3D-AVC extension header are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

@@ -82,6 +82,9 @@ pub struct Sps {
     pub seq_tcoeff: bool,
     /// `adaptive_tcoeff_level_prediction_flag`.
     pub adaptive_tcoeff: bool,
+    /// Annex H `view_id` list. Empty for an Annex A or SVC sequence.
+    /// Index 0 is the base view.
+    pub views: Vec<u16>,
 }
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
@@ -396,8 +399,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         });
     }
     let scalable = matches!(profile, 83 | 86);
+    let multiview = matches!(profile, 118 | 128);
     if subset {
-        if !scalable {
+        if !scalable && !multiview {
             return Err(CodecError::Unsupported { what: "subset sps" });
         }
     } else if !matches!(profile, 66 | 77 | 88 | 100 | 110 | 122 | 244) {
@@ -479,26 +483,36 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     } else {
         Vui::unspecified(max_num_ref_frames)
     };
-    let svc = if subset {
+    let plain = SvcSyntax {
+        inter_layer_deblock: false,
+        spatial: 0,
+        seq_tcoeff: false,
+        adaptive_tcoeff: false,
+        restriction: true,
+    };
+    let (svc, views) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
         if bits.bit()? {
             return Err(CodecError::Unsupported { what: "svc vui" });
         }
+        (syntax, Vec::new())
+    } else if subset {
+        if !bits.bit()? {
+            return Err(bits.malformed("mvc"));
+        }
+        let views = mvc_extension(&mut bits)?;
         if bits.bit()? {
-            while bits.more_rbsp() {
-                let _ = bits.bit()?;
-            }
+            return Err(CodecError::Unsupported { what: "mvc vui" });
         }
-        syntax
+        (plain, views)
     } else {
-        SvcSyntax {
-            inter_layer_deblock: false,
-            spatial: 0,
-            seq_tcoeff: false,
-            adaptive_tcoeff: false,
-            restriction: true,
-        }
+        (plain, Vec::new())
     };
+    if subset && bits.bit()? {
+        while bits.more_rbsp() {
+            let _ = bits.bit()?;
+        }
+    }
     let _ = bits.rbsp_trailing();
     let sps = Sps {
         id: id as u8,
@@ -547,6 +561,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         svc_spatial: svc.spatial,
         seq_tcoeff: svc.seq_tcoeff,
         adaptive_tcoeff: svc.adaptive_tcoeff,
+        views,
     };
     if !sps.within_level() {
         return Err(CodecError::Limit {
@@ -602,6 +617,58 @@ fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<SvcSyntax, Cod
         adaptive_tcoeff,
         restriction,
     })
+}
+
+fn mvc_limit(bits: &mut Bits<'_>, max: u32) -> Result<u32, CodecError> {
+    let value = bits.ue()?;
+    if value > max {
+        return Err(CodecError::Limit { what: "mvc" });
+    }
+    Ok(value)
+}
+
+/// `seq_parameter_set_mvc_extension`. The view list is kept. Interview
+/// reference ids are consumed and not used: an intra view does not need them.
+fn mvc_extension(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
+    let views_minus1 = mvc_limit(bits, 1023)?;
+    let mut views = Vec::new();
+    for _ in 0..=views_minus1 {
+        let id = mvc_limit(bits, 1023)?;
+        let Ok(id) = u16::try_from(id) else {
+            return Err(CodecError::Limit { what: "mvc" });
+        };
+        views.push(id);
+    }
+    for _ in 1..=views_minus1 {
+        consume_refs(bits)?;
+        consume_refs(bits)?;
+    }
+    for _ in 1..=views_minus1 {
+        consume_refs(bits)?;
+        consume_refs(bits)?;
+    }
+    let levels = mvc_limit(bits, 63)?;
+    for _ in 0..=levels {
+        let _ = bits.u(8)?;
+        let ops = mvc_limit(bits, 1023)?;
+        for _ in 0..=ops {
+            let _ = bits.u(3)?;
+            let targets = mvc_limit(bits, 1023)?;
+            for _ in 0..=targets {
+                let _ = mvc_limit(bits, 1023)?;
+            }
+            let _ = mvc_limit(bits, 1023)?;
+        }
+    }
+    Ok(views)
+}
+
+fn consume_refs(bits: &mut Bits<'_>) -> Result<(), CodecError> {
+    let count = mvc_limit(bits, 15)?;
+    for _ in 0..count {
+        let _ = mvc_limit(bits, 1023)?;
+    }
+    Ok(())
 }
 
 struct Vui {

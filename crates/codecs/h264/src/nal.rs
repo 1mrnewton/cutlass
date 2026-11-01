@@ -22,9 +22,17 @@ pub struct Nal {
 pub enum Extension {
     Svc(SvcHeader),
     /// Annex H. `svc_extension_flag` is 0.
-    Mvc,
+    Mvc(MvcHeader),
     /// NAL type 21 with `avc_3d_extension_flag` 1.
     ThreeD,
+}
+
+/// Annex H `nal_unit_header_mvc_extension`. Fields the reconstruction reads.
+#[derive(Clone, Copy, Debug)]
+pub struct MvcHeader {
+    /// `IdrPicFlag`, the inverse of `non_idr_flag`.
+    pub idr: bool,
+    pub view_id: u16,
 }
 
 /// `nal_unit_header_svc_extension`. Annex G. Fields the reconstruction reads.
@@ -114,8 +122,7 @@ fn extension_header(kind: u8, bytes: &[u8]) -> Result<(Extension, usize), CodecE
     if kind != 21 && flag {
         Ok((Extension::Svc(svc_header(header)?), len))
     } else {
-        mvc_header(header)?;
-        Ok((Extension::Mvc, len))
+        Ok((Extension::Mvc(mvc_header(header)?), len))
     }
 }
 
@@ -139,14 +146,20 @@ fn svc_header(bytes: &[u8]) -> Result<SvcHeader, CodecError> {
     })
 }
 
-fn mvc_header(bytes: &[u8]) -> Result<(), CodecError> {
-    if bytes[2] & 0x01 != 0x01 {
+fn mvc_header(bytes: &[u8]) -> Result<MvcHeader, CodecError> {
+    let b0 = bytes[0];
+    let b1 = bytes[1];
+    let b2 = bytes[2];
+    if b2 & 0x01 != 0x01 {
         return Err(CodecError::Malformed {
             at_bit: 8,
             what: "extension header",
         });
     }
-    Ok(())
+    Ok(MvcHeader {
+        idr: b0 & 0x40 == 0,
+        view_id: (u16::from(b1) << 2) | u16::from(b2 >> 6),
+    })
 }
 
 /// Annex B access unit, or one length-prefixed access unit.
@@ -367,7 +380,7 @@ mod tests {
 
         // `00 00 03` is a legal MVC header. It must not be stripped as emulation.
         let mvc = access_unit(&[0, 0, 0, 1, 0x74, 0x00, 0x00, 0x03, 0x80], 0).unwrap();
-        assert!(matches!(mvc[0].extension, Some(Extension::Mvc)));
+        assert!(matches!(mvc[0].extension, Some(Extension::Mvc(_))));
         assert_eq!(mvc[0].rbsp, vec![0x80]);
     }
 

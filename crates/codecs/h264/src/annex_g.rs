@@ -86,6 +86,42 @@ fn inter_layer_intra_prediction_copies_the_base() {
 }
 
 #[test]
+fn a_non_base_mvc_view_is_an_intra_picture() {
+    for profile in [118u8, 128] {
+        let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
+        assert_eq!(parsed.views, vec![0, 1], "profile {profile}");
+    }
+    let annex = mvc_annex(&mvc_header(1));
+    let picture = decode(&annex);
+    assert!(flat(&picture));
+    assert_eq!(picture.picture.width(), 16);
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &annex).is_empty(),
+            "ffmpeg decoded a non-base view"
+        );
+    }
+    let err = open()
+        .push(&Packet::video(mvc_annex(&mvc_header(2)), 0, 1, 30, false))
+        .expect_err("view");
+    assert!(
+        matches!(
+            err,
+            CodecError::Malformed {
+                what: "view id",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let vui = parse_subset_sps(&mvc_subset(118, true)).expect_err("vui");
+    assert!(matches!(vui, CodecError::Unsupported { what: "mvc vui" }));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &annex);
+    assert!(flat(&decode_with(&mut decoder, &base_idr())));
+}
+
+#[test]
 fn an_annex_a_picture_survives_svc_mvc_and_3d_nal_units() {
     let annex = base_with_extensions();
     let picture = decode(&annex);
@@ -163,7 +199,7 @@ fn a_refused_extension_leaves_the_next_idr() {
             what: "reference base picture"
         }
     ));
-    assert!(matches!(errors[4], CodecError::Unsupported { what: "mvc" }));
+    assert!(matches!(errors[4], CodecError::Truncated { .. }));
     assert!(matches!(errors[5], CodecError::Unsupported { what: "3d" }));
     assert!(matches!(
         errors[6],
@@ -241,6 +277,71 @@ fn svc_bytes(no_inter_layer_pred: bool, quality: u8, output: bool) -> [u8; 3] {
     let b1 = (u8::from(no_inter_layer_pred) << 7) | (quality & 0x0f);
     let b2 = 0x03 | (u8::from(output) << 2);
     [0xc0, b1, b2]
+}
+
+/// IDR view, `view_id` in the low bits, anchor, reserved 1.
+fn mvc_header(view: u16) -> [u8; 3] {
+    let view = view & 0x03ff;
+    let b1 = (view >> 2) as u8;
+    let b2 = ((view as u8) << 6) | 0x05;
+    [0x00, b1, b2]
+}
+
+fn mvc_annex(header: &[u8; 3]) -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &mvc_subset(118, false));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        header,
+        &idr_slice(true, true, false),
+    ));
+    out
+}
+
+fn mvc_subset(profile: u8, vui: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(u32::from(profile), 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(30, 8);
+    w.ue(0);
+    w.bits(0, 3);
+    w.ue(0);
+    w.ue(1);
+    w.ue(1);
+    w.bit(vui);
+    if !vui {
+        w.bit(false);
+        w.trailing();
+    }
+    w.bytes
 }
 
 /// IDR, dependency 1, quality 0, inter-layer prediction on, output, reserved 3.

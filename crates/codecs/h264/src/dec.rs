@@ -544,9 +544,12 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
             }
             15 => store_subset(&mut sets.subset, &nal.rbsp)?,
             1 | 2 | 5 | 20 => {
-                let svc = svc_header(nal);
+                let class = slice_class(nal);
                 if nal.kind == 20
-                    && !matches!(layer_of(nal.extension, false, false), Layer::Decode(_))
+                    && !matches!(
+                        layer_of(nal.extension, false, false),
+                        Layer::Decode(_) | Layer::View(_)
+                    )
                 {
                     continue;
                 }
@@ -554,9 +557,9 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
                 let header = read_header(
                     &mut bits,
                     &sets,
-                    nal.kind == 5 || svc.is_some_and(|svc| svc.idr),
+                    nal.kind == 5 || slice_idr(class),
                     nal.ref_idc != 0,
-                    svc,
+                    class,
                 )?;
                 let Some(sps) = sets.sequence(header.sps_id, header.subset) else {
                     return Err(CodecError::Malformed {
@@ -682,6 +685,37 @@ fn decode_au<S: Sample>(
                                 planes: &mut planes,
                                 held: &mut held_field,
                                 layer: Some(&base),
+                            },
+                        )?;
+                        if built {
+                            slice_id = slice_id.saturating_add(1);
+                        }
+                        index += 1;
+                    }
+                    Layer::View(mvc) => {
+                        extension_pic = true;
+                        if mvc.idr {
+                            idr_pic = true;
+                        }
+                        let built = decode_slice(
+                            sets,
+                            poc,
+                            dpb,
+                            SliceCursor {
+                                nal: &nals[index],
+                                idr: mvc.idr,
+                                slice_id,
+                                packet,
+                                intra: None,
+                                inter: None,
+                            },
+                            AuScratch {
+                                picture: &mut picture,
+                                next_mb: &mut next_mb,
+                                prior: &mut prior,
+                                planes: &mut planes,
+                                held: &mut held_field,
+                                layer: None,
                             },
                         )?;
                         if built {
@@ -1703,7 +1737,7 @@ fn decode_slice<S: Sample>(
         layer,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
-    let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, svc_header(nal))?;
+    let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, slice_class(nal))?;
     let (part_intra, part_inter) = if nal.kind == 2 {
         read_partitions(&mut bits, sets, &header, (intra, inter))?
     } else {
@@ -1976,25 +2010,20 @@ struct Mod {
     arg: u32,
 }
 
-fn svc_header(nal: &Nal) -> Option<nal::SvcHeader> {
-    match nal.extension {
-        Some(nal::Extension::Svc(svc)) => Some(svc),
-        _ => None,
-    }
-}
-
 enum Layer {
     Decode(nal::SvcHeader),
     /// Inter-layer prediction from the picture this access unit already built.
     Inter(nal::SvcHeader),
+    /// Annex H non-base view.
+    View(nal::MvcHeader),
     Skip,
     Refuse(&'static str),
 }
 
 /// A slice extension is the picture when the access unit has no Annex A slice.
 /// Inter-layer prediction replaces that picture when the base is already in
-/// the access unit. MVC and 3D stay refused. Beside an Annex A slice, a mode
-/// this decoder does not apply is skipped.
+/// the access unit. An MVC non-base view is the picture when it is the only
+/// slice. 3D stays refused. Beside an Annex A slice, MVC and 3D are skipped.
 fn layer_of(extension: Option<nal::Extension>, picture: bool, extension_pic: bool) -> Layer {
     match extension {
         Some(nal::Extension::Svc(svc)) if svc.use_ref_base_pic && !picture => {
@@ -2013,8 +2042,31 @@ fn layer_of(extension: Option<nal::Extension>, picture: bool, extension_pic: boo
         Some(nal::Extension::Svc(svc)) if !svc.no_inter_layer_pred && !picture => {
             Layer::Refuse("inter-layer prediction")
         }
-        Some(nal::Extension::Mvc) if !picture && !extension_pic => Layer::Refuse("mvc"),
+        Some(nal::Extension::Mvc(mvc)) if !picture && !extension_pic => Layer::View(mvc),
         _ => Layer::Skip,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SliceClass {
+    Avc,
+    Svc(nal::SvcHeader),
+    Mvc(nal::MvcHeader),
+}
+
+fn slice_class(nal: &Nal) -> SliceClass {
+    match nal.extension {
+        Some(nal::Extension::Svc(svc)) => SliceClass::Svc(svc),
+        Some(nal::Extension::Mvc(mvc)) => SliceClass::Mvc(mvc),
+        _ => SliceClass::Avc,
+    }
+}
+
+fn slice_idr(class: SliceClass) -> bool {
+    match class {
+        SliceClass::Svc(svc) => svc.idr,
+        SliceClass::Mvc(mvc) => mvc.idr,
+        SliceClass::Avc => false,
     }
 }
 
@@ -2023,8 +2075,16 @@ fn read_header(
     sets: &Sets,
     idr: bool,
     nal_ref: bool,
-    svc: Option<nal::SvcHeader>,
+    class: SliceClass,
 ) -> Result<Header, CodecError> {
+    let svc = match class {
+        SliceClass::Svc(svc) => Some(svc),
+        _ => None,
+    };
+    let mvc = match class {
+        SliceClass::Mvc(mvc) => Some(mvc),
+        _ => None,
+    };
     let first_mb = bits.ue()? as usize;
     let slice_type = bits.ue()?;
     let kind = match slice_type % 5 {
@@ -2041,7 +2101,7 @@ fn read_header(
     let Some(pps) = sets.pps[pps_id as usize].clone() else {
         return Err(bits.malformed("missing pps"));
     };
-    let Some(sps) = sets.sequence(pps.sps_id, svc.is_some()) else {
+    let Some(sps) = sets.sequence(pps.sps_id, svc.is_some() || mvc.is_some()) else {
         return Err(bits.malformed("missing sps"));
     };
     let restriction = sps.slice_header_restriction;
@@ -2255,6 +2315,17 @@ fn read_header(
         let width = crate::fmo::cycle_bits(units, pps.groups.rate)?;
         group_cycle = bits.u(width)?;
     }
+    if let Some(mvc) = mvc {
+        if !intra_slice(kind) {
+            return Err(CodecError::Unsupported { what: "mvc" });
+        }
+        let Some(index) = sps.views.iter().position(|view| *view == mvc.view_id) else {
+            return Err(bits.malformed("view id"));
+        };
+        if index == 0 {
+            return Err(bits.malformed("view id"));
+        }
+    }
     let base_mode = match svc {
         Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
         _ => false,
@@ -2303,7 +2374,7 @@ fn read_header(
         group_cycle,
         sp_switch,
         qs,
-        subset: svc.is_some(),
+        subset: svc.is_some() || mvc.is_some(),
         output: svc.is_none_or(|svc| svc.output),
         base_mode,
     })
@@ -3197,6 +3268,7 @@ mod tests {
             svc_spatial: 0,
             seq_tcoeff: false,
             adaptive_tcoeff: false,
+            views: Vec::new(),
         }
     }
 

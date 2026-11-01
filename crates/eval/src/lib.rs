@@ -7,11 +7,13 @@
 //! compound clip. `audio_slice` is the engine mix at that time, and a
 //! compound segment contributes the child's mix. A text segment is drawn
 //! when [`Fonts`] supplies the face named by `font_path`. Word columns on
-//! that segment are the caption. Effects are not drawn on this path.
+//! that segment are the caption. An effect package is drawn when the
+//! snapshot supplies the package store. A missing package stays off the frame.
 
 #![forbid(unsafe_code)]
 
 mod audio;
+mod effect;
 mod frame;
 mod media;
 mod nest;

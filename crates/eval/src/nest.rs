@@ -9,6 +9,7 @@
 //! Playback does not read `sub_draft_stack`.
 
 use cutlass_compositor::Device;
+use cutlass_effects::PackageStore;
 use cutlass_engine::{DisplayQuarter, ReaderFactory, map_timeline, placement_of};
 use cutlass_model::{Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
@@ -54,6 +55,7 @@ pub(crate) struct NestPass<'a, D: Device> {
     pub(crate) height: u32,
     pub(crate) time: Micros,
     pub(crate) fonts: &'a dyn Fonts,
+    pub(crate) packages: &'a dyn PackageStore,
     pub(crate) device: &'a mut D,
     pub(crate) clips: &'a mut OpenClips,
     pub(crate) revision: u64,
@@ -141,7 +143,7 @@ fn child_frame<D: Device>(
     let child_clips = pass.clips.child(segment);
     let chain = descend(pass.ancestors, &draft.id);
     match compose(
-        &Snapshot::with_fonts(child, pass.fonts),
+        &Snapshot::with_fonts_and_packages(child, pass.fonts, pass.packages),
         time,
         pass.device,
         pass.media,
@@ -429,12 +431,14 @@ mod tests {
         let media = ReaderFactory::new();
         let mut clips = OpenClips::new();
         let fonts = crate::frame::NoFonts;
+        let packages = cutlass_effects::MissingPackages;
         let mut pass = NestPass {
             media: &media,
             width: 1,
             height: 1,
             time: Micros(0),
             fonts: &fonts,
+            packages: &packages,
             device: &mut device,
             clips: &mut clips,
             revision: 0,

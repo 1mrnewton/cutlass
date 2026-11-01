@@ -1,10 +1,12 @@
 use std::fmt;
 
-use cutlass_compositor::{Device, Extent, Frame, submit};
+use cutlass_compositor::{Device, Extent, Frame};
+use cutlass_effects::{MissingPackages, PackageStore};
 use cutlass_engine::ReaderFactory;
 use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
 
+use crate::effect::{StackLayer, present};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
@@ -29,27 +31,51 @@ impl Fonts for NoFonts {
 }
 
 static NO_FONTS: NoFonts = NoFonts;
+static NO_PACKAGES: MissingPackages = MissingPackages;
 
 /// A draft borrowed for evaluation. The draft is not written.
 #[derive(Clone, Copy)]
 pub struct Snapshot<'a> {
     draft: &'a Draft,
     fonts: &'a dyn Fonts,
+    packages: &'a dyn PackageStore,
 }
 
 impl<'a> Snapshot<'a> {
+    /// No font bytes and no package store. Text and effects are not drawn.
     #[must_use]
     pub fn new(draft: &'a Draft) -> Self {
-        Self {
-            draft,
-            fonts: &NO_FONTS,
-        }
+        Self::prepare(draft, &NO_FONTS, &NO_PACKAGES)
     }
 
-    /// `fonts` is consulted for each text segment. The draft is not written.
+    /// `fonts` is consulted for each text segment. Effects are not drawn.
     #[must_use]
     pub fn with_fonts(draft: &'a Draft, fonts: &'a dyn Fonts) -> Self {
-        Self { draft, fonts }
+        Self::prepare(draft, fonts, &NO_PACKAGES)
+    }
+
+    /// `packages` is consulted for each effect. Text is not drawn.
+    #[must_use]
+    pub fn with_packages(draft: &'a Draft, packages: &'a dyn PackageStore) -> Self {
+        Self::prepare(draft, &NO_FONTS, packages)
+    }
+
+    /// `fonts` and `packages` are consulted. The draft is not written.
+    #[must_use]
+    pub fn with_fonts_and_packages(
+        draft: &'a Draft,
+        fonts: &'a dyn Fonts,
+        packages: &'a dyn PackageStore,
+    ) -> Self {
+        Self::prepare(draft, fonts, packages)
+    }
+
+    fn prepare(draft: &'a Draft, fonts: &'a dyn Fonts, packages: &'a dyn PackageStore) -> Self {
+        Self {
+            draft,
+            fonts,
+            packages,
+        }
     }
 
     #[must_use]
@@ -59,6 +85,10 @@ impl<'a> Snapshot<'a> {
 
     pub(crate) fn fonts(self) -> &'a dyn Fonts {
         self.fonts
+    }
+
+    pub(crate) fn packages(self) -> &'a dyn PackageStore {
+        self.packages
     }
 }
 
@@ -95,9 +125,10 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 
 /// The composited frame at `time`. The snapshot's draft is not changed.
 ///
-/// Solids, text, nested drafts, and video pictures share one paint order:
-/// `render_index`, then track, then segment. A video the factory cannot
-/// open is skipped. A text segment whose face the snapshot does not supply
+/// Solids, text, nested drafts, video, and effect packages share one paint
+/// order: `render_index`, then track, then segment. A video the factory
+/// cannot open is skipped. A text segment whose face the snapshot does not
+/// supply is skipped. An effect whose package the snapshot does not supply
 /// is skipped. An open file in `clips` is seeked when `time` changes.
 /// `revision` drops those files when the draft changes.
 pub fn frame<D: Device>(
@@ -129,6 +160,7 @@ pub(crate) fn compose<D: Device>(
         height: extent.height,
         time,
         fonts: snapshot.fonts(),
+        packages: snapshot.packages(),
         device,
         clips,
         revision,
@@ -148,11 +180,22 @@ pub(crate) fn compose<D: Device>(
         ),
         nests,
     );
-    let mut sources: Vec<&dyn PictureSource> = Vec::with_capacity(layers.len());
-    for layer in &layers {
-        sources.push(layer.source());
-    }
-    submit(pass.device, extent, pass.time, &sources).map_err(EvalError::Compose)
+    let stack = stack_of(&layers);
+    present(
+        draft,
+        snapshot.packages(),
+        pass.time,
+        pass.device,
+        extent,
+        &stack,
+    )
+}
+
+fn stack_of<'a>(layers: &'a [Ordered<'a>]) -> Vec<StackLayer<'a>> {
+    layers
+        .iter()
+        .map(|layer| StackLayer::new(layer.key.0, layer.key.1, layer.key.2, layer.source()))
+        .collect()
 }
 
 enum Paint<'a> {

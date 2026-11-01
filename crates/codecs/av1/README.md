@@ -53,7 +53,7 @@ Implemented for that scope, and matched against dav1d on the keyframe fixtures n
 - Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
 - Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe or an inter frame may select its transform size.
 - Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered.
-- CDEF, uniform and non-uniform tiles, a quantizer matrix, and a superblock quantizer delta.
+- CDEF, including one index copied across every 64×64 unit of a 128×128 block. Uniform and non-uniform tiles, a quantizer matrix, and a superblock quantizer delta.
 - Super resolution on a keyframe: reconstruction uses the coded width, and the shown picture is the upscaled width.
 - Wiener, self-guided, and switchable loop restoration on a keyframe.
 - Film grain on the shown picture: luma, chroma, overlap, chroma grain scaled from luma, and parameters copied from a reference. The reference is stored before grain.

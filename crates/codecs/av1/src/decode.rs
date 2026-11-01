@@ -1570,6 +1570,27 @@ mod tests {
     }
 
     #[test]
+    fn cdef_index_covers_a_block_wider_than_64() {
+        // aomenc --sb-size=128 --min-partition-size=128 --max-partition-size=128.
+        // The 128×128 block reads one CDEF index and that index covers all four
+        // 64×64 units. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/cdef-wide.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.use_128);
+        assert!(sequence.enable_cdef);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        assert_ne!(frame.cdef.y_pri[0], 0);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xc184_d76c_fa98_bc01);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn restoration_units_keep_the_updated_cdf() {
         // 512×128 noise. Luma is self-guided with 128×128 units, four of them.
         // CDF update is on, so each unit after the first reads the adapted

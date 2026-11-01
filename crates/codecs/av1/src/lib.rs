@@ -1,7 +1,7 @@
 //! AV1 encoder and decoder.
 //!
 //! The support record is `STATUS.md` next to this crate. Loop restoration and
-//! film grain are applied for 8-bit 4:2:0. A restoration frame keeps the updated type CDF for the next unit. 8-bit film grain is also applied for 4:4:4 and 4:2:2. A single-reference frame may carry
+//! film grain are applied for 8-bit 4:2:0. A restoration frame keeps the updated type CDF for the next unit. A block wider than 64 copies its CDEF index across each 64×64 unit. 8-bit film grain is also applied for 4:4:4 and 4:2:2. A single-reference frame may carry
 //! an order hint. A frame may use a uniform or non-uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter. Filter intra reconstructs a luma block no larger than 32.

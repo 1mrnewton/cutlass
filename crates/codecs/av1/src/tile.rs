@@ -1423,7 +1423,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         if !self.seg.preskip {
             self.read_intra_segment(row, col, skip)?;
         }
-        self.read_cdef(row, col, skip)?;
+        self.read_cdef(row, col, bsize, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
         self.pal_n = [0, 0];
         self.predict_intrabc = false;
@@ -1511,7 +1511,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         if !self.seg.preskip {
             self.read_inter_segment(row, col, bsize, false, skip)?;
         }
-        self.read_cdef(row, col, skip)?;
+        self.read_cdef(row, col, bsize, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
         self.filter_mode = None;
         self.pal_n = [0, 0];
@@ -4123,19 +4123,39 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         Ok(kind)
     }
 
-    fn read_cdef(&mut self, row: usize, col: usize, skip: bool) -> Result<(), CodecError> {
+    fn read_cdef(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        skip: bool,
+    ) -> Result<(), CodecError> {
         if skip || self.lossless || self.allow_intrabc || !self.cdef_on {
             return Ok(());
         }
-        let aligned_row = row & !15;
-        let aligned_col = col & !15;
+        // Section 5.11.56. The index is one symbol per 64×64, then copied across
+        // a block that covers more than one of those units.
+        let cdef_size4 = NUM_4X4_WIDE[BLOCK_64X64];
+        let aligned_row = row & !(cdef_size4 - 1);
+        let aligned_col = col & !(cdef_size4 - 1);
         let at = aligned_row * self.mi_cols + aligned_col;
         if self.cdef_idx.get(at).copied().unwrap_or(0) >= 0 {
             return Ok(());
         }
         let index = self.symbols.read_literal(u32::from(self.cdef.bits))? as i8;
-        if let Some(slot) = self.cdef_idx.get_mut(at) {
-            *slot = index;
+        let wide = NUM_4X4_WIDE[bsize];
+        let high = NUM_4X4_HIGH[bsize];
+        let mut unit_row = aligned_row;
+        while unit_row < aligned_row + high {
+            let mut unit_col = aligned_col;
+            while unit_col < aligned_col + wide {
+                let slot = unit_row * self.mi_cols + unit_col;
+                if let Some(cell) = self.cdef_idx.get_mut(slot) {
+                    *cell = index;
+                }
+                unit_col += cdef_size4;
+            }
+            unit_row += cdef_size4;
         }
         Ok(())
     }

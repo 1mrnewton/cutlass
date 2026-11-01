@@ -543,8 +543,11 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
                 sets.pps[id] = Some(pps);
             }
             15 => store_subset(&mut sets.subset, &nal.rbsp)?,
-            1 | 2 | 5 | 20 => {
+            1 | 2 | 5 | 20 | 21 => {
                 let class = slice_class(nal);
+                if nal.kind == 21 && !matches!(nal.extension, Some(nal::Extension::Mvc(_))) {
+                    continue;
+                }
                 if nal.kind == 20
                     && !matches!(
                         layer_of(nal.extension, false, false),
@@ -730,10 +733,43 @@ fn decode_au<S: Sample>(
                 }
             }
             21 => {
-                if picture.is_none() && !extension_pic {
+                if let Some(nal::Extension::Mvc(mvc)) = nals[index].extension {
+                    if picture.is_none() && !extension_pic {
+                        extension_pic = true;
+                        if mvc.idr {
+                            idr_pic = true;
+                        }
+                        let built = decode_slice(
+                            sets,
+                            poc,
+                            dpb,
+                            SliceCursor {
+                                nal: &nals[index],
+                                idr: mvc.idr,
+                                slice_id,
+                                packet,
+                                intra: None,
+                                inter: None,
+                            },
+                            AuScratch {
+                                picture: &mut picture,
+                                next_mb: &mut next_mb,
+                                prior: &mut prior,
+                                planes: &mut planes,
+                                held: &mut held_field,
+                                layer: None,
+                            },
+                        )?;
+                        if built {
+                            slice_id = slice_id.saturating_add(1);
+                        }
+                    }
+                    index += 1;
+                } else if picture.is_none() && !extension_pic {
                     return Err(CodecError::Unsupported { what: "3d" });
+                } else {
+                    index += 1;
                 }
-                index += 1;
             }
             1 | 5 | 2 => {
                 let attached = if kind == 2 {
@@ -2052,11 +2088,14 @@ enum SliceClass {
     Avc,
     Svc(nal::SvcHeader),
     Mvc(nal::MvcHeader),
+    /// NAL type 21 with `avc_3d_extension_flag` 0. Annex I depth view.
+    Depth(nal::MvcHeader),
 }
 
 fn slice_class(nal: &Nal) -> SliceClass {
     match nal.extension {
         Some(nal::Extension::Svc(svc)) => SliceClass::Svc(svc),
+        Some(nal::Extension::Mvc(mvc)) if nal.kind == 21 => SliceClass::Depth(mvc),
         Some(nal::Extension::Mvc(mvc)) => SliceClass::Mvc(mvc),
         _ => SliceClass::Avc,
     }
@@ -2065,7 +2104,7 @@ fn slice_class(nal: &Nal) -> SliceClass {
 fn slice_idr(class: SliceClass) -> bool {
     match class {
         SliceClass::Svc(svc) => svc.idr,
-        SliceClass::Mvc(mvc) => mvc.idr,
+        SliceClass::Mvc(mvc) | SliceClass::Depth(mvc) => mvc.idr,
         SliceClass::Avc => false,
     }
 }
@@ -2082,9 +2121,10 @@ fn read_header(
         _ => None,
     };
     let mvc = match class {
-        SliceClass::Mvc(mvc) => Some(mvc),
+        SliceClass::Mvc(mvc) | SliceClass::Depth(mvc) => Some(mvc),
         _ => None,
     };
+    let depth = matches!(class, SliceClass::Depth(_));
     let first_mb = bits.ue()? as usize;
     let slice_type = bits.ue()?;
     let kind = match slice_type % 5 {
@@ -2317,12 +2357,19 @@ fn read_header(
     }
     if let Some(mvc) = mvc {
         if !intra_slice(kind) {
-            return Err(CodecError::Unsupported { what: "mvc" });
+            return Err(CodecError::Unsupported {
+                what: if depth { "3d" } else { "mvc" },
+            });
         }
         let Some(index) = sps.views.iter().position(|view| *view == mvc.view_id) else {
             return Err(bits.malformed("view id"));
         };
-        if index == 0 {
+        let depth_view = sps.depth_views.get(index).copied().unwrap_or(false);
+        if depth {
+            if !depth_view {
+                return Err(bits.malformed("view id"));
+            }
+        } else if index == 0 {
             return Err(bits.malformed("view id"));
         }
     }
@@ -3269,6 +3316,7 @@ mod tests {
             seq_tcoeff: false,
             adaptive_tcoeff: false,
             views: Vec::new(),
+            depth_views: Vec::new(),
         }
     }
 

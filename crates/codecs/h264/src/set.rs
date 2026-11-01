@@ -85,6 +85,8 @@ pub struct Sps {
     /// Annex H `view_id` list. Empty for an Annex A or SVC sequence.
     /// Index 0 is the base view.
     pub views: Vec<u16>,
+    /// Annex I `depth_view_present_flag`, one entry per `views` index.
+    pub depth_views: Vec<bool>,
 }
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
@@ -400,8 +402,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     }
     let scalable = matches!(profile, 83 | 86);
     let multiview = matches!(profile, 118 | 128);
+    let depth = matches!(profile, 135 | 138);
     if subset {
-        if !scalable && !multiview {
+        if !scalable && !multiview && !depth {
             return Err(CodecError::Unsupported { what: "subset sps" });
         }
     } else if !matches!(profile, 66 | 77 | 88 | 100 | 110 | 122 | 244) {
@@ -490,13 +493,13 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         adaptive_tcoeff: false,
         restriction: true,
     };
-    let (svc, views) = if subset && scalable {
+    let (svc, views, depth_views) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
         if bits.bit()? {
             return Err(CodecError::Unsupported { what: "svc vui" });
         }
-        (syntax, Vec::new())
-    } else if subset {
+        (syntax, Vec::new(), Vec::new())
+    } else if subset && multiview {
         if !bits.bit()? {
             return Err(bits.malformed("mvc"));
         }
@@ -504,9 +507,19 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         if bits.bit()? {
             return Err(CodecError::Unsupported { what: "mvc vui" });
         }
-        (plain, views)
+        let depth_views = vec![false; views.len()];
+        (plain, views, depth_views)
+    } else if subset {
+        if !bits.bit()? {
+            return Err(bits.malformed("mvcd"));
+        }
+        let (views, depth_views) = mvcd_extension(&mut bits)?;
+        if bits.bit()? || bits.bit()? {
+            return Err(CodecError::Unsupported { what: "mvcd vui" });
+        }
+        (plain, views, depth_views)
     } else {
-        (plain, Vec::new())
+        (plain, Vec::new(), Vec::new())
     };
     if subset && bits.bit()? {
         while bits.more_rbsp() {
@@ -562,6 +575,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         seq_tcoeff: svc.seq_tcoeff,
         adaptive_tcoeff: svc.adaptive_tcoeff,
         views,
+        depth_views,
     };
     if !sps.within_level() {
         return Err(CodecError::Limit {
@@ -669,6 +683,58 @@ fn consume_refs(bits: &mut Bits<'_>) -> Result<(), CodecError> {
         let _ = mvc_limit(bits, 1023)?;
     }
     Ok(())
+}
+
+/// `seq_parameter_set_mvcd_extension`. Depth-view ids are kept. Interview
+/// reference lists and the level operation points are consumed.
+fn mvcd_extension(bits: &mut Bits<'_>) -> Result<(Vec<u16>, Vec<bool>), CodecError> {
+    let views_minus1 = mvc_limit(bits, 1023)?;
+    let mut views = Vec::new();
+    let mut depth_views = Vec::new();
+    for _ in 0..=views_minus1 {
+        let id = mvc_limit(bits, 1023)?;
+        let Ok(id) = u16::try_from(id) else {
+            return Err(CodecError::Limit { what: "mvc" });
+        };
+        let depth = bits.bit()?;
+        let texture = bits.bit()?;
+        if !depth && !texture {
+            return Err(bits.malformed("mvcd"));
+        }
+        views.push(id);
+        depth_views.push(depth);
+    }
+    for index in 1..=views_minus1 {
+        let depth = depth_views.get(index as usize).copied().unwrap_or(false);
+        if depth {
+            consume_refs(bits)?;
+            consume_refs(bits)?;
+        }
+    }
+    for index in 1..=views_minus1 {
+        let depth = depth_views.get(index as usize).copied().unwrap_or(false);
+        if depth {
+            consume_refs(bits)?;
+            consume_refs(bits)?;
+        }
+    }
+    let levels = mvc_limit(bits, 63)?;
+    for _ in 0..=levels {
+        let _ = bits.u(8)?;
+        let ops = mvc_limit(bits, 1023)?;
+        for _ in 0..=ops {
+            let _ = bits.u(3)?;
+            let targets = mvc_limit(bits, 1023)?;
+            for _ in 0..=targets {
+                let _ = mvc_limit(bits, 1023)?;
+                let _ = bits.bit()?;
+                let _ = bits.bit()?;
+            }
+            let _ = mvc_limit(bits, 1023)?;
+            let _ = mvc_limit(bits, 1023)?;
+        }
+    }
+    Ok((views, depth_views))
 }
 
 struct Vui {

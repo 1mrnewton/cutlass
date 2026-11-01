@@ -5,7 +5,9 @@
 //! A slice extension with no inter-layer prediction is reconstructed.
 //! Same-size inter-layer intra prediction copies the reference layer.
 //! An MVC non-base view that is intra is reconstructed.
-//! Motion prediction, residual prediction, resampling, inter-view prediction, and 3D are refused.
+//! An Annex I depth view that is intra is reconstructed.
+//! Motion prediction, residual prediction, resampling, inter-view prediction,
+//! and a 3D-AVC extension header are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

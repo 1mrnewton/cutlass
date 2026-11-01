@@ -122,6 +122,43 @@ fn a_non_base_mvc_view_is_an_intra_picture() {
 }
 
 #[test]
+fn an_annex_i_depth_view_is_an_intra_picture() {
+    for profile in [135u8, 138] {
+        let parsed = parse_subset_sps(&mvcd_subset(profile, false)).expect("mvcd");
+        assert_eq!(parsed.views, vec![0], "profile {profile}");
+        assert_eq!(parsed.depth_views, vec![true], "profile {profile}");
+    }
+    let annex = depth_annex(&mvc_header(0));
+    let picture = decode(&annex);
+    assert!(flat(&picture));
+    assert_eq!(picture.picture.width(), 16);
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &annex).is_empty(),
+            "ffmpeg decoded a depth view"
+        );
+    }
+    let err = open()
+        .push(&Packet::video(depth_annex(&mvc_header(1)), 0, 1, 30, false))
+        .expect_err("view");
+    assert!(
+        matches!(
+            err,
+            CodecError::Malformed {
+                what: "view id",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let vui = parse_subset_sps(&mvcd_subset(138, true)).expect_err("vui");
+    assert!(matches!(vui, CodecError::Unsupported { what: "mvcd vui" }));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &annex);
+    assert!(flat(&decode_with(&mut decoder, &base_idr())));
+}
+
+#[test]
 fn an_annex_a_picture_survives_svc_mvc_and_3d_nal_units() {
     let annex = base_with_extensions();
     let picture = decode(&annex);
@@ -297,6 +334,64 @@ fn mvc_annex(header: &[u8; 3]) -> Vec<u8> {
         &idr_slice(true, true, false),
     ));
     out
+}
+
+fn depth_annex(header: &[u8; 3]) -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &mvcd_subset(138, false));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(
+        3,
+        21,
+        header,
+        &idr_slice(true, true, false),
+    ));
+    out
+}
+
+fn mvcd_subset(profile: u8, vui: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(u32::from(profile), 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.bits(30, 8);
+    w.ue(0);
+    w.bits(0, 3);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(vui);
+    if !vui {
+        w.bit(false);
+        w.bit(false);
+        w.trailing();
+    }
+    w.bytes
 }
 
 fn mvc_subset(profile: u8, vui: bool) -> Vec<u8> {

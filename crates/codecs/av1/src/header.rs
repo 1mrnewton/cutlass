@@ -285,7 +285,8 @@ pub fn parse_with_motion(
                     what: "tile group outside a frame",
                 });
             }
-            5 | 15 => {
+            0 | 5 | 9..=14 | 15 => {
+                // Reserved types have no syntax. The payload is skipped by size.
                 bits.byte_align();
                 while bits.position() + 8 <= payload_end {
                     let _ = bits.read(8)?;

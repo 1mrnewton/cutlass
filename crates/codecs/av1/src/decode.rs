@@ -129,7 +129,9 @@ impl Av1Decoder {
         let mut saw_frame = false;
         for obu in obus {
             match obu.kind {
-                2 | 5 | 15 => {}
+                // Padding, metadata, a temporal delimiter, and a reserved type
+                // carry no frame. A reserved payload is not inspected.
+                0 | 2 | 5 | 9..=14 | 15 => {}
                 1 => prefix.extend_from_slice(obu.bytes),
                 3 | 6 | 7 => {
                     saw_frame = true;
@@ -2981,5 +2983,52 @@ mod tests {
             assert_eq!(packed.len(), 128 * 128 * 3 / 2);
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
+    }
+
+    #[test]
+    fn a_reserved_obu_is_skipped() {
+        // The picture is the flat 128 superblock keyframe. A reserved OBU
+        // sits between the sequence and the frame. Digests are dav1d 1.5.3.
+        let frame = include_bytes!("../fixtures/sb128_flat_0.obu");
+        let expected = 0xf206_7a5e_2040_2325;
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let plain = push_frame(&mut decoder, frame, 0);
+        assert_eq!(frame_digest(&plain), expected);
+
+        let mut with_reserved = Vec::new();
+        with_reserved.extend_from_slice(&frame[..11]);
+        with_reserved.extend_from_slice(&reserved_obu(9, &[0xff, 0x01]));
+        with_reserved.extend_from_slice(&frame[11..]);
+        with_reserved.splice(0..0, reserved_obu(0, &[0x80]));
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, &with_reserved, 0);
+        assert_eq!(frame_digest(&packed), expected);
+
+        let mut overrun = reserved_obu(14, &[0x80]);
+        overrun[1] = 50;
+        overrun.extend_from_slice(frame);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        assert!(
+            decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: overrun,
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .is_err()
+        );
+    }
+
+    fn reserved_obu(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2 + payload.len());
+        bytes.push((kind << 3) | 0x02);
+        bytes.push(u8::try_from(payload.len()).expect("size"));
+        bytes.extend_from_slice(payload);
+        bytes
     }
 }

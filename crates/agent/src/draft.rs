@@ -435,6 +435,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetReverse { .. } => "set_reverse",
         Request::SetFreeze { .. } => "set_freeze",
         Request::SetMirror { .. } => "set_mirror",
+        Request::SetRotation { .. } => "set_rotation",
         Request::SetVolume { .. } => "set_volume",
         Request::SetFade { .. } => "set_fade",
         Request::SetCrop { .. } => "set_crop",

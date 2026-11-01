@@ -11,6 +11,7 @@ mod mirror;
 mod move_segment;
 mod place;
 mod reverse;
+mod rotate;
 mod speed;
 mod split;
 mod text;
@@ -75,6 +76,8 @@ pub enum EditError {
     NotAudio,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
+    /// The rotation is not a finite number of degrees.
+    Angle,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -125,6 +128,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             horizontal,
         } => mirror::set_mirror(draft, segment_id, *horizontal),
+        Request::SetRotation {
+            segment_id,
+            degrees,
+        } => rotate::set_rotation(draft, segment_id, *degrees),
         Request::SetVolume { segment_id, volume } => volume::set_volume(draft, segment_id, *volume),
         Request::SetFade {
             segment_id,

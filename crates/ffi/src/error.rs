@@ -108,6 +108,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::DuplicateMark => "a marker is already there".to_owned(),
         EditError::DuplicateBeat => "a beat is already there".to_owned(),
         EditError::NotAudio => "a beat belongs on audio".to_owned(),
+        EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
     }
 }
 

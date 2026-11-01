@@ -7036,6 +7036,50 @@ mod tests {
         assert!(decoder.drain().expect("drain").is_empty());
     }
 
+    #[test]
+    fn segmentation_reference_matches_dav1d() {
+        // Realtime ROI map, 128×128. The right half is segment 1, and that
+        // segment forces LAST. The reference symbol is not in the bitstream.
+        // Reading it desynchronizes the tile. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/seg-ref.ivf"));
+        assert_eq!(frames.len(), 4);
+        let expected = [
+            0x029d_a659_a7b9_4134,
+            0x5c36_2d07_d8de_49d1,
+            0x5144_7d1a_3910_d111,
+            0xd42d_6b4e_7765_b9c0,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(frame.intra);
+                assert!(!frame.segmentation.enabled);
+            } else {
+                assert!(!frame.intra);
+                assert!(frame.segmentation.enabled);
+                assert!(frame.segmentation.update_map);
+                assert!(frame.segmentation.update_data);
+                assert!(frame.segmentation.preskip);
+                assert!(frame.segmentation.active(1, crate::header::SEG_REF_FRAME));
+                assert_eq!(
+                    frame.segmentation.value(1, crate::header::SEG_REF_FRAME),
+                    i32::from(crate::inter::LAST_FRAME)
+                );
+                assert!(!frame.segmentation.active(1, crate::header::SEG_SKIP));
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
     fn reserved_obu(kind: u8, payload: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(2 + payload.len());
         bytes.push((kind << 3) | 0x02);

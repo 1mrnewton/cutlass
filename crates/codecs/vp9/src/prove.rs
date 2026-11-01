@@ -341,6 +341,71 @@ fn sharp_loop_filter_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same sharpness at 10-bit and 12-bit. The filter thresholds scale with the depth.
+/// 4:2:2 uses the chroma walk that 4:2:0 does not.
+#[test]
+fn sharp_high_depth_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no loop-filter source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let cases = [
+        ("2", "yuv420p10le", PixelFormat::Yuv420p10),
+        ("2", "yuv420p12le", PixelFormat::Yuv420p12),
+        ("3", "yuv422p10le", PixelFormat::Yuv422p10),
+    ];
+    for (profile, pix_fmt, format) in cases {
+        let dir = temp_dir(pix_fmt);
+        let ivf = dir.join("in.ivf");
+        encode_bitrate(&ffmpeg, &source, &ivf, profile, pix_fmt, "160:96", "40k");
+        let stream = read_ivf(&ivf);
+        assert_eq!(stream.width, 160, "{pix_fmt} width");
+        assert_eq!(stream.height, 96, "{pix_fmt} height");
+        assert!(stream.frames.len() > 1, "{pix_fmt} needs an inter frame");
+        let rewritten: Vec<Vec<u8>> = stream
+            .frames
+            .iter()
+            .map(|frame| force_sharpness(frame, 7))
+            .collect();
+        assert!(
+            rewritten_sharpness_filters(&rewritten),
+            "{pix_fmt} never combined sharpness 7 with a loop-filter level"
+        );
+        let (plain_pic, _) = decode_shown(&stream, format);
+        let sharp_ivf = dir.join("sharp7.ivf");
+        write_same_ivf(&ivf, &sharp_ivf, &rewritten);
+        let sharp_stream = read_ivf(&sharp_ivf);
+        let (sharp_pic, _) = decode_shown(&sharp_stream, format);
+        assert_ne!(
+            plain_pic, sharp_pic,
+            "{pix_fmt} sharpness 7 did not change a sample"
+        );
+        let oracle = ffmpeg_yuv(&ffmpeg, &sharp_ivf, pix_fmt);
+        assert_eq!(
+            sharp_pic.len(),
+            oracle.len(),
+            "{pix_fmt} shown bytes differ"
+        );
+        let mismatch = sharp_pic
+            .iter()
+            .zip(oracle.iter())
+            .position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{pix_fmt} first mismatch at {mismatch:?}");
+        eprintln!(
+            "sharpness 7 {pix_fmt} {}x{} {} frames {} bytes",
+            sharp_stream.width,
+            sharp_stream.height,
+            sharp_stream.frames.len(),
+            sharp_pic.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn rewritten_sharpness_filters(frames: &[Vec<u8>]) -> bool {
     let mut state = crate::header::Persist::new();
     let mut active = false;
@@ -396,6 +461,7 @@ fn sharpness_bit(frame: &[u8]) -> Option<usize> {
         } else {
             bits.read(1).ok()?;
             if profile & 1 == 1 {
+                bits.read(1).ok()?;
                 bits.read(1).ok()?;
                 bits.read(1).ok()?;
             }
@@ -1336,6 +1402,50 @@ fn encode_scaled(
             pix_fmt,
             "-b:v",
             "200k",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-f",
+            "ivf",
+        ])
+        .arg(ivf)
+        .output()
+        .expect("encode");
+    assert!(
+        status.status.success(),
+        "encode {pix_fmt} {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn encode_bitrate(
+    ffmpeg: &Path,
+    source: &Path,
+    ivf: &Path,
+    profile: &str,
+    pix_fmt: &str,
+    scale: &str,
+    bitrate: &str,
+) {
+    let vf = format!("scale={scale}");
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-an",
+            "-frames:v",
+            "4",
+            "-vf",
+            &vf,
+            "-c:v",
+            "libvpx-vp9",
+            "-profile:v",
+            profile,
+            "-pix_fmt",
+            pix_fmt,
+            "-b:v",
+            bitrate,
             "-deadline",
             "realtime",
             "-cpu-used",

@@ -775,8 +775,8 @@ fn intra_base<S: Sample>(
     Ok(qp)
 }
 
-/// Inter base mode. Motion is the reference layer's list-0 vectors. The
-/// samples come from the decoded picture buffer, not from the reference layer.
+/// Inter base mode. Motion is the reference layer's vectors. The samples come
+/// from the decoded picture buffer. A coded residual is a 4×4 or an 8×8.
 fn motion_base<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -825,10 +825,8 @@ fn motion_base<S: Sample>(
     bind_refs(&mut mb, slice);
     pic.mb[slot] = mb.clone();
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
-    if luma_cbp > 0 && slice.pps.transform_8x8 && transform8_flag(pic, entropy, mx, my, slice_id)? {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
+    if luma_cbp > 0 && slice.pps.transform_8x8 {
+        mb.transform8 = transform8_flag(pic, entropy, mx, my, slice_id)?;
     }
     let mut qp = qp;
     if luma_cbp > 0 || chroma_cbp > 0 {
@@ -838,33 +836,52 @@ fn motion_base<S: Sample>(
     }
     mb.cbp = luma_cbp | (chroma_cbp << 4);
     predict_inter(pic, dpb, slice, mx, my, &mb)?;
-    for i in 0..16 {
-        let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
-        if luma_cbp & bit == 0 {
-            continue;
+    if mb.transform8 {
+        for i in 0..4 {
+            if luma_cbp & (1 << i) == 0 {
+                continue;
+            }
+            let block = read8(pic, entropy, mx, my, i, &mut mb, 0)?;
+            let span = luma_span(my, false);
+            super::add_scaled(
+                &mut pic.y,
+                pic.w,
+                (mx * 16 + (i & 1) * 8, span.at((i >> 1) * 8), span.step),
+                &block,
+                (qp, qp_bypass::<S>(slice, qp)),
+                &slice.pps.weight8[1],
+                8,
+            );
         }
-        let block = read_block(
-            pic,
-            entropy,
-            (2, 16, false),
-            Place { mx, my },
-            Cell {
-                bx: blk_x(i),
-                by: blk_y(i),
-            },
-            &mut mb,
-            0,
-        )?;
-        let span = luma_span(my, false);
-        super::add_scaled(
-            &mut pic.y,
-            pic.w,
-            (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
-            &block,
-            (qp, qp_bypass::<S>(slice, qp)),
-            &slice.pps.weight4[3],
-            4,
-        );
+    } else {
+        for i in 0..16 {
+            let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
+            if luma_cbp & bit == 0 {
+                continue;
+            }
+            let block = read_block(
+                pic,
+                entropy,
+                (2, 16, false),
+                Place { mx, my },
+                Cell {
+                    bx: blk_x(i),
+                    by: blk_y(i),
+                },
+                &mut mb,
+                0,
+            )?;
+            let span = luma_span(my, false);
+            super::add_scaled(
+                &mut pic.y,
+                pic.w,
+                (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
+                &block,
+                (qp, qp_bypass::<S>(slice, qp)),
+                &slice.pps.weight4[3],
+                4,
+            );
+        }
     }
     let chroma = read_chroma(pic, entropy, mx, my, chroma_cbp, &mut mb)?;
     if chroma_cbp != 0 {

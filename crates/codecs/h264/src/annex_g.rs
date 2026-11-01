@@ -362,6 +362,28 @@ fn inter_view_prediction_uses_the_base_view() {
 }
 
 #[test]
+fn inter_layer_motion_adds_an_8x8_residual() {
+    let mut ordinary = open();
+    let idr = decode_with(&mut ordinary, &eight_idr());
+    assert!(painted(&idr, 150, 90));
+    let predicted = decode_with(&mut ordinary, &annex_b_nal(0, 1, &eight_p_slice()));
+    assert_ne!(planes_of(&predicted), planes_of(&idr));
+    assert_eq!(predicted.picture.y()[8 * 16], 150);
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = eight_idr();
+        annex.extend(annex_b_nal(0, 1, &eight_p_slice()));
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        assert_eq!(&raw[frame..], &planes_of(&predicted));
+    }
+    let mut layered = open();
+    let _ = decode_with(&mut layered, &eight_idr());
+    let picture = decode_with(&mut layered, &eight_layer());
+    assert_eq!(planes_of(&picture), planes_of(&predicted));
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -1756,6 +1778,147 @@ fn subset(profile: u8, restriction: bool, spatial: u32, vui: bool) -> Vec<u8> {
             w.trailing();
         }
     }
+    w.bytes
+}
+
+fn eight_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &high_subset()));
+    out.extend(annex_b_nal(3, 8, &pps_8x8()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(150, 90)));
+    out
+}
+
+fn eight_layer() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &eight_base_slice());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &eight_enhancement(),
+    ));
+    out
+}
+
+fn eight_p_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    eight_residual(&mut w);
+    w.trailing();
+    w.bytes
+}
+
+fn eight_base_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn eight_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    eight_residual(&mut w);
+    w.trailing();
+    w.bytes
+}
+
+fn eight_residual(w: &mut Writer) {
+    w.ue(2);
+    w.bit(true);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+}
+
+fn high_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(100, 8);
+    high_body(&mut w);
+    w.trailing();
+    w.bytes
+}
+
+fn high_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(86, 8);
+    high_body(&mut w);
+    w.bit(true);
+    w.bits(0, 2);
+    w.bit(false);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn high_body(w: &mut Writer) {
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+}
+
+fn pps_8x8() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bits(0, 2);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.trailing();
     w.bytes
 }
 

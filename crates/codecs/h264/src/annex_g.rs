@@ -921,11 +921,94 @@ fn a_3d_avc_header_is_an_intra_picture() {
         ),
         "{err:?}"
     );
-    let tool = parse_subset_sps(&three_d_subset(true)).expect_err("prediction");
-    assert!(matches!(tool, CodecError::Unsupported { what: "3d" }));
+    let tool = parse_subset_sps(&three_d_subset(true)).expect("prediction");
+    assert!(tool.header_prediction);
     let mut decoder = open();
     let _ = decode_with(&mut decoder, &annex);
     assert!(flat(&decode_with(&mut decoder, &base_idr())));
+}
+
+#[test]
+fn a_predicted_3d_header_copies_the_texture_slice() {
+    let texture = base_idr();
+    let depth = predicted_depth_annex();
+    let mut decoder = open();
+    let missing = decoder
+        .push(&Packet::video(depth.clone(), 0, 1, 30, false))
+        .expect_err("source");
+    assert!(
+        matches!(missing, CodecError::Malformed { what: "3d", .. }),
+        "{missing:?}"
+    );
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &texture);
+    pictures.extend(push_pictures(&mut decoder, &depth));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    assert!(flat(&pictures[0]));
+    assert!(copied_depth(&pictures[1]));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert_eq!(ffmpeg_bytes(&ffmpeg, &texture), paint(16, 128, 128));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &depth).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let mut inter = Writer::new();
+    inter.ue(0);
+    inter.ue(0);
+    inter.ue(0);
+    inter.trailing();
+    let err = decoder
+        .push(&Packet::video(
+            annex_b_extension(1, 21, &[0x80, 0x60], &inter.bytes),
+            0,
+            1,
+            30,
+            false,
+        ))
+        .expect_err("inter");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+}
+
+fn copied_depth(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let luma = y.chunks(16).all(|row| {
+        row[..8].iter().all(|sample| *sample == 40) && row[8..].iter().all(|sample| *sample == 220)
+    });
+    luma && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 50)
+}
+
+fn predicted_depth_annex() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(2, 2);
+    w.bits(2, 2);
+    w.se(0);
+    w.ue(25);
+    w.align_zeros();
+    for _row in 0..16 {
+        for col in 0..16 {
+            w.bytes.push(if col < 8 { 40 } else { 220 });
+        }
+    }
+    w.bytes.extend(std::iter::repeat_n(50, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    let mut out = annex_b_nal(3, 15, &three_d_subset(true));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0x42], &w.bytes));
+    out
 }
 
 #[test]
@@ -1392,13 +1475,11 @@ fn three_d_sequence(prediction: bool, near_exp: u32, far_exp: u32) -> Vec<u8> {
     w.bit(false);
     w.ue(0);
     w.bit(prediction);
-    if !prediction {
-        w.bit(false);
-        w.bit(false);
-        w.bit(false);
-        w.bit(false);
-        w.trailing();
-    }
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
     w.bytes
 }
 

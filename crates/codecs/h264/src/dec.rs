@@ -270,6 +270,8 @@ struct Sets {
     pps: Vec<Option<Pps>>,
     /// Depth parameter sets, NAL type 16. Index 0 stays empty.
     dps: Vec<Option<set::DepthSet>>,
+    /// First slice header of each view component, for 3D header prediction.
+    copies: Vec<HeaderCopy>,
 }
 
 impl Sets {
@@ -279,6 +281,7 @@ impl Sets {
             subset: vec![None; set::MAX_SPS],
             pps: vec![None; set::MAX_PPS],
             dps: vec![None; 64],
+            copies: Vec::new(),
         }
     }
 
@@ -579,7 +582,7 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
                 let mut bits = Bits::new(&nal.rbsp);
                 let header = read_header(
                     &mut bits,
-                    &sets,
+                    &mut sets,
                     nal.kind == 5 || slice_idr(class),
                     nal.ref_idc != 0,
                     class,
@@ -1896,6 +1899,10 @@ fn decode_slice<S: Sample>(
     if header.redundant > 0 {
         return Ok(false);
     }
+    if picture.is_none() {
+        let depth = matches!(slice_class(nal), SliceClass::ThreeD(three) if three.depth);
+        remember(sets, &header, depth);
+    }
     let Some(sps) = sets.sequence(header.sps_id, header.subset).cloned() else {
         return Err(bits.malformed("missing sps"));
     };
@@ -2279,7 +2286,7 @@ fn slice_idr(class: SliceClass) -> bool {
 
 fn read_header(
     bits: &mut Bits<'_>,
-    sets: &Sets,
+    sets: &mut Sets,
     idr: bool,
     nal_ref: bool,
     class: SliceClass,
@@ -2319,6 +2326,24 @@ fn read_header(
     ) else {
         return Err(bits.malformed("missing sps"));
     };
+    if let Some(three) = three
+        && sps.header_prediction
+    {
+        return predicted_header(
+            bits,
+            sets,
+            sps,
+            &pps,
+            three,
+            PredictedIds {
+                first_mb,
+                kind,
+                pps_id,
+                idr,
+                nal_ref,
+            },
+        );
+    }
     let restriction = sps.slice_header_restriction;
     let base_quality = svc.is_none_or(|svc| svc.quality_id == 0);
     let mut colour_plane = 0u8;
@@ -2638,7 +2663,7 @@ fn read_header(
             }
         }
     }
-    Ok(Header {
+    let header = Header {
         first_mb,
         pps_id: pps_id as u8,
         sps_id: pps.sps_id,
@@ -2690,7 +2715,213 @@ fn read_header(
         depth_weight,
         dps_id,
         scale: layer.scale,
-    })
+    };
+    Ok(header)
+}
+
+struct PredictedIds {
+    first_mb: usize,
+    kind: u8,
+    pps_id: u32,
+    idr: bool,
+    nal_ref: bool,
+}
+
+/// Slice-header fields `pre_slice_header_src` copies. `remember` runs for the
+/// first slice of a picture, so that slice is the source.
+#[derive(Clone)]
+struct HeaderCopy {
+    view_id: u16,
+    depth: bool,
+    colour_plane: u8,
+    frame_num: u32,
+    field: bool,
+    bottom: bool,
+    poc_lsb: i32,
+    delta_poc: [i32; 2],
+    redundant: u32,
+    spatial_direct: bool,
+    cabac_init: u8,
+    sp_switch: bool,
+    qs: i32,
+    deblock: u8,
+    off_a: i32,
+    off_b: i32,
+    group_cycle: u32,
+    depth_weight: bool,
+    dps_id: u8,
+    no_output_prior: bool,
+    long_term_ref: bool,
+    adaptive: bool,
+    mmco: Vec<Mark>,
+}
+
+fn remember(sets: &mut Sets, header: &Header, depth: bool) {
+    let copy = HeaderCopy {
+        view_id: header.view_id,
+        depth,
+        colour_plane: header.colour_plane,
+        frame_num: header.frame_num,
+        field: header.field,
+        bottom: header.bottom,
+        poc_lsb: header.poc_lsb,
+        delta_poc: header.delta_poc,
+        redundant: header.redundant,
+        spatial_direct: header.spatial_direct,
+        cabac_init: header.cabac_init,
+        sp_switch: header.sp_switch,
+        qs: header.qs,
+        deblock: header.deblock,
+        off_a: header.off_a,
+        off_b: header.off_b,
+        group_cycle: header.group_cycle,
+        depth_weight: header.depth_weight,
+        dps_id: header.dps_id,
+        no_output_prior: header.no_output_prior,
+        long_term_ref: header.long_term_ref,
+        adaptive: header.adaptive,
+        mmco: header.mmco.clone(),
+    };
+    if let Some(slot) = sets
+        .copies
+        .iter_mut()
+        .find(|item| item.view_id == copy.view_id && item.depth == copy.depth)
+    {
+        *slot = copy;
+    } else {
+        sets.copies.push(copy);
+    }
+}
+
+/// `slice_header_in_3davc_extension` when `slice_header_prediction_flag` is 1.
+/// An intra depth slice copies the texture slice of the same view. Inter
+/// slices and the other sources stay refused.
+fn predicted_header(
+    bits: &mut Bits<'_>,
+    sets: &Sets,
+    sps: &Sps,
+    pps: &Pps,
+    three: nal::ThreeDHeader,
+    ids: PredictedIds,
+) -> Result<Header, CodecError> {
+    if !intra_slice(ids.kind) || !three.depth {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let src = bits.u(2)?;
+    if src == 0 {
+        return Err(bits.malformed("3d"));
+    }
+    if src != 2 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let index = usize::from(three.view_idx);
+    let Some(view_id) = sps.views.get(index).copied() else {
+        return Err(bits.malformed("view id"));
+    };
+    let depth_view = sps.depth_views.get(index).copied().unwrap_or(false);
+    if !depth_view {
+        return Err(bits.malformed("view id"));
+    }
+    let mut copied_marking = true;
+    let mut no_output = false;
+    let mut long_term = false;
+    if ids.nal_ref {
+        let marking = bits.u(2)?;
+        if marking == 0 {
+            copied_marking = false;
+            if ids.idr {
+                no_output = bits.bit()?;
+                long_term = bits.bit()?;
+            } else if bits.bit()? {
+                return Err(CodecError::Unsupported { what: "3d" });
+            }
+        } else if marking != 2 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+    }
+    let qp = pps.init_qp + bits.se()?;
+    let qp_bd = 6 * i32::from(sps.bit_depth.saturating_sub(8));
+    if !(-qp_bd..=51).contains(&qp) {
+        return Err(bits.malformed("slice qp"));
+    }
+    let Some(source) = sets
+        .copies
+        .iter()
+        .find(|item| item.view_id == view_id && !item.depth)
+        .cloned()
+    else {
+        return Err(bits.malformed("3d"));
+    };
+    let header = Header {
+        first_mb: ids.first_mb,
+        pps_id: ids.pps_id as u8,
+        sps_id: pps.sps_id,
+        kind: ids.kind,
+        colour_plane: source.colour_plane,
+        field: source.field,
+        bottom: source.bottom,
+        frame_num: source.frame_num,
+        poc_lsb: source.poc_lsb,
+        delta_poc: source.delta_poc,
+        qp,
+        deblock: source.deblock,
+        off_a: source.off_a,
+        off_b: source.off_b,
+        cabac_init: source.cabac_init,
+        spatial_direct: source.spatial_direct,
+        num_ref_l0: 0,
+        num_ref_l1: 0,
+        nal_ref: ids.nal_ref,
+        redundant: source.redundant,
+        no_output_prior: if copied_marking {
+            source.no_output_prior
+        } else {
+            no_output
+        },
+        long_term_ref: if copied_marking {
+            source.long_term_ref
+        } else {
+            long_term
+        },
+        adaptive: if copied_marking {
+            source.adaptive
+        } else {
+            false
+        },
+        mmco: if copied_marking {
+            source.mmco
+        } else {
+            Vec::new()
+        },
+        ref_mod_l0: Vec::new(),
+        ref_mod_l1: Vec::new(),
+        weights: false,
+        luma_denom: 0,
+        chroma_denom: 0,
+        yw: [[0; 32]; 2],
+        yo: [[0; 32]; 2],
+        cw: [[[0; 2]; 32]; 2],
+        co: [[[0; 2]; 32]; 2],
+        group_cycle: source.group_cycle,
+        sp_switch: source.sp_switch,
+        qs: source.qs,
+        subset: true,
+        output: true,
+        base_mode: false,
+        adaptive_base: false,
+        adaptive_motion: false,
+        motion_pred: false,
+        residual_pred: false,
+        adaptive_residual: false,
+        view_id,
+        inter_view: three.inter_view,
+        interview_l0: Vec::new(),
+        interview_l1: Vec::new(),
+        depth_weight: source.depth_weight,
+        dps_id: source.dps_id,
+        scale: sps.svc_scale.clone(),
+    };
+    Ok(header)
 }
 
 struct InterLayer {
@@ -3844,6 +4075,7 @@ mod tests {
             acquisition: 0,
             depth_near: Vec::new(),
             depth_far: Vec::new(),
+            header_prediction: false,
             interview: Vec::new(),
         }
     }

@@ -100,6 +100,8 @@ pub struct Sps {
     pub depth_near: Vec<i32>,
     /// `ZFar` for each depth view, in acquisition order.
     pub depth_far: Vec<i32>,
+    /// `slice_header_prediction_flag`. A 3D slice copies header fields.
+    pub header_prediction: bool,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
@@ -541,6 +543,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut acquisition = 0u8;
     let mut depth_near = Vec::new();
     let mut depth_far = Vec::new();
+    let mut header_prediction = false;
     let mut texture_views = Vec::new();
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
@@ -576,6 +579,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         acquisition = axis.acquisition;
         depth_near = axis.near;
         depth_far = axis.far;
+        header_prediction = axis.header_prediction;
         avc_3d = true;
         texture_views = mvcd.texture_views;
         let views = mvcd.views;
@@ -657,6 +661,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         acquisition,
         depth_near,
         depth_far,
+        header_prediction,
         interview,
     };
     if !sps.within_level() {
@@ -871,10 +876,11 @@ struct DepthAxis {
     acquisition: u8,
     near: Vec<i32>,
     far: Vec<i32>,
+    header_prediction: bool,
 }
 
-/// `seq_parameter_set_3davc_extension`. Header prediction and the other tools
-/// stay refused. Acquisition 1 and 2 store integer depth ranges.
+/// `seq_parameter_set_3davc_extension`. `slice_header_prediction_flag` is stored.
+/// The other tools stay refused. Acquisition 1 and 2 store integer depth ranges.
 fn three_d_extension(
     bits: &mut Bits<'_>,
     views: &[u16],
@@ -890,6 +896,7 @@ fn three_d_extension(
         acquisition: 0,
         near: Vec::new(),
         far: Vec::new(),
+        header_prediction: false,
     };
     if !depth_ids.is_empty() {
         let acquisition = bits.ue()?;
@@ -909,7 +916,11 @@ fn three_d_extension(
             axis.near = near;
             axis.far = far;
         }
-        if bits.bit()? || bits.bit()? || bits.ue()? != 0 || bits.bit()? || bits.bit()? {
+        if bits.bit()? || bits.bit()? || bits.ue()? != 0 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        axis.header_prediction = bits.bit()?;
+        if bits.bit()? {
             return Err(CodecError::Unsupported { what: "3d" });
         }
     }

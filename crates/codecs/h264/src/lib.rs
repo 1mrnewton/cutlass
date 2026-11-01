@@ -24,7 +24,8 @@
 //! Macroblock-level spatial scalability reads that crop from the slice.
 //! An intra 3D-AVC picture is reconstructed. A predicted depth picture copies
 //! its reference when `depth_weighted_pred_flag` is 0. A different depth range
-//! scales that luma. Header prediction and the other 3D tools stay refused.
+//! scales that luma. An intra depth slice can copy its header from the texture
+//! slice. The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

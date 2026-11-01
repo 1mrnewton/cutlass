@@ -117,6 +117,11 @@ pub struct RefView<'a, S: Pix = u8> {
 pub struct MotionGrid<'a> {
     pub cols: usize,
     pub rows: usize,
+    /// Spatial candidates stay inside the tile. A neighbor in another tile is unavailable.
+    pub tile_row: usize,
+    pub tile_col: usize,
+    pub tile_row_end: usize,
+    pub tile_col_end: usize,
     pub inter: &'a [u8],
     pub refs: &'a [i8],
     pub refs1: &'a [i8],
@@ -896,7 +901,12 @@ impl Search {
 
 impl MotionGrid<'_> {
     fn inside(&self, row: i32, col: i32) -> bool {
-        row >= 0 && col >= 0 && (row as usize) < self.rows && (col as usize) < self.cols
+        row >= self.tile_row as i32
+            && col >= self.tile_col as i32
+            && (row as usize) < self.tile_row_end
+            && (col as usize) < self.tile_col_end
+            && (row as usize) < self.rows
+            && (col as usize) < self.cols
     }
 
     fn index(&self, row: i32, col: i32) -> usize {

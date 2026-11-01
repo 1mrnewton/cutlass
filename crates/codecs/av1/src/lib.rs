@@ -28,8 +28,11 @@
 //! single-reference block may blend intra through a luma wedge. A frame
 //! may replace a loop-filter reference or mode delta, and a later frame keeps it.
 //! A superblock may add its own loop-filter delta. A sequence may use a
-//! 128×128 superblock. A switch frame is predicted as an inter frame and
-//! refreshes every reference slot. A reserved OBU is skipped. An OBU with no
+//! 128×128 superblock. A 3840×2160 inter frame on that superblock reads a
+//! quantizer delta for a skipped block smaller than the superblock, and a
+//! motion candidate or a warp sample in another tile is unavailable. A switch
+//! frame is predicted as an inter frame and refreshes every reference slot.
+//! A reserved OBU is skipped. An OBU with no
 //! size field runs to the end of the packet. A frame header may be followed by
 //! tile groups. A large-scale tile list copies tiles from the eight stored
 //! references and does not refresh them. Film grain may be copied from a

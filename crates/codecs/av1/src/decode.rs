@@ -6922,6 +6922,42 @@ mod tests {
         out
     }
 
+    #[test]
+    fn tiled_128_inter_matches_dav1d() {
+        // 3840×2160, 128×128 superblocks, an 8×4 uniform tile grid. A skipped
+        // 64×64 inside a 128×128 superblock still reads the quantizer delta.
+        // Skipping that symbol desynchronizes the tile. Motion candidates and
+        // warp samples from the next tile are unavailable. Counting either one
+        // changes a later symbol and the shown picture. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/sb128-tiles.ivf"));
+        assert_eq!(frames.len(), 3);
+        let expected = [
+            0x8200_f621_e97e_d218,
+            0x0575_05f3_8604_582f,
+            0x4976_250c_815a_0b21,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 3840, 2160);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.use_128);
+            assert_eq!(frame.tile_cols, 8);
+            assert_eq!(frame.tile_rows, 4);
+            if index == 2 {
+                assert!(!frame.intra);
+                assert!(frame.allow_warped);
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 3840 * 2160 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
     fn reserved_obu(kind: u8, payload: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(2 + payload.len());
         bytes.push((kind << 3) | 0x02);

@@ -1876,6 +1876,10 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             &MotionGrid {
                 cols: self.mi_cols,
                 rows: self.mi_rows,
+                tile_row: self.tile_row,
+                tile_col: self.tile_col,
+                tile_row_end: self.tile_row_end,
+                tile_col_end: self.tile_col_end,
                 inter: &self.inter_flag,
                 refs: &self.block_ref,
                 refs1: &self.block_ref1,
@@ -2953,10 +2957,12 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         }
         let mv_row = query.row as isize + delta_row;
         let mv_col = query.col as isize + delta_col;
-        if mv_row < 0
-            || mv_col < 0
-            || mv_row >= self.mi_rows as isize
-            || mv_col >= self.mi_cols as isize
+        // A neighbor in another tile is unavailable, including the corner above
+        // a tile's top edge.
+        if mv_row < self.tile_row as isize
+            || mv_col < self.tile_col as isize
+            || mv_row >= self.tile_row_end as isize
+            || mv_col >= self.tile_col_end as isize
         {
             return;
         }
@@ -4171,10 +4177,11 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
     }
 
     /// Superblock quantizer delta, then the loop-filter delta when the frame has one.
-    /// The first coded block of the superblock reads them. A skipped 64×64 block
-    /// leaves the running values unchanged.
+    /// The first coded block of the superblock reads them. A skipped block the size of
+    /// the superblock leaves the running values unchanged. A smaller skipped block,
+    /// including a 64×64 inside a 128×128 superblock, still reads the delta.
     fn read_quantizer_delta(&mut self, bsize: usize, skip: bool) -> Result<(), CodecError> {
-        let full_superblock = bsize == 12 || bsize == BLOCK_128X128;
+        let full_superblock = NUM_4X4_WIDE[bsize] == self.sb4 && NUM_4X4_HIGH[bsize] == self.sb4;
         if self.read_deltas && !(full_superblock && skip) {
             let reduced = read_coded_delta(
                 &mut self.symbols,
@@ -4242,6 +4249,10 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             &MotionGrid {
                 cols: self.mi_cols,
                 rows: self.mi_rows,
+                tile_row: self.tile_row,
+                tile_col: self.tile_col,
+                tile_row_end: self.tile_row_end,
+                tile_col_end: self.tile_col_end,
                 inter: &self.inter_flag,
                 refs: &self.block_ref,
                 refs1: &self.block_ref1,

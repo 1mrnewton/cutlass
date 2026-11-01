@@ -465,6 +465,58 @@ fn uhd_3840x2160_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Four tile columns and two tile rows. Level 1 streams are one column, so they
+/// do not exercise this path.
+#[test]
+fn tiled_picture_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no tile source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("tiles");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &[
+            "-frames:v",
+            "4",
+            "-vf",
+            "scale=1024:256",
+            "-tile-columns",
+            "2",
+            "-tile-rows",
+            "1",
+            "-threads",
+            "1",
+        ],
+    );
+    let stream = read_ivf(&ivf);
+    assert!(stream.frames.len() > 1, "tiles need an inter frame");
+    let parsed = crate::header::parse(&crate::header::Persist::new(), &stream.frames[0])
+        .expect("keyframe header");
+    assert_eq!(parsed.header.log2_tile_cols, 2, "tile columns");
+    assert_eq!(parsed.header.log2_tile_rows, 1, "tile rows");
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "tiles 4x2 {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
     let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");

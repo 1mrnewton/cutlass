@@ -63,6 +63,7 @@ Recorded line:
 | Side above 16832, or luma area above 35,651,584 | Error `Limit` | Error `Limit` above 4096 | `open_rejects_the_sizes_and_formats_outside_profile_0`, `level_width_above_4096_matches_ffmpeg_software` | Verified |
 | Official level 1 streams, all six tests, profile 0 and profile 2 | Pictures match at the coded size | n/a | `official_level_stream_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files/vp9-levels` is missing. |
 | 3840×2160 profile 0 | Pictures match | n/a | `uhd_3840x2160_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no 3840×2160 source. |
+| Four tile columns and two tile rows | Pictures match | One tile | `tiled_picture_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |
 | libvpx-vp9, native vp9, and GStreamer vp9dec decode our bitstreams | n/a | All three | `independent_decoders_match_our_yuv` | Verified on this machine |

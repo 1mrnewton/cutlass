@@ -10,7 +10,10 @@
 //! is in that oriented picture, from the top left, with Y down. An all-zero
 //! quad is the whole picture. `crop_ratio` is not read. `crop_scale` above 1
 //! shrinks the quad around its center. Alpha, rotation, position, and scale
-//! keyframes are straight lines measured from the segment start.
+//! keyframes are measured from the segment start. A line, an empty curve,
+//! `none`, and an unknown curve stay straight and ignore their handles. Any
+//! other curve is a cubic through the earlier key's right handle and the
+//! later key's left handle. A graph id is not sampled.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
@@ -19,8 +22,8 @@ use std::collections::HashMap;
 
 use cutlass_engine::{ClockKind, DisplayQuarter, ReaderFactory, VideoSource, open_segment};
 use cutlass_model::{
-    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, MaterialRef, Micros, Segment, SegmentId,
-    TrackAttribute, UniformScale,
+    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialRef, Micros, Segment,
+    SegmentId, TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
@@ -286,12 +289,16 @@ pub(crate) fn video_layers<'a>(
     layers
 }
 
-/// The clip at `time`, with line keyframes measured from the segment start.
+/// The clip at `time`, with keyframes measured from the segment start.
 ///
 /// A key before the first sample holds that sample. A key after the last
-/// holds the last. The same offset keeps the later key. A curve type other
-/// than a straight line is still sampled as a straight line. A non-finite
-/// sample refuses the clip. `KFTypeScale` drives both axes through uniform
+/// holds the last. The same offset keeps the later key. A line, an empty
+/// curve, `none`, and an unknown curve are a straight line, and their handles
+/// are ignored. Any other curve is a cubic. The earlier key's right handle
+/// and the later key's left handle are offsets from those samples. The sample
+/// solves that cubic in time, and stops when the time error is under a
+/// thousandth of the span. A handle that is not finite refuses the clip. A
+/// graph id is not sampled. `KFTypeScale` drives both axes through uniform
 /// scale when that switch is on, and through `clip.scale` when it is off.
 /// `KFTypeScaleX` and `KFTypeScaleY` replace one axis only while uniform
 /// scale is off.
@@ -331,6 +338,18 @@ pub(crate) fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, Uni
     Some((clip, uniform))
 }
 
+#[derive(Clone)]
+struct KeySample {
+    time: i64,
+    value: f64,
+    order: usize,
+    bends: bool,
+    left_x: f64,
+    left_y: f64,
+    right_x: f64,
+    right_y: f64,
+}
+
 fn line_at(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Option<Option<f64>> {
     let mut keys = Vec::new();
     for group in groups {
@@ -344,48 +363,175 @@ fn line_at(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Optio
             if !value.is_finite() {
                 return None;
             }
-            keys.push((key.time_offset.0, value, keys.len()));
+            let bends = bends(&key.curve_type);
+            if bends
+                && !(key.left_control.x.is_finite()
+                    && key.left_control.y.is_finite()
+                    && key.right_control.x.is_finite()
+                    && key.right_control.y.is_finite())
+            {
+                return None;
+            }
+            let (left_x, left_y, right_x, right_y) = if bends {
+                (
+                    key.left_control.x,
+                    key.left_control.y,
+                    key.right_control.x,
+                    key.right_control.y,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+            keys.push(KeySample {
+                time: key.time_offset.0,
+                value,
+                order: keys.len(),
+                bends,
+                left_x,
+                left_y,
+                right_x,
+                right_y,
+            });
         }
     }
-    Some(straight_line(&mut keys, offset))
+    Some(sample_keys(&mut keys, offset))
 }
 
-fn straight_line(keys: &mut [(i64, f64, usize)], at: i64) -> Option<f64> {
+fn bends(curve_type: &str) -> bool {
+    match KeyframeCurve::parse(curve_type) {
+        Some(
+            KeyframeCurve::CurveOut
+            | KeyframeCurve::CurveIn
+            | KeyframeCurve::CurveInOut
+            | KeyframeCurve::FreeCurveIn
+            | KeyframeCurve::FreeCurveOut
+            | KeyframeCurve::FreeCurveInOut,
+        ) => true,
+        Some(KeyframeCurve::Line | KeyframeCurve::None) | None => false,
+    }
+}
+
+fn sample_keys(keys: &mut [KeySample], at: i64) -> Option<f64> {
     if keys.is_empty() {
         return None;
     }
-    keys.sort_by(|left, right| left.0.cmp(&right.0).then(left.2.cmp(&right.2)));
-    let mut collapsed: Vec<(i64, f64)> = Vec::new();
-    for (time, value, _) in keys.iter().copied() {
+    keys.sort_by(|left, right| {
+        left.time
+            .cmp(&right.time)
+            .then(left.order.cmp(&right.order))
+    });
+    let mut collapsed: Vec<KeySample> = Vec::new();
+    for key in keys.iter().cloned() {
         if let Some(last) = collapsed.last_mut()
-            && last.0 == time
+            && last.time == key.time
         {
-            last.1 = value;
+            *last = key;
             continue;
         }
-        collapsed.push((time, value));
+        collapsed.push(key);
     }
-    let (first_time, first) = collapsed.first().copied()?;
-    if at <= first_time {
-        return Some(first);
+    let first = collapsed.first()?;
+    if at <= first.time {
+        return Some(first.value);
     }
-    let (last_time, last) = collapsed.last().copied()?;
-    if at >= last_time {
-        return Some(last);
+    let last = collapsed.last()?;
+    if at >= last.time {
+        return Some(last.value);
     }
     for pair in collapsed.windows(2) {
-        let (left_time, left) = pair[0];
-        let (right_time, right) = pair[1];
-        if at >= left_time && at <= right_time {
-            let span = (right_time - left_time) as f64;
-            if span == 0.0 {
-                return Some(right);
-            }
-            let t = (at - left_time) as f64 / span;
-            return Some(left + (right - left) * t);
+        if at >= pair[0].time && at <= pair[1].time {
+            return Some(blend(&pair[0], &pair[1], at));
         }
     }
-    Some(last)
+    Some(last.value)
+}
+
+fn blend(left: &KeySample, right: &KeySample, at: i64) -> f64 {
+    let span = (right.time - left.time) as f64;
+    if span == 0.0 {
+        return right.value;
+    }
+    let along = (at - left.time) as f64 / span;
+    let linear = left.value + (right.value - left.value) * along;
+    if !left.bends && !right.bends {
+        return linear;
+    }
+    let t = parameter(left.right_x / span, 1.0 + right.left_x / span, along);
+    let curved = bezier(
+        left.value,
+        left.value + left.right_y,
+        right.value + right.left_y,
+        right.value,
+        t,
+    );
+    if curved.is_finite() { curved } else { linear }
+}
+
+/// Cubic parameter whose horizontal bezier equals `along`.
+///
+/// Eight Newton steps from `along`, then bisection. A step whose time error
+/// is under a thousandth of the span is kept. A query on either sample
+/// returns that end.
+fn parameter(cx1: f64, cx2: f64, along: f64) -> f64 {
+    if along < 1e-6 {
+        return 0.0;
+    }
+    if along > 1.0 || (1.0 - along) < 1e-6 {
+        return 1.0;
+    }
+    let mut t = along;
+    for _ in 0..8 {
+        let x = horizontal(cx1, cx2, t);
+        if (x - along).abs() < 1e-3 {
+            return t;
+        }
+        let slope = horizontal_slope(cx1, cx2, t);
+        if slope.abs() < 1e-6 {
+            break;
+        }
+        t = (t - (x - along) / slope).clamp(0.0, 1.0);
+    }
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..64 {
+        if low >= high || (high - low) <= 1e-6 {
+            return t.min(1.0);
+        }
+        let mid = low + (high - low) * 0.5;
+        let x = horizontal(cx1, cx2, mid);
+        if x < along {
+            low = mid;
+        } else {
+            high = mid;
+        }
+        if (x - along).abs() < 1e-3 {
+            return mid;
+        }
+    }
+    t.min(1.0)
+}
+
+fn horizontal(cx1: f64, cx2: f64, t: f64) -> f64 {
+    let (cubic, square, linear) = horizontal_terms(cx1, cx2);
+    ((cubic * t + square) * t + linear) * t
+}
+
+fn horizontal_slope(cx1: f64, cx2: f64, t: f64) -> f64 {
+    let (cubic, square, linear) = horizontal_terms(cx1, cx2);
+    (3.0 * cubic * t + 2.0 * square) * t + linear
+}
+
+fn horizontal_terms(cx1: f64, cx2: f64) -> (f64, f64, f64) {
+    (
+        3.0 * cx1 - 3.0 * cx2 + 1.0,
+        3.0 * cx2 - 6.0 * cx1,
+        3.0 * cx1,
+    )
+}
+
+fn bezier(y0: f64, y1: f64, y2: f64, y3: f64, t: f64) -> f64 {
+    let rest = 1.0 - t;
+    rest * rest * rest * y0 + 3.0 * rest * rest * t * y1 + 3.0 * rest * t * t * y2 + t * t * t * y3
 }
 
 fn covers(start: i64, duration: i64, time: i64) -> bool {
@@ -1376,6 +1522,72 @@ mod tests {
         let picture = CpuBytes::new(3, 1, vec![1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255]).unwrap();
         let rgba = paint(3, 3, picture, turned, uniform);
         assert_eq!([rgba[4], rgba[16], rgba[28]], [3, 2, 1]);
+    }
+
+    #[test]
+    fn curve_keyframes_follow_the_handles() {
+        let mut raised = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        raised.keyframe_list[0].curve_type = "CurveOut".to_owned();
+        raised.keyframe_list[0].right_control.y = 1.0;
+        let segment = keyed(0, vec![raised.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.875).abs() < 1e-12);
+        raised.keyframe_list[0].right_control.y = 2.0;
+        let segment = keyed(0, vec![raised.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 1.25).abs() < 1e-12);
+        raised.keyframe_list[0].right_control.y = 1.0;
+        let segment = keyed(0, vec![raised.clone()]);
+        let (held, _) = segment_clip(&segment, Micros(0)).expect("clip");
+        assert_eq!(held.alpha, 0.0);
+        let (end, _) = segment_clip(&segment, Micros(5_000)).expect("clip");
+        assert_eq!(end.alpha, 1.0);
+
+        raised.keyframe_list[0].curve_type = "FreeCurveInOut".to_owned();
+        raised.keyframe_list[0].graph_id = "missing".to_owned();
+        let segment = keyed(0, vec![raised]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.875).abs() < 1e-12);
+
+        let mut straight = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        straight.keyframe_list[0].right_control.y = 1.0;
+        straight.keyframe_list[0].curve_type = "Ease".to_owned();
+        let segment = keyed(0, vec![straight.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-12);
+        straight.keyframe_list[0].curve_type = "none".to_owned();
+        straight.keyframe_list[0].right_control.y = f64::NAN;
+        let segment = keyed(0, vec![straight]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-12);
+
+        let mut eased = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        eased.keyframe_list[0].curve_type = "CurveInOut".to_owned();
+        eased.keyframe_list[0].right_control.x = 400.0;
+        eased.keyframe_list[1].curve_type = "CurveInOut".to_owned();
+        eased.keyframe_list[1].left_control.x = -400.0;
+        let segment = keyed(0, vec![eased]);
+        let (quarter, _) = segment_clip(&segment, Micros(250)).expect("clip");
+        assert!((quarter.alpha - 0.13518434228493398).abs() < 1e-12);
+        let (three, _) = segment_clip(&segment, Micros(750)).expect("clip");
+        assert!((three.alpha - 0.864_815_657_715_066).abs() < 1e-12);
+
+        let mut replaced = line("KFTypeAlpha", &[(0, 0.0), (0, 0.0), (1_000, 1.0)]);
+        replaced.keyframe_list[0].curve_type = "CurveOut".to_owned();
+        replaced.keyframe_list[0].right_control.y = 1.0;
+        let segment = keyed(0, vec![replaced.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-12);
+        replaced.keyframe_list[1].curve_type = "CurveOut".to_owned();
+        replaced.keyframe_list[1].right_control.y = 1.0;
+        let segment = keyed(0, vec![replaced]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.875).abs() < 1e-12);
+
+        let mut broken = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        broken.keyframe_list[0].curve_type = "CurveIn".to_owned();
+        broken.keyframe_list[0].right_control.x = f64::INFINITY;
+        assert!(segment_clip(&keyed(0, vec![broken]), Micros(500)).is_none());
     }
 
     #[test]

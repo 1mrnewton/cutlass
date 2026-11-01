@@ -190,6 +190,10 @@ impl Shell {
     pub fn new(decoders: DecodeFactory, encoders: EncodeFactory, mut settings: Settings) -> Self {
         ensure_shortcut(&mut settings, "undo", "primary+z");
         ensure_shortcut(&mut settings, "redo", "primary+shift+z");
+        ensure_shortcut(&mut settings, "play", "space");
+        ensure_shortcut(&mut settings, "frame_back", "left");
+        ensure_shortcut(&mut settings, "frame_forward", "right");
+        ensure_shortcut(&mut settings, "delete", "delete");
         Self {
             decoders,
             encoders,
@@ -502,9 +506,13 @@ impl Shell {
     }
 
     pub fn play(&mut self) {
-        if self.cut_duration().0 <= 0 {
+        let end = self.cut_duration().0;
+        if end <= 0 {
             self.playing = false;
             return;
+        }
+        if self.playhead.0 >= end {
+            self.playhead = Micros(0);
         }
         self.playing = true;
         self.queue_preview(PLAY_FRAMES);
@@ -513,6 +521,28 @@ impl Shell {
     pub fn pause(&mut self) {
         self.playing = false;
         self.output.queue(&[]);
+    }
+
+    pub fn toggle_play(&mut self) {
+        if self.playing {
+            self.pause();
+        } else {
+            self.play();
+        }
+    }
+
+    /// Move to another frame. A positive count goes forward.
+    pub fn step_frame(&mut self, frames: i64) -> Result<(), ShellError> {
+        let rate = self
+            .draft()
+            .and_then(Draft::frame_rate)
+            .unwrap_or(FrameRate::FPS_30);
+        let index = rate.frame_index(self.playhead).unwrap_or(0);
+        let next = index.saturating_add(frames).max(0);
+        let time = rate.frame_start(next).ok_or(ShellError::Zoom)?;
+        let end = self.cut_duration().0.max(0);
+        self.seek(Micros(time.0.min(end)));
+        Ok(())
     }
 
     pub fn scrub(&mut self, time: Micros) -> Result<Picture, ShellError> {
@@ -614,6 +644,18 @@ impl Shell {
         match action.as_deref() {
             Some("undo") => self.undo(),
             Some("redo") => self.redo(),
+            Some("play") => {
+                self.toggle_play();
+                Ok(())
+            }
+            Some("frame_back") => self.step_frame(-1),
+            Some("frame_forward") => self.step_frame(1),
+            Some("delete") => {
+                if self.selected.is_none() {
+                    return Ok(());
+                }
+                self.remove_selected()
+            }
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -841,7 +883,13 @@ impl Shell {
     pub fn remove_selected(&mut self) -> Result<(), ShellError> {
         let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::Remove { segment_id })
+        self.apply(Request::Remove {
+            segment_id: segment_id.clone(),
+        })?;
+        if self.selected.as_ref() == Some(&segment_id) {
+            self.selected = None;
+        }
+        Ok(())
     }
 
     pub fn split_selected(&mut self) -> Result<(), ShellError> {
@@ -1418,8 +1466,8 @@ mod tests {
     };
     use cutlass_eval::ReaderFactory;
     use cutlass_model::{
-        Draft, MaterialAudio, MaterialColorConfig, MaterialId, MaterialVideo, Micros, Segment,
-        SegmentId, TimeRange, Track, TrackAttribute, TrackType,
+        Draft, FrameRate, MaterialAudio, MaterialColorConfig, MaterialId, MaterialVideo, Micros,
+        Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
     use cutlass_playback::AudioHost;
     use cutlass_session::EditError;
@@ -2030,6 +2078,48 @@ mod tests {
         desktop.advance(1_000_000);
         assert!(!desktop.playing());
         assert_eq!(desktop.playhead(), Micros(0));
+    }
+
+    #[test]
+    fn play_at_the_end_starts_again_from_zero() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(1_000_000));
+        desktop.play();
+        assert!(desktop.playing());
+        assert_eq!(desktop.playhead(), Micros(0));
+        desktop.advance(1_000_000);
+        assert!(!desktop.playing());
+        assert_eq!(desktop.playhead(), Micros(1_000_000));
+    }
+
+    #[test]
+    fn space_toggles_play_and_the_arrows_step_one_frame() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.run_shortcut("space").unwrap();
+        assert!(desktop.playing());
+        desktop.run_shortcut("space").unwrap();
+        assert!(!desktop.playing());
+        desktop.run_shortcut("right").unwrap();
+        let frame = FrameRate::FPS_30.frame_start(1).unwrap();
+        assert_eq!(desktop.playhead(), frame);
+        desktop.run_shortcut("left").unwrap();
+        assert_eq!(desktop.playhead(), Micros(0));
+        desktop.run_shortcut("left").unwrap();
+        assert_eq!(desktop.playhead(), Micros(0));
+        desktop.seek(Micros(1_000_000));
+        desktop.run_shortcut("right").unwrap();
+        assert_eq!(desktop.playhead(), Micros(1_000_000));
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        desktop.select(Some(id));
+        desktop.run_shortcut("delete").unwrap();
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+        desktop.run_shortcut("delete").unwrap();
     }
 
     #[test]

@@ -182,6 +182,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             export_dialog(shell, ui, view, parent);
         }
         shortcuts(shell, ui);
+        if shell.playing() {
+            ui.ctx().request_repaint();
+        }
     }
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
@@ -1340,9 +1343,9 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let ruler_hit = ui.interact(
         lane_ruler(ruler, lanes_left),
         ui.scope_id().with("ruler"),
-        Sense::click(),
+        Sense::click_and_drag(),
     );
-    if ruler_hit.clicked()
+    if (ruler_hit.clicked() || ruler_hit.dragged())
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
     {
         let x = f64::from(pointer.x - lanes_left).max(0.0);
@@ -2034,6 +2037,9 @@ fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
 }
 
 fn shortcuts(shell: &mut Shell, ui: &Ui) {
+    if ui.ctx().text_edit_focused() {
+        return;
+    }
     if let Some(chord) = ui.input(pressed_chord)
         && let Err(error) = shell.run_shortcut(&chord)
         && !error.to_string().contains("not available")
@@ -2050,8 +2056,17 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
     let name = match key {
         egui::Key::Z => "z",
         egui::Key::Y => "y",
+        egui::Key::Space => "space",
+        egui::Key::ArrowLeft => "left",
+        egui::Key::ArrowRight => "right",
+        egui::Key::Delete | egui::Key::Backspace => "delete",
         _ => return None,
     };
+    if matches!(name, "space" | "left" | "right" | "delete")
+        && (input.modifiers.command || input.modifiers.alt || input.modifiers.shift)
+    {
+        return None;
+    }
     let mut parts = Vec::new();
     if input.modifiers.command {
         parts.push("primary");
@@ -2535,6 +2550,149 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn pressing_play_keeps_the_window_awake_and_space_pauses() {
+        let temp = std::env::temp_dir().join(format!("cutlass-play-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "segment",
+            "color",
+            cutlass_model::TimeRange::new(0, 1_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let play = Pos2::new(674.0, 348.0);
+        let pointer = |pressed: bool| egui::Event::PointerButton {
+            pos: play,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::PointerMoved(play),
+                    pointer(true),
+                    pointer(false),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.playing(), "the play control did not start");
+        assert!(ctx.has_requested_repaint());
+        let mut last = Some(0.0);
+        crate::window::advance_if_playing(&mut shell, &mut last, 0.05);
+        assert_eq!(shell.playhead(), Micros(50_000));
+        assert!(shell.playing());
+        let key = |pressed: bool| egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![key(true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(!shell.playing());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn dragging_the_ruler_moves_the_playhead() {
+        let temp = std::env::temp_dir().join(format!("cutlass-scrub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "segment",
+            "color",
+            cutlass_model::TimeRange::new(0, 1_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let start = text_pos(&output, "00:00:00").expect("ruler");
+        output.textures_delta.clear();
+        let end = start + Vec2::new(120.0, 0.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(start), press(start, true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(end)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(
+            shell.playhead().0 > 0,
+            "the ruler drag did not seek, playhead {}",
+            shell.playhead().0
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

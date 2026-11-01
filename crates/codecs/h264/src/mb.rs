@@ -818,8 +818,7 @@ fn correspond_mv<S: Sample>(
     if stored.intra {
         return [0, 0];
     }
-    let bx = part.x / 4;
-    let by = part.y / 4;
+    let (bx, by) = correspond_block(part);
     let Some(mv) = stored.mv0.get(by * 4 + bx) else {
         return [0, 0];
     };
@@ -830,6 +829,34 @@ fn correspond_mv<S: Sample>(
         *mv
     } else {
         [0, 0]
+    }
+}
+
+/// Clause J.8.2.1.7.2. The 4×4 index is `4 * mbPartIdx + subMbPartIdx`, then
+/// the scan in clause 6.4.3. An 8×4 partition's second block is not its origin.
+fn correspond_block(part: &Part) -> (usize, usize) {
+    let mb_part = (part.y / 8) * 2 + (part.x / 8);
+    let sub = if part.w == 8 && part.h == 4 {
+        (part.y % 8) / 4
+    } else if part.w == 4 && part.h == 8 {
+        (part.x % 8) / 4
+    } else if part.w == 4 && part.h == 4 {
+        ((part.y % 8) / 4) * 2 + ((part.x % 8) / 4)
+    } else {
+        0
+    };
+    let index = 4 * mb_part + sub;
+    let x = inverse_raster(index / 4, 8, 8, 16, false) + inverse_raster(index % 4, 4, 4, 8, false);
+    let y = inverse_raster(index / 4, 8, 8, 16, true) + inverse_raster(index % 4, 4, 4, 8, true);
+    (x / 4, y / 4)
+}
+
+fn inverse_raster(index: usize, width: usize, height: usize, span: usize, vertical: bool) -> usize {
+    let across = span / width;
+    if vertical {
+        (index / across) * height
+    } else {
+        (index % across) * width
     }
 }
 
@@ -7268,15 +7295,6 @@ fn read_sub<S: Sample>(
         let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
         if w < 8 || h < 8 {
             mb.partition8 = false;
-        }
-    }
-    if slice.dmvp {
-        for kind in kinds {
-            let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
-            let square = w == h && (w == 8 || w == 4);
-            if !square && (w != 4 || h != 8) {
-                return Err(CodecError::Unsupported { what: "3d" });
-            }
         }
     }
     let ref0_forced = spec == 4;

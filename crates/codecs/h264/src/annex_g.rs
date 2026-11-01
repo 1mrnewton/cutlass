@@ -1100,17 +1100,46 @@ fn an_8x8_depth_motion_vector_cancels_the_base_motion() {
             "ffmpeg decoded a 3d view"
         );
     }
+}
+
+#[test]
+fn an_8x4_depth_motion_vector_reads_the_scanned_block() {
+    let base_idr = dmvp_base_idr();
+    let other_idr = dmvp_other_idr();
+    let base_p = dmvp_base_8x4();
+    let coded = dmvp_coded_8x4();
     let mut decoder = open();
-    for annex in [&base_idr, &other_idr, &base_p] {
-        let _ = push_pictures(&mut decoder, annex);
+    let mut pictures = Vec::new();
+    for annex in [&base_idr, &other_idr, &base_p, &coded] {
+        pictures.extend(push_pictures(&mut decoder, annex));
     }
-    let err = decoder
-        .push(&Packet::video(dmvp_coded_8x4(), 0, 1, 30, false))
-        .expect_err("8x4");
-    assert!(
-        matches!(err, CodecError::Unsupported { what: "3d" }),
-        "{err:?}"
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| copied_depth(picture))
+            .count(),
+        2
     );
+    assert!(pictures.iter().any(top_left_band));
+    assert!(pictures.iter().all(|picture| !painted(picture, 220, 50)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = base_idr.clone();
+        annex.extend(&base_p);
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let predicted = pictures
+            .iter()
+            .find(|picture| top_left_band(picture))
+            .expect("base motion");
+        assert_eq!(&raw[frame..], &planes_of(predicted));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &coded).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
 }
 
 #[test]
@@ -1318,6 +1347,24 @@ fn dmvp_coded_4x8() -> Vec<u8> {
     annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
 }
 
+fn dmvp_base_8x4() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.ue(0);
+    w.ue(3);
+    for _sub in 0..4 {
+        w.ue(1);
+    }
+    // The second 8×4 moves eight pixels. The block an 8×4 scan would read stays still.
+    for dx in [0, 32, 0, 0, 0, 0, 0, 0] {
+        w.se(dx);
+        w.se(0);
+    }
+    w.ue(0);
+    w.trailing();
+    annex_b_nal(2, 1, &w.bytes)
+}
+
 fn dmvp_coded_8x4() -> Vec<u8> {
     let mut w = Writer::new();
     ref_p_header(&mut w, 1, 1, true, false);
@@ -1328,8 +1375,28 @@ fn dmvp_coded_8x4() -> Vec<u8> {
     for _sub in 0..4 {
         w.ue(1);
     }
+    for _part in 0..8 {
+        w.se(0);
+        w.se(0);
+    }
+    w.ue(0);
     w.trailing();
     annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn top_left_band(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let luma = y.chunks(16).enumerate().all(|(row, samples)| {
+        let left = if (4..8).contains(&row) { 180 } else { 100 };
+        samples[..8].iter().all(|sample| *sample == left)
+            && samples[8..].iter().all(|sample| *sample == 180)
+    });
+    luma && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
 }
 
 fn copied_depth(picture: &VideoOutput) -> bool {

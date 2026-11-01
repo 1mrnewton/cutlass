@@ -373,6 +373,7 @@ pub(crate) fn decode_mbs<S: Sample>(
     slice_id: u16,
     next_mb: &mut usize,
     mut entropy: Entropy<'_, '_>,
+    layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
     let mbaff = slice.sps.mbaff && !pic.field;
@@ -439,7 +440,16 @@ pub(crate) fn decode_mbs<S: Sample>(
             break;
         }
         fresh(pic, addr, mbaff, !next.is_empty())?;
-        qp = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
+        qp = if slice.base_mode {
+            let Some(layer) = layer else {
+                return Err(CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                });
+            };
+            intra_base(pic, layer, slice, slice_id, addr, qp, &mut entropy)?
+        } else {
+            one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?
+        };
         let bottom = !mbaff || pair_bottom(pic, addr, mbaff);
         let end = match &mut entropy {
             Entropy::Cavlc(bits) => bottom && !bits.more_rbsp(),
@@ -611,6 +621,126 @@ fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i1
             &Mb::new(slice),
         )
     }
+}
+
+/// Intra base mode. The macroblock is the co-located reference-layer samples,
+/// then `coded_block_pattern`. A coded residual is refused until that addition
+/// is implemented. Motion prediction and resampling are refused earlier.
+fn intra_base<S: Sample>(
+    pic: &mut Frame<S>,
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    slice_id: u16,
+    addr: usize,
+    qp: i32,
+    entropy: &mut Entropy<'_, '_>,
+) -> Result<i32, CodecError> {
+    if slice.sps.mbaff || pic.field || pic.separate_plane || pic.chroma() != 1 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (mx, my) = locate(pic, addr, false);
+    let slot = my * pic.mb_w + mx;
+    copy_reference(pic, layer, mx, my)?;
+    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, true, slice_id, slice.sps.chroma)?;
+    if luma_cbp != 0 || chroma_cbp != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let mut mb = Mb::new(slice_id);
+    mb.intra = true;
+    mb.off_a = slice.off_a as i8;
+    mb.off_b = slice.off_b as i8;
+    mb.deblock = slice.deblock;
+    mb.qp = qp as i8;
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    pic.mb[slot] = mb;
+    Ok(qp)
+}
+
+fn copy_reference<S: Sample>(
+    pic: &mut Frame<S>,
+    layer: &Frame<S>,
+    mx: usize,
+    my: usize,
+) -> Result<(), CodecError> {
+    if layer.w != pic.w || layer.h != pic.h || layer.mb_w != pic.mb_w {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let slot = my * pic.mb_w + mx;
+    let Some(reference) = layer.mb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    if !reference.intra {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let x0 = mx.saturating_mul(16);
+    let y0 = my.saturating_mul(16);
+    if x0.saturating_add(16) > pic.w || y0.saturating_add(16) > pic.h {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    }
+    for row in 0..16 {
+        let src = (y0 + row) * pic.w + x0;
+        let Some(from) = layer.y.get(src..src + 16) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        let Some(into) = pic.y.get_mut(src..src + 16) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        into.copy_from_slice(from);
+    }
+    let stride = pic.w / 2;
+    let cx = mx.saturating_mul(8);
+    let cy = my.saturating_mul(8);
+    for row in 0..8 {
+        let src = (cy + row) * stride + cx;
+        let Some(from) = layer.u.get(src..src + 8) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        let Some(into) = pic.u.get_mut(src..src + 8) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        into.copy_from_slice(from);
+        let Some(from) = layer.v.get(src..src + 8) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        let Some(into) = pic.v.get_mut(src..src + 8) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        into.copy_from_slice(from);
+    }
+    Ok(())
 }
 
 fn one_mb<S: Sample>(

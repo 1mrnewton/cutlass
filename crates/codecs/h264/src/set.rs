@@ -74,6 +74,14 @@ pub struct Sps {
     /// `slice_header_restriction_flag`. True for an Annex A SPS, so an
     /// extension slice omits `store_ref_base_pic_flag` and `scan_idx`.
     pub slice_header_restriction: bool,
+    /// `inter_layer_deblocking_filter_control_present_flag`.
+    pub inter_layer_deblock: bool,
+    /// `extended_spatial_scalability_idc`. 0 is the same size as the reference.
+    pub svc_spatial: u8,
+    /// `seq_tcoeff_level_prediction_flag`.
+    pub seq_tcoeff: bool,
+    /// `adaptive_tcoeff_level_prediction_flag`.
+    pub adaptive_tcoeff: bool,
 }
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
@@ -471,8 +479,8 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     } else {
         Vui::unspecified(max_num_ref_frames)
     };
-    let slice_header_restriction = if subset {
-        let restriction = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
+    let svc = if subset {
+        let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
         if bits.bit()? {
             return Err(CodecError::Unsupported { what: "svc vui" });
         }
@@ -481,9 +489,15 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
                 let _ = bits.bit()?;
             }
         }
-        restriction
+        syntax
     } else {
-        true
+        SvcSyntax {
+            inter_layer_deblock: false,
+            spatial: 0,
+            seq_tcoeff: false,
+            adaptive_tcoeff: false,
+            restriction: true,
+        }
     };
     let _ = bits.rbsp_trailing();
     let sps = Sps {
@@ -528,7 +542,11 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         cpb_delay_bits: vui.cpb_delay_bits,
         dpb_delay_bits: vui.dpb_delay_bits,
         time_offset_bits: vui.time_offset_bits,
-        slice_header_restriction,
+        slice_header_restriction: svc.restriction,
+        inter_layer_deblock: svc.inter_layer_deblock,
+        svc_spatial: svc.spatial,
+        seq_tcoeff: svc.seq_tcoeff,
+        adaptive_tcoeff: svc.adaptive_tcoeff,
     };
     if !sps.within_level() {
         return Err(CodecError::Limit {
@@ -539,13 +557,25 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     Ok(sps)
 }
 
-/// `seq_parameter_set_svc_extension`. Returns `slice_header_restriction_flag`.
-fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<bool, CodecError> {
-    let _inter_layer_deblock = bits.bit()?;
-    let spatial = bits.u(2)?;
-    if spatial > 2 {
-        return Err(bits.malformed("extended spatial scalability"));
-    }
+struct SvcSyntax {
+    inter_layer_deblock: bool,
+    spatial: u8,
+    seq_tcoeff: bool,
+    adaptive_tcoeff: bool,
+    restriction: bool,
+}
+
+/// `seq_parameter_set_svc_extension`.
+fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<SvcSyntax, CodecError> {
+    let inter_layer_deblock = bits.bit()?;
+    let spatial = match bits.u(2)? {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => {
+            return Err(bits.malformed("extended spatial scalability"));
+        }
+    };
     if chroma_array == 1 || chroma_array == 2 {
         let _ = bits.bit()?;
     }
@@ -563,10 +593,15 @@ fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<bool, CodecErr
         let _ = bits.se()?;
     }
     let seq_tcoeff = bits.bit()?;
-    if seq_tcoeff {
-        let _ = bits.bit()?;
-    }
-    bits.bit()
+    let adaptive_tcoeff = if seq_tcoeff { bits.bit()? } else { false };
+    let restriction = bits.bit()?;
+    Ok(SvcSyntax {
+        inter_layer_deblock,
+        spatial,
+        seq_tcoeff,
+        adaptive_tcoeff,
+        restriction,
+    })
 }
 
 struct Vui {

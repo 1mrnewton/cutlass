@@ -636,6 +636,52 @@ fn decode_au<S: Sample>(
                                 prior: &mut prior,
                                 planes: &mut planes,
                                 held: &mut held_field,
+                                layer: None,
+                            },
+                        )?;
+                        if built {
+                            slice_id = slice_id.saturating_add(1);
+                        }
+                        index += 1;
+                    }
+                    Layer::Inter(svc) => {
+                        let Some(mut base) = picture.take() else {
+                            return Err(CodecError::Unsupported {
+                                what: "inter-layer prediction",
+                            });
+                        };
+                        let complete = next_mb == base.mb_w.saturating_mul(base.h / 16);
+                        if !complete {
+                            return Err(CodecError::Malformed {
+                                at_bit: 0,
+                                what: "incomplete picture",
+                            });
+                        }
+                        mb::deblock(&mut base);
+                        next_mb = 0;
+                        extension_pic = true;
+                        if svc.idr {
+                            idr_pic = true;
+                        }
+                        let built = decode_slice(
+                            sets,
+                            poc,
+                            dpb,
+                            SliceCursor {
+                                nal: &nals[index],
+                                idr: svc.idr,
+                                slice_id,
+                                packet,
+                                intra: None,
+                                inter: None,
+                            },
+                            AuScratch {
+                                picture: &mut picture,
+                                next_mb: &mut next_mb,
+                                prior: &mut prior,
+                                planes: &mut planes,
+                                held: &mut held_field,
+                                layer: Some(&base),
                             },
                         )?;
                         if built {
@@ -687,6 +733,7 @@ fn decode_au<S: Sample>(
                         prior: &mut prior,
                         planes: &mut planes,
                         held: &mut held_field,
+                        layer: None,
                     },
                 )?;
                 if built {
@@ -1607,6 +1654,8 @@ pub(crate) struct Slice<'a> {
     sp_switch: bool,
     /// QSY. Zero when the slice is not SP or SI.
     qs: i32,
+    /// Intra base mode. Each macroblock copies the reference layer.
+    base_mode: bool,
 }
 
 struct SliceCursor<'a> {
@@ -1626,6 +1675,8 @@ struct AuScratch<'a, S: Sample> {
     prior: &'a mut Vec<VideoOutput>,
     planes: &'a mut ColourPlanes,
     held: &'a mut Option<Frame<S>>,
+    /// Reference layer for inter-layer intra prediction.
+    layer: Option<&'a Frame<S>>,
 }
 
 fn decode_slice<S: Sample>(
@@ -1649,6 +1700,7 @@ fn decode_slice<S: Sample>(
         prior,
         planes,
         held,
+        layer,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
     let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, svc_header(nal))?;
@@ -1749,6 +1801,7 @@ fn decode_slice<S: Sample>(
             slice_id,
             next_mb,
             Entropy::Cabac(&mut cab),
+            layer,
         )?;
     } else {
         let cavlc = if nal.kind == 2 {
@@ -1756,7 +1809,15 @@ fn decode_slice<S: Sample>(
         } else {
             Cavlc::plain(bits)
         };
-        mb::decode_mbs(pic, dpb, &slice, slice_id, next_mb, Entropy::Cavlc(cavlc))?;
+        mb::decode_mbs(
+            pic,
+            dpb,
+            &slice,
+            slice_id,
+            next_mb,
+            Entropy::Cavlc(cavlc),
+            layer,
+        )?;
     }
     Ok(true)
 }
@@ -1906,6 +1967,8 @@ struct Header {
     subset: bool,
     /// `output_flag` of a slice extension. An Annex A slice is displayed.
     output: bool,
+    /// Every macroblock copies the reference layer. Residual is still read.
+    base_mode: bool,
 }
 
 struct Mod {
@@ -1922,13 +1985,16 @@ fn svc_header(nal: &Nal) -> Option<nal::SvcHeader> {
 
 enum Layer {
     Decode(nal::SvcHeader),
+    /// Inter-layer prediction from the picture this access unit already built.
+    Inter(nal::SvcHeader),
     Skip,
     Refuse(&'static str),
 }
 
 /// A slice extension is the picture when the access unit has no Annex A slice.
-/// Inter-layer prediction, MVC, and 3D stay refused. Beside an Annex A slice
-/// they are skipped, so that slice stays the picture.
+/// Inter-layer prediction replaces that picture when the base is already in
+/// the access unit. MVC and 3D stay refused. Beside an Annex A slice, a mode
+/// this decoder does not apply is skipped.
 fn layer_of(extension: Option<nal::Extension>, picture: bool, extension_pic: bool) -> Layer {
     match extension {
         Some(nal::Extension::Svc(svc)) if svc.use_ref_base_pic && !picture => {
@@ -1938,6 +2004,11 @@ fn layer_of(extension: Option<nal::Extension>, picture: bool, extension_pic: boo
             if svc.no_inter_layer_pred && !svc.use_ref_base_pic && (!picture || extension_pic) =>
         {
             Layer::Decode(svc)
+        }
+        Some(nal::Extension::Svc(svc))
+            if !svc.no_inter_layer_pred && !svc.use_ref_base_pic && picture && !extension_pic =>
+        {
+            Layer::Inter(svc)
         }
         Some(nal::Extension::Svc(svc)) if !svc.no_inter_layer_pred && !picture => {
             Layer::Refuse("inter-layer prediction")
@@ -2184,6 +2255,10 @@ fn read_header(
         let width = crate::fmo::cycle_bits(units, pps.groups.rate)?;
         group_cycle = bits.u(width)?;
     }
+    let base_mode = match svc {
+        Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
+        _ => false,
+    };
     if svc.is_some() && !restriction {
         let start = bits.u(4)?;
         let end = bits.u(4)?;
@@ -2230,7 +2305,77 @@ fn read_header(
         qs,
         subset: svc.is_some(),
         output: svc.is_none_or(|svc| svc.output),
+        base_mode,
     })
+}
+
+/// Slice-header fields that follow the Annex A tail when inter-layer prediction
+/// is used. Same-size intra base mode is reconstructed. Resampling, motion
+/// prediction, residual prediction, and coefficient prediction are refused.
+fn read_inter_layer(
+    bits: &mut Bits<'_>,
+    sps: &Sps,
+    svc: nal::SvcHeader,
+) -> Result<bool, CodecError> {
+    if svc.quality_id != 0 || sps.svc_spatial != 0 || !sps.inter_layer_deblock {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let dqid = (u32::from(svc.dependency_id) << 4) + u32::from(svc.quality_id);
+    let reference = bits.ue()?;
+    if reference >= dqid {
+        return Err(bits.malformed("ref_layer_dq_id"));
+    }
+    if reference != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let idc = bits.ue()?;
+    if idc > 6 {
+        return Err(bits.malformed("inter-layer deblock"));
+    }
+    if idc != 1 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    // `constrained_intra_resampling_flag` and `slice_skip_flag`.
+    if bits.bit()? || bits.bit()? {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let adaptive_base = bits.bit()?;
+    let default_base = if adaptive_base { false } else { bits.bit()? };
+    if adaptive_base || !default_base {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let adaptive_residual = bits.bit()?;
+    let default_residual = if adaptive_residual {
+        false
+    } else {
+        bits.bit()?
+    };
+    if adaptive_residual || default_residual {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    if sps.adaptive_tcoeff && bits.bit()? {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    if sps.seq_tcoeff && !sps.adaptive_tcoeff {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    Ok(true)
 }
 
 fn read_list_mod(bits: &mut Bits<'_>) -> Result<Vec<Mod>, CodecError> {
@@ -2547,6 +2692,7 @@ fn make_slice<'a, S: Sample>(
         group_next,
         sp_switch: header.sp_switch,
         qs: header.qs,
+        base_mode: header.base_mode,
     })
 }
 
@@ -2952,6 +3098,7 @@ mod tests {
             qs: 0,
             subset: false,
             output: true,
+            base_mode: false,
         }
     }
 
@@ -3046,6 +3193,10 @@ mod tests {
             dpb_delay_bits: 0,
             time_offset_bits: 0,
             slice_header_restriction: true,
+            inter_layer_deblock: false,
+            svc_spatial: 0,
+            seq_tcoeff: false,
+            adaptive_tcoeff: false,
         }
     }
 

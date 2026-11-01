@@ -3,7 +3,8 @@
 //! data partitions, SP and SI slices, picture timing, film grain, Annex E
 //! sample aspect, timing, colour tags, and Annex A picture sizes.
 //! A slice extension with no inter-layer prediction is reconstructed.
-//! Inter-layer prediction, MVC, and 3D are refused.
+//! Same-size inter-layer intra prediction copies the reference layer.
+//! Motion prediction, residual prediction, resampling, MVC, and 3D are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

@@ -32,6 +32,8 @@ pub enum Extension {
 pub struct SvcHeader {
     pub idr: bool,
     pub no_inter_layer_pred: bool,
+    /// `dependency_id`. With `quality_id` this is the layer's DQId.
+    pub dependency_id: u8,
     pub quality_id: u8,
     pub use_ref_base_pic: bool,
     pub output: bool,
@@ -130,6 +132,7 @@ fn svc_header(bytes: &[u8]) -> Result<SvcHeader, CodecError> {
     Ok(SvcHeader {
         idr: b0 & 0x40 != 0,
         no_inter_layer_pred: b1 & 0x80 != 0,
+        dependency_id: (b1 >> 4) & 7,
         quality_id: b1 & 0x0f,
         use_ref_base_pic: b2 & 0x10 != 0,
         output: b2 & 0x04 != 0,

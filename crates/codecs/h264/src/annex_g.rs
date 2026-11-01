@@ -1,8 +1,9 @@
-//! Annex G slice extension with no inter-layer prediction.
+//! Annex G slice extension.
 //!
-//! The picture is the Annex A reconstruction. FFmpeg 8.1.1 does not decode
-//! NAL type 20, so that picture follows the recommendation. An Annex A slice
-//! in the same access unit stays the picture and matches FFmpeg.
+//! A slice with no inter-layer prediction is the Annex A reconstruction.
+//! Same-size intra base mode copies the reference layer and the enhancement
+//! crop is the picture. FFmpeg 8.1.1 does not decode NAL type 20, so that
+//! picture follows the recommendation. FFmpeg still emits the Annex A base.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -57,6 +58,34 @@ fn output_flag_keeps_the_extension_off_the_display() {
 }
 
 #[test]
+fn inter_layer_intra_prediction_copies_the_base() {
+    let parsed = parse_subset_sps(&layer_subset()).expect("subset");
+    assert!(parsed.inter_layer_deblock);
+    assert_eq!(parsed.svc_spatial, 0);
+    assert!(!parsed.seq_tcoeff);
+    assert_eq!(parsed.visible().expect("visible"), (8, 8));
+    let base = pcm_annex();
+    let base_picture = decode(&base);
+    assert_eq!(base_picture.picture.width(), 16);
+    assert_eq!(base_picture.picture.height(), 16);
+    assert!(painted(&base_picture, 200, 40));
+    let annex = inter_layer_annex();
+    let picture = decode(&annex);
+    assert_eq!(picture.picture.width(), 8);
+    assert_eq!(picture.picture.height(), 8);
+    assert!(painted(&picture, 200, 40));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        assert_eq!(raw, paint(16, 200, 40));
+        let layered = ffmpeg_raw(&ffmpeg, &annex);
+        assert_eq!(layered, paint(16, 200, 40));
+    }
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &annex);
+    assert!(flat(&decode_with(&mut decoder, &base_idr())));
+}
+
+#[test]
 fn an_annex_a_picture_survives_svc_mvc_and_3d_nal_units() {
     let annex = base_with_extensions();
     let picture = decode(&annex);
@@ -97,6 +126,8 @@ fn a_refused_extension_leaves_the_next_idr() {
         annex_b_nal(3, 15, &subset(83, true, 0, true)),
         annex_b_nal(3, 15, &truncated_scalable()),
         stored_base_picture(),
+        base_with_broken_layer(),
+        residual_layer(),
     ];
     let mut errors = Vec::new();
     for annex in refused {
@@ -145,6 +176,13 @@ fn a_refused_extension_leaves_the_next_idr() {
             what: "reference base picture"
         }
     ));
+    assert!(matches!(errors[9], CodecError::Truncated { .. }));
+    assert!(matches!(
+        errors[10],
+        CodecError::Unsupported {
+            what: "inter-layer prediction"
+        }
+    ));
     let picture = decode_with(&mut decoder, &base_idr());
     assert!(flat(&picture));
 }
@@ -187,12 +225,6 @@ fn base_with_extensions() -> Vec<u8> {
     out.extend(annex_b_nal(3, 8, &pps()));
     out.extend(annex_b_extension(3, 14, &svc_bytes(true, 0, true), &[0x80]));
     out.extend(annex_b_nal(3, 5, &idr_slice(true, true, false)));
-    out.extend(annex_b_extension(
-        3,
-        20,
-        &svc_bytes(false, 0, true),
-        &[0x80],
-    ));
     out.extend(annex_b_extension(3, 20, &[0x00, 0x00, 0x03], &[0x80]));
     out.extend(annex_b_extension(3, 21, &[0x80, 0x00], &[0x80]));
     out
@@ -209,6 +241,134 @@ fn svc_bytes(no_inter_layer_pred: bool, quality: u8, output: bool) -> [u8; 3] {
     let b1 = (u8::from(no_inter_layer_pred) << 7) | (quality & 0x0f);
     let b2 = 0x03 | (u8::from(output) << 2);
     [0xc0, b1, b2]
+}
+
+/// IDR, dependency 1, quality 0, inter-layer prediction on, output, reserved 3.
+fn ilp_header() -> [u8; 3] {
+    [0xc0, 0x10, 0x07]
+}
+
+fn pcm_annex() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(200, 40)));
+    out
+}
+
+fn inter_layer_annex() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &layer_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(200, 40)));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &ilp_header(),
+        &base_mode_slice(false),
+    ));
+    out
+}
+
+fn residual_layer() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &layer_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(200, 40)));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &ilp_header(),
+        &base_mode_slice(true),
+    ));
+    out
+}
+
+fn base_with_broken_layer() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &layer_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &idr_slice(true, true, false)));
+    out.extend(annex_b_extension(3, 20, &ilp_header(), &[0x80]));
+    out
+}
+
+fn layer_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(83, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(4);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.bit(true);
+    w.bits(0, 2);
+    w.bit(false);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn pcm_slice(luma: u8, chroma: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(25);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(luma, 256));
+    w.bytes.extend(std::iter::repeat_n(chroma, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn base_mode_slice(residual: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(residual);
+    w.ue(3);
+    w.trailing();
+    w.bytes
+}
+
+fn i_header(w: &mut Writer) {
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(0, 4);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bit(false);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
 }
 
 fn open() -> H264Decoder {
@@ -231,13 +391,23 @@ fn decode_with(decoder: &mut H264Decoder, annex: &[u8]) -> VideoOutput {
 }
 
 fn flat(picture: &VideoOutput) -> bool {
-    picture
-        .picture
-        .y()
-        .iter()
-        .chain(picture.picture.u())
-        .chain(picture.picture.v())
-        .all(|sample| *sample == 128)
+    painted(picture, 128, 128)
+}
+
+fn painted(picture: &VideoOutput, luma: u8, chroma: u8) -> bool {
+    picture.picture.y().iter().all(|sample| *sample == luma)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == chroma)
+}
+
+fn paint(edge: usize, luma: u8, chroma: u8) -> Vec<u8> {
+    let mut raw = vec![luma; edge * edge];
+    raw.extend(std::iter::repeat_n(chroma, (edge / 2) * (edge / 2) * 2));
+    raw
 }
 
 fn baseline_sps() -> Vec<u8> {
@@ -469,6 +639,12 @@ impl Writer {
             self.bit(false);
         }
         self.bits(code, zeros + 1);
+    }
+
+    fn align_zeros(&mut self) {
+        while !self.bit.is_multiple_of(8) {
+            self.bit(false);
+        }
     }
 
     fn se(&mut self, value: i32) {

@@ -17,17 +17,20 @@ use cutlass_decode::{
     PictureInfo, PictureOutput, PixelFormat, Transfer,
 };
 use cutlass_jpeg::JpegDecoder;
-use cutlass_model::{Draft, MaterialVideo, Micros, Segment, SegmentId, TimeRange, TrackType};
+use cutlass_model::{
+    Draft, MaterialAudio, MaterialId, MaterialVideo, Micros, Segment, SegmentId, TimeRange, Track,
+    TrackAttribute, TrackType,
+};
 use cutlass_picture::{Picture, PictureSource, Sample, rgba_len};
 use cutlass_png::PngDecoder;
 use cutlass_still::{StillDemux, StillProbe, still_limits};
 
-use crate::MAX_EDGE;
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
-use crate::reader::ReaderFactory;
-use crate::source::open_segment;
+use crate::reader::{MAX_AUDIO_FRAMES, ReaderFactory};
+use crate::source::{open_segment, peaks_from};
+use crate::{MAX_BUCKETS, MAX_EDGE};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -954,4 +957,190 @@ fn a_real_still_fills_a_filmstrip_when_the_folder_is_present() {
         cell.rgba()
     );
     assert_eq!(source.decodes(), 1);
+}
+
+fn audio_readers() -> ReaderFactory {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(cutlass_riff::probe, open_wav);
+    cutlass_pcm::register_decoders(readers.decoders_mut());
+    readers
+}
+
+fn audio_draft(path: &Path, mute: bool) -> (Draft, SegmentId) {
+    let mut draft = Draft::empty("D");
+    draft.materials.audios.push(MaterialAudio {
+        id: MaterialId::new("tone"),
+        path: path.display().to_string(),
+        duration: Micros(1_000_000),
+        ..MaterialAudio::default()
+    });
+    let mut track = Track::main("audio");
+    track.kind = TrackType::Audio;
+    if mute {
+        track.attribute = TrackAttribute(TrackAttribute::MUTE);
+    }
+    let mut segment = Segment::new("clip", "tone", TimeRange::new(0, 1_000_000));
+    segment.source_range = Some(TimeRange::new(0, 1_000_000));
+    track.segments.push(segment);
+    draft.tracks.push(track);
+    (draft, SegmentId::new("clip"))
+}
+
+fn full_scale_wav(path: &Path) {
+    let mut payload = Vec::new();
+    for sample in [0_i16, 32_767, -32_767] {
+        payload.extend_from_slice(&sample.to_le_bytes());
+    }
+    write_pcm_wav(path, 48_000, 16, &payload);
+}
+
+fn assert_full_scale(wave: &crate::Waveform) {
+    assert_eq!(wave.frames(), 3);
+    assert!(!wave.capped());
+    assert_eq!(wave.peaks().len(), MAX_BUCKETS);
+    let mid = MAX_BUCKETS / 3;
+    let last = 2 * MAX_BUCKETS / 3;
+    for (index, peak) in wave.peaks().iter().enumerate() {
+        let (min, max): (f32, f32) = match index {
+            0 => (0.0, 0.0),
+            index if index == mid => (1.0, 1.0),
+            index if index == last => (-1.0, -1.0),
+            _ => (0.0, 0.0),
+        };
+        assert_eq!(peak.min.to_bits(), min.to_bits(), "{index}");
+        assert_eq!(peak.max.to_bits(), max.to_bits(), "{index}");
+    }
+}
+
+#[test]
+fn a_waveform_ask_does_not_decode_and_a_fill_stores_full_scale_peaks() {
+    let path = std::env::temp_dir().join(format!("cutlass-wave-peaks-{}", std::process::id()));
+    full_scale_wav(&path);
+    let readers = audio_readers();
+    let (draft, id) = audio_draft(&path, false);
+    let source = open_segment(&readers, &draft, &id, ClockKind::Playback, 2).expect("audio");
+    assert_eq!(source.waveform().expect_err("miss"), EngineError::NotReady);
+    assert_eq!(source.decodes(), 0);
+    source.fill_waveform().expect("fill");
+    assert_eq!(source.decodes(), 0);
+    assert_full_scale(&source.waveform().expect("wave"));
+    assert_eq!(source.decodes(), 0);
+    assert_eq!(
+        source.fill_strip(Micros(0)).expect_err("picture"),
+        EngineError::NoDecoder {
+            codec: "picture".to_owned(),
+        }
+    );
+    assert_eq!(source.decodes(), 1);
+    assert_eq!(source.waveform().expect("kept").frames(), 3);
+    std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
+fn a_muted_track_still_stores_the_file_waveform() {
+    let path = std::env::temp_dir().join(format!("cutlass-wave-mute-{}", std::process::id()));
+    full_scale_wav(&path);
+    let readers = audio_readers();
+    let (draft, id) = audio_draft(&path, true);
+    let source = open_segment(&readers, &draft, &id, ClockKind::Playback, 2).expect("muted");
+    source.fill_waveform().expect("fill");
+    assert_eq!(source.decodes(), 0);
+    assert_full_scale(&source.waveform().expect("wave"));
+    std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
+fn a_waveform_prefix_drops_the_unread_tail() {
+    let longer = std::env::temp_dir().join(format!("cutlass-wave-prefix-{}", std::process::id()));
+    let mut loud_tail = Vec::new();
+    for sample in [0_i16, 0, 0, 0, 32_767] {
+        loud_tail.extend_from_slice(&sample.to_le_bytes());
+    }
+    write_pcm_wav(&longer, 48_000, 16, &loud_tail);
+    let readers = audio_readers();
+    let mut media = readers.open(&longer).expect("longer");
+    let prefix = peaks_from(&mut media, 4).expect("prefix");
+    assert!(prefix.capped());
+    assert_eq!(prefix.frames(), 4);
+    assert_eq!(prefix.peaks().len(), MAX_BUCKETS);
+    for peak in prefix.peaks() {
+        assert_eq!(peak.max.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(peak.min.to_bits(), 0.0_f32.to_bits());
+    }
+
+    let exact = std::env::temp_dir().join(format!("cutlass-wave-exact-{}", std::process::id()));
+    write_pcm_wav(&exact, 48_000, 16, &loud_tail[..8]);
+    let mut media = readers.open(&exact).expect("exact");
+    let whole = peaks_from(&mut media, 4).expect("whole");
+    assert!(!whole.capped());
+    assert_eq!(whole.frames(), 4);
+    std::fs::remove_file(&longer).expect("remove longer");
+    std::fs::remove_file(&exact).expect("remove exact");
+}
+
+#[test]
+fn a_still_has_no_waveform() {
+    let factory = factory();
+    let path = fixture("pattern.png");
+    let (draft, id) = draft_for(&path);
+    let source = open_segment(&factory, &draft, &id, ClockKind::Export, 2).expect("still");
+    assert_eq!(
+        source.fill_waveform().expect_err("audio"),
+        EngineError::NotMedia
+    );
+    assert_eq!(source.waveform().expect_err("empty"), EngineError::NotReady);
+    assert_eq!(source.decodes(), 0);
+}
+
+#[test]
+fn a_real_wav_fills_a_waveform_when_the_folder_is_present() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    if !root.is_dir() {
+        eprintln!("skipped: ../local-files is missing");
+        return;
+    }
+    let Some(path) = smallest_wav(&root) else {
+        eprintln!("skipped: ../local-files has no wav");
+        return;
+    };
+    let readers = audio_readers();
+    let (draft, id) = audio_draft(&path, false);
+    let source = open_segment(&readers, &draft, &id, ClockKind::Playback, 2).expect("wav");
+    assert_eq!(source.waveform().expect_err("miss"), EngineError::NotReady);
+    source.fill_waveform().expect("fill");
+    let wave = source.waveform().expect("wave");
+    assert_eq!(source.decodes(), 0);
+    assert_eq!(wave.peaks().len(), MAX_BUCKETS);
+    assert!(wave.frames() > 0);
+    assert!(wave.frames() <= MAX_AUDIO_FRAMES);
+    if wave.frames() == MAX_AUDIO_FRAMES {
+        assert!(wave.capped());
+    } else {
+        assert!(!wave.capped());
+    }
+    for peak in wave.peaks() {
+        assert!(peak.min <= peak.max);
+        assert!(peak.min >= -1.0 && peak.max <= 1.0);
+    }
+    assert_eq!(source.waveform().expect("again").frames(), wave.frames());
+}
+
+fn smallest_wav(root: &Path) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("wav") {
+            continue;
+        }
+        let Ok(len) = entry.metadata().map(|meta| meta.len()) else {
+            continue;
+        };
+        if len == 0 {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(size, _)| len < *size) {
+            best = Some((len, path));
+        }
+    }
+    best.map(|(_, path)| path)
 }

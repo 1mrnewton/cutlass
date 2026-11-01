@@ -2,9 +2,9 @@
 //!
 //! The shell registers container and decoder implementations. This crate
 //! opens them, maps timeline time, caches pictures, and mixes audio.
-//! A filmstrip is a smaller picture cache. Asking before a fill is not ready
-//! and does not decode. Waveforms are not in this crate yet. Nested playback
-//! is not in this crate.
+//! A filmstrip and a waveform are smaller caches for the timeline.
+//! Asking for one before it is filled is not ready and does not decode.
+//! Nested playback is not in this crate.
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +17,7 @@ mod mix;
 mod preload;
 mod reader;
 mod source;
+mod waveform;
 
 pub use cache::{FrameWindow, MAX_WINDOW};
 pub use clock::{ClockKind, MediaClock};
@@ -34,6 +35,7 @@ pub use reader::{
     DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, StreamReport,
 };
 pub use source::{VideoSource, decoded_picture, open_segment};
+pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 
 #[cfg(test)]
 mod tests;

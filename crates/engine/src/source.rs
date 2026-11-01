@@ -25,7 +25,8 @@ use crate::error::EngineError;
 use crate::filmstrip::{self, StripCell};
 use crate::map::{self, TimelineMap};
 use crate::preload::Preload;
-use crate::reader::{DecodedFrame, Media, MediaInfo, ReaderFactory};
+use crate::reader::{DecodedFrame, MAX_AUDIO_FRAMES, Media, MediaInfo, ReaderFactory};
+use crate::waveform::{MAX_BUCKETS, Waveform};
 
 /// Decoded pictures for one segment.
 pub struct VideoSource {
@@ -134,6 +135,28 @@ impl VideoSource {
         Ok(())
     }
 
+    /// The waveform already stored for this file.
+    ///
+    /// A miss is [`EngineError::NotReady`] and does not decode.
+    pub fn waveform(&self) -> Result<Waveform, EngineError> {
+        self.preload.borrow().waveform()
+    }
+
+    /// Read a bounded prefix of the file and store its peaks.
+    ///
+    /// A file with no audio is [`EngineError::NotMedia`]. The peaks cover the
+    /// frames that were read, at most the mix window. A full window sets
+    /// [`Waveform::capped`] when another buffer remains, and that buffer is
+    /// not folded into the peaks. This does not decode a picture.
+    pub fn fill_waveform(&self) -> Result<(), EngineError> {
+        let wave = {
+            let mut media = self.media.borrow_mut();
+            peaks_from(&mut media, MAX_AUDIO_FRAMES)?
+        };
+        self.preload.borrow_mut().store_waveform(wave);
+        Ok(())
+    }
+
     fn decode(&self, source: Micros) -> Result<crate::reader::HeldFrame, EngineError> {
         self.decodes.set(self.decodes.get().saturating_add(1));
         self.media.borrow_mut().decode_at(source, &self.map.source)
@@ -188,6 +211,23 @@ pub fn open_segment(
         decodes: Cell::new(0),
         display,
     })
+}
+
+/// Peaks for at most `frames` from the start of `media`.
+///
+/// A shorter file is not marked capped. A file that continues past `frames`
+/// is capped, and the next buffer is discarded.
+pub(crate) fn peaks_from(media: &mut Media, frames: u32) -> Result<Waveform, EngineError> {
+    let pcm = media.audio_from(Micros(0), frames)?;
+    let capped = if pcm.samples == frames {
+        media.pull_audio()?.is_some()
+    } else {
+        false
+    };
+    let Some(samples) = pcm.as_f32() else {
+        return Err(EngineError::Layout);
+    };
+    Waveform::from_interleaved(samples, pcm.layout.len(), MAX_BUCKETS, pcm.samples, capped)
 }
 
 /// The CPU or platform picture for one decoded frame.

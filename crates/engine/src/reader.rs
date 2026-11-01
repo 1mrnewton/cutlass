@@ -30,7 +30,7 @@ const DECODE_PACKETS: u32 = 64;
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
 /// PCM frames one [`Media::audio_from`] call will decode.
-const MAX_AUDIO_FRAMES: u32 = 480_000;
+pub(crate) const MAX_AUDIO_FRAMES: u32 = 480_000;
 /// Full-scale positive [`i16`]. The mix uses the same divisor.
 const I16_FULL: f32 = 32_767.0;
 

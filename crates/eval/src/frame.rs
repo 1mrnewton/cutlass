@@ -8,22 +8,57 @@ use cutlass_model::{Draft, Micros};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
+use crate::text::{TextLayer, text_layers};
+
+/// Font bytes for a text material's `font_path`.
+///
+/// Evaluation does not open that path. A face this returns `None` for is not drawn.
+pub trait Fonts {
+    /// The font file named by `path`, or `None` when this table does not have it.
+    fn face(&self, path: &str) -> Option<&[u8]>;
+}
+
+/// No font bytes. Text segments are not drawn.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoFonts;
+
+impl Fonts for NoFonts {
+    fn face(&self, _path: &str) -> Option<&[u8]> {
+        None
+    }
+}
+
+static NO_FONTS: NoFonts = NoFonts;
 
 /// A draft borrowed for evaluation. The draft is not written.
 #[derive(Clone, Copy)]
 pub struct Snapshot<'a> {
     draft: &'a Draft,
+    fonts: &'a dyn Fonts,
 }
 
 impl<'a> Snapshot<'a> {
     #[must_use]
     pub fn new(draft: &'a Draft) -> Self {
-        Self { draft }
+        Self {
+            draft,
+            fonts: &NO_FONTS,
+        }
+    }
+
+    /// `fonts` is consulted for each text segment. The draft is not written.
+    #[must_use]
+    pub fn with_fonts(draft: &'a Draft, fonts: &'a dyn Fonts) -> Self {
+        Self { draft, fonts }
     }
 
     #[must_use]
     pub fn draft(self) -> &'a Draft {
         self.draft
+    }
+
+    pub(crate) fn fonts(self) -> &'a dyn Fonts {
+        self.fonts
     }
 }
 
@@ -60,9 +95,10 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 
 /// The composited frame at `time`. The snapshot's draft is not changed.
 ///
-/// Solids, nested drafts, and video pictures share one paint order:
+/// Solids, text, nested drafts, and video pictures share one paint order:
 /// `render_index`, then track, then segment. A video the factory cannot
-/// open is skipped. An open file in `clips` is seeked when `time` changes.
+/// open is skipped. A text segment whose face the snapshot does not supply
+/// is skipped. An open file in `clips` is seeked when `time` changes.
 /// `revision` drops those files when the draft changes.
 pub fn frame<D: Device>(
     snapshot: &Snapshot<'_>,
@@ -92,6 +128,7 @@ pub(crate) fn compose<D: Device>(
         width: extent.width,
         height: extent.height,
         time,
+        fonts: snapshot.fonts(),
         device,
         clips,
         revision,
@@ -100,6 +137,7 @@ pub(crate) fn compose<D: Device>(
     let nests = nest_layers(draft, &mut pass)?;
     let layers = ordered(
         solid_layers(draft, extent.width, extent.height),
+        text_layers(draft, pass.fonts, extent.width, extent.height, pass.time),
         video_layers(
             draft,
             pass.media,
@@ -119,6 +157,7 @@ pub(crate) fn compose<D: Device>(
 
 enum Paint<'a> {
     Solid(SolidColor),
+    Text(crate::text::PlacedText),
     Video(Placed<'a>),
     Nest(NestedPicture),
 }
@@ -132,6 +171,7 @@ impl Ordered<'_> {
     fn source(&self) -> &dyn PictureSource {
         match &self.paint {
             Paint::Solid(solid) => solid,
+            Paint::Text(text) => text,
             Paint::Video(video) => video,
             Paint::Nest(nested) => nested,
         }
@@ -140,14 +180,21 @@ impl Ordered<'_> {
 
 fn ordered<'a>(
     solids: Vec<SolidLayer>,
+    texts: Vec<TextLayer>,
     videos: Vec<crate::media::VideoLayer<'a>>,
     nests: Vec<NestedLayer>,
 ) -> Vec<Ordered<'a>> {
-    let mut layers = Vec::with_capacity(solids.len() + videos.len() + nests.len());
+    let mut layers = Vec::with_capacity(solids.len() + texts.len() + videos.len() + nests.len());
     for solid in solids {
         layers.push(Ordered {
             key: (solid.render_index, solid.track_index, solid.segment_index),
             paint: Paint::Solid(solid.solid),
+        });
+    }
+    for text in texts {
+        layers.push(Ordered {
+            key: (text.render_index, text.track_index, text.segment_index),
+            paint: Paint::Text(text.placed),
         });
     }
     for video in videos {

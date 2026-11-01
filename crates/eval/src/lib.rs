@@ -5,8 +5,9 @@
 //! keeps that file for one draft revision and seeks it at a later time.
 //! A compound segment is the inlined child draft's picture, placed with the
 //! compound clip. `audio_slice` is the engine mix at that time, and a
-//! compound segment contributes the child's mix. Text, captions, and effects
-//! are not drawn on this path.
+//! compound segment contributes the child's mix. A text segment is drawn
+//! when [`Fonts`] supplies the face named by `font_path`. Captions and
+//! effects are not drawn on this path.
 
 #![forbid(unsafe_code)]
 
@@ -15,10 +16,11 @@ mod frame;
 mod media;
 mod nest;
 mod sources;
+mod text;
 
 pub use audio::{AudioError, MixWindow, audio_slice};
 pub use cutlass_compositor::{Device, Frame};
 pub use cutlass_engine::{ClipPcm, ClockKind, MixResult, ReaderFactory};
 pub use cutlass_model::Micros;
-pub use frame::{EvalError, Snapshot, frame, wait_export_frame};
+pub use frame::{EvalError, Fonts, NoFonts, Snapshot, frame, wait_export_frame};
 pub use media::OpenClips;

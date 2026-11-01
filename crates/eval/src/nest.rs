@@ -13,7 +13,7 @@ use cutlass_engine::{DisplayQuarter, ReaderFactory, map_timeline, placement_of};
 use cutlass_model::{Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 
-use crate::frame::{EvalError, Snapshot, compose};
+use crate::frame::{EvalError, Fonts, Snapshot, compose};
 use crate::media::{OpenClips, PictureTransform, picture_transform, place_with, segment_clip};
 
 /// Compound drafts above this many ancestors are not drawn.
@@ -53,6 +53,7 @@ pub(crate) struct NestPass<'a, D: Device> {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) time: Micros,
+    pub(crate) fonts: &'a dyn Fonts,
     pub(crate) device: &'a mut D,
     pub(crate) clips: &'a mut OpenClips,
     pub(crate) revision: u64,
@@ -140,7 +141,7 @@ fn child_frame<D: Device>(
     let child_clips = pass.clips.child(segment);
     let chain = descend(pass.ancestors, &draft.id);
     match compose(
-        &Snapshot::new(child),
+        &Snapshot::with_fonts(child, pass.fonts),
         time,
         pass.device,
         pass.media,
@@ -427,11 +428,13 @@ mod tests {
         let mut device = SoftwareDevice::new();
         let media = ReaderFactory::new();
         let mut clips = OpenClips::new();
+        let fonts = crate::frame::NoFonts;
         let mut pass = NestPass {
             media: &media,
             width: 1,
             height: 1,
             time: Micros(0),
+            fonts: &fonts,
             device: &mut device,
             clips: &mut clips,
             revision: 0,

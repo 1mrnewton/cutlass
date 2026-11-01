@@ -1894,8 +1894,8 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         };
         let mv_index = self.read_drl(y_mode, stack.found, &stack)?;
         let (mv, mv1) = self.assign_mvs(y_mode, mv_index, &stack, global, global1)?;
-        let ii = if compound {
-            -1
+        let (ii, ii_wedge) = if compound {
+            (-1, None)
         } else {
             self.read_interintra(bsize)?
         };
@@ -1909,11 +1909,16 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             mv,
             skip_mode,
         })?;
-        let compound_choice = if skip_mode || !compound {
+        let mut compound_choice = if skip_mode || !compound {
             CompoundChoice::average()
         } else {
             self.read_compound_choice(row, col, bsize, reference, reference1)?
         };
+        if let Some(index) = ii_wedge {
+            compound_choice.kind = MASK_WEDGE;
+            compound_choice.wedge = index;
+            compound_choice.sign = 0;
+        }
         // A skip-mode block carries no interpolation symbol. The frame filter
         // is used, or eight-tap regular when that filter is switchable.
         let interp = if skip_mode {
@@ -2540,10 +2545,11 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         )
     }
 
-    /// Interintra is a single-reference blend. A wedge mask stays unsupported.
-    fn read_interintra(&mut self, bsize: usize) -> Result<i8, CodecError> {
+    /// Interintra blends one reference with an intra predictor.
+    /// A wedge uses `wedge_sign` 0. The index is absent when the wedge flag is clear.
+    fn read_interintra(&mut self, bsize: usize) -> Result<(i8, Option<u8>), CodecError> {
         if !self.interintra || !(3..=9).contains(&bsize) {
-            return Ok(-1);
+            return Ok((-1, None));
         }
         let ctx = SIZE_GROUP
             .get(bsize)
@@ -2558,7 +2564,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             &[ctx],
         )? == 1;
         if !on {
-            return Ok(-1);
+            return Ok((-1, None));
         }
         let mode = read_sym(
             &mut self.symbols,
@@ -2574,12 +2580,17 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             &[22, 3],
             &[bsize],
         )? == 1;
-        if wedge {
-            return Err(CodecError::Unsupported {
-                what: "interintra wedge",
-            });
+        if !wedge {
+            return Ok((mode, None));
         }
-        Ok(mode)
+        let index = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.wedge_index,
+            &[22, 17],
+            &[bsize],
+        )? as u8;
+        Ok((mode, Some(index)))
     }
 
     fn assign_mvs(
@@ -3162,7 +3173,8 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             } else {
                 predict(&mut sample)?;
             }
-            self.blend_interintra(block.plane, ii as u8, (x, y, w, h), &packed);
+            let packed_mask = self.compound_mask.get(at).copied().unwrap_or(0);
+            self.blend_interintra(block, ii as u8, (x, y, w, h), &packed, packed_mask);
             return Ok(());
         }
         if self.predict_sub8x8_chroma(block)? {
@@ -3944,23 +3956,65 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         predict_intra(plane, stride, &pred, &mut self.predict)
     }
 
-    /// `COMPOUND_INTRA` blend. The mask is built at this plane's resolution.
+    /// `COMPOUND_INTRA` uses a mode ramp at this plane's size.
+    /// `COMPOUND_WEDGE` uses the luma wedge and subsamples it for chroma.
     fn blend_interintra(
         &mut self,
-        plane: usize,
+        block: &Block,
         mode: u8,
         place: (usize, usize, usize, usize),
         inter: &[S],
+        packed: u16,
     ) {
         let (x, y, w, h) = place;
-        let stride = if plane == 0 {
+        let stride = if block.plane == 0 {
             self.width
         } else {
             self.chroma_w
         };
-        let dst = if plane == 0 {
+        let wedge = mask_kind(packed) == MASK_WEDGE;
+        if wedge && !self.blend_ready {
+            let luma_w = block_width(block.bsize);
+            let luma_h = block_height(block.bsize);
+            let n = luma_w.saturating_mul(luma_h);
+            self.blend_mask.resize(n, 0);
+            wedge_mask(
+                luma_w,
+                luma_h,
+                usize::from(mask_wedge(packed)),
+                mask_sign(packed),
+                &mut self.blend_mask,
+            );
+            self.blend_w = luma_w;
+            self.blend_ready = true;
+        }
+        let n = w.saturating_mul(h);
+        let weights = if wedge {
+            let luma_w = if self.blend_w == 0 {
+                block_width(block.bsize)
+            } else {
+                self.blend_w
+            };
+            let mut weights = vec![0i32; n];
+            for row in 0..h {
+                for col in 0..w {
+                    weights[row * w + col] = compound_mask_weight(
+                        &self.blend_mask,
+                        luma_w,
+                        col,
+                        row,
+                        block.sub_x != 0,
+                        block.sub_y != 0,
+                    );
+                }
+            }
+            Some(weights)
+        } else {
+            None
+        };
+        let dst = if block.plane == 0 {
             &mut self.y
-        } else if plane == 1 {
+        } else if block.plane == 1 {
             &mut self.u
         } else {
             &mut self.v
@@ -3975,7 +4029,11 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
                 let Some(slot) = dst.get_mut(at) else {
                     continue;
                 };
-                let weight = interintra_weight(mode, row, col, scale);
+                let weight = if let Some(weights) = &weights {
+                    weights[row * w + col]
+                } else {
+                    interintra_weight(mode, row, col, scale)
+                };
                 let intra = slot.to_i32();
                 let mixed = weight * intra + (64 - weight) * sample.to_i32();
                 *slot = S::from_i32(clip_sample((mixed + 32) >> 6, self.bit_depth));

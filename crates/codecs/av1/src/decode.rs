@@ -3816,6 +3816,44 @@ mod tests {
     }
 
     #[test]
+    fn an_interintra_wedge_picture_matches_dav1d() {
+        // aomenc 64×64. Six blocks on the inter frame blend one reference with
+        // intra through a luma wedge. The wedge sign is 0. Restoration, CDEF,
+        // and super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/interintra-wedge.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.enable_interintra);
+        let expected = [0x79f7_4b34_bf00_4135, 0xf0cd_13c5_915c_11ca];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3 / 2);
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn smooth_interintra_matches_dav1d() {
         // aomenc 64×64. The inter frame blends one 16×16 block with DC intra.
         // The wedge symbol is 0. Digests are `ffmpeg -c:v libdav1d -threads 1`.

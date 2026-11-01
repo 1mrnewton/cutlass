@@ -5598,6 +5598,50 @@ mod tests {
     }
 
     #[test]
+    fn restoration_cdf_is_kept_for_the_next_frame() {
+        // aomenc --cpu-used=0 --sharpness=5 --cq-level=32, 512×128, two frames.
+        // The key is Wiener on every plane, with 128-sample units, and it
+        // stores the adapted CDF. The inter frame loads that table: its chroma
+        // planes are Wiener. Replacing the stored restoration CDFs with the
+        // defaults makes that frame fail. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-carry.ivf"));
+        assert_eq!(frames.len(), 2);
+        let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert!(key.intra);
+        assert!(!key.disable_cdf_update);
+        assert!(!key.disable_frame_end_update);
+        assert_eq!(key.width, 512);
+        assert_eq!(key.height, 128);
+        assert_eq!(key.restoration.plane, [crate::header::RESTORE_WIENER; 3]);
+        assert_eq!(key.restoration.unit, [128; 3]);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        assert!(inter.primary_ref < 7);
+        assert!(!inter.disable_cdf_update);
+        assert_eq!(
+            inter.restoration.plane,
+            [
+                crate::header::RESTORE_SGRPROJ,
+                crate::header::RESTORE_WIENER,
+                crate::header::RESTORE_WIENER,
+            ]
+        );
+        assert_eq!(inter.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let expected = [0x6fdf_19a7_01f0_8e3f, 0x76ee_a177_f801_d985];
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 512 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn twelve_bit_wiener_matches_dav1d() {
         // aomenc --profile=2 --bit-depth=12 --sharpness=5 --cq-level=32, 512×128
         // 4:2:0. Every plane is Wiener with 256-sample units. Luma has two

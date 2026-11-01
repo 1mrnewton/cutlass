@@ -2,8 +2,8 @@
 //!
 //! Text and shapes never open a decoder. A platform buffer stays a platform
 //! buffer. Coded video goes through `cutlass-color`. A still is scaled to
-//! 8-bit RGBA and premultiplied. Gamma, chromaticity, and a profile are not
-//! applied. A layout neither path can convert is a named miss.
+//! 8-bit, mapped through its gamma or profile, then premultiplied. A layout
+//! neither path can convert is a named miss.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -258,7 +258,9 @@ fn yuv420(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
 ///
 /// A depth below 8 bits and a 16-bit sample use `sample * 255 / max`.
 /// Palette alpha past the table is opaque. A color key compares the coded
-/// samples. Partial alpha is `(channel * alpha + 127) / 255`.
+/// samples. The straight sample is mapped, then partial alpha is
+/// `(channel * alpha + 127) / 255`. A gamma of zero, with no sRGB intent and
+/// no readable profile, is a color miss.
 fn still_picture(image: &StillImage) -> Result<Picture, EngineError> {
     let Some(rgba) = still_rgba(image) else {
         return Err(EngineError::ColorMiss {
@@ -286,9 +288,17 @@ fn still_rgba(image: &StillImage) -> Option<Vec<u8>> {
     if image.samples.len() != pixels.checked_mul(channels)? {
         return None;
     }
+    let map = cutlass_color::StillMap::prepare(&cutlass_color::StillTags {
+        gamma_times_100000: image.gamma_times_100000,
+        chromaticity: image.chromaticity,
+        srgb_intent: image.srgb_intent,
+        icc_profile: &image.icc_profile,
+    })
+    .ok()?;
     let mut rgba = vec![0_u8; rgba_len(image.width, image.height)?];
     for (pixel, chunk) in image.samples.chunks(channels).enumerate() {
         let (red, green, blue, alpha) = straight(image, chunk)?;
+        let [red, green, blue] = map.map_rgb([red, green, blue]);
         let dest = pixel.checked_mul(4)?;
         let slot = rgba.get_mut(dest..dest + 4)?;
         slot[0] = premultiply(red, alpha);
@@ -489,11 +499,150 @@ mod tests {
     }
 
     #[test]
-    fn gamma_and_a_profile_do_not_change_the_samples() {
+    fn reference_gamma_and_an_unreadable_profile_keep_the_samples() {
         let mut tagged = row(ColorType::Rgb, BitDepth::Eight, vec![1, 2, 3]);
         tagged.gamma_times_100000 = Some(45_455);
         tagged.icc_profile = vec![1, 2, 3, 4];
         assert_eq!(rgba(tagged), vec![1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn linear_gamma_is_encoded_before_premultiply() {
+        let mut gray = row(ColorType::Gray, BitDepth::Eight, vec![128]);
+        gray.gamma_times_100000 = Some(100_000);
+        assert_eq!(rgba(gray), vec![186, 186, 186, 255]);
+
+        let mut partial = row(ColorType::GrayAlpha, BitDepth::Eight, vec![100, 128]);
+        partial.gamma_times_100000 = Some(100_000);
+        assert_eq!(rgba(partial), vec![84, 84, 84, 128]);
+
+        let mut wide = row(ColorType::Gray, BitDepth::Sixteen, vec![32_768]);
+        wide.gamma_times_100000 = Some(100_000);
+        assert_eq!(rgba(wide), vec![186, 186, 186, 255]);
+
+        let mut intent = row(ColorType::Rgb, BitDepth::Eight, vec![128, 10, 20]);
+        intent.gamma_times_100000 = Some(100_000);
+        intent.srgb_intent = Some(0);
+        assert_eq!(rgba(intent), vec![128, 10, 20, 255]);
+
+        let mut zero_intent = row(ColorType::Rgb, BitDepth::Eight, vec![128, 10, 20]);
+        zero_intent.gamma_times_100000 = Some(0);
+        zero_intent.srgb_intent = Some(0);
+        assert_eq!(rgba(zero_intent), vec![128, 10, 20, 255]);
+
+        let mut broken = row(ColorType::Gray, BitDepth::Eight, vec![128]);
+        broken.gamma_times_100000 = Some(100_000);
+        broken.icc_profile = vec![1, 2, 3, 4];
+        assert_eq!(rgba(broken), vec![186, 186, 186, 255]);
+
+        let mut zero = row(ColorType::Gray, BitDepth::Eight, vec![128]);
+        zero.gamma_times_100000 = Some(0);
+        assert!(matches!(
+            still_picture(&zero),
+            Err(EngineError::ColorMiss { .. })
+        ));
+    }
+
+    #[test]
+    fn chromaticity_and_a_profile_move_the_straight_sample() {
+        let mut shifted = row(ColorType::Rgb, BitDepth::Eight, vec![180, 80, 40]);
+        shifted.gamma_times_100000 = Some(45_455);
+        shifted.chromaticity = Some([
+            31_270, 32_900, 50_000, 30_000, 30_000, 60_000, 15_000, 6_000,
+        ]);
+        assert_eq!(rgba(shifted), vec![180, 93, 86, 255]);
+
+        let mut ignored = row(ColorType::Gray, BitDepth::Eight, vec![128]);
+        ignored.gamma_times_100000 = Some(100_000);
+        ignored.chromaticity = Some([31_270, 0, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000]);
+        assert_eq!(rgba(ignored), vec![186, 186, 186, 255]);
+
+        let mut profiled = row(ColorType::Gray, BitDepth::Eight, vec![128]);
+        profiled.gamma_times_100000 = Some(45_455);
+        profiled.srgb_intent = Some(1);
+        profiled.icc_profile = linear_bt709_profile();
+        assert_eq!(rgba(profiled), vec![186, 186, 186, 255]);
+
+        let mut indexed = row(ColorType::Indexed, BitDepth::Eight, vec![0]);
+        indexed.palette = vec![Rgb8 {
+            red: 128,
+            green: 128,
+            blue: 128,
+        }];
+        indexed.gamma_times_100000 = Some(100_000);
+        assert_eq!(rgba(indexed), vec![186, 186, 186, 255]);
+    }
+
+    fn linear_bt709_profile() -> Vec<u8> {
+        let columns = [
+            [0.4124564, 0.2126729, 0.0193339],
+            [0.3575761, 0.7151522, 0.1191920],
+            [0.1804375, 0.0721750, 0.9503041],
+        ];
+        let illuminant = [0.95047, 1.0, 1.08883];
+        let signatures: [[u8; 4]; 6] = [*b"rXYZ", *b"gXYZ", *b"bXYZ", *b"rTRC", *b"gTRC", *b"bTRC"];
+        let mut tags = Vec::new();
+        for column in columns {
+            tags.push(xyz_tag(column));
+        }
+        for _ in 0..3 {
+            tags.push(curv_tag(256));
+        }
+        let mut body = vec![0_u8; 128];
+        body[16..20].copy_from_slice(b"RGB ");
+        body[20..24].copy_from_slice(b"XYZ ");
+        body[36..40].copy_from_slice(b"acsp");
+        for (index, value) in illuminant.iter().enumerate() {
+            let at = 68 + index * 4;
+            body[at..at + 4].copy_from_slice(&fixed(*value).to_be_bytes());
+        }
+        let mut cursor = 132 + signatures.len() * 12;
+        let mut entries = Vec::new();
+        for (signature, tag) in signatures.iter().zip(&tags) {
+            entries.push((*signature, cursor, tag.len()));
+            cursor = cursor.saturating_add(tag.len()).div_ceil(4) * 4;
+        }
+        body.extend(
+            u32::try_from(signatures.len())
+                .expect("count")
+                .to_be_bytes(),
+        );
+        for (signature, offset, size) in &entries {
+            body.extend(signature);
+            body.extend(u32::try_from(*offset).expect("offset").to_be_bytes());
+            body.extend(u32::try_from(*size).expect("size").to_be_bytes());
+        }
+        for tag in tags {
+            let pad = (4 - tag.len() % 4) % 4;
+            body.extend(tag);
+            body.extend(std::iter::repeat_n(0, pad));
+        }
+        let size = u32::try_from(body.len()).expect("size");
+        body[..4].copy_from_slice(&size.to_be_bytes());
+        body
+    }
+
+    fn xyz_tag(xyz: [f64; 3]) -> Vec<u8> {
+        let mut tag = Vec::new();
+        tag.extend(b"XYZ ");
+        tag.extend([0, 0, 0, 0]);
+        for value in xyz {
+            tag.extend(fixed(value).to_be_bytes());
+        }
+        tag
+    }
+
+    fn curv_tag(gamma_8_8: u16) -> Vec<u8> {
+        let mut tag = Vec::new();
+        tag.extend(b"curv");
+        tag.extend([0, 0, 0, 0]);
+        tag.extend(1_u32.to_be_bytes());
+        tag.extend(gamma_8_8.to_be_bytes());
+        tag
+    }
+
+    fn fixed(value: f64) -> i32 {
+        value.mul_add(65_536.0, 0.0).round() as i32
     }
 
     #[test]

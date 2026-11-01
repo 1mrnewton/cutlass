@@ -1,6 +1,6 @@
 use cutlass_model::{
     CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
-    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, WordColumns,
+    MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
 };
 
 /// A media record stored in the library. A segment places it later.
@@ -115,4 +115,7 @@ pub enum Request {
     },
     /// Add a material to the library. This does not place a segment.
     Import { medium: ImportedMedium },
+    /// Add an empty lane. Video and mixed lanes are overlays above the main track.
+    /// Audio is inserted under the main track. This does not place a segment.
+    InsertTrack { track_id: TrackId, kind: TrackType },
 }

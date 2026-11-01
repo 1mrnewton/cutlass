@@ -104,7 +104,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::DuplicateMaterial => "the material id is already in a pool".to_owned(),
         EditError::TransitionWindow => "the split falls inside a transition window".to_owned(),
         EditError::AlreadyLinked => "the segment is already linked".to_owned(),
-        EditError::TrackKind => "the track type is not the type the import named".to_owned(),
+        EditError::TrackKind => "the track could not be added".to_owned(),
     }
 }
 
@@ -132,12 +132,9 @@ mod tests {
     }
 
     #[test]
-    fn a_track_kind_mismatch_names_the_import() {
+    fn a_track_that_cannot_be_added_names_the_cause() {
         let error = FfiError::from(EditError::TrackKind);
-        assert_eq!(
-            error.to_string(),
-            "the track type is not the type the import named"
-        );
+        assert_eq!(error.to_string(), "the track could not be added");
     }
 
     #[test]

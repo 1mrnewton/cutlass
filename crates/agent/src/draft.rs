@@ -440,6 +440,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextContent { .. } => "set_text_content",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::Import { .. } => "import",
+        Request::InsertTrack { .. } => "insert_track",
     }
 }
 
@@ -645,6 +646,7 @@ fn map_redo(error: EditError) -> DraftError {
 mod tests {
     use cutlass_model::{
         Draft, MaterialId, MaterialVideo, Micros, Segment, SegmentId, TimeRange, Track, TrackId,
+        TrackType,
     };
     use cutlass_session::{EditError, ImportedMedium, Request, Session};
 
@@ -673,6 +675,15 @@ mod tests {
             medium: ImportedMedium::Video(Box::new(MaterialVideo::new("clip"))),
         };
         assert_eq!(request_name(&request), "import");
+    }
+
+    #[test]
+    fn insert_track_is_named() {
+        let request = Request::InsertTrack {
+            track_id: TrackId::new("lane"),
+            kind: TrackType::Audio,
+        };
+        assert_eq!(request_name(&request), "insert_track");
     }
 
     fn apply_input(

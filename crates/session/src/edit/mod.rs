@@ -63,7 +63,7 @@ pub enum EditError {
     TransitionWindow,
     /// The dependent already has an owner, or it is an owner itself.
     AlreadyLinked,
-    /// The track exists and its type is not the type the import named.
+    /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
 }
 
@@ -128,6 +128,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
         Request::Import { medium } => import::import(draft, medium.clone()),
+        Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
     }
 }
 

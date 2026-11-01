@@ -154,6 +154,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::LineSpacing) => {
                 formatter.write_str("line spacing must be greater than -1 and at most 4")
             }
+            Self::Edit(EditError::LineWidth) => {
+                formatter.write_str("the line width must be from zero through 8192")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -221,6 +224,7 @@ pub struct Inspection {
     pub text_align: i32,
     pub letter_spacing: f64,
     pub line_spacing: f64,
+    pub line_width: f64,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -1933,7 +1937,7 @@ impl Shell {
         let id = self.selected()?;
         let (segment, locked) = locate(draft, id)?;
         let (material, text, words) = material_label(draft, &segment.material_id);
-        let (text_size, text_color, text_align, letter_spacing, line_spacing) =
+        let (text_size, text_color, text_align, letter_spacing, line_spacing, line_width) =
             text_style(draft, &segment.material_id);
         Some(Inspection {
             segment_id: segment.id.clone(),
@@ -1952,6 +1956,7 @@ impl Shell {
             text_align,
             letter_spacing,
             line_spacing,
+            line_width,
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -2814,6 +2819,18 @@ impl Shell {
         self.apply(Request::SetLetterSpacing {
             segment_id,
             spacing,
+            face,
+        })
+    }
+
+    /// Store the wrap width in pixels. `0` keeps one line. One undo restores it.
+    pub fn set_line_width(&mut self, width: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetLineWidth {
+            segment_id,
+            width,
             face,
         })
     }
@@ -4347,7 +4364,7 @@ fn picture_scale(segment: &Segment) -> (f64, f64) {
     }
 }
 
-fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64, f64) {
+fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64, f64, f64) {
     draft
         .materials
         .texts
@@ -4360,9 +4377,10 @@ fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64
                 text.alignment,
                 text.letter_spacing,
                 text.line_spacing,
+                text.line_max_width,
             )
         })
-        .unwrap_or((0.0, String::new(), 0, 0.0, 0.0))
+        .unwrap_or((0.0, String::new(), 0, 0.0, 0.0, 0.0))
 }
 
 fn fade_durations(draft: &Draft, segment: &Segment) -> (i64, i64) {
@@ -6855,6 +6873,83 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().line_spacing, 1.0);
+    }
+
+    #[test]
+    fn a_line_width_wraps_the_words_and_zero_keeps_one_line() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.set_line_width(40.0).unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "AB".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.set_line_width(40.0).unwrap_err().to_string(),
+            "a text style belongs on text"
+        );
+
+        desktop.select(Some(SegmentId::new("caption")));
+        desktop.set_text_size(64.0).unwrap();
+        let one_line = desktop.preview_bytes().unwrap();
+        desktop.set_line_width(1.0).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.line_width, 1.0);
+        assert_eq!(inspection.text_align, 0);
+        assert_eq!(inspection.text_size, 64.0);
+        assert_eq!(inspection.text.as_deref(), Some("AB"));
+        let wrapped = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&one_line.rgba), digest(&wrapped.rgba));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().line_width, 0.0);
+        assert_eq!(
+            desktop.set_line_width(-1.0).unwrap_err().to_string(),
+            "the line width must be from zero through 8192"
+        );
+        assert_eq!(
+            desktop.set_line_width(8_193.0).unwrap_err().to_string(),
+            "the line width must be from zero through 8192"
+        );
+        desktop.set_line_width(8_192.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().line_width, 8_192.0);
+
+        let lane = desktop.draft().unwrap().tracks[1].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.set_line_width(40.0).unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.inspection().unwrap().line_width, 8_192.0);
     }
 
     #[test]

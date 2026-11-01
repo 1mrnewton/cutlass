@@ -118,6 +118,7 @@ pub struct ViewState {
     text_color_buffer: String,
     letter_buffer: String,
     line_buffer: String,
+    width_buffer: String,
     x_buffer: String,
     y_buffer: String,
     scale_buffer: String,
@@ -151,6 +152,7 @@ impl Default for ViewState {
             text_color_buffer: String::new(),
             letter_buffer: String::new(),
             line_buffer: String::new(),
+            width_buffer: String::new(),
             x_buffer: String::new(),
             y_buffer: String::new(),
             scale_buffer: String::new(),
@@ -1213,6 +1215,13 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
+        if let Some(width) =
+            number_field(ui, "Width", &mut view.width_buffer, inspection.line_width)
+            && !inspection.locked
+            && let Err(error) = shell.set_line_width(width)
+        {
+            shell.set_notice(error.to_string());
+        }
     }
     if let Some(volume) = number_field(ui, "Volume", &mut view.volume_buffer, inspection.volume)
         && !inspection.locked
@@ -1271,6 +1280,8 @@ fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Opt
             response.on_hover_text("Pixels");
         } else if label == "Letters" || label == "Lines" {
             response.on_hover_text("0 is the normal gap");
+        } else if label == "Width" {
+            response.on_hover_text("Pixels. 0 keeps one line");
         } else if label.starts_with("Fade") {
             response.on_hover_text("Seconds");
         }

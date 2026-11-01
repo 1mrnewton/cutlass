@@ -74,6 +74,7 @@ Recorded line:
 | Sharpness 7 at 10-bit, 12-bit, and 10-bit 4:2:2 | Pictures match | 8-bit sharpness 7 | `sharp_high_depth_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Frame parallel mode | Pictures match | Probability adaptation | `frame_parallel_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Intra loop-filter delta -63 | Pictures match | Encoded deltas | `loop_filter_delta_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Relative segment quantizer step above 63 | Pictures match | No segmentation | `segment_quant_delta_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Colour spaces 0, 3, 4, 5, and 6, and profile 0 sRGB | On the picture, or malformed | Space 1 only | `color_and_render_size_are_on_the_picture` | Verified |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |

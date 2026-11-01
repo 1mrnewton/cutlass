@@ -530,6 +530,81 @@ fn loop_filter_delta_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A relative segment quantizer step above 63 is added to the base index and clamped.
+#[test]
+fn segment_quant_delta_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no segmentation source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("seg-q");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &[
+            "-frames:v",
+            "6",
+            "-vf",
+            "scale=320:240",
+            "-aq-mode",
+            "4",
+            "-deadline",
+            "good",
+            "-cpu-used",
+            "2",
+        ],
+    );
+    let stream = read_ivf(&ivf);
+    assert_eq!(stream.width, 320);
+    assert_eq!(stream.height, 240);
+    assert!(
+        stream.frames.len() > 1,
+        "segment quant needs an inter frame"
+    );
+    assert!(
+        large_relative_quant(&stream),
+        "no relative segment quantizer step above 63"
+    );
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "segment quant {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn large_relative_quant(stream: &Ivf) -> bool {
+    let mut state = crate::header::Persist::new();
+    let mut found = false;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("segment frame {index} header: {err}"));
+        let seg = &parsed.header.seg;
+        if seg.enabled && !seg.abs_delta {
+            found |= seg
+                .feature_data
+                .iter()
+                .enumerate()
+                .any(|(id, data)| seg.feature_on[id][0] && data[0] > 63_i16);
+        }
+        remember_header(&mut state, &parsed);
+    }
+    found
+}
+
 fn intra_delta_is_extreme(frames: &[Vec<u8>]) -> bool {
     let mut state = crate::header::Persist::new();
     let mut active = false;
@@ -542,6 +617,7 @@ fn intra_delta_is_extreme(frames: &[Vec<u8>]) -> bool {
     active
 }
 
+#[derive(Clone, Copy)]
 struct DeltaBits {
     magnitude: usize,
     sign: usize,

@@ -16,7 +16,7 @@ This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the pa
 
 Film grain synthesis is part of the output process in that specification. When a frame sends its own grain parameters, the noise is added to the shown picture. The reference keeps the picture from before that step.
 
-Main profile allows 10-bit 4:2:0 and monochrome. An 8-bit or 10-bit monochrome picture is one gray plane. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 picture keeps native samples, including a frame shown wider than it was coded, a keyframe restored by Wiener or self-guided filtering, and film grain on the shown picture. This is not yet a Main-profile-compliant decoder.
+Main profile allows 10-bit 4:2:0 and monochrome. Profile 1 at 8-bit is 4:4:4. 10-bit 4:4:4 is still rejected. An 8-bit or 10-bit monochrome picture is one gray plane. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 picture keeps native samples, including a frame shown wider than it was coded, a keyframe restored by Wiener or self-guided filtering, and film grain on the shown picture. This is not yet a Main-profile-compliant decoder.
 
 ## API
 
@@ -116,7 +116,7 @@ If ffmpeg is missing, the example prints `skip: ffmpeg is not installed` and exi
 
 Refused with a typed error before a picture is published:
 
-- 12-bit, 4:2:2, and 4:4:4. Monochrome 8-bit and 10-bit are one gray plane. The 10-bit monochrome pair leaves film grain off. 10-bit 4:2:0 is little-endian samples, including super resolution, Wiener or self-guided restoration, and film grain.
+- 10-bit 4:4:4, 12-bit, and 4:2:2. 8-bit 4:4:4 matches. Monochrome 8-bit and 10-bit are one gray plane. The 10-bit monochrome pair leaves film grain off. 10-bit 4:2:0 is little-endian samples, including super resolution, Wiener or self-guided restoration, and film grain.
 - A profile other than 0, a second operating point, and the decoder model.
 - A tile group that does not follow a frame header. A large-scale tile anchor of 8 or more, or an empty reference slot.
 - A show-existing frame shows the stored picture and does not re-apply grain.

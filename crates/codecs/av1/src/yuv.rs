@@ -87,6 +87,37 @@ impl Yuv420 {
         }
         Ok(Self { y, u, v })
     }
+
+    /// Chroma edges follow the sequence subsampling flags. Both flags set is 4:2:0.
+    /// Both clear is 4:4:4.
+    pub fn subsampled(
+        y: Plane,
+        u: Plane,
+        v: Plane,
+        sub_x: bool,
+        sub_y: bool,
+    ) -> Result<Self, CodecError> {
+        let chroma_w = if sub_x {
+            y.width().div_ceil(2)
+        } else {
+            y.width()
+        };
+        let chroma_h = if sub_y {
+            y.height().div_ceil(2)
+        } else {
+            y.height()
+        };
+        if u.width() != chroma_w
+            || v.width() != chroma_w
+            || u.height() != chroma_h
+            || v.height() != chroma_h
+        {
+            return Err(CodecError::InvalidApi {
+                what: "chroma size",
+            });
+        }
+        Ok(Self { y, u, v })
+    }
 }
 
 /// One picture presented to this encoder, beside the shared still and frame inputs.
@@ -247,7 +278,11 @@ pub fn picture_output(
         PictureInfo {
             width,
             height,
-            pixel: PixelFormat::Yuv420p,
+            pixel: if picture.u.width() == width && picture.u.height() == height {
+                PixelFormat::Yuv444p
+            } else {
+                PixelFormat::Yuv420p
+            },
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
         },

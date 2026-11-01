@@ -37,6 +37,8 @@ pub struct CdefInput<'a, S> {
     pub index: &'a [i8],
     pub params: CdefParams,
     pub bit_depth: u8,
+    pub sub_x: bool,
+    pub sub_y: bool,
 }
 
 pub fn apply<S: Pix>(frame: &mut CdefInput<'_, S>) {
@@ -151,26 +153,34 @@ fn filter_chroma<S: Pix>(
     let shift = i32::try_from(depth_shift(frame.bit_depth)).unwrap_or(0);
     let pri = i32::from(frame.params.uv_pri.get(idx).copied().unwrap_or(0)) << shift;
     let sec = i32::from(frame.params.uv_sec.get(idx).copied().unwrap_or(0)) << shift;
+    let damping = (i32::from(frame.params.damping) + shift).saturating_sub(1);
+    let sub_x = frame.sub_x;
+    let sub_y = frame.sub_y;
+    let shift_x = usize::from(sub_x);
+    let shift_y = usize::from(sub_y);
+    let x0 = (col * 4) >> shift_x;
+    let y0 = (row * 4) >> shift_y;
+    let width = 8 >> shift_x;
+    let height = 8 >> shift_y;
     let dir = if pri == 0 {
         0
     } else {
-        usize::from(UV_DIR[1][1][y_dir])
+        usize::from(UV_DIR[shift_x][shift_y][y_dir])
     };
-    let damping = (i32::from(frame.params.damping) + shift).saturating_sub(1);
     filter_rect(Rect {
         src: src_u,
         dst: frame.u,
         stride: frame.c_stride,
-        x0: col * 2,
-        y0: row * 2,
-        width: 4,
-        height: 4,
+        x0,
+        y0,
+        width,
+        height,
         dir,
         pri,
         sec,
         damping,
-        sub_x: true,
-        sub_y: true,
+        sub_x,
+        sub_y,
         mi_cols: frame.mi_cols,
         mi_rows: frame.mi_rows,
         bit_depth: frame.bit_depth,
@@ -179,16 +189,16 @@ fn filter_chroma<S: Pix>(
         src: src_v,
         dst: frame.v,
         stride: frame.c_stride,
-        x0: col * 2,
-        y0: row * 2,
-        width: 4,
-        height: 4,
+        x0,
+        y0,
+        width,
+        height,
         dir,
         pri,
         sec,
         damping,
-        sub_x: true,
-        sub_y: true,
+        sub_x,
+        sub_y,
         mi_cols: frame.mi_cols,
         mi_rows: frame.mi_rows,
         bit_depth: frame.bit_depth,
@@ -454,6 +464,8 @@ mod tests {
             skips: &[0, 0, 0, 0],
             index: &[0, -1, -1, -1],
             bit_depth: 8,
+            sub_x: true,
+            sub_y: true,
             params: CdefParams {
                 damping: 3,
                 bits: 0,

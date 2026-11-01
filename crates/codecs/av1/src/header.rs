@@ -569,7 +569,8 @@ fn obu_length_matches(obu: &[u8]) -> Result<(), CodecError> {
 
 fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let profile = bits.read(3)? as u8;
-    if profile != 0 {
+    // Profile 2 is 4:2:2 and 12-bit. That color config is still unread.
+    if profile > 1 {
         return Err(CodecError::Unsupported { what: "profile" });
     }
     let still = bits.read_bool()?;
@@ -674,25 +675,17 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let enable_superres = bits.read_bool()?;
     let enable_cdef = bits.read_bool()?;
     let enable_restoration = bits.read_bool()?;
-    let high = bits.read_bool()?;
-    // Profile 0 has no `twelve_bit`. `high_bitdepth` selects 10-bit samples.
-    let bit_depth = if high { 10 } else { 8 };
-    // Profile 0 with `mono_chrome` has one plane. Chroma sample position and
-    // `separate_uv_delta_q` are not present. A three-plane header still reads both.
-    let monochrome = bits.read_bool()?;
-    let described = bits.read_bool()?;
-    if described {
-        let _ = bits.read(8)?;
-        let _ = bits.read(8)?;
-        let _ = bits.read(8)?;
-    }
-    let color_range_full = bits.read_bool()?;
-    let separate_uv_delta_q = if monochrome {
-        false
+    let (
+        bit_depth,
+        monochrome,
+        subsampling_x,
+        subsampling_y,
+        color_range_full,
+        separate_uv_delta_q,
+    ) = if profile == 0 {
+        read_profile0_color(bits)?
     } else {
-        let chroma_pos = bits.read(2)?;
-        let _ = chroma_pos;
-        bits.read_bool()?
+        read_profile1_color(bits)?
     };
     let film_grain = bits.read_bool()?;
     Ok(Sequence {
@@ -722,8 +715,8 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         force_integer,
         bit_depth,
         monochrome,
-        subsampling_x: true,
-        subsampling_y: true,
+        subsampling_x,
+        subsampling_y,
         color_range_full,
         separate_uv_delta_q,
         film_grain,
@@ -732,6 +725,69 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         delta_frame_id_len: delta_id,
         use_128,
     })
+}
+
+/// Profile 0 is 4:2:0. `high_bitdepth` selects 10-bit. There is no `twelve_bit`.
+fn read_profile0_color(
+    bits: &mut BitReader<'_>,
+) -> Result<(u8, bool, bool, bool, bool, bool), CodecError> {
+    let high = bits.read_bool()?;
+    let bit_depth = if high { 10 } else { 8 };
+    // `mono_chrome` removes the chroma sample position and `separate_uv_delta_q`.
+    let monochrome = bits.read_bool()?;
+    let described = bits.read_bool()?;
+    if described {
+        let _ = bits.read(8)?;
+        let _ = bits.read(8)?;
+        let _ = bits.read(8)?;
+    }
+    let color_range_full = bits.read_bool()?;
+    let separate_uv_delta_q = if monochrome {
+        false
+    } else {
+        let chroma_pos = bits.read(2)?;
+        let _ = chroma_pos;
+        bits.read_bool()?
+    };
+    Ok((
+        bit_depth,
+        monochrome,
+        true,
+        true,
+        color_range_full,
+        separate_uv_delta_q,
+    ))
+}
+
+/// Profile 1 is 4:4:4. `mono_chrome` is not present. Chroma sample position is
+/// not present, because both subsampling flags are zero.
+fn read_profile1_color(
+    bits: &mut BitReader<'_>,
+) -> Result<(u8, bool, bool, bool, bool, bool), CodecError> {
+    let high = bits.read_bool()?;
+    let bit_depth = if high { 10 } else { 8 };
+    let described = bits.read_bool()?;
+    let (primaries, transfer, matrix) = if described {
+        (
+            bits.read(8)? as u8,
+            bits.read(8)? as u8,
+            bits.read(8)? as u8,
+        )
+    } else {
+        (2, 2, 2)
+    };
+    // BT.709 + sRGB + identity infers full range and does not read `color_range`.
+    let identity = primaries == 1 && transfer == 13 && matrix == 0;
+    let color_range_full = if identity { true } else { bits.read_bool()? };
+    let separate_uv_delta_q = bits.read_bool()?;
+    Ok((
+        bit_depth,
+        false,
+        false,
+        false,
+        color_range_full,
+        separate_uv_delta_q,
+    ))
 }
 
 fn parse_frame(

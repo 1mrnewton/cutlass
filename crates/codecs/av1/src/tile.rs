@@ -223,13 +223,15 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
             index: &tile.cdef_idx,
             params: tile.cdef,
             bit_depth: tile.bit_depth,
+            sub_x: tile.sub_x,
+            sub_y: tile.sub_y,
         });
     }
-    let chroma_w = visible_w.div_ceil(2);
-    let chroma_h = visible_h.div_ceil(2);
+    let chroma_w = chroma_edge(visible_w, sequence.subsampling_x);
+    let chroma_h = chroma_edge(visible_h, sequence.subsampling_y);
     let up_w = frame.upscaled_width as usize;
     let (y, u, v, out_w) = if postprocess && up_w > visible_w {
-        let up_chroma = up_w.div_ceil(2);
+        let up_chroma = chroma_edge(up_w, sequence.subsampling_x);
         (
             S::upscale(
                 &tile.y,
@@ -270,7 +272,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     };
     let (y, u, v) = if let Some((pre_y, pre_u, pre_v)) = before {
         let (before_y, before_u, before_v) = if up_w > visible_w {
-            let up_chroma = up_w.div_ceil(2);
+            let up_chroma = chroma_edge(up_w, sequence.subsampling_x);
             (
                 S::upscale(
                     &pre_y,
@@ -309,8 +311,24 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
         };
         (
             S::restore_plane(&y, &before_y, out_w, visible_h, &lr, 0, frame),
-            S::restore_plane(&u, &before_u, out_w.div_ceil(2), chroma_h, &lr, 1, frame),
-            S::restore_plane(&v, &before_v, out_w.div_ceil(2), chroma_h, &lr, 2, frame),
+            S::restore_plane(
+                &u,
+                &before_u,
+                chroma_edge(out_w, sequence.subsampling_x),
+                chroma_h,
+                &lr,
+                1,
+                frame,
+            ),
+            S::restore_plane(
+                &v,
+                &before_v,
+                chroma_edge(out_w, sequence.subsampling_x),
+                chroma_h,
+                &lr,
+                2,
+                frame,
+            ),
         )
     } else {
         (y, u, v)
@@ -639,6 +657,10 @@ fn copy_cells<T: Copy>(dst: &mut [T], src: &[T], start: usize, n: usize) {
         return;
     };
     into.copy_from_slice(from);
+}
+
+fn chroma_edge(luma: usize, subsampled: bool) -> usize {
+    if subsampled { luma.div_ceil(2) } else { luma }
 }
 
 fn crop<S: Copy + Default>(src: &[S], stride: usize, width: usize, height: usize) -> Vec<S> {
@@ -1205,6 +1227,22 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         } else {
             (usize::from(self.sub_x), usize::from(self.sub_y))
         }
+    }
+
+    /// Width and height of one reference plane. Chroma uses the sequence subsampling.
+    fn reference_plane_size(&self, slot: usize, plane: usize) -> (usize, usize) {
+        let (sub_x, sub_y) = self.subsampling(plane);
+        let width = if sub_x == 0 {
+            self.ref_w[slot]
+        } else {
+            self.ref_w[slot].div_ceil(2)
+        };
+        let height = if sub_y == 0 {
+            self.ref_h[slot]
+        } else {
+            self.ref_h[slot].div_ceil(2)
+        };
+        (width, height)
     }
 
     fn decode_partition(&mut self, row: usize, col: usize, bsize: usize) -> Result<(), CodecError> {
@@ -3072,16 +3110,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
                 },
             );
         }
-        let plane_w = if block.plane == 0 {
-            ref_w
-        } else {
-            ref_w.div_ceil(2)
-        };
-        let plane_h = if block.plane == 0 {
-            ref_h
-        } else {
-            ref_h.div_ceil(2)
-        };
+        let (plane_w, plane_h) = self.reference_plane_size(slot, block.plane);
         let ii = self.ii_mode.get(at).copied().unwrap_or(-1);
         let gm_index = usize::try_from(frame_ref).unwrap_or(0);
         let gm_kind = self.gm_type.get(gm_index).copied().unwrap_or(0);
@@ -3288,8 +3317,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         let filter = self.interp[at];
         let ref_w = self.ref_w[slot];
         let ref_h = self.ref_h[slot];
-        let plane_w = ref_w.div_ceil(2);
-        let plane_h = ref_h.div_ceil(2);
+        let (plane_w, plane_h) = self.reference_plane_size(slot, block.plane);
         let stride = self.chroma_w;
         let reference: &[S] = if block.plane == 1 {
             self.ref_u[slot]
@@ -3549,16 +3577,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
     fn predict_neighbor(&self, pred: NeighborPred) -> Result<Vec<S>, CodecError> {
         let ref_w = self.ref_w[pred.slot];
         let ref_h = self.ref_h[pred.slot];
-        let plane_w = if pred.plane == 0 {
-            ref_w
-        } else {
-            ref_w.div_ceil(2)
-        };
-        let plane_h = if pred.plane == 0 {
-            ref_h
-        } else {
-            ref_h.div_ceil(2)
-        };
+        let (plane_w, plane_h) = self.reference_plane_size(pred.slot, pred.plane);
         let reference = self.ref_plane(pred.slot, pred.plane);
         let mut packed = vec![S::default(); pred.w.saturating_mul(pred.h)];
         let mut sample = InterSample {
@@ -3778,16 +3797,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         };
         let ref_w = self.ref_w[slot];
         let ref_h = self.ref_h[slot];
-        let plane_w = if block.plane == 0 {
-            ref_w
-        } else {
-            ref_w.div_ceil(2)
-        };
-        let plane_h = if block.plane == 0 {
-            ref_h
-        } else {
-            ref_h.div_ceil(2)
-        };
+        let (plane_w, plane_h) = self.reference_plane_size(slot, block.plane);
         let mode = list_mode(block.y_mode, list);
         let gm_index = usize::try_from(reference).unwrap_or(0);
         let gm_kind = self.gm_type.get(gm_index).copied().unwrap_or(0);

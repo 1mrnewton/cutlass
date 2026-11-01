@@ -10,6 +10,8 @@ pub enum PixelFormat {
     Yuv420p,
     /// Tightly packed 10-bit 4:2:0. Each sample is a little-endian `u16` in the low 10 bits.
     Yuv420p10,
+    /// Tightly packed 8-bit 4:4:4. A full-size Y plane, then U, then V.
+    Yuv444p,
     /// One tightly packed 8-bit plane, `width` by `height`.
     Gray8,
     /// One 10-bit plane. Each sample is a little-endian `u16` in the low 10 bits.

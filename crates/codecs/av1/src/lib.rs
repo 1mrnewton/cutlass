@@ -5,7 +5,9 @@
 //! an order hint. A frame may use a uniform or non-uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
-//! An 8-bit or 10-bit monochrome sequence is published as one gray plane. A
+//! An 8-bit profile 1 sequence is published as 4:4:4. A 10-bit 4:4:4 sequence
+//! is rejected. An 8-bit or 10-bit monochrome sequence is published as one gray
+//! plane. A
 //! 10-bit 4:2:0 sequence is published as little-endian samples, including a
 //! frame that is upscaled after reconstruction, a keyframe restored by Wiener
 //! or self-guided filtering, and film grain on the shown picture. 12-bit is

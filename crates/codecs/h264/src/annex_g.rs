@@ -574,6 +574,42 @@ fn motion_resampling_scales_the_base_vector() {
     }
 }
 
+#[test]
+fn residual_resampling_upsamples_the_base_difference() {
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &motion_scale_idr());
+    pictures.extend(push_pictures(&mut decoder, &residual_scale_p()));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    assert!(upsampled_reference(&pictures[0]));
+    let picture = &pictures[1];
+    assert_eq!(picture.picture.width(), 32);
+    assert_eq!(picture.picture.height(), 32);
+    assert!(
+        residual_resampled(picture),
+        "row {:?} row8 {:?} chroma {:?}",
+        &picture.picture.y()[..32],
+        &picture.picture.y()[8 * 32..9 * 32],
+        &picture.picture.u()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = motion_scale_idr();
+        annex.extend(residual_scale_p());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let base = decode(&resample_base());
+        let mut second = planes_of(&base);
+        for row in 0..4 {
+            for col in 0..4 {
+                second[row * 16 + col] = 43;
+            }
+        }
+        let mut want = planes_of(&base);
+        want.extend(second);
+        assert_eq!(raw, want);
+        assert_ne!(planes_of(picture), &raw[raw.len() / 2..]);
+    }
+}
+
 fn push_pictures(decoder: &mut H264Decoder, annex: &[u8]) -> Vec<VideoOutput> {
     decoder
         .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
@@ -2531,6 +2567,72 @@ fn motion_scale_base() -> Vec<u8> {
     w.ue(0);
     w.trailing();
     w.bytes
+}
+
+fn residual_scale_p() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &residual_scale_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &residual_scale_enhancement(),
+    ));
+    out
+}
+
+fn residual_scale_base() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn residual_scale_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(true);
+    for _ in 0..4 {
+        w.ue(0);
+        w.ue(0);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn residual_resampled(picture: &VideoOutput) -> bool {
+    let luma = upsampled_luma();
+    let chroma = upsampled_chroma();
+    let y = picture.picture.y();
+    let luma_ok = (0..32).all(|row| {
+        (0..32).all(|col| {
+            let mut want = luma[col];
+            if row < 8 && col < 8 {
+                want = 43;
+            }
+            y[row * 32 + col] == want
+        })
+    });
+    let chroma_ok = |plane: &[u8]| (0..16).all(|row| plane[row * 16..row * 16 + 16] == chroma);
+    luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
 }
 
 fn motion_scale_enhancement() -> Vec<u8> {

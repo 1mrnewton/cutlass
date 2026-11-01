@@ -1148,6 +1148,467 @@ fn scale_vector(mv: i16, reference: i32, scaled: i32) -> Result<i16, CodecError>
     })
 }
 
+pub(crate) struct ResidualPlanes {
+    pub(crate) y: Vec<i32>,
+    pub(crate) u: Vec<i32>,
+    pub(crate) v: Vec<i32>,
+}
+
+/// Upsample a zero-offset inter-layer residual onto the enhancement picture.
+pub(crate) fn resample_residual<S: Sample>(
+    layer: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+) -> Result<ResidualPlanes, CodecError> {
+    if layer.field
+        || layer.mbaff
+        || slice.sps.mbaff
+        || !slice.sps.frame_mbs_only
+        || slice.sps.chroma != 1
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let crop = &slice.sps.svc_scale;
+    if crop.left != 0 || crop.top != 0 || crop.right != 0 || crop.bottom != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let base = base_residual(layer, dpb)?;
+    let out_w = i32::try_from(slice.sps.width).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let out_h = i32::try_from(slice.sps.height).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let base_w = i32::try_from(layer.w).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let base_h = i32::try_from(layer.h).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let level = slice.sps.level_idc;
+    let y = upsample_residual(ResidualUp {
+        src: &base.y,
+        base_w,
+        base_h,
+        out_w,
+        out_h,
+        phase_x: 0,
+        phase_y: 0,
+        ref_phase_x: 0,
+        ref_phase_y: 0,
+        level,
+        mbs: &layer.mb,
+        mb_w: layer.mb_w,
+        chroma: false,
+    })?;
+    let chroma = (
+        i32::from(crop.chroma_x),
+        i32::from(crop.chroma_y),
+        i32::from(crop.ref_chroma_x),
+        i32::from(crop.ref_chroma_y),
+    );
+    let u = upsample_residual(ResidualUp {
+        src: &base.u,
+        base_w: base_w / 2,
+        base_h: base_h / 2,
+        out_w: out_w / 2,
+        out_h: out_h / 2,
+        phase_x: chroma.0,
+        phase_y: chroma.1,
+        ref_phase_x: chroma.2,
+        ref_phase_y: chroma.3,
+        level,
+        mbs: &layer.mb,
+        mb_w: layer.mb_w,
+        chroma: true,
+    })?;
+    let v = upsample_residual(ResidualUp {
+        src: &base.v,
+        base_w: base_w / 2,
+        base_h: base_h / 2,
+        out_w: out_w / 2,
+        out_h: out_h / 2,
+        phase_x: chroma.0,
+        phase_y: chroma.1,
+        ref_phase_x: chroma.2,
+        ref_phase_y: chroma.3,
+        level,
+        mbs: &layer.mb,
+        mb_w: layer.mb_w,
+        chroma: true,
+    })?;
+    Ok(ResidualPlanes { y, u, v })
+}
+
+fn base_residual<S: Sample>(
+    layer: &Frame<S>,
+    dpb: &[Frame<S>],
+) -> Result<ResidualPlanes, CodecError> {
+    if layer.w == 0 || layer.h == 0 || layer.mb_w == 0 || layer.chroma() != 1 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let mut y = vec![0i32; layer.w.saturating_mul(layer.h)];
+    let cw = layer.w / 2;
+    let ch = layer.h / 2;
+    let mut u = vec![0i32; cw.saturating_mul(ch)];
+    let mut v = vec![0i32; cw.saturating_mul(ch)];
+    let mb_h = layer.h / 16;
+    for my in 0..mb_h {
+        for mx in 0..layer.mb_w {
+            let slot = my.saturating_mul(layer.mb_w).saturating_add(mx);
+            let Some(mb) = layer.mb.get(slot) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "inter-layer prediction",
+                });
+            };
+            if mb.intra || !has_prediction(mb) {
+                return Err(CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                });
+            }
+            for by in 0..4 {
+                for bx in 0..4 {
+                    let index = by * 4 + bx;
+                    let part = (by / 2) * 2 + (bx / 2);
+                    let x = mx * 16 + bx * 4;
+                    let y0 = my * 16 + by * 4;
+                    let pred = layer_pred(
+                        dpb,
+                        (mb.ref0[part], mb.ref1[part]),
+                        (mb.slot0[part], mb.slot1[part]),
+                        (mb.mv0[index], mb.mv1[index]),
+                        (x, y0),
+                        4,
+                    )?;
+                    for row in 0..4 {
+                        for col in 0..4 {
+                            let at = (y0 + row).saturating_mul(layer.w).saturating_add(x + col);
+                            let Some(sample) = layer.y.get(at) else {
+                                return Err(CodecError::Malformed {
+                                    at_bit: 0,
+                                    what: "inter-layer prediction",
+                                });
+                            };
+                            let Some(predicted) = pred.get(row * 4 + col) else {
+                                return Err(CodecError::Malformed {
+                                    at_bit: 0,
+                                    what: "inter-layer prediction",
+                                });
+                            };
+                            y[at] = Into::<i32>::into(*sample) - Into::<i32>::into(*predicted);
+                        }
+                    }
+                    let chroma = layer_chroma(
+                        dpb,
+                        (mb.ref0[part], mb.ref1[part]),
+                        (mb.slot0[part], mb.slot1[part]),
+                        (mb.mv0[index], mb.mv1[index]),
+                        (x, y0),
+                    )?;
+                    let cx = mx * 8 + bx * 2;
+                    let cy = my * 8 + by * 2;
+                    for row in 0..2 {
+                        for col in 0..2 {
+                            let at = (cy + row).saturating_mul(cw).saturating_add(cx + col);
+                            let Some(sample_u) = layer.u.get(at) else {
+                                return Err(CodecError::Malformed {
+                                    at_bit: 0,
+                                    what: "inter-layer prediction",
+                                });
+                            };
+                            let Some(sample_v) = layer.v.get(at) else {
+                                return Err(CodecError::Malformed {
+                                    at_bit: 0,
+                                    what: "inter-layer prediction",
+                                });
+                            };
+                            let Some(pred_u) = chroma.0.get(row * 2 + col) else {
+                                return Err(CodecError::Malformed {
+                                    at_bit: 0,
+                                    what: "inter-layer prediction",
+                                });
+                            };
+                            let Some(pred_v) = chroma.1.get(row * 2 + col) else {
+                                return Err(CodecError::Malformed {
+                                    at_bit: 0,
+                                    what: "inter-layer prediction",
+                                });
+                            };
+                            u[at] = Into::<i32>::into(*sample_u) - Into::<i32>::into(*pred_u);
+                            v[at] = Into::<i32>::into(*sample_v) - Into::<i32>::into(*pred_v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(ResidualPlanes { y, u, v })
+}
+
+struct ResidualUp<'a> {
+    src: &'a [i32],
+    base_w: i32,
+    base_h: i32,
+    out_w: i32,
+    out_h: i32,
+    phase_x: i32,
+    phase_y: i32,
+    ref_phase_x: i32,
+    ref_phase_y: i32,
+    level: u8,
+    mbs: &'a [Mb],
+    mb_w: usize,
+    chroma: bool,
+}
+
+fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
+    let ResidualUp {
+        src,
+        base_w,
+        base_h,
+        out_w,
+        out_h,
+        phase_x,
+        phase_y,
+        ref_phase_x,
+        ref_phase_y,
+        level,
+        mbs,
+        mb_w,
+        chroma,
+    } = up;
+    if base_w <= 0 || base_h <= 0 || out_w <= 0 || out_h <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let base_stride = usize::try_from(base_w).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let base_rows = usize::try_from(base_h).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    if src.len() != base_stride.saturating_mul(base_rows) {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    }
+    let (scale_x, add_x, shift_x, delta_x) =
+        resample_axis(base_w, out_w, phase_x, ref_phase_x, level)?;
+    let (scale_y, add_y, shift_y, delta_y) =
+        resample_axis(base_h, out_h, phase_y, ref_phase_y, level)?;
+    let out_stride = usize::try_from(out_w).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let out_rows = usize::try_from(out_h).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let mut horizontal = vec![0i32; base_rows.saturating_mul(out_stride)];
+    for row in 0..base_h {
+        for col in 0..out_w {
+            let (tap, reference) = resample_pos(col, 0, scale_x, add_x, shift_x, delta_x)?;
+            let x0 = reference.clamp(0, base_w - 1);
+            let x1 = (reference + 1).clamp(0, base_w - 1);
+            let s0 = *plane_at(src, base_stride, row, x0)?;
+            let s1 = *plane_at(src, base_stride, row, x1)?;
+            let blended = if residual_block(mbs, mb_w, x0, row, chroma)
+                == residual_block(mbs, mb_w, x1, row, chroma)
+            {
+                i64::from(16 - tap) * i64::from(s0) + i64::from(tap) * i64::from(s1)
+            } else if tap < 8 {
+                i64::from(s0) << 4
+            } else {
+                i64::from(s1) << 4
+            };
+            *plane_at_mut(&mut horizontal, out_stride, row, col)? = i32::try_from(blended)
+                .map_err(|_| CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                })?;
+        }
+    }
+    let mut output = vec![0i32; out_rows.saturating_mul(out_stride)];
+    for col in 0..out_w {
+        let (tap_x, reference_x) = resample_pos(col, 0, scale_x, add_x, shift_x, delta_x)?;
+        let ref_x = (reference_x + (tap_x >> 3)).clamp(0, base_w - 1);
+        for row in 0..out_h {
+            let (tap, reference) = resample_pos(row, 0, scale_y, add_y, shift_y, delta_y)?;
+            let y0 = reference.clamp(0, base_h - 1);
+            let y1 = (reference + 1).clamp(0, base_h - 1);
+            let h0 = *plane_at(&horizontal, out_stride, y0, col)?;
+            let h1 = *plane_at(&horizontal, out_stride, y1, col)?;
+            let value = if residual_block(mbs, mb_w, ref_x, y0, chroma)
+                == residual_block(mbs, mb_w, ref_x, y1, chroma)
+            {
+                (i64::from(16 - tap) * i64::from(h0) + i64::from(tap) * i64::from(h1) + 128) >> 8
+            } else if tap < 8 {
+                (i64::from(h0) + 8) >> 4
+            } else {
+                (i64::from(h1) + 8) >> 4
+            };
+            *plane_at_mut(&mut output, out_stride, row, col)? =
+                i32::try_from(value).map_err(|_| CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                })?;
+        }
+    }
+    Ok(output)
+}
+
+fn plane_at(plane: &[i32], stride: usize, row: i32, col: i32) -> Result<&i32, CodecError> {
+    let row = usize::try_from(row).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let col = usize::try_from(col).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    plane
+        .get(row.saturating_mul(stride).saturating_add(col))
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        })
+}
+
+fn plane_at_mut(
+    plane: &mut [i32],
+    stride: usize,
+    row: i32,
+    col: i32,
+) -> Result<&mut i32, CodecError> {
+    let row = usize::try_from(row).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let col = usize::try_from(col).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    plane
+        .get_mut(row.saturating_mul(stride).saturating_add(col))
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        })
+}
+
+fn residual_block(mbs: &[Mb], mb_w: usize, x: i32, y: i32, chroma: bool) -> i32 {
+    if mb_w == 0 || x < 0 || y < 0 {
+        return 0;
+    }
+    let mb_size = if chroma { 8 } else { 16 };
+    let mb_x = x / mb_size;
+    let mb_y = y / mb_size;
+    let Some(width) = i32::try_from(mb_w).ok() else {
+        return 0;
+    };
+    let slot = mb_y * width + mb_x;
+    let local_x = x - mb_x * mb_size;
+    let local_y = y - mb_y * mb_size;
+    let transform8 = !chroma
+        && usize::try_from(slot)
+            .ok()
+            .and_then(|index| mbs.get(index))
+            .is_some_and(|mb| mb.transform8);
+    if transform8 {
+        let id = ((local_y >> 3) << 1) + (local_x >> 3) + (slot << 2);
+        (id << 1) + 1
+    } else {
+        let id = ((local_y >> 2) << 2) + (local_x >> 2) + (slot << 4);
+        id << 1
+    }
+}
+
+fn add_resampled_residual<S: Sample>(
+    pic: &mut Frame<S>,
+    slice: &Slice<'_>,
+    addr: usize,
+) -> Result<(), CodecError> {
+    if slice.residual_y.len() != pic.w.saturating_mul(pic.h) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let chroma_w = pic.w / 2;
+    let chroma_h = pic.h / 2;
+    if slice.residual_u.len() != chroma_w.saturating_mul(chroma_h)
+        || slice.residual_v.len() != chroma_w.saturating_mul(chroma_h)
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (mx, my) = locate(pic, addr, false);
+    for row in 0..16 {
+        for col in 0..16 {
+            let x = mx * 16 + col;
+            let y = my * 16 + row;
+            let at = y.saturating_mul(pic.w).saturating_add(x);
+            let Some(delta) = slice.residual_y.get(at) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "inter-layer prediction",
+                });
+            };
+            let Some(sample) = pic.y.get(at).copied() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "inter-layer prediction",
+                });
+            };
+            let Some(slot) = pic.y.get_mut(at) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "inter-layer prediction",
+                });
+            };
+            *slot = S::clip(Into::<i32>::into(sample) + *delta);
+        }
+    }
+    for row in 0..8 {
+        for col in 0..8 {
+            let x = mx * 8 + col;
+            let y = my * 8 + row;
+            let at = y.saturating_mul(chroma_w).saturating_add(x);
+            add_residual_sample(&mut pic.u, &slice.residual_u, at)?;
+            add_residual_sample(&mut pic.v, &slice.residual_v, at)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_residual_sample<S: Sample>(
+    plane: &mut [S],
+    residual: &[i32],
+    at: usize,
+) -> Result<(), CodecError> {
+    let Some(delta) = residual.get(at) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    let Some(sample) = plane.get(at).copied() else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    let Some(slot) = plane.get_mut(at) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    *slot = S::clip(Into::<i32>::into(sample) + *delta);
+    Ok(())
+}
+
 /// Inter-layer residual prediction. The residual is the reference-layer
 /// reconstruction minus that layer's own list-0 prediction.
 fn add_layer_residual<S: Sample>(
@@ -1163,9 +1624,7 @@ fn add_layer_residual<S: Sample>(
         });
     }
     if layer.w != pic.w || layer.h != pic.h || layer.mb_w != pic.mb_w {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
+        return add_resampled_residual(pic, slice, addr);
     }
     let (mx, my) = locate(pic, addr, false);
     let slot = my.saturating_mul(pic.mb_w).saturating_add(mx);

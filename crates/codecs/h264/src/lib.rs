@@ -17,7 +17,8 @@
 //! `adaptive_residual_prediction_flag` selects residual prediction per macroblock.
 //! Picture-level intra resampling upsamples the reference layer with the 16-phase intra filter.
 //! A zero-offset inter base layer scales its motion onto the enhancement.
-//! Residual resampling, a crop change, macroblock-level spatial scalability, and a 3D-AVC extension header are refused.
+//! Its residual is resampled with the transform-block residual filter.
+//! A crop change, macroblock-level spatial scalability, and a 3D-AVC extension header are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

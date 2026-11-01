@@ -1765,6 +1765,10 @@ pub(crate) struct Slice<'a> {
     residual_pred: bool,
     /// `adaptive_residual_prediction_flag`. The macroblock layer reads `residual_prediction_flag`.
     adaptive_residual: bool,
+    /// Upsampled reference-layer residual. Empty unless the layers differ in size.
+    residual_y: Vec<i32>,
+    residual_u: Vec<i32>,
+    residual_v: Vec<i32>,
 }
 
 struct SliceCursor<'a> {
@@ -1887,7 +1891,7 @@ fn decode_slice<S: Sample>(
             planes.seen |= bit;
         }
     }
-    let slice = make_slice(sets, dpb, &header, poc)?;
+    let mut slice = make_slice(sets, dpb, &header, poc)?;
     let Some(pic) = picture.as_mut() else {
         return Err(bits.malformed("picture"));
     };
@@ -1911,6 +1915,18 @@ fn decode_slice<S: Sample>(
         None
     };
     let layer = upsampled.as_ref().or(layer);
+    if sps.svc_spatial == 1
+        && (slice.residual_pred || slice.adaptive_residual)
+        && layer.is_some_and(|base| base.w != pic.w || base.h != pic.h)
+    {
+        let Some(base) = layer else {
+            return Err(bits.malformed("inter-layer prediction"));
+        };
+        let planes = mb::resample_residual(base, dpb, &slice)?;
+        slice.residual_y = planes.y;
+        slice.residual_u = planes.u;
+        slice.residual_v = planes.v;
+    }
     if slice.cabac {
         let _ = (part_intra, part_inter);
         let mut cab = Cabac::start(&mut bits, slice.qp, cabac_init(&header))?;
@@ -2532,9 +2548,9 @@ fn read_header(
 /// vector as the motion predictor. `adaptive_residual_prediction_flag` selects
 /// residual prediction per macroblock.
 /// Picture-level intra resampling is reconstructed. A zero-offset inter base
-/// layer scales its motion onto the enhancement. Residual resampling, a crop
-/// change, macroblock-level spatial scalability, and coefficient prediction
-/// are refused.
+/// layer scales its motion onto the enhancement, and its residual is resampled
+/// with the transform-block residual filter. A crop change, macroblock-level
+/// spatial scalability, and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
@@ -2945,6 +2961,9 @@ fn make_slice<'a, S: Sample>(
         motion_pred: header.motion_pred,
         residual_pred: header.residual_pred,
         adaptive_residual: header.adaptive_residual,
+        residual_y: Vec::new(),
+        residual_u: Vec::new(),
+        residual_v: Vec::new(),
     })
 }
 

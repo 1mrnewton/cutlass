@@ -8,7 +8,7 @@ use egui::{
     Ui, Vec2,
 };
 
-use cutlass_model::{FrameRate, Micros};
+use cutlass_model::{FrameRate, Micros, SegmentId};
 use cutlass_session::TrimEdge;
 
 use crate::dialogs::{Dialogs, Finished, Picker};
@@ -122,6 +122,8 @@ pub struct ViewState {
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    marquee_press: Option<Pos2>,
+    marquee: Option<Rect>,
 }
 
 impl Default for ViewState {
@@ -143,6 +145,8 @@ impl Default for ViewState {
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
+            marquee_press: None,
+            marquee: None,
         }
     }
 }
@@ -178,7 +182,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             Pos2::new(full.min.x, row.max.y + tokens::SPLIT),
             Vec2::new(full.width(), sizes.timeline),
         );
-        timeline_panel(shell, ui, timeline);
+        timeline_panel(shell, ui, view, timeline);
         paint_library_ghost(shell, ui);
         if view.export_open {
             export_dialog(shell, ui, view, parent);
@@ -1139,7 +1143,7 @@ fn clip_fields(
     }
 }
 
-fn timeline_panel(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     panel(ui, rect);
     shell.chrome.timeline = true;
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::TOOLBAR_HEIGHT));
@@ -1158,7 +1162,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         egui::Stroke::new(1.0, tokens::GAP),
     );
     let body = Rect::from_min_max(toolbar.left_bottom(), rect.max);
-    ruler_and_lanes(shell, ui, body);
+    ruler_and_lanes(shell, ui, view, body);
     let handle = Rect::from_min_size(
         Pos2::new(rect.min.x, rect.min.y - tokens::SPLIT),
         Vec2::new(rect.width(), tokens::SPLIT),
@@ -1322,7 +1326,7 @@ fn paint_notice(ui: &Ui, center_x: f32, top: f32, notice: &str) {
     );
 }
 
-fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let ruler = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::RULER_HEIGHT));
     let tracks = Rect::from_min_max(ruler.left_bottom(), rect.max);
     let lanes_left = tracks.left() + tokens::TRACK_HEAD + tokens::COVER_WIDTH;
@@ -1342,6 +1346,11 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let rows = shell.lanes();
     let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
     let boxes = lane_rects(flags, lane_area);
+    let marquee = ui.interact(
+        lane_area,
+        ui.scope_id().with("marquee"),
+        Sense::click_and_drag(),
+    );
     if rows.is_empty() {
         paint_empty_main(ui, lane_area);
     }
@@ -1351,6 +1360,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
+    track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
         lanes_left,
         shell.pixel_size(),
@@ -1857,10 +1867,6 @@ fn paint_lane(
     );
     lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
     lane_switches(shell, ui, lane, row, index);
-    let background = ui.interact(row, ui.scope_id().with(("lane", index)), Sense::click());
-    if background.clicked() {
-        shell.select(None);
-    }
     let follower = shell
         .move_preview()
         .filter(|preview| preview.track_id == lane.track_id);
@@ -1927,6 +1933,98 @@ fn lane_switches(
     }
 }
 
+fn track_marquee(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    response: &egui::Response,
+    lanes_left: f32,
+    rows: &[crate::shell::LaneView],
+    boxes: &[Rect],
+) {
+    if response.drag_started()
+        && let Some(pos) = ui.input(|input| input.pointer.press_origin())
+    {
+        view.marquee_press = Some(pos);
+        view.marquee = None;
+    }
+    let pos = pointer_pos(ui, response);
+    let moved = view
+        .marquee_press
+        .is_some_and(|press| pos.is_some_and(|pos| (pos - press).length_sq() >= 16.0));
+    if moved
+        && response.dragged()
+        && let (Some(press), Some(pos)) = (view.marquee_press, pos)
+    {
+        view.marquee = Some(Rect::from_two_pos(press, pos));
+        scroll_with_drag(shell, ui, f64::from(pos.x - lanes_left).max(0.0));
+    }
+    let shift = ui.input(|input| input.modifiers.shift);
+    if response.drag_stopped() {
+        if moved && let Some(rect) = view.marquee {
+            shell.select_box(clips_touching(shell, rows, boxes, lanes_left, rect), shift);
+        } else if !shift {
+            shell.select(None);
+        }
+        view.marquee_press = None;
+        view.marquee = None;
+    } else if response.clicked() && !shift {
+        shell.select(None);
+    }
+    if let Some(rect) = view.marquee {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::ZERO,
+            tokens::SELECTED.gamma_multiply(0.25),
+        );
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, tokens::SELECTED),
+            egui::StrokeKind::Outside,
+        );
+    }
+}
+
+fn clips_touching(
+    shell: &Shell,
+    rows: &[crate::shell::LaneView],
+    boxes: &[Rect],
+    lanes_left: f32,
+    rect: Rect,
+) -> Vec<SegmentId> {
+    let mut ids = Vec::new();
+    for (lane, row) in rows.iter().zip(boxes.iter().copied()) {
+        for clip in &lane.clips {
+            let (start, duration) = preview_bounds(shell, clip);
+            let bounds = clip_bounds(shell, lane.main, start, duration, row, lanes_left);
+            if bounds.intersects(rect) {
+                ids.push(clip.id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn clip_bounds(
+    shell: &Shell,
+    main: bool,
+    start: Micros,
+    duration: Micros,
+    row: Rect,
+    lanes_left: f32,
+) -> Rect {
+    let (inset, height) = if main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let x = lane_x(
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        start.0,
+    );
+    let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
+    Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height))
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -1936,21 +2034,13 @@ fn paint_clip(
     lanes_left: f32,
     index: usize,
 ) {
-    let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
     let (start, duration) = preview_bounds(shell, clip);
-    let x = lane_x(
-        lanes_left,
-        shell.pixel_size(),
-        shell.view_origin().0,
-        start.0,
-    );
-    let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
+    let clip_rect = clip_bounds(shell, lane.main, start, duration, row, lanes_left);
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
     }
-    let selected = shell.selected().is_some_and(|id| id == &clip.id);
+    let selected = shell.is_selected(&clip.id);
     let ghost = shell.moving(&clip.id);
     let painter = ui.painter().with_clip_rect(row);
     let fill = if ghost {
@@ -2021,7 +2111,9 @@ fn paint_clip(
             && let Some(pos) = pointer_pos(ui, &response)
         {
             shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y));
-            shell.select(Some(clip.id.clone()));
+            if !ui.input(|input| input.modifiers.shift) {
+                shell.select(Some(clip.id.clone()));
+            }
         }
         let pos = pointer_pos(ui, &response);
         let moved = pos.is_some_and(|pos| shell.clip_drag_moved(pos.x, pos.y));
@@ -2035,7 +2127,11 @@ fn paint_clip(
             shell.preview_move(clip.id.clone(), x, editor_lane_y(index));
         }
         if response.drag_stopped() && !moved {
-            shell.select(Some(clip.id.clone()));
+            if ui.input(|input| input.modifiers.shift) {
+                shell.toggle_selected(clip.id.clone());
+            } else {
+                shell.select(Some(clip.id.clone()));
+            }
             shell.cancel_clip_drag();
         } else {
             finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, index, None);
@@ -2110,7 +2206,7 @@ fn finish_clip_pointer(
     shell: &mut Shell,
     ui: &Ui,
     response: &egui::Response,
-    id: &cutlass_model::SegmentId,
+    id: &SegmentId,
     lanes_left: f32,
     index: usize,
     edge: Option<TrimEdge>,
@@ -2159,7 +2255,7 @@ fn paint_move_follower(
     }
     let painter = ui.painter().with_clip_rect(row);
     painter.rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
-    if shell.selected().is_some_and(|id| id == &preview.id) {
+    if shell.is_selected(&preview.id) {
         painter.rect_stroke(
             clip_rect,
             CornerRadius::same(7),
@@ -3396,6 +3492,90 @@ mod tests {
             "the wheel did not scroll, origin {}",
             shell.view_origin().0
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_drag_across_empty_space_selects_the_clips_it_touches() {
+        let temp = std::env::temp_dir().join(format!("cutlass-trim-{}-box", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "one",
+            "color",
+            cutlass_model::TimeRange::new(0, 500_000),
+        ));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "two",
+            "color",
+            cutlass_model::TimeRange::new(1_000_000, 500_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let names: Vec<_> = shell.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.as_str().to_owned())
+            .collect();
+        let one = text_pos(&output, &names[0]).expect("first clip");
+        let two = text_pos(&output, &names[1]).expect("second clip");
+        output.textures_delta.clear();
+        let two_width = (500_000_f32 * shell.pixel_size() as f32).max(8.0);
+        let start = Pos2::new(two.x - 8.0 + two_width + 36.0, two.y);
+        drag(&ctx, start, one, &mut shell, &mut view);
+        assert_eq!(shell.selection().len(), 2, "notice {}", shell.notice());
+        let modifiers = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(one),
+                    press(one, true),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::ModifiersChanged(modifiers),
+                    egui::Event::PointerMoved(one),
+                    press(one, false),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert_eq!(shell.selection().len(), 1);
+        assert!(!shell.is_selected(&SegmentId::new(&names[0])));
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -220,7 +220,8 @@ pub struct Shell {
     library_width: f32,
     inspector_width: f32,
     timeline_height: f32,
-    selected: Option<SegmentId>,
+    /// Clips the user has picked. The last one is the inspector clip.
+    selection: Vec<SegmentId>,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
     clip_drag: Option<ClipDrag>,
@@ -261,7 +262,7 @@ impl Shell {
             library_width: tokens::LIBRARY_WIDTH,
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
-            selected: None,
+            selection: Vec::new(),
             blade: false,
             clip_drag: None,
             pending_trim: None,
@@ -384,7 +385,7 @@ impl Shell {
         self.playhead = Micros(0);
         self.playing = false;
         self.view_origin = 0;
-        self.selected = None;
+        self.selection.clear();
         self.blade = false;
         self.cancel_clip_drag();
         self.fit_on_layout = false;
@@ -477,7 +478,7 @@ impl Shell {
         self.playhead = Micros(0);
         self.playing = false;
         self.view_origin = 0;
-        self.selected = None;
+        self.selection.clear();
         self.blade = false;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
@@ -729,7 +730,7 @@ impl Shell {
             Some("frame_back") => self.step_frame(-1),
             Some("frame_forward") => self.step_frame(1),
             Some("delete") => {
-                if self.selected.is_none() {
+                if self.selection.is_empty() {
                     return Ok(());
                 }
                 self.remove_selected()
@@ -782,7 +783,7 @@ impl Shell {
         self.pending_trim = None;
         self.pending_move = None;
         if edge.is_some() {
-            self.selected = Some(id.clone());
+            self.select(Some(id.clone()));
         }
         self.clip_drag = Some(ClipDrag {
             id,
@@ -1153,16 +1154,49 @@ impl Shell {
     }
 
     pub fn select(&mut self, id: Option<SegmentId>) {
-        self.selected = id;
+        self.selection.clear();
+        if let Some(id) = id {
+            self.selection.push(id);
+        }
+    }
+
+    /// Add `id` to the selection, or drop it when it is already there.
+    pub fn toggle_selected(&mut self, id: SegmentId) {
+        if let Some(index) = self.selection.iter().position(|item| item == &id) {
+            self.selection.remove(index);
+        } else {
+            self.selection.push(id);
+        }
+    }
+
+    /// Replace the selection with `ids`. `keep` adds them to the clips already selected.
+    pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
+        if !keep {
+            self.selection.clear();
+        }
+        for id in ids {
+            if !self.selection.iter().any(|item| item == &id) {
+                self.selection.push(id);
+            }
+        }
     }
 
     pub fn selected(&self) -> Option<&SegmentId> {
-        self.selected.as_ref()
+        self.selection.last()
+    }
+
+    pub fn selection(&self) -> &[SegmentId] {
+        &self.selection
+    }
+
+    #[must_use]
+    pub fn is_selected(&self, id: &SegmentId) -> bool {
+        self.selection.iter().any(|item| item == id)
     }
 
     pub fn inspection(&self) -> Option<Inspection> {
         let draft = self.draft()?;
-        let id = self.selected.as_ref()?;
+        let id = self.selected()?;
         let (segment, locked) = locate(draft, id)?;
         let (material, text, words) = material_label(draft, &segment.material_id);
         Some(Inspection {
@@ -1184,19 +1218,19 @@ impl Shell {
     }
 
     pub fn set_volume(&mut self, volume: f64) -> Result<(), ShellError> {
-        let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetVolume { segment_id, volume })
     }
 
     pub fn set_speed(&mut self, speed: f64) -> Result<(), ShellError> {
-        let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetConstantSpeed { segment_id, speed })
     }
 
     pub fn set_text(&mut self, content: String) -> Result<(), ShellError> {
-        let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetTextContent {
             segment_id,
@@ -1205,7 +1239,7 @@ impl Shell {
     }
 
     pub fn set_range_start(&mut self, start: Micros) -> Result<(), ShellError> {
-        let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
         let track_id = self.track_of(&segment_id)?.clone();
         self.apply(Request::Move {
@@ -1228,14 +1262,28 @@ impl Shell {
     }
 
     pub fn remove_selected(&mut self) -> Result<(), ShellError> {
-        let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
-        self.refuse_locked(&segment_id)?;
-        self.apply(Request::Remove {
-            segment_id: segment_id.clone(),
-        })?;
-        if self.selected.as_ref() == Some(&segment_id) {
-            self.selected = None;
+        let ids = {
+            let draft = self.session_draft()?;
+            self.selection
+                .iter()
+                .filter(|id| locate(draft, id).is_some())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if ids.is_empty() {
+            self.selection.clear();
+            return Err(ShellError::NoProject);
         }
+        for id in &ids {
+            self.refuse_locked(id)?;
+        }
+        let requests: Vec<Request> = ids
+            .iter()
+            .cloned()
+            .map(|segment_id| Request::Remove { segment_id })
+            .collect();
+        self.apply_requests(&requests)?;
+        self.selection.clear();
         if !self.has_clip() {
             self.blade = false;
         }
@@ -1266,7 +1314,7 @@ impl Shell {
 
     /// Cut the selected clip at the playhead.
     pub fn split_selected(&mut self) -> Result<(), ShellError> {
-        let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.split_clip(segment_id, self.playhead)
     }
 
@@ -1299,8 +1347,11 @@ impl Shell {
 
     fn clip_under(&self, time: Micros) -> Option<SegmentId> {
         let draft = self.draft()?;
-        if let Some(id) = &self.selected
-            && locate(draft, id).is_some_and(|(segment, _)| covers(segment, time))
+        if let Some(id) = self
+            .selection
+            .iter()
+            .rev()
+            .find(|id| locate(draft, id).is_some_and(|(segment, _)| covers(segment, time)))
         {
             return Some(id.clone());
         }
@@ -1334,7 +1385,7 @@ impl Shell {
             at,
             right_id,
         })?;
-        self.selected = Some(segment_id);
+        self.select(Some(segment_id));
         Ok(())
     }
 
@@ -3678,6 +3729,47 @@ mod tests {
         let at_end = desktop.view_origin();
         assert!(desktop.pan_pixels(-4_000.0));
         assert!(desktop.view_origin().0 < at_end.0);
+    }
+
+    #[test]
+    fn a_box_selection_deletes_every_clip_in_one_step() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let ids: Vec<_> = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.id.clone())
+            .collect();
+        desktop.select_box(ids.clone(), false);
+        assert_eq!(desktop.selection(), ids.as_slice());
+        assert!(desktop.is_selected(&ids[0]));
+        desktop.toggle_selected(ids[0].clone());
+        assert!(!desktop.is_selected(&ids[0]));
+        assert_eq!(desktop.selected(), Some(&ids[1]));
+        desktop.toggle_selected(ids[0].clone());
+        desktop.select(Some(ids[0].clone()));
+        assert_eq!(desktop.selection(), std::slice::from_ref(&ids[0]));
+        desktop.select_box(ids.iter().cloned(), true);
+        assert_eq!(desktop.selection().len(), 2);
+        let track = desktop.lanes()[0].track_id.clone();
+        desktop
+            .toggle_attribute(track.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.remove_selected().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.remove_selected().unwrap();
+        assert!(desktop.selection().is_empty());
+        assert!(desktop.draft().unwrap().tracks[0].segments.is_empty());
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
     }
 
     #[test]

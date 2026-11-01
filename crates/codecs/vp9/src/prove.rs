@@ -530,6 +530,105 @@ fn loop_filter_delta_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A segment loop-filter step of -63 and a segment reference of the last frame.
+#[test]
+fn segment_tools_match_ffmpeg_software() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let Some(flags) = vpx_compile_flags() else {
+        eprintln!("skipped: libvpx headers were not found");
+        return;
+    };
+    let dir = temp_dir("seg-tools");
+    let ivf = dir.join("in.ivf");
+    if !encode_roi_map(&dir, &ivf, &flags) {
+        eprintln!("skipped: the segment-map encoder did not build");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let stream = read_ivf(&ivf);
+    assert_eq!((stream.width, stream.height), (160, 96));
+    assert!(
+        segment_tools_are_set(&stream),
+        "no inter frame carried the loop-filter step and the reference"
+    );
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    assert_eq!(ours.len(), 160 * 96 * 3 / 2 * 4);
+    eprintln!(
+        "segment tools {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn vpx_compile_flags() -> Option<Vec<String>> {
+    let output = Command::new("pkg-config")
+        .args(["--cflags", "--libs", "vpx"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let flags: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+    (!flags.is_empty()).then_some(flags)
+}
+
+fn encode_roi_map(dir: &Path, ivf: &Path, flags: &[String]) -> bool {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/roi_map.c");
+    let bin = dir.join("roi_map");
+    let Ok(built) = Command::new("cc")
+        .arg("-O2")
+        .arg(&source)
+        .arg("-o")
+        .arg(&bin)
+        .args(flags)
+        .output()
+    else {
+        return false;
+    };
+    if !built.status.success() {
+        return false;
+    }
+    let encoded = Command::new(&bin).arg(ivf).output().expect("roi map");
+    assert!(
+        encoded.status.success(),
+        "roi map {}",
+        String::from_utf8_lossy(&encoded.stderr)
+    );
+    true
+}
+
+fn segment_tools_are_set(stream: &Ivf) -> bool {
+    let mut state = crate::header::Persist::new();
+    let mut found = false;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("segment tool frame {index} header: {err}"));
+        let header = &parsed.header;
+        let seg = &header.seg;
+        found |= !header.key_frame
+            && header.filter_level > 0
+            && seg.enabled
+            && !seg.abs_delta
+            && seg.feature_on[1][1]
+            && seg.feature_data[1][1] == -63
+            && seg.feature_on[2][2]
+            && seg.feature_data[2][2] == 1;
+        remember_header(&mut state, &parsed);
+    }
+    found
+}
+
 /// A hidden alternate reference is coded with context 1, and later frames
 /// mark that reference as backward.
 #[test]

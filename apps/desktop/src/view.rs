@@ -1195,7 +1195,17 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "split" => shell.blade(),
                                 "guides" => shell.guides_shown(),
                                 "lock" => shell.guides_locked(),
+                                "linkage" => shell.linkage_enabled(),
                                 _ => false,
+                            };
+                            let tip = if *name == "linkage" {
+                                if shell.linkage_enabled() {
+                                    "Linkage on"
+                                } else {
+                                    "Linkage off"
+                                }
+                            } else {
+                                tip
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
                                 tool_clicked(shell, name);
@@ -1252,7 +1262,7 @@ fn toolbar_button(
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
         "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
-        | "lock" => true,
+        | "lock" | "linkage" => true,
         "split" => shell.has_clip(),
         _ => false,
     }
@@ -1285,6 +1295,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             shell.toggle_guide_lock();
             Ok(())
         }
+        "linkage" => shell.toggle_linkage(),
         _ => Ok(()),
     };
     if let Err(error) = result {

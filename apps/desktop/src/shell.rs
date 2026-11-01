@@ -24,6 +24,7 @@ use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
     Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType, Micros,
     Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
+    linkage_from_biz,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -416,7 +417,9 @@ impl Shell {
         let now = unix_millis();
         draft.create_time = now;
         draft.update_time = now;
-        Folder::new(draft).save(&path).map_err(ShellError::Store)?;
+        let mut folder = Folder::new(draft);
+        folder.set_linkage_enabled(true);
+        folder.save(&path).map_err(ShellError::Store)?;
         Ok(path)
     }
 
@@ -522,7 +525,15 @@ impl Shell {
             .frame_rate()
             .unwrap_or(FrameRate::FPS_30);
         self.path = Some(path.to_path_buf());
-        self.session = Some(Session::open(opened.folder.draft.clone()));
+        let has_pairs = draft_has_linkage(&opened.folder.draft);
+        let linkage = linkage_from_biz(
+            opened.folder.biz_config.as_ref(),
+            opened.folder.draft.id.as_str(),
+            has_pairs,
+        );
+        let mut session = Session::open(opened.folder.draft.clone());
+        session.set_linkage(linkage);
+        self.session = Some(session);
         self.folder = Some(opened.folder);
         self.hold = Some(hold);
         self.playhead = Micros(0);
@@ -547,6 +558,12 @@ impl Shell {
         if !path.is_dir() {
             return Err(ShellError::MissingFolder(path));
         }
+        let enabled = self
+            .session
+            .as_ref()
+            .ok_or(ShellError::NoProject)?
+            .linkage()
+            .enabled;
         let draft = self
             .session
             .as_ref()
@@ -559,6 +576,7 @@ impl Shell {
         if let Some(timeline) = folder.timelines.get_mut(&main) {
             *timeline = draft;
         }
+        folder.set_linkage_enabled(enabled);
         folder.save(&path).map_err(ShellError::Store)?;
         Ok(())
     }
@@ -1287,10 +1305,30 @@ impl Shell {
             TimeRange::new(start.0, duration.0),
         );
         segment.source_range = Some(TimeRange::new(0, duration.0));
+        let link_owner = if self.linkage_enabled() {
+            let draft = self.session_draft()?;
+            let on_main = draft
+                .tracks
+                .iter()
+                .any(|track| track.id == track_id && track.is_main());
+            if on_main {
+                None
+            } else {
+                exclusive_main_owner(draft, start, duration)
+            }
+        } else {
+            None
+        };
         requests.push(Request::Place {
             track_id,
             segment: Box::new(segment),
         });
+        if let Some(owner) = link_owner {
+            requests.push(Request::Link {
+                owner,
+                dependent: segment_id.clone(),
+            });
+        }
         self.apply_requests(&requests)?;
         self.select(Some(segment_id));
         if first_clip {
@@ -1441,6 +1479,24 @@ impl Shell {
 
     pub fn toggle_guide_lock(&mut self) {
         self.guides_locked = !self.guides_locked;
+    }
+
+    /// The linkage switch. A new project starts on. A folder with no stored
+    /// switch and no pairs starts off.
+    #[must_use]
+    pub fn linkage_enabled(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.linkage().enabled)
+    }
+
+    /// Turn follow on or off. Stored pairs stay either way. This is not an undo step.
+    pub fn toggle_linkage(&mut self) -> Result<(), ShellError> {
+        let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
+        let mut settings = session.linkage();
+        settings.enabled = !settings.enabled;
+        session.set_linkage(settings);
+        Ok(())
     }
 
     pub fn preview_guide(&mut self, time: Micros) {
@@ -2373,6 +2429,44 @@ fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
 }
 
+/// The one main-track clip `span` sits on, when it sits on no other.
+/// A locked main lane is not an owner. Touching at an endpoint is not an overlap.
+fn exclusive_main_owner(draft: &Draft, start: Micros, duration: Micros) -> Option<SegmentId> {
+    let end = start.0.checked_add(duration.0)?;
+    if duration.0 <= 0 {
+        return None;
+    }
+    let mut owner = None;
+    for track in &draft.tracks {
+        if !track.is_main() || track.attribute.contains(TrackAttribute::LOCK) {
+            continue;
+        }
+        for segment in &track.segments {
+            let segment_end = segment
+                .target
+                .start
+                .0
+                .checked_add(segment.target.duration.0)?;
+            let overlaps = start.0 < segment_end && segment.target.start.0 < end;
+            if !overlaps {
+                continue;
+            }
+            if owner.is_some() {
+                return None;
+            }
+            owner = Some(segment.id.clone());
+        }
+    }
+    owner
+}
+
+fn draft_has_linkage(draft: &Draft) -> bool {
+    draft
+        .relationships
+        .iter()
+        .any(|item| item.kind == "linkage" && !item.id_to_id.is_empty())
+}
+
 fn medium_span(draft: &Draft, id: &str) -> Option<(TrackType, Micros)> {
     if let Some(video) = draft
         .materials
@@ -3057,6 +3151,148 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn a_new_project_starts_with_linkage_on_and_keeps_the_switch() {
+        let root = Temp::new();
+        let path = Shell::create_project(&root.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&path).unwrap();
+        assert!(desktop.linkage_enabled());
+        desktop.toggle_linkage().unwrap();
+        assert!(!desktop.linkage_enabled());
+        desktop.close_project().unwrap();
+        desktop.open_folder(&path).unwrap();
+        assert!(!desktop.linkage_enabled());
+        let saved = Folder::read(&path).unwrap();
+        assert_eq!(
+            saved.biz_config.unwrap()["timeline_settings"][saved.draft.id.as_str()]["linkage_enabled"],
+            false
+        );
+    }
+
+    #[test]
+    fn a_clip_on_one_main_clip_follows_it() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(!desktop.linkage_enabled());
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        desktop.toggle_linkage().unwrap();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        assert!(desktop.draft().unwrap().relationships.is_empty());
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        let draft = desktop.draft().unwrap();
+        let owner = draft.tracks[1].segments[0].id.as_str().to_owned();
+        let dependent = draft.tracks[0].segments[0].id.as_str().to_owned();
+        let duration = draft.tracks[1].segments[0].target.duration.0;
+        let pairs: Vec<_> = draft
+            .relationships
+            .iter()
+            .filter(|item| item.kind == "linkage")
+            .flat_map(|item| item.id_to_id.iter())
+            .map(|pair| {
+                (
+                    pair.owner.as_str().to_owned(),
+                    pair.dependent.as_str().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(pairs, [(owner.clone(), dependent.clone())]);
+        desktop
+            .trim_edge(
+                SegmentId::new(owner.clone()),
+                TrimEdge::End,
+                lane_time(&desktop, duration as f64 / 2.0),
+            )
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration
+                .0,
+            duration / 2
+        );
+        desktop.undo().unwrap();
+        desktop
+            .drag_segment(
+                SegmentId::new(owner.clone()),
+                lane_time(&desktop, 500_000.0),
+                crate::tokens::LANE_HEIGHT + y,
+            )
+            .unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks[1].segments[0].target.start, Micros(500_000));
+        assert_eq!(draft.tracks[0].segments[0].target.start, Micros(500_000));
+        desktop.undo().unwrap();
+        desktop.toggle_linkage().unwrap();
+        desktop
+            .drag_segment(
+                SegmentId::new(owner.clone()),
+                lane_time(&desktop, 500_000.0),
+                crate::tokens::LANE_HEIGHT + y,
+            )
+            .unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks[1].segments[0].target.start, Micros(500_000));
+        assert_eq!(draft.tracks[0].segments[0].target.start, Micros(0));
+        assert_eq!(
+            draft.relationships[0].id_to_id[0].dependent.as_str(),
+            dependent
+        );
+        desktop.toggle_linkage().unwrap();
+        desktop.undo().unwrap();
+        desktop.select(Some(SegmentId::new(owner)));
+        desktop.remove_selected().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .all(|track| track.segments.is_empty())
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+        assert_eq!(desktop.draft().unwrap().tracks[1].segments.len(), 1);
+    }
+
+    #[test]
+    fn a_clip_on_two_main_clips_is_not_linked() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut video = MaterialVideo::new("wide");
+        video.duration = Micros(10_000_000);
+        draft.materials.videos.push(video);
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("first", "wide", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "second",
+            "wide",
+            TimeRange::new(3_000_000, 500_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.toggle_linkage().unwrap();
+        desktop
+            .drop_medium("wide", 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        assert!(desktop.draft().unwrap().relationships.is_empty());
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 2);
     }
 
     #[test]

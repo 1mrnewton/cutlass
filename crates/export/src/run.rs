@@ -543,7 +543,7 @@ where
             frames,
         },
         ClockKind::Export,
-        |segment, count, rate| match audio(segment, count, rate) {
+        |segment, _when, count, rate| match audio(segment, count, rate) {
             Ok(pcm) => Ok(pcm),
             Err(error) => {
                 source_error = Some(error);

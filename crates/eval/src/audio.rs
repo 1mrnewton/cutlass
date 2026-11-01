@@ -58,10 +58,11 @@ pub struct MixWindow {
 
 /// Mixed PCM for clips that cover `time`.
 ///
-/// `fill` is asked once per media segment the mix will hear. A muted track
-/// is skipped first, so its source is not read. A compound segment is filled
-/// from the child mix instead. The mix then applies volume and fades. The
-/// draft is not written.
+/// `fill` is asked once per media segment the mix will hear, at the time
+/// that mix is using. Inside a compound segment that time is the mapped
+/// child time. A muted track is skipped first, so its source is not read.
+/// A compound segment is filled from the child mix instead. The mix then
+/// applies volume and fades. The draft is not written.
 pub fn audio_slice<F>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -70,7 +71,7 @@ pub fn audio_slice<F>(
     mut fill: F,
 ) -> Result<MixResult, AudioError>
 where
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, AudioError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, AudioError>,
 {
     if window.rate == 0 {
         return Err(AudioError::NoClock);
@@ -87,7 +88,7 @@ fn mix_at<F>(
     ancestors: &[DraftId],
 ) -> Result<MixResult, AudioError>
 where
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, AudioError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, AudioError>,
 {
     let draft = snapshot.draft();
     let mut clips = mix_inputs(draft, time);
@@ -103,7 +104,7 @@ where
         }
         match compound_pcm(draft, segment, time, window, clock, fill, ancestors)? {
             Compound::Media => {
-                clip.pcm = fill(&segment.id, window.frames, window.rate)?;
+                clip.pcm = fill(&segment.id, time, window.frames, window.rate)?;
                 keep.push(true);
             }
             Compound::Slice(mixed) => {
@@ -147,7 +148,7 @@ fn compound_pcm<F>(
     ancestors: &[DraftId],
 ) -> Result<Compound, AudioError>
 where
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, AudioError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, AudioError>,
 {
     let Some(MaterialRef::Draft(material)) = draft.materials.get(segment.material_id.as_str())
     else {
@@ -237,8 +238,9 @@ mod tests {
             Micros(0),
             window,
             ClockKind::Export,
-            |segment, frames, rate| {
+            |segment, when, frames, rate| {
                 assert_eq!(segment, &id);
+                assert_eq!(when, Micros(0));
                 assert_eq!(frames, 4);
                 assert_eq!(rate, 4_000);
                 Ok(ClipPcm::Ready(tone(1.0)))
@@ -254,7 +256,7 @@ mod tests {
             Micros(0),
             window,
             ClockKind::Export,
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         );
         assert_eq!(missing, Err(AudioError::NotReady));
 
@@ -263,7 +265,7 @@ mod tests {
             Micros(0),
             window,
             ClockKind::Playback,
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("playback skip");
         assert_eq!(skipped.contributed, 0);
@@ -285,7 +287,7 @@ mod tests {
             Micros(0),
             window,
             ClockKind::Export,
-            |_, _, _| {
+            |_, _, _, _| {
                 asked = true;
                 Ok(ClipPcm::Missing)
             },
@@ -342,16 +344,16 @@ mod tests {
         TimeRange::new(start, duration)
     }
 
-    fn asked(draft: &Draft, time: i64) -> (MixResult, Vec<SegmentId>) {
+    fn asked(draft: &Draft, time: i64) -> (MixResult, Vec<(SegmentId, Micros)>) {
         let mut heard = Vec::new();
         let mixed = audio_slice(
             &Snapshot::new(draft),
             Micros(time),
             window(),
             ClockKind::Export,
-            |segment, frames, rate| {
+            |segment, when, frames, rate| {
                 assert_eq!((frames, rate), (4, 4_000));
-                heard.push(segment.clone());
+                heard.push((segment.clone(), when));
                 Ok(ClipPcm::Ready(tone(1.0)))
             },
         )
@@ -372,7 +374,7 @@ mod tests {
         let before = draft.clone();
         let (mixed, heard) = asked(&draft, 0);
         assert_eq!(heard.len(), 1);
-        assert_eq!(heard[0].as_str(), "child-clip");
+        assert_eq!(heard[0].0.as_str(), "child-clip");
         assert_eq!(mixed.contributed, 1);
         assert_eq!(mixed.pcm.as_f32(), Some(&[0.25; 4][..]));
         assert_eq!(draft, before);
@@ -386,6 +388,7 @@ mod tests {
         );
         let (mixed, heard) = asked(&mapped, 0);
         assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].1, Micros(1_000));
         assert_eq!(mixed.pcm.as_f32(), Some(&[1.0; 4][..]));
 
         let mut faded = compound_audio(
@@ -466,7 +469,7 @@ mod tests {
         stalled.tracks.push(sibling);
         let (mixed, heard) = asked(&stalled, 0);
         assert_eq!(heard.len(), 1);
-        assert_eq!(heard[0].as_str(), "sibling");
+        assert_eq!(heard[0].0.as_str(), "sibling");
         assert_eq!(mixed.pcm.as_f32(), Some(&[1.0; 4][..]));
     }
 
@@ -511,7 +514,7 @@ mod tests {
             Micros(0),
             window(),
             ClockKind::Export,
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         );
         assert_eq!(waiting, Err(AudioError::NotReady));
 

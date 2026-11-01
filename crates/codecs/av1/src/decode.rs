@@ -8,7 +8,7 @@ use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{
     FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
-    header_is_addressable, obu_payload, parse_with_motion, tile_span, unit_obus,
+    header_is_addressable, obu_payload, parse_with_motion, tile_list, tile_span, unit_obus,
 };
 use crate::inter::{RefView, SavedMotion};
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_tile_parts, decode_with_refs};
@@ -249,9 +249,18 @@ impl Av1Decoder {
                     }
                 }
                 8 => {
-                    return Err(CodecError::Unsupported {
-                        what: "large scale tile list",
-                    });
+                    let Some(open) = pending.take() else {
+                        return Err(tile_list_error());
+                    };
+                    if open.next != 0 {
+                        return Err(tile_list_error());
+                    }
+                    let payload = obu_payload(obu.bytes)?;
+                    record(
+                        &mut shown,
+                        undo,
+                        self.show_tile_list(packet, open.sequence, open.frame, payload)?,
+                    );
                 }
                 _ => {
                     return Err(CodecError::Unsupported {
@@ -357,7 +366,9 @@ impl Av1Decoder {
         let carried = self.carried_cdf(frame)?;
         let views = self.ref_views();
         match parts {
-            Some(parts) => decode_tile_parts(sequence, frame, &views, carried.as_deref(), parts),
+            Some(parts) => {
+                decode_tile_parts(sequence, frame, &views, carried.as_deref(), parts, true)
+            }
             None => decode_with_refs(sequence, frame, &views, carried.as_deref()),
         }
     }
@@ -514,6 +525,184 @@ impl Av1Decoder {
             }
         }
     }
+
+    /// Section 7.3. Each listed tile is decoded from one stored reference and copied
+    /// into the output mosaic. The list does not refresh reference slots, and it does
+    /// not run the loop filter, CDEF, super resolution, or restoration.
+    ///
+    /// Anchor frames are the eight reference slots. The specification allows 128
+    /// external anchors; this decoder does not keep that extra buffer.
+    fn show_tile_list(
+        &mut self,
+        packet: &Packet,
+        sequence: Sequence,
+        frame: FrameInfo,
+        payload: &[u8],
+    ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
+        if frame.show_existing || frame.intra || frame.upscaled_width != frame.width {
+            return Err(tile_list_error());
+        }
+        let list = tile_list(payload)?;
+        let (tile_w, tile_h) = uniform_tile_size(&frame)?;
+        let out_w = list
+            .tiles_wide
+            .checked_mul(tile_w)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        let out_h = list
+            .tiles_high
+            .checked_mul(tile_h)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        if out_w == 0 || out_h == 0 || out_w > 4096 || out_h > 4096 {
+            return Err(CodecError::Limit { what: "frame size" });
+        }
+        let chroma_w = out_w / 2;
+        let chroma_h = out_h / 2;
+        let y_len = out_w
+            .checked_mul(out_h)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        let c_len = chroma_w
+            .checked_mul(chroma_h)
+            .ok_or(CodecError::Limit { what: "frame size" })?;
+        let mut y = vec![0u8; y_len];
+        let mut u = vec![128u8; c_len];
+        let mut v = vec![128u8; c_len];
+        let carried = self.carried_cdf(&frame)?;
+        for (index, entry) in list.entries.into_iter().enumerate() {
+            if usize::from(entry.anchor) >= self.refs.len()
+                || entry.row >= frame.tile_rows as usize
+                || entry.col >= frame.tile_cols as usize
+            {
+                return Err(tile_list_error());
+            }
+            let Some(&row_start) = frame.mi_row_starts.get(entry.row) else {
+                return Err(tile_list_error());
+            };
+            let Some(&row_end) = frame.mi_row_starts.get(entry.row + 1) else {
+                return Err(tile_list_error());
+            };
+            let Some(&col_start) = frame.mi_col_starts.get(entry.col) else {
+                return Err(tile_list_error());
+            };
+            let Some(&col_end) = frame.mi_col_starts.get(entry.col + 1) else {
+                return Err(tile_list_error());
+            };
+            let views = self.views_for_anchor(&frame, usize::from(entry.anchor))?;
+            let part = TilePart {
+                row: row_start as usize,
+                row_end: row_end as usize,
+                col: col_start as usize,
+                col_end: col_end as usize,
+                data: entry.data,
+            };
+            let picture = decode_tile_parts(
+                &sequence,
+                &frame,
+                &views,
+                carried.as_deref(),
+                &[part],
+                false,
+            )?
+            .picture;
+            let dx = (index % list.tiles_wide).saturating_mul(tile_w);
+            let dy = (index / list.tiles_wide).saturating_mul(tile_h);
+            let sx = col_start as usize * 4;
+            let sy = row_start as usize * 4;
+            copy_rect(PlaneCopy {
+                dst: &mut y,
+                dst_stride: out_w,
+                src: &picture.y,
+                src_stride: picture.width,
+                dx,
+                dy,
+                sx,
+                sy,
+                width: tile_w,
+                height: tile_h,
+            })?;
+            let src_c = picture.width.div_ceil(2);
+            copy_rect(PlaneCopy {
+                dst: &mut u,
+                dst_stride: chroma_w,
+                src: &picture.u,
+                src_stride: src_c,
+                dx: dx / 2,
+                dy: dy / 2,
+                sx: sx / 2,
+                sy: sy / 2,
+                width: tile_w / 2,
+                height: tile_h / 2,
+            })?;
+            copy_rect(PlaneCopy {
+                dst: &mut v,
+                dst_stride: chroma_w,
+                src: &picture.v,
+                src_stride: src_c,
+                dx: dx / 2,
+                dy: dy / 2,
+                sx: sx / 2,
+                sy: sy / 2,
+                width: tile_w / 2,
+                height: tile_h / 2,
+            })?;
+        }
+        let picture = owned(DecodedPicture {
+            y,
+            u,
+            v,
+            width: out_w,
+            height: out_h,
+        })?;
+        let shown = if frame.show_frame {
+            Some(picture_output(&picture, packet.pts, packet.timescale)?)
+        } else {
+            None
+        };
+        self.sequence = Some(sequence);
+        Ok((
+            shown,
+            FrameUndo {
+                stored: Vec::new(),
+                stale: std::array::from_fn(|_| None),
+            },
+        ))
+    }
+
+    /// The camera-tile process replaces `FrameStore[ref_frame_idx[0]]` with the anchor.
+    fn views_for_anchor(
+        &self,
+        frame: &FrameInfo,
+        anchor: usize,
+    ) -> Result<[Option<RefView<'_>>; 8], CodecError> {
+        let Some(slot) = frame.ref_frames.first().copied() else {
+            return Err(tile_list_error());
+        };
+        let slot = usize::from(slot);
+        if slot >= 8 || anchor >= 8 {
+            return Err(tile_list_error());
+        }
+        if self.refs[anchor].is_none() {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "missing reference",
+            });
+        }
+        Ok(std::array::from_fn(|index| {
+            let source = if index == slot { anchor } else { index };
+            self.refs[source].as_ref().map(|reference| RefView {
+                y: reference.picture.y.samples(),
+                u: reference.picture.u.samples(),
+                v: reference.picture.v.samples(),
+                width: reference.picture.y.width() as usize,
+                height: reference.picture.y.height() as usize,
+                frame_type: reference.field.frame_type,
+                mi_cols: reference.field.mi_cols,
+                mi_rows: reference.field.mi_rows,
+                saved_hints: reference.field.saved_hints,
+                mf_refs: &reference.field.refs,
+                mf_mvs: &reference.field.mvs,
+            })
+        }))
+    }
 }
 
 fn unfinished_tiles() -> CodecError {
@@ -521,6 +710,92 @@ fn unfinished_tiles() -> CodecError {
         at_bit: 0,
         what: "tile group",
     }
+}
+
+fn tile_list_error() -> CodecError {
+    CodecError::Malformed {
+        at_bit: 0,
+        what: "tile list",
+    }
+}
+
+/// The camera-tile output uses one tile width and one tile height.
+fn uniform_tile_size(frame: &FrameInfo) -> Result<(usize, usize), CodecError> {
+    let cols = frame.mi_col_starts.len().saturating_sub(1);
+    let rows = frame.mi_row_starts.len().saturating_sub(1);
+    if cols == 0
+        || rows == 0
+        || cols != frame.tile_cols as usize
+        || rows != frame.tile_rows as usize
+    {
+        return Err(tile_list_error());
+    }
+    let width = frame.mi_col_starts[1].saturating_sub(frame.mi_col_starts[0]);
+    let height = frame.mi_row_starts[1].saturating_sub(frame.mi_row_starts[0]);
+    if width == 0 || height == 0 {
+        return Err(tile_list_error());
+    }
+    for col in 1..cols {
+        let start = frame.mi_col_starts[col];
+        let end = frame.mi_col_starts[col + 1];
+        if end.saturating_sub(start) != width {
+            return Err(tile_list_error());
+        }
+    }
+    for row in 1..rows {
+        let start = frame.mi_row_starts[row];
+        let end = frame.mi_row_starts[row + 1];
+        if end.saturating_sub(start) != height {
+            return Err(tile_list_error());
+        }
+    }
+    let px_w = usize::try_from(width).unwrap_or(0).saturating_mul(4);
+    let px_h = usize::try_from(height).unwrap_or(0).saturating_mul(4);
+    if px_w == 0 || px_h == 0 || !px_w.is_multiple_of(2) || !px_h.is_multiple_of(2) {
+        return Err(tile_list_error());
+    }
+    Ok((px_w, px_h))
+}
+
+struct PlaneCopy<'a> {
+    dst: &'a mut [u8],
+    dst_stride: usize,
+    src: &'a [u8],
+    src_stride: usize,
+    dx: usize,
+    dy: usize,
+    sx: usize,
+    sy: usize,
+    width: usize,
+    height: usize,
+}
+
+fn copy_rect(plane: PlaneCopy<'_>) -> Result<(), CodecError> {
+    if plane.width == 0 || plane.height == 0 || plane.dst_stride == 0 || plane.src_stride == 0 {
+        return Err(tile_list_error());
+    }
+    for row in 0..plane.height {
+        let Some(from) = (plane.sy + row)
+            .checked_mul(plane.src_stride)
+            .and_then(|off| off.checked_add(plane.sx))
+        else {
+            return Err(tile_list_error());
+        };
+        let Some(to) = (plane.dy + row)
+            .checked_mul(plane.dst_stride)
+            .and_then(|off| off.checked_add(plane.dx))
+        else {
+            return Err(tile_list_error());
+        };
+        let Some(src_row) = plane.src.get(from..from + plane.width) else {
+            return Err(tile_list_error());
+        };
+        let Some(dst_row) = plane.dst.get_mut(to..to + plane.width) else {
+            return Err(tile_list_error());
+        };
+        dst_row.copy_from_slice(src_row);
+    }
+    Ok(())
 }
 
 fn record(
@@ -2228,6 +2503,283 @@ mod tests {
             packed.extend_from_slice(picture.v.samples());
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
+    }
+
+    #[test]
+    fn large_scale_tile_list_matches_dav1d() {
+        // 128×128 keyframe and one inter frame. CDF update, CDEF, restoration,
+        // the loop filter, and order hint are off, and the grid is four 64×64
+        // tiles. dav1d decodes those frame OBUs. The tile-list packet below is
+        // the inter frame's header plus those same tile bytes. dav1d does not
+        // decode a tile-list OBU; the mosaic is compared to dav1d's inter frame.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/lst_0.obu"),
+            include_bytes!("../fixtures/lst_1.obu"),
+        ];
+        let expected = [0x6103_2e26_fc9f_2ab5, 0x909f_ce3d_18f4_c300];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let key = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(key.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&key), expected[0]);
+        let inter = push_frame(&mut decoder, frames[1], 1);
+        assert_eq!(inter.len(), key.len());
+        assert_eq!(frame_digest(&inter), expected[1]);
+
+        let key_obus = crate::header::unit_obus(frames[0]).expect("key obus");
+        let inter_obus = crate::header::unit_obus(frames[1]).expect("inter obus");
+        let sequence = key_obus
+            .iter()
+            .find(|obu| obu.kind == 1)
+            .expect("sequence")
+            .bytes;
+        let frame_obu = inter_obus
+            .iter()
+            .find(|obu| obu.kind == 6)
+            .expect("frame")
+            .bytes;
+        let mut parsed = sequence.to_vec();
+        parsed.extend_from_slice(frame_obu);
+        let (_sequence, info) = crate::header::parse_unit(&parsed, None).expect("inter header");
+        assert!(!info.intra);
+        assert!(!info.show_existing);
+        assert!(info.disable_cdf_update);
+        assert_eq!(info.lf_level, [0, 0, 0, 0]);
+        assert_eq!((info.tile_cols, info.tile_rows), (2, 2));
+        assert_eq!(info.upscaled_width, info.width);
+        assert!(!info.grain.apply);
+        assert_eq!(info.ref_frames[0], 0);
+        let payload = crate::header::obu_payload(frame_obu).expect("frame payload");
+        assert!(payload.ends_with(&info.tile));
+        let raw_header = &payload[..payload.len() - info.tile.len()];
+        let mut headers = Vec::new();
+        for pad in 0..8 {
+            let candidate = header_with_trailing(raw_header, pad);
+            let mut probe = sequence.to_vec();
+            probe.extend(obu_with_size(3, &candidate));
+            let Ok((_sequence, parsed)) = crate::header::parse_unit(&probe, None) else {
+                continue;
+            };
+            if parsed.frame_type == info.frame_type
+                && parsed.width == info.width
+                && parsed.height == info.height
+                && parsed.base_q == info.base_q
+                && parsed.disable_cdf_update == info.disable_cdf_update
+                && parsed.ref_frames == info.ref_frames
+                && parsed.lf_level == info.lf_level
+                && parsed.mi_col_starts == info.mi_col_starts
+                && parsed.mi_row_starts == info.mi_row_starts
+                && parsed.refresh_flags == info.refresh_flags
+                && parsed.primary_ref == info.primary_ref
+                && parsed.reference_select == info.reference_select
+            {
+                headers.push(candidate);
+            }
+        }
+        assert_eq!(headers.len(), 1, "frame header trailing bit");
+        let header = &headers[0];
+        let parts = crate::header::tile_parts(&info).expect("tiles");
+        assert_eq!(parts.len(), 4);
+        let mut listed = Vec::new();
+        for part in &parts {
+            let row = info
+                .mi_row_starts
+                .iter()
+                .position(|start| *start as usize == part.row)
+                .expect("tile row") as u8;
+            let col = info
+                .mi_col_starts
+                .iter()
+                .position(|start| *start as usize == part.col)
+                .expect("tile col") as u8;
+            listed.push((0u8, row, col, part.data.as_slice()));
+        }
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(_, row, col, _)| (*row, *col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (0, 1), (1, 0), (1, 1)]
+        );
+
+        let mut mosaic = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut mosaic, frames[0], 0);
+        let listed_packet = list_packet(sequence, header, &listed, 2, 2);
+        let picture = push_frame(&mut mosaic, &listed_packet, 1);
+        assert_eq!(frame_digest(&picture), expected[1]);
+        let again = push_frame(&mut mosaic, frames[1], 2);
+        assert_eq!(frame_digest(&again), expected[1]);
+
+        let swapped = vec![listed[1], listed[0], listed[3], listed[2]];
+        let swapped = list_packet(sequence, header, &swapped, 2, 2);
+        let mut reorder = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut reorder, frames[0], 0);
+        let picture = push_frame(&mut reorder, &swapped, 1);
+        assert_eq!(frame_digest(&picture), frame_digest(&swap_columns(&inter)));
+
+        let one = list_packet(sequence, header, &listed[3..], 1, 1);
+        let mut single = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut single, frames[0], 0);
+        let picture = push_frame(&mut single, &one, 1);
+        assert_eq!(picture.len(), 64 * 64 * 3 / 2);
+        assert_eq!(
+            frame_digest(&picture),
+            frame_digest(&crop_tile(&inter, 1, 1))
+        );
+
+        let corner = list_packet(sequence, header, &listed[..1], 2, 2);
+        let mut partial = Av1Decoder::open(&params).expect("open");
+        push_frame(&mut partial, frames[0], 0);
+        let picture = push_frame(&mut partial, &corner, 1);
+        assert_eq!(picture[64], 0);
+        assert_eq!(picture[128 * 128 + 32], 128);
+        assert_eq!(
+            frame_digest(&crop_tile(&picture, 0, 0)),
+            frame_digest(&crop_tile(&inter, 0, 0))
+        );
+
+        let mut fresh = Av1Decoder::open(&params).expect("open");
+        let missing = push_error(&mut fresh, &listed_packet, 0);
+        assert!(matches!(
+            missing,
+            cutlass_decode::CodecError::Malformed {
+                what: "missing reference",
+                ..
+            }
+        ));
+        let listed_obus = crate::header::unit_obus(&listed_packet).expect("list obus");
+        let list_obu = listed_obus
+            .iter()
+            .find(|obu| obu.kind == 8)
+            .expect("tile list obu");
+        let orphan = push_error(&mut fresh, list_obu.bytes, 0);
+        assert!(matches!(
+            orphan,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile list",
+                ..
+            }
+        ));
+        push_frame(&mut fresh, frames[0], 0);
+        let mut anchored = listed.clone();
+        anchored[0].0 = 8;
+        let high = list_packet(sequence, header, &anchored, 2, 2);
+        let high = push_error(&mut fresh, &high, 1);
+        assert!(matches!(
+            high,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile list",
+                ..
+            }
+        ));
+        let mut overrun = listed_packet.clone();
+        let list_at = overrun
+            .windows(list_obu.bytes.len())
+            .position(|window| window == list_obu.bytes)
+            .expect("list obu");
+        let list_payload = crate::header::obu_payload(list_obu.bytes).expect("list payload");
+        let size_at = list_at + (list_obu.bytes.len() - list_payload.len()) + 7;
+        overrun[size_at] = 0xff;
+        overrun[size_at + 1] = 0xff;
+        let overrun = push_error(&mut fresh, &overrun, 1);
+        assert!(matches!(
+            overrun,
+            cutlass_decode::CodecError::Truncated {
+                what: "tile list",
+                ..
+            }
+        ));
+        let inter = push_frame(&mut fresh, frames[1], 2);
+        assert_eq!(frame_digest(&inter), expected[1]);
+    }
+
+    fn header_with_trailing(header: &[u8], pad: usize) -> Vec<u8> {
+        if pad == 0 {
+            let mut out = header.to_vec();
+            out.push(0x80);
+            return out;
+        }
+        let mut out = header.to_vec();
+        let last = out.last_mut().expect("header byte");
+        let keep = !((1u8 << pad) - 1);
+        let trail = 1u8 << (pad - 1);
+        *last = (*last & keep) | trail;
+        out
+    }
+
+    fn obu_with_size(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![(kind << 3) | 0x02];
+        out.extend(leb128(payload.len()));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn list_packet(
+        sequence: &[u8],
+        header: &[u8],
+        entries: &[(u8, u8, u8, &[u8])],
+        wide: u8,
+        high: u8,
+    ) -> Vec<u8> {
+        let mut payload = vec![wide - 1, high - 1];
+        let count = u16::try_from(entries.len()).expect("count") - 1;
+        payload.extend(count.to_be_bytes());
+        for (anchor, row, col, data) in entries {
+            payload.push(*anchor);
+            payload.push(*row);
+            payload.push(*col);
+            let size = u16::try_from(data.len()).expect("tile size") - 1;
+            payload.extend(size.to_be_bytes());
+            payload.extend_from_slice(data);
+        }
+        let mut packet = vec![0x12, 0x00];
+        packet.extend_from_slice(sequence);
+        packet.extend(obu_with_size(3, header));
+        packet.extend(obu_with_size(8, &payload));
+        packet
+    }
+
+    fn crop_tile(packed: &[u8], col: usize, row: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 * 64 * 3 / 2);
+        for line in 0..64 {
+            let start = (row * 64 + line) * 128 + col * 64;
+            out.extend_from_slice(&packed[start..start + 64]);
+        }
+        for plane in 0..2 {
+            let chroma = &packed[128 * 128 + plane * 64 * 64..];
+            for line in 0..32 {
+                let start = (row * 32 + line) * 64 + col * 32;
+                out.extend_from_slice(&chroma[start..start + 32]);
+            }
+        }
+        out
+    }
+
+    fn swap_columns(packed: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; packed.len()];
+        let order = [(1usize, 0usize), (0, 0), (1, 1), (0, 1)];
+        for (index, (sx, sy)) in order.iter().enumerate() {
+            let dx = index % 2;
+            let dy = index / 2;
+            for line in 0..64 {
+                let from = (sy * 64 + line) * 128 + sx * 64;
+                let to = (dy * 64 + line) * 128 + dx * 64;
+                out[to..to + 64].copy_from_slice(&packed[from..from + 64]);
+            }
+        }
+        for plane in 0..2 {
+            let base = 128 * 128 + plane * 64 * 64;
+            for (index, (sx, sy)) in order.iter().enumerate() {
+                let dx = index % 2;
+                let dy = index / 2;
+                for line in 0..32 {
+                    let from = base + (sy * 32 + line) * 64 + sx * 32;
+                    let to = base + (dy * 32 + line) * 64 + dx * 32;
+                    out[to..to + 32].copy_from_slice(&packed[from..from + 32]);
+                }
+            }
+        }
+        out
     }
 
     #[test]

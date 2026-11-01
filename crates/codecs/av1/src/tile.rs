@@ -95,7 +95,7 @@ pub fn decode_with_refs(
     carried: Option<&Cdfs>,
 ) -> Result<Reconstructed, CodecError> {
     let parts = crate::header::tile_parts(frame)?;
-    decode_tile_parts(sequence, frame, refs, carried, &parts)
+    decode_tile_parts(sequence, frame, refs, carried, &parts, true)
 }
 
 pub(crate) fn decode_tile_parts(
@@ -104,6 +104,7 @@ pub(crate) fn decode_tile_parts(
     refs: &[Option<RefView<'_>>],
     carried: Option<&Cdfs>,
     parts: &[TilePart],
+    postprocess: bool,
 ) -> Result<Reconstructed, CodecError> {
     if frame.width > 4096 || frame.height > 4096 {
         return Err(CodecError::Limit { what: "frame size" });
@@ -158,45 +159,47 @@ pub(crate) fn decode_tile_parts(
     } else {
         end_cdfs.unwrap_or(initial)
     };
-    let sizes = tile.sizes.clone();
-    let tx_sizes = tile.tx_sizes.clone();
-    let refs = tile.block_ref.clone();
-    let skips = tile.skips.clone();
-    let modes = tile.y_mode.clone();
-    let lf = tile.lf_delta.clone();
     let segments = tile.seg_ids.clone();
-    let edges = Edges {
-        sizes: &sizes,
-        tx: &tx_sizes,
-        refs: &refs,
-        skips: &skips,
-        modes: &modes,
-        lf: &lf,
-        segments: &segments,
-        mi_cols: tile.mi_cols,
-        mi_rows: tile.mi_rows,
-        sub_x: tile.sub_x,
-        sub_y: tile.sub_y,
-        frame,
-    };
-    deblock_picture(
-        Picture {
-            y: &mut tile.y,
-            y_w: buf_w,
-            y_h: buf_h,
-            u: &mut tile.u,
-            v: &mut tile.v,
-            c_w: tile.chroma_w,
-            c_h: tile.chroma_h,
-        },
-        &edges,
-    );
-    let before = if lr.active() {
+    if postprocess {
+        let sizes = tile.sizes.clone();
+        let tx_sizes = tile.tx_sizes.clone();
+        let block_refs = tile.block_ref.clone();
+        let skips = tile.skips.clone();
+        let modes = tile.y_mode.clone();
+        let lf = tile.lf_delta.clone();
+        let edges = Edges {
+            sizes: &sizes,
+            tx: &tx_sizes,
+            refs: &block_refs,
+            skips: &skips,
+            modes: &modes,
+            lf: &lf,
+            segments: &segments,
+            mi_cols: tile.mi_cols,
+            mi_rows: tile.mi_rows,
+            sub_x: tile.sub_x,
+            sub_y: tile.sub_y,
+            frame,
+        };
+        deblock_picture(
+            Picture {
+                y: &mut tile.y,
+                y_w: buf_w,
+                y_h: buf_h,
+                u: &mut tile.u,
+                v: &mut tile.v,
+                c_w: tile.chroma_w,
+                c_h: tile.chroma_h,
+            },
+            &edges,
+        );
+    }
+    let before = if postprocess && lr.active() {
         Some((tile.y.clone(), tile.u.clone(), tile.v.clone()))
     } else {
         None
     };
-    if tile.cdef_on {
+    if postprocess && tile.cdef_on {
         cdef::apply(&mut CdefInput {
             y: &mut tile.y,
             u: &mut tile.u,
@@ -213,7 +216,7 @@ pub(crate) fn decode_tile_parts(
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
     let up_w = frame.upscaled_width as usize;
-    let (y, u, v, out_w) = if up_w > visible_w {
+    let (y, u, v, out_w) = if postprocess && up_w > visible_w {
         let up_chroma = up_w.div_ceil(2);
         (
             superres::upscale(

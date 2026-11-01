@@ -21,8 +21,9 @@
 //! 128×128 superblock. A switch frame is predicted as an inter frame and
 //! refreshes every reference slot. A reserved OBU is skipped. An OBU with no
 //! size field runs to the end of the packet. A frame header may be followed by
-//! tile groups. A packet may be one Annex B temporal unit. A segment may change
-//! the quantizer, and a later frame may keep
+//! tile groups. A large-scale tile list copies tiles from the eight stored
+//! references and does not refresh them. A packet may be one Annex B temporal
+//! unit. A segment may change the quantizer, and a later frame may keep
 //! that segment map.
 
 #![forbid(unsafe_code)]

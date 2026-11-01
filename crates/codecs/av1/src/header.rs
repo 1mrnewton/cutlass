@@ -1772,6 +1772,71 @@ pub(crate) fn tile_span(frame: &FrameInfo, payload: &[u8]) -> Result<TileSpan, C
     })
 }
 
+/// One coded tile in a large-scale tile list, and which anchor tile it copies.
+pub(crate) struct TileListEntry {
+    pub anchor: u8,
+    pub row: usize,
+    pub col: usize,
+    pub data: Vec<u8>,
+}
+
+/// `tile_list_obu`. The output is `tiles_wide` by `tiles_high` tiles.
+pub(crate) struct TileList {
+    pub tiles_wide: usize,
+    pub tiles_high: usize,
+    pub entries: Vec<TileListEntry>,
+}
+
+/// Section 5.12. `tile_count_minus_1` is at most 511, and `anchor_frame_idx` is at most 127.
+pub(crate) fn tile_list(payload: &[u8]) -> Result<TileList, CodecError> {
+    let mut bits = BitReader::new(payload);
+    let tiles_wide = usize::try_from(bits.read(8)?).map_err(|_| malformed(&bits, "tile list"))? + 1;
+    let tiles_high = usize::try_from(bits.read(8)?).map_err(|_| malformed(&bits, "tile list"))? + 1;
+    let count = usize::try_from(bits.read(16)?).map_err(|_| malformed(&bits, "tile list"))? + 1;
+    if count > 512 || count > tiles_wide.saturating_mul(tiles_high) {
+        return Err(malformed(&bits, "tile list"));
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let anchor = u8::try_from(bits.read(8)?).map_err(|_| malformed(&bits, "tile list"))?;
+        if anchor > 127 {
+            return Err(malformed(&bits, "tile list"));
+        }
+        let row = usize::try_from(bits.read(8)?).map_err(|_| malformed(&bits, "tile list"))?;
+        let col = usize::try_from(bits.read(8)?).map_err(|_| malformed(&bits, "tile list"))?;
+        let size = usize::try_from(bits.read(16)?).map_err(|_| malformed(&bits, "tile list"))? + 1;
+        if !bits.position().is_multiple_of(8) {
+            return Err(malformed(&bits, "tile list"));
+        }
+        let start = bits.position() / 8;
+        let Some(end) = start.checked_add(size) else {
+            return Err(CodecError::Limit { what: "tile list" });
+        };
+        let Some(data) = payload.get(start..end) else {
+            return Err(CodecError::Truncated {
+                at_bit: bits.position() as u64,
+                what: "tile list",
+            });
+        };
+        let data = data.to_vec();
+        bits.skip(size.saturating_mul(8))?;
+        entries.push(TileListEntry {
+            anchor,
+            row,
+            col,
+            data,
+        });
+    }
+    if bits.bits_left() > 0 {
+        trailing(&mut bits, payload.len().saturating_mul(8))?;
+    }
+    Ok(TileList {
+        tiles_wide,
+        tiles_high,
+        entries,
+    })
+}
+
 /// Payload of one OBU. The size field is a byte count; without one the payload
 /// runs to the end of `bytes`.
 pub(crate) fn obu_payload(bytes: &[u8]) -> Result<&[u8], CodecError> {

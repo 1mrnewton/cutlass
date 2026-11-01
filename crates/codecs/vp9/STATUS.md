@@ -78,6 +78,7 @@ Recorded line:
 | Alternate reference on context 1, backward sign bias | Pictures match | One context, bias 0 | `altref_context_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Segment loop-filter step -63 and a last-frame reference | Pictures match | Quantizer feature only | `segment_tools_match_ffmpeg_software` | Verified on this machine. The test skips when libvpx headers are missing. |
 | Segment skip | Pictures match | No skip feature | `segment_skip_matches_ffmpeg_software` | Verified on this machine. The test skips when libvpx headers are missing. |
+| Absolute segment loop-filter step -8 | Pictures match, and they differ from the relative step | Relative deltas | `absolute_segment_loop_filter_matches_ffmpeg_software` | Verified on this machine. The test skips when libvpx headers are missing. |
 | Colour spaces 0, 3, 4, 5, and 6, and profile 0 sRGB | On the picture, or malformed | Space 1 only | `color_and_render_size_are_on_the_picture` | Verified |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |

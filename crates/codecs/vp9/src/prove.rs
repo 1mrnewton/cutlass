@@ -530,6 +530,63 @@ fn loop_filter_delta_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same loop-filter step is an absolute level, not an offset from the frame.
+#[test]
+fn absolute_segment_loop_filter_matches_ffmpeg_software() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let Some(flags) = vpx_compile_flags() else {
+        eprintln!("skipped: libvpx headers were not found");
+        return;
+    };
+    let dir = temp_dir("seg-abs");
+    let ivf = dir.join("in.ivf");
+    let absolute = dir.join("abs.ivf");
+    if !encode_roi_map(&dir, &ivf, &flags, Some("mild")) {
+        eprintln!("skipped: the segment-map encoder did not build");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let stream = read_ivf(&ivf);
+    assert_eq!((stream.width, stream.height), (160, 96));
+    assert!(
+        mild_relative_filter(&stream),
+        "no inter frame had a relative loop-filter step of -8 above a level of 8"
+    );
+    let flipped: Vec<Vec<u8>> = stream
+        .frames
+        .iter()
+        .map(|frame| force_absolute(frame))
+        .collect();
+    write_same_ivf(&ivf, &absolute, &flipped);
+    let absolute_stream = read_ivf(&absolute);
+    assert!(
+        absolute_filter(&absolute_stream),
+        "the absolute bit did not change the loop-filter step"
+    );
+    let (relative, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let (ours, _) = decode_shown(&absolute_stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &absolute, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    assert_ne!(
+        ours, relative,
+        "absolute and relative steps decoded the same"
+    );
+    assert_eq!(ours.len(), 160 * 96 * 3 / 2 * 4);
+    eprintln!(
+        "absolute segment filter {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Segment 1 is skip: those blocks have no residual and a zero motion vector.
 #[test]
 fn segment_skip_matches_ffmpeg_software() {
@@ -651,6 +708,97 @@ fn encode_roi_map(dir: &Path, ivf: &Path, flags: &[String], mode: Option<&str>) 
         String::from_utf8_lossy(&encoded.stderr)
     );
     true
+}
+
+fn mild_relative_filter(stream: &Ivf) -> bool {
+    segment_filter(stream, false)
+}
+
+fn absolute_filter(stream: &Ivf) -> bool {
+    segment_filter(stream, true)
+}
+
+fn segment_filter(stream: &Ivf, absolute: bool) -> bool {
+    let mut state = crate::header::Persist::new();
+    let mut found = false;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("absolute frame {index} header: {err}"));
+        let header = &parsed.header;
+        let seg = &header.seg;
+        found |= !header.key_frame
+            && header.filter_level > 8
+            && seg.enabled
+            && seg.abs_delta == absolute
+            && seg.feature_on[1][1]
+            && seg.feature_data[1][1] == -8;
+        remember_header(&mut state, &parsed);
+    }
+    found
+}
+
+fn force_absolute(frame: &[u8]) -> Vec<u8> {
+    let Some(at) = abs_delta_bit(frame) else {
+        return frame.to_vec();
+    };
+    let mut out = frame.to_vec();
+    set_msb_bit(&mut out, at, true);
+    out
+}
+
+fn abs_delta_bit(frame: &[u8]) -> Option<usize> {
+    let sharp = sharpness_bit(frame)?;
+    let mut bits = crate::bits::BitReader::new(frame);
+    skip_bits(&mut bits, sharp.saturating_add(3))?;
+    if bits.read(1).ok()? == 1 && bits.read(1).ok()? == 1 {
+        skip_delta_list(&mut bits, 4)?;
+        skip_delta_list(&mut bits, 2)?;
+    }
+    skip_bits(&mut bits, 8)?;
+    for _ in 0..3 {
+        if bits.read(1).ok()? == 1 {
+            skip_signed(&mut bits, 4)?;
+        }
+    }
+    if bits.read(1).ok()? == 0 {
+        return None;
+    }
+    if bits.read(1).ok()? == 1 {
+        for _ in 0..7 {
+            skip_prob(&mut bits)?;
+        }
+        if bits.read(1).ok()? == 1 {
+            for _ in 0..3 {
+                skip_prob(&mut bits)?;
+            }
+        }
+    }
+    if bits.read(1).ok()? == 0 {
+        return None;
+    }
+    Some(bits.position())
+}
+
+fn skip_delta_list(bits: &mut crate::bits::BitReader<'_>, count: usize) -> Option<()> {
+    for _ in 0..count {
+        if bits.read(1).ok()? == 1 {
+            skip_signed(bits, 6)?;
+        }
+    }
+    Some(())
+}
+
+fn skip_signed(bits: &mut crate::bits::BitReader<'_>, width: usize) -> Option<()> {
+    skip_bits(bits, width)?;
+    bits.read(1).ok()?;
+    Some(())
+}
+
+fn skip_prob(bits: &mut crate::bits::BitReader<'_>) -> Option<()> {
+    if bits.read(1).ok()? == 1 {
+        skip_bits(bits, 8)?;
+    }
+    Some(())
 }
 
 fn segment_skip_is_set(stream: &Ivf) -> bool {

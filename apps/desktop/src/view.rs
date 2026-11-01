@@ -1270,6 +1270,18 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
+        let face_name = if inspection.font.is_empty() {
+            "Face"
+        } else {
+            inspection.font.as_str()
+        };
+        let face = widgets::toolbar_button(ui, face_name).on_hover_text("Installed face");
+        if face.clicked()
+            && !inspection.locked
+            && let Err(error) = shell.cycle_text_font()
+        {
+            shell.set_notice(error.to_string());
+        }
         if let Some(size) =
             number_field(ui, "Size", &mut view.text_size_buffer, inspection.text_size)
             && !inspection.locked

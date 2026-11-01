@@ -157,6 +157,7 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::LineWidth) => {
                 formatter.write_str("the line width must be from zero through 8192")
             }
+            Self::Edit(EditError::TextFont) => formatter.write_str("the face is not a file name"),
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
             }
@@ -243,6 +244,7 @@ pub struct Inspection {
     pub letter_spacing: f64,
     pub line_spacing: f64,
     pub line_width: f64,
+    pub font: String,
     pub letterbox: String,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
@@ -2068,7 +2070,7 @@ impl Shell {
         let id = self.selected()?;
         let (segment, locked) = locate(draft, id)?;
         let (material, text, words) = material_label(draft, &segment.material_id);
-        let (text_size, text_color, text_align, letter_spacing, line_spacing, line_width) =
+        let (text_size, text_color, text_align, letter_spacing, line_spacing, line_width, font) =
             text_style(draft, &segment.material_id);
         Some(Inspection {
             segment_id: segment.id.clone(),
@@ -2088,6 +2090,7 @@ impl Shell {
             letter_spacing,
             line_spacing,
             line_width,
+            font,
             letterbox: letterbox_color(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
@@ -3027,6 +3030,28 @@ impl Shell {
         })
     }
 
+    /// Step to the next installed face. One undo restores the previous name.
+    /// The words and the size stay. The same face is not an undo step.
+    pub fn cycle_text_font(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let current = {
+            let draft = self.session_draft()?;
+            text_font(draft, &segment_id)
+        };
+        let names = self.face.names();
+        let Some(next) = next_face(&names, &current) else {
+            return Err(ShellError::Unavailable("no face is installed".to_owned()));
+        };
+        if next == current {
+            return Ok(());
+        }
+        self.apply(Request::SetTextFont {
+            segment_id,
+            face: next,
+        })
+    }
+
     /// Cycle left, center, and right. The first step gives the line the canvas
     /// width when it has none. One undo restores the previous alignment.
     pub fn cycle_text_align(&mut self) -> Result<(), ShellError> {
@@ -3081,6 +3106,16 @@ impl Shell {
     #[cfg(test)]
     pub fn use_face(&mut self, name: &str, bytes: Vec<u8>) {
         self.face = FaceTable::named(name, bytes);
+    }
+
+    #[cfg(test)]
+    pub fn use_faces(&mut self, faces: Vec<(&str, Vec<u8>)>) {
+        self.face = FaceTable::from_pairs(
+            faces
+                .into_iter()
+                .map(|(name, bytes)| (name.to_owned(), bytes))
+                .collect(),
+        );
     }
 
     pub fn remove_selected(&mut self) -> Result<(), ShellError> {
@@ -4531,7 +4566,10 @@ fn picture_scale(segment: &Segment) -> (f64, f64) {
     }
 }
 
-fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64, f64, f64) {
+fn text_style(
+    draft: &Draft,
+    material_id: &MaterialId,
+) -> (f64, String, i32, f64, f64, f64, String) {
     draft
         .materials
         .texts
@@ -4545,9 +4583,35 @@ fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64
                 text.letter_spacing,
                 text.line_spacing,
                 text.line_max_width,
+                text.font_path.clone(),
             )
         })
-        .unwrap_or((0.0, String::new(), 0, 0.0, 0.0, 0.0))
+        .unwrap_or((0.0, String::new(), 0, 0.0, 0.0, 0.0, String::new()))
+}
+
+fn text_font(draft: &Draft, segment_id: &SegmentId) -> String {
+    placed(draft, segment_id)
+        .and_then(|(segment, _)| {
+            draft
+                .materials
+                .texts
+                .iter()
+                .find(|text| text.id == segment.material_id)
+        })
+        .map(|text| text.font_path.clone())
+        .unwrap_or_default()
+}
+
+fn next_face(names: &[String], current: &str) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let index = names
+        .iter()
+        .position(|name| name == current)
+        .map(|index| index.saturating_add(1))
+        .unwrap_or(0);
+    Some(names[index % names.len()].clone())
 }
 
 fn letterbox_color(draft: &Draft, segment: &Segment) -> String {
@@ -7018,6 +7082,87 @@ mod tests {
     }
 
     const SAMPLE_TTF: &[u8] = include_bytes!("../../../crates/font/fixtures/sample.ttf");
+    const GRAY_OTF: &[u8] = include_bytes!("../../../crates/font/fixtures/gray-strike.otf");
+
+    #[test]
+    fn a_face_changes_the_drawn_letters() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.cycle_text_font().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.materials.videos.push(MaterialVideo::new("picture"));
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.use_faces(vec![
+            ("sample.ttf", SAMPLE_TTF.to_vec()),
+            ("gray.otf", GRAY_OTF.to_vec()),
+        ]);
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.cycle_text_font().unwrap_err().to_string(),
+            "a text style belongs on text"
+        );
+
+        desktop.select(Some(SegmentId::new("caption")));
+        desktop.set_text_size(48.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().font, "sample.ttf");
+        let sized = desktop.preview_bytes().unwrap();
+        desktop.cycle_text_font().unwrap();
+        assert_eq!(desktop.inspection().unwrap().font, "gray.otf");
+        assert_eq!(desktop.inspection().unwrap().text_size, 48.0);
+        assert_eq!(desktop.draft().unwrap().materials.texts[0].content, "A");
+        let other = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&sized.rgba), digest(&other.rgba));
+        desktop.set_text_size(48.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().font, "gray.otf");
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().font, "sample.ttf");
+        assert_eq!(
+            digest(&desktop.preview_bytes().unwrap().rgba),
+            digest(&sized.rgba)
+        );
+
+        desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        let revision = desktop.revision();
+        desktop.cycle_text_font().unwrap();
+        assert_eq!(desktop.revision(), revision);
+
+        let lane = desktop.draft().unwrap().tracks[1].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.cycle_text_font().unwrap_err().to_string(),
+            "the track is locked"
+        );
+    }
 
     #[test]
     fn a_text_clip_changes_size_color_and_alignment() {

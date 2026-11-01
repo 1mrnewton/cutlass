@@ -1,7 +1,7 @@
-//! One installed face for text segments.
+//! Installed faces for text segments.
 //!
 //! The draft stores the file name. Evaluation does not open that path. This
-//! table supplies the bytes when the name matches the face that was read.
+//! table supplies the bytes when the name matches a face that was read.
 
 use std::path::Path;
 
@@ -16,14 +16,15 @@ const FACE_CANDIDATES: &[&str] = &[
     "C:\\Windows\\Fonts\\arial.ttf",
 ];
 
-/// Bytes for one face. An empty name supplies nothing.
+/// Bytes for the faces that were read. An empty table supplies nothing.
 pub struct FaceTable {
-    name: String,
-    bytes: Vec<u8>,
+    faces: Vec<(String, Vec<u8>)>,
 }
 
 impl FaceTable {
-    /// The first candidate that is a single readable face.
+    /// Every candidate that is a single readable face, in that order.
+    ///
+    /// A second file with the same name is skipped.
     #[must_use]
     pub fn load() -> Self {
         Self::load_from(FACE_CANDIDATES)
@@ -32,18 +33,38 @@ impl FaceTable {
     #[cfg(test)]
     #[must_use]
     pub fn named(name: impl Into<String>, bytes: Vec<u8>) -> Self {
-        Self {
-            name: name.into(),
-            bytes,
-        }
+        let mut table = Self { faces: Vec::new() };
+        table.push_face(name.into(), bytes);
+        table
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub fn from_pairs(faces: Vec<(String, Vec<u8>)>) -> Self {
+        let mut table = Self { faces: Vec::new() };
+        for (name, bytes) in faces {
+            table.push_face(name, bytes);
+        }
+        table
+    }
+
+    /// The first face. An empty table has an empty name.
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        self.faces
+            .first()
+            .map(|(name, _)| name.as_str())
+            .unwrap_or("")
+    }
+
+    /// File names, in the order they were read.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.faces.iter().map(|(name, _)| name.clone()).collect()
     }
 
     fn load_from(paths: &[&str]) -> Self {
+        let mut table = Self { faces: Vec::new() };
         for path in paths {
             let Ok(bytes) = std::fs::read(path) else {
                 continue;
@@ -54,25 +75,25 @@ impl FaceTable {
             let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            return Self {
-                name: name.to_owned(),
-                bytes,
-            };
+            table.push_face(name.to_owned(), bytes);
         }
-        Self {
-            name: String::new(),
-            bytes: Vec::new(),
+        table
+    }
+
+    fn push_face(&mut self, name: String, bytes: Vec<u8>) {
+        if name.is_empty() || self.faces.iter().any(|(have, _)| have == &name) {
+            return;
         }
+        self.faces.push((name, bytes));
     }
 }
 
 impl Fonts for FaceTable {
     fn face(&self, path: &str) -> Option<&[u8]> {
-        if self.name.is_empty() || path != self.name {
-            None
-        } else {
-            Some(self.bytes.as_slice())
-        }
+        self.faces
+            .iter()
+            .find(|(name, _)| name == path)
+            .map(|(_, bytes)| bytes.as_slice())
     }
 }
 
@@ -103,6 +124,24 @@ mod tests {
         );
         assert!(loaded.face(loaded.name()).is_some());
         assert!(loaded.face("other.ttf").is_none());
+
+        let second = directory.join(format!(
+            "cutlass-face-b-{}-{}.otf",
+            std::process::id(),
+            SAMPLE.len()
+        ));
+        std::fs::write(&path, SAMPLE).expect("write");
+        std::fs::write(&second, SAMPLE).expect("write");
+        let both = FaceTable::load_from(&[
+            path.to_str().expect("utf-8"),
+            second.to_str().expect("utf-8"),
+            second.to_str().expect("utf-8"),
+        ]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&second);
+        assert_eq!(both.names().len(), 2);
+        assert!(both.face(both.names()[0].as_str()).is_some());
+        assert!(both.face(both.names()[1].as_str()).is_some());
 
         let junk = directory.join(format!("cutlass-face-junk-{}", std::process::id()));
         std::fs::write(&junk, b"not a font").expect("write");

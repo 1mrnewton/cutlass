@@ -13,6 +13,7 @@
 //! An Annex I depth view that is intra is reconstructed.
 //! An inter-layer macroblock, intra or inter, can add an 8×8 residual.
 //! `adaptive_base_mode_flag` selects base mode per macroblock.
+//! `adaptive_motion_prediction_flag` uses the reference layer's vector as the predictor.
 //! `adaptive_residual_prediction_flag` selects residual prediction per macroblock.
 //! Resampling and a 3D-AVC extension header are refused.
 //!

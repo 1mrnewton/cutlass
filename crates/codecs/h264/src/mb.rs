@@ -490,7 +490,8 @@ pub(crate) fn decode_mbs<S: Sample>(
             }
             qp
         } else {
-            let (qp, residual) = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
+            let (qp, residual) =
+                one_mb(pic, dpb, slice, slice_id, addr, (qp, layer), &mut entropy)?;
             if residual {
                 let Some(layer) = layer else {
                     return Err(CodecError::Unsupported {
@@ -1236,9 +1237,10 @@ fn one_mb<S: Sample>(
     slice: &Slice<'_>,
     slice_id: u16,
     addr: usize,
-    qp: i32,
+    coded: (i32, Option<&Frame<S>>),
     entropy: &mut Entropy<'_, '_>,
 ) -> Result<(i32, bool), CodecError> {
+    let (qp, layer) = coded;
     let mbaff = slice.sps.mbaff && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     let slot = my * pic.mb_w + mx;
@@ -1284,7 +1286,7 @@ fn one_mb<S: Sample>(
             slice,
             Place { mx, my },
             spec,
-            (&mut mb, &mut qp),
+            (&mut mb, &mut qp, layer),
         )?
     };
     mb.qp = qp as i8;
@@ -5395,21 +5397,26 @@ fn decode_inter<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     spec: u32,
-    work: (&mut Mb, &mut i32),
+    work: (&mut Mb, &mut i32, Option<&Frame<S>>),
 ) -> Result<bool, CodecError> {
     let Place { mx, my } = at;
-    let (mb, qp) = work;
+    let (mb, qp, layer) = work;
     let sub = if slice.kind == 1 {
         spec == 22
     } else {
         spec == 3 || spec == 4
     };
+    if (slice.adaptive_motion || slice.motion_pred) && (sub || (slice.kind == 1 && spec == 0)) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
     if slice.kind == 1 && spec == 0 {
         direct_16(pic, dpb, slice, mx, my, mb)?;
     } else if sub {
         read_sub(pic, dpb, entropy, slice, Place { mx, my }, spec, mb)?;
     } else {
-        read_parts(pic, entropy, slice, mx, my, spec, mb)?;
+        read_parts(pic, entropy, slice, mb, (mx, my, spec), layer)?;
     }
     let residual = coded_residual_flag(slice, entropy)?;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, mb.slice, slice.sps.chroma)?;
@@ -5518,34 +5525,61 @@ fn read_parts<S: Sample>(
     pic: &Frame<S>,
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
-    mx: usize,
-    my: usize,
-    spec: u32,
     mb: &mut Mb,
+    at: (usize, usize, u32),
+    layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
+    let (mx, my, spec) = at;
     let parts = partitions(super::syntax_kind(slice.kind), spec);
+    let mut from_layer0 = vec![false; parts.len()];
+    let mut from_layer1 = vec![false; parts.len()];
+    if slice.adaptive_motion || slice.motion_pred {
+        for (index, part) in parts.iter().enumerate() {
+            if part.l0 {
+                from_layer0[index] = motion_prediction_flag(slice, entropy)?;
+            }
+        }
+        for (index, part) in parts.iter().enumerate() {
+            if part.l1 {
+                from_layer1[index] = motion_prediction_flag(slice, entropy)?;
+            }
+        }
+    }
     // Clause 7.3.5.1: every list 0 value, then every list 1 value.
-    for part in &parts {
-        if part.l0 && slice.num_ref_l0 > 1 {
+    // A motion-prediction flag borrows that list's reference from the base.
+    for (index, part) in parts.iter().enumerate() {
+        if !part.l0 {
+            continue;
+        }
+        if from_layer0[index] {
+            let (_, reference) = layer_motion(layer, mx, my, part, 0)?;
+            fill_ref(&mut mb.ref0, &mut mb.uses0, part, reference);
+        } else if slice.num_ref_l0 > 1 {
             let r = read_te(
                 entropy,
                 slice.num_ref_l0,
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 0, mb),
             )?;
             fill_ref(&mut mb.ref0, &mut mb.uses0, part, r as i8);
-        } else if part.l0 {
+        } else {
             fill_ref(&mut mb.ref0, &mut mb.uses0, part, 0);
         }
     }
-    for part in &parts {
-        if part.l1 && slice.num_ref_l1 > 1 {
+    for (index, part) in parts.iter().enumerate() {
+        if !part.l1 {
+            continue;
+        }
+        if from_layer1[index] {
+            let (_, reference) = layer_motion(layer, mx, my, part, 1)?;
+            fill_ref(&mut mb.ref1, &mut mb.uses1, part, reference);
+        } else if slice.num_ref_l1 > 1 {
             let r = read_te(
                 entropy,
                 slice.num_ref_l1,
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 1, mb),
             )?;
             fill_ref(&mut mb.ref1, &mut mb.uses1, part, r as i8);
-        } else if part.l1 {
+        } else {
             fill_ref(&mut mb.ref1, &mut mb.uses1, part, 0);
         }
     }
@@ -5556,17 +5590,95 @@ fn read_parts<S: Sample>(
             mark_decoded(mb, part.x, part.y, part.w, part.h);
         }
     }
-    for part in &parts {
+    for (index, part) in parts.iter().enumerate() {
         if part.l0 {
-            read_mvd_part(pic, entropy, slice, Place { mx, my }, part, 0, mb)?;
+            let predicted = if from_layer0[index] {
+                Some(layer_motion(layer, mx, my, part, 0)?.0)
+            } else {
+                None
+            };
+            read_mvd_part(
+                pic,
+                entropy,
+                slice,
+                Place { mx, my },
+                part,
+                (0, predicted),
+                mb,
+            )?;
         }
     }
-    for part in &parts {
+    for (index, part) in parts.iter().enumerate() {
         if part.l1 {
-            read_mvd_part(pic, entropy, slice, Place { mx, my }, part, 1, mb)?;
+            let predicted = if from_layer1[index] {
+                Some(layer_motion(layer, mx, my, part, 1)?.0)
+            } else {
+                None
+            };
+            read_mvd_part(
+                pic,
+                entropy,
+                slice,
+                Place { mx, my },
+                part,
+                (1, predicted),
+                mb,
+            )?;
         }
     }
     Ok(())
+}
+
+/// `motion_prediction_flag`. The reference layer supplies the predictor.
+fn motion_prediction_flag(
+    slice: &Slice<'_>,
+    entropy: &mut Entropy<'_, '_>,
+) -> Result<bool, CodecError> {
+    if !slice.adaptive_motion {
+        return Ok(slice.motion_pred);
+    }
+    match entropy {
+        Entropy::Cavlc(bits) => bits.bit(),
+        Entropy::Cabac(_) => Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        }),
+    }
+}
+
+fn layer_motion<S: Sample>(
+    layer: Option<&Frame<S>>,
+    mx: usize,
+    my: usize,
+    part: &Part,
+    list: usize,
+) -> Result<([i16; 2], i8), CodecError> {
+    let Some(layer) = layer else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    let slot = my.saturating_mul(layer.mb_w).saturating_add(mx);
+    let Some(reference) = layer.mb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    let bx = part.x / 4;
+    let by = part.y / 4;
+    let block = by * 4 + bx;
+    let block8 = (by / 2) * 2 + (bx / 2);
+    let (mv, index) = if list == 0 {
+        (reference.mv0[block], reference.ref0[block8])
+    } else {
+        (reference.mv1[block], reference.ref1[block8])
+    };
+    if index < 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    Ok((mv, index))
 }
 
 struct Part {
@@ -5756,21 +5868,26 @@ fn read_mvd_part<S: Sample>(
     slice: &Slice<'_>,
     at: Place,
     part: &Part,
-    list: usize,
+    motion: (usize, Option<[i16; 2]>),
     mb: &mut Mb,
 ) -> Result<(), CodecError> {
+    let (list, predicted) = motion;
     let Place { mx, my } = at;
     let x = part.x / 4;
     let y = part.y / 4;
-    let pred = mvp(
-        pic,
-        Place { mx, my },
-        Cell { bx: x, by: y },
-        (part.w, part.h),
-        list,
-        ref_of(mb, x, y, list),
-        mb,
-    );
+    let pred = if let Some(mv) = predicted {
+        mv
+    } else {
+        mvp(
+            pic,
+            Place { mx, my },
+            Cell { bx: x, by: y },
+            (part.w, part.h),
+            list,
+            ref_of(mb, x, y, list),
+            mb,
+        )
+    };
     let dx = read_mvd(
         entropy,
         mvd_sum(pic, Place { mx, my }, Cell { bx: x, by: y }, (list, 0), mb),
@@ -6188,7 +6305,15 @@ fn read_sub<S: Sample>(
             let y0 = (i >> 1) * 8;
             for (px, py) in sub_origins(x0, y0, w, h) {
                 let part = part(px, py, w, h, list == 0, list == 1);
-                read_mvd_part(pic, entropy, slice, Place { mx, my }, &part, list, mb)?;
+                read_mvd_part(
+                    pic,
+                    entropy,
+                    slice,
+                    Place { mx, my },
+                    &part,
+                    (list, None),
+                    mb,
+                )?;
             }
         }
     }

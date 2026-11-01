@@ -1736,6 +1736,10 @@ pub(crate) struct Slice<'a> {
     base_mode: bool,
     /// `adaptive_base_mode_flag`. The macroblock layer reads `base_mode_flag`.
     adaptive_base: bool,
+    /// `adaptive_motion_prediction_flag`. Each partition reads `motion_prediction_flag`.
+    adaptive_motion: bool,
+    /// The reference layer's vector is the motion predictor for every partition.
+    motion_pred: bool,
     /// Add the reference layer's residual after this slice's prediction.
     /// When `adaptive_residual` is set, each inter macroblock carries its own flag.
     residual_pred: bool,
@@ -2057,6 +2061,10 @@ struct Header {
     base_mode: bool,
     /// `adaptive_base_mode_flag`. The macroblock layer reads `base_mode_flag`.
     adaptive_base: bool,
+    /// `adaptive_motion_prediction_flag`. Each partition reads `motion_prediction_flag`.
+    adaptive_motion: bool,
+    /// The reference layer's vector is the motion predictor for every partition.
+    motion_pred: bool,
     /// The reference layer's residual is added after prediction.
     /// When `adaptive_residual` is set, each inter macroblock carries its own flag.
     residual_pred: bool,
@@ -2420,10 +2428,11 @@ fn read_header(
             };
         }
     }
-    let (adaptive_base, base_mode, adaptive_residual, residual_pred) = match svc {
-        Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
-        _ => (false, false, false, false),
-    };
+    let (adaptive_base, base_mode, adaptive_motion, motion_pred, adaptive_residual, residual_pred) =
+        match svc {
+            Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
+            _ => (false, false, false, false, false, false),
+        };
     if svc.is_some() && !restriction {
         let start = bits.u(4)?;
         let end = bits.u(4)?;
@@ -2472,6 +2481,8 @@ fn read_header(
         output: svc.is_none_or(|svc| svc.output),
         base_mode,
         adaptive_base,
+        adaptive_motion,
+        motion_pred,
         residual_pred,
         adaptive_residual,
         view_id,
@@ -2486,14 +2497,15 @@ fn read_header(
 /// residual are reconstructed, including both tools on one macroblock and a
 /// list-0 index other than 0. A reference macroblock can use list 1, and both
 /// lists are averaged. `adaptive_base_mode_flag` selects base mode per
-/// macroblock. `adaptive_residual_prediction_flag` selects residual prediction
-/// per macroblock.
+/// macroblock. `adaptive_motion_prediction_flag` selects the reference layer's
+/// vector as the motion predictor. `adaptive_residual_prediction_flag` selects
+/// residual prediction per macroblock.
 /// Resampling and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
     svc: nal::SvcHeader,
-) -> Result<(bool, bool, bool, bool), CodecError> {
+) -> Result<(bool, bool, bool, bool, bool, bool), CodecError> {
     if svc.quality_id != 0 || sps.svc_spatial != 0 || !sps.inter_layer_deblock {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -2526,6 +2538,13 @@ fn read_inter_layer(
     }
     let adaptive_base = bits.bit()?;
     let default_base = if adaptive_base { false } else { bits.bit()? };
+    let (adaptive_motion, default_motion) = if default_base {
+        (false, false)
+    } else {
+        let adaptive_motion = bits.bit()?;
+        let default_motion = if adaptive_motion { false } else { bits.bit()? };
+        (adaptive_motion, default_motion)
+    };
     let adaptive_residual = bits.bit()?;
     let default_residual = if adaptive_residual {
         false
@@ -2533,7 +2552,13 @@ fn read_inter_layer(
         bits.bit()?
     };
     // A slice with neither tool is not inter-layer prediction.
-    if !adaptive_base && !adaptive_residual && !(default_base || default_residual) {
+    if !adaptive_base
+        && !default_base
+        && !adaptive_motion
+        && !default_motion
+        && !adaptive_residual
+        && !default_residual
+    {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2551,6 +2576,8 @@ fn read_inter_layer(
     Ok((
         adaptive_base,
         default_base,
+        adaptive_motion,
+        default_motion,
         adaptive_residual,
         default_residual,
     ))
@@ -2874,6 +2901,8 @@ fn make_slice<'a, S: Sample>(
         qs: header.qs,
         base_mode: header.base_mode,
         adaptive_base: header.adaptive_base,
+        adaptive_motion: header.adaptive_motion,
+        motion_pred: header.motion_pred,
         residual_pred: header.residual_pred,
         adaptive_residual: header.adaptive_residual,
     })
@@ -3283,6 +3312,8 @@ mod tests {
             output: true,
             base_mode: false,
             adaptive_base: false,
+            adaptive_motion: false,
+            motion_pred: false,
             residual_pred: false,
             adaptive_residual: false,
             view_id: 0,

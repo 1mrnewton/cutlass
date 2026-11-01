@@ -384,6 +384,27 @@ fn inter_layer_motion_adds_an_8x8_residual() {
 }
 
 #[test]
+fn inter_layer_intra_adds_an_8x8_residual() {
+    let mut ordinary = open();
+    let idr = decode_with(&mut ordinary, &intra8_idr());
+    assert!(painted(&idr, 200, 40));
+    let predicted = decode_with(&mut ordinary, &annex_b_nal(0, 1, &eight_p_slice()));
+    assert_ne!(planes_of(&predicted), planes_of(&idr));
+    assert_eq!(predicted.picture.y()[8 * 16], 200);
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = intra8_idr();
+        annex.extend(annex_b_nal(0, 1, &eight_p_slice()));
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        assert_eq!(&raw[frame..], &planes_of(&predicted));
+    }
+    let picture = decode(&intra8_layer());
+    assert_eq!(planes_of(&picture), planes_of(&predicted));
+    assert!(picture.picture.u().iter().all(|sample| *sample == 40));
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -1778,6 +1799,44 @@ fn subset(profile: u8, restriction: bool, spatial: u32, vui: bool) -> Vec<u8> {
             w.trailing();
         }
     }
+    w.bytes
+}
+
+fn intra8_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &high_subset()));
+    out.extend(annex_b_nal(3, 8, &pps_8x8()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(200, 40)));
+    out
+}
+
+fn intra8_layer() -> Vec<u8> {
+    let mut out = intra8_idr();
+    out.extend(annex_b_extension(3, 20, &ilp_header(), &intra8_slice()));
+    out
+}
+
+fn intra8_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.ue(29);
+    w.bit(true);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
     w.bytes
 }
 

@@ -640,12 +640,6 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     }
     let still = bits.read_bool()?;
     let reduced = bits.read_bool()?;
-    if still && !reduced && false {
-        return Err(CodecError::Malformed {
-            at_bit: bits.position() as u64,
-            what: "still picture",
-        });
-    }
     let mut order_hint_bits = 0u8;
     let mut enable_order_hint = false;
     let mut enable_interintra = false;

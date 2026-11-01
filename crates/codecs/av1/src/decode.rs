@@ -5598,6 +5598,28 @@ mod tests {
     }
 
     #[test]
+    fn full_still_picture_header_matches_dav1d() {
+        // aomenc --limit=1 --full-still-picture-hdr, 128×128. The sequence is a
+        // still picture and uses the full header, not the reduced one. Rejecting
+        // that combination fails before a picture is produced. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/still-full.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.still);
+        assert!(!sequence.reduced);
+        assert!(frame.intra);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xefec_d6e6_78fd_c52a);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn chroma_quantizer_delta_matches_dav1d() {
         // aomenc --enable-chroma-deltaq=1, 128×128, two frames. Both headers
         // add 2 to the chroma DC and AC quantizers and leave the luma DC delta

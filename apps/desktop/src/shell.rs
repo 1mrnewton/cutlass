@@ -148,6 +148,12 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::TextAlign) => {
                 formatter.write_str("text alignment is not left, center, or right")
             }
+            Self::Edit(EditError::LetterSpacing) => {
+                formatter.write_str("letter spacing must be from -1 to 4")
+            }
+            Self::Edit(EditError::LineSpacing) => {
+                formatter.write_str("line spacing must be greater than -1 and at most 4")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -213,6 +219,8 @@ pub struct Inspection {
     pub text_size: f64,
     pub text_color: String,
     pub text_align: i32,
+    pub letter_spacing: f64,
+    pub line_spacing: f64,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -1925,7 +1933,8 @@ impl Shell {
         let id = self.selected()?;
         let (segment, locked) = locate(draft, id)?;
         let (material, text, words) = material_label(draft, &segment.material_id);
-        let (text_size, text_color, text_align) = text_style(draft, &segment.material_id);
+        let (text_size, text_color, text_align, letter_spacing, line_spacing) =
+            text_style(draft, &segment.material_id);
         Some(Inspection {
             segment_id: segment.id.clone(),
             start: segment.target.start,
@@ -1941,6 +1950,8 @@ impl Shell {
             text_size,
             text_color,
             text_align,
+            letter_spacing,
+            line_spacing,
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -2790,6 +2801,32 @@ impl Shell {
         self.apply(Request::SetTextSize {
             segment_id,
             size,
+            face,
+        })
+    }
+
+    /// Store the extra gap between letters, as a fraction of the size.
+    /// `0` is the normal gap. One undo restores the previous gap.
+    pub fn set_letter_spacing(&mut self, spacing: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetLetterSpacing {
+            segment_id,
+            spacing,
+            face,
+        })
+    }
+
+    /// Store the extra gap between lines, as a fraction of the size.
+    /// `0` is the normal gap. One undo restores the previous gap.
+    pub fn set_line_spacing(&mut self, spacing: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetLineSpacing {
+            segment_id,
+            spacing,
             face,
         })
     }
@@ -4310,14 +4347,22 @@ fn picture_scale(segment: &Segment) -> (f64, f64) {
     }
 }
 
-fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32) {
+fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64, f64) {
     draft
         .materials
         .texts
         .iter()
         .find(|text| text.id == *material_id)
-        .map(|text| (text.font_size, text.text_color.clone(), text.alignment))
-        .unwrap_or((0.0, String::new(), 0))
+        .map(|text| {
+            (
+                text.font_size,
+                text.text_color.clone(),
+                text.alignment,
+                text.letter_spacing,
+                text.line_spacing,
+            )
+        })
+        .unwrap_or((0.0, String::new(), 0, 0.0, 0.0))
 }
 
 fn fade_durations(draft: &Draft, segment: &Segment) -> (i64, i64) {
@@ -6727,6 +6772,89 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().text_align, 0);
+    }
+
+    #[test]
+    fn text_spacing_opens_the_gaps_between_letters_and_lines() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.set_letter_spacing(1.0).unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "AA".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.set_line_spacing(0.5).unwrap_err().to_string(),
+            "a text style belongs on text"
+        );
+
+        desktop.select(Some(SegmentId::new("caption")));
+        desktop.set_text_size(64.0).unwrap();
+        let fitted = desktop.preview_bytes().unwrap();
+        desktop.set_letter_spacing(1.0).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.letter_spacing, 1.0);
+        assert_eq!(inspection.line_spacing, 0.0);
+        assert_eq!(inspection.text_size, 64.0);
+        let opened = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&fitted.rgba), digest(&opened.rgba));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().letter_spacing, 0.0);
+        assert_eq!(
+            desktop.set_letter_spacing(4.1).unwrap_err().to_string(),
+            "letter spacing must be from -1 to 4"
+        );
+        assert_eq!(
+            desktop.set_line_spacing(-1.0).unwrap_err().to_string(),
+            "line spacing must be greater than -1 and at most 4"
+        );
+        assert_eq!(desktop.inspection().unwrap().letter_spacing, 0.0);
+
+        desktop.set_text("A\nA".to_owned()).unwrap();
+        let stacked = desktop.preview_bytes().unwrap();
+        desktop.set_line_spacing(1.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().line_spacing, 1.0);
+        assert_eq!(desktop.inspection().unwrap().text.as_deref(), Some("A\nA"));
+        let spaced = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&stacked.rgba), digest(&spaced.rgba));
+
+        let lane = desktop.draft().unwrap().tracks[1].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.set_letter_spacing(0.5).unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.inspection().unwrap().line_spacing, 1.0);
     }
 
     #[test]

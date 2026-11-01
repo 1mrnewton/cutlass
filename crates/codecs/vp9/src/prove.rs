@@ -561,6 +561,56 @@ fn tiled_picture_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Four tile rows is the largest row split the header can name.
+#[test]
+fn four_tile_rows_match_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no tile source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("tile-rows");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &[
+            "-frames:v",
+            "4",
+            "-vf",
+            "scale=256:512",
+            "-tile-columns",
+            "0",
+            "-tile-rows",
+            "2",
+            "-threads",
+            "1",
+        ],
+    );
+    let stream = read_ivf(&ivf);
+    assert!(stream.frames.len() > 1, "tile rows need an inter frame");
+    let parsed = crate::header::parse(&crate::header::Persist::new(), &stream.frames[0])
+        .expect("keyframe header");
+    assert_eq!(parsed.header.log2_tile_rows, 2, "tile rows");
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "tiles 1x4 {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The literal filter values are smooth, regular, sharp, and bilinear.
 /// A fixed filter is two bits, so rewriting it leaves the rest of the frame aligned.
 #[test]

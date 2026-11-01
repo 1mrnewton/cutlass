@@ -1302,6 +1302,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let tracks = Rect::from_min_max(ruler.left_bottom(), rect.max);
     let lanes_left = tracks.left() + tokens::TRACK_HEAD + tokens::COVER_WIDTH;
     let lane_area = Rect::from_min_max(Pos2::new(lanes_left, tracks.top()), tracks.max);
+    shell.prepare_lane(lane_area.width().max(1.0));
     let (rate, drop_frame) = ruler_rate(shell);
     paint_ticks(ui, ruler, lanes_left, shell.pixel_size(), rate, drop_frame);
     let rows = shell.lanes();
@@ -1354,7 +1355,6 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         }
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
-    shell.set_lane_width(lane_area.width().max(1.0));
 }
 
 fn release_library_drop(
@@ -2660,7 +2660,9 @@ mod tests {
             },
             |ui| show(&mut shell, ui, &mut view, None),
         );
-        let start = text_pos(&output, "00:00:00").expect("ruler");
+        let start = text_pos(&output, "00:00:00")
+            .or_else(|| text_pos(&output, "00:00"))
+            .expect("ruler");
         output.textures_delta.clear();
         let end = start + Vec2::new(120.0, 0.0);
         let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {

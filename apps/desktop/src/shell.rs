@@ -177,6 +177,8 @@ pub struct Shell {
     playing: bool,
     pixel_size: f64,
     lane_width: f64,
+    /// Fit the cut on the next lane layout. An empty cut stays at the opening scale.
+    fit_on_layout: bool,
     library_width: f32,
     inspector_width: f32,
     timeline_height: f32,
@@ -210,6 +212,7 @@ impl Shell {
             playing: false,
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             lane_width: 800.0,
+            fit_on_layout: false,
             library_width: tokens::LIBRARY_WIDTH,
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
@@ -332,6 +335,7 @@ impl Shell {
         self.playhead = Micros(0);
         self.playing = false;
         self.selected = None;
+        self.fit_on_layout = false;
         self.notice.clear();
         self.heard.clear();
         self.output.queue(&[]);
@@ -365,6 +369,15 @@ impl Shell {
     pub fn set_lane_width(&mut self, width: f32) {
         if width.is_finite() && width > 0.0 {
             self.lane_width = f64::from(width);
+        }
+    }
+
+    /// Remember the lane width, and fit a saved cut the first time it is shown.
+    pub fn prepare_lane(&mut self, width: f32) {
+        self.set_lane_width(width);
+        if self.fit_on_layout {
+            self.fit_on_layout = false;
+            let _ = self.zoom_fit();
         }
     }
 
@@ -408,6 +421,7 @@ impl Shell {
         self.playing = false;
         self.selected = None;
         self.pixel_size = opening_pixel_size(rate);
+        self.fit_on_layout = self.cut_duration().0 > 0;
         self.notice.clear();
         self.heard.clear();
         self.output.queue(&[]);
@@ -710,12 +724,16 @@ impl Shell {
     /// A lane of the material's type is added when the pointer lane and the
     /// upper lane of that type are taken. The source range is the whole
     /// material. One undo removes the segment and a lane this drop added.
+    /// The first segment on an empty cut fits that cut to three quarters of
+    /// the lane. Another segment keeps the scale.
     pub fn drop_medium(&mut self, material_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
-        let (kind, duration) = {
+        let (kind, duration, first_clip) = {
             let draft = self.session_draft()?;
-            medium_span(draft, material_id).ok_or_else(|| {
+            let span = medium_span(draft, material_id).ok_or_else(|| {
                 ShellError::Unavailable("the media is not in the library".to_owned())
-            })?
+            })?;
+            let first_clip = draft.tracks.iter().all(|track| track.segments.is_empty());
+            (span.0, span.1, first_clip)
         };
         if duration.0 <= 0 {
             return Err(ShellError::Unavailable(
@@ -767,6 +785,9 @@ impl Shell {
         });
         self.apply_requests(&requests)?;
         self.select(Some(segment_id));
+        if first_clip {
+            let _ = self.zoom_fit();
+        }
         Ok(())
     }
 
@@ -2481,6 +2502,53 @@ mod tests {
             "{error}"
         );
         assert_eq!(desktop.lanes()[0].clips[0].start, start);
+    }
+
+    #[test]
+    fn the_first_clip_fits_the_lane_and_the_next_keeps_the_scale() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.set_lane_width(800.0);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let duration = desktop.draft().unwrap().materials.videos[0].duration;
+        let opening = desktop.pixel_size();
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let fitted = cutlass_editor::fit_pixel_size(800.0, duration).unwrap();
+        assert!((desktop.pixel_size() - fitted).abs() < 0.000_000_1);
+        assert!(desktop.pixel_size() < opening);
+        let kept = desktop.pixel_size();
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        assert_eq!(desktop.pixel_size(), kept);
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_saved_cut_fits_once_when_the_lane_is_shown() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let opening = desktop.pixel_size();
+        desktop.prepare_lane(800.0);
+        let fitted = cutlass_editor::fit_pixel_size(800.0, Micros(1_000_000)).unwrap();
+        assert!((desktop.pixel_size() - fitted).abs() < 0.000_000_1);
+        assert!(desktop.pixel_size() < opening);
+        desktop.zoom_in().unwrap();
+        let closer = desktop.pixel_size();
+        desktop.prepare_lane(900.0);
+        assert_eq!(desktop.pixel_size(), closer);
     }
 
     #[test]

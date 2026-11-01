@@ -3,7 +3,9 @@
 //! Parent time is mapped with the engine placement: freeze, then speed,
 //! then reverse. That microsecond is where the child is evaluated, on the
 //! child's canvas. The parent then places that picture with the compound
-//! clip. A cycle, a chain past [`MAX_COMPOUND_DEPTH`], or a material with
+//! clip. A crop quad on the compound material is sampled from that picture
+//! first. An all-zero quad keeps the child picture. A cycle, a chain past
+//! [`MAX_COMPOUND_DEPTH`], or a material with
 //! no inlined draft contributes no picture. A file path on the material is
 //! not opened, and `precompile_combination` does not replace the draft.
 //! Playback does not read `sub_draft_stack`.
@@ -17,7 +19,8 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use crate::canvas::over_backdrop;
 use crate::frame::{EvalError, Fonts, Snapshot, compose};
 use crate::media::{
-    OpenClips, PictureTransform, backdrop_for, picture_transform, place_with, segment_clip,
+    OpenClips, PictureTransform, apply_crop, backdrop_for, picture_transform, place_with,
+    segment_clip,
 };
 
 /// Compound drafts above this many ancestors are not drawn.
@@ -137,6 +140,7 @@ fn place_child<D: Device>(
     else {
         return Ok(None);
     };
+    let crop = material.crop;
     let Some(child) = material.draft.as_deref() else {
         return Ok(None);
     };
@@ -165,6 +169,7 @@ fn place_child<D: Device>(
     else {
         return Ok(None);
     };
+    let bytes = apply_crop(bytes, crop, 1.0);
     let backdrop = backdrop_for(
         draft,
         segment,
@@ -230,7 +235,7 @@ fn covers(start: i64, duration: i64, time: i64) -> bool {
 mod tests {
     use cutlass_engine::ReaderFactory;
     use cutlass_model::{
-        Draft, DraftId, MaterialColorConfig, MaterialDraft, Micros, Segment, TimeRange,
+        Crop, Draft, DraftId, MaterialColorConfig, MaterialDraft, Micros, Segment, TimeRange,
         TrackAttribute,
     };
     use cutlass_renderer_software::SoftwareDevice;
@@ -377,6 +382,45 @@ mod tests {
         reversed.tracks[0].segments[0].reverse = true;
         assert_eq!(pixels(&reversed, 0), vec![0, 0, 255, 255]);
         assert_eq!(pixels(&reversed, 999), vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_crop_on_the_compound_keeps_the_middle() {
+        let mut child = Draft::empty("child");
+        child.canvas_config.width = 4;
+        child.canvas_config.height = 4;
+        child.materials.material_colors.push(MaterialColorConfig {
+            id: "solid".into(),
+            is_color_clip: true,
+            solid_color: "0xFFFF0000".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        child.tracks[0]
+            .segments
+            .push(Segment::new("solid", "solid", TimeRange::new(0, 1_000)));
+        let mut draft = compound(
+            "parent",
+            child,
+            TimeRange::new(0, 1_000),
+            TimeRange::new(0, 1_000),
+        );
+        draft.canvas_config.width = 4;
+        draft.canvas_config.height = 4;
+        let full = pixels(&draft, 0);
+        assert_eq!(&full[0..4], &[255, 0, 0, 255]);
+        draft.materials.drafts[0].crop = Crop {
+            upper_left_x: 0.25,
+            upper_left_y: 0.25,
+            upper_right_x: 0.75,
+            upper_right_y: 0.25,
+            lower_left_x: 0.25,
+            lower_left_y: 0.75,
+            lower_right_x: 0.75,
+            lower_right_y: 0.75,
+        };
+        let cropped = pixels(&draft, 0);
+        assert_eq!(&cropped[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&cropped[20..24], &[255, 0, 0, 255]);
     }
 
     #[test]

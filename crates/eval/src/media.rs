@@ -757,7 +757,7 @@ fn finish_picture(
 /// `picture`. `crop_scale` above 1 moves each corner toward the quad center.
 /// A scale that is not finite or not positive stays 1. A sample that falls
 /// outside the picture is clear.
-fn apply_crop(picture: CpuBytes, crop: Crop, crop_scale: f64) -> CpuBytes {
+pub(crate) fn apply_crop(picture: CpuBytes, crop: Crop, crop_scale: f64) -> CpuBytes {
     if crop_absent(crop) {
         return picture;
     }

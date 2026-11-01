@@ -1724,7 +1724,8 @@ pub(crate) struct Slice<'a> {
     sp_switch: bool,
     /// QSY. Zero when the slice is not SP or SI.
     qs: i32,
-    /// Intra base mode. Each macroblock copies the reference layer.
+    /// Base mode. Intra reference-layer macroblocks are copied. Inter ones
+    /// inherit list-0 motion.
     base_mode: bool,
 }
 
@@ -2428,8 +2429,8 @@ fn read_header(
 }
 
 /// Slice-header fields that follow the Annex A tail when inter-layer prediction
-/// is used. Same-size intra base mode is reconstructed. Resampling, motion
-/// prediction, residual prediction, and coefficient prediction are refused.
+/// is used. Same-size intra base mode and list-0 motion are reconstructed.
+/// Resampling, residual prediction, and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,

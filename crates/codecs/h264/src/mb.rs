@@ -446,7 +446,7 @@ pub(crate) fn decode_mbs<S: Sample>(
                     what: "inter-layer prediction",
                 });
             };
-            intra_base(pic, layer, slice, slice_id, addr, qp, &mut entropy)?
+            inferred_base(pic, dpb, layer, slice, &mut entropy, addr, (slice_id, qp))?
         } else {
             one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?
         };
@@ -623,9 +623,32 @@ fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i1
     }
 }
 
+/// Base mode. An intra reference layer macroblock is copied, then a coded
+/// residual is added. An inter one inherits list-0 motion and predicts from
+/// the decoded picture buffer. Resampling and residual prediction are refused.
+fn inferred_base<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    entropy: &mut Entropy<'_, '_>,
+    addr: usize,
+    state: (u16, i32),
+) -> Result<i32, CodecError> {
+    let (slice_id, qp) = state;
+    let (mx, my) = locate(pic, addr, false);
+    let slot = my.saturating_mul(pic.mb_w).saturating_add(mx);
+    let intra = layer.mb.get(slot).is_some_and(|mb| mb.intra);
+    if intra {
+        intra_base(pic, layer, slice, slice_id, addr, qp, entropy)
+    } else {
+        motion_base(pic, dpb, layer, slice, entropy, addr, state)
+    }
+}
+
 /// Intra base mode. The prediction is the co-located reference-layer samples.
 /// A coded residual is the ordinary intra 4×4 residual added to that prediction.
-/// An 8×8 transform, motion prediction, and resampling are refused.
+/// An 8×8 transform is refused.
 fn intra_base<S: Sample>(
     pic: &mut Frame<S>,
     layer: &Frame<S>,
@@ -707,6 +730,64 @@ fn intra_base<S: Sample>(
             false,
         );
     }
+    mb.qp = qp as i8;
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    pic.mb[slot] = mb;
+    Ok(qp)
+}
+
+/// Inter base mode. Motion is the reference layer's list-0 vectors. The
+/// samples come from the decoded picture buffer, not from the reference layer.
+fn motion_base<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    entropy: &mut Entropy<'_, '_>,
+    addr: usize,
+    state: (u16, i32),
+) -> Result<i32, CodecError> {
+    let (slice_id, qp) = state;
+    if slice.sps.mbaff || pic.field || pic.separate_plane || pic.chroma() != 1 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    if layer.w != pic.w || layer.h != pic.h || layer.mb_w != pic.mb_w {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (mx, my) = locate(pic, addr, false);
+    let slot = my.saturating_mul(pic.mb_w).saturating_add(mx);
+    let Some(reference) = layer.mb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    if reference.ref0.iter().any(|index| *index != 0)
+        || reference.ref1.iter().any(|index| *index >= 0)
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
+    if luma_cbp != 0 || chroma_cbp != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let mut mb = Mb::new(slice_id);
+    mb.off_a = slice.off_a as i8;
+    mb.off_b = slice.off_b as i8;
+    mb.deblock = slice.deblock;
+    mb.ref0 = [0; 4];
+    mb.mv0 = reference.mv0;
+    bind_refs(&mut mb, slice);
+    predict_inter(pic, dpb, slice, mx, my, &mb)?;
     mb.qp = qp as i8;
     mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
     mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);

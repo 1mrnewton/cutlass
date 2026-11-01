@@ -114,6 +114,47 @@ fn intra_base_adds_the_coded_residual() {
 }
 
 #[test]
+fn inter_layer_motion_predicts_from_the_reference() {
+    let idr = motion_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(painted(&first, 150, 90));
+    let base = decode_with(&mut decoder, &motion_base_packet());
+    assert_eq!(base.picture.width(), 16);
+    let base_y = base.picture.y();
+    let corner = (0..4).all(|row| {
+        base_y[row * 16..row * 16 + 4]
+            .iter()
+            .all(|sample| *sample == 153)
+    });
+    let elsewhere = (0..16).all(|row| {
+        let start = if row < 4 { 4 } else { 0 };
+        base_y[row * 16 + start..row * 16 + 16]
+            .iter()
+            .all(|sample| *sample == 150)
+    });
+    assert!(
+        corner && elsewhere,
+        "base residual did not land on the top-left 4×4"
+    );
+    assert!(base.picture.u().iter().all(|sample| *sample == 90));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &motion_layer_packet());
+    assert!(painted(&picture, 150, 90));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(motion_layer_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_ne!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -491,6 +532,84 @@ fn inter_layer_annex() -> Vec<u8> {
         &base_mode_slice(false),
     ));
     out
+}
+
+fn motion_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &uncropped_layer()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(150, 90)));
+    out
+}
+
+fn motion_base_packet() -> Vec<u8> {
+    annex_b_nal(0, 1, &motion_p_slice())
+}
+
+fn motion_layer_packet() -> Vec<u8> {
+    let mut out = motion_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &motion_enhancement(),
+    ));
+    out
+}
+
+fn motion_p_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn motion_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn motion_p_header(w: &mut Writer) {
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(1, 4);
+    w.bits(1, 4);
+    w.bit(false);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+}
+
+fn planes_of(picture: &VideoOutput) -> Vec<u8> {
+    let mut raw = picture.picture.y().to_vec();
+    raw.extend_from_slice(picture.picture.u());
+    raw.extend_from_slice(picture.picture.v());
+    raw
 }
 
 fn residual_annex() -> Vec<u8> {

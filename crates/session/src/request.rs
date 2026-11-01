@@ -221,4 +221,8 @@ pub enum Request {
     SetMagnet { on: bool },
     /// Store the project canvas color. An empty string clears it.
     SetCanvasBackground { color: String },
+    /// Store the project frame rate. `drop_frame` is a timecode label.
+    SetFrameRate { fps: f64, drop_frame: bool },
+    /// Store the drop-frame timecode label. The frame rate stays.
+    SetDropFrame { on: bool },
 }

@@ -164,6 +164,8 @@ pub struct ListedProject {
 struct ClipDrag {
     id: SegmentId,
     edge: Option<TrimEdge>,
+    press_x: f32,
+    press_y: f32,
 }
 
 struct PendingTrim {
@@ -764,13 +766,31 @@ impl Shell {
     }
 
     /// Remember which edge a clip drag started on. A body drag clears a trim preview.
-    pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>) {
+    ///
+    /// `press` is the pointer where the drag began, in points.
+    pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>, press: (f32, f32)) {
         self.pending_trim = None;
         self.pending_move = None;
         if edge.is_some() {
             self.selected = Some(id.clone());
         }
-        self.clip_drag = Some(ClipDrag { id, edge });
+        self.clip_drag = Some(ClipDrag {
+            id,
+            edge,
+            press_x: press.0,
+            press_y: press.1,
+        });
+    }
+
+    /// A body drag that stayed on the press is a click, not a move.
+    #[must_use]
+    pub fn clip_drag_moved(&self, x: f32, y: f32) -> bool {
+        let Some(drag) = &self.clip_drag else {
+            return false;
+        };
+        let dx = f64::from(x - drag.press_x);
+        let dy = f64::from(y - drag.press_y);
+        dx * dx + dy * dy >= 16.0
     }
 
     /// The edge this clip's current drag is trimming.

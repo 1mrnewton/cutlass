@@ -1936,23 +1936,31 @@ fn paint_clip(
         let response = ui.interact(
             body,
             ui.scope_id().with(("clip", index, clip.id.as_str())),
-            Sense::click_and_drag(),
+            Sense::drag(),
         );
         response.clone().on_hover_text(span.clone());
-        if response.clicked() {
+        if response.drag_started()
+            && let Some(pos) = pointer_pos(ui, &response)
+        {
+            shell.begin_clip_drag(clip.id.clone(), None, (pos.x, pos.y));
             shell.select(Some(clip.id.clone()));
         }
-        if response.drag_started() {
-            shell.begin_clip_drag(clip.id.clone(), None);
-        }
-        if response.dragged()
+        let pos = pointer_pos(ui, &response);
+        let moved = pos.is_some_and(|pos| shell.clip_drag_moved(pos.x, pos.y));
+        if moved
+            && response.dragged()
             && shell.clip_edge(&clip.id).is_none()
-            && let Some(pos) = pointer_pos(ui, &response)
+            && let Some(pos) = pos
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
             shell.preview_move(clip.id.clone(), x, editor_lane_y(index));
         }
-        finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, index, None);
+        if response.drag_stopped() && !moved {
+            shell.select(Some(clip.id.clone()));
+            shell.cancel_clip_drag();
+        } else {
+            finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, index, None);
+        }
     }
     drag_clip_edge(
         shell,
@@ -1996,8 +2004,10 @@ fn drag_clip_edge(
     if response.hovered() || response.dragged() {
         ui.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
-    if response.drag_started() {
-        shell.begin_clip_drag(clip.id.clone(), Some(edge));
+    if response.drag_started()
+        && let Some(pos) = pointer_pos(ui, &response)
+    {
+        shell.begin_clip_drag(clip.id.clone(), Some(edge), (pos.x, pos.y));
     }
     if response.dragged()
         && let Some(pos) = pointer_pos(ui, &response)
@@ -2035,7 +2045,7 @@ fn finish_clip_pointer(
     let x = f64::from(pos.x - lanes_left).max(0.0);
     let y = editor_lane_y(index);
     if edge.is_some() && shell.clip_edge(id).is_none() {
-        shell.begin_clip_drag(id.clone(), edge);
+        shell.begin_clip_drag(id.clone(), edge, (pos.x, pos.y));
     }
     if let Err(error) = shell.finish_clip_drag(id.clone(), x, y) {
         shell.set_notice(error.to_string());
@@ -3098,6 +3108,30 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::default(),
         };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(text), press(text, true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(text), press(text, false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.move_preview().is_none());
+        assert_eq!(
+            shell.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+        assert!(shell.selected().is_some());
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: screen,

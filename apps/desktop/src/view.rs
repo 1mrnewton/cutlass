@@ -13,7 +13,7 @@ use cutlass_session::TrimEdge;
 
 use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
-use crate::shell::{ExportRequest, ListedProject, Shell, ShellError};
+use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError};
 use crate::tokens;
 use crate::widgets;
 
@@ -1801,8 +1801,14 @@ fn paint_lane(
     );
     lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
     lane_switches(shell, ui, lane, row, index);
+    let follower = shell
+        .move_preview()
+        .filter(|preview| preview.track_id == lane.track_id);
     for clip in &lane.clips {
         paint_clip(shell, ui, lane, clip, row, lanes_left, index);
+    }
+    if let Some(preview) = follower {
+        paint_move_follower(shell, ui, lane, &preview, row, lanes_left);
     }
 }
 
@@ -1885,8 +1891,14 @@ fn paint_clip(
         return;
     }
     let selected = shell.selected().is_some_and(|id| id == &clip.id);
+    let ghost = shell.moving(&clip.id);
     let painter = ui.painter().with_clip_rect(row);
-    painter.rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
+    let fill = if ghost {
+        lane_color(&lane.kind).gamma_multiply(0.35)
+    } else {
+        lane_color(&lane.kind)
+    };
+    painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
     if selected {
         painter.rect_stroke(
             clip_rect,
@@ -1903,7 +1915,11 @@ fn paint_clip(
         Align2::LEFT_CENTER,
         &clip.name,
         FontId::proportional(11.0),
-        Color32::WHITE,
+        if ghost {
+            Color32::WHITE.gamma_multiply(0.45)
+        } else {
+            Color32::WHITE
+        },
     );
     let span = format!(
         "{} · {}–{}",
@@ -1928,6 +1944,13 @@ fn paint_clip(
         }
         if response.drag_started() {
             shell.begin_clip_drag(clip.id.clone(), None);
+        }
+        if response.dragged()
+            && shell.clip_edge(&clip.id).is_none()
+            && let Some(pos) = pointer_pos(ui, &response)
+        {
+            let x = f64::from(pos.x - lanes_left).max(0.0);
+            shell.preview_move(clip.id.clone(), x, editor_lane_y(index));
         }
         finish_clip_pointer(shell, ui, &response, &clip.id, lanes_left, index, None);
     }
@@ -2010,14 +2033,60 @@ fn finish_clip_pointer(
         return;
     };
     let x = f64::from(pos.x - lanes_left).max(0.0);
-    let y = f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT
-        + tokens::LANE_HEIGHT / 2.0;
+    let y = editor_lane_y(index);
     if edge.is_some() && shell.clip_edge(id).is_none() {
         shell.begin_clip_drag(id.clone(), edge);
     }
     if let Err(error) = shell.finish_clip_drag(id.clone(), x, y) {
         shell.set_notice(error.to_string());
     }
+}
+
+fn editor_lane_y(index: usize) -> f64 {
+    f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0
+}
+
+fn paint_move_follower(
+    shell: &Shell,
+    ui: &Ui,
+    lane: &crate::shell::LaneView,
+    preview: &MovePreview,
+    row: Rect,
+    lanes_left: f32,
+) {
+    let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let x = lane_x(
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        preview.start.0,
+    );
+    let width = (preview.duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
+    let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
+    let visible = clip_rect.intersect(row);
+    if visible.width() <= 0.0 || visible.height() <= 0.0 {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(row);
+    painter.rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
+    if shell.selected().is_some_and(|id| id == &preview.id) {
+        painter.rect_stroke(
+            clip_rect,
+            CornerRadius::same(7),
+            egui::Stroke::new(1.5, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let painter = ui
+        .painter()
+        .with_clip_rect(clip_rect.shrink(6.0).intersect(row));
+    painter.text(
+        clip_rect.left_center() + Vec2::new(8.0, 0.0),
+        Align2::LEFT_CENTER,
+        &preview.name,
+        FontId::proportional(11.0),
+        Color32::WHITE,
+    );
 }
 
 fn pointer_pos(ui: &Ui, response: &egui::Response) -> Option<Pos2> {
@@ -3022,13 +3091,48 @@ mod tests {
             .to_owned();
         let text = text_pos(&output, &id).expect("clip");
         output.textures_delta.clear();
-        drag(
-            &ctx,
-            text,
-            text + Vec2::new(80.0, 0.0),
-            &mut shell,
-            &mut view,
+        let moved = text + Vec2::new(80.0, 0.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(text), press(text, true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
         );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(moved)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let preview = shell.move_preview().expect("the clip follows the pointer");
+        assert!(preview.start.0 > 0, "the preview stayed at the start");
+        assert_eq!(preview.duration, Micros(2_000_000));
+        assert_eq!(
+            shell.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(moved), press(moved, false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.move_preview().is_none());
         let segment = &shell.draft().unwrap().tracks[0].segments[0];
         assert!(
             segment.target.start.0 > 0,

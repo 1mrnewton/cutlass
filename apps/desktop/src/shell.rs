@@ -173,6 +173,25 @@ struct PendingTrim {
     snapped: bool,
 }
 
+struct PendingMove {
+    id: SegmentId,
+    name: String,
+    start: Micros,
+    duration: Micros,
+    track_id: TrackId,
+    snapped: bool,
+}
+
+/// Where a clip drag is showing, before the draft is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovePreview {
+    pub id: SegmentId,
+    pub name: String,
+    pub start: Micros,
+    pub duration: Micros,
+    pub track_id: TrackId,
+}
+
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
@@ -199,6 +218,7 @@ pub struct Shell {
     selected: Option<SegmentId>,
     clip_drag: Option<ClipDrag>,
     pending_trim: Option<PendingTrim>,
+    pending_move: Option<PendingMove>,
     notice: String,
     next_id: u64,
     pub chrome: Chrome,
@@ -236,6 +256,7 @@ impl Shell {
             selected: None,
             clip_drag: None,
             pending_trim: None,
+            pending_move: None,
             notice: String::new(),
             next_id: 0,
             chrome: Chrome::default(),
@@ -728,31 +749,24 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
-        let x = self.time_zero_x(x);
-        let gesture = MoveGesture {
-            segment_id,
-            pointer: Pointer { x, y },
-            scale: self.scale(),
-            playhead: self.playhead,
-            snap_threshold: Micros(0),
-        };
-        let draft = self.session_draft()?;
-        let outcome = move_gesture(draft, &gesture)
-            .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
-        match outcome {
-            GestureOutcome::Edit(request) => self.apply(request),
-            GestureOutcome::Miss => Err(ShellError::Unavailable(
-                "the drag missed the lanes".to_owned(),
-            )),
-            GestureOutcome::NewLane { .. } => Err(ShellError::Unavailable(
-                "a new lane is not available".to_owned(),
-            )),
+        let plan = self.plan_move(segment_id, x, y)?;
+        self.pending_move = None;
+        if self.move_is_current(&plan) {
+            return Ok(());
         }
+        self.apply(Request::Move {
+            segment_id: plan.id,
+            track_id: plan.track_id,
+            start: plan.start,
+        })?;
+        self.reveal_playhead();
+        Ok(())
     }
 
     /// Remember which edge a clip drag started on. A body drag clears a trim preview.
     pub fn begin_clip_drag(&mut self, id: SegmentId, edge: Option<TrimEdge>) {
         self.pending_trim = None;
+        self.pending_move = None;
         if edge.is_some() {
             self.selected = Some(id.clone());
         }
@@ -770,6 +784,7 @@ impl Shell {
 
     /// Follow the pointer without writing the draft. The next paint uses this edge.
     pub fn preview_edge(&mut self, segment_id: SegmentId, edge: TrimEdge, x: f64) {
+        self.pending_move = None;
         match self.plan_trim(segment_id, edge, x) {
             Ok(plan) => {
                 self.pending_trim = Some(PendingTrim {
@@ -792,18 +807,53 @@ impl Shell {
             .map(|pending| (pending.edge, pending.time))
     }
 
-    /// A snap target the trim preview is holding.
+    /// Follow a body drag without writing the draft. The next paint uses this span.
+    pub fn preview_move(&mut self, segment_id: SegmentId, x: f64, y: f64) {
+        self.pending_trim = None;
+        match self.plan_move(segment_id, x, y) {
+            Ok(plan) => self.pending_move = Some(plan),
+            Err(_) => self.pending_move = None,
+        }
+    }
+
+    /// The clip copy that follows the pointer.
+    #[must_use]
+    pub fn move_preview(&self) -> Option<MovePreview> {
+        self.pending_move.as_ref().map(|pending| MovePreview {
+            id: pending.id.clone(),
+            name: pending.name.clone(),
+            start: pending.start,
+            duration: pending.duration,
+            track_id: pending.track_id.clone(),
+        })
+    }
+
+    /// The original clip is the one being dragged.
+    #[must_use]
+    pub fn moving(&self, id: &SegmentId) -> bool {
+        self.pending_move
+            .as_ref()
+            .is_some_and(|pending| &pending.id == id)
+    }
+
+    /// A snap target the trim or move preview is holding.
     #[must_use]
     pub fn snap_line(&self) -> Option<Micros> {
-        self.pending_trim
+        if let Some(pending) = &self.pending_trim
+            && pending.snapped
+        {
+            return Some(pending.time);
+        }
+        self.pending_move
             .as_ref()
             .filter(|pending| pending.snapped)
-            .map(|pending| pending.time)
+            .map(|pending| pending.start)
     }
 
     pub fn cancel_clip_drag(&mut self) {
         self.clip_drag = None;
         self.pending_trim = None;
+        self.pending_move = None;
     }
 
     /// Finish the drag that `begin_clip_drag` started. An edge trims. The body moves.
@@ -819,6 +869,7 @@ impl Shell {
             .filter(|drag| drag.id == segment_id)
             .and_then(|drag| drag.edge);
         self.pending_trim = None;
+        self.pending_move = None;
         match edge {
             Some(edge) => self.trim_edge(segment_id, edge, x),
             None => self.drag_segment(segment_id, x, y),
@@ -838,6 +889,7 @@ impl Shell {
     ) -> Result<(), ShellError> {
         let plan = self.plan_trim(segment_id, edge, x)?;
         self.pending_trim = None;
+        self.pending_move = None;
         let unchanged = self
             .draft()
             .is_some_and(|draft| trim_is_current(draft, &plan));
@@ -873,6 +925,86 @@ impl Shell {
             GestureError::BadScale | GestureError::EmptyDuration => {
                 ShellError::Unavailable("the drag could not be read".to_owned())
             }
+        })
+    }
+
+    /// The body drag lands on the pointer time, pulled to a snap within twelve pixels.
+    ///
+    /// A start that matches the clip does not push an undo step. The draft is
+    /// not written here.
+    fn plan_move(&self, segment_id: SegmentId, x: f64, y: f64) -> Result<PendingMove, ShellError> {
+        self.refuse_locked(&segment_id)?;
+        let x = self.time_zero_x(x);
+        let scale = self.scale();
+        let pointer = Pointer { x, y };
+        let gesture = MoveGesture {
+            segment_id: segment_id.clone(),
+            pointer,
+            scale,
+            playhead: self.playhead,
+            snap_threshold: snap_window(self.pixel_size),
+        };
+        let draft = self.session_draft()?;
+        let raw = match hit_test(draft, scale, pointer) {
+            Ok(Some(hit)) => hit.time,
+            Ok(None) => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            Err(_) => {
+                return Err(ShellError::Unavailable(
+                    "the drag could not be read".to_owned(),
+                ));
+            }
+        };
+        let outcome = move_gesture(draft, &gesture)
+            .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
+        let (segment_id, track_id, start) = match outcome {
+            GestureOutcome::Edit(Request::Move {
+                segment_id,
+                track_id,
+                start,
+            }) => (segment_id, track_id, start),
+            GestureOutcome::Edit(_) => {
+                return Err(ShellError::Unavailable(
+                    "the drag could not be read".to_owned(),
+                ));
+            }
+            GestureOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            GestureOutcome::NewLane { .. } => {
+                return Err(ShellError::Unavailable(
+                    "a new lane is not available".to_owned(),
+                ));
+            }
+        };
+        let (name, duration) = locate(draft, &segment_id)
+            .map(|(segment, _)| (clip_name(draft, segment), segment.target.duration))
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        Ok(PendingMove {
+            id: segment_id,
+            name,
+            start,
+            duration,
+            track_id,
+            snapped: start != raw,
+        })
+    }
+
+    fn move_is_current(&self, plan: &PendingMove) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        draft.tracks.iter().any(|track| {
+            track.id == plan.track_id
+                && track
+                    .segments
+                    .iter()
+                    .any(|segment| segment.id == plan.id && segment.target.start == plan.start)
         })
     }
 
@@ -3175,6 +3307,75 @@ mod tests {
                 .target
                 .duration,
             Micros(1_000_000)
+        );
+    }
+
+    #[test]
+    fn dragging_a_clip_follows_the_pointer_and_snaps_without_writing() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.seek(Micros(2_000_000));
+        let revision = desktop.revision();
+        desktop.preview_move(id.clone(), lane_time(&desktop, 2_001_000.0), y);
+        let preview = desktop.move_preview().expect("the drag is showing");
+        assert_eq!(preview.start, Micros(2_000_000));
+        assert_eq!(preview.duration, Micros(1_000_000));
+        assert!(desktop.moving(&id));
+        assert_eq!(desktop.snap_line(), Some(Micros(2_000_000)));
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+        assert_eq!(desktop.revision(), revision);
+        desktop
+            .drag_segment(id.clone(), lane_time(&desktop, 2_001_000.0), y)
+            .unwrap();
+        assert!(desktop.move_preview().is_none());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(2_000_000)
+        );
+        let held = desktop.revision();
+        desktop
+            .drag_segment(id.clone(), lane_time(&desktop, 2_000_000.0), y)
+            .unwrap();
+        assert_eq!(desktop.revision(), held);
+        desktop.undo().unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+        desktop.seek(Micros(0));
+        desktop.preview_move(id.clone(), lane_time(&desktop, 500_000.0), y);
+        assert_eq!(
+            desktop.move_preview().expect("the drag is showing").start,
+            Micros(500_000)
+        );
+        assert!(desktop.snap_line().is_none());
+        desktop
+            .drag_segment(id.clone(), lane_time(&desktop, 500_000.0), y)
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(500_000)
+        );
+        let track = desktop.lanes()[0].track_id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.preview_move(id.clone(), lane_time(&desktop, 800_000.0), y);
+        assert!(desktop.move_preview().is_none());
+        let error = desktop
+            .drag_segment(id, lane_time(&desktop, 800_000.0), y)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the track is locked");
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(500_000)
         );
     }
 

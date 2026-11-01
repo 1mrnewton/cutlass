@@ -13,19 +13,25 @@
 //! keyframes are measured from the segment start. A line, an empty curve,
 //! `none`, and an unknown curve stay straight and ignore their handles. Any
 //! other curve is a cubic through the earlier key's right handle and the
-//! later key's left handle. A graph id is not sampled.
+//! later key's left handle. A graph id is not sampled. A segment canvas is
+//! drawn behind that fitted picture.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use cutlass_engine::{ClockKind, DisplayQuarter, ReaderFactory, VideoSource, open_segment};
+use cutlass_engine::{
+    ClockKind, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture, open_segment,
+};
 use cutlass_model::{
-    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialRef, Micros, Segment,
-    SegmentId, TrackAttribute, UniformScale,
+    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialCanvas, MaterialRef,
+    Micros, Segment, SegmentId, TimeRange, TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
+
+use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
 
 /// Open video files for one draft revision.
 pub struct OpenClips {
@@ -34,6 +40,7 @@ pub struct OpenClips {
     bound: bool,
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
+    images: HashMap<String, CpuBytes>,
 }
 
 impl OpenClips {
@@ -45,6 +52,7 @@ impl OpenClips {
             bound: false,
             sources: HashMap::new(),
             nests: HashMap::new(),
+            images: HashMap::new(),
         }
     }
 
@@ -52,6 +60,7 @@ impl OpenClips {
     pub fn clear(&mut self) {
         self.sources.clear();
         self.nests.clear();
+        self.images.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
@@ -71,6 +80,7 @@ impl OpenClips {
         }
         self.sources.clear();
         self.nests.clear();
+        self.images.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;
@@ -117,6 +127,7 @@ pub(crate) struct Placed<'a> {
     transform: PictureTransform,
     crop: Crop,
     crop_scale: f64,
+    backdrop: Backdrop,
 }
 
 pub(crate) fn picture_transform(
@@ -256,6 +267,7 @@ pub(crate) fn video_layers<'a>(
                 };
                 clips.sources.insert(segment.id.clone(), source);
             }
+            let backdrop = backdrop_for(draft, segment, media, clips, width, height);
             chosen.push((
                 segment.render_index,
                 track_index,
@@ -264,11 +276,14 @@ pub(crate) fn video_layers<'a>(
                 transform,
                 crop,
                 crop_scale,
+                backdrop,
             ));
         }
     }
     let mut layers = Vec::with_capacity(chosen.len());
-    for (render_index, track_index, segment_index, id, transform, crop, crop_scale) in chosen {
+    for (render_index, track_index, segment_index, id, transform, crop, crop_scale, backdrop) in
+        chosen
+    {
         let Some(source) = clips.sources.get(&id) else {
             continue;
         };
@@ -283,10 +298,74 @@ pub(crate) fn video_layers<'a>(
                 transform,
                 crop,
                 crop_scale,
+                backdrop,
             },
         });
     }
     layers
+}
+
+pub(crate) fn backdrop_for(
+    draft: &Draft,
+    segment: &Segment,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    width: u32,
+    height: u32,
+) -> Backdrop {
+    let Some(canvas) = segment_canvas(draft, segment) else {
+        return Backdrop::None;
+    };
+    if canvas.kind == "canvas_image" {
+        let image = canvas_image(canvas, media, clips, width, height);
+        return image_backdrop(canvas, image);
+    }
+    segment_backdrop(canvas, width, height)
+}
+
+fn segment_canvas<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a MaterialCanvas> {
+    segment
+        .extra_material_refs
+        .iter()
+        .find_map(|id| match draft.materials.get(id.as_str()) {
+            Some(MaterialRef::Canvas(canvas)) => Some(canvas),
+            _ => None,
+        })
+}
+
+fn canvas_image(
+    canvas: &MaterialCanvas,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    width: u32,
+    height: u32,
+) -> Option<CpuBytes> {
+    let path = if canvas.image.is_empty() {
+        canvas.album_image.as_str()
+    } else {
+        canvas.image.as_str()
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let decoded = if let Some(cached) = clips.images.get(path) {
+        cached.clone()
+    } else {
+        let decoded = decode_canvas_image(media, path)?;
+        clips.images.insert(path.to_owned(), decoded.clone());
+        decoded
+    };
+    cover(&decoded, width, height)
+}
+
+fn decode_canvas_image(media: &ReaderFactory, path: &str) -> Option<CpuBytes> {
+    let mut opened = media.open(Path::new(path)).ok()?;
+    let display = opened.info().display;
+    let held = opened.decode_at(Micros(0), &TimeRange::new(0, 1)).ok()?;
+    let Picture::Cpu(bytes) = decoded_picture(&held.frame).ok()? else {
+        return None;
+    };
+    orient(bytes, display)
 }
 
 /// The clip at `time`, with keyframes measured from the segment start.
@@ -548,13 +627,13 @@ impl PictureSource for Placed<'_> {
         };
         match picture {
             Picture::Cpu(bytes) => finish_picture(
-                self.width,
-                self.height,
+                (self.width, self.height),
                 bytes,
                 self.transform,
                 self.source.display(),
                 self.crop,
                 self.crop_scale,
+                &self.backdrop,
             ),
             Picture::Platform(_) => Sample::Miss,
         }
@@ -569,19 +648,30 @@ impl PictureTransform {
 }
 
 fn finish_picture(
-    canvas_w: u32,
-    canvas_h: u32,
+    canvas: (u32, u32),
     picture: CpuBytes,
     transform: PictureTransform,
     display: DisplayQuarter,
     crop: Crop,
     crop_scale: f64,
+    backdrop: &Backdrop,
 ) -> Sample {
+    let (canvas_w, canvas_h) = canvas;
     let Some(picture) = orient(picture, display) else {
         return Sample::Miss;
     };
     let picture = apply_crop(picture, crop, crop_scale);
-    place_with(canvas_w, canvas_h, picture, transform, DisplayQuarter::Zero)
+    let sharp = matches!(backdrop, Backdrop::Blur(_)).then(|| picture.clone());
+    let Sample::Ready(Picture::Cpu(placed)) =
+        place_with(canvas_w, canvas_h, picture, transform, DisplayQuarter::Zero)
+    else {
+        return Sample::Miss;
+    };
+    Sample::Ready(Picture::Cpu(over_backdrop(
+        placed,
+        sharp.as_ref(),
+        backdrop,
+    )))
 }
 
 /// Sample `crop` from the oriented picture.
@@ -1751,13 +1841,13 @@ mod tests {
             picture_transform(&Clip::default(), &UniformScale::default(), 1, 2).expect("transform");
         let left = quad([0.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0]);
         let Sample::Ready(Picture::Cpu(bytes)) = finish_picture(
-            1,
-            2,
+            (1, 2),
             picture,
             transform,
             DisplayQuarter::Clockwise90,
             left,
             1.0,
+            &Backdrop::None,
         ) else {
             panic!("ready");
         };

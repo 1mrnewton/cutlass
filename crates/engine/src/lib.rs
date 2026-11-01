@@ -28,7 +28,7 @@ pub use mix::{
 pub use reader::{
     DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, StreamReport,
 };
-pub use source::{VideoSource, open_segment};
+pub use source::{VideoSource, decoded_picture, open_segment};
 
 #[cfg(test)]
 mod tests;

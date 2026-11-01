@@ -9,10 +9,14 @@
 //! when [`Fonts`] supplies the face named by `font_path`. Word columns on
 //! that segment are the caption. An effect package is drawn when the
 //! snapshot supplies the package store. A missing package stays off the frame.
+//! The project canvas color is drawn under every layer. An absent or
+//! unreadable color leaves the clear frame. A segment canvas is drawn
+//! behind that segment's picture.
 
 #![forbid(unsafe_code)]
 
 mod audio;
+mod canvas;
 mod effect;
 mod frame;
 mod media;

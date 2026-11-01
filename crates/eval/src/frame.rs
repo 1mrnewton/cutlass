@@ -129,7 +129,8 @@ fn canvas_extent(draft: &Draft) -> Option<Extent> {
 /// order: `render_index`, then track, then segment. A video the factory
 /// cannot open is skipped. A text segment whose face the snapshot does not
 /// supply is skipped. An effect whose package the snapshot does not supply
-/// is skipped. An open file in `clips` is seeked when `time` changes.
+/// is skipped. The project canvas color is under every layer. An open file
+/// in `clips` is seeked when `time` changes.
 /// `revision` drops those files when the draft changes.
 pub fn frame<D: Device>(
     snapshot: &Snapshot<'_>,
@@ -286,8 +287,10 @@ mod tests {
     use cutlass_decode::{CodecError, CodecParams, Decoder};
     use cutlass_engine::{DisplayQuarter, ReaderFactory};
     use cutlass_model::{
-        Crop, Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute,
+        Crop, Draft, MaterialCanvas, MaterialColorConfig, MaterialEffect, MaterialVideo, Micros,
+        Segment, TimeRange, TrackAttribute,
     };
+    use cutlass_picture::CpuBytes;
     use cutlass_png::PngDecoder;
     use cutlass_renderer_software::SoftwareDevice;
     use cutlass_still::{StillDemux, StillProbe, still_limits};
@@ -376,6 +379,41 @@ mod tests {
         let before_invisible = invisible.clone();
         assert_eq!(pixels(&invisible, 10), vec![0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(invisible, before_invisible);
+    }
+
+    #[test]
+    fn the_project_canvas_color_is_under_every_layer() {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.canvas_config.background = Some("#336699".to_owned());
+        let before = draft.clone();
+        assert_eq!(pixels(&draft, 0), [0x33, 0x66, 0x99, 0xFF].repeat(2));
+        assert_eq!(pixels(&draft, -1), [0x33, 0x66, 0x99, 0xFF].repeat(2));
+        assert_eq!(draft, before);
+
+        draft.materials.effects.push(MaterialEffect {
+            id: "fx".into(),
+            effect_id: "missing".to_owned(),
+            ..MaterialEffect::default()
+        });
+        let mut effect = Segment::new("fx", "fx", TimeRange::new(0, 1_000));
+        effect.render_index = 11_000;
+        draft.tracks[0].segments.push(effect);
+        assert_eq!(pixels(&draft, 0), [0x33, 0x66, 0x99, 0xFF].repeat(2));
+
+        let mut packed = draft.clone();
+        packed.canvas_config.background = Some("0xFF336699".to_owned());
+        assert_eq!(pixels(&packed, 0), [0x33, 0x66, 0x99, 0xFF].repeat(2));
+
+        let mut unread = draft.clone();
+        unread.canvas_config.background = Some("white".to_owned());
+        assert_eq!(pixels(&unread, 0), vec![0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut blended = color_clip("0x80640000", false);
+        blended.canvas_config.background = Some("#0000C8".to_owned());
+        assert_eq!(pixels(&blended, 0), [100, 0, 99, 255].repeat(2));
+        assert_eq!(pixels(&blended, 1_000_000), [0, 0, 200, 255].repeat(2));
     }
 
     #[test]
@@ -623,6 +661,113 @@ mod tests {
         .rgba;
         assert_eq!(rgba, vec![0, 0, 0, 0]);
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_segment_canvas_fills_the_letterbox_around_the_still() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/fixtures/pattern.png");
+        let picture = still_frame(&path, 16, 16, Crop::default(), "free");
+        let covered = crate::canvas::cover(
+            &CpuBytes::new(16, 16, picture.clone()).expect("picture"),
+            16,
+            18,
+        )
+        .expect("cover");
+        let project = framed(&path, Some("#0000FF"), None);
+        assert_eq!(row(&project, 16, 0), [0, 0, 255, 255].repeat(16));
+        assert_eq!(row(&project, 16, 17), [0, 0, 255, 255].repeat(16));
+        assert_eq!(rows(&project, 16, 1, 16), picture);
+
+        let color = framed(
+            &path,
+            Some("#0000FF"),
+            Some(canvas("canvas_color", "#FF0000", 0.0, "")),
+        );
+        assert_eq!(row(&color, 16, 0), [255, 0, 0, 255].repeat(16));
+        assert_eq!(rows(&color, 16, 1, 16), picture);
+
+        let image = framed(
+            &path,
+            None,
+            Some(canvas(
+                "canvas_image",
+                "#00FF00",
+                0.0,
+                path.to_str().expect("path"),
+            )),
+        );
+        assert_eq!(row(&image, 16, 0), row(covered.rgba(), 16, 0));
+        assert_eq!(rows(&image, 16, 1, 16), picture);
+
+        let missing = framed(
+            &path,
+            None,
+            Some(canvas(
+                "canvas_image",
+                "#00FF00",
+                0.0,
+                "/no/such/canvas.png",
+            )),
+        );
+        assert_eq!(row(&missing, 16, 0), [0, 255, 0, 255].repeat(16));
+
+        let blur = framed(&path, None, Some(canvas("canvas_blur", "", 0.0, "")));
+        assert_eq!(row(&blur, 16, 0), row(covered.rgba(), 16, 0));
+        assert_eq!(rows(&blur, 16, 1, 16), picture);
+    }
+
+    fn canvas(kind: &str, color: &str, blur: f64, image: &str) -> MaterialCanvas {
+        MaterialCanvas {
+            id: "canvas".into(),
+            kind: kind.to_owned(),
+            color: color.to_owned(),
+            blur,
+            image: image.to_owned(),
+            ..MaterialCanvas::default()
+        }
+    }
+
+    fn framed(path: &Path, background: Option<&str>, canvas: Option<MaterialCanvas>) -> Vec<u8> {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 18;
+        draft.canvas_config.background = background.map(str::to_owned);
+        let mut video = MaterialVideo::new("still");
+        video.path = path.display().to_string();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        if let Some(canvas) = canvas {
+            segment.extra_material_refs.push(canvas.id.clone());
+            draft.materials.canvases.push(canvas);
+        }
+        draft.tracks[0].segments.push(segment);
+        let before = draft.clone();
+        let mut device = SoftwareDevice::new();
+        let media = stills();
+        let mut clips = OpenClips::new();
+        let rgba = frame(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+        )
+        .expect("frame")
+        .rgba;
+        assert_eq!(draft, before);
+        rgba
+    }
+
+    fn row(rgba: &[u8], width: usize, y: usize) -> &[u8] {
+        let stride = width * 4;
+        &rgba[y * stride..(y + 1) * stride]
+    }
+
+    fn rows(rgba: &[u8], width: usize, y: usize, count: usize) -> Vec<u8> {
+        let stride = width * 4;
+        rgba[y * stride..(y + count) * stride].to_vec()
     }
 
     #[test]

@@ -160,6 +160,11 @@ pub fn open_segment(
     })
 }
 
+/// The CPU or platform picture for one decoded frame.
+pub fn decoded_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
+    to_picture(frame)
+}
+
 fn to_picture(frame: &DecodedFrame) -> Result<Picture, EngineError> {
     match frame {
         DecodedFrame::Platform {

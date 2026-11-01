@@ -23,6 +23,7 @@ use cutlass_model::{Draft, MaterialRef, Micros, Segment, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::EvalError;
+use crate::canvas::project_canvas;
 
 pub(crate) struct StackLayer<'a> {
     pub(crate) render_index: i32,
@@ -88,8 +89,18 @@ pub(crate) fn present<D: Device>(
             ClipFilter::None
         )
     });
+    let canvas = project_canvas(
+        draft.canvas_config.background.as_deref(),
+        extent.width,
+        extent.height,
+    );
     if marks.is_empty() && !filtered {
-        let sources: Vec<&dyn PictureSource> = stack.iter().map(|layer| layer.source).collect();
+        let held = canvas.map(Held);
+        let mut sources: Vec<&dyn PictureSource> = Vec::new();
+        if let Some(held) = held.as_ref() {
+            sources.push(held);
+        }
+        sources.extend(stack.iter().map(|layer| layer.source));
         return submit(device, extent, time, &sources).map_err(EvalError::Compose);
     }
 
@@ -100,7 +111,7 @@ pub(crate) fn present<D: Device>(
         device,
         extent,
     };
-    let mut base = None;
+    let mut base = canvas;
     let mut batch = Vec::new();
     let mut visual_at = 0;
     let mut mark_at = 0;

@@ -14,8 +14,11 @@ use cutlass_engine::{DisplayQuarter, ReaderFactory, map_timeline, placement_of};
 use cutlass_model::{Draft, DraftId, MaterialRef, Micros, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 
+use crate::canvas::over_backdrop;
 use crate::frame::{EvalError, Fonts, Snapshot, compose};
-use crate::media::{OpenClips, PictureTransform, picture_transform, place_with, segment_clip};
+use crate::media::{
+    OpenClips, PictureTransform, backdrop_for, picture_transform, place_with, segment_clip,
+};
 
 /// Compound drafts above this many ancestors are not drawn.
 pub(crate) const MAX_COMPOUND_DEPTH: usize = 32;
@@ -32,6 +35,7 @@ pub(crate) struct NestedPicture {
     canvas_w: u32,
     canvas_h: u32,
     transform: PictureTransform,
+    backdrop: crate::canvas::Backdrop,
 }
 
 impl PictureSource for NestedPicture {
@@ -45,7 +49,9 @@ impl PictureSource for NestedPicture {
         ) else {
             return Sample::Miss;
         };
-        Sample::Ready(Picture::Cpu(bytes))
+        let sharp =
+            matches!(self.backdrop, crate::canvas::Backdrop::Blur(_)).then_some(&self.bytes);
+        Sample::Ready(Picture::Cpu(over_backdrop(bytes, sharp, &self.backdrop)))
     }
 }
 
@@ -117,6 +123,14 @@ pub(crate) fn nest_layers<D: Device>(
             else {
                 continue;
             };
+            let backdrop = backdrop_for(
+                draft,
+                segment,
+                pass.media,
+                pass.clips,
+                pass.width,
+                pass.height,
+            );
             layers.push(NestedLayer {
                 render_index: segment.render_index,
                 track_index,
@@ -126,6 +140,7 @@ pub(crate) fn nest_layers<D: Device>(
                     canvas_w: pass.width,
                     canvas_h: pass.height,
                     transform,
+                    backdrop,
                 },
             });
         }

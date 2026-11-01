@@ -3407,7 +3407,7 @@ mod tests {
         let mut stored = [const { None }; crate::set::MAX_SPS];
         stored[0] = Some(sps);
         let pps_nal = nals.iter().find(|nal| nal.kind == 8).unwrap();
-        let pps = crate::set::parse_pps(&pps_nal.rbsp, &stored).unwrap();
+        let pps = crate::set::parse_pps_in(&pps_nal.rbsp, &stored, &[]).unwrap();
         assert!(pps.cabac);
         assert!(pps.deblocking_control);
         assert_eq!(pps.init_qp, 26);

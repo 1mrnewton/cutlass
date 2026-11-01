@@ -254,6 +254,8 @@ impl<S: Sample> Frame<S> {
 #[derive(Clone)]
 struct Sets {
     sps: Vec<Option<Sps>>,
+    /// Subset SPS, NAL type 15. A slice extension resolves its id here.
+    subset: Vec<Option<Sps>>,
     pps: Vec<Option<Pps>>,
 }
 
@@ -261,8 +263,26 @@ impl Sets {
     fn new() -> Self {
         Self {
             sps: vec![None; set::MAX_SPS],
+            subset: vec![None; set::MAX_SPS],
             pps: vec![None; set::MAX_PPS],
         }
+    }
+
+    fn sequence(&self, id: u8, subset: bool) -> Option<&Sps> {
+        let table = if subset { &self.subset } else { &self.sps };
+        table.get(usize::from(id)).and_then(|sps| sps.as_ref())
+    }
+}
+
+fn store_subset(subset: &mut [Option<Sps>], rbsp: &[u8]) -> Result<(), CodecError> {
+    match set::parse_subset_sps(rbsp) {
+        Ok(sps) => {
+            let id = usize::from(sps.id);
+            subset[id] = Some(sps);
+            Ok(())
+        }
+        Err(CodecError::Unsupported { what: "subset sps" }) => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -407,10 +427,11 @@ impl H264Decoder {
                 self.sets.sps[id] = Some(sps);
             }
             8 => {
-                let pps = set::parse_pps(&nal.rbsp, &self.sets.sps)?;
+                let pps = set::parse_pps_in(&nal.rbsp, &self.sets.sps, &self.sets.subset)?;
                 let id = usize::from(pps.id);
                 self.sets.pps[id] = Some(pps);
             }
+            15 => store_subset(&mut self.sets.subset, &nal.rbsp)?,
             _ => {}
         }
         Ok(())
@@ -517,14 +538,27 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
                 sets.sps[id] = Some(sps);
             }
             8 => {
-                let pps = set::parse_pps(&nal.rbsp, &sets.sps)?;
+                let pps = set::parse_pps_in(&nal.rbsp, &sets.sps, &sets.subset)?;
                 let id = usize::from(pps.id);
                 sets.pps[id] = Some(pps);
             }
-            1 | 2 | 5 => {
+            15 => store_subset(&mut sets.subset, &nal.rbsp)?,
+            1 | 2 | 5 | 20 => {
+                let svc = svc_header(nal);
+                if nal.kind == 20
+                    && !matches!(layer_of(nal.extension, false, false), Layer::Decode(_))
+                {
+                    continue;
+                }
                 let mut bits = Bits::new(&nal.rbsp);
-                let header = read_header(&mut bits, &sets, nal.kind == 5, nal.ref_idc != 0)?;
-                let Some(sps) = sets.sps[usize::from(header.sps_id)].as_ref() else {
+                let header = read_header(
+                    &mut bits,
+                    &sets,
+                    nal.kind == 5 || svc.is_some_and(|svc| svc.idr),
+                    nal.ref_idc != 0,
+                    svc,
+                )?;
+                let Some(sps) = sets.sequence(header.sps_id, header.subset) else {
                     return Err(CodecError::Malformed {
                         at_bit: 0,
                         what: "missing sps",
@@ -556,19 +590,68 @@ fn decode_au<S: Sample>(
     let mut held_field: Option<Frame<S>> = None;
     let mut messages = Vec::new();
     let mut idr_pic = false;
+    let mut extension_pic = false;
     let mut index = 0usize;
     while index < nals.len() {
         let kind = nals[index].kind;
         match kind {
-            7 | 8 => {
+            7 | 8 | 15 => {
                 if kind == 7 {
                     let sps = set::parse_sps(&nals[index].rbsp)?;
                     let id = usize::from(sps.id);
                     sets.sps[id] = Some(sps);
+                } else if kind == 15 {
+                    store_subset(&mut sets.subset, &nals[index].rbsp)?;
                 } else {
-                    let pps = set::parse_pps(&nals[index].rbsp, &sets.sps)?;
+                    let pps = set::parse_pps_in(&nals[index].rbsp, &sets.sps, &sets.subset)?;
                     let id = usize::from(pps.id);
                     sets.pps[id] = Some(pps);
+                }
+                index += 1;
+            }
+            14 => index += 1,
+            20 => {
+                let started = picture.is_some();
+                match layer_of(nals[index].extension, started, extension_pic) {
+                    Layer::Decode(svc) => {
+                        extension_pic = true;
+                        if svc.idr {
+                            idr_pic = true;
+                        }
+                        let built = decode_slice(
+                            sets,
+                            poc,
+                            dpb,
+                            SliceCursor {
+                                nal: &nals[index],
+                                idr: svc.idr,
+                                slice_id,
+                                packet,
+                                intra: None,
+                                inter: None,
+                            },
+                            AuScratch {
+                                picture: &mut picture,
+                                next_mb: &mut next_mb,
+                                prior: &mut prior,
+                                planes: &mut planes,
+                                held: &mut held_field,
+                            },
+                        )?;
+                        if built {
+                            slice_id = slice_id.saturating_add(1);
+                        }
+                        index += 1;
+                    }
+                    Layer::Refuse(what) => {
+                        return Err(CodecError::Unsupported { what });
+                    }
+                    Layer::Skip => index += 1,
+                }
+            }
+            21 => {
+                if picture.is_none() && !extension_pic {
+                    return Err(CodecError::Unsupported { what: "3d" });
                 }
                 index += 1;
             }
@@ -1568,7 +1651,7 @@ fn decode_slice<S: Sample>(
         held,
     } = scratch;
     let mut bits = Bits::new(&nal.rbsp);
-    let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0)?;
+    let header = read_header(&mut bits, sets, idr, nal.ref_idc != 0, svc_header(nal))?;
     let (part_intra, part_inter) = if nal.kind == 2 {
         read_partitions(&mut bits, sets, &header, (intra, inter))?
     } else {
@@ -1579,8 +1662,7 @@ fn decode_slice<S: Sample>(
     if header.redundant > 0 {
         return Ok(false);
     }
-    let sps_id = usize::from(header.sps_id);
-    let Some(sps) = sets.sps[sps_id].clone() else {
+    let Some(sps) = sets.sequence(header.sps_id, header.subset).cloned() else {
         return Err(bits.malformed("missing sps"));
     };
     if sps.bit_depth != S::BITS as u8 {
@@ -1820,6 +1902,10 @@ struct Header {
     sp_switch: bool,
     /// QSY. Zero when the slice is not SP or SI.
     qs: i32,
+    /// The slice uses the subset SPS.
+    subset: bool,
+    /// `output_flag` of a slice extension. An Annex A slice is displayed.
+    output: bool,
 }
 
 struct Mod {
@@ -1827,11 +1913,46 @@ struct Mod {
     arg: u32,
 }
 
+fn svc_header(nal: &Nal) -> Option<nal::SvcHeader> {
+    match nal.extension {
+        Some(nal::Extension::Svc(svc)) => Some(svc),
+        _ => None,
+    }
+}
+
+enum Layer {
+    Decode(nal::SvcHeader),
+    Skip,
+    Refuse(&'static str),
+}
+
+/// A slice extension is the picture when the access unit has no Annex A slice.
+/// Inter-layer prediction, MVC, and 3D stay refused. Beside an Annex A slice
+/// they are skipped, so that slice stays the picture.
+fn layer_of(extension: Option<nal::Extension>, picture: bool, extension_pic: bool) -> Layer {
+    match extension {
+        Some(nal::Extension::Svc(svc)) if svc.use_ref_base_pic && !picture => {
+            Layer::Refuse("reference base picture")
+        }
+        Some(nal::Extension::Svc(svc))
+            if svc.no_inter_layer_pred && !svc.use_ref_base_pic && (!picture || extension_pic) =>
+        {
+            Layer::Decode(svc)
+        }
+        Some(nal::Extension::Svc(svc)) if !svc.no_inter_layer_pred && !picture => {
+            Layer::Refuse("inter-layer prediction")
+        }
+        Some(nal::Extension::Mvc) if !picture && !extension_pic => Layer::Refuse("mvc"),
+        _ => Layer::Skip,
+    }
+}
+
 fn read_header(
     bits: &mut Bits<'_>,
     sets: &Sets,
     idr: bool,
     nal_ref: bool,
+    svc: Option<nal::SvcHeader>,
 ) -> Result<Header, CodecError> {
     let first_mb = bits.ue()? as usize;
     let slice_type = bits.ue()?;
@@ -1849,9 +1970,11 @@ fn read_header(
     let Some(pps) = sets.pps[pps_id as usize].clone() else {
         return Err(bits.malformed("missing pps"));
     };
-    let Some(sps) = sets.sps[usize::from(pps.sps_id)].as_ref() else {
+    let Some(sps) = sets.sequence(pps.sps_id, svc.is_some()) else {
         return Err(bits.malformed("missing sps"));
     };
+    let restriction = sps.slice_header_restriction;
+    let base_quality = svc.is_none_or(|svc| svc.quality_id == 0);
     let mut colour_plane = 0u8;
     if sps.separate {
         let id = bits.u(2)?;
@@ -1898,7 +2021,7 @@ fn read_header(
     }
     let mut num_ref_l0 = usize::from(pps.num_ref_idx_l0);
     let mut num_ref_l1 = usize::from(pps.num_ref_idx_l1);
-    if !intra_slice(kind) {
+    if !intra_slice(kind) && base_quality {
         if bits.bit()? {
             num_ref_l0 = bits.ue()? as usize + 1;
             if kind == 1 {
@@ -1910,11 +2033,11 @@ fn read_header(
                 what: "reference index",
             });
         }
-    } else {
+    } else if intra_slice(kind) {
         num_ref_l0 = 0;
         num_ref_l1 = 0;
     }
-    let (ref_mod_l0, ref_mod_l1) = if !intra_slice(kind) {
+    let (ref_mod_l0, ref_mod_l1) = if !intra_slice(kind) && base_quality {
         (
             read_list_mod(bits)?,
             if kind == 1 {
@@ -1933,7 +2056,10 @@ fn read_header(
     let mut yo = [[0i32; 32]; 2];
     let mut cw = [[[0i32; 2]; 32]; 2];
     let mut co = [[[0i32; 2]; 32]; 2];
-    if (pps.weighted_pred && syntax_kind(kind) == 0) || (pps.weighted_bipred == 1 && kind == 1) {
+    if base_quality
+        && ((pps.weighted_pred && syntax_kind(kind) == 0)
+            || (pps.weighted_bipred == 1 && kind == 1))
+    {
         weights = true;
         luma_denom = bits.ue()? as i32;
         chroma_denom = bits.ue()? as i32;
@@ -1974,7 +2100,7 @@ fn read_header(
     let mut long_term_ref = false;
     let mut adaptive = false;
     let mut mmco = Vec::new();
-    if nal_ref {
+    if nal_ref && base_quality {
         if idr {
             no_output_prior = bits.bit()?;
             long_term_ref = bits.bit()?;
@@ -2006,6 +2132,11 @@ fn read_header(
                     arg2,
                 });
             }
+        }
+        if svc.is_some() && !restriction && bits.bit()? {
+            return Err(CodecError::Unsupported {
+                what: "reference base picture",
+            });
         }
     }
     let mut cabac_init = 0u8;
@@ -2048,10 +2179,17 @@ fn read_header(
         }
     }
     let mut group_cycle = 0u32;
-    if pps.groups.minus1 > 0 && (3..=5).contains(&pps.groups.map_type) {
+    if base_quality && pps.groups.minus1 > 0 && (3..=5).contains(&pps.groups.map_type) {
         let units = crate::fmo::map_units(sps.mb_width, sps.mb_height, sps.frame_mbs_only);
         let width = crate::fmo::cycle_bits(units, pps.groups.rate)?;
         group_cycle = bits.u(width)?;
+    }
+    if svc.is_some() && !restriction {
+        let start = bits.u(4)?;
+        let end = bits.u(4)?;
+        if start != 0 || end != 15 {
+            return Err(CodecError::Unsupported { what: "scan idx" });
+        }
     }
     Ok(Header {
         first_mb,
@@ -2090,6 +2228,8 @@ fn read_header(
         group_cycle,
         sp_switch,
         qs,
+        subset: svc.is_some(),
+        output: svc.is_none_or(|svc| svc.output),
     })
 }
 
@@ -2304,7 +2444,7 @@ fn new_frame<S: Sample>(
         referenced: header.nal_ref,
         long_term: header.long_term_ref,
         long_idx: if header.long_term_ref { 0 } else { -1 },
-        output: true,
+        output: header.output,
         key: idr || intra_slice(header.kind),
         pts: packet.pts,
         duration: packet.duration,
@@ -2345,7 +2485,7 @@ fn make_slice<'a, S: Sample>(
     header: &Header,
     poc: i32,
 ) -> Result<Slice<'a>, CodecError> {
-    let Some(sps) = sets.sps[usize::from(header.sps_id)].as_ref() else {
+    let Some(sps) = sets.sequence(header.sps_id, header.subset) else {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "missing sps",
@@ -2509,7 +2649,7 @@ fn read_partitions<'a>(
         let Some(pps) = sets.pps[usize::from(header.pps_id)].as_ref() else {
             return Err(bits.malformed("missing pps"));
         };
-        let Some(sps) = sets.sps[usize::from(header.sps_id)].as_ref() else {
+        let Some(sps) = sets.sequence(header.sps_id, header.subset) else {
             return Err(bits.malformed("missing sps"));
         };
         (
@@ -2810,6 +2950,8 @@ mod tests {
             group_cycle: 0,
             sp_switch: false,
             qs: 0,
+            subset: false,
+            output: true,
         }
     }
 
@@ -2903,6 +3045,7 @@ mod tests {
             cpb_delay_bits: 0,
             dpb_delay_bits: 0,
             time_offset_bits: 0,
+            slice_header_restriction: true,
         }
     }
 

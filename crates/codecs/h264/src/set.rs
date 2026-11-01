@@ -71,6 +71,9 @@ pub struct Sps {
     pub dpb_delay_bits: u8,
     /// `time_offset_length`.
     pub time_offset_bits: u8,
+    /// `slice_header_restriction_flag`. True for an Annex A SPS, so an
+    /// extension slice omits `store_ref_base_pic_flag` and `scan_idx`.
+    pub slice_header_restriction: bool,
 }
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
@@ -333,6 +336,16 @@ pub(crate) fn max_coded_mbs() -> u32 {
 }
 
 pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
+    parse_sequence(rbsp, false)
+}
+
+/// Subset SPS, NAL type 15. Profiles 83 and 86 carry the SVC extension.
+/// Any other profile is `subset sps` and is left for the caller to skip.
+pub(crate) fn parse_subset_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
+    parse_sequence(rbsp, true)
+}
+
+fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut bits = Bits::new(rbsp);
     let profile = bits.u(8)? as u8;
     let _constraint = bits.u(8)? as u8;
@@ -374,7 +387,12 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
             what: "chroma format",
         });
     }
-    if !matches!(profile, 66 | 77 | 88 | 100 | 110 | 122 | 244) {
+    let scalable = matches!(profile, 83 | 86);
+    if subset {
+        if !scalable {
+            return Err(CodecError::Unsupported { what: "subset sps" });
+        }
+    } else if !matches!(profile, 66 | 77 | 88 | 100 | 110 | 122 | 244) {
         return Err(CodecError::Unsupported { what: "profile" });
     }
     let log2_max_frame_num = (bits.ue()? + 4) as u8;
@@ -453,6 +471,20 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     } else {
         Vui::unspecified(max_num_ref_frames)
     };
+    let slice_header_restriction = if subset {
+        let restriction = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
+        if bits.bit()? {
+            return Err(CodecError::Unsupported { what: "svc vui" });
+        }
+        if bits.bit()? {
+            while bits.more_rbsp() {
+                let _ = bits.bit()?;
+            }
+        }
+        restriction
+    } else {
+        true
+    };
     let _ = bits.rbsp_trailing();
     let sps = Sps {
         id: id as u8,
@@ -496,6 +528,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         cpb_delay_bits: vui.cpb_delay_bits,
         dpb_delay_bits: vui.dpb_delay_bits,
         time_offset_bits: vui.time_offset_bits,
+        slice_header_restriction,
     };
     if !sps.within_level() {
         return Err(CodecError::Limit {
@@ -504,6 +537,36 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     }
     sps.visible()?;
     Ok(sps)
+}
+
+/// `seq_parameter_set_svc_extension`. Returns `slice_header_restriction_flag`.
+fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<bool, CodecError> {
+    let _inter_layer_deblock = bits.bit()?;
+    let spatial = bits.u(2)?;
+    if spatial > 2 {
+        return Err(bits.malformed("extended spatial scalability"));
+    }
+    if chroma_array == 1 || chroma_array == 2 {
+        let _ = bits.bit()?;
+    }
+    if chroma_array == 1 {
+        let _ = bits.u(2)?;
+    }
+    if spatial == 1 {
+        if chroma_array > 0 {
+            let _ = bits.bit()?;
+            let _ = bits.u(2)?;
+        }
+        let _ = bits.se()?;
+        let _ = bits.se()?;
+        let _ = bits.se()?;
+        let _ = bits.se()?;
+    }
+    let seq_tcoeff = bits.bit()?;
+    if seq_tcoeff {
+        let _ = bits.bit()?;
+    }
+    bits.bit()
 }
 
 struct Vui {
@@ -764,14 +827,25 @@ fn matrix_of(idc: u32) -> ColorMatrix {
     }
 }
 
-pub fn parse_pps(rbsp: &[u8], sps_of: &[Option<Sps>]) -> Result<Pps, CodecError> {
+/// A picture parameter set names an id. An Annex A slice resolves it in
+/// `sps_of`. A slice extension resolves it in `subset` when the Annex A
+/// table has no set with that id.
+pub(crate) fn parse_pps_in(
+    rbsp: &[u8],
+    sps_of: &[Option<Sps>],
+    subset: &[Option<Sps>],
+) -> Result<Pps, CodecError> {
     let mut bits = Bits::new(rbsp);
     let id = bits.ue()?;
     let sps_id = bits.ue()?;
     if id >= MAX_PPS as u32 || sps_id >= MAX_SPS as u32 {
         return Err(bits.malformed("pps id"));
     }
-    let Some(sps) = sps_of[sps_id as usize].as_ref() else {
+    let Some(sps) = sps_of
+        .get(sps_id as usize)
+        .and_then(|sps| sps.as_ref())
+        .or_else(|| subset.get(sps_id as usize).and_then(|sps| sps.as_ref()))
+    else {
         return Err(bits.malformed("pps without sps"));
     };
     let cabac = bits.bit()?;

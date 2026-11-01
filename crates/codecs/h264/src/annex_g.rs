@@ -1,0 +1,489 @@
+//! Annex G slice extension with no inter-layer prediction.
+//!
+//! The picture is the Annex A reconstruction. FFmpeg 8.1.1 does not decode
+//! NAL type 20, so that picture follows the recommendation. An Annex A slice
+//! in the same access unit stays the picture and matches FFmpeg.
+
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, VideoDecoder, VideoOutput};
+
+use crate::H264Decoder;
+use crate::nal::{annex_b_extension, annex_b_nal};
+use crate::set::parse_subset_sps;
+
+#[test]
+fn a_slice_extension_without_inter_layer_prediction_is_a_picture() {
+    for profile in [83u8, 86] {
+        for restriction in [true, false] {
+            let rbsp = subset(profile, restriction, 0, false);
+            let parsed = parse_subset_sps(&rbsp).expect("subset");
+            assert_eq!(parsed.slice_header_restriction, restriction);
+            let annex = svc_annex(&rbsp, 0, true, restriction);
+            let picture = decode(&annex);
+            assert!(
+                flat(&picture),
+                "profile {profile} restriction {restriction}"
+            );
+            if let Some(ffmpeg) = ffmpeg_bin() {
+                assert!(
+                    ffmpeg_bytes(&ffmpeg, &annex).is_empty(),
+                    "ffmpeg decoded a slice extension"
+                );
+            }
+        }
+    }
+    let annex = svc_annex(&subset(83, true, 0, false), 1, true, true);
+    assert!(flat(&decode(&annex)));
+}
+
+#[test]
+fn output_flag_keeps_the_extension_off_the_display() {
+    let annex = svc_annex(&subset(83, true, 0, false), 0, false, true);
+    let mut decoder = open();
+    let pictures = decoder
+        .push(&Packet::video(annex, 0, 1, 30, true))
+        .expect("decode");
+    assert!(pictures.is_empty());
+    assert!(decoder.drain().expect("drain").is_empty());
+    let (y, u, v) = decoder.picture_at(0).expect("held");
+    assert!(
+        y.iter()
+            .chain(u.iter())
+            .chain(v.iter())
+            .all(|sample| *sample == 128)
+    );
+}
+
+#[test]
+fn an_annex_a_picture_survives_svc_mvc_and_3d_nal_units() {
+    let annex = base_with_extensions();
+    let picture = decode(&annex);
+    assert!(flat(&picture));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        assert_eq!(raw, vec![128u8; 16 * 16 + 8 * 8 * 2]);
+    }
+}
+
+#[test]
+fn the_svc_extension_syntax_is_consumed() {
+    let parsed = parse_subset_sps(&subset(83, true, 1, false)).expect("ess");
+    assert!(parsed.slice_header_restriction);
+    let err = parse_subset_sps(&subset(83, true, 3, false)).expect_err("ess");
+    assert!(
+        matches!(
+            err,
+            CodecError::Malformed {
+                what: "extended spatial scalability",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn a_refused_extension_leaves_the_next_idr() {
+    let mut decoder = open();
+    let refused = [
+        annex_b_nal(3, 20, &[]),
+        annex_b_extension(3, 20, &[0xc0, 0x80, 0x04], &[0x80]),
+        svc_annex_header(svc_bytes(false, 0, true)),
+        annex_b_extension(3, 20, &[0xc0, 0x80, 0x17], &[0x80]),
+        annex_b_extension(3, 20, &[0x00, 0x00, 0x03], &[0x80]),
+        annex_b_extension(3, 21, &[0x80, 0x00], &[0x80]),
+        annex_b_nal(3, 15, &subset(83, true, 0, true)),
+        annex_b_nal(3, 15, &truncated_scalable()),
+        stored_base_picture(),
+    ];
+    let mut errors = Vec::new();
+    for annex in refused {
+        errors.push(
+            decoder
+                .push(&Packet::video(annex, 0, 1, 30, false))
+                .expect_err("refused"),
+        );
+    }
+    assert!(matches!(
+        errors[0],
+        CodecError::Truncated {
+            what: "extension header",
+            ..
+        }
+    ));
+    assert!(matches!(
+        errors[1],
+        CodecError::Malformed {
+            what: "extension header",
+            ..
+        }
+    ));
+    assert!(matches!(
+        errors[2],
+        CodecError::Unsupported {
+            what: "inter-layer prediction"
+        }
+    ));
+    assert!(matches!(
+        errors[3],
+        CodecError::Unsupported {
+            what: "reference base picture"
+        }
+    ));
+    assert!(matches!(errors[4], CodecError::Unsupported { what: "mvc" }));
+    assert!(matches!(errors[5], CodecError::Unsupported { what: "3d" }));
+    assert!(matches!(
+        errors[6],
+        CodecError::Unsupported { what: "svc vui" }
+    ));
+    assert!(matches!(errors[7], CodecError::Truncated { .. }));
+    assert!(matches!(
+        errors[8],
+        CodecError::Unsupported {
+            what: "reference base picture"
+        }
+    ));
+    let picture = decode_with(&mut decoder, &base_idr());
+    assert!(flat(&picture));
+}
+
+fn stored_base_picture() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &subset(83, false, 0, false));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &svc_bytes(true, 0, true),
+        &idr_slice(true, false, true),
+    ));
+    out
+}
+
+fn svc_annex(rbsp: &[u8], quality: u8, output: bool, restriction: bool) -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, rbsp);
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &svc_bytes(true, quality, output),
+        &idr_slice(quality == 0, restriction, false),
+    ));
+    out
+}
+
+fn svc_annex_header(header: [u8; 3]) -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &subset(83, true, 0, false));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 20, &header, &[0x80]));
+    out
+}
+
+fn base_with_extensions() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &subset(83, true, 0, false)));
+    out.extend(annex_b_nal(3, 15, &baseline_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 14, &svc_bytes(true, 0, true), &[0x80]));
+    out.extend(annex_b_nal(3, 5, &idr_slice(true, true, false)));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &svc_bytes(false, 0, true),
+        &[0x80],
+    ));
+    out.extend(annex_b_extension(3, 20, &[0x00, 0x00, 0x03], &[0x80]));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0x00], &[0x80]));
+    out
+}
+
+fn base_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &idr_slice(true, true, false)));
+    out
+}
+
+fn svc_bytes(no_inter_layer_pred: bool, quality: u8, output: bool) -> [u8; 3] {
+    let b1 = (u8::from(no_inter_layer_pred) << 7) | (quality & 0x0f);
+    let b2 = 0x03 | (u8::from(output) << 2);
+    [0xc0, b1, b2]
+}
+
+fn open() -> H264Decoder {
+    let mut params = CodecParams::video(CodecId::H264, 16, 16);
+    params.nal_length_size = 0;
+    H264Decoder::open(&params).expect("open")
+}
+
+fn decode(annex: &[u8]) -> VideoOutput {
+    decode_with(&mut open(), annex)
+}
+
+fn decode_with(decoder: &mut H264Decoder, annex: &[u8]) -> VideoOutput {
+    let mut pictures = decoder
+        .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
+        .expect("decode");
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 1);
+    pictures.remove(0)
+}
+
+fn flat(picture: &VideoOutput) -> bool {
+    picture
+        .picture
+        .y()
+        .iter()
+        .chain(picture.picture.u())
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 128)
+}
+
+fn baseline_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn baseline_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn truncated_scalable() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(83, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn subset(profile: u8, restriction: bool, spatial: u32, vui: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(u32::from(profile), 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bits(spatial, 2);
+    if spatial <= 2 {
+        w.bit(false);
+        w.bits(1, 2);
+        if spatial == 1 {
+            w.bit(false);
+            w.bits(1, 2);
+            w.se(0);
+            w.se(0);
+            w.se(0);
+            w.se(0);
+        }
+        w.bit(false);
+        w.bit(restriction);
+        w.bit(vui);
+        if !vui {
+            w.bit(false);
+            w.trailing();
+        }
+    }
+    w.bytes
+}
+
+fn pps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bits(0, 2);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn idr_slice(base_quality: bool, restriction: bool, store_ref_base: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(0, 4);
+    w.ue(0);
+    w.bits(0, 4);
+    if base_quality {
+        w.bit(false);
+        w.bit(false);
+        if !restriction {
+            w.bit(store_ref_base);
+        }
+    }
+    w.se(0);
+    w.ue(1);
+    if !restriction {
+        w.bits(0, 4);
+        w.bits(15, 4);
+    }
+    w.ue(3);
+    w.ue(0);
+    w.se(0);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn ffmpeg_bin() -> Option<PathBuf> {
+    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn ffmpeg_bytes(ffmpeg: &std::path::Path, annex: &[u8]) -> Vec<u8> {
+    spawn(ffmpeg, annex).stdout
+}
+
+fn ffmpeg_raw(ffmpeg: &std::path::Path, annex: &[u8]) -> Vec<u8> {
+    let output = spawn(ffmpeg, annex);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+fn spawn(ffmpeg: &std::path::Path, annex: &[u8]) -> std::process::Output {
+    let mut child = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-hwaccel",
+            "none",
+            "-threads",
+            "1",
+            "-f",
+            "h264",
+            "-i",
+            "pipe:0",
+            "-vsync",
+            "0",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg");
+    std::io::Write::write_all(child.stdin.as_mut().expect("stdin"), annex).expect("write");
+    child.wait_with_output().expect("wait")
+}
+
+struct Writer {
+    bytes: Vec<u8>,
+    bit: usize,
+}
+
+impl Writer {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            bit: 0,
+        }
+    }
+
+    fn bit(&mut self, value: bool) {
+        let index = self.bit / 8;
+        if index == self.bytes.len() {
+            self.bytes.push(0);
+        }
+        if value {
+            self.bytes[index] |= 1 << (7 - (self.bit % 8));
+        }
+        self.bit += 1;
+    }
+
+    fn bits(&mut self, value: u32, n: u32) {
+        for shift in (0..n).rev() {
+            self.bit(((value >> shift) & 1) == 1);
+        }
+    }
+
+    fn ue(&mut self, value: u32) {
+        let code = value + 1;
+        let zeros = 31 - code.leading_zeros();
+        for _ in 0..zeros {
+            self.bit(false);
+        }
+        self.bits(code, zeros + 1);
+    }
+
+    fn se(&mut self, value: i32) {
+        let code = if value > 0 {
+            value.unsigned_abs() * 2 - 1
+        } else {
+            value.unsigned_abs() * 2
+        };
+        self.ue(code);
+    }
+
+    fn trailing(&mut self) {
+        self.bit(true);
+        while !self.bit.is_multiple_of(8) {
+            self.bit(false);
+        }
+    }
+}

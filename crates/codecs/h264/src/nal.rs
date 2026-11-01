@@ -11,6 +11,30 @@ pub struct Nal {
     pub ref_idc: u8,
     pub kind: u8,
     pub rbsp: Vec<u8>,
+    /// Header extension for NAL types 14, 20, and 21. Type 15 has none.
+    pub extension: Option<Extension>,
+}
+
+/// NAL unit header extension. Clause 7.3.1. The three-byte form is Annex G
+/// when `svc_extension_flag` is 1 and Annex H when it is 0. Annex I depth
+/// with `avc_3d_extension_flag` 1 is two bytes.
+#[derive(Clone, Copy, Debug)]
+pub enum Extension {
+    Svc(SvcHeader),
+    /// Annex H. `svc_extension_flag` is 0.
+    Mvc,
+    /// NAL type 21 with `avc_3d_extension_flag` 1.
+    ThreeD,
+}
+
+/// `nal_unit_header_svc_extension`. Annex G. Fields the reconstruction reads.
+#[derive(Clone, Copy, Debug)]
+pub struct SvcHeader {
+    pub idr: bool,
+    pub no_inter_layer_pred: bool,
+    pub quality_id: u8,
+    pub use_ref_base_pic: bool,
+    pub output: bool,
 }
 
 pub fn rbsp(ebsp: &[u8]) -> Result<Vec<u8>, CodecError> {
@@ -49,16 +73,77 @@ fn nal_from_ebsp(ebsp: &[u8]) -> Result<Nal, CodecError> {
         });
     }
     let kind = header & 0x1f;
-    if matches!(kind, 14 | 15 | 20 | 21) {
-        return Err(CodecError::Unsupported {
-            what: "nal unit type",
-        });
-    }
+    let (extension, header_bytes) = if matches!(kind, 14 | 20 | 21) {
+        let (extension, len) = extension_header(kind, &ebsp[1..])?;
+        (Some(extension), len)
+    } else {
+        (None, 0)
+    };
     Ok(Nal {
         ref_idc: (header >> 5) & 0x3,
         kind,
-        rbsp: rbsp(&ebsp[1..])?,
+        rbsp: rbsp(&ebsp[1 + header_bytes..])?,
+        extension,
     })
+}
+
+/// The extension bytes are part of the NAL header. Emulation prevention
+/// starts after them, so a `00 00 03` inside the header stays.
+fn extension_header(kind: u8, bytes: &[u8]) -> Result<(Extension, usize), CodecError> {
+    let Some(first) = bytes.first().copied() else {
+        return Err(CodecError::Truncated {
+            at_bit: 8,
+            what: "extension header",
+        });
+    };
+    let flag = first & 0x80 != 0;
+    let three_d = kind == 21 && flag;
+    let len = if three_d { 2 } else { 3 };
+    if bytes.len() < len {
+        return Err(CodecError::Truncated {
+            at_bit: 8,
+            what: "extension header",
+        });
+    }
+    let header = &bytes[..len];
+    if three_d {
+        return Ok((Extension::ThreeD, len));
+    }
+    if kind != 21 && flag {
+        Ok((Extension::Svc(svc_header(header)?), len))
+    } else {
+        mvc_header(header)?;
+        Ok((Extension::Mvc, len))
+    }
+}
+
+fn svc_header(bytes: &[u8]) -> Result<SvcHeader, CodecError> {
+    let b0 = bytes[0];
+    let b1 = bytes[1];
+    let b2 = bytes[2];
+    if b2 & 0x03 != 0x03 {
+        return Err(CodecError::Malformed {
+            at_bit: 8,
+            what: "extension header",
+        });
+    }
+    Ok(SvcHeader {
+        idr: b0 & 0x40 != 0,
+        no_inter_layer_pred: b1 & 0x80 != 0,
+        quality_id: b1 & 0x0f,
+        use_ref_base_pic: b2 & 0x10 != 0,
+        output: b2 & 0x04 != 0,
+    })
+}
+
+fn mvc_header(bytes: &[u8]) -> Result<(), CodecError> {
+    if bytes[2] & 0x01 != 0x01 {
+        return Err(CodecError::Malformed {
+            at_bit: 8,
+            what: "extension header",
+        });
+    }
+    Ok(())
 }
 
 /// Annex B access unit, or one length-prefixed access unit.
@@ -215,6 +300,16 @@ pub fn annex_b_nal(ref_idc: u8, kind: u8, rbsp: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Annex B NAL whose header is longer than one byte. `header` is not
+/// escaped. Emulation prevention applies to `rbsp` only.
+#[cfg(test)]
+pub(crate) fn annex_b_extension(ref_idc: u8, kind: u8, header: &[u8], rbsp: &[u8]) -> Vec<u8> {
+    let mut out = vec![0, 0, 0, 1, (ref_idc << 5) | (kind & 0x1f)];
+    out.extend_from_slice(header);
+    out.extend(emulation(rbsp));
+    out
+}
+
 pub fn length_nal(length_size: u8, ref_idc: u8, kind: u8, rbsp: &[u8]) -> Vec<u8> {
     let ebsp = emulation(rbsp);
     let len = 1 + ebsp.len();
@@ -247,7 +342,7 @@ fn emulation(rbsp: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{access_unit, rbsp};
+    use super::{Extension, access_unit, rbsp};
 
     #[test]
     fn emulation_prevention_is_removed() {
@@ -255,6 +350,34 @@ mod tests {
             rbsp(&[0x00, 0x00, 0x03, 0x01]).unwrap(),
             vec![0x00, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn an_extension_header_is_not_part_of_the_rbsp() {
+        let svc = access_unit(&[0, 0, 0, 1, 0x74, 0xc0, 0x80, 0x07, 0x80], 0).unwrap();
+        let Extension::Svc(header) = svc[0].extension.unwrap() else {
+            panic!("svc");
+        };
+        assert!(header.idr && header.no_inter_layer_pred && header.output);
+        assert_eq!(header.quality_id, 0);
+        assert_eq!(svc[0].rbsp, vec![0x80]);
+
+        // `00 00 03` is a legal MVC header. It must not be stripped as emulation.
+        let mvc = access_unit(&[0, 0, 0, 1, 0x74, 0x00, 0x00, 0x03, 0x80], 0).unwrap();
+        assert!(matches!(mvc[0].extension, Some(Extension::Mvc)));
+        assert_eq!(mvc[0].rbsp, vec![0x80]);
+    }
+
+    #[test]
+    fn a_short_extension_header_is_truncated() {
+        let err = access_unit(&[0, 0, 0, 1, 0x74], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            cutlass_decode::CodecError::Truncated {
+                what: "extension header",
+                ..
+            }
+        ));
     }
 
     #[test]

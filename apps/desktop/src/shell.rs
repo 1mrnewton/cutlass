@@ -160,6 +160,12 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
             }
+            Self::Edit(EditError::CanvasSize) => {
+                formatter.write_str("the canvas side must be from 1 to 7680")
+            }
+            Self::Edit(EditError::CanvasRatio) => {
+                formatter.write_str("the canvas ratio is not a project ratio")
+            }
             Self::Edit(EditError::FrameRate) => {
                 formatter.write_str("the frame rate is not a project rate")
             }
@@ -1810,6 +1816,23 @@ impl Shell {
         self.apply(Request::SetFrameRate {
             fps: stored_fps(next),
             drop_frame,
+        })
+    }
+
+    /// Step to the next canvas shape and store its frame size.
+    ///
+    /// 1920×1080 is the 16:9 frame, so a new project steps to 9:16.
+    /// One undo restores the size and the ratio. The background stays.
+    pub fn cycle_canvas(&mut self) -> Result<(), ShellError> {
+        let (width, height) = {
+            let canvas = &self.session_draft()?.canvas_config;
+            (canvas.width, canvas.height)
+        };
+        let next = next_canvas(width, height);
+        self.apply(Request::SetCanvasSize {
+            width: next.width,
+            height: next.height,
+            ratio: next.ratio.to_owned(),
         })
     }
 
@@ -4550,6 +4573,91 @@ fn file_name(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
+#[derive(Clone, Copy)]
+struct CanvasShape {
+    ratio: &'static str,
+    width: i32,
+    height: i32,
+}
+
+/// Shapes the preview can show. A new project is 1920×1080, so the next shape is 9:16.
+const CANVAS_SHAPES: [CanvasShape; 13] = [
+    CanvasShape {
+        ratio: "16:9",
+        width: 1920,
+        height: 1080,
+    },
+    CanvasShape {
+        ratio: "9:16",
+        width: 1080,
+        height: 1920,
+    },
+    CanvasShape {
+        ratio: "1:1",
+        width: 1080,
+        height: 1080,
+    },
+    CanvasShape {
+        ratio: "4:3",
+        width: 1440,
+        height: 1080,
+    },
+    CanvasShape {
+        ratio: "3:4",
+        width: 1080,
+        height: 1440,
+    },
+    CanvasShape {
+        ratio: "4:5",
+        width: 1080,
+        height: 1350,
+    },
+    CanvasShape {
+        ratio: "2:1",
+        width: 1920,
+        height: 960,
+    },
+    CanvasShape {
+        ratio: "21:9",
+        width: 2520,
+        height: 1080,
+    },
+    CanvasShape {
+        ratio: "2.35:1",
+        width: 1920,
+        height: 817,
+    },
+    CanvasShape {
+        ratio: "1.85:1",
+        width: 1920,
+        height: 1038,
+    },
+    CanvasShape {
+        ratio: "1:2",
+        width: 960,
+        height: 1920,
+    },
+    CanvasShape {
+        ratio: "128:27",
+        width: 5120,
+        height: 1080,
+    },
+    CanvasShape {
+        ratio: "1.125:2.436",
+        width: 1125,
+        height: 2436,
+    },
+];
+
+fn next_canvas(width: i32, height: i32) -> CanvasShape {
+    let index = CANVAS_SHAPES
+        .iter()
+        .position(|shape| shape.width == width && shape.height == height)
+        .map(|index| index.saturating_add(1))
+        .unwrap_or(0);
+    CANVAS_SHAPES[index % CANVAS_SHAPES.len()]
+}
+
 const PROJECT_RATES: [FrameRate; 9] = [
     FrameRate::FPS_23_976,
     FrameRate::FPS_24,
@@ -7025,6 +7133,46 @@ mod tests {
             .unwrap();
         desktop.cycle_frame_rate().unwrap();
         assert_eq!(desktop.frame_rate_label(), "59.94 fps");
+    }
+
+    #[test]
+    fn the_canvas_shape_changes_the_frame() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.cycle_canvas().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.background = Some("#336699".to_owned());
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.cycle_canvas().unwrap();
+        assert_eq!(desktop.draft().unwrap().canvas_config.width, 1_080);
+        assert_eq!(desktop.draft().unwrap().canvas_config.height, 1_920);
+        assert_eq!(desktop.draft().unwrap().canvas_config.ratio, "9:16");
+        assert_eq!(
+            desktop.draft().unwrap().canvas_config.background.as_deref(),
+            Some("#336699")
+        );
+        assert_eq!(desktop.draft().unwrap().fps, 30.0);
+        let picture = desktop.preview_bytes().unwrap();
+        assert_eq!((picture.width, picture.height), (1_080, 1_920));
+        assert_eq!(&picture.rgba[..4], &[0x33, 0x66, 0x99, 0xFF]);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().canvas_config.width, 1_920);
+        assert_eq!(desktop.draft().unwrap().canvas_config.height, 1_080);
+        assert_eq!(desktop.draft().unwrap().canvas_config.ratio, "original");
+
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.cycle_canvas().unwrap();
+        assert_eq!(desktop.draft().unwrap().canvas_config.ratio, "9:16");
     }
 
     #[test]

@@ -1092,7 +1092,12 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
     );
     ui.add_space(16.0);
-    fact(ui, "Ratio", &ratio, width);
+    let shape = widgets::toolbar_button(ui, &ratio).on_hover_text("Canvas shape");
+    if shape.clicked()
+        && let Err(error) = shell.cycle_canvas()
+    {
+        shell.set_notice(error.to_string());
+    }
     fact(
         ui,
         "Resolution",

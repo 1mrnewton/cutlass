@@ -6,6 +6,7 @@
 use cutlass_decode::CodecError;
 
 use crate::header::{FrameInfo, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
+use crate::sample::{Pix, clip_sample};
 use crate::symbol::SymbolDecoder;
 
 const SGR_PARAMS: [[i32; 4]; 16] = [
@@ -378,14 +379,15 @@ fn clip3(min: i32, max: i32, value: i32) -> i32 {
 
 /// Filter one plane. `cdef` is the picture after CDEF. `before` is the picture
 /// before CDEF, used for the two rows outside a restoration stripe.
-pub fn apply_sgr(
-    cdef: &[u8],
-    before: &[u8],
+pub fn apply_sgr<S: Pix>(
+    cdef: &[S],
+    before: &[S],
     width: usize,
     height: usize,
     grid: &Grid,
     plane: usize,
-) -> Vec<u8> {
+    bit_depth: u8,
+) -> Vec<S> {
     let mut out = cdef.to_vec();
     if width == 0 || height == 0 || plane >= 3 || grid.rows[plane] == 0 {
         return out;
@@ -407,6 +409,7 @@ pub fn apply_sgr(
                 width,
                 grid,
                 plane,
+                bit_depth,
             },
             Span {
                 y0: y,
@@ -420,13 +423,14 @@ pub fn apply_sgr(
     out
 }
 
-struct Rows<'a> {
-    out: &'a mut [u8],
-    cdef: &'a [u8],
-    before: &'a [u8],
+struct Rows<'a, S: Pix> {
+    out: &'a mut [S],
+    cdef: &'a [S],
+    before: &'a [S],
     width: usize,
     grid: &'a Grid,
     plane: usize,
+    bit_depth: u8,
 }
 
 struct Span {
@@ -436,7 +440,7 @@ struct Span {
     stripe_end: i32,
 }
 
-fn filter_rows(rows: &mut Rows<'_>, span: Span) {
+fn filter_rows<S: Pix>(rows: &mut Rows<'_, S>, span: Span) {
     let width = rows.width;
     let mut x = 0usize;
     while x < width {
@@ -466,6 +470,7 @@ fn filter_rows(rows: &mut Rows<'_>, span: Span) {
                 height: rows.cdef.len() / width.max(1),
                 stripe_start: span.stripe_start,
                 stripe_end: span.stripe_end,
+                bit_depth: rows.bit_depth,
             };
             let block = Block {
                 x,
@@ -483,16 +488,17 @@ fn filter_rows(rows: &mut Rows<'_>, span: Span) {
     }
 }
 
-struct Source<'a> {
-    cdef: &'a [u8],
-    before: &'a [u8],
+struct Source<'a, S: Pix> {
+    cdef: &'a [S],
+    before: &'a [S],
     width: usize,
     height: usize,
     stripe_start: i32,
     stripe_end: i32,
+    bit_depth: u8,
 }
 
-impl Source<'_> {
+impl<S: Pix> Source<'_, S> {
     fn sample(&self, x: i32, y: i32) -> i32 {
         let last_x = self.width.saturating_sub(1) as i32;
         let last_y = self.height.saturating_sub(1) as i32;
@@ -509,7 +515,11 @@ impl Source<'_> {
         };
         let y = y.clamp(0, last_y) as usize;
         let x = x as usize;
-        i32::from(*plane.get(y * self.width + x).unwrap_or(&0))
+        plane
+            .get(y * self.width + x)
+            .copied()
+            .unwrap_or(S::default())
+            .to_i32()
     }
 }
 
@@ -520,7 +530,7 @@ struct Block {
     h: usize,
 }
 
-fn project(out: &mut [u8], source: &Source<'_>, block: Block, set: u8, xqd: [i32; 2]) {
+fn project<S: Pix>(out: &mut [S], source: &Source<'_, S>, block: Block, set: u8, xqd: [i32; 2]) {
     let params = SGR_PARAMS[usize::from(set.min(15))];
     let w0 = xqd[0];
     let w1 = xqd[1];
@@ -560,14 +570,14 @@ fn project(out: &mut [u8], source: &Source<'_>, block: Block, set: u8, xqd: [i32
             }
             let rounded = round2(v, RST_BITS + PRJ_BITS);
             if let Some(slot) = out.get_mut((block.y + row) * source.width + block.x + col) {
-                *slot = u8::try_from(rounded.clamp(0, 255)).unwrap_or(0);
+                *slot = S::from_i32(clip_sample(i32_from_i64(rounded), source.bit_depth));
             }
         }
     }
 }
 
-fn box_value(
-    source: &Source<'_>,
+fn box_value<S: Pix>(
+    source: &Source<'_, S>,
     frame_x: usize,
     frame_y: usize,
     row: usize,
@@ -625,8 +635,8 @@ fn neighbor_weight(pass: i32, row: i32, dy: i32, dx: i32) -> i32 {
     }
 }
 
-fn box_ab(
-    source: &Source<'_>,
+fn box_ab<S: Pix>(
+    source: &Source<'_, S>,
     x: i32,
     y: i32,
     radius: i32,
@@ -643,7 +653,11 @@ fn box_ab(
             b += sample;
         }
     }
-    let d = b;
+    // Section 7.17. The sums are reduced by `2 * (BitDepth - 8)` and `BitDepth - 8`.
+    // Both shifts are zero at 8-bit, so that path is unchanged.
+    let shift = i32::from(source.bit_depth.saturating_sub(8));
+    let a = round2(a, 2 * shift);
+    let d = round2(b, shift);
     let p = (a * i64::from(n) - d * d).max(0);
     let z = round2(p * s, MTABLE_BITS);
     let a2 = if z >= 255 {
@@ -662,14 +676,15 @@ fn box_ab(
 /// `cdef` is the picture after CDEF. `before` is the deblocked picture, used
 /// for the two rows outside a restoration stripe. Pass 0 of `coeff` is the
 /// vertical filter. Pass 1 is the horizontal filter, and it runs first.
-pub fn apply_wiener(
-    cdef: &[u8],
-    before: &[u8],
+pub fn apply_wiener<S: Pix>(
+    cdef: &[S],
+    before: &[S],
     width: usize,
     height: usize,
     grid: &Grid,
     plane: usize,
-) -> Vec<u8> {
+    bit_depth: u8,
+) -> Vec<S> {
     let mut out = cdef.to_vec();
     if width == 0 || height == 0 || plane >= 3 || grid.rows[plane] == 0 {
         return out;
@@ -702,6 +717,7 @@ pub fn apply_wiener(
                         height: cdef.len() / width.max(1),
                         stripe_start: start,
                         stripe_end: end,
+                        bit_depth,
                     };
                     wiener_block(
                         &mut out,
@@ -724,9 +740,9 @@ pub fn apply_wiener(
     out
 }
 
-fn wiener_block(
-    out: &mut [u8],
-    source: &Source<'_>,
+fn wiener_block<S: Pix>(
+    out: &mut [S],
+    source: &Source<'_, S>,
     block: Block,
     vertical: [i32; 3],
     horizontal: [i32; 3],
@@ -747,7 +763,8 @@ fn wiener_block(
             }
             let rounded = round2(i64::from(sum), 3) as i32;
             if let Some(slot) = intermediate.get_mut(row * block.w + col) {
-                *slot = clip3(-2048, 6143, rounded);
+                let (low, high) = wiener_intermediate(source.bit_depth);
+                *slot = clip3(low, high, rounded);
             }
         }
     }
@@ -763,10 +780,23 @@ fn wiener_block(
             }
             let rounded = round2(i64::from(sum), 11);
             if let Some(slot) = out.get_mut((block.y + row) * source.width + block.x + col) {
-                *slot = u8::try_from(rounded.clamp(0, 255)).unwrap_or(0);
+                *slot = S::from_i32(clip_sample(i32_from_i64(rounded), source.bit_depth));
             }
         }
     }
+}
+
+/// Horizontal Wiener intermediate range. At 8-bit this is `-2048..=6143`.
+/// Ten-bit uses the same rounding and a wider range. Twelve-bit changes the rounding.
+fn wiener_intermediate(bit_depth: u8) -> (i32, i32) {
+    let depth = i32::from(bit_depth);
+    let offset = 1i32 << (depth + 3);
+    let limit = (1i32 << (depth + 5)) - 1;
+    (-offset, limit - offset)
+}
+
+fn i32_from_i64(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
 fn round2(value: i64, bits: i32) -> i64 {
@@ -809,7 +839,7 @@ mod tests {
             wiener_ref: [[WIENER_MID; 2]; 3],
             active: true,
         };
-        let out = apply_sgr(&samples, &samples, width, height, &grid, 0);
+        let out = apply_sgr(&samples, &samples, width, height, &grid, 0, 8);
         assert!(out.iter().all(|sample| *sample == 40));
     }
 
@@ -841,7 +871,30 @@ mod tests {
             wiener_ref: [[WIENER_MID; 2]; 3],
             active: true,
         };
-        let out = apply_wiener(&samples, &samples, width, height, &grid, 0);
+        let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 8);
         assert!(out.iter().all(|sample| *sample == 40));
+    }
+
+    #[test]
+    fn a_ten_bit_constant_keeps_its_wiener_range() {
+        let width = 16usize;
+        let height = 8usize;
+        let samples = vec![400u16; width * height];
+        let grid = Grid {
+            cols: [1, 0, 0],
+            rows: [1, 0, 0],
+            unit_size: [256, 0, 0],
+            units: vec![Unit {
+                kind: RESTORE_WIENER,
+                set: 0,
+                xqd: [0; 2],
+                coeff: [[0, 0, 0], [0, 0, 0]],
+            }],
+            reference: [XQD_REF; 3],
+            wiener_ref: [[WIENER_MID; 2]; 3],
+            active: true,
+        };
+        let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 10);
+        assert!(out.iter().all(|sample| *sample == 400));
     }
 }

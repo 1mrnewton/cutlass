@@ -228,9 +228,6 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
     let up_w = frame.upscaled_width as usize;
-    if sequence.bit_depth != 8 && postprocess && lr.active() {
-        return Err(CodecError::Unsupported { what: "bit depth" });
-    }
     let (y, u, v, out_w) = if postprocess && up_w > visible_w {
         let up_chroma = up_w.div_ceil(2);
         (
@@ -402,7 +399,15 @@ impl FinishPlane for u8 {
         plane: usize,
         frame: &FrameInfo,
     ) -> Vec<Self> {
-        restore_eight(cdef, before, width, height, lr, plane, frame)
+        match frame.restoration.plane.get(plane).copied() {
+            Some(RESTORE_WIENER) => {
+                restore::apply_wiener(cdef, before, width, height, lr, plane, 8)
+            }
+            Some(RESTORE_SGRPROJ) | Some(RESTORE_SWITCHABLE) => {
+                restore::apply_sgr(cdef, before, width, height, lr, plane, 8)
+            }
+            _ => cdef.to_vec(),
+        }
     }
 }
 
@@ -428,26 +433,15 @@ impl FinishPlane for u16 {
         plane: usize,
         frame: &FrameInfo,
     ) -> Vec<Self> {
-        let _ = (before, width, height, lr, plane, frame);
-        cdef.to_vec()
-    }
-}
-
-fn restore_eight(
-    cdef: &[u8],
-    before: &[u8],
-    width: usize,
-    height: usize,
-    lr: &restore::Grid,
-    plane: usize,
-    frame: &FrameInfo,
-) -> Vec<u8> {
-    match frame.restoration.plane.get(plane).copied() {
-        Some(RESTORE_WIENER) => restore::apply_wiener(cdef, before, width, height, lr, plane),
-        Some(RESTORE_SGRPROJ) | Some(RESTORE_SWITCHABLE) => {
-            restore::apply_sgr(cdef, before, width, height, lr, plane)
+        match frame.restoration.plane.get(plane).copied() {
+            Some(RESTORE_WIENER) => {
+                restore::apply_wiener(cdef, before, width, height, lr, plane, 10)
+            }
+            Some(RESTORE_SGRPROJ) | Some(RESTORE_SWITCHABLE) => {
+                restore::apply_sgr(cdef, before, width, height, lr, plane, 10)
+            }
+            _ => cdef.to_vec(),
         }
-        _ => cdef.to_vec(),
     }
 }
 

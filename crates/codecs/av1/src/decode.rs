@@ -554,8 +554,8 @@ impl Av1Decoder {
         })
     }
 
-    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Restoration, film grain,
-    /// and monochrome at this depth are still refused.
+    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Film grain and
+    /// monochrome at this depth are still refused.
     fn hold_wide(
         &self,
         sequence: &Sequence,
@@ -4368,6 +4368,59 @@ mod tests {
             assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
         }
         assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_restoration_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, 64×64 keyframes. One luma plane uses the
+        // Wiener filter and one uses self-guided restoration. Chroma selects
+        // none. CDEF, the loop filter, and super resolution are off. Digests
+        // are `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/ten-wiener.ivf").as_slice(),
+                1u8,
+                0x940b_250a_982f_0c81u64,
+            ),
+            (
+                include_bytes!("../fixtures/ten-sgr.ivf").as_slice(),
+                2u8,
+                0xd51c_3ef3_fbd2_f5c1u64,
+            ),
+        ];
+        for (file, luma, expected) in cases {
+            let frames = ivf_payloads(file);
+            let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.bit_depth, 10);
+            assert!(sequence.enable_restoration);
+            assert_eq!(frame.restoration.plane[0], luma);
+            assert!(frame.restoration.uses);
+            let params = CodecParams::video(CodecId::Av1, 64, 64);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("luma {luma}: {error:?}"));
+            assert_eq!(shown.len(), 1);
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3);
+            assert_eq!(frame_digest(bytes), expected, "luma {luma}");
+        }
     }
 
     #[test]

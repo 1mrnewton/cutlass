@@ -127,6 +127,12 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Angle) => {
                 formatter.write_str("the rotation is not a finite number of degrees")
             }
+            Self::Edit(EditError::Position) => {
+                formatter.write_str("the position is not a finite number")
+            }
+            Self::Edit(EditError::Scale) => {
+                formatter.write_str("the scale must be greater than zero")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -1893,8 +1899,8 @@ impl Shell {
             duration: segment.target.duration,
             speed: segment.speed,
             volume: segment.volume,
-            scale_x: segment.clip.scale.x,
-            scale_y: segment.clip.scale.y,
+            scale_x: picture_scale(segment).0,
+            scale_y: picture_scale(segment).1,
             rotation: segment.clip.rotation,
             transform_x: segment.clip.transform.x,
             transform_y: segment.clip.transform.y,
@@ -2613,10 +2619,47 @@ impl Shell {
         })
     }
 
-    pub fn edit_transform(&mut self) -> Result<(), ShellError> {
-        Err(ShellError::Unavailable(
-            "a transform edit is not available".to_owned(),
-        ))
+    /// The selected clip is a picture, so its position and scale can change.
+    #[must_use]
+    pub fn place_enabled(&self) -> bool {
+        self.selection_can_turn()
+    }
+
+    /// Move the selected picture. `x` and `y` are fractions of half the canvas,
+    /// and positive `y` is up. One undo restores the previous position.
+    pub fn set_position(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetPosition { segment_id, x, y })
+    }
+
+    /// Scale the selected picture. One undo restores the previous scale.
+    pub fn set_scale(&mut self, scale: f64) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment()?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetScale { segment_id, scale })
+    }
+
+    fn picture_segment(&self) -> Result<SegmentId, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let draft = self.session_draft()?;
+        let Some((segment, kind)) = placed(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        if !can_turn(draft, segment, kind) {
+            return Err(ShellError::Unavailable(
+                "a placement belongs on a picture".to_owned(),
+            ));
+        }
+        Ok(segment_id)
     }
 
     pub fn edit_style(&mut self) -> Result<(), ShellError> {
@@ -4063,6 +4106,15 @@ fn placed<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, &'a Trac
 }
 
 /// A video, a text, a sticker, or a composition can flip or turn. A sound cannot.
+/// The scale the preview uses. Uniform scale wins while that switch is on.
+fn picture_scale(segment: &Segment) -> (f64, f64) {
+    if segment.uniform_scale.on {
+        (segment.uniform_scale.value, segment.uniform_scale.value)
+    } else {
+        (segment.clip.scale.x, segment.clip.scale.y)
+    }
+}
+
 fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
     match draft.materials.get(segment.material_id.as_str()) {
         Some(MaterialRef::Video(_) | MaterialRef::Text(_) | MaterialRef::Draft(_)) => true,
@@ -6045,6 +6097,105 @@ mod tests {
         assert!(
             (desktop.pixel_size() - fitted).abs() < 0.000_000_1 || desktop.pixel_size() >= floor
         );
+    }
+
+    #[test]
+    fn a_picture_moves_and_scales_and_a_sound_does_not() {
+        let mut bare = shell();
+        assert!(!bare.place_enabled());
+        assert_eq!(
+            bare.set_position(0.0, 0.0).unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 1_000_000));
+        picture.clip.flip.horizontal = true;
+        draft.tracks[0].segments.push(picture);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("tone");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 500_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 500_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        assert_eq!(
+            desktop.set_position(0.0, 0.0).unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.place_enabled());
+        assert_eq!(
+            desktop.set_scale(2.0).unwrap_err().to_string(),
+            "a placement belongs on a picture"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.place_enabled());
+        desktop.set_position(0.5, -0.25).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.transform_x, 0.5);
+        assert_eq!(inspection.transform_y, -0.25);
+        assert!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .clip
+                .flip
+                .horizontal
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().transform_x, 0.0);
+        desktop.set_scale(2.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().scale_x, 2.0);
+        assert_eq!(desktop.inspection().unwrap().scale_y, 2.0);
+        assert_eq!(
+            desktop.set_scale(0.0).unwrap_err().to_string(),
+            "the scale must be greater than zero"
+        );
+        assert_eq!(
+            desktop.set_position(f64::NAN, 0.0).unwrap_err().to_string(),
+            "the position is not a finite number"
+        );
+        assert_eq!(desktop.inspection().unwrap().scale_x, 2.0);
+
+        let main = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(main, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.set_position(1.0, 0.0).unwrap_err().to_string(),
+            "the track is locked"
+        );
+
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(desktop.place_enabled());
+        desktop.set_position(0.1, 0.2).unwrap();
+        assert_eq!(desktop.inspection().unwrap().transform_y, 0.2);
     }
 
     #[test]

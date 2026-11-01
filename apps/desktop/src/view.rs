@@ -114,6 +114,9 @@ pub struct ViewState {
     export_path: String,
     text_buffer: String,
     text_for: String,
+    x_buffer: String,
+    y_buffer: String,
+    scale_buffer: String,
     volume_buffer: String,
     speed_buffer: String,
     dialogs: Dialogs,
@@ -137,6 +140,9 @@ impl Default for ViewState {
             export_path: String::new(),
             text_buffer: String::new(),
             text_for: String::new(),
+            x_buffer: String::new(),
+            y_buffer: String::new(),
+            scale_buffer: String::new(),
             volume_buffer: String::new(),
             speed_buffer: String::new(),
             dialogs: Dialogs::new(),
@@ -1116,10 +1122,25 @@ fn clip_fields(
     view: &mut ViewState,
     inspection: &crate::shell::Inspection,
 ) {
-    if widgets::toolbar_button(ui, "Transform").clicked()
-        && let Err(error) = shell.edit_transform()
-    {
-        shell.set_notice(error.to_string());
+    if shell.place_enabled() {
+        if let Some(x) = number_field(ui, "X", &mut view.x_buffer, inspection.transform_x)
+            && !inspection.locked
+            && let Err(error) = shell.set_position(x, inspection.transform_y)
+        {
+            shell.set_notice(error.to_string());
+        }
+        if let Some(y) = number_field(ui, "Y", &mut view.y_buffer, inspection.transform_y)
+            && !inspection.locked
+            && let Err(error) = shell.set_position(inspection.transform_x, y)
+        {
+            shell.set_notice(error.to_string());
+        }
+        if let Some(scale) = number_field(ui, "Scale", &mut view.scale_buffer, inspection.scale_x)
+            && !inspection.locked
+            && let Err(error) = shell.set_scale(scale)
+        {
+            shell.set_notice(error.to_string());
+        }
     }
     if let Some(text) = inspection.text.clone() {
         if view.text_for != inspection.segment_id.as_str() {
@@ -1139,20 +1160,45 @@ fn clip_fields(
             shell.set_notice(error.to_string());
         }
     }
-    view.volume_buffer = format!("{}", inspection.volume);
-    if widgets::field(ui, &mut view.volume_buffer).lost_focus()
-        && let Ok(volume) = view.volume_buffer.parse()
+    if let Some(volume) = number_field(ui, "Volume", &mut view.volume_buffer, inspection.volume)
+        && !inspection.locked
         && let Err(error) = shell.set_volume(volume)
     {
         shell.set_notice(error.to_string());
     }
-    view.speed_buffer = format!("{}", inspection.speed);
-    if widgets::field(ui, &mut view.speed_buffer).lost_focus()
-        && let Ok(speed) = view.speed_buffer.parse()
+    if let Some(speed) = number_field(ui, "Speed", &mut view.speed_buffer, inspection.speed)
+        && !inspection.locked
         && let Err(error) = shell.set_speed(speed)
     {
         shell.set_notice(error.to_string());
     }
+}
+
+/// A number row. The typed text stays while the field has focus, and the
+/// stored value returns when it does not. `Some` is a new finite parse.
+fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Option<f64> {
+    let mut edited = None;
+    ui.horizontal(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.add_sized(
+            [108.0, 18.0],
+            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
+        );
+        let response = widgets::field(ui, text);
+        if response.lost_focus() {
+            edited = text.parse().ok();
+        }
+        if !response.has_focus() {
+            *text = format!("{stored}");
+        }
+        if label == "Y" {
+            response.on_hover_text("Up is positive");
+        } else if label == "Scale" {
+            response.on_hover_text("1 is the fitted picture");
+        }
+    });
+    ui.add_space(4.0);
+    edited.filter(|value| *value != stored)
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {

@@ -301,6 +301,39 @@ fn inter_layer_prediction_uses_list_one() {
 }
 
 #[test]
+fn inter_layer_prediction_averages_both_lists() {
+    let past = older_idr();
+    let future = future_reference();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &past);
+    assert!(split_luma(&first, 100, 180));
+    let second = decode_with(&mut decoder, &future);
+    assert!(painted(&second, 40, 90));
+    let base = decode_with(&mut decoder, &bipred_base_packet());
+    assert!(corner_on_split(&base, 73, 70, 110, 90));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &past);
+    let _ = decode_with(&mut decoder, &future);
+    let inherited = decode_with(&mut decoder, &bipred_inherit_packet());
+    assert!(split_luma(&inherited, 70, 110));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &past);
+    let _ = decode_with(&mut decoder, &future);
+    let added = decode_with(&mut decoder, &bipred_residual_packet());
+    assert!(base_residual_picture(&added));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = past.clone();
+        layered.extend(future);
+        layered.extend(bipred_residual_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 3, "ffmpeg picture count");
+        assert_eq!(&raw[frame..frame * 2], &planes_of(&base));
+        assert_ne!(&raw[frame..frame * 2], &planes_of(&added));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -1011,6 +1044,111 @@ fn list1_inherit() -> Vec<u8> {
     w.ue(0);
     w.trailing();
     w.bytes
+}
+
+fn bipred_base_packet() -> Vec<u8> {
+    annex_b_nal(0, 1, &bipred_base_slice())
+}
+
+fn bipred_inherit_packet() -> Vec<u8> {
+    let mut out = bipred_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &bipred_inherit(),
+    ));
+    out
+}
+
+fn bipred_residual_packet() -> Vec<u8> {
+    let mut out = bipred_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &bipred_residual(),
+    ));
+    out
+}
+
+fn bipred_base_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    b_header(&mut w);
+    w.ue(0);
+    w.ue(3);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn bipred_inherit() -> Vec<u8> {
+    let mut w = Writer::new();
+    b_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn bipred_residual() -> Vec<u8> {
+    let mut w = Writer::new();
+    b_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn corner_on_split(picture: &VideoOutput, corner: u8, left: u8, right: u8, chroma: u8) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let want = if row < 4 && col < 4 {
+                corner
+            } else if col < 8 {
+                left
+            } else {
+                right
+            };
+            y[row * 16 + col] == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == chroma)
 }
 
 fn list1_residual() -> Vec<u8> {

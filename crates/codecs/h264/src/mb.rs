@@ -780,7 +780,7 @@ fn motion_base<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if !single_list(reference) {
+    if !has_prediction(reference) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -892,7 +892,7 @@ fn add_layer_residual<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if reference_mb.intra || !single_list(reference_mb) {
+    if reference_mb.intra || !has_prediction(reference_mb) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -900,6 +900,7 @@ fn add_layer_residual<S: Sample>(
     let motion0 = reference_mb.mv0;
     let motion1 = reference_mb.mv1;
     let refs0 = reference_mb.ref0;
+    let refs1 = reference_mb.ref1;
     let slots0 = reference_mb.slot0;
     let slots1 = reference_mb.slot1;
     let chroma_stride = pic.w / 2;
@@ -907,32 +908,95 @@ fn add_layer_residual<S: Sample>(
         for bx in 0..4 {
             let index = by * 4 + bx;
             let part = (by / 2) * 2 + (bx / 2);
-            let list1 = refs0[part] < 0;
-            let mv = if list1 {
-                motion1[index]
-            } else {
-                motion0[index]
-            };
-            let frame = dpb_slot(dpb, if list1 { slots1[part] } else { slots0[part] })?;
             let x = mx * 16 + bx * 4;
             let y = my * 16 + by * 4;
-            let mut pred = [S::default(); 16];
-            predict_luma(&mut pred, frame, x, y, 4, 4, mv);
+            let pred = layer_pred(
+                dpb,
+                (refs0[part], refs1[part]),
+                (slots0[part], slots1[part]),
+                (motion0[index], motion1[index]),
+                (x, y),
+                4,
+            )?;
             add_predicted(&mut pic.y, &layer.y, &pred, pic.w, x, y, 4)?;
-            let mut cu = [S::default(); 4];
-            let mut cv = [S::default(); 4];
-            predict_chroma((&mut cu, &mut cv), frame, (x, y), (2, 2), mv);
+            let chroma = layer_chroma(
+                dpb,
+                (refs0[part], refs1[part]),
+                (slots0[part], slots1[part]),
+                (motion0[index], motion1[index]),
+                (x, y),
+            )?;
             let cx = mx * 8 + bx * 2;
             let cy = my * 8 + by * 2;
-            add_predicted(&mut pic.u, &layer.u, &cu, chroma_stride, cx, cy, 2)?;
-            add_predicted(&mut pic.v, &layer.v, &cv, chroma_stride, cx, cy, 2)?;
+            add_predicted(&mut pic.u, &layer.u, &chroma.0, chroma_stride, cx, cy, 2)?;
+            add_predicted(&mut pic.v, &layer.v, &chroma.1, chroma_stride, cx, cy, 2)?;
         }
     }
     Ok(())
 }
 
-fn single_list(mb: &Mb) -> bool {
-    (0..4).all(|index| (mb.ref0[index] >= 0) != (mb.ref1[index] >= 0))
+fn has_prediction(mb: &Mb) -> bool {
+    (0..4).all(|index| mb.ref0[index] >= 0 || mb.ref1[index] >= 0)
+}
+
+fn layer_pred<S: Sample>(
+    dpb: &[Frame<S>],
+    refs: (i8, i8),
+    slots: (i8, i8),
+    motion: ([i16; 2], [i16; 2]),
+    origin: (usize, usize),
+    n: usize,
+) -> Result<Vec<S>, CodecError> {
+    let (x, y) = origin;
+    let mut pred = vec![S::default(); n * n];
+    if refs.0 >= 0 {
+        let frame = dpb_slot(dpb, slots.0)?;
+        predict_luma(&mut pred, frame, x, y, n, n, motion.0);
+    }
+    if refs.1 >= 0 {
+        let frame = dpb_slot(dpb, slots.1)?;
+        let mut other = vec![S::default(); n * n];
+        predict_luma(&mut other, frame, x, y, n, n, motion.1);
+        if refs.0 >= 0 {
+            for (sample, averaged) in pred.iter_mut().zip(other) {
+                *sample = recon::avg(*sample, averaged);
+            }
+        } else {
+            pred = other;
+        }
+    }
+    Ok(pred)
+}
+
+fn layer_chroma<S: Sample>(
+    dpb: &[Frame<S>],
+    refs: (i8, i8),
+    slots: (i8, i8),
+    motion: ([i16; 2], [i16; 2]),
+    origin: (usize, usize),
+) -> Result<([S; 4], [S; 4]), CodecError> {
+    let mut cu = [S::default(); 4];
+    let mut cv = [S::default(); 4];
+    if refs.0 >= 0 {
+        let frame = dpb_slot(dpb, slots.0)?;
+        predict_chroma((&mut cu, &mut cv), frame, origin, (2, 2), motion.0);
+    }
+    if refs.1 >= 0 {
+        let frame = dpb_slot(dpb, slots.1)?;
+        let mut ou = [S::default(); 4];
+        let mut ov = [S::default(); 4];
+        predict_chroma((&mut ou, &mut ov), frame, origin, (2, 2), motion.1);
+        if refs.0 >= 0 {
+            for i in 0..4 {
+                cu[i] = recon::avg(cu[i], ou[i]);
+                cv[i] = recon::avg(cv[i], ov[i]);
+            }
+        } else {
+            cu = ou;
+            cv = ov;
+        }
+    }
+    Ok((cu, cv))
 }
 
 fn dpb_slot<S: Sample>(dpb: &[Frame<S>], slot: i8) -> Result<&Frame<S>, CodecError> {

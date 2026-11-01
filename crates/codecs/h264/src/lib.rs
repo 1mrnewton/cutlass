@@ -51,6 +51,9 @@
 //! and the right block stays the split.
 //! A depth parameter set deviation of 15 maps depth 64 to 81, so that scale
 //! shifts five pixels: three columns stay 100 and the rest are 180.
+//! A 32×16 skipped texture picture copies each base macroblock: the left
+//! vector is zero, so that half stays 40 and 220, and the right vector of
+//! eight pixels makes that half 220.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

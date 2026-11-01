@@ -1031,6 +1031,70 @@ fn a_depth_motion_vector_shifts_the_other_view() {
 }
 
 #[test]
+fn a_wide_skip_copies_each_base_macroblock_vector() {
+    let base_idr = wide_base();
+    let other_idr = wide_other_view();
+    let base_p = wide_base_motion();
+    let skip = wide_dmvp_skip();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base_idr, &other_idr, &base_p, &skip] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_split(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_copied(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| wide_right_motion(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| right_half_shifts(picture))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = base_idr.clone();
+        annex.extend(&base_p);
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 32 * 16 + 16 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let idr = pictures
+            .iter()
+            .find(|picture| wide_split(picture))
+            .expect("base idr");
+        let predicted = pictures
+            .iter()
+            .find(|picture| wide_right_motion(picture))
+            .expect("base motion");
+        assert_eq!(&raw[..frame], &planes_of(idr));
+        assert_eq!(&raw[frame..], &planes_of(predicted));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &skip).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_coded_depth_motion_vector_cancels_the_base_motion() {
     let base_idr = dmvp_base_idr();
     let other_idr = dmvp_other_idr();
@@ -1882,6 +1946,121 @@ fn dmvp_other_idr() -> Vec<u8> {
     out.extend(annex_b_nal(3, 8, &pps()));
     out.extend(annex_b_extension(3, 21, &[0x80, 0xA0], &w.bytes));
     out
+}
+
+fn wide_other_view() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bits(0, 4);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+    for _ in 0..2 {
+        let mut luma = Vec::with_capacity(256);
+        for _row in 0..16 {
+            for col in 0..16 {
+                luma.push(if col < 8 { 40 } else { 220 });
+            }
+        }
+        pcm_block(&mut w, &luma, 50);
+    }
+    w.trailing();
+    let mut out = annex_b_nal(3, 15, &three_d_views(2));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0xA0], &w.bytes));
+    out
+}
+
+fn wide_base_motion() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.ue(1);
+    w.ue(0);
+    w.se(32);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    annex_b_nal(2, 1, &w.bytes)
+}
+
+fn wide_dmvp_skip() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(2);
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn wide_copied(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 32 * 16
+        && (0..16).all(|row| {
+            let start = row * 32;
+            let samples = &y[start..start + 32];
+            samples[..8].iter().all(|sample| *sample == 40)
+                && samples[8..16].iter().all(|sample| *sample == 220)
+                && samples[16..24].iter().all(|sample| *sample == 40)
+                && samples[24..].iter().all(|sample| *sample == 220)
+        })
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 50)
+}
+
+fn wide_right_motion(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 32 * 16
+        && (0..16).all(|row| {
+            let start = row * 32;
+            let left = &y[start..start + 16];
+            let right = &y[start + 16..start + 32];
+            left[..8].iter().all(|sample| *sample == 100)
+                && left[8..].iter().all(|sample| *sample == 180)
+                && right.iter().enumerate().all(|(col, sample)| {
+                    let want = if row < 4 && col < 4 { 183 } else { 180 };
+                    *sample == want
+                })
+        })
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
+}
+
+fn right_half_shifts(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 32 * 16
+        && (0..16).all(|row| {
+            let start = row * 32;
+            let left = &y[start..start + 16];
+            let right = &y[start + 16..start + 32];
+            left[..8].iter().all(|sample| *sample == 40)
+                && left[8..].iter().all(|sample| *sample == 220)
+                && right.iter().all(|sample| *sample == 220)
+        })
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 50)
 }
 
 fn dmvp_skip(flag: bool) -> Vec<u8> {
@@ -3309,6 +3488,10 @@ fn three_d_sequence(prediction: bool, near_exp: u32, far_exp: u32) -> Vec<u8> {
 /// flag copies that emptiness onto the texture interview lists. Four reference
 /// frames keep both views' pictures.
 fn three_d_two_views() -> Vec<u8> {
+    three_d_views(1)
+}
+
+fn three_d_views(mbs: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(139, 8);
     w.bits(0, 8);
@@ -3324,7 +3507,7 @@ fn three_d_two_views() -> Vec<u8> {
     w.ue(0);
     w.ue(4);
     w.bit(false);
-    w.ue(0);
+    w.ue(mbs.saturating_sub(1));
     w.ue(0);
     w.bit(true);
     w.bit(true);

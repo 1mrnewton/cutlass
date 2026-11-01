@@ -422,9 +422,6 @@ pub(crate) fn decode_mbs<S: Sample>(
     layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
-    if slice.dmvp && total != 1 {
-        return Err(CodecError::Unsupported { what: "3d" });
-    }
     let mbaff = slice.sps.mbaff && !pic.field;
     let next = slice.group_next.as_slice();
     if !next.is_empty() && next.len() != total {
@@ -654,7 +651,7 @@ fn skip_mb<S: Sample>(
             return Err(CodecError::Unsupported { what: "3d" });
         }
         let (mv, reference) = if slice.dmvp {
-            dmvp_skip_motion(pic, dpb, slice)
+            dmvp_skip_motion(pic, dpb, slice, mx, my)
                 .unwrap_or_else(|| (p_skip_mv(pic, mx, my, slice_id), 0))
         } else {
             (p_skip_mv(pic, mx, my, slice_id), 0)
@@ -787,16 +784,20 @@ fn interview_index<S: Sample>(pic: &Frame<S>, dpb: &[Frame<S>], list: &[usize]) 
     None
 }
 
-/// J.8.2.1.2 for one macroblock. `TextureFirstFlag` is 1, so the disparity
-/// starts at zero and the base view's texture at this order count supplies
-/// the vector. A missing or intra base macroblock leaves the ordinary skip.
+/// J.8.2.1.2. `TextureFirstFlag` is 1, so the disparity starts at zero and the
+/// base view's texture at this order count supplies the vector. The sample
+/// lands on (7, 7) of this macroblock. A missing or intra base macroblock
+/// leaves the ordinary skip.
 fn dmvp_skip_motion<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
+    mx: usize,
+    my: usize,
 ) -> Option<([i16; 2], i8)> {
     let base = base_texture(pic, dpb, slice)?;
-    let mb = base.mb.first()?;
+    let slot = my.saturating_mul(base.mb_w).saturating_add(mx);
+    let mb = base.mb.get(slot)?;
     if mb.intra {
         return None;
     }
@@ -860,7 +861,7 @@ fn dmvp_temporal_mvp<S: Sample>(
     let x = part.x / 4;
     let y = part.y / 4;
     let reference = ref_of(mb, x, y, 0);
-    let derived = correspond_mv(pic, dpb, slice, part, reference);
+    let derived = correspond_mv(pic, dpb, slice, (mx, my), part, reference);
     let mut a = part_motion(pic, mx, my, x as i32 - 1, y as i32, 0, mb);
     let mut b = part_motion(pic, mx, my, x as i32, y as i32 - 1, 0, mb);
     let above_right = part_motion(
@@ -911,13 +912,16 @@ fn correspond_mv<S: Sample>(
     pic: &Frame<S>,
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
+    at: (usize, usize),
     part: &Part,
     reference: i8,
 ) -> [i16; 2] {
     let Some(base) = base_texture(pic, dpb, slice) else {
         return [0, 0];
     };
-    let Some(stored) = base.mb.first() else {
+    let (mx, my) = at;
+    let slot = my.saturating_mul(base.mb_w).saturating_add(mx);
+    let Some(stored) = base.mb.get(slot) else {
         return [0, 0];
     };
     if stored.intra {

@@ -1,4 +1,4 @@
-//! Stateful profile 0 decoder.
+//! Stateful VP9 decoder.
 //!
 //! A failed frame leaves references and probabilities as they were. Reference
 //! slots update only after reconstruction succeeds. `show_existing_frame`
@@ -311,7 +311,7 @@ impl Default for Decoder {
     }
 }
 
-/// Profile-0 decoder on the video codec contract.
+/// VP9 decoder on the video codec contract.
 ///
 /// `push` consumes one access unit. A hidden frame returns no picture.
 /// `drain` is empty. `reset` drops reference pictures. A failed `push`
@@ -334,9 +334,17 @@ impl Vp9Decoder {
                 | PixelFormat::Yuv420p10
                 | PixelFormat::Yuv420p12
                 | PixelFormat::Yuv422p
+                | PixelFormat::Yuv422p10
+                | PixelFormat::Yuv422p12
                 | PixelFormat::Yuv440p
+                | PixelFormat::Yuv440p10
+                | PixelFormat::Yuv440p12
                 | PixelFormat::Yuv444p
+                | PixelFormat::Yuv444p10
+                | PixelFormat::Yuv444p12
                 | PixelFormat::Gbrp
+                | PixelFormat::Gbrp10
+                | PixelFormat::Gbrp12
         ) {
             return Err(CodecError::Unsupported {
                 what: "vp9 pixel format",
@@ -411,6 +419,14 @@ fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
     ) {
         (10, 1, 1, _) => PixelFormat::Yuv420p10,
         (12, 1, 1, _) => PixelFormat::Yuv420p12,
+        (10, 1, 0, _) => PixelFormat::Yuv422p10,
+        (12, 1, 0, _) => PixelFormat::Yuv422p12,
+        (10, 0, 1, _) => PixelFormat::Yuv440p10,
+        (12, 0, 1, _) => PixelFormat::Yuv440p12,
+        (10, 0, 0, 7) => PixelFormat::Gbrp10,
+        (12, 0, 0, 7) => PixelFormat::Gbrp12,
+        (10, 0, 0, _) => PixelFormat::Yuv444p10,
+        (12, 0, 0, _) => PixelFormat::Yuv444p12,
         (8, 1, 1, _) => PixelFormat::Yuv420p,
         (8, 1, 0, _) => PixelFormat::Yuv422p,
         (8, 0, 1, _) => PixelFormat::Yuv440p,

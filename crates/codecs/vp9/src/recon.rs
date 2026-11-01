@@ -1,4 +1,4 @@
-//! Reconstruction for profiles 0, 1, and 2.
+//! Reconstruction for profiles 0 through 3.
 //!
 //! Partition walk, mode decode, and coefficient reconstruction follow
 //! libvpx `decode_partition` and `decode_block`. Inter prediction scales a

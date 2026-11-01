@@ -168,11 +168,6 @@ pub fn parse<'a>(state: &Persist, data: &'a [u8]) -> Result<Parsed<'a>, CodecErr
     if profile > 3 {
         return Err(bad(&bits, "vp9 profile"));
     }
-    if profile == 3 {
-        return Err(CodecError::Unsupported {
-            what: "vp9 profile",
-        });
-    }
     if bits.read(1)? == 1 {
         return show_existing(state, &mut bits, data);
     }
@@ -1112,9 +1107,9 @@ mod tests {
     }
 
     #[test]
-    fn profile_three_is_unsupported() {
+    fn profile_three_header_continues_past_the_profile_bits() {
         let err = must_fail(&[0xb0]);
-        assert!(err.contains("profile"), "{err}");
+        assert!(!err.contains("vp9 profile"), "{err}");
     }
 
     #[test]

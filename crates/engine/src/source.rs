@@ -265,6 +265,14 @@ fn pixel_layout(pixel: PixelFormat) -> &'static str {
         PixelFormat::Gbrp => "gbrp",
         PixelFormat::Yuv420p10 => "yuv420p10",
         PixelFormat::Yuv420p12 => "yuv420p12",
+        PixelFormat::Yuv422p10 => "yuv422p10",
+        PixelFormat::Yuv422p12 => "yuv422p12",
+        PixelFormat::Yuv440p10 => "yuv440p10",
+        PixelFormat::Yuv440p12 => "yuv440p12",
+        PixelFormat::Yuv444p10 => "yuv444p10",
+        PixelFormat::Yuv444p12 => "yuv444p12",
+        PixelFormat::Gbrp10 => "gbrp10",
+        PixelFormat::Gbrp12 => "gbrp12",
         PixelFormat::None => "none",
     }
 }

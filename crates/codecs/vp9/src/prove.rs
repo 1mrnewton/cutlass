@@ -192,6 +192,52 @@ fn profile2_depth_matches_ffmpeg_software() {
     }
 }
 
+#[test]
+fn profile3_chroma_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no profile 3 source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let cases = [
+        ("yuv422p10le", PixelFormat::Yuv422p10),
+        ("yuv422p12le", PixelFormat::Yuv422p12),
+        ("yuv440p10le", PixelFormat::Yuv440p10),
+        ("yuv440p12le", PixelFormat::Yuv440p12),
+        ("yuv444p10le", PixelFormat::Yuv444p10),
+        ("yuv444p12le", PixelFormat::Yuv444p12),
+        ("gbrp10le", PixelFormat::Gbrp10),
+        ("gbrp12le", PixelFormat::Gbrp12),
+    ];
+    for (pix_fmt, format) in cases {
+        let dir = temp_dir(pix_fmt);
+        let ivf = dir.join("in.ivf");
+        encode_profile3(&ffmpeg, &source, &ivf, pix_fmt);
+        let stream = read_ivf(&ivf);
+        assert!(!stream.frames.is_empty(), "{pix_fmt} produced no frames");
+        let (ours, _) = decode_shown(&stream, format);
+        let oracle = ffmpeg_yuv(&ffmpeg, &ivf, pix_fmt);
+        assert_eq!(
+            ours.len(),
+            oracle.len(),
+            "{pix_fmt} shown bytes differ {} vs {}",
+            ours.len(),
+            oracle.len()
+        );
+        let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{pix_fmt} first mismatch at {mismatch:?}");
+        eprintln!(
+            "profile 3 {pix_fmt} {} frames {} bytes",
+            stream.frames.len(),
+            ours.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
     let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");
@@ -309,6 +355,41 @@ fn encode_profile2(ffmpeg: &Path, source: &Path, ivf: &Path, pix_fmt: &str) {
             "libvpx-vp9",
             "-profile:v",
             "2",
+            "-pix_fmt",
+            pix_fmt,
+            "-b:v",
+            "400k",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-f",
+            "ivf",
+        ])
+        .arg(ivf)
+        .output()
+        .expect("encode");
+    assert!(
+        status.status.success(),
+        "encode {pix_fmt} {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+fn encode_profile3(ffmpeg: &Path, source: &Path, ivf: &Path, pix_fmt: &str) {
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(source)
+        .args([
+            "-an",
+            "-frames:v",
+            "4",
+            "-vf",
+            "scale=160:96",
+            "-c:v",
+            "libvpx-vp9",
+            "-profile:v",
+            "3",
             "-pix_fmt",
             pix_fmt,
             "-b:v",

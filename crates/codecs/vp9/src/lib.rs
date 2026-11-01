@@ -1,7 +1,7 @@
 //! VP9 decoder and profile 0 encoder.
 //!
-//! The decoder accepts profiles 0, 1, and 2. Profile 3 is rejected. The
-//! encoder emits profile 0. Playback and a WebM container are outside this crate.
+//! The decoder accepts profiles 0, 1, 2, and 3. The encoder emits profile 0.
+//! Playback and a WebM container are outside this crate.
 
 #![forbid(unsafe_code)]
 

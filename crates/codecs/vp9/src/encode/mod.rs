@@ -724,8 +724,8 @@ mod tests {
         assert!(matches!(empty, Err(CodecError::InvalidApi { .. })));
         let err = decoder
             .push(&Packet::video(vec![0xb0], 0, 1, 30, true))
-            .expect_err("profile");
-        assert!(err.to_string().contains("profile"), "{err}");
+            .expect_err("truncated profile 3");
+        assert!(!err.to_string().contains("vp9 profile"), "{err}");
         let err = decoder
             .push(&Packet::video(vec![0x90], 0, 1, 30, true))
             .expect_err("truncated profile 2");

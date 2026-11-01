@@ -29,7 +29,7 @@ Known specification mismatches this crate follows libvpx on, because that is wha
 
 Profile 0, 8-bit, 4:2:0, key frames and inter frames. The decoder accepts partitions, transform sizes through 32×32, intra modes, inter modes including compound prediction, sub-pixel motion, the loop filter, segmentation, tiles, eight reference slots, `show_existing_frame`, error-resilient frames, probability adaptation, and reference scaling.
 
-Profile 1 (8-bit 4:2:2, 4:4:0, 4:4:4, and sRGB) and profile 2 (10-bit and 12-bit 4:2:0) are decoded. Profile 3 still returns `CodecError::Unsupported`. A coded edge above 4096 returns `CodecError::Limit`. That edge is a resource limit, not a profile cut.
+Profiles 0 through 3 are decoded, including 10-bit and 12-bit 4:2:0, 4:2:2, 4:4:0, 4:4:4, and sRGB. A coded edge above 4096 returns `CodecError::Limit`. That edge is a resource limit, not a profile cut.
 
 The encoder emits profile 0, error-resilient, one tile, no loop filter, no segmentation, DC intra, a single LAST reference, integer motion, and transforms no larger than 8×8. It quantizes and can follow a target bitrate. The decoder still accepts libvpx streams that use the rest of profile 0.
 
@@ -59,7 +59,7 @@ Recorded line:
 | Profile 0, 8-bit, 4:2:0, key and inter | Accept | Emit, within the encoder limits above | `lossless_constant_matches_the_source`, `lossless_motion_matches_the_source`, `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `factories_open_the_profile_0_codec` | Verified on this machine |
 | Profile 1, 8-bit 4:2:2, 4:4:0, 4:4:4, sRGB | Accept | Error | `profile1_chroma_matches_ffmpeg_software` | Verified |
 | Profile 2, 10-bit and 12-bit 4:2:0 | Accept | Error | `profile2_depth_matches_ffmpeg_software` | Verified |
-| Profile 3 | Error | Error | `profile_three_is_unsupported` | Verified |
+| Profile 3, 10-bit and 12-bit 4:2:2, 4:4:0, 4:4:4, sRGB | Accept | Error | `profile3_chroma_matches_ffmpeg_software` | Verified |
 | Edge above 4096 | Error `Limit` | Error `Limit` | `open_rejects_the_sizes_and_formats_outside_profile_0` | Verified |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |

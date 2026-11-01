@@ -19,6 +19,22 @@ pub enum PixelFormat {
     Yuv420p10,
     /// 12-bit 4:2:0, little-endian samples.
     Yuv420p12,
+    /// 10-bit 4:2:2, little-endian samples.
+    Yuv422p10,
+    /// 12-bit 4:2:2, little-endian samples.
+    Yuv422p12,
+    /// 10-bit 4:4:0, little-endian samples.
+    Yuv440p10,
+    /// 12-bit 4:4:0, little-endian samples.
+    Yuv440p12,
+    /// 10-bit 4:4:4, little-endian samples.
+    Yuv444p10,
+    /// 12-bit 4:4:4, little-endian samples.
+    Yuv444p12,
+    /// 10-bit 4:4:4 stored as G, B, R, little-endian samples.
+    Gbrp10,
+    /// 12-bit 4:4:4 stored as G, B, R, little-endian samples.
+    Gbrp12,
 }
 
 /// Color primaries named on a video stream.
@@ -87,9 +103,14 @@ impl PixelFormat {
             Self::Yuv420p | Self::Yuv420p10 | Self::Yuv420p12 => {
                 Some((width.div_ceil(2), height.div_ceil(2)))
             }
-            Self::Yuv422p => Some((width.div_ceil(2), height)),
-            Self::Yuv440p => Some((width, height.div_ceil(2))),
-            Self::Yuv444p | Self::Gbrp => Some((width, height)),
+            Self::Yuv422p | Self::Yuv422p10 | Self::Yuv422p12 => Some((width.div_ceil(2), height)),
+            Self::Yuv440p | Self::Yuv440p10 | Self::Yuv440p12 => Some((width, height.div_ceil(2))),
+            Self::Yuv444p
+            | Self::Yuv444p10
+            | Self::Yuv444p12
+            | Self::Gbrp
+            | Self::Gbrp10
+            | Self::Gbrp12 => Some((width, height)),
             Self::None | Self::Rgba8 => None,
         }
     }

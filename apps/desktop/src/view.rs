@@ -1304,7 +1304,15 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let lane_area = Rect::from_min_max(Pos2::new(lanes_left, tracks.top()), tracks.max);
     shell.prepare_lane(lane_area.width().max(1.0));
     let (rate, drop_frame) = ruler_rate(shell);
-    paint_ticks(ui, ruler, lanes_left, shell.pixel_size(), rate, drop_frame);
+    paint_ticks(
+        ui,
+        ruler,
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        rate,
+        drop_frame,
+    );
     let rows = shell.lanes();
     let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
     let boxes = lane_rects(flags, lane_area);
@@ -1317,7 +1325,12 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
-    let playhead_x = lanes_left + shell.playhead().0 as f32 * shell.pixel_size() as f32;
+    let playhead_x = lane_x(
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        shell.playhead().0,
+    );
     if (lanes_left..=tracks.right()).contains(&playhead_x) {
         let mark = Rect::from_center_size(
             Pos2::new(playhead_x, ruler.bottom() - 6.0),
@@ -1469,11 +1482,17 @@ fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
     Rect::from_min_max(Pos2::new(lanes_left, ruler.top()), ruler.max)
 }
 
+fn lane_x(lanes_left: f32, pixel_size: f64, origin: i64, time: i64) -> f32 {
+    let delta = (time - origin) as f64 * pixel_size;
+    lanes_left + delta as f32
+}
+
 fn paint_ticks(
     ui: &Ui,
     ruler: Rect,
     lanes_left: f32,
     pixel_size: f64,
+    origin: i64,
     rate: FrameRate,
     drop_frame: bool,
 ) {
@@ -1485,6 +1504,7 @@ fn paint_ticks(
         ruler,
         lanes_left,
         pixel_size,
+        origin,
         width: f64::from(ruler.right() - lanes_left),
     };
     if let Some(stride) = frame_stride(pixel_size, rate) {
@@ -1492,8 +1512,16 @@ fn paint_ticks(
         return;
     }
     let step = second_step(pixel_size);
-    let mut time = 0.0;
-    while time * pixel_size <= grid.width {
+    let origin = grid.origin as f64;
+    let mut time = if origin <= 0.0 {
+        0.0
+    } else {
+        (origin / step).floor() * step
+    };
+    if time < 0.0 {
+        time = 0.0;
+    }
+    while (time - origin) * pixel_size <= grid.width {
         paint_major(&grid, time, second_label(time));
         paint_minor(&grid, time, time + step / 2.0);
         time += step;
@@ -1508,6 +1536,7 @@ struct TickGrid<'a> {
     ruler: Rect,
     lanes_left: f32,
     pixel_size: f64,
+    origin: i64,
     width: f64,
 }
 
@@ -1525,13 +1554,17 @@ fn frame_stride(pixel_size: f64, rate: FrameRate) -> Option<i64> {
 }
 
 fn paint_frame_ticks(grid: &TickGrid<'_>, rate: FrameRate, drop_frame: bool, stride: i64) {
-    let mut index = 0_i64;
+    let mut index = rate.frame_index(Micros(grid.origin.max(0))).unwrap_or(0);
+    if stride > 1 {
+        index -= index.rem_euclid(stride);
+    }
+    let origin = grid.origin as f64;
     for _ in 0..10_000 {
         let Some(start) = rate.frame_start(index) else {
             return;
         };
         let time = start.0 as f64;
-        if time * grid.pixel_size > grid.width {
+        if (time - origin) * grid.pixel_size > grid.width {
             return;
         }
         paint_major(grid, time, ruler_label(time, 1.0, rate, drop_frame));
@@ -1567,7 +1600,15 @@ fn second_step(pixel_size: f64) -> f64 {
 }
 
 fn paint_major(grid: &TickGrid<'_>, time: f64, label: String) {
-    let x = grid.lanes_left + (time * grid.pixel_size) as f32;
+    let x = lane_x(
+        grid.lanes_left,
+        grid.pixel_size,
+        grid.origin,
+        time.round() as i64,
+    );
+    if x < grid.lanes_left - 1.0 || x > grid.ruler.right() + 1.0 {
+        return;
+    }
     grid.ui.painter().vline(
         x,
         (grid.ruler.bottom() - 12.0)..=grid.ruler.bottom(),
@@ -1583,9 +1624,20 @@ fn paint_major(grid: &TickGrid<'_>, time: f64, label: String) {
 }
 
 fn paint_minor(grid: &TickGrid<'_>, major: f64, minor: f64) {
-    let x = grid.lanes_left + (major * grid.pixel_size) as f32;
-    let minor_x = grid.lanes_left + (minor * grid.pixel_size) as f32;
-    if minor * grid.pixel_size <= grid.width && minor_x - x >= 8.0 {
+    let x = lane_x(
+        grid.lanes_left,
+        grid.pixel_size,
+        grid.origin,
+        major.round() as i64,
+    );
+    let minor_x = lane_x(
+        grid.lanes_left,
+        grid.pixel_size,
+        grid.origin,
+        minor.round() as i64,
+    );
+    let origin = grid.origin as f64;
+    if (minor - origin) * grid.pixel_size <= grid.width && minor_x - x >= 8.0 {
         grid.ui.painter().vline(
             minor_x,
             (grid.ruler.bottom() - 6.0)..=grid.ruler.bottom(),
@@ -1801,21 +1853,32 @@ fn paint_clip(
     index: usize,
 ) {
     let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
-    let x = lanes_left + clip.start.0 as f32 * shell.pixel_size() as f32;
+    let x = lane_x(
+        lanes_left,
+        shell.pixel_size(),
+        shell.view_origin().0,
+        clip.start.0,
+    );
     let width = (clip.duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
     let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
+    let visible = clip_rect.intersect(row);
+    if visible.width() <= 0.0 || visible.height() <= 0.0 {
+        return;
+    }
     let selected = shell.selected().is_some_and(|id| id == &clip.id);
-    ui.painter()
-        .rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
+    let painter = ui.painter().with_clip_rect(row);
+    painter.rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
     if selected {
-        ui.painter().rect_stroke(
+        painter.rect_stroke(
             clip_rect,
             CornerRadius::same(7),
             egui::Stroke::new(1.5, tokens::SELECTED),
             egui::StrokeKind::Inside,
         );
     }
-    let painter = ui.painter().with_clip_rect(clip_rect.shrink(6.0));
+    let painter = ui
+        .painter()
+        .with_clip_rect(clip_rect.shrink(6.0).intersect(row));
     painter.text(
         clip_rect.left_center() + Vec2::new(8.0, 0.0),
         Align2::LEFT_CENTER,
@@ -1824,7 +1887,7 @@ fn paint_clip(
         Color32::WHITE,
     );
     let response = ui.interact(
-        clip_rect,
+        visible,
         ui.scope_id().with(("clip", index, clip.id.as_str())),
         Sense::click_and_drag(),
     );

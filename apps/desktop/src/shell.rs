@@ -176,6 +176,8 @@ pub struct Shell {
     playhead: Micros,
     playing: bool,
     pixel_size: f64,
+    /// Left edge of the lanes, in microseconds.
+    view_origin: i64,
     lane_width: f64,
     /// Fit the cut on the next lane layout. An empty cut stays at the opening scale.
     fit_on_layout: bool,
@@ -211,6 +213,7 @@ impl Shell {
             playhead: Micros(0),
             playing: false,
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
+            view_origin: 0,
             lane_width: 800.0,
             fit_on_layout: false,
             library_width: tokens::LIBRARY_WIDTH,
@@ -334,6 +337,7 @@ impl Shell {
         self.path = None;
         self.playhead = Micros(0);
         self.playing = false;
+        self.view_origin = 0;
         self.selected = None;
         self.fit_on_layout = false;
         self.notice.clear();
@@ -352,6 +356,11 @@ impl Shell {
 
     pub fn pixel_size(&self) -> f64 {
         self.pixel_size
+    }
+
+    /// The time at the left edge of the lanes.
+    pub fn view_origin(&self) -> Micros {
+        Micros(self.view_origin.max(0))
     }
 
     pub fn library_width(&self) -> f32 {
@@ -419,6 +428,7 @@ impl Shell {
         self.hold = Some(hold);
         self.playhead = Micros(0);
         self.playing = false;
+        self.view_origin = 0;
         self.selected = None;
         self.pixel_size = opening_pixel_size(rate);
         self.fit_on_layout = self.cut_duration().0 > 0;
@@ -496,6 +506,7 @@ impl Shell {
     }
 
     pub fn seek_ruler(&mut self, x: f64) -> Result<Micros, ShellError> {
+        let x = self.time_zero_x(x);
         let draft = self.session_draft()?;
         let hit =
             hit_test(draft, self.scale(), Pointer { x, y: 0.0 }).map_err(|_| ShellError::Zoom)?;
@@ -517,6 +528,7 @@ impl Shell {
         if self.playing || self.settings.playback.scrub_audio {
             self.queue_preview(PLAY_FRAMES);
         }
+        self.reveal_playhead();
     }
 
     pub fn play(&mut self) {
@@ -530,6 +542,7 @@ impl Shell {
         }
         self.playing = true;
         self.queue_preview(PLAY_FRAMES);
+        self.reveal_playhead();
     }
 
     pub fn pause(&mut self) {
@@ -590,6 +603,7 @@ impl Shell {
         } else {
             self.output.queue(&[]);
         }
+        self.reveal_playhead();
     }
 
     #[cfg(test)]
@@ -696,6 +710,7 @@ impl Shell {
         x: f64,
         y: f64,
     ) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
         let gesture = MoveGesture {
             segment_id,
             pointer: Pointer { x, y },
@@ -727,6 +742,7 @@ impl Shell {
     /// The first segment on an empty cut fits that cut to three quarters of
     /// the lane. Another segment keeps the scale.
     pub fn drop_medium(&mut self, material_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
         let (kind, duration, first_clip) = {
             let draft = self.session_draft()?;
             let span = medium_span(draft, material_id).ok_or_else(|| {
@@ -797,6 +813,7 @@ impl Shell {
             .zoom_in(self.zoom_bounds())
             .ok_or(ShellError::Zoom)?
             .pixel_size();
+        self.reveal_playhead();
         Ok(())
     }
 
@@ -806,6 +823,7 @@ impl Shell {
             .zoom_out(self.zoom_bounds())
             .ok_or(ShellError::Zoom)?
             .pixel_size();
+        self.reveal_playhead();
         Ok(())
     }
 
@@ -819,6 +837,8 @@ impl Shell {
             .zoom_to_fit(bounds)
             .ok_or(ShellError::Zoom)?
             .pixel_size();
+        self.view_origin = 0;
+        self.reveal_playhead();
         Ok(())
     }
 
@@ -1129,6 +1149,58 @@ impl Shell {
             }
         }
         Micros(end.max(0))
+    }
+
+    /// `x` is pixels from the left of the lanes. Hit testing counts from time zero.
+    fn time_zero_x(&self, x_in_view: f64) -> f64 {
+        let shift = self.view_origin.max(0) as f64 * self.pixel_size;
+        if shift.is_finite() {
+            x_in_view + shift
+        } else {
+            x_in_view
+        }
+    }
+
+    fn visible_micros(&self) -> Option<i64> {
+        if !self.pixel_size.is_finite()
+            || self.pixel_size <= 0.0
+            || !self.lane_width.is_finite()
+            || self.lane_width <= 0.0
+        {
+            return None;
+        }
+        let span = self.lane_width / self.pixel_size;
+        if !span.is_finite() || span <= 1.0 || span >= i64::MAX as f64 {
+            return None;
+        }
+        Some(span.round() as i64)
+    }
+
+    /// Keep the playhead inside the lanes. A cut that already fits stays at the start.
+    fn reveal_playhead(&mut self) {
+        let Some(visible) = self.visible_micros() else {
+            return;
+        };
+        let end = self.cut_duration().0.max(0);
+        if end <= visible {
+            self.view_origin = 0;
+            return;
+        }
+        let lead = ((visible as f64) * 0.15).round() as i64;
+        let lead = lead.clamp(0, visible.saturating_sub(1));
+        let play = self.playhead.0.max(0);
+        let mut origin = self.view_origin.max(0);
+        let right = origin.saturating_add(visible).saturating_sub(lead);
+        if play >= right {
+            origin = play.saturating_sub(visible.saturating_sub(lead));
+        } else if play < origin {
+            origin = play;
+        }
+        let max_origin = end.saturating_sub(visible).max(0);
+        if origin > max_origin {
+            origin = max_origin;
+        }
+        self.view_origin = origin.max(0);
     }
 
     fn attribute_on(&self, track_id: &TrackId, flag: i32) -> bool {
@@ -2114,6 +2186,37 @@ mod tests {
         desktop.advance(1_000_000);
         assert!(!desktop.playing());
         assert_eq!(desktop.playhead(), Micros(1_000_000));
+    }
+
+    #[test]
+    fn playback_keeps_a_zoomed_playhead_in_the_lane() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.set_lane_width(800.0);
+        desktop.play();
+        desktop.advance(400_000);
+        let origin = desktop.view_origin().0;
+        let play = desktop.playhead().0;
+        let visible = (800.0 / desktop.pixel_size()).round() as i64;
+        assert!(origin > 0, "origin {origin}");
+        assert!(
+            play >= origin && play <= origin + visible,
+            "play {play} origin {origin} visible {visible}"
+        );
+        let at_left = desktop.seek_ruler(0.0).unwrap();
+        assert!(at_left.0 > 0, "{at_left:?}");
+        assert!(at_left.0 <= desktop.view_origin().0.saturating_add(1));
+        desktop.seek(Micros(0));
+        assert_eq!(desktop.view_origin(), Micros(0));
+        desktop.zoom_fit().unwrap();
+        desktop.advance(400_000);
+        assert_eq!(
+            desktop.view_origin(),
+            Micros(0),
+            "a cut that fits the lane stays at the start"
+        );
     }
 
     #[test]

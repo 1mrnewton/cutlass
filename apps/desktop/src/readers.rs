@@ -9,11 +9,12 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// The codecs [`crate::register_codecs`] installs, plus ISOBMFF and stills.
+/// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, and stills.
 pub(crate) fn installed_readers() -> ReaderFactory {
     let (decoders, _) = crate::register_codecs();
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
+    readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_still::probe, open_still);
     *readers.decoders_mut() = decoders;
     readers
@@ -41,6 +42,19 @@ fn open_isobmff(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         message: error.to_string(),
     })?;
     Ok(Box::new(IsoBmffFile::open(file)?))
+}
+
+fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_riff::WavDemux::open(file, length)?))
 }
 
 fn open_still(path: &Path) -> Result<Box<dyn Demux>, OpenError> {

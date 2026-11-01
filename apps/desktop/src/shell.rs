@@ -5,8 +5,9 @@
 //! not push an undo step. The picture is `eval::frame` on the software
 //! device. Video segments open through the shell's reader factory. A repeated
 //! playhead reuses the stored picture. A new playhead seeks the open file.
-//! This shell does not composite, and it does not open an audio device.
-//! Export asks eval for the frame at the playhead and writes that PNG.
+//! This shell does not composite. Play queues the mixed audio into a software
+//! buffer. The window opens this host's output. Export asks eval for the
+//! frame at the playhead and writes that PNG.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -17,12 +18,14 @@ use cutlass_editor::{
     hit_test, lane_category, lanes, last_accuracy_step, minimum_pixel_size, move_gesture,
 };
 use cutlass_encode::EncodeFactory;
-use cutlass_eval::ReaderFactory;
+use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
     Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType, Micros,
     Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
 };
-use cutlass_playback::FrameCache;
+use cutlass_playback::{
+    AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
+};
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
@@ -149,6 +152,8 @@ pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
     readers: ReaderFactory,
+    output: AudioOutput,
+    heard: Heard,
     preview_cache: RefCell<FrameCache>,
     settings: Settings,
     session: Option<Session>,
@@ -176,6 +181,8 @@ impl Shell {
             decoders,
             encoders,
             readers: crate::readers::installed_readers(),
+            output: AudioOutput::open(AudioHost::Software),
+            heard: Heard::new(),
             preview_cache: RefCell::new(FrameCache::new()),
             settings,
             session: None,
@@ -211,6 +218,10 @@ impl Shell {
 
     pub fn set_seek_during_playback(&mut self, value: SeekDuringPlayback) {
         self.settings.playback.seek_during_playback = value;
+    }
+
+    pub fn set_scrub_audio(&mut self, value: bool) {
+        self.settings.playback.scrub_audio = value;
     }
 
     pub fn project_name(&self) -> String {
@@ -259,9 +270,20 @@ impl Shell {
         self.session.as_ref().map(Session::draft)
     }
 
-    /// This checkout opens no audio device. The picture still advances.
+    /// Software output and a live device are open. Linux and a missing device
+    /// are not. Pictures still advance either way.
     pub fn audio_output_open(&self) -> bool {
-        false
+        self.output.gap().is_none()
+    }
+
+    /// Replace the software buffer with the output for `host`.
+    pub fn open_preview_audio(&mut self, host: AudioHost) {
+        self.output = AudioOutput::open(host);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_preview(&self) -> &[u8] {
+        self.output.queued()
     }
 
     pub fn open_folder(&mut self, path: &Path) -> Result<(), ShellError> {
@@ -281,6 +303,8 @@ impl Shell {
         self.selected = None;
         self.pixel_size = opening_pixel_size(rate);
         self.notice.clear();
+        self.heard.clear();
+        self.output.queue(&[]);
         Ok(())
     }
 
@@ -369,14 +393,19 @@ impl Shell {
             self.playing = false;
         }
         self.playhead = Micros(time.0.max(0));
+        if self.playing || self.settings.playback.scrub_audio {
+            self.queue_preview(PLAY_FRAMES);
+        }
     }
 
     pub fn play(&mut self) {
         self.playing = true;
+        self.queue_preview(PLAY_FRAMES);
     }
 
     pub fn pause(&mut self) {
         self.playing = false;
+        self.output.queue(&[]);
     }
 
     pub fn scrub(&mut self, time: Micros) -> Result<Picture, ShellError> {
@@ -399,12 +428,38 @@ impl Shell {
             }
         }
         self.playhead = Micros(next);
+        if self.playing {
+            self.queue_preview(preview_frames(elapsed));
+        } else {
+            self.output.queue(&[]);
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
         self.readers = readers;
         self.preview_cache.borrow_mut().clear();
+        self.heard.clear();
+    }
+
+    fn queue_preview(&mut self, frames: u32) {
+        let Some(session) = self.session.as_ref() else {
+            self.output.queue(&[]);
+            return;
+        };
+        let root = self.path.clone();
+        queue_mix(
+            &mut self.output,
+            PreviewMix {
+                draft: session.draft(),
+                revision: session.revision(),
+                time: self.playhead,
+                frames,
+                readers: &self.readers,
+                heard: &mut self.heard,
+                root: root.as_deref(),
+            },
+        );
     }
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
@@ -1147,9 +1202,10 @@ mod tests {
     };
     use cutlass_eval::ReaderFactory;
     use cutlass_model::{
-        Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, SegmentId, TimeRange,
-        TrackAttribute,
+        Draft, MaterialAudio, MaterialColorConfig, MaterialId, MaterialVideo, Micros, Segment,
+        SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
+    use cutlass_playback::AudioHost;
     use cutlass_session::EditError;
     use cutlass_settings::{SeekDuringPlayback, Settings};
     use cutlass_store::Folder;
@@ -1583,7 +1639,7 @@ mod tests {
         desktop.open_folder(&temp.path).unwrap();
         let revision = desktop.revision();
         desktop.play();
-        assert!(!desktop.audio_output_open());
+        assert!(desktop.audio_output_open());
         let colored = desktop.preview_bytes().unwrap();
         assert_eq!(colored.width, 2);
         assert_eq!(colored.height, 1);
@@ -1598,6 +1654,151 @@ mod tests {
         desktop.pause();
         assert!(!desktop.playing());
         assert_eq!(desktop.revision(), revision);
+    }
+
+    fn write_tone(path: &Path) {
+        let mut payload = Vec::new();
+        for _ in 0..4 {
+            payload.extend_from_slice(&32_767_i16.to_le_bytes());
+        }
+        let data_bytes = u32::try_from(payload.len()).expect("wav size");
+        let rate = 48_000_u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        std::fs::write(path, bytes).expect("wav");
+    }
+
+    fn tone_project(dir: &Path, stored: &str) {
+        let mut draft = Draft::empty("draft");
+        draft.duration = Micros(1_000_000);
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: stored.to_owned(),
+            duration: Micros(1_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("audio");
+        track.kind = TrackType::Audio;
+        let mut segment = Segment::new("clip", "tone", TimeRange::new(0, 1_000_000));
+        segment.volume = 0.5;
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        track.segments.push(segment);
+        draft.tracks.push(track);
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    fn preview_samples(bytes: &[u8]) -> Vec<f32> {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect()
+    }
+
+    #[test]
+    fn play_queues_the_mixed_tone_and_a_mute_or_linux_host_stays_silent() {
+        let temp = Temp::new();
+        write_tone(&temp.path.join("tone.wav"));
+        tone_project(&temp.path, "tone.wav");
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let revision = desktop.revision();
+        desktop.play();
+        assert!(desktop.audio_output_open());
+        assert_eq!(preview_samples(desktop.queued_preview()), vec![0.5; 8]);
+        assert_eq!(desktop.revision(), revision);
+        let picture = desktop.preview_bytes().unwrap();
+        assert_eq!(picture.width, 2);
+        assert_eq!(picture.height, 1);
+
+        desktop.pause();
+        desktop.seek(Micros(0));
+        assert!(desktop.queued_preview().is_empty());
+        desktop.set_scrub_audio(true);
+        desktop.seek(Micros(0));
+        assert_eq!(preview_samples(desktop.queued_preview()), vec![0.5; 8]);
+        assert_eq!(desktop.revision(), revision);
+
+        let audio = desktop
+            .lanes()
+            .into_iter()
+            .find(|lane| !lane.main)
+            .expect("audio lane");
+        desktop
+            .toggle_attribute(audio.track_id, TrackAttribute::MUTE)
+            .unwrap();
+        desktop.play();
+        assert!(desktop.queued_preview().is_empty());
+
+        desktop.open_preview_audio(AudioHost::Linux);
+        assert!(!desktop.audio_output_open());
+        desktop.play();
+        assert!(desktop.queued_preview().is_empty());
+        assert!(desktop.preview_bytes().is_ok());
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_project_does_not_play() {
+        let temp = Temp::new();
+        let name = format!(
+            "escape-{}.wav",
+            temp.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap()
+        );
+        let outside = temp.path.join("..").join(&name);
+        write_tone(&outside);
+        tone_project(&temp.path, &format!("../{name}"));
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let revision = desktop.revision();
+        desktop.play();
+        assert!(desktop.queued_preview().is_empty());
+        assert_eq!(desktop.revision(), revision);
+        let _ = std::fs::remove_file(outside);
+    }
+
+    #[test]
+    fn a_local_wav_queues_when_one_is_present() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let Some(tone) = std::fs::read_dir(&root).ok().and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("wav") {
+                    return None;
+                }
+                let len = entry.metadata().ok()?.len();
+                (len > 0 && len <= 256 * 1024).then_some(path)
+            })
+        }) else {
+            eprintln!("skipped: ../local-files has no small wav");
+            return;
+        };
+        let temp = Temp::new();
+        tone_project(&temp.path, &tone.display().to_string());
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let revision = desktop.revision();
+        desktop.play();
+        assert!(desktop.queued_preview().len().is_multiple_of(8));
+        assert_eq!(desktop.revision(), revision);
+        assert!(desktop.preview_bytes().is_ok());
     }
 
     #[test]

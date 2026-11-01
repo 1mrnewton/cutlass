@@ -35,15 +35,15 @@ pub struct PreviewMix<'a> {
     pub root: Option<&'a Path>,
 }
 
-/// Queue the mix at `mix.time`. A silent host is left alone. A failed mix
-/// queues silence so the picture can still be shown.
+/// Queue the mix at `mix.time`. A silent host is left alone. Zero frames
+/// leaves the current slice in place. A failed mix queues silence so the
+/// picture can still be shown.
 pub fn queue_mix(output: &mut AudioOutput, mix: PreviewMix<'_>) {
     if output.gap().is_some() {
         return;
     }
     let frames = mix.frames.min(max_frames());
     if frames == 0 {
-        output.queue(&[]);
         return;
     }
     output.queue(&mixed_bytes(mix, frames));

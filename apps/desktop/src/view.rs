@@ -1205,6 +1205,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                             let enabled = tool_enabled(shell, name);
                             let active = match *name {
                                 "split" => shell.blade(),
+                                "marker" => shell.marking(),
                                 "guides" => shell.guides_shown(),
                                 "lock" => shell.guides_locked(),
                                 "linkage" => shell.linkage_enabled(),
@@ -1275,7 +1276,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
         "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
         | "lock" | "linkage" => true,
-        "split" => shell.has_clip(),
+        "split" | "marker" => shell.has_clip(),
         _ => false,
     }
 }
@@ -1283,6 +1284,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
 fn tool_clicked(shell: &mut Shell, name: &str) {
     if name == "select" {
         shell.clear_blade();
+        shell.clear_marker();
         return;
     }
     if !tool_enabled(shell, name) {
@@ -1297,6 +1299,10 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "delete" => shell.delete_target(),
         "split" => {
             shell.toggle_blade();
+            Ok(())
+        }
+        "marker" => {
+            shell.toggle_marker();
             Ok(())
         }
         "guides" => {
@@ -1472,11 +1478,16 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     {
         shell.set_notice(error.to_string());
     }
+    let marker_clicked = paint_ruler_markers(shell, ui, lanes_left, ruler);
     if ruler_hit.clicked()
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
     {
         let x = f64::from(pointer.x - lanes_left).max(0.0);
-        if let Err(error) = shell.seek_ruler(x) {
+        if shell.marking() && !marker_clicked {
+            if let Err(error) = shell.drop_marker(None, x, 0.0) {
+                shell.set_notice(error.to_string());
+            }
+        } else if !marker_clicked && let Err(error) = shell.seek_ruler(x) {
             shell.set_notice(error.to_string());
         }
     }
@@ -2444,6 +2455,24 @@ fn paint_clip(
                 shell.set_notice(error.to_string());
             }
         }
+    } else if body.width() > 0.0 && shell.marking() {
+        let response = ui.interact(
+            body,
+            ui.scope_id().with(("clip", index, clip.id.as_str())),
+            Sense::click(),
+        );
+        response.clone().on_hover_text(span.clone());
+        if response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::VerticalText);
+        }
+        if response.clicked()
+            && let Some(pos) = pointer_pos(ui, &response)
+        {
+            let x = f64::from(pos.x - lanes_left).max(0.0);
+            if let Err(error) = shell.drop_marker(Some(clip.id.clone()), x, editor_lane_y(index)) {
+                shell.set_notice(error.to_string());
+            }
+        }
     } else if body.width() > 0.0 {
         let response = ui.interact(
             body,
@@ -2499,6 +2528,7 @@ fn paint_clip(
         lanes_left,
         index,
     );
+    paint_clip_markers(shell, ui, clip, lanes_left, row);
 }
 
 fn drag_clip_edge(
@@ -2544,6 +2574,111 @@ fn drag_clip_edge(
         index,
         Some(edge),
     );
+}
+
+fn paint_ruler_markers(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, ruler: Rect) -> bool {
+    let marks: Vec<_> = shell
+        .markers()
+        .into_iter()
+        .filter(|mark| mark.segment_id.is_none())
+        .collect();
+    let mut clicked = false;
+    for mark in marks {
+        let x = lane_x(
+            lanes_left,
+            shell.pixel_size(),
+            shell.view_origin().0,
+            mark.time.0,
+        );
+        let flag = marker_flag(x, ruler.bottom() - 16.0);
+        if !ruler.intersects(flag) {
+            continue;
+        }
+        if paint_marker_flag(shell, ui, &mark, flag, "ruler") {
+            clicked = true;
+        }
+    }
+    clicked
+}
+
+fn paint_clip_markers(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    lanes_left: f32,
+    row: Rect,
+) {
+    let marks: Vec<_> = shell
+        .markers()
+        .into_iter()
+        .filter(|mark| mark.segment_id.as_ref() == Some(&clip.id))
+        .collect();
+    for mark in marks {
+        let x = lane_x(
+            lanes_left,
+            shell.pixel_size(),
+            shell.view_origin().0,
+            mark.time.0,
+        );
+        let flag = marker_flag(x, row.top() + 4.0);
+        if !row.intersects(flag) {
+            continue;
+        }
+        let _ = paint_marker_flag(shell, ui, &mark, flag, clip.id.as_str());
+    }
+}
+
+fn marker_flag(x: f32, top: f32) -> Rect {
+    Rect::from_min_size(Pos2::new(x - 4.0, top), Vec2::new(8.0, 12.0))
+}
+
+fn paint_marker_flag(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    mark: &crate::shell::MarkerView,
+    flag: Rect,
+    salt: &str,
+) -> bool {
+    let response = ui.interact(
+        flag,
+        ui.scope_id().with(("marker", salt, mark.stored_start)),
+        Sense::click(),
+    );
+    let selected = shell.marker_selected(&mark.segment_id, mark.stored_start);
+    ui.painter()
+        .rect_filled(flag, CornerRadius::same(1), marker_color(&mark.color));
+    if selected {
+        ui.painter().rect_stroke(
+            flag,
+            CornerRadius::same(1),
+            egui::Stroke::new(1.0, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.clone().on_hover_text(marker_tip(&mark.title));
+    if response.clicked() {
+        shell.select_marker(mark.segment_id.clone(), mark.stored_start);
+        return true;
+    }
+    false
+}
+
+fn marker_tip(title: &str) -> &str {
+    if title.is_empty() { "Marker" } else { title }
+}
+
+fn marker_color(hex: &str) -> Color32 {
+    let bytes = hex.trim().trim_start_matches('#');
+    if bytes.len() != 6 {
+        return Color32::from_rgb(0xE8, 0xB9, 0x31);
+    }
+    let Ok(value) = u32::from_str_radix(bytes, 16) else {
+        return Color32::from_rgb(0xE8, 0xB9, 0x31);
+    };
+    let red = u8::try_from((value >> 16) & 0xff).unwrap_or(0);
+    let green = u8::try_from((value >> 8) & 0xff).unwrap_or(0);
+    let blue = u8::try_from(value & 0xff).unwrap_or(0);
+    Color32::from_rgb(red, green, blue)
 }
 
 fn finish_clip_pointer(
@@ -3859,6 +3994,60 @@ mod tests {
             segments[0].target.duration.0 + segments[1].target.duration.0,
             2_000_000
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_marker_drops_on_the_clip_under_the_pointer() {
+        let (mut shell, temp) = open_span("marker", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        shell.toggle_marker();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        let width = (2_000_000_f32 * shell.pixel_size() as f32).max(8.0);
+        let center = Pos2::new(text.x - 8.0 + width / 2.0, text.y);
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(center), press(true), press(false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert_eq!(
+            shell.draft().unwrap().tracks[0].segments.len(),
+            1,
+            "the marker click changed the clip ({})",
+            shell.notice()
+        );
+        let marks = shell.markers();
+        assert_eq!(marks.len(), 1, "notice {}", shell.notice());
+        assert_eq!(
+            marks[0].segment_id.as_ref().map(|id| id.as_str()),
+            Some(id.as_str())
+        );
+        assert!(marks[0].stored_start > 0);
+        assert!(marks[0].stored_start < 2_000_000);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

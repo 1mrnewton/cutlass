@@ -23,8 +23,8 @@ use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
     Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialTransition, MaterialVideo,
-    MetaType, Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId,
-    TrackType, linkage_from_biz,
+    MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute,
+    TrackId, TrackType, linkage_from_biz, segment_time_mark, time_mark_items, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -57,6 +57,9 @@ impl TransitionOffer {
         format!("transition:{}", self.id)
     }
 }
+
+/// The color stored on a marker dropped from the timeline.
+pub const MARKER_COLOR: &str = "#E8B931";
 
 /// Dissolve crosses the cut. Dip stays on the outgoing clip.
 pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
@@ -103,6 +106,9 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("a transition cannot be split")
             }
             Self::Edit(EditError::Overlap) => formatter.write_str("the clips overlap"),
+            Self::Edit(EditError::DuplicateMark) => {
+                formatter.write_str("a marker is already there")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -229,6 +235,25 @@ struct CopiedClip {
     track_id: TrackId,
     offset: i64,
     segment: Segment,
+    /// Offsets from the clip start. The paste stores them on a new material.
+    marks: Vec<TimeMarkItem>,
+}
+
+/// A marker the timeline draws. `stored_start` is the file value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkerView {
+    pub segment_id: Option<SegmentId>,
+    pub stored_start: i64,
+    pub time: Micros,
+    pub color: String,
+    pub title: String,
+}
+
+/// The marker Delete will remove.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MarkerPick {
+    segment_id: Option<SegmentId>,
+    stored_start: i64,
 }
 
 /// The open clip menu, in window points.
@@ -294,6 +319,9 @@ pub struct Shell {
     guides_locked: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
+    /// The marker tool drops a mark on the ruler or on a clip.
+    marking: bool,
+    selected_marker: Option<MarkerPick>,
     clip_drag: Option<ClipDrag>,
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<PendingMove>,
@@ -346,6 +374,8 @@ impl Shell {
             guides_shown: true,
             guides_locked: false,
             blade: false,
+            marking: false,
+            selected_marker: None,
             clip_drag: None,
             pending_trim: None,
             pending_moves: Vec::new(),
@@ -474,6 +504,8 @@ impl Shell {
         self.clip_menu = None;
         self.clear_guides();
         self.blade = false;
+        self.marking = false;
+        self.selected_marker = None;
         self.cancel_clip_drag();
         self.fit_on_layout = false;
         self.notice.clear();
@@ -578,6 +610,8 @@ impl Shell {
         self.clip_menu = None;
         self.clear_guides();
         self.blade = false;
+        self.marking = false;
+        self.selected_marker = None;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fit_on_layout = self.cut_duration().0 > 0;
@@ -1481,6 +1515,7 @@ impl Shell {
 
     pub fn select(&mut self, id: Option<SegmentId>) {
         self.selected_mark = None;
+        self.selected_marker = None;
         self.selection.clear();
         if let Some(id) = id {
             self.selection.push(id);
@@ -1490,6 +1525,7 @@ impl Shell {
     /// Add `id` to the selection, or drop it when it is already there.
     pub fn toggle_selected(&mut self, id: SegmentId) {
         self.selected_mark = None;
+        self.selected_marker = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
             self.selection.remove(index);
         } else {
@@ -1500,6 +1536,7 @@ impl Shell {
     /// Replace the selection with `ids`. `keep` adds them to the clips already selected.
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
         self.selected_mark = None;
+        self.selected_marker = None;
         if !keep {
             self.selection.clear();
         }
@@ -1528,6 +1565,9 @@ impl Shell {
         if self.selection.is_empty() {
             if self.selected_mark.is_some() {
                 return self.remove_selected_guide();
+            }
+            if self.selected_marker.is_some() {
+                return self.remove_selected_marker();
             }
             return Ok(());
         }
@@ -1606,6 +1646,7 @@ impl Shell {
             self.guides.push(time);
             self.guides.sort_by_key(|guide| guide.0);
         }
+        self.selected_marker = None;
         self.selected_mark = Some(GuideMark::Time(time.0));
         Ok(())
     }
@@ -1613,6 +1654,7 @@ impl Shell {
     pub fn select_guide(&mut self, time: Micros) {
         if self.guides.iter().any(|guide| guide.0 == time.0) {
             self.selected_mark = Some(GuideMark::Time(time.0));
+            self.selected_marker = None;
             self.selection.clear();
         }
     }
@@ -1639,6 +1681,7 @@ impl Shell {
             self.horizontal.push(row);
             self.horizontal.sort_unstable();
         }
+        self.selected_marker = None;
         self.selected_mark = Some(GuideMark::Row(row));
         Ok(())
     }
@@ -1674,6 +1717,7 @@ impl Shell {
     pub fn select_horizontal(&mut self, row: i32) {
         if self.horizontal.contains(&row) {
             self.selected_mark = Some(GuideMark::Row(row));
+            self.selected_marker = None;
             self.selection.clear();
         }
     }
@@ -1823,6 +1867,7 @@ impl Shell {
         self.selection.clear();
         if !self.has_clip() {
             self.blade = false;
+            self.marking = false;
         }
         Ok(())
     }
@@ -1842,10 +1887,19 @@ impl Shell {
                 if bit(track.attribute, TrackAttribute::LOCK) {
                     return Err(ShellError::Locked);
                 }
+                let owned = segment_time_mark(&draft.materials, segment).map(|raw| raw.id.clone());
+                let marks = segment_time_mark(&draft.materials, segment)
+                    .map(time_mark_items)
+                    .unwrap_or_default();
+                let mut segment = segment.clone();
+                if let Some(id) = owned {
+                    segment.extra_material_refs.retain(|ref_id| ref_id != &id);
+                }
                 copies.push(CopiedClip {
                     track_id: track.id.clone(),
                     offset: segment.target.start.0,
-                    segment: segment.clone(),
+                    segment,
+                    marks,
                 });
             }
         }
@@ -1889,19 +1943,34 @@ impl Shell {
         let copies = self.clipboard.clone();
         let mut requests = Vec::new();
         let mut ids = Vec::new();
+        let mut marks = Vec::new();
         for item in copies {
             let mut segment = item.segment.clone();
             let id = SegmentId::new(self.fresh("seg"));
             segment.id = id.clone();
-            segment.target = TimeRange::new(
-                playhead.saturating_add(item.offset),
-                segment.target.duration.0,
-            );
+            let start = playhead.saturating_add(item.offset);
+            segment.target = TimeRange::new(start, segment.target.duration.0);
+            let duration = segment.target.duration.0;
             requests.push(Request::Place {
                 track_id: item.track_id.clone(),
                 segment: Box::new(segment),
             });
+            for mark in item.marks {
+                if mark.start.0 < 0 || mark.start.0 >= duration {
+                    continue;
+                }
+                let at = start.saturating_add(mark.start.0);
+                marks.push((id.clone(), at, mark.color));
+            }
             ids.push(id);
+        }
+        for (segment_id, at, color) in marks {
+            requests.push(Request::AddTimeMark {
+                segment_id: Some(segment_id),
+                at: Micros(at),
+                color,
+                material_id: MaterialId::new(self.fresh("time-mark")),
+            });
         }
         self.apply_requests(&requests)?;
         self.selection = ids;
@@ -1935,11 +2004,138 @@ impl Shell {
 
     pub fn toggle_blade(&mut self) {
         self.blade = !self.blade && self.has_clip();
+        if self.blade {
+            self.marking = false;
+        }
     }
 
     /// Turn the blade off. Select uses this.
     pub fn clear_blade(&mut self) {
         self.blade = false;
+    }
+
+    /// The marker tool is armed. A click on the ruler or a clip drops a mark.
+    #[must_use]
+    pub fn marking(&self) -> bool {
+        self.marking
+    }
+
+    pub fn toggle_marker(&mut self) {
+        self.marking = !self.marking && self.has_clip();
+        if self.marking {
+            self.blade = false;
+        }
+    }
+
+    /// Turn the marker tool off. Select uses this.
+    pub fn clear_marker(&mut self) {
+        self.marking = false;
+    }
+
+    /// Markers currently drawn. A clip mark past the clip is omitted.
+    #[must_use]
+    pub fn markers(&self) -> Vec<MarkerView> {
+        let Some(draft) = self.draft() else {
+            return Vec::new();
+        };
+        visible_marks(draft)
+            .into_iter()
+            .map(|mark| MarkerView {
+                segment_id: mark.segment_id,
+                stored_start: mark.stored_start,
+                time: mark.time,
+                color: mark.color,
+                title: mark.title,
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn marker_selected(&self, segment_id: &Option<SegmentId>, stored_start: i64) -> bool {
+        self.selected_marker
+            .as_ref()
+            .is_some_and(|pick| &pick.segment_id == segment_id && pick.stored_start == stored_start)
+    }
+
+    pub fn select_marker(&mut self, segment_id: Option<SegmentId>, stored_start: i64) {
+        let present = self
+            .markers()
+            .iter()
+            .any(|mark| mark.segment_id == segment_id && mark.stored_start == stored_start);
+        if !present {
+            return;
+        }
+        self.selected_marker = Some(MarkerPick {
+            segment_id,
+            stored_start,
+        });
+        self.selected_mark = None;
+        self.selection.clear();
+    }
+
+    /// Drop a mark at the pointer. `None` is the ruler. `Some` is that clip.
+    ///
+    /// A ruler mark is a timeline time. A clip mark is stored as an offset
+    /// from the clip start, so a later move carries it.
+    pub fn drop_marker(
+        &mut self,
+        segment_id: Option<SegmentId>,
+        x: f64,
+        y: f64,
+    ) -> Result<(), ShellError> {
+        if !self.has_clip() {
+            return Err(ShellError::Unavailable(
+                "marker is not available".to_owned(),
+            ));
+        }
+        let x = self.time_zero_x(x);
+        let scale = self.scale();
+        let pointer_y = if segment_id.is_some() { y } else { 0.0 };
+        let at = {
+            let draft = self.session_draft()?;
+            let hit = hit_test(draft, scale, Pointer { x, y: pointer_y }).map_err(|_| {
+                ShellError::Unavailable("the marker missed the timeline".to_owned())
+            })?;
+            let Some(hit) = hit else {
+                return Err(ShellError::Unavailable(
+                    "the marker missed the timeline".to_owned(),
+                ));
+            };
+            if let Some(id) = &segment_id
+                && hit.segment_id.as_ref() != Some(id)
+            {
+                return Err(ShellError::Unavailable(
+                    "the marker missed the clip".to_owned(),
+                ));
+            }
+            Micros(hit.time.0.max(0))
+        };
+        let material_id = MaterialId::new(self.fresh("time-mark"));
+        self.apply(Request::AddTimeMark {
+            segment_id,
+            at,
+            color: MARKER_COLOR.to_owned(),
+            material_id,
+        })
+    }
+
+    fn remove_selected_marker(&mut self) -> Result<(), ShellError> {
+        let Some(pick) = self.selected_marker.clone() else {
+            return Ok(());
+        };
+        let present = self.markers().iter().any(|mark| {
+            mark.segment_id == pick.segment_id && mark.stored_start == pick.stored_start
+        });
+        if !present {
+            self.selected_marker = None;
+            return Ok(());
+        }
+        self.apply(Request::RemoveTimeMark {
+            segment_id: pick.segment_id,
+            start: Micros(pick.stored_start),
+        })?;
+        self.selected_marker = None;
+        Ok(())
     }
 
     /// Any lane has a clip. An empty cut leaves the blade off.
@@ -3443,6 +3639,124 @@ mod tests {
             .unwrap();
         assert!(desktop.draft().unwrap().relationships.is_empty());
         assert_eq!(desktop.draft().unwrap().tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_marker_lands_on_the_ruler_or_on_a_clip() {
+        let mut bare = shell();
+        bare.toggle_marker();
+        assert!(!bare.marking());
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("clip", "media", TimeRange::new(0, 2_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        desktop.toggle_marker();
+        assert!(desktop.marking());
+        desktop.toggle_blade();
+        assert!(desktop.blade());
+        assert!(!desktop.marking());
+        desktop.clear_blade();
+        desktop.toggle_marker();
+
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_marker(None, lane_time(&desktop, 1_500_000.0), 0.0)
+            .unwrap();
+        assert!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .extra_material_refs
+                .is_empty()
+        );
+        let ruler = desktop.markers();
+        assert_eq!(ruler.len(), 1);
+        assert!(ruler[0].segment_id.is_none());
+        assert_eq!(ruler[0].time, Micros(1_500_000));
+        assert_eq!(ruler[0].color, super::MARKER_COLOR);
+        desktop.undo().unwrap();
+        assert!(desktop.markers().is_empty());
+        desktop.redo().unwrap();
+
+        let id = SegmentId::new("clip");
+        desktop
+            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
+            .unwrap();
+        let clip_mark = desktop
+            .markers()
+            .into_iter()
+            .find(|mark| mark.segment_id.is_some())
+            .expect("clip mark");
+        assert_eq!(clip_mark.stored_start, 400_000);
+        assert_eq!(clip_mark.time, Micros(400_000));
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        let again = desktop
+            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
+            .unwrap_err();
+        assert_eq!(again.to_string(), "a marker is already there");
+
+        let track_id = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track_id.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop
+            .drop_marker(Some(id.clone()), lane_time(&desktop, 800_000.0), y)
+            .unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        desktop
+            .toggle_attribute(track_id, TrackAttribute::LOCK)
+            .unwrap();
+
+        desktop.select_marker(Some(id.clone()), 400_000);
+        desktop.delete_target().unwrap();
+        assert!(
+            desktop
+                .markers()
+                .iter()
+                .all(|mark| mark.segment_id.is_none())
+        );
+        desktop
+            .drop_marker(Some(id.clone()), lane_time(&desktop, 400_000.0), y)
+            .unwrap();
+        desktop
+            .drag_segment(id.clone(), lane_time(&desktop, 1_000_000.0), y)
+            .unwrap();
+        let moved = desktop
+            .markers()
+            .into_iter()
+            .find(|mark| mark.segment_id.is_some())
+            .expect("moved mark");
+        let start = desktop.draft().unwrap().tracks[0].segments[0]
+            .target
+            .start
+            .0;
+        assert_eq!(moved.stored_start, 400_000);
+        assert_eq!(moved.time.0, start + 400_000);
+        assert!(start > 0, "the clip did not move");
+
+        desktop.seek(Micros(start.saturating_add(2_000_000)));
+        desktop.select(Some(id));
+        desktop.copy_selected().unwrap();
+        desktop.paste().unwrap();
+        let clips: Vec<_> = desktop
+            .markers()
+            .into_iter()
+            .filter(|mark| mark.segment_id.is_some())
+            .collect();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].stored_start, 400_000);
+        assert_eq!(clips[1].stored_start, 400_000);
+        assert_ne!(clips[0].segment_id, clips[1].segment_id);
+        assert_ne!(clips[0].time, clips[1].time);
     }
 
     fn touching_cut(dir: &Path) {

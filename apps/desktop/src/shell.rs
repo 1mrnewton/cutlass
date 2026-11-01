@@ -172,6 +172,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::FrameRate) => {
                 formatter.write_str("the frame rate is not a project rate")
             }
+            Self::Edit(EditError::ColorSpace) => {
+                formatter.write_str("the color space is not a project color space")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -1837,6 +1840,22 @@ impl Shell {
             width: next.width,
             height: next.height,
             ratio: next.ratio.to_owned(),
+        })
+    }
+
+    /// The label for the project color space. A stored int outside the five
+    /// spaces is shown as that int.
+    pub fn color_space_label(&self) -> String {
+        let space = self.draft().map(|draft| draft.color_space).unwrap_or(0);
+        color_space_name(space)
+    }
+
+    /// Step to the next project color space. One undo restores the previous
+    /// space. The preview is not retinted. The canvas and the frame rate stay.
+    pub fn cycle_color_space(&mut self) -> Result<(), ShellError> {
+        let current = self.session_draft()?.color_space;
+        self.apply(Request::SetColorSpace {
+            space: next_color_space(current),
         })
     }
 
@@ -4709,6 +4728,31 @@ fn next_canvas(width: i32, height: i32) -> CanvasShape {
     CANVAS_SHAPES[index % CANVAS_SHAPES.len()]
 }
 
+const COLOR_SPACES: [(i32, &str); 5] = [
+    (-1, "Unknown"),
+    (0, "None"),
+    (2, "SDR 2020"),
+    (67, "HLG"),
+    (2084, "PQ"),
+];
+
+fn color_space_name(space: i32) -> String {
+    COLOR_SPACES
+        .iter()
+        .find(|item| item.0 == space)
+        .map(|item| item.1.to_owned())
+        .unwrap_or_else(|| space.to_string())
+}
+
+fn next_color_space(current: i32) -> i32 {
+    let index = COLOR_SPACES
+        .iter()
+        .position(|item| item.0 == current)
+        .map(|index| index.saturating_add(1))
+        .unwrap_or(0);
+    COLOR_SPACES[index % COLOR_SPACES.len()].0
+}
+
 const PROJECT_RATES: [FrameRate; 9] = [
     FrameRate::FPS_23_976,
     FrameRate::FPS_24,
@@ -7255,6 +7299,61 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().letterbox, "");
+    }
+
+    #[test]
+    fn the_color_space_steps_and_the_picture_stays() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.cycle_color_space().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.canvas_config.background = Some("#336699".to_owned());
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert_eq!(desktop.color_space_label(), "None");
+        let picture = desktop.preview_bytes().unwrap();
+        assert_eq!(picture.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(2));
+
+        let steps = ["SDR 2020", "HLG", "PQ", "Unknown", "None"];
+        let spaces = [2, 67, 2084, -1, 0];
+        for (label, space) in steps.into_iter().zip(spaces) {
+            desktop.cycle_color_space().unwrap();
+            assert_eq!(desktop.color_space_label(), label);
+            assert_eq!(desktop.draft().unwrap().color_space, space);
+            assert_eq!(desktop.draft().unwrap().fps, 30.0);
+            assert_eq!(desktop.draft().unwrap().canvas_config.width, 2);
+            let next = desktop.preview_bytes().unwrap();
+            assert_eq!(next.rgba, picture.rgba);
+            let compared = cutlass_export::same_software_pixels(
+                desktop.draft().unwrap(),
+                next.width,
+                next.height,
+                &picture.rgba,
+                &next.rgba,
+            );
+            if space == 67 || space == 2084 {
+                assert_eq!(compared, Err(cutlass_export::ExportError::HdrNotThisCase));
+            } else {
+                assert_eq!(compared, Ok(()));
+            }
+        }
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().color_space, -1);
+
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.cycle_color_space().unwrap();
+        assert_eq!(desktop.draft().unwrap().color_space, 0);
     }
 
     #[test]

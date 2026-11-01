@@ -1085,6 +1085,13 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     }) else {
         return;
     };
+    let space = shell.color_space_label();
+    let color_space = widgets::toolbar_button(ui, &space).on_hover_text("Project color space");
+    if color_space.clicked()
+        && let Err(error) = shell.cycle_color_space()
+    {
+        shell.set_notice(error.to_string());
+    }
     ui.add_space(8.0);
     let span = ui.available_rect_before_wrap().x_range();
     let y = ui.cursor().min.y;

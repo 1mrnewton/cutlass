@@ -90,6 +90,10 @@ pub struct Sps {
     pub views: Vec<u16>,
     /// Annex I `depth_view_present_flag`, one entry per `views` index.
     pub depth_views: Vec<bool>,
+    /// Annex I `texture_view_present_flag`, one entry per `views` index.
+    pub texture_views: Vec<bool>,
+    /// Profile 139. The 3D-AVC extension was present and its tools are off.
+    pub avc_3d: bool,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
@@ -435,8 +439,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let scalable = matches!(profile, 83 | 86);
     let multiview = matches!(profile, 118 | 128);
     let depth = matches!(profile, 135 | 138);
+    let three_d = profile == 139;
     if subset {
-        if !scalable && !multiview && !depth {
+        if !scalable && !multiview && !depth && !three_d {
             return Err(CodecError::Unsupported { what: "subset sps" });
         }
     } else if !matches!(profile, 66 | 77 | 88 | 100 | 110 | 122 | 244) {
@@ -526,6 +531,8 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         restriction: true,
         scale: SvcScale::default(),
     };
+    let mut avc_3d = false;
+    let mut texture_views = Vec::new();
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
         if bits.bit()? {
@@ -541,15 +548,38 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
             return Err(CodecError::Unsupported { what: "mvc vui" });
         }
         let depth_views = vec![false; views.len()];
+        texture_views = vec![true; views.len()];
         (plain, views, depth_views, interview)
+    } else if subset && three_d {
+        if !bits.bit()? {
+            return Err(bits.malformed("mvcd"));
+        }
+        let mvcd = mvcd_extension(&mut bits)?;
+        if bits.bit()? || bits.bit()? {
+            return Err(CodecError::Unsupported { what: "mvcd vui" });
+        }
+        three_d_extension(
+            &mut bits,
+            &mvcd.views,
+            &mvcd.depth_views,
+            &mvcd.texture_views,
+        )?;
+        avc_3d = true;
+        texture_views = mvcd.texture_views;
+        let views = mvcd.views;
+        let depth_views = mvcd.depth_views;
+        (plain, views, depth_views, Vec::new())
     } else if subset {
         if !bits.bit()? {
             return Err(bits.malformed("mvcd"));
         }
-        let (views, depth_views) = mvcd_extension(&mut bits)?;
+        let mvcd = mvcd_extension(&mut bits)?;
         if bits.bit()? || bits.bit()? {
             return Err(CodecError::Unsupported { what: "mvcd vui" });
         }
+        texture_views = mvcd.texture_views;
+        let views = mvcd.views;
+        let depth_views = mvcd.depth_views;
         (plain, views, depth_views, Vec::new())
     } else {
         (plain, Vec::new(), Vec::new(), Vec::new())
@@ -610,6 +640,8 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         adaptive_tcoeff: svc.adaptive_tcoeff,
         views,
         depth_views,
+        texture_views,
+        avc_3d,
         interview,
     };
     if !sps.within_level() {
@@ -758,10 +790,17 @@ fn read_view_refs(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
 
 /// `seq_parameter_set_mvcd_extension`. Depth-view ids are kept. Interview
 /// reference lists and the level operation points are consumed.
-fn mvcd_extension(bits: &mut Bits<'_>) -> Result<(Vec<u16>, Vec<bool>), CodecError> {
+struct MvcdViews {
+    views: Vec<u16>,
+    depth_views: Vec<bool>,
+    texture_views: Vec<bool>,
+}
+
+fn mvcd_extension(bits: &mut Bits<'_>) -> Result<MvcdViews, CodecError> {
     let views_minus1 = mvc_limit(bits, 1023)?;
     let mut views = Vec::new();
     let mut depth_views = Vec::new();
+    let mut texture_views = Vec::new();
     for _ in 0..=views_minus1 {
         let id = mvc_limit(bits, 1023)?;
         let Ok(id) = u16::try_from(id) else {
@@ -774,6 +813,7 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<(Vec<u16>, Vec<bool>), CodecErr
         }
         views.push(id);
         depth_views.push(depth);
+        texture_views.push(texture);
     }
     for index in 1..=views_minus1 {
         let depth = depth_views.get(index as usize).copied().unwrap_or(false);
@@ -805,7 +845,58 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<(Vec<u16>, Vec<bool>), CodecErr
             let _ = mvc_limit(bits, 1023)?;
         }
     }
-    Ok((views, depth_views))
+    Ok(MvcdViews {
+        views,
+        depth_views,
+        texture_views,
+    })
+}
+
+/// `seq_parameter_set_3davc_extension` with its tools off.
+fn three_d_extension(
+    bits: &mut Bits<'_>,
+    views: &[u16],
+    depth_views: &[bool],
+    texture_views: &[bool],
+) -> Result<(), CodecError> {
+    let depth_ids: Vec<u16> = views
+        .iter()
+        .zip(depth_views)
+        .filter_map(|(id, depth)| depth.then_some(*id))
+        .collect();
+    if !depth_ids.is_empty() {
+        if bits.ue()? != 0 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        for id in depth_ids {
+            let coded = mvc_limit(bits, 1023)?;
+            if u16::try_from(coded).ok() != Some(id) {
+                return Err(bits.malformed("3d"));
+            }
+        }
+        if bits.bit()? || bits.bit()? || bits.ue()? != 0 || bits.bit()? || bits.bit()? {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+    }
+    if bits.bit()? || bits.bit()? {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let paired = depth_views
+        .iter()
+        .zip(texture_views)
+        .skip(1)
+        .all(|(depth, texture)| *depth && *texture);
+    if !paired {
+        for _ in 0..2 {
+            for texture in texture_views.iter().skip(1) {
+                if *texture {
+                    let _ = read_view_refs(bits)?;
+                    let _ = read_view_refs(bits)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 struct Vui {

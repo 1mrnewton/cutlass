@@ -16,15 +16,16 @@ pub struct Nal {
 }
 
 /// NAL unit header extension. Clause 7.3.1. The three-byte form is Annex G
-/// when `svc_extension_flag` is 1 and Annex H when it is 0. Annex I depth
-/// with `avc_3d_extension_flag` 1 is two bytes.
+/// when `svc_extension_flag` is 1 and Annex H when it is 0. NAL type 21 with
+/// `avc_3d_extension_flag` 0 is Annex I depth and is three bytes. The flag
+/// equal to 1 is the two-byte 3D-AVC header.
 #[derive(Clone, Copy, Debug)]
 pub enum Extension {
     Svc(SvcHeader),
     /// Annex H. `svc_extension_flag` is 0.
     Mvc(MvcHeader),
     /// NAL type 21 with `avc_3d_extension_flag` 1.
-    ThreeD,
+    ThreeD(ThreeDHeader),
 }
 
 /// Annex H `nal_unit_header_mvc_extension`. Fields the reconstruction reads.
@@ -34,6 +35,20 @@ pub struct MvcHeader {
     pub idr: bool,
     pub view_id: u16,
     /// `anchor_pic_flag`. Selects the anchor interview list.
+    pub anchor: bool,
+    /// `inter_view_flag`. This view can be an interview reference.
+    pub inter_view: bool,
+}
+
+/// `nal_unit_header_3davc_extension`. `view_idx` is the view order index.
+#[derive(Clone, Copy, Debug)]
+pub struct ThreeDHeader {
+    pub view_idx: u8,
+    /// `depth_flag`. The NAL belongs to a depth view.
+    pub depth: bool,
+    /// `IdrPicFlag`, the inverse of `non_idr_flag`.
+    pub idr: bool,
+    /// `anchor_pic_flag`.
     pub anchor: bool,
     /// `inter_view_flag`. This view can be an interview reference.
     pub inter_view: bool,
@@ -121,12 +136,23 @@ fn extension_header(kind: u8, bytes: &[u8]) -> Result<(Extension, usize), CodecE
     }
     let header = &bytes[..len];
     if three_d {
-        return Ok((Extension::ThreeD, len));
+        return Ok((Extension::ThreeD(three_d_header(header)), len));
     }
     if kind != 21 && flag {
         Ok((Extension::Svc(svc_header(header)?), len))
     } else {
         Ok((Extension::Mvc(mvc_header(header)?), len))
+    }
+}
+
+fn three_d_header(bytes: &[u8]) -> ThreeDHeader {
+    let bits = (u16::from(bytes[0]) << 8) | u16::from(bytes[1]);
+    ThreeDHeader {
+        view_idx: ((bits >> 7) & 0xff) as u8,
+        depth: bits & 0x40 != 0,
+        idr: bits & 0x20 == 0,
+        anchor: bits & 0x02 != 0,
+        inter_view: bits & 0x01 != 0,
     }
 }
 

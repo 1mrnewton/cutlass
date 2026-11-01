@@ -886,6 +886,49 @@ fn an_annex_i_depth_view_is_an_intra_picture() {
 }
 
 #[test]
+fn a_3d_avc_header_is_an_intra_picture() {
+    let parsed = parse_subset_sps(&three_d_subset(false)).expect("3d");
+    assert_eq!(parsed.views, vec![0]);
+    assert_eq!(parsed.depth_views, vec![true]);
+    assert_eq!(parsed.texture_views, vec![true]);
+    assert!(parsed.avc_3d);
+    let annex = three_d_annex(&[0x80, 0x42]);
+    let picture = decode(&annex);
+    assert!(flat(&picture));
+    assert_eq!(picture.picture.width(), 16);
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &annex).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let err = open()
+        .push(&Packet::video(
+            three_d_annex(&[0x80, 0xC2]),
+            0,
+            1,
+            30,
+            false,
+        ))
+        .expect_err("view");
+    assert!(
+        matches!(
+            err,
+            CodecError::Malformed {
+                what: "view id",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let tool = parse_subset_sps(&three_d_subset(true)).expect_err("prediction");
+    assert!(matches!(tool, CodecError::Unsupported { what: "3d" }));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &annex);
+    assert!(flat(&decode_with(&mut decoder, &base_idr())));
+}
+
+#[test]
 fn an_annex_a_picture_survives_svc_mvc_and_3d_nal_units() {
     let annex = base_with_extensions();
     let picture = decode(&annex);
@@ -1098,6 +1141,75 @@ fn mvc_annex(header: &[u8; 3]) -> Vec<u8> {
         &idr_slice(true, true, false),
     ));
     out
+}
+
+fn three_d_annex(header: &[u8; 2]) -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &three_d_subset(false));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(
+        3,
+        21,
+        header,
+        &idr_slice(true, true, false),
+    ));
+    out
+}
+
+/// Profile 139. The MVCD view is view id 0, depth and texture, and the 3D
+/// tools are off unless `prediction` is set.
+fn three_d_subset(prediction: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(139, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.bits(30, 8);
+    w.ue(0);
+    w.bits(0, 3);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.bit(prediction);
+    if !prediction {
+        w.bit(false);
+        w.bit(false);
+        w.bit(false);
+        w.bit(false);
+        w.trailing();
+    }
+    w.bytes
 }
 
 fn depth_annex(header: &[u8; 3]) -> Vec<u8> {

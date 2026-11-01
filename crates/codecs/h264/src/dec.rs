@@ -555,7 +555,13 @@ fn au_depth(sets: &Sets, data: &[u8], length_size: u8, current: u8) -> Result<u8
             1 | 2 | 5 | 20 | 21 => {
                 let class = slice_class(nal);
                 if nal.kind == 21 && !matches!(nal.extension, Some(nal::Extension::Mvc(_))) {
-                    continue;
+                    let ready = sets
+                        .subset
+                        .iter()
+                        .any(|sps| sps.as_ref().is_some_and(|sps| sps.avc_3d));
+                    if !ready {
+                        continue;
+                    }
                 }
                 if nal.kind == 20
                     && !matches!(
@@ -749,7 +755,45 @@ fn decode_au<S: Sample>(
                 }
             }
             21 => {
-                if let Some(nal::Extension::Mvc(mvc)) = nals[index].extension {
+                if let Some(nal::Extension::ThreeD(three)) = nals[index].extension {
+                    let ready = sets
+                        .subset
+                        .iter()
+                        .any(|sps| sps.as_ref().is_some_and(|sps| sps.avc_3d));
+                    if picture.is_none() && !extension_pic && ready {
+                        extension_pic = true;
+                        if three.idr {
+                            idr_pic = true;
+                        }
+                        let built = decode_slice(
+                            sets,
+                            poc,
+                            dpb,
+                            SliceCursor {
+                                nal: &nals[index],
+                                idr: three.idr,
+                                slice_id,
+                                packet,
+                                intra: None,
+                                inter: None,
+                            },
+                            AuScratch {
+                                picture: &mut picture,
+                                next_mb: &mut next_mb,
+                                prior: &mut prior,
+                                planes: &mut planes,
+                                held: &mut held_field,
+                                layer: None,
+                            },
+                        )?;
+                        if built {
+                            slice_id = slice_id.saturating_add(1);
+                        }
+                    } else if picture.is_none() && !extension_pic {
+                        return Err(CodecError::Unsupported { what: "3d" });
+                    }
+                    index += 1;
+                } else if let Some(nal::Extension::Mvc(mvc)) = nals[index].extension {
                     if picture.is_none() && !extension_pic {
                         extension_pic = true;
                         if mvc.idr {
@@ -2160,7 +2204,8 @@ enum Layer {
 /// A slice extension is the picture when the access unit has no Annex A slice.
 /// Inter-layer prediction replaces that picture when the base is already in
 /// the access unit. An MVC non-base view is the picture when it is the only
-/// slice. 3D stays refused. Beside an Annex A slice, MVC and 3D are skipped.
+/// slice. A 3D-AVC header is decoded on its own path. Beside an Annex A
+/// slice, MVC and 3D are skipped.
 fn layer_of(extension: Option<nal::Extension>, picture: bool, extension_pic: bool) -> Layer {
     match extension {
         Some(nal::Extension::Svc(svc)) if svc.use_ref_base_pic && !picture => {
@@ -2191,6 +2236,8 @@ enum SliceClass {
     Mvc(nal::MvcHeader),
     /// NAL type 21 with `avc_3d_extension_flag` 0. Annex I depth view.
     Depth(nal::MvcHeader),
+    /// NAL type 21 with `avc_3d_extension_flag` 1.
+    ThreeD(nal::ThreeDHeader),
 }
 
 fn slice_class(nal: &Nal) -> SliceClass {
@@ -2198,6 +2245,7 @@ fn slice_class(nal: &Nal) -> SliceClass {
         Some(nal::Extension::Svc(svc)) => SliceClass::Svc(svc),
         Some(nal::Extension::Mvc(mvc)) if nal.kind == 21 => SliceClass::Depth(mvc),
         Some(nal::Extension::Mvc(mvc)) => SliceClass::Mvc(mvc),
+        Some(nal::Extension::ThreeD(three)) => SliceClass::ThreeD(three),
         _ => SliceClass::Avc,
     }
 }
@@ -2206,6 +2254,7 @@ fn slice_idr(class: SliceClass) -> bool {
     match class {
         SliceClass::Svc(svc) => svc.idr,
         SliceClass::Mvc(mvc) | SliceClass::Depth(mvc) => mvc.idr,
+        SliceClass::ThreeD(three) => three.idr,
         SliceClass::Avc => false,
     }
 }
@@ -2226,6 +2275,10 @@ fn read_header(
         _ => None,
     };
     let depth = matches!(class, SliceClass::Depth(_));
+    let three = match class {
+        SliceClass::ThreeD(three) => Some(three),
+        _ => None,
+    };
     let first_mb = bits.ue()? as usize;
     let slice_type = bits.ue()?;
     let kind = match slice_type % 5 {
@@ -2242,7 +2295,10 @@ fn read_header(
     let Some(pps) = sets.pps[pps_id as usize].clone() else {
         return Err(bits.malformed("missing pps"));
     };
-    let Some(sps) = sets.sequence(pps.sps_id, svc.is_some() || mvc.is_some()) else {
+    let Some(sps) = sets.sequence(
+        pps.sps_id,
+        svc.is_some() || mvc.is_some() || three.is_some(),
+    ) else {
         return Err(bits.malformed("missing sps"));
     };
     let restriction = sps.slice_header_restriction;
@@ -2490,6 +2546,36 @@ fn read_header(
             };
         }
     }
+    if let Some(three) = three {
+        if !sps.avc_3d || !intra_slice(kind) {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        let index = usize::from(three.view_idx);
+        let Some(id) = sps.views.get(index).copied() else {
+            return Err(bits.malformed("view id"));
+        };
+        let depth_view = sps.depth_views.get(index).copied().unwrap_or(false);
+        let texture_view = sps.texture_views.get(index).copied().unwrap_or(false);
+        if three.depth {
+            if !depth_view {
+                return Err(bits.malformed("view id"));
+            }
+        } else if !texture_view {
+            return Err(bits.malformed("view id"));
+        }
+        view_id = id;
+        inter_view = three.inter_view;
+        let anchor = three.anchor;
+        if let Some(refs) = sps.interview.get(index) {
+            let (list0, list1) = if anchor {
+                (&refs.anchor_l0, &refs.anchor_l1)
+            } else {
+                (&refs.non_anchor_l0, &refs.non_anchor_l1)
+            };
+            interview_l0 = list0.clone();
+            interview_l1 = list1.clone();
+        }
+    }
     let layer = match svc {
         Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
         _ => InterLayer {
@@ -2546,7 +2632,7 @@ fn read_header(
         group_cycle,
         sp_switch,
         qs,
-        subset: svc.is_some() || mvc.is_some(),
+        subset: svc.is_some() || mvc.is_some() || three.is_some(),
         output: svc.is_none_or(|svc| svc.output),
         base_mode: layer.base_mode,
         adaptive_base: layer.adaptive_base,
@@ -3558,6 +3644,8 @@ mod tests {
             adaptive_tcoeff: false,
             views: Vec::new(),
             depth_views: Vec::new(),
+            texture_views: Vec::new(),
+            avc_3d: false,
             interview: Vec::new(),
         }
     }

@@ -35,6 +35,8 @@ pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Res
 
 /// The largest size a line can store. A larger size does not draw.
 const MAX_TEXT_SIZE: f64 = 512.0;
+/// The widest wrap box. A wider box passes the picture edge.
+const MAX_LINE_WIDTH: f64 = 8_192.0;
 
 /// Store the text size in pixels. An empty `font_path` takes `face`.
 /// The string and the word columns stay.
@@ -128,6 +130,25 @@ pub fn set_line_spacing(
     }
     let text = &mut draft.materials.texts[index];
     text.line_spacing = spacing;
+    fill_face(text, face);
+    Ok(())
+}
+
+/// Store the wrap width in pixels. `0` keeps the run on one line unless the
+/// string itself breaks. A positive width wraps the next letter that would
+/// pass it, and it is the box center and right move inside.
+pub fn set_line_width(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    width: f64,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    if !width.is_finite() || width < 0.0 || width > MAX_LINE_WIDTH {
+        return Err(EditError::LineWidth);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.line_max_width = width;
     fill_face(text, face);
     Ok(())
 }
@@ -414,6 +435,68 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error, EditError::LineSpacing);
+        assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_line_width_wraps_and_zero_keeps_one_line() {
+        let mut session = open();
+        session
+            .apply(
+                0,
+                &[Request::SetLineWidth {
+                    segment_id: "a".into(),
+                    width: 40.0,
+                    face: "face.ttf".to_owned(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.line_max_width, 40.0);
+        assert_eq!(text.alignment, 0);
+        assert_eq!(text.font_path, "face.ttf");
+        assert_eq!(text.font_size, 0.0);
+        assert_eq!(text.content, "A");
+        assert_eq!(text.words.text, ["A"]);
+
+        session
+            .apply(
+                1,
+                &[Request::SetLineWidth {
+                    segment_id: "a".into(),
+                    width: 0.0,
+                    face: "other.ttf".to_owned(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().materials.texts[0].line_max_width, 0.0);
+        assert_eq!(session.draft().materials.texts[0].font_path, "face.ttf");
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].line_max_width, 40.0);
+
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                3,
+                &[Request::SetLineWidth {
+                    segment_id: "a".into(),
+                    width: -1.0,
+                    face: "face.ttf".to_owned(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LineWidth);
+        let error = session
+            .apply(
+                3,
+                &[Request::SetLineWidth {
+                    segment_id: "a".into(),
+                    width: 8_193.0,
+                    face: "face.ttf".to_owned(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LineWidth);
         assert_eq!(session.draft(), &before);
     }
 }

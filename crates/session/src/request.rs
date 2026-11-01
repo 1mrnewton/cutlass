@@ -176,6 +176,12 @@ pub enum Request {
         spacing: f64,
         face: String,
     },
+    /// Store the wrap width in pixels. Zero keeps the run on one line.
+    SetLineWidth {
+        segment_id: SegmentId,
+        width: f64,
+        face: String,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

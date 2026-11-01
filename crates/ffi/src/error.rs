@@ -122,6 +122,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
         EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
+        EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
     }
 }
 
@@ -201,6 +202,10 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::LineSpacing).to_string(),
             "line spacing must be greater than -1 and at most 4"
+        );
+        assert_eq!(
+            FfiError::from(EditError::LineWidth).to_string(),
+            "the line width must be from zero through 8192"
         );
     }
 

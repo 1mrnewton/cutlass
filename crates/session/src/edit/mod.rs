@@ -106,6 +106,8 @@ pub enum EditError {
     LetterSpacing,
     /// Line spacing is not greater than -1 and at most 4.
     LineSpacing,
+    /// The wrap width is negative or past the picture edge.
+    LineWidth,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -226,6 +228,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             spacing,
             face,
         } => text::set_line_spacing(draft, segment_id, *spacing, face),
+        Request::SetLineWidth {
+            segment_id,
+            width,
+            face,
+        } => text::set_line_width(draft, segment_id, *width, face),
         Request::SetKeyframes {
             segment_id,
             keyframes,

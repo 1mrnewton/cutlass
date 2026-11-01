@@ -450,6 +450,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextAlign { .. } => "set_text_align",
         Request::SetLetterSpacing { .. } => "set_letter_spacing",
         Request::SetLineSpacing { .. } => "set_line_spacing",
+        Request::SetLineWidth { .. } => "set_line_width",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::Import { .. } => "import",
         Request::InsertTrack { .. } => "insert_track",

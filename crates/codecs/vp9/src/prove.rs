@@ -359,6 +359,42 @@ fn official_level_stream_matches_ffmpeg_software() {
     }
 }
 
+#[test]
+fn uhd_3840x2160_matches_ffmpeg_software() {
+    let Some(source) = local_uhd() else {
+        eprintln!("skipped: ../local-files has no 3840x2160 source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("uhd-3840");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &["-frames:v", "2", "-vf", "scale=3840:2160"],
+    );
+    let stream = read_ivf(&ivf);
+    assert_eq!(stream.width, 3840, "coded width {}", stream.width);
+    assert_eq!(stream.height, 2160, "coded height {}", stream.height);
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "uhd {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
     let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");
@@ -399,6 +435,25 @@ fn copy_webm_to_ivf(ffmpeg: &Path, webm: &Path, ivf: &Path) {
         webm.display(),
         String::from_utf8_lossy(&status.stderr)
     );
+}
+
+fn local_uhd() -> Option<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
+    if !root.is_dir() {
+        return None;
+    }
+    const NAMES: &[&str] = &[
+        "14703872_3840_2160_60fps.mp4",
+        "12471039-uhd_3840_2160_24fps.mp4",
+        "12129324_3840_2160_30fps.mp4",
+    ];
+    for name in NAMES {
+        let path = root.join(name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn local_video() -> Option<PathBuf> {

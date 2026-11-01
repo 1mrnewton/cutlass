@@ -278,11 +278,19 @@ pub fn wait_export_frame<E>(
 
 #[cfg(test)]
 mod tests {
-    use cutlass_engine::ReaderFactory;
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+
+    use cutlass_codec::CodecId;
+    use cutlass_container::{Demux, Input, OpenError, Probe, ProbeResult};
+    use cutlass_decode::{CodecError, CodecParams, Decoder};
+    use cutlass_engine::{DisplayQuarter, ReaderFactory};
     use cutlass_model::{
-        Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute,
+        Crop, Draft, MaterialColorConfig, MaterialVideo, Micros, Segment, TimeRange, TrackAttribute,
     };
+    use cutlass_png::PngDecoder;
     use cutlass_renderer_software::SoftwareDevice;
+    use cutlass_still::{StillDemux, StillProbe, still_limits};
 
     use super::*;
 
@@ -472,5 +480,164 @@ mod tests {
         let kept = wait_export_frame::<()>(Micros(10), Micros(80), frame).expect("wait");
         assert_eq!(kept.rgba, vec![4, 5, 6, 7]);
         assert_eq!(kept.extent.width, 1);
+    }
+
+    fn probe_still(header: &[u8]) -> ProbeResult {
+        StillProbe.probe(header)
+    }
+
+    fn open_still(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+        let file = File::open(path).map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?;
+        let len = file
+            .metadata()
+            .map_err(|error| OpenError::Source {
+                message: error.to_string(),
+            })?
+            .len();
+        Ok(Box::new(StillDemux::open(Input::random(
+            file,
+            len,
+            still_limits(),
+        ))?))
+    }
+
+    fn open_png(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+        Ok(Box::new(PngDecoder::open(params)?))
+    }
+
+    fn stills() -> ReaderFactory {
+        let mut factory = ReaderFactory::new();
+        factory.register_container(probe_still, open_still);
+        factory.decoders_mut().register(CodecId::Png, open_png);
+        factory
+    }
+
+    fn left_half() -> Crop {
+        Crop {
+            upper_left_x: 0.0,
+            upper_left_y: 0.0,
+            upper_right_x: 0.5,
+            upper_right_y: 0.0,
+            lower_left_x: 0.0,
+            lower_left_y: 1.0,
+            lower_right_x: 0.5,
+            lower_right_y: 1.0,
+        }
+    }
+
+    fn still_frame(path: &Path, width: u32, height: u32, crop: Crop, ratio: &str) -> Vec<u8> {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = i32::try_from(width).expect("width");
+        draft.canvas_config.height = i32::try_from(height).expect("height");
+        let mut video = MaterialVideo::new("still");
+        video.path = path.display().to_string();
+        video.crop = crop;
+        video.crop_ratio = ratio.to_owned();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        let before = draft.clone();
+        let mut device = SoftwareDevice::new();
+        let media = stills();
+        let mut clips = OpenClips::new();
+        let rgba = frame(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+        )
+        .expect("frame")
+        .rgba;
+        assert_eq!(draft, before);
+        rgba
+    }
+
+    fn columns(rgba: &[u8], width: usize, start: usize, count: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for row in rgba.chunks(width * 4) {
+            let from = start * 4;
+            let to = (start + count) * 4;
+            out.extend_from_slice(&row[from..to]);
+        }
+        out
+    }
+
+    fn oriented(path: &Path) -> (u32, u32) {
+        let info = stills().probe(path).expect("probe");
+        let width = info.width.expect("width");
+        let height = info.height.expect("height");
+        match info.display {
+            DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
+            DisplayQuarter::Zero | DisplayQuarter::Half => (width, height),
+        }
+    }
+
+    #[test]
+    fn a_still_crop_keeps_the_left_half_and_ignores_the_ratio_label() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/fixtures/pattern.png");
+        let (width, height) = oriented(&path);
+        assert_eq!((width, height), (16, 16));
+        let full = still_frame(&path, width, height, Crop::default(), "free");
+        let half = width / 2;
+        let left = still_frame(&path, half, height, left_half(), "free");
+        let labeled = still_frame(&path, half, height, left_half(), "square");
+        assert_eq!(left, labeled);
+        assert_eq!(left, columns(&full, width as usize, 0, half as usize));
+        assert_ne!(
+            columns(&full, width as usize, 0, half as usize),
+            columns(&full, width as usize, half as usize, half as usize)
+        );
+    }
+
+    #[test]
+    fn a_missing_still_with_a_crop_stays_clear() {
+        let path = Path::new("/no/such/still.png");
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 1;
+        draft.canvas_config.height = 1;
+        let mut video = MaterialVideo::new("still");
+        video.path = path.display().to_string();
+        video.crop = left_half();
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        let before = draft.clone();
+        let mut device = SoftwareDevice::new();
+        let media = stills();
+        let mut clips = OpenClips::new();
+        let rgba = frame(
+            &Snapshot::new(&draft),
+            Micros(0),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+        )
+        .expect("frame")
+        .rgba;
+        assert_eq!(rgba, vec![0, 0, 0, 0]);
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_local_still_crops_to_its_left_half() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/04-motion-graphics.png");
+        if !path.is_file() {
+            eprintln!("skipped: ../local-files is missing");
+            return;
+        }
+        let (width, height) = oriented(&path);
+        assert_eq!(width % 2, 0);
+        let half = width / 2;
+        let full = still_frame(&path, width, height, Crop::default(), "free");
+        let left = still_frame(&path, half, height, left_half(), "free");
+        assert_eq!(left, columns(&full, width as usize, 0, half as usize));
     }
 }

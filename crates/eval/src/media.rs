@@ -6,8 +6,11 @@
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
 //! A translation of 1 is half the canvas. A file display quarter turn is
-//! clockwise and is applied before that fit. Alpha, rotation, position, and
-//! scale keyframes are straight lines measured from the segment start.
+//! clockwise and is applied before that fit. The video material's crop quad
+//! is in that oriented picture, from the top left, with Y down. An all-zero
+//! quad is the whole picture. `crop_ratio` is not read. `crop_scale` above 1
+//! shrinks the quad around its center. Alpha, rotation, position, and scale
+//! keyframes are straight lines measured from the segment start.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
@@ -16,7 +19,7 @@ use std::collections::HashMap;
 
 use cutlass_engine::{ClockKind, DisplayQuarter, ReaderFactory, VideoSource, open_segment};
 use cutlass_model::{
-    Clip, CommonKeyframeGroup, Draft, DraftId, MaterialRef, Micros, Segment, SegmentId,
+    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, MaterialRef, Micros, Segment, SegmentId,
     TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
@@ -109,6 +112,8 @@ pub(crate) struct Placed<'a> {
     width: u32,
     height: u32,
     transform: PictureTransform,
+    crop: Crop,
+    crop_scale: f64,
 }
 
 pub(crate) fn picture_transform(
@@ -226,12 +231,12 @@ pub(crate) fn video_layers<'a>(
             if !covers(segment.target.start.0, segment.target.duration.0, time.0) {
                 continue;
             }
-            if !matches!(
-                draft.materials.get(segment.material_id.as_str()),
-                Some(MaterialRef::Video(_))
-            ) {
+            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
+            else {
                 continue;
-            }
+            };
+            let crop = video.crop;
+            let crop_scale = video.crop_scale;
             let Some((clip, uniform)) = segment_clip(segment, time) else {
                 continue;
             };
@@ -254,11 +259,13 @@ pub(crate) fn video_layers<'a>(
                 segment_index,
                 segment.id.clone(),
                 transform,
+                crop,
+                crop_scale,
             ));
         }
     }
     let mut layers = Vec::with_capacity(chosen.len());
-    for (render_index, track_index, segment_index, id, transform) in chosen {
+    for (render_index, track_index, segment_index, id, transform, crop, crop_scale) in chosen {
         let Some(source) = clips.sources.get(&id) else {
             continue;
         };
@@ -271,6 +278,8 @@ pub(crate) fn video_layers<'a>(
                 width,
                 height,
                 transform,
+                crop,
+                crop_scale,
             },
         });
     }
@@ -392,12 +401,14 @@ impl PictureSource for Placed<'_> {
             return Sample::Miss;
         };
         match picture {
-            Picture::Cpu(bytes) => place_with(
+            Picture::Cpu(bytes) => finish_picture(
                 self.width,
                 self.height,
                 bytes,
                 self.transform,
                 self.source.display(),
+                self.crop,
+                self.crop_scale,
             ),
             Picture::Platform(_) => Sample::Miss,
         }
@@ -409,6 +420,209 @@ impl PictureTransform {
     pub(crate) fn omitted(self) -> bool {
         self.opacity == 0 || self.scale_x == 0.0 || self.scale_y == 0.0
     }
+}
+
+fn finish_picture(
+    canvas_w: u32,
+    canvas_h: u32,
+    picture: CpuBytes,
+    transform: PictureTransform,
+    display: DisplayQuarter,
+    crop: Crop,
+    crop_scale: f64,
+) -> Sample {
+    let Some(picture) = orient(picture, display) else {
+        return Sample::Miss;
+    };
+    let picture = apply_crop(picture, crop, crop_scale);
+    place_with(canvas_w, canvas_h, picture, transform, DisplayQuarter::Zero)
+}
+
+/// Sample `crop` from the oriented picture.
+///
+/// Coordinates are fractions of the picture. Y grows downward. An all-zero
+/// quad, a non-finite corner, or an edge that does not cover a pixel returns
+/// `picture`. `crop_scale` above 1 moves each corner toward the quad center.
+/// A scale that is not finite or not positive stays 1. A sample that falls
+/// outside the picture is clear.
+fn apply_crop(picture: CpuBytes, crop: Crop, crop_scale: f64) -> CpuBytes {
+    if crop_absent(crop) {
+        return picture;
+    }
+    let quad = scale_quad(crop, crop_scale);
+    if !quad_finite(quad) {
+        return picture;
+    }
+    let src_w = picture.width();
+    let src_h = picture.height();
+    let Some(out_w) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.upper_right_x,
+        quad.upper_right_y,
+        src_w,
+        src_h,
+    )) else {
+        return picture;
+    };
+    let Some(out_h) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.lower_left_x,
+        quad.lower_left_y,
+        src_w,
+        src_h,
+    )) else {
+        return picture;
+    };
+    let Some(len) = rgba_len(out_w, out_h) else {
+        return picture;
+    };
+    let mut dst = vec![0_u8; len];
+    let built = {
+        let src = picture.rgba();
+        let mut wrote = true;
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let u = (f64::from(x) + 0.5) / f64::from(out_w);
+                let v = (f64::from(y) + 0.5) / f64::from(out_h);
+                let nx = bilinear(
+                    u,
+                    v,
+                    quad.upper_left_x,
+                    quad.upper_right_x,
+                    quad.lower_left_x,
+                    quad.lower_right_x,
+                );
+                let ny = bilinear(
+                    u,
+                    v,
+                    quad.upper_left_y,
+                    quad.upper_right_y,
+                    quad.lower_left_y,
+                    quad.lower_right_y,
+                );
+                let pixel = sample_norm(src, src_w, src_h, nx, ny);
+                let Some(slot) = dst_slot(&mut dst, out_w, x, y) else {
+                    wrote = false;
+                    break;
+                };
+                slot.copy_from_slice(&pixel);
+            }
+            if !wrote {
+                break;
+            }
+        }
+        wrote
+    };
+    if !built {
+        return picture;
+    }
+    CpuBytes::new(out_w, out_h, dst).unwrap_or(picture)
+}
+
+fn crop_absent(crop: Crop) -> bool {
+    is_zero(crop.upper_left_x)
+        && is_zero(crop.upper_left_y)
+        && is_zero(crop.upper_right_x)
+        && is_zero(crop.upper_right_y)
+        && is_zero(crop.lower_left_x)
+        && is_zero(crop.lower_left_y)
+        && is_zero(crop.lower_right_x)
+        && is_zero(crop.lower_right_y)
+}
+
+fn is_zero(value: f64) -> bool {
+    value.to_bits() == 0.0_f64.to_bits() || value.to_bits() == (-0.0_f64).to_bits()
+}
+
+fn scale_quad(crop: Crop, scale: f64) -> Crop {
+    if !scale.is_finite() || scale <= 0.0 || scale.to_bits() == 1.0_f64.to_bits() {
+        return crop;
+    }
+    let center_x =
+        (crop.upper_left_x + crop.upper_right_x + crop.lower_left_x + crop.lower_right_x) / 4.0;
+    let center_y =
+        (crop.upper_left_y + crop.upper_right_y + crop.lower_left_y + crop.lower_right_y) / 4.0;
+    Crop {
+        upper_left_x: toward(crop.upper_left_x, center_x, scale),
+        upper_left_y: toward(crop.upper_left_y, center_y, scale),
+        upper_right_x: toward(crop.upper_right_x, center_x, scale),
+        upper_right_y: toward(crop.upper_right_y, center_y, scale),
+        lower_left_x: toward(crop.lower_left_x, center_x, scale),
+        lower_left_y: toward(crop.lower_left_y, center_y, scale),
+        lower_right_x: toward(crop.lower_right_x, center_x, scale),
+        lower_right_y: toward(crop.lower_right_y, center_y, scale),
+    }
+}
+
+fn toward(value: f64, center: f64, scale: f64) -> f64 {
+    center + (value - center) / scale
+}
+
+fn quad_finite(crop: Crop) -> bool {
+    [
+        crop.upper_left_x,
+        crop.upper_left_y,
+        crop.upper_right_x,
+        crop.upper_right_y,
+        crop.lower_left_x,
+        crop.lower_left_y,
+        crop.lower_right_x,
+        crop.lower_right_y,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+}
+
+fn edge_len(x0: f64, y0: f64, x1: f64, y1: f64, width: u32, height: u32) -> f64 {
+    let dx = (x1 - x0) * f64::from(width);
+    let dy = (y1 - y0) * f64::from(height);
+    dx.mul_add(dx, dy * dy).sqrt()
+}
+
+fn round_edge(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 1.0 {
+        return None;
+    }
+    let rounded = value.round();
+    if !(1.0..4_294_967_296.0).contains(&rounded) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(rounded as u32)
+}
+
+fn bilinear(
+    u: f64,
+    v: f64,
+    upper_left: f64,
+    upper_right: f64,
+    lower_left: f64,
+    lower_right: f64,
+) -> f64 {
+    let upper = upper_left + (upper_right - upper_left) * u;
+    let lower = lower_left + (lower_right - lower_left) * u;
+    upper + (lower - upper) * v
+}
+
+fn sample_norm(src: &[u8], width: u32, height: u32, nx: f64, ny: f64) -> [u8; 4] {
+    let Some(x) = floor_index(nx * f64::from(width), width) else {
+        return [0, 0, 0, 0];
+    };
+    let Some(y) = floor_index(ny * f64::from(height), height) else {
+        return [0, 0, 0, 0];
+    };
+    src_pixel(src, width, x, y).unwrap_or([0, 0, 0, 0])
+}
+
+fn dst_slot(dst: &mut [u8], width: u32, x: u32, y: u32) -> Option<&mut [u8]> {
+    let stride = usize::try_from(width).ok()?.checked_mul(4)?;
+    let index = usize::try_from(y)
+        .ok()?
+        .checked_mul(stride)?
+        .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
+    dst.get_mut(index..index + 4)
 }
 
 pub(crate) fn place_with(
@@ -802,7 +1016,9 @@ fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) 
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{CommonKeyframe, CommonKeyframeGroup, Flip, Point, Segment, TimeRange};
+    use cutlass_model::{
+        CommonKeyframe, CommonKeyframeGroup, Crop, Flip, Point, Segment, TimeRange,
+    };
 
     use super::*;
 
@@ -1205,5 +1421,143 @@ mod tests {
             ..Clip::default()
         };
         assert!(picture_transform(&clip, &UniformScale::default(), 2, 2).is_none());
+    }
+
+    fn quad(corners: [f64; 8]) -> Crop {
+        Crop {
+            upper_left_x: corners[0],
+            upper_left_y: corners[1],
+            upper_right_x: corners[2],
+            upper_right_y: corners[3],
+            lower_left_x: corners[4],
+            lower_left_y: corners[5],
+            lower_right_x: corners[6],
+            lower_right_y: corners[7],
+        }
+    }
+
+    fn full_quad() -> Crop {
+        quad([0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+    }
+
+    fn colored(width: u32, height: u32, pixels: &[[u8; 4]]) -> CpuBytes {
+        let mut rgba = Vec::new();
+        for pixel in pixels {
+            rgba.extend(pixel);
+        }
+        CpuBytes::new(width, height, rgba).unwrap()
+    }
+
+    fn cropped(picture: CpuBytes, crop: Crop, scale: f64) -> Vec<u8> {
+        apply_crop(picture, crop, scale).rgba().to_vec()
+    }
+
+    #[test]
+    fn an_absent_quad_and_a_full_quad_keep_the_picture() {
+        let picture = colored(
+            2,
+            2,
+            &[
+                [1, 0, 0, 255],
+                [2, 0, 0, 255],
+                [3, 0, 0, 255],
+                [4, 0, 0, 255],
+            ],
+        );
+        let pixels = picture.rgba().to_vec();
+        assert_eq!(cropped(picture.clone(), Crop::default(), 1.0), pixels);
+        assert_eq!(cropped(picture.clone(), full_quad(), 1.0), pixels);
+        assert_eq!(cropped(picture.clone(), full_quad(), 0.0), pixels);
+        let mut broken = full_quad();
+        broken.upper_left_x = f64::NAN;
+        assert_eq!(cropped(picture, broken, 1.0), pixels);
+    }
+
+    #[test]
+    fn a_half_quad_keeps_that_side_and_a_reversed_edge_swaps_it() {
+        let strip = colored(
+            4,
+            1,
+            &[
+                [1, 0, 0, 255],
+                [2, 0, 0, 255],
+                [3, 0, 0, 255],
+                [4, 0, 0, 255],
+            ],
+        );
+        let left = quad([0.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0]);
+        let right = quad([0.5, 0.0, 1.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            cropped(strip.clone(), left, 1.0),
+            vec![1, 0, 0, 255, 2, 0, 0, 255]
+        );
+        assert_eq!(
+            cropped(strip.clone(), right, f64::NAN),
+            vec![3, 0, 0, 255, 4, 0, 0, 255]
+        );
+        assert_eq!(cropped(strip.clone(), full_quad(), 2.0), strip.rgba());
+        let block = colored(
+            4,
+            2,
+            &[
+                [1, 0, 0, 255],
+                [2, 0, 0, 255],
+                [3, 0, 0, 255],
+                [4, 0, 0, 255],
+                [5, 0, 0, 255],
+                [6, 0, 0, 255],
+                [7, 0, 0, 255],
+                [8, 0, 0, 255],
+            ],
+        );
+        assert_eq!(
+            cropped(block, full_quad(), 2.0),
+            vec![6, 0, 0, 255, 7, 0, 0, 255]
+        );
+
+        let pair = colored(2, 1, &[[9, 0, 0, 255], [8, 0, 0, 255]]);
+        let reversed = quad([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            cropped(pair, reversed, 1.0),
+            vec![8, 0, 0, 255, 9, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn the_quarter_turn_precedes_the_crop() {
+        let picture = colored(
+            2,
+            2,
+            &[
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255, 255, 0, 255],
+            ],
+        );
+        let transform =
+            picture_transform(&Clip::default(), &UniformScale::default(), 1, 2).expect("transform");
+        let left = quad([0.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0]);
+        let Sample::Ready(Picture::Cpu(bytes)) = finish_picture(
+            1,
+            2,
+            picture,
+            transform,
+            DisplayQuarter::Clockwise90,
+            left,
+            1.0,
+        ) else {
+            panic!("ready");
+        };
+        assert_eq!(bytes.width(), 1);
+        assert_eq!(bytes.height(), 2);
+        assert_eq!(bytes.rgba(), &[0, 0, 255, 255, 255, 255, 0, 255]);
+    }
+
+    #[test]
+    fn a_quad_outside_the_picture_is_clear() {
+        let picture = colored(2, 1, &[[9, 0, 0, 255], [8, 0, 0, 255]]);
+        let outside = quad([1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 2.0, 1.0]);
+        assert_eq!(cropped(picture, outside, 1.0), vec![0, 0, 0, 0, 0, 0, 0, 0]);
     }
 }

@@ -1837,6 +1837,8 @@ pub(crate) struct Slice<'a> {
     adaptive_residual: bool,
     /// Crop used to resample this slice. A sequence crop is copied here.
     scale: set::SvcScale,
+    /// `dmvp_flag`. A one-macroblock P skip copies the base view's motion.
+    dmvp: bool,
     /// Upsampled reference-layer residual. Empty unless the layers differ in size.
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
@@ -2206,6 +2208,8 @@ struct Header {
     depth_weight: bool,
     /// Depth parameter set used by this picture. 0 is the sequence range.
     dps_id: u8,
+    /// `dmvp_flag`. A texture P skip copies the base view's motion.
+    dmvp: bool,
     /// Crop of this slice. Picture-level scalability copies the sequence crop.
     /// Macroblock-level scalability reads it from the slice header.
     scale: set::SvcScale,
@@ -2592,7 +2596,7 @@ fn read_header(
     if let Some(three) = three {
         // A texture slice that is not intra carries DMVP. A depth slice that
         // is not intra carries `depth_weighted_pred_flag` after this header.
-        if !sps.avc_3d || (!intra_slice(kind) && !three.depth) {
+        if !sps.avc_3d || (!three.depth && !intra_slice(kind) && kind != 0) {
             return Err(CodecError::Unsupported { what: "3d" });
         }
         let index = usize::from(three.view_idx);
@@ -2641,10 +2645,11 @@ fn read_header(
         }
     }
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
-    // depth slice. The ranges scale list-0 luma. A texture slice and a B
-    // slice stay refused.
+    // depth slice. The ranges scale list-0 luma. A texture P slice reads
+    // `dmvp_flag` instead. Flag 0, a B slice, and a coded partition stay refused.
     let mut depth_weight = false;
     let mut dps_id = 0u8;
+    let mut dmvp = false;
     if three.is_some_and(|header| header.depth) && !intra_slice(kind) {
         depth_weight = bits.bit()?;
         if depth_weight {
@@ -2661,6 +2666,19 @@ fn read_header(
             if !matches!(kind, 0 | 3) {
                 return Err(CodecError::Unsupported { what: "3d" });
             }
+        }
+    }
+    if three.is_some_and(|header| !header.depth) && kind == 0 {
+        dmvp = bits.bit()?;
+        if !dmvp {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        if sps.acquisition != 1 {
+            let id = bits.ue()?;
+            if id > 63 {
+                return Err(bits.malformed("3d"));
+            }
+            dps_id = id as u8;
         }
     }
     let header = Header {
@@ -2714,6 +2732,7 @@ fn read_header(
         interview_l1,
         depth_weight,
         dps_id,
+        dmvp,
         scale: layer.scale,
     };
     Ok(header)
@@ -2919,6 +2938,7 @@ fn predicted_header(
         interview_l1: Vec::new(),
         depth_weight: source.depth_weight,
         dps_id: source.dps_id,
+        dmvp: false,
         scale: sps.svc_scale.clone(),
     };
     Ok(header)
@@ -3540,6 +3560,7 @@ fn make_slice<'a, S: Sample>(
         motion_pred: header.motion_pred,
         residual_pred: header.residual_pred,
         adaptive_residual: header.adaptive_residual,
+        dmvp: header.dmvp,
         scale: header.scale.clone(),
         residual_y: Vec::new(),
         residual_u: Vec::new(),
@@ -3961,6 +3982,7 @@ mod tests {
             interview_l1: Vec::new(),
             depth_weight: false,
             dps_id: 0,
+            dmvp: false,
             scale: crate::set::SvcScale::default(),
         }
     }

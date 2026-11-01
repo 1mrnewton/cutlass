@@ -25,7 +25,8 @@
 //! An intra 3D-AVC picture is reconstructed. A predicted depth picture copies
 //! its reference when `depth_weighted_pred_flag` is 0. A different depth range
 //! scales that luma. An intra depth slice can copy its header from the texture
-//! slice. The other 3D tools stay refused.
+//! slice. A one-macroblock texture P skip can copy the base view's motion.
+//! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

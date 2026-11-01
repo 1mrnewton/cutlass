@@ -422,6 +422,9 @@ pub(crate) fn decode_mbs<S: Sample>(
     layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
+    if slice.dmvp && total != 1 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
     let mbaff = slice.sps.mbaff && !pic.field;
     let next = slice.group_next.as_slice();
     if !next.is_empty() && next.len() != total {
@@ -484,6 +487,9 @@ pub(crate) fn decode_mbs<S: Sample>(
         }
         if addr >= total {
             break;
+        }
+        if slice.dmvp {
+            return Err(CodecError::Unsupported { what: "3d" });
         }
         fresh(pic, addr, mbaff, !next.is_empty())?;
         let base_mode = if slice.adaptive_base {
@@ -635,9 +641,14 @@ fn skip_mb<S: Sample>(
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
     if super::syntax_kind(slice.kind) == 0 {
-        let mv = p_skip_mv(pic, mx, my, slice_id);
+        let (mv, reference) = if slice.dmvp {
+            dmvp_skip_motion(pic, dpb, slice)
+                .unwrap_or_else(|| (p_skip_mv(pic, mx, my, slice_id), 0))
+        } else {
+            (p_skip_mv(pic, mx, my, slice_id), 0)
+        };
         for part in 0..4 {
-            mb.ref0[part] = 0;
+            mb.ref0[part] = reference;
         }
         for block in 0..16 {
             mb.mv0[block] = mv;
@@ -672,6 +683,39 @@ fn skip_mb<S: Sample>(
     let slot = my * pic.mb_w + mx;
     pic.mb[slot] = mb;
     Ok(())
+}
+
+/// J.8.2.1.2 for one macroblock. `TextureFirstFlag` is 1, so the disparity
+/// starts at zero and the base view's texture at this order count supplies
+/// the vector. A missing or intra base macroblock leaves the ordinary skip.
+fn dmvp_skip_motion<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+) -> Option<([i16; 2], i8)> {
+    let base_id = slice.sps.views.first().copied()?;
+    if pic.view_id == base_id {
+        return None;
+    }
+    let base = dpb.iter().find(|frame| {
+        frame.referenced
+            && frame.inter_view
+            && !frame.nonexisting
+            && frame.view_id == base_id
+            && frame.poc == pic.poc
+            && frame.w == pic.w
+            && frame.h == pic.h
+    })?;
+    let mb = base.mb.first()?;
+    if mb.intra {
+        return None;
+    }
+    let reference = mb.ref0[0];
+    if reference < 0 || usize::try_from(reference).ok()? >= slice.ref0.len() {
+        return None;
+    }
+    // Disparity zero lands on sample (7, 7), the 4×4 at block 5.
+    Some((mb.mv0[5], reference))
 }
 
 fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i16; 2] {

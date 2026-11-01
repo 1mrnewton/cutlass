@@ -974,6 +974,147 @@ fn a_predicted_3d_header_copies_the_texture_slice() {
     );
 }
 
+#[test]
+fn a_depth_motion_vector_shifts_the_other_view() {
+    let parsed = parse_subset_sps(&three_d_two_views()).expect("views");
+    assert_eq!(parsed.views, vec![0, 1]);
+    assert_eq!(parsed.max_num_ref_frames, 4);
+    let base_sps = crate::set::parse_sps(&four_ref_sps()).expect("base sps");
+    assert_eq!(base_sps.max_num_ref_frames, 4);
+    let base_idr = dmvp_base_idr();
+    let other_idr = dmvp_other_idr();
+    let base_p = dmvp_base_p();
+    let skip = dmvp_skip(true);
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base_idr, &other_idr, &base_p, &skip] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert!(pictures.iter().any(|picture| split_luma(picture, 100, 180)));
+    assert!(pictures.iter().any(copied_depth));
+    assert!(pictures.iter().any(shifted_residual_picture));
+    assert!(pictures.iter().any(|picture| painted(picture, 220, 50)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = base_idr.clone();
+        annex.extend(&base_p);
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let idr = pictures
+            .iter()
+            .find(|picture| split_luma(picture, 100, 180))
+            .expect("base idr");
+        let predicted = pictures
+            .iter()
+            .find(|picture| shifted_residual_picture(picture))
+            .expect("base motion");
+        assert_eq!(&raw[..frame], &planes_of(idr));
+        assert_eq!(&raw[frame..], &planes_of(predicted));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &skip).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let mut decoder = open();
+    for annex in [&base_idr, &other_idr, &base_p] {
+        let _ = push_pictures(&mut decoder, annex);
+    }
+    let err = decoder
+        .push(&Packet::video(dmvp_skip(false), 0, 1, 30, false))
+        .expect_err("flag");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+    let err = decoder
+        .push(&Packet::video(dmvp_coded(), 0, 1, 30, false))
+        .expect_err("coded");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+}
+
+fn dmvp_base_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &four_ref_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &residual_pcm()));
+    out
+}
+
+fn dmvp_base_p() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.ue(0);
+    w.ue(0);
+    w.se(32);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    annex_b_nal(2, 1, &w.bytes)
+}
+
+fn dmvp_other_idr() -> Vec<u8> {
+    let mut w = Writer::new();
+    // Not an IDR. An IDR would drop the base view's reference.
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bits(0, 4);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+    w.ue(25);
+    w.align_zeros();
+    for _row in 0..16 {
+        for col in 0..16 {
+            w.bytes.push(if col < 8 { 40 } else { 220 });
+        }
+    }
+    w.bytes.extend(std::iter::repeat_n(50, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    let mut out = annex_b_nal(3, 15, &three_d_two_views());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0xA0], &w.bytes));
+    out
+}
+
+fn dmvp_skip(flag: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(flag);
+    if flag {
+        w.ue(0);
+    }
+    w.ue(1);
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn dmvp_coded() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 2, 2, true, false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
 fn copied_depth(picture: &VideoOutput) -> bool {
     let y = picture.picture.y();
     let luma = y.chunks(16).all(|row| {
@@ -1475,6 +1616,69 @@ fn three_d_sequence(prediction: bool, near_exp: u32, far_exp: u32) -> Vec<u8> {
     w.bit(false);
     w.ue(0);
     w.bit(prediction);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+/// Two paired views. View 1's depth reference lists are empty, so the paired
+/// flag copies that emptiness onto the texture interview lists. Four reference
+/// frames keep both views' pictures.
+fn three_d_two_views() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(139, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(30, 8);
+    w.ue(0);
+    w.bits(0, 3);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
     w.bit(false);
     w.bit(false);
     w.bit(false);
@@ -2514,6 +2718,27 @@ fn paint(edge: usize, luma: u8, chroma: u8) -> Vec<u8> {
     let mut raw = vec![luma; edge * edge];
     raw.extend(std::iter::repeat_n(chroma, (edge / 2) * (edge / 2) * 2));
     raw
+}
+
+fn four_ref_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
 }
 
 fn baseline_sps() -> Vec<u8> {

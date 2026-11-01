@@ -50,7 +50,7 @@ Implemented for that scope, and matched against dav1d on the keyframe fixtures n
 
 - Sequence headers, frame headers, tile groups that follow a frame header, large-scale tile lists anchored at the eight reference slots, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped. An Annex B temporal unit is accepted as one packet.
 - Eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0` returns no picture).
-- Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
+- Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes. A 128×128 frame leaves the intra edge filter off.
 - Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe or an inter frame may select its transform size.
 - Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered. A frame with sharpness 7 matches dav1d.
 - CDEF, including one index copied across every 64×64 unit of a 128×128 block. A 128×128 frame uses damping 6. Uniform and non-uniform tiles, a quantizer matrix, and a superblock quantizer delta. A 128×128 keyframe and inter frame add 2 to the chroma DC and AC quantizers. A still picture may use the full sequence header.

@@ -5621,6 +5621,26 @@ mod tests {
     }
 
     #[test]
+    fn intra_edge_filter_off_matches_dav1d() {
+        // aomenc --enable-intra-edge-filter=0 --usage=2, 128×128. Directional
+        // prediction does not filter the edge. Turning that filter on changes
+        // the picture. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/edge-off.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(!sequence.enable_intra_edge);
+        assert!(frame.intra);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xece9_bcc0_6b4d_536d);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn identity_matrix_grain_clip_matches_dav1d() {
         // aomenc --i444 --matrix-coefficients=identity --film-grain-test=1, 128×128.
         // The matrix is identity and grain clips to the restricted range, so chroma

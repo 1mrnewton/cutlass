@@ -15,8 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    GestureOutcome, MoveGesture, Pointer, TimelineScale, Zoom, ZoomBounds, fit_pixel_size,
-    hit_test, lanes, last_accuracy_step, minimum_pixel_size, move_gesture,
+    DropGesture, DropOutcome, GestureOutcome, MoveGesture, Pointer, TimelineScale, Zoom,
+    ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category, lanes, last_accuracy_step,
+    minimum_pixel_size, move_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
@@ -578,10 +579,11 @@ impl Shell {
         let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let time = self.playhead;
         let mut device = SoftwareDevice::new();
+        let root = self.path.clone();
         let picture = self
             .preview_cache
             .borrow_mut()
-            .frame(session, &mut device, time, &self.readers)
+            .frame(session, &mut device, time, &self.readers, root.as_deref())
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         Ok(Picture {
             width: picture.width,
@@ -657,6 +659,73 @@ impl Shell {
                 "a new lane is not available".to_owned(),
             )),
         }
+    }
+
+    /// Place one library material at the timeline point.
+    ///
+    /// `x` is pixels from time zero and `y` is pixels from the top lane, on
+    /// the same scale as a segment drag. The material stays in the library.
+    /// A lane of the material's type is added when the pointer lane and the
+    /// upper lane of that type are taken. The source range is the whole
+    /// material. One undo removes the segment and a lane this drop added.
+    pub fn drop_medium(&mut self, material_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let (kind, duration) = {
+            let draft = self.session_draft()?;
+            medium_span(draft, material_id).ok_or_else(|| {
+                ShellError::Unavailable("the media is not in the library".to_owned())
+            })?
+        };
+        if duration.0 <= 0 {
+            return Err(ShellError::Unavailable(
+                "the media has no duration".to_owned(),
+            ));
+        }
+        let outcome = {
+            let gesture = DropGesture {
+                kind,
+                duration,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: snap_window(self.pixel_size),
+            };
+            let draft = self.session_draft()?;
+            drop_gesture(draft, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        let (track_id, start, lane) = match outcome {
+            DropOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            DropOutcome::Place { track_id, start } => (track_id, start, None),
+            DropOutcome::NewLane { kind, start } => {
+                let track_id = TrackId::new(self.fresh("track"));
+                (track_id, start, Some(kind))
+            }
+        };
+        let segment_id = SegmentId::new(self.fresh("seg"));
+        let mut requests = Vec::new();
+        if let Some(kind) = lane {
+            requests.push(Request::InsertTrack {
+                track_id: track_id.clone(),
+                kind,
+            });
+        }
+        let mut segment = Segment::new(
+            segment_id.clone(),
+            material_id,
+            TimeRange::new(start.0, duration.0),
+        );
+        segment.source_range = Some(TimeRange::new(0, duration.0));
+        requests.push(Request::Place {
+            track_id,
+            segment: Box::new(segment),
+        });
+        self.apply_requests(&requests)?;
+        self.select(Some(segment_id));
+        Ok(())
     }
 
     pub fn zoom_in(&mut self) -> Result<(), ShellError> {
@@ -815,6 +884,7 @@ impl Shell {
         if request.path.exists() && !request.replace {
             return Err(ShellError::Overwrite(request.path));
         }
+        let root = self.path.clone();
         let draft = self.session_draft()?;
         let (width, height) = self.scaled_canvas(request.long_side);
         let params = CodecParams::video(request.codec, width, height);
@@ -855,6 +925,7 @@ impl Shell {
                 readers: &self.readers,
                 mux: &mut mux,
                 destination: None,
+                root: root.as_deref(),
             },
             |_, _, _| Ok(cutlass_eval::ClipPcm::Missing),
         )
@@ -938,10 +1009,14 @@ impl Shell {
     }
 
     fn apply(&mut self, request: Request) -> Result<(), ShellError> {
+        self.apply_requests(std::slice::from_ref(&request))
+    }
+
+    fn apply_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         let revision = session.revision();
         session
-            .apply(revision, &[request])
+            .apply(revision, requests)
             .map_err(ShellError::Edit)?;
         Ok(())
     }
@@ -1126,6 +1201,42 @@ fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
 
 fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
+}
+
+fn medium_span(draft: &Draft, id: &str) -> Option<(TrackType, Micros)> {
+    if let Some(video) = draft
+        .materials
+        .videos
+        .iter()
+        .find(|item| item.id.as_str() == id)
+    {
+        let kind = MetaType::parse(&video.kind)
+            .and_then(lane_category)
+            .unwrap_or(TrackType::Video);
+        return Some((kind, video.duration));
+    }
+    let audio = draft
+        .materials
+        .audios
+        .iter()
+        .find(|item| item.id.as_str() == id)?;
+    Some((TrackType::Audio, audio.duration))
+}
+
+/// Twelve pixels, in microseconds. A bad pixel size snaps to nothing.
+fn snap_window(pixel_size: f64) -> Micros {
+    const PIXELS: f64 = 12.0;
+    if !pixel_size.is_finite() || pixel_size <= 0.0 {
+        return Micros(0);
+    }
+    let micros = PIXELS / pixel_size;
+    if !micros.is_finite() || micros <= 0.0 {
+        return Micros(0);
+    }
+    if micros >= i64::MAX as f64 {
+        return Micros(i64::MAX);
+    }
+    Micros(micros.round() as i64)
 }
 
 fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
@@ -1462,6 +1573,15 @@ mod tests {
         Ok(Box::new(Flat))
     }
 
+    fn digest(bytes: &[u8]) -> u64 {
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
     fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
@@ -1660,6 +1780,169 @@ mod tests {
         assert!(error.to_string().contains("still"), "{error}");
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(!temp.path.join("Resources").join("short.png").exists());
+    }
+
+    #[test]
+    fn a_library_drop_places_the_still_and_one_undo_removes_it() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let duration = desktop.draft().unwrap().materials.videos[0].duration;
+        desktop.pixel_size = 0.001;
+        let clear = desktop.preview_bytes().unwrap();
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let lanes = desktop.lanes();
+        assert_eq!(lanes.len(), 1);
+        assert!(lanes[0].main);
+        assert_eq!(lanes[0].clips.len(), 1);
+        assert_eq!(lanes[0].clips[0].start, Micros(0));
+        assert_eq!(lanes[0].clips[0].duration, duration);
+        let segment = &desktop.draft().unwrap().tracks[0].segments[0];
+        assert_eq!(segment.source_range, Some(TimeRange::new(0, duration.0)));
+        assert_eq!(segment.material_id.as_str(), id);
+        assert_eq!(
+            desktop.selected().map(|item| item.as_str()),
+            Some(segment.id.as_str())
+        );
+        let placed = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&clear.rgba), digest(&placed.rgba));
+        desktop
+            .drop_medium(&id, 4_000.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+        assert_eq!(desktop.lanes()[0].clips.len(), 2);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.lanes()[0].clips.len(), 1);
+        desktop.undo().unwrap();
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+        desktop.redo().unwrap();
+        assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn a_drop_on_a_taken_span_opens_an_overlay_above_the_main_lane() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 2);
+        assert!(draft.tracks[0].is_sub_video());
+        assert_eq!(draft.tracks[0].segments.len(), 1);
+        assert!(draft.tracks[1].is_main());
+        assert_eq!(draft.tracks[1].segments.len(), 1);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+        assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn an_audio_drop_opens_a_lane_under_the_main_track() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let sound = temp.path.join("tone.wav");
+        write_wav(&sound);
+        desktop.import_file(&sound).unwrap();
+        let id = desktop.draft().unwrap().materials.audios[0]
+            .id
+            .as_str()
+            .to_owned();
+        let duration = desktop.draft().unwrap().materials.audios[0].duration;
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 2);
+        assert!(draft.tracks[0].is_main());
+        assert!(draft.tracks[0].segments.is_empty());
+        assert_eq!(draft.tracks[1].kind, TrackType::Audio);
+        assert_eq!(draft.tracks[1].segments.len(), 1);
+        assert_eq!(
+            draft.tracks[1].segments[0].source_range,
+            Some(TimeRange::new(0, duration.0))
+        );
+        assert_eq!(desktop.lanes().len(), 2);
+        assert!(desktop.lanes()[0].main);
+        assert!(!desktop.lanes()[1].main);
+        assert_eq!(desktop.lanes()[1].clips.len(), 1);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+    }
+
+    #[test]
+    fn a_drop_off_the_lanes_and_a_locked_lane_leave_the_draft() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let revision = desktop.revision();
+        let missed = desktop.drop_medium(&id, 10.0, -1.0).unwrap_err();
+        assert!(missed.to_string().contains("missed"), "{missed}");
+        assert_eq!(desktop.revision(), revision);
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+        let unknown = desktop.drop_medium("missing", 0.0, 24.0).unwrap_err();
+        assert!(unknown.to_string().contains("library"), "{unknown}");
+        desktop
+            .toggle_attribute(desktop.lanes()[0].track_id.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap_err();
+        assert!(locked.to_string().contains("locked"), "{locked}");
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+        assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
+    }
+
+    #[test]
+    fn media_with_no_duration_is_not_placed() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let mut video = MaterialVideo::new("empty");
+        video.duration = Micros(0);
+        desktop
+            .apply(cutlass_session::Request::Import {
+                medium: cutlass_session::ImportedMedium::Video(Box::new(video)),
+            })
+            .unwrap();
+        let error = desktop
+            .drop_medium("empty", 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap_err();
+        assert!(error.to_string().contains("no duration"), "{error}");
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub use mix::{
 pub use reader::{
     DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, StreamReport,
 };
-pub use source::{VideoSource, decoded_picture, open_segment};
+pub use source::{VideoSource, decoded_picture, media_in_project, open_segment, open_segment_in};
 pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use cutlass_encode::{
 };
 use cutlass_eval::{
     AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, OpenClips, ReaderFactory,
-    Snapshot, audio_slice, frame, wait_export_frame,
+    Snapshot, audio_slice, frame_in, wait_export_frame,
 };
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 
@@ -54,6 +54,8 @@ pub struct ExportRun<'a, D, M> {
     pub readers: &'a ReaderFactory,
     pub mux: &'a mut M,
     pub destination: Option<&'a Path>,
+    /// Project folder for a relative media path.
+    pub root: Option<&'a Path>,
 }
 
 struct TrackTicks {
@@ -404,7 +406,15 @@ where
             .checked_add(run.request.late_by)
             .ok_or(ExportError::Range)?,
     );
-    let evaluated = evaluated_frame(run.draft, run.device, time, ready, run.readers, clips)?;
+    let evaluated = evaluated_frame(
+        run.draft,
+        run.device,
+        time,
+        ready,
+        run.readers,
+        clips,
+        run.root,
+    )?;
     let bytes = scale_rgba(
         evaluated.width,
         evaluated.height,
@@ -470,9 +480,10 @@ fn evaluated_frame<D: Device>(
     ready_at: Micros,
     media: &ReaderFactory,
     clips: &mut OpenClips,
+    root: Option<&Path>,
 ) -> Result<ExportedFrame, ExportError> {
     let snapshot = Snapshot::new(draft);
-    let picture = frame(&snapshot, time, device, media, clips, 0).map_err(map_eval)?;
+    let picture = frame_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?;
     let picture = wait_export_frame::<D::Error>(time, ready_at, picture).map_err(map_eval)?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| ExportError::Canvas)?;
@@ -1051,6 +1062,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1104,6 +1116,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1131,6 +1144,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1154,6 +1168,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1190,6 +1205,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1256,6 +1272,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1279,6 +1296,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1340,6 +1358,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |segment, frames, rate| {
                 assert_eq!(frames, 4);
@@ -1420,6 +1439,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1475,6 +1495,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: Some(&dir),
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1502,6 +1523,7 @@ mod tests {
                     Limits::standard(),
                 ),
                 destination: Some(&dir),
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1532,6 +1554,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1578,6 +1601,7 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )

@@ -31,6 +31,6 @@ pub use audio::{AudioError, MixWindow, audio_slice};
 pub use cutlass_compositor::{Device, Frame};
 pub use cutlass_engine::{ClipPcm, ClockKind, MixResult, ReaderFactory};
 pub use cutlass_model::Micros;
-pub use frame::{EvalError, Fonts, NoFonts, Snapshot, frame, wait_export_frame};
+pub use frame::{EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, wait_export_frame};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;

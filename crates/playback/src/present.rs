@@ -6,6 +6,7 @@
 //! drops the cache.
 
 use std::collections::VecDeque;
+use std::path::Path;
 
 use cutlass_eval::{OpenClips, ReaderFactory, Snapshot};
 use cutlass_gpu::Device;
@@ -165,6 +166,7 @@ impl FrameCache {
         device: &mut D,
         time: Micros,
         media: &ReaderFactory,
+        root: Option<&Path>,
     ) -> Result<Readback, PresentError<D::Error>> {
         evaluate(
             &mut self.inner,
@@ -173,6 +175,7 @@ impl FrameCache {
             device,
             time,
             media,
+            root,
         )
     }
 }
@@ -190,6 +193,7 @@ pub(crate) fn evaluate<D: Device>(
     device: &mut D,
     time: Micros,
     media: &ReaderFactory,
+    root: Option<&Path>,
 ) -> Result<Readback, PresentError<D::Error>> {
     let draft = session.draft();
     let revision = session.revision();
@@ -198,8 +202,16 @@ pub(crate) fn evaluate<D: Device>(
     if let Some(hit) = cache.lookup(&draft.id, revision, time, width, height) {
         return Ok(hit);
     }
-    let frame = cutlass_eval::frame(&Snapshot::new(draft), time, device, media, clips, revision)
-        .map_err(PresentError::Picture)?;
+    let frame = cutlass_eval::frame_in(
+        &Snapshot::new(draft),
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        root,
+    )
+    .map_err(PresentError::Picture)?;
     let readback = Readback {
         width: frame.extent.width,
         height: frame.extent.height,

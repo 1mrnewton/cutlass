@@ -177,12 +177,30 @@ impl PictureSource for VideoSource {
 }
 
 /// Opens the segment's file. The draft is only borrowed.
+///
+/// A relative path is opened from the process directory. [`open_segment_in`]
+/// joins that path to a project folder instead.
 pub fn open_segment(
     factory: &ReaderFactory,
     draft: &Draft,
     id: &SegmentId,
     clock: ClockKind,
     window: usize,
+) -> Result<VideoSource, EngineError> {
+    open_segment_in(factory, draft, id, clock, window, None)
+}
+
+/// Opens the segment's file. A relative path stays inside `root`.
+///
+/// An absolute path is opened as stored. Without `root`, a relative path is
+/// opened from the process directory. `..` is refused when `root` is set.
+pub fn open_segment_in(
+    factory: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    clock: ClockKind,
+    window: usize,
+    root: Option<&Path>,
 ) -> Result<VideoSource, EngineError> {
     let segment = draft
         .tracks
@@ -193,16 +211,19 @@ pub fn open_segment(
     if map::is_graphic(draft, segment) {
         return Err(EngineError::NotMedia);
     }
-    let Some(path) = map::media_path(draft, segment) else {
+    let Some(stored) = map::media_path(draft, segment) else {
         return Err(EngineError::MissingFile {
             path: PathBuf::new(),
         });
     };
-    let media = factory.open(Path::new(path))?;
+    let path = located_media(root, stored).ok_or_else(|| EngineError::MissingFile {
+        path: PathBuf::from(stored),
+    })?;
+    let media = factory.open(&path)?;
     let display = media.info().display;
     let map = map::placement_of(draft, segment)?;
     Ok(VideoSource {
-        path: PathBuf::from(path),
+        path,
         media: RefCell::new(media),
         map,
         cache: RefCell::new(FrameWindow::new(window)?),
@@ -211,6 +232,39 @@ pub fn open_segment(
         decodes: Cell::new(0),
         display,
     })
+}
+
+/// A relative media path joined to `root`. `..` and a path outside `root` are refused.
+#[must_use]
+pub fn media_in_project(root: &Path, stored: &str) -> Option<PathBuf> {
+    let path = Path::new(stored);
+    if stored.is_empty() || path.is_absolute() {
+        return None;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let joined = root.join(path);
+    let root = root.canonicalize().ok()?;
+    let canonical = joined.canonicalize().ok()?;
+    canonical.starts_with(&root).then_some(canonical)
+}
+
+fn located_media(root: Option<&Path>, stored: &str) -> Option<PathBuf> {
+    if stored.is_empty() {
+        return None;
+    }
+    let path = Path::new(stored);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    match root {
+        Some(root) => media_in_project(root, stored),
+        None => Some(PathBuf::from(stored)),
+    }
 }
 
 /// Peaks for at most `frames` from the start of `media`.
@@ -507,6 +561,20 @@ mod tests {
             panic!("cpu");
         };
         bytes.into_rgba()
+    }
+
+    #[test]
+    fn a_relative_path_stays_inside_the_project_and_a_parent_is_refused() {
+        let root = std::env::temp_dir().join(format!("cutlass-media-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Resources")).expect("root");
+        std::fs::write(root.join("Resources/clip.png"), b"png").expect("file");
+        let resolved = media_in_project(&root, "Resources/clip.png").expect("inside");
+        assert!(resolved.ends_with("Resources/clip.png"));
+        assert!(media_in_project(&root, "../clip.png").is_none());
+        assert!(media_in_project(&root, "/tmp/clip.png").is_none());
+        assert!(media_in_project(&root, "").is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

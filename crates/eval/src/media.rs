@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cutlass_engine::{
-    ClockKind, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture, open_segment,
+    ClockKind, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture, open_segment_in,
 };
 use cutlass_model::{
     Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialCanvas, MaterialRef,
@@ -38,6 +38,8 @@ pub struct OpenClips {
     draft: Option<DraftId>,
     revision: u64,
     bound: bool,
+    /// Project folder for a relative media path. An absolute path ignores it.
+    root: Option<std::path::PathBuf>,
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
@@ -50,6 +52,7 @@ impl OpenClips {
             draft: None,
             revision: 0,
             bound: false,
+            root: None,
             sources: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
@@ -71,7 +74,17 @@ impl OpenClips {
     /// Each compound keeps its own child files. A second segment that stores
     /// its own copy of a nest does not share them.
     pub(crate) fn child(&mut self, id: &SegmentId) -> &mut Self {
-        self.nests.entry(id.clone()).or_default()
+        let root = self.root.clone();
+        let child = self.nests.entry(id.clone()).or_default();
+        if child.root.is_none() {
+            child.root = root;
+        }
+        child
+    }
+
+    /// The folder a relative media path is joined to. `None` opens a relative path from the process directory.
+    pub fn set_project(&mut self, root: Option<&Path>) {
+        self.root = root.map(Path::to_path_buf);
     }
 
     pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
@@ -261,8 +274,15 @@ pub(crate) fn video_layers<'a>(
                 continue;
             }
             if !clips.sources.contains_key(&segment.id) {
-                let Ok(source) = open_segment(media, draft, &segment.id, ClockKind::Export, 1)
-                else {
+                let root = clips.root.clone();
+                let Ok(source) = open_segment_in(
+                    media,
+                    draft,
+                    &segment.id,
+                    ClockKind::Export,
+                    1,
+                    root.as_deref(),
+                ) else {
                     continue;
                 };
                 clips.sources.insert(segment.id.clone(), source);
@@ -332,7 +352,16 @@ pub(crate) fn video_picture(
         return None;
     }
     if !clips.sources.contains_key(&segment.id) {
-        let source = open_segment(media, draft, &segment.id, ClockKind::Export, 1).ok()?;
+        let root = clips.root.clone();
+        let source = open_segment_in(
+            media,
+            draft,
+            &segment.id,
+            ClockKind::Export,
+            1,
+            root.as_deref(),
+        )
+        .ok()?;
         clips.sources.insert(segment.id.clone(), source);
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);

@@ -143,6 +143,20 @@ pub fn frame<D: Device>(
     clips: &mut OpenClips,
     revision: u64,
 ) -> Result<Frame, EvalError<D::Error>> {
+    frame_in(snapshot, time, device, media, clips, revision, None)
+}
+
+/// The composited picture. A relative media path is joined to `root`.
+pub fn frame_in<D: Device>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    root: Option<&std::path::Path>,
+) -> Result<Frame, EvalError<D::Error>> {
+    clips.set_project(root);
     compose(snapshot, time, device, media, clips, revision, &[])
 }
 

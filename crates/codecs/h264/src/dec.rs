@@ -1736,8 +1736,11 @@ pub(crate) struct Slice<'a> {
     base_mode: bool,
     /// `adaptive_base_mode_flag`. The macroblock layer reads `base_mode_flag`.
     adaptive_base: bool,
-    /// Add the reference layer's list-0 residual after this slice's prediction.
+    /// Add the reference layer's residual after this slice's prediction.
+    /// When `adaptive_residual` is set, each inter macroblock carries its own flag.
     residual_pred: bool,
+    /// `adaptive_residual_prediction_flag`. The macroblock layer reads `residual_prediction_flag`.
+    adaptive_residual: bool,
 }
 
 struct SliceCursor<'a> {
@@ -2054,8 +2057,11 @@ struct Header {
     base_mode: bool,
     /// `adaptive_base_mode_flag`. The macroblock layer reads `base_mode_flag`.
     adaptive_base: bool,
-    /// The reference layer's list-0 residual is added after prediction.
+    /// The reference layer's residual is added after prediction.
+    /// When `adaptive_residual` is set, each inter macroblock carries its own flag.
     residual_pred: bool,
+    /// `adaptive_residual_prediction_flag`. The macroblock layer reads `residual_prediction_flag`.
+    adaptive_residual: bool,
     /// Annex H `view_id`. Zero for an Annex A picture.
     view_id: u16,
     /// This picture may be an interview reference.
@@ -2414,9 +2420,9 @@ fn read_header(
             };
         }
     }
-    let (adaptive_base, base_mode, residual_pred) = match svc {
+    let (adaptive_base, base_mode, adaptive_residual, residual_pred) = match svc {
         Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
-        _ => (false, false, false),
+        _ => (false, false, false, false),
     };
     if svc.is_some() && !restriction {
         let start = bits.u(4)?;
@@ -2467,6 +2473,7 @@ fn read_header(
         base_mode,
         adaptive_base,
         residual_pred,
+        adaptive_residual,
         view_id,
         inter_view,
         interview_l0,
@@ -2479,13 +2486,14 @@ fn read_header(
 /// residual are reconstructed, including both tools on one macroblock and a
 /// list-0 index other than 0. A reference macroblock can use list 1, and both
 /// lists are averaged. `adaptive_base_mode_flag` selects base mode per
-/// macroblock.
+/// macroblock. `adaptive_residual_prediction_flag` selects residual prediction
+/// per macroblock.
 /// Resampling and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
     svc: nal::SvcHeader,
-) -> Result<(bool, bool, bool), CodecError> {
+) -> Result<(bool, bool, bool, bool), CodecError> {
     if svc.quality_id != 0 || sps.svc_spatial != 0 || !sps.inter_layer_deblock {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -2524,9 +2532,8 @@ fn read_inter_layer(
     } else {
         bits.bit()?
     };
-    // A slice with neither tool is not inter-layer prediction. Residual
-    // prediction stays a slice default; the per-macroblock flag is still open.
-    if adaptive_residual || (!adaptive_base && !(default_base || default_residual)) {
+    // A slice with neither tool is not inter-layer prediction.
+    if !adaptive_base && !adaptive_residual && !(default_base || default_residual) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2541,7 +2548,12 @@ fn read_inter_layer(
             what: "inter-layer prediction",
         });
     }
-    Ok((adaptive_base, default_base, default_residual))
+    Ok((
+        adaptive_base,
+        default_base,
+        adaptive_residual,
+        default_residual,
+    ))
 }
 
 fn read_list_mod(bits: &mut Bits<'_>) -> Result<Vec<Mod>, CodecError> {
@@ -2863,6 +2875,7 @@ fn make_slice<'a, S: Sample>(
         base_mode: header.base_mode,
         adaptive_base: header.adaptive_base,
         residual_pred: header.residual_pred,
+        adaptive_residual: header.adaptive_residual,
     })
 }
 
@@ -3271,6 +3284,7 @@ mod tests {
             base_mode: false,
             adaptive_base: false,
             residual_pred: false,
+            adaptive_residual: false,
             view_id: 0,
             inter_view: true,
             interview_l0: Vec::new(),

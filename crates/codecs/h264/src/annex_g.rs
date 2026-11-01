@@ -432,6 +432,38 @@ fn adaptive_base_mode_chooses_per_macroblock() {
 }
 
 #[test]
+fn adaptive_residual_prediction_chooses_per_macroblock() {
+    let idr = residual_flag_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert_eq!(first.picture.width(), 32);
+    assert!(painted(&first, 150, 90));
+    let base = decode_with(&mut decoder, &residual_flag_base());
+    assert!(
+        residual_corners(&base, 153, 153, 150),
+        "base row {:?}",
+        &base.picture.y()[..32]
+    );
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &residual_flag_layer());
+    assert!(
+        residual_corners(&picture, 153, 150, 150),
+        "row {:?}",
+        &picture.picture.y()[..32]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr;
+        layered.extend(residual_flag_layer());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 32 * 16 + 16 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        assert_eq!(&raw[frame..], &planes_of(&base));
+        assert_ne!(&raw[frame..], &planes_of(&picture));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -1982,6 +2014,104 @@ fn adaptive_slice() -> Vec<u8> {
     w.bit = w.bytes.len() * 8;
     w.trailing();
     w.bytes
+}
+
+fn residual_flag_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps_width(1));
+    out.extend(annex_b_nal(3, 15, &high_subset_width(1)));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &wide_flat_pcm(150, 90)));
+    out
+}
+
+fn residual_flag_base() -> Vec<u8> {
+    annex_b_nal(0, 1, &residual_flag_base_slice())
+}
+
+fn residual_flag_layer() -> Vec<u8> {
+    let mut out = residual_flag_base();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &residual_flag_enhancement(),
+    ));
+    out
+}
+
+fn wide_flat_pcm(luma: u8, chroma: u8) -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    for _ in 0..2 {
+        w.ue(25);
+        w.align_zeros();
+        w.bytes.extend(std::iter::repeat_n(luma, 256));
+        w.bytes.extend(std::iter::repeat_n(chroma, 128));
+        w.bit = w.bytes.len() * 8;
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn residual_flag_base_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    for _ in 0..2 {
+        w.ue(0);
+        w.ue(0);
+        w.se(0);
+        w.se(0);
+        w.ue(2);
+        w.se(0);
+        w.bits(1, 2);
+        w.bit(false);
+        w.bit(true);
+        w.bit(true);
+        w.bit(true);
+        w.bit(true);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn residual_flag_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn residual_corners(picture: &VideoOutput, left: u8, right: u8, fill: u8) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..32).all(|col| {
+            let corner = if col < 16 { left } else { right };
+            let want = if row < 4 && (col < 4 || (16..20).contains(&col)) {
+                corner
+            } else {
+                fill
+            };
+            y[row * 32 + col] == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
 }
 
 fn paint_row(left: u8, right: u8) -> Vec<u8> {

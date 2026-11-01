@@ -483,14 +483,15 @@ pub(crate) fn decode_mbs<S: Sample>(
                     what: "inter-layer prediction",
                 });
             };
+            let residual = coded_residual_flag(slice, &mut entropy)?;
             let qp = inferred_base(pic, dpb, layer, slice, &mut entropy, addr, (slice_id, qp))?;
-            if slice.residual_pred {
+            if residual {
                 add_layer_residual(pic, dpb, layer, slice, addr)?;
             }
             qp
         } else {
-            let qp = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
-            if slice.residual_pred {
+            let (qp, residual) = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
+            if residual {
                 let Some(layer) = layer else {
                     return Err(CodecError::Unsupported {
                         what: "inter-layer prediction",
@@ -676,6 +677,26 @@ fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i1
 /// Base mode. An intra reference layer macroblock is copied, then a coded
 /// residual is added. An inter one inherits list-0 motion and predicts from
 /// the decoded picture buffer. Resampling and residual prediction are refused.
+/// `residual_prediction_flag` when the slice asks for it on every macroblock.
+/// An intra slice does not carry the flag. Otherwise the slice default applies.
+fn coded_residual_flag(
+    slice: &Slice<'_>,
+    entropy: &mut Entropy<'_, '_>,
+) -> Result<bool, CodecError> {
+    if !slice.adaptive_residual {
+        return Ok(slice.residual_pred);
+    }
+    if super::intra_slice(slice.kind) {
+        return Ok(false);
+    }
+    match entropy {
+        Entropy::Cavlc(bits) => bits.bit(),
+        Entropy::Cabac(_) => Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        }),
+    }
+}
+
 fn inferred_base<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -1217,7 +1238,7 @@ fn one_mb<S: Sample>(
     addr: usize,
     qp: i32,
     entropy: &mut Entropy<'_, '_>,
-) -> Result<i32, CodecError> {
+) -> Result<(i32, bool), CodecError> {
     let mbaff = slice.sps.mbaff && !pic.field;
     let (mx, my) = locate(pic, addr, mbaff);
     let slot = my * pic.mb_w + mx;
@@ -1241,10 +1262,10 @@ fn one_mb<S: Sample>(
         mb.nnz_c = [16; 32];
         mb.qp = 0;
         pic.mb[slot] = mb;
-        return Ok(qp);
+        return Ok((qp, false));
     }
     let mut qp = qp;
-    if intra {
+    let residual = if intra {
         decode_intra(
             pic,
             entropy,
@@ -1254,6 +1275,7 @@ fn one_mb<S: Sample>(
             &mut mb,
             &mut qp,
         )?;
+        false
     } else {
         decode_inter(
             pic,
@@ -1263,8 +1285,8 @@ fn one_mb<S: Sample>(
             Place { mx, my },
             spec,
             (&mut mb, &mut qp),
-        )?;
-    }
+        )?
+    };
     mb.qp = qp as i8;
     mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
     mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
@@ -1272,7 +1294,7 @@ fn one_mb<S: Sample>(
         bind_refs(&mut mb, slice);
     }
     pic.mb[slot] = mb;
-    Ok(qp)
+    Ok((qp, residual))
 }
 
 fn field_flag<S: Sample>(
@@ -5374,7 +5396,7 @@ fn decode_inter<S: Sample>(
     at: Place,
     spec: u32,
     work: (&mut Mb, &mut i32),
-) -> Result<(), CodecError> {
+) -> Result<bool, CodecError> {
     let Place { mx, my } = at;
     let (mb, qp) = work;
     let sub = if slice.kind == 1 {
@@ -5389,6 +5411,7 @@ fn decode_inter<S: Sample>(
     } else {
         read_parts(pic, entropy, slice, mx, my, spec, mb)?;
     }
+    let residual = coded_residual_flag(slice, entropy)?;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, mb.slice, slice.sps.chroma)?;
     mb.cbp = luma_cbp | (chroma_cbp << 4);
     let direct16 = slice.kind == 1 && spec == 0;
@@ -5408,7 +5431,7 @@ fn decode_inter<S: Sample>(
     mb.qpd = delta as i8;
     predict_inter(pic, dpb, slice, mx, my, mb)?;
     if slice.kind == 3 {
-        return sp_inter(
+        sp_inter(
             pic,
             entropy,
             slice,
@@ -5419,7 +5442,8 @@ fn decode_inter<S: Sample>(
                 luma_cbp,
                 chroma_cbp,
             },
-        );
+        )?;
+        return Ok(residual);
     }
     if mb.transform8 {
         for i in 0..4 {
@@ -5487,7 +5511,7 @@ fn decode_inter<S: Sample>(
             false,
         );
     }
-    Ok(())
+    Ok(residual)
 }
 
 fn read_parts<S: Sample>(

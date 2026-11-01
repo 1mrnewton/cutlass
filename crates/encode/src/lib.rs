@@ -230,6 +230,9 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
         PixelFormat::Yuv444p => pixels
             .checked_mul(3)
             .ok_or(CodecError::Limit { what: "frame size" }),
+        PixelFormat::Yuv444p10 => pixels
+            .checked_mul(6)
+            .ok_or(CodecError::Limit { what: "frame size" }),
         PixelFormat::Gray8 => Ok(pixels),
         PixelFormat::Gray10 => pixels
             .checked_mul(2)

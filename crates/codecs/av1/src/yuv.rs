@@ -239,11 +239,19 @@ pub fn wide_output(
     pack_le(y, &mut bytes);
     pack_le(u, &mut bytes);
     pack_le(v, &mut bytes);
+    let luma = usize::try_from(width)
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0));
+    let pixel = if u.len() == luma && v.len() == luma {
+        PixelFormat::Yuv444p10
+    } else {
+        PixelFormat::Yuv420p10
+    };
     PictureOutput::cpu(
         PictureInfo {
             width,
             height,
-            pixel: PixelFormat::Yuv420p10,
+            pixel,
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
         },

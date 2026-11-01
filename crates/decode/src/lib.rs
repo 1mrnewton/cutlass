@@ -78,7 +78,8 @@ pub struct AudioOutput {
 /// outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
 /// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Yuv420p10`]
 /// is that layout with a little-endian `u16` per sample. [`PixelFormat::Yuv444p`]
-/// is 4:4:4: three full-size planes. [`PixelFormat::Gray8`]
+/// is 4:4:4: three full-size planes. [`PixelFormat::Yuv444p10`] is that layout
+/// with a little-endian `u16` per sample. [`PixelFormat::Gray8`]
 /// is one 8-bit plane, `width` by `height`. [`PixelFormat::Gray10`] is that
 /// plane with a little-endian `u16` per sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +155,12 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
         PixelFormat::Yuv444p => width
             .checked_mul(height)
             .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or(CodecError::Limit {
+                what: "picture bytes",
+            }),
+        PixelFormat::Yuv444p10 => width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(6))
             .ok_or(CodecError::Limit {
                 what: "picture bytes",
             }),
@@ -863,6 +870,10 @@ mod tests {
         assert_eq!(
             picture_byte_len(2, 2, PixelFormat::Yuv444p).expect("444"),
             12
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv444p10).expect("444-10"),
+            24
         );
     }
 

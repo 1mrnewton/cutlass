@@ -12,8 +12,8 @@ mod snap;
 mod zoom;
 
 pub use gesture::{
-    DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, drop_gesture,
-    move_gesture, placement,
+    DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
+    TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use lane::{Lane, lane_category, lanes};

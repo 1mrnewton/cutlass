@@ -73,7 +73,7 @@ fn row_at(lane_height: f64, y: f64) -> Result<Option<usize>, BadScale> {
     Ok(Some(row as usize))
 }
 
-fn time_at(pixel_size: f64, x: f64) -> Option<Micros> {
+pub(crate) fn time_at(pixel_size: f64, x: f64) -> Option<Micros> {
     if !pixel_size.is_finite() || pixel_size <= 0.0 || !x.is_finite() {
         return None;
     }

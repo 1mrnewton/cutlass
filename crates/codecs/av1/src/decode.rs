@@ -5598,6 +5598,58 @@ mod tests {
     }
 
     #[test]
+    fn ten_bit_switchable_luma_matches_dav1d() {
+        // aomenc --bit-depth=10 --cpu-used=0 --cq-level=28, 512×64. Luma is
+        // switchable, in 256-sample units, so the plane has two units and the
+        // frame updates that CDF. Chroma restoration is off. Samples stay in
+        // the low 10 bits. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-switch-10.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 0);
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(!sequence.enable_cdef);
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.width, 512);
+        assert_eq!(frame.height, 64);
+        assert_eq!(
+            frame.restoration.plane,
+            [
+                crate::header::RESTORE_SWITCHABLE,
+                crate::header::RESTORE_NONE,
+                crate::header::RESTORE_NONE,
+            ]
+        );
+        assert_eq!(frame.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("frame");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        assert_eq!(picture.info().pixel, cutlass_decode::PixelFormat::Yuv420p10);
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 512 * 64 * 3);
+        assert_eq!(frame_digest(bytes), 0x27f0_0717_c048_041c);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn twelve_bit_wiener_on_444_and_422_matches_dav1d() {
         // aomenc --bit-depth=12 --sharpness=5 --cq-level=32. Both frames are
         // Wiener on every plane, in 256-sample units, and the frame updates

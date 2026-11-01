@@ -4752,6 +4752,7 @@ mod intra8 {
             max_fn: 16,
             view_id: 0,
             inter_view: true,
+            dps_id: 0,
             shown: super::super::Shown::plain(0, 0),
             svc_left: 0,
             svc_top: 0,

@@ -180,6 +180,8 @@ pub(crate) struct Frame<S: Sample = u8> {
     view_id: u16,
     /// This picture may be an interview reference. The base view is.
     inter_view: bool,
+    /// Depth parameter set active for this picture. 0 is the sequence range.
+    dps_id: u8,
     /// Display time and film grain. Reconstruction keeps `pts` and the planes.
     shown: Shown,
     /// Scaled-window offsets in luma samples. A picture without that window stores zero.
@@ -266,6 +268,8 @@ struct Sets {
     /// Subset SPS, NAL type 15. A slice extension resolves its id here.
     subset: Vec<Option<Sps>>,
     pps: Vec<Option<Pps>>,
+    /// Depth parameter sets, NAL type 16. Index 0 stays empty.
+    dps: Vec<Option<set::DepthSet>>,
 }
 
 impl Sets {
@@ -274,6 +278,7 @@ impl Sets {
             sps: vec![None; set::MAX_SPS],
             subset: vec![None; set::MAX_SPS],
             pps: vec![None; set::MAX_PPS],
+            dps: vec![None; 64],
         }
     }
 
@@ -882,6 +887,14 @@ fn decode_au<S: Sample>(
                 index += 1;
             }
             9..=12 => index += 1,
+            16 => {
+                let depth = set::parse_dps(&nals[index].rbsp)?;
+                let id = usize::from(depth.id);
+                if let Some(slot) = sets.dps.get_mut(id) {
+                    *slot = Some(depth);
+                }
+                index += 1;
+            }
             _ => {
                 return Err(CodecError::Unsupported {
                     what: "nal unit type",
@@ -1433,6 +1446,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         max_fn: 1u32 << sps.log2_max_frame_num,
         view_id: 0,
         inter_view: false,
+        dps_id: 0,
         shown: Shown::plain(0, 0),
         svc_left: 0,
         svc_top: 0,
@@ -2181,6 +2195,10 @@ struct Header {
     interview_l0: Vec<u16>,
     /// Interview reference views for list 1.
     interview_l1: Vec<u16>,
+    /// `depth_weighted_pred_flag`. Luma weights come from the depth ranges.
+    depth_weight: bool,
+    /// Depth parameter set used by this picture. 0 is the sequence range.
+    dps_id: u8,
     /// Crop of this slice. Picture-level scalability copies the sequence crop.
     /// Macroblock-level scalability reads it from the slice header.
     scale: set::SvcScale,
@@ -2598,9 +2616,27 @@ fn read_header(
         }
     }
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
-    // depth slice. The weighted process stays refused.
-    if three.is_some_and(|header| header.depth) && !intra_slice(kind) && bits.bit()? {
-        return Err(CodecError::Unsupported { what: "3d" });
+    // depth slice. The ranges scale list-0 luma. A texture slice and a B
+    // slice stay refused.
+    let mut depth_weight = false;
+    let mut dps_id = 0u8;
+    if three.is_some_and(|header| header.depth) && !intra_slice(kind) {
+        depth_weight = bits.bit()?;
+        if depth_weight {
+            if sps.depth_near.is_empty() {
+                return Err(CodecError::Unsupported { what: "3d" });
+            }
+            if sps.acquisition != 1 {
+                let id = bits.ue()?;
+                if id > 63 {
+                    return Err(bits.malformed("3d"));
+                }
+                dps_id = id as u8;
+            }
+            if !matches!(kind, 0 | 3) {
+                return Err(CodecError::Unsupported { what: "3d" });
+            }
+        }
     }
     Ok(Header {
         first_mb,
@@ -2651,6 +2687,8 @@ fn read_header(
         inter_view,
         interview_l0,
         interview_l1,
+        depth_weight,
+        dps_id,
         scale: layer.scale,
     })
 }
@@ -3036,12 +3074,134 @@ fn new_frame<S: Sample>(
         max_fn: 1u32 << sps.log2_max_frame_num,
         view_id: header.view_id,
         inter_view: header.inter_view,
+        dps_id: header.dps_id,
         shown: Shown::from_sps(packet.pts, packet.duration, sps),
         svc_left: mb::sample_offset(header.scale.left)?,
         svc_top: mb::sample_offset(header.scale.top)?,
         svc_right: mb::sample_offset(header.scale.right)?,
         svc_bottom: mb::sample_offset(header.scale.bottom)?,
     })
+}
+
+struct DepthWeights<'a> {
+    yw: &'a mut [[i32; 32]; 2],
+    yo: &'a mut [[i32; 32]; 2],
+    cw: &'a mut [[[i32; 2]; 32]; 2],
+    co: &'a mut [[[i32; 2]; 32]; 2],
+}
+
+/// J.8.2.2. The current depth range and each list-0 reference range scale luma.
+/// Chroma stays an identity so the ordinary weight formula leaves it.
+fn depth_luma<S: Sample>(
+    sets: &Sets,
+    sps: &Sps,
+    dpb: &[Frame<S>],
+    header: &Header,
+    refs: &[usize],
+    weights: &mut DepthWeights<'_>,
+) -> Result<(), CodecError> {
+    let (near, far) = depth_pair(sets, sps, header.dps_id, header.view_id)?;
+    for (index, &slot) in refs.iter().enumerate() {
+        if index >= 32 {
+            return Err(CodecError::Limit { what: "3d" });
+        }
+        let Some(frame) = dpb.get(slot) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "3d",
+            });
+        };
+        let (ref_near, ref_far) = depth_pair(sets, sps, frame.dps_id, frame.view_id)?;
+        let (weight, offset) = depth_factors(near, far, ref_near, ref_far)?;
+        weights.yw[0][index] = weight;
+        weights.yo[0][index] = offset;
+        weights.cw[0][index] = [1, 1];
+        weights.co[0][index] = [0, 0];
+    }
+    Ok(())
+}
+
+fn depth_pair(sets: &Sets, sps: &Sps, dps_id: u8, view: u16) -> Result<(i32, i32), CodecError> {
+    let index = sps
+        .views
+        .iter()
+        .zip(sps.depth_views.iter())
+        .filter(|(_, depth)| **depth)
+        .position(|(id, _)| *id == view)
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "view id",
+        })?;
+    let (near, far) = if dps_id == 0 {
+        (sps.depth_near.as_slice(), sps.depth_far.as_slice())
+    } else {
+        let Some(stored) = sets.dps.get(usize::from(dps_id)).and_then(Option::as_ref) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "3d",
+            });
+        };
+        (stored.near.as_slice(), stored.far.as_slice())
+    };
+    let Some(&z_near) = near.get(index) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    let Some(&z_far) = far.get(index) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    Ok((z_near, z_far))
+}
+
+/// J.8.2.2.1. Integer division is toward zero, and the result is clipped to the weight range.
+fn depth_factors(
+    z_near_c: i32,
+    z_far_c: i32,
+    z_near_r: i32,
+    z_far_r: i32,
+) -> Result<(i32, i32), CodecError> {
+    if z_far_r == 0 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let a = w_factor(i64::from(z_far_r) - i64::from(z_near_r), i64::from(z_far_r))?;
+    let b = w_factor(i64::from(z_far_c), i64::from(z_far_c) - i64::from(z_near_c))?;
+    let c = w_factor(i64::from(z_near_c), i64::from(z_near_r))?;
+    let weight = ((a * b * c + (1 << 18)) >> 19).clamp(-127, 128);
+    let o_a = ((i64::from(z_near_c) << 8) + (i64::from(z_far_r) >> 1)) / i64::from(z_far_r);
+    let o_b = o_factor(
+        i64::from(z_far_c) - i64::from(z_far_r),
+        i64::from(z_far_c) - i64::from(z_near_c),
+    )?;
+    let offset = ((o_a * o_b + (1 << 7)) >> 8).clamp(-127, 128);
+    Ok((weight as i32, offset as i32))
+}
+
+fn w_factor(k: i64, m: i64) -> Result<i64, CodecError> {
+    if m == 0 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let x = (k + (m >> 1)) / m;
+    let sign = if k - x * m < 0 { -1 } else { 1 };
+    let mut factor = x << 8;
+    factor += (((k - x * m) << 8) + sign * (m >> 1)) / m;
+    Ok(factor)
+}
+
+fn o_factor(k: i64, m: i64) -> Result<i64, CodecError> {
+    if m == 0 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let sign0 = if k < 0 { -1 } else { 1 };
+    let x = (k + sign0 * (m >> 1)) / m;
+    let sign = if k - x * m < 0 { -1 } else { 1 };
+    let mut factor = x << 8;
+    factor += (((k - x * m) << 8) + sign * (m >> 1)) / m;
+    Ok(factor)
 }
 
 fn make_slice<'a, S: Sample>(
@@ -3088,6 +3248,31 @@ fn make_slice<'a, S: Sample>(
         &pps.groups,
         header.group_cycle,
     )?;
+    let mut weighted = header.weights;
+    let mut luma_denom = header.luma_denom;
+    let mut chroma_denom = header.chroma_denom;
+    let mut yw = header.yw;
+    let mut yo = header.yo;
+    let mut cw = header.cw;
+    let mut co = header.co;
+    if header.depth_weight {
+        depth_luma(
+            sets,
+            sps,
+            dpb,
+            header,
+            &ref0,
+            &mut DepthWeights {
+                yw: &mut yw,
+                yo: &mut yo,
+                cw: &mut cw,
+                co: &mut co,
+            },
+        )?;
+        weighted = true;
+        luma_denom = 5;
+        chroma_denom = 0;
+    }
     Ok(Slice {
         sps,
         pps,
@@ -3104,13 +3289,13 @@ fn make_slice<'a, S: Sample>(
         poc1,
         long0,
         long1,
-        weighted: header.weights,
-        luma_denom: header.luma_denom,
-        chroma_denom: header.chroma_denom,
-        yw: header.yw,
-        yo: header.yo,
-        cw: header.cw,
-        co: header.co,
+        weighted,
+        luma_denom,
+        chroma_denom,
+        yw,
+        yo,
+        cw,
+        co,
         num_ref_l0: header.num_ref_l0,
         num_ref_l1: header.num_ref_l1,
         spatial_direct: header.spatial_direct,
@@ -3543,6 +3728,8 @@ mod tests {
             inter_view: true,
             interview_l0: Vec::new(),
             interview_l1: Vec::new(),
+            depth_weight: false,
+            dps_id: 0,
             scale: crate::set::SvcScale::default(),
         }
     }
@@ -3591,6 +3778,7 @@ mod tests {
             max_fn: 16,
             view_id: 0,
             inter_view: true,
+            dps_id: 0,
             shown: super::Shown::plain(0, 1),
             svc_left: 0,
             svc_top: 0,
@@ -3653,6 +3841,9 @@ mod tests {
             depth_views: Vec::new(),
             texture_views: Vec::new(),
             avc_3d: false,
+            acquisition: 0,
+            depth_near: Vec::new(),
+            depth_far: Vec::new(),
             interview: Vec::new(),
         }
     }

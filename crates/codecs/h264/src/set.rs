@@ -92,8 +92,14 @@ pub struct Sps {
     pub depth_views: Vec<bool>,
     /// Annex I `texture_view_present_flag`, one entry per `views` index.
     pub texture_views: Vec<bool>,
-    /// Profile 139. The 3D-AVC extension was present and its tools are off.
+    /// Profile 139. The 3D-AVC extension was present.
     pub avc_3d: bool,
+    /// `3dv_acquisition_idc`. 0 has no depth ranges. 1 and 2 store them.
+    pub acquisition: u8,
+    /// `ZNear` for each depth view, in acquisition order. Empty when absent.
+    pub depth_near: Vec<i32>,
+    /// `ZFar` for each depth view, in acquisition order.
+    pub depth_far: Vec<i32>,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
@@ -532,6 +538,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         scale: SvcScale::default(),
     };
     let mut avc_3d = false;
+    let mut acquisition = 0u8;
+    let mut depth_near = Vec::new();
+    let mut depth_far = Vec::new();
     let mut texture_views = Vec::new();
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
@@ -558,12 +567,15 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         if bits.bit()? || bits.bit()? {
             return Err(CodecError::Unsupported { what: "mvcd vui" });
         }
-        three_d_extension(
+        let axis = three_d_extension(
             &mut bits,
             &mvcd.views,
             &mvcd.depth_views,
             &mvcd.texture_views,
         )?;
+        acquisition = axis.acquisition;
+        depth_near = axis.near;
+        depth_far = axis.far;
         avc_3d = true;
         texture_views = mvcd.texture_views;
         let views = mvcd.views;
@@ -642,6 +654,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         depth_views,
         texture_views,
         avc_3d,
+        acquisition,
+        depth_near,
+        depth_far,
         interview,
     };
     if !sps.within_level() {
@@ -852,27 +867,47 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<MvcdViews, CodecError> {
     })
 }
 
-/// `seq_parameter_set_3davc_extension` with its tools off.
+struct DepthAxis {
+    acquisition: u8,
+    near: Vec<i32>,
+    far: Vec<i32>,
+}
+
+/// `seq_parameter_set_3davc_extension`. Header prediction and the other tools
+/// stay refused. Acquisition 1 and 2 store integer depth ranges.
 fn three_d_extension(
     bits: &mut Bits<'_>,
     views: &[u16],
     depth_views: &[bool],
     texture_views: &[bool],
-) -> Result<(), CodecError> {
+) -> Result<DepthAxis, CodecError> {
     let depth_ids: Vec<u16> = views
         .iter()
         .zip(depth_views)
         .filter_map(|(id, depth)| depth.then_some(*id))
         .collect();
+    let mut axis = DepthAxis {
+        acquisition: 0,
+        near: Vec::new(),
+        far: Vec::new(),
+    };
     if !depth_ids.is_empty() {
-        if bits.ue()? != 0 {
+        let acquisition = bits.ue()?;
+        if acquisition > 2 {
             return Err(CodecError::Unsupported { what: "3d" });
         }
-        for id in depth_ids {
+        axis.acquisition = acquisition as u8;
+        for id in &depth_ids {
             let coded = mvc_limit(bits, 1023)?;
-            if u16::try_from(coded).ok() != Some(id) {
+            if u16::try_from(coded).ok() != Some(*id) {
                 return Err(bits.malformed("3d"));
             }
+        }
+        if acquisition != 0 {
+            let (near, far) = depth_ranges(bits, depth_ids.len())?;
+            view_synthesis(bits, depth_ids.len())?;
+            axis.near = near;
+            axis.far = far;
         }
         if bits.bit()? || bits.bit()? || bits.ue()? != 0 || bits.bit()? || bits.bit()? {
             return Err(CodecError::Unsupported { what: "3d" });
@@ -893,6 +928,109 @@ fn three_d_extension(
                     let _ = read_view_refs(bits)?;
                     let _ = read_view_refs(bits)?;
                 }
+            }
+        }
+    }
+    Ok(axis)
+}
+
+/// One depth parameter set, NAL type 16. `pred_direction` 2 stores absolute ranges.
+#[derive(Clone)]
+pub(crate) struct DepthSet {
+    pub id: u8,
+    pub near: Vec<i32>,
+    pub far: Vec<i32>,
+}
+
+pub(crate) fn parse_dps(rbsp: &[u8]) -> Result<DepthSet, CodecError> {
+    let mut bits = Bits::new(rbsp);
+    let id = bits.ue()?;
+    if id == 0 || id > 63 {
+        return Err(bits.malformed("3d"));
+    }
+    if bits.ue()? != 2 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let views = bits.ue()?.saturating_add(1) as usize;
+    if views > 1024 {
+        return Err(CodecError::Limit { what: "3d" });
+    }
+    let (near, far) = depth_ranges(&mut bits, views)?;
+    if bits.bit()? || bits.bit()? || bits.ue()? != 0 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    bits.rbsp_trailing()?;
+    Ok(DepthSet {
+        id: id as u8,
+        near,
+        far,
+    })
+}
+
+/// `depth_ranges` with `predDirection` 2. A clear flag has no value to copy.
+fn depth_ranges(bits: &mut Bits<'_>, views: usize) -> Result<(Vec<i32>, Vec<i32>), CodecError> {
+    let near_flag = bits.bit()?;
+    let far_flag = bits.bit()?;
+    if !near_flag || !far_flag {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    Ok((depth_axis(bits, views)?, depth_axis(bits, views)?))
+}
+
+fn depth_axis(bits: &mut Bits<'_>, views: usize) -> Result<Vec<i32>, CodecError> {
+    let equal = if views > 1 { bits.bit()? } else { true };
+    let count = if equal { 1 } else { views };
+    let mut values = Vec::with_capacity(count);
+    let mut man_len = 0u32;
+    for index in 0..count {
+        if index == 0 {
+            man_len = bits.u(5)?.saturating_add(1);
+        }
+        let sign = bits.bit()?;
+        let exp = bits.u(7)?;
+        let mantissa = if man_len == 0 { 0 } else { bits.u(man_len)? };
+        values.push(depth_value(sign, exp, mantissa, man_len)?);
+    }
+    if equal {
+        let Some(first) = values.first().copied() else {
+            return Err(CodecError::Unsupported { what: "3d" });
+        };
+        values.resize(views, first);
+    }
+    Ok(values)
+}
+
+/// J.8.4, kept only when the depth is an integer.
+fn depth_value(sign: bool, exp: u32, mantissa: u32, man_len: u32) -> Result<i32, CodecError> {
+    if exp == 0 || exp >= 127 || man_len > 30 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let shift = exp as i32 - 31;
+    let base = (1i64 << man_len) + i64::from(mantissa);
+    let magnitude = if shift >= man_len as i32 {
+        let up = shift - man_len as i32;
+        if up > 30 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        base << up
+    } else {
+        let down = man_len as i32 - shift;
+        let mask = (1i64 << down) - 1;
+        if base & mask != 0 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        base >> down
+    };
+    let value = if sign { -magnitude } else { magnitude };
+    i32::try_from(value).map_err(|_| CodecError::Unsupported { what: "3d" })
+}
+
+/// `vsp_param`. One depth view writes no bits.
+fn view_synthesis(bits: &mut Bits<'_>, views: usize) -> Result<(), CodecError> {
+    for left in 0..views {
+        for _right in 0..left {
+            for _ in 0..4 {
+                let _ = bits.ue()?;
             }
         }
     }

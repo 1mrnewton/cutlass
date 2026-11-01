@@ -1246,9 +1246,105 @@ fn three_d_annex(header: &[u8; 2]) -> Vec<u8> {
     out
 }
 
+#[test]
+fn a_depth_range_scales_the_predicted_luma() {
+    let idr = three_d_pcm_ranges();
+    let predicted = three_d_weighted();
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &idr);
+    pictures.extend(push_pictures(&mut decoder, &predicted));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    assert!(split_depth(&pictures[0]));
+    assert!(weighted_depth(&pictures[1]));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = idr.clone();
+        annex.extend(predicted);
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &annex).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+fn weighted_depth(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let luma = y.chunks(16).all(|row| {
+        row[..8].iter().all(|sample| *sample == 152) && row[8..].iter().all(|sample| *sample == 204)
+    });
+    luma && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
+}
+
+fn three_d_pcm_ranges() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(25);
+    w.align_zeros();
+    for _row in 0..16 {
+        for col in 0..16 {
+            w.bytes.push(if col < 8 { 100 } else { 180 });
+        }
+    }
+    w.bytes.extend(std::iter::repeat_n(90, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    let mut out = annex_b_nal(3, 15, &three_d_sequence(false, 31, 32));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0x42], &w.bytes));
+    out
+}
+
+fn three_d_weighted() -> Vec<u8> {
+    let mut out = depth_parameter(31, 33);
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(true);
+    w.ue(1);
+    w.ue(1);
+    w.trailing();
+    out.extend(annex_b_extension(1, 21, &[0x80, 0x60], &w.bytes));
+    out
+}
+
+fn depth_parameter(near_exp: u32, far_exp: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(1);
+    w.ue(2);
+    w.ue(0);
+    write_depth_ranges(&mut w, near_exp, far_exp);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.trailing();
+    annex_b_nal(3, 16, &w.bytes)
+}
+
+fn write_depth_ranges(w: &mut Writer, near_exp: u32, far_exp: u32) {
+    w.bit(true);
+    w.bit(true);
+    write_depth_value(w, near_exp);
+    write_depth_value(w, far_exp);
+}
+
+fn write_depth_value(w: &mut Writer, exp: u32) {
+    w.bits(0, 5);
+    w.bit(false);
+    w.bits(exp, 7);
+    w.bits(0, 1);
+}
+
 /// Profile 139. The MVCD view is view id 0, depth and texture, and the 3D
 /// tools are off unless `prediction` is set.
 fn three_d_subset(prediction: bool) -> Vec<u8> {
+    three_d_sequence(prediction, 0, 0)
+}
+
+fn three_d_sequence(prediction: bool, near_exp: u32, far_exp: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(139, 8);
     w.bits(0, 8);
@@ -1287,8 +1383,11 @@ fn three_d_subset(prediction: bool) -> Vec<u8> {
     w.ue(1);
     w.bit(false);
     w.bit(false);
+    w.ue(if near_exp == 0 { 0 } else { 2 });
     w.ue(0);
-    w.ue(0);
+    if near_exp != 0 {
+        write_depth_ranges(&mut w, near_exp, far_exp);
+    }
     w.bit(false);
     w.bit(false);
     w.ue(0);

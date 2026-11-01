@@ -117,6 +117,7 @@ pub struct ViewState {
     x_buffer: String,
     y_buffer: String,
     scale_buffer: String,
+    opacity_buffer: String,
     volume_buffer: String,
     fade_in_buffer: String,
     fade_out_buffer: String,
@@ -145,6 +146,7 @@ impl Default for ViewState {
             x_buffer: String::new(),
             y_buffer: String::new(),
             scale_buffer: String::new(),
+            opacity_buffer: String::new(),
             volume_buffer: String::new(),
             fade_in_buffer: String::new(),
             fade_out_buffer: String::new(),
@@ -1145,6 +1147,13 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
+        if let Some(opacity) =
+            number_field(ui, "Opacity", &mut view.opacity_buffer, inspection.opacity)
+            && !inspection.locked
+            && let Err(error) = shell.set_opacity(opacity)
+        {
+            shell.set_notice(error.to_string());
+        }
     }
     if let Some(text) = inspection.text.clone() {
         if view.text_for != inspection.segment_id.as_str() {
@@ -1215,6 +1224,8 @@ fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Opt
             response.on_hover_text("Up is positive");
         } else if label == "Scale" {
             response.on_hover_text("1 is the fitted picture");
+        } else if label == "Opacity" {
+            response.on_hover_text("1 is solid");
         } else if label.starts_with("Fade") {
             response.on_hover_text("Seconds");
         }

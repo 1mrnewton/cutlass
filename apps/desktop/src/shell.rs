@@ -134,6 +134,9 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("the scale must be greater than zero")
             }
             Self::Edit(EditError::Fade) => formatter.write_str("a fade cannot be negative"),
+            Self::Edit(EditError::Opacity) => {
+                formatter.write_str("the opacity must be from zero to one")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -195,6 +198,7 @@ pub struct Inspection {
     pub rotation: f64,
     pub transform_x: f64,
     pub transform_y: f64,
+    pub opacity: f64,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -1909,6 +1913,7 @@ impl Shell {
             rotation: segment.clip.rotation,
             transform_x: segment.clip.transform.x,
             transform_y: segment.clip.transform.y,
+            opacity: segment.clip.alpha,
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -2635,16 +2640,27 @@ impl Shell {
     /// Move the selected picture. `x` and `y` are fractions of half the canvas,
     /// and positive `y` is up. One undo restores the previous position.
     pub fn set_position(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
-        let segment_id = self.picture_segment()?;
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetPosition { segment_id, x, y })
     }
 
     /// Scale the selected picture. One undo restores the previous scale.
     pub fn set_scale(&mut self, scale: f64) -> Result<(), ShellError> {
-        let segment_id = self.picture_segment()?;
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetScale { segment_id, scale })
+    }
+
+    /// Set how solid the selected picture is. `1` is solid and `0` is clear.
+    /// One undo restores the previous opacity.
+    pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("an opacity belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetOpacity {
+            segment_id,
+            opacity,
+        })
     }
 
     /// The selected clip is a picture or a sound, so its fade can change.
@@ -2718,7 +2734,7 @@ impl Shell {
         Ok(segment_id)
     }
 
-    fn picture_segment(&self) -> Result<SegmentId, ShellError> {
+    fn picture_segment(&self, refusal: &str) -> Result<SegmentId, ShellError> {
         let Some(segment_id) = self.selected().cloned() else {
             return Err(if self.session.is_none() {
                 ShellError::NoProject
@@ -2733,9 +2749,7 @@ impl Shell {
             ));
         };
         if !can_turn(draft, segment, kind) {
-            return Err(ShellError::Unavailable(
-                "a placement belongs on a picture".to_owned(),
-            ));
+            return Err(ShellError::Unavailable(refusal.to_owned()));
         }
         Ok(segment_id)
     }
@@ -6397,6 +6411,104 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().fade_out, 1_000_000);
+    }
+
+    #[test]
+    fn a_picture_changes_opacity_and_a_sound_does_not() {
+        let mut bare = shell();
+        assert!(!bare.place_enabled());
+        assert_eq!(
+            bare.set_opacity(0.5).unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 1_000_000));
+        picture.clip.rotation = 90.0;
+        picture.clip.flip.horizontal = true;
+        draft.tracks[0].segments.push(picture);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("tone");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 500_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 500_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        assert_eq!(
+            desktop.set_opacity(0.5).unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.place_enabled());
+        assert_eq!(
+            desktop.set_opacity(0.5).unwrap_err().to_string(),
+            "an opacity belongs on a picture"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.place_enabled());
+        assert_eq!(desktop.inspection().unwrap().opacity, 1.0);
+        desktop.set_opacity(0.5).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.opacity, 0.5);
+        assert_eq!(inspection.rotation, 90.0);
+        assert_eq!(inspection.scale_x, 1.0);
+        assert!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .clip
+                .flip
+                .horizontal
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 1.0);
+        desktop.set_opacity(0.0).unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.0);
+        assert_eq!(
+            desktop.set_opacity(1.1).unwrap_err().to_string(),
+            "the opacity must be from zero to one"
+        );
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.0);
+
+        let main = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(main, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.set_opacity(1.0).unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.0);
+
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(desktop.place_enabled());
+        desktop.set_opacity(0.25).unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.25);
     }
 
     #[test]

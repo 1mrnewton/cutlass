@@ -6,8 +6,8 @@
 //! A compound segment is the inlined child draft's picture, placed with the
 //! compound clip. `audio_slice` is the engine mix at that time, and a
 //! compound segment contributes the child's mix. A text segment is drawn
-//! when [`Fonts`] supplies the face named by `font_path`. Captions and
-//! effects are not drawn on this path.
+//! when [`Fonts`] supplies the face named by `font_path`. Word columns on
+//! that segment are the caption. Effects are not drawn on this path.
 
 #![forbid(unsafe_code)]
 

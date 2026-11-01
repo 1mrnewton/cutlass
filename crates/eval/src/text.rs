@@ -4,11 +4,16 @@
 //! `font_path`. A missing face, a refused run, a hidden track, or a segment
 //! that does not cover the time contributes nothing. The text picture is
 //! placed with the segment clip, including its line keyframes.
+//!
+//! Word columns replace `content`. Those glyphs are the caption sample.
+//! An identity style keeps the material color. A sampled color replaces it.
+//! Style position is a pixel shift. Scale and rotation are not applied.
 
+use cutlass_captions::{CaptionQuery, PageLimits, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
-use cutlass_model::{Draft, MaterialRef, Micros, TrackAttribute};
-use cutlass_picture::{Picture, PictureSource, Sample};
-use cutlass_text::TextSource;
+use cutlass_model::{Draft, MaterialRef, MaterialText, Micros, TrackAttribute, WordColumns};
+use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
+use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
 
 use crate::Fonts;
 use crate::media::{picture_transform, place_with, segment_clip};
@@ -21,16 +26,27 @@ pub(crate) struct TextLayer {
 }
 
 pub(crate) struct PlacedText {
-    source: TextSource,
+    ink: Ink,
     width: u32,
     height: u32,
     transform: crate::media::PictureTransform,
 }
 
+enum Ink {
+    Run(TextSource),
+    Caption(CpuBytes),
+}
+
 impl PictureSource for PlacedText {
     fn sample(&self, time: Micros) -> Sample {
-        let Sample::Ready(Picture::Cpu(bytes)) = self.source.sample(time) else {
-            return Sample::Miss;
+        let bytes = match &self.ink {
+            Ink::Run(source) => {
+                let Sample::Ready(Picture::Cpu(bytes)) = source.sample(time) else {
+                    return Sample::Miss;
+                };
+                bytes
+            }
+            Ink::Caption(bytes) => bytes.clone(),
         };
         place_with(
             self.width,
@@ -69,7 +85,7 @@ pub(crate) fn text_layers(
             if material.font_path.is_empty() {
                 continue;
             }
-            let Some(bytes) = fonts.face(&material.font_path) else {
+            let Some(face) = fonts.face(&material.font_path) else {
                 continue;
             };
             let Some((clip, uniform)) = segment_clip(segment, time) else {
@@ -81,15 +97,24 @@ pub(crate) fn text_layers(
             if transform.omitted() {
                 continue;
             }
-            let Ok(source) = TextSource::open(bytes, None, material, segment) else {
-                continue;
+            let ink = if words_present(material) {
+                let Some(bytes) = caption_picture(face, material, segment.target.start, time)
+                else {
+                    continue;
+                };
+                Ink::Caption(bytes)
+            } else {
+                let Ok(source) = TextSource::open(face, None, material, segment) else {
+                    continue;
+                };
+                Ink::Run(source)
             };
             layers.push(TextLayer {
                 render_index: segment.render_index,
                 track_index,
                 segment_index,
                 placed: PlacedText {
-                    source,
+                    ink,
                     width,
                     height,
                     transform,
@@ -98,6 +123,128 @@ pub(crate) fn text_layers(
         }
     }
     layers
+}
+
+fn words_present(material: &MaterialText) -> bool {
+    columns_present(&material.current_words) || columns_present(&material.words)
+}
+
+fn columns_present(columns: &WordColumns) -> bool {
+    !columns.start_time.is_empty() || !columns.end_time.is_empty() || !columns.text.is_empty()
+}
+
+/// Word columns replace `content`. An empty style keeps the material color.
+/// A sampled color that is not opaque white replaces it. Position is a pixel
+/// shift, right and down. Scale and rotation on the style are not applied.
+fn caption_picture(
+    face: &[u8],
+    material: &MaterialText,
+    placed_at: Micros,
+    time: Micros,
+) -> Option<CpuBytes> {
+    let styles = RangeStyles::identity();
+    let frame = sample_caption(&CaptionQuery {
+        material,
+        font: face,
+        timeline: time,
+        placed_at,
+        limits: PageLimits {
+            words_per_line: 0,
+            lines_per_page: 0,
+        },
+        keywords: &[],
+        styles: &styles,
+        stagger_shift_ms: 0,
+    })
+    .ok()?;
+    let base = text_fill(material).ok()?;
+    let mut drawn = Vec::new();
+    for batch in &frame.batches {
+        for sample in &batch.glyphs {
+            let Some(baseline) = baseline_of(&frame.letters.layout, &sample.glyph) else {
+                continue;
+            };
+            let Some(shift_x) = shift_px(sample.style.position_x) else {
+                continue;
+            };
+            let Some(shift_y) = shift_px(sample.style.position_y) else {
+                continue;
+            };
+            let Some(fill) = ink_color(base, sample.style.color) else {
+                continue;
+            };
+            drawn.push(HeldGlyph {
+                placed: sample.glyph.clone(),
+                baseline,
+                fill,
+                shift_x,
+                shift_y,
+            });
+        }
+    }
+    let borrowed: Vec<DrawnGlyph<'_>> = drawn
+        .iter()
+        .map(|glyph| DrawnGlyph {
+            placed: &glyph.placed,
+            baseline: glyph.baseline,
+            fill: glyph.fill,
+            shift_x: glyph.shift_x,
+            shift_y: glyph.shift_y,
+        })
+        .collect();
+    match paint_glyphs(face, frame.letters.layout.font_size, &borrowed) {
+        Ok(Picture::Cpu(bytes)) => Some(bytes),
+        Ok(Picture::Platform(_)) | Err(_) => None,
+    }
+}
+
+struct HeldGlyph {
+    placed: PlacedGlyph,
+    baseline: f32,
+    fill: [u8; 4],
+    shift_x: f32,
+    shift_y: f32,
+}
+
+fn baseline_of(layout: &Layout, glyph: &PlacedGlyph) -> Option<f32> {
+    layout.lines.iter().find_map(|line| {
+        let found = line.glyphs.iter().any(|item| {
+            item.source == glyph.source && item.glyph_id == glyph.glyph_id && item.x == glyph.x
+        });
+        found.then_some(line.baseline)
+    })
+}
+
+fn shift_px(value: f64) -> Option<f32> {
+    if !value.is_finite() || value.abs() > 8_192.0 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Some(value as f32)
+}
+
+fn ink_color(base: [u8; 4], color: Rgba) -> Option<[u8; 4]> {
+    if is_one(color.red) && is_one(color.green) && is_one(color.blue) && is_one(color.alpha) {
+        return Some(base);
+    }
+    Some([
+        unit_byte(color.red)?,
+        unit_byte(color.green)?,
+        unit_byte(color.blue)?,
+        unit_byte(color.alpha)?,
+    ])
+}
+
+fn is_one(value: f64) -> bool {
+    value.to_bits() == 1.0_f64.to_bits()
+}
+
+fn unit_byte(value: f64) -> Option<u8> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some((value * 255.0).round() as u8)
 }
 
 fn covers(start: i64, duration: i64, time: i64) -> bool {
@@ -115,7 +262,7 @@ mod tests {
     use cutlass_engine::ReaderFactory;
     use cutlass_model::{
         Clip, CommonKeyframe, CommonKeyframeGroup, Draft, MaterialDraft, MaterialText, Micros,
-        Segment, TimeRange, TrackAttribute,
+        Segment, TimeRange, TrackAttribute, WordColumns,
     };
     use cutlass_renderer_software::SoftwareDevice;
 
@@ -274,5 +421,53 @@ mod tests {
             ..Clip::default()
         };
         assert!(!ink(&pixels(&parent, 0)));
+    }
+
+    fn words(rows: &[(&str, i64, i64)]) -> WordColumns {
+        let mut columns = WordColumns::default();
+        for (text, start, end) in rows {
+            columns.text.push((*text).to_owned());
+            columns.start_time.push(*start);
+            columns.end_time.push(*end);
+        }
+        columns
+    }
+
+    #[test]
+    fn word_columns_replace_the_text_content() {
+        let mut draft = text_segment("A", false);
+        draft.materials.texts[0].words = words(&[("\n", 0, 100)]);
+        let before = draft.clone();
+        assert!(!ink(&pixels(&draft, 0)));
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_caption_word_uses_the_material_color() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].text_color = "#FF0000".to_owned();
+        draft.materials.texts[0].words = words(&[("A", 0, 1_000)]);
+        let before = draft.clone();
+        let shown = pixels(&draft, 0);
+        assert!(shown.chunks(4).any(|pixel| pixel == [255, 0, 0, 255]));
+        assert!(
+            pixels(&draft, 1_000_000)
+                .chunks(4)
+                .all(|pixel| pixel == [0, 0, 0, 0])
+        );
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn current_words_are_the_caption_that_is_drawn() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].text_color = "#FF0000".to_owned();
+        draft.materials.texts[0].words = words(&[("\n", 0, 100)]);
+        draft.materials.texts[0].current_words = words(&[("A", 0, 1_000)]);
+        assert!(
+            pixels(&draft, 0)
+                .chunks(4)
+                .any(|pixel| pixel == [255, 0, 0, 255])
+        );
     }
 }

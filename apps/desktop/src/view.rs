@@ -1,5 +1,7 @@
 //! The column of panels. egui draws the chrome. The preview is a texture of
 //! the evaluated frame. This pass does not composite.
+//!
+//! With no project open, the window lists the saved projects and can create one.
 
 use egui::{
     Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, ScrollArea, Sense,
@@ -8,7 +10,7 @@ use egui::{
 
 use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
-use crate::shell::{ExportRequest, Shell, ShellError};
+use crate::shell::{ExportRequest, ListedProject, Shell, ShellError};
 use crate::tokens;
 use crate::widgets;
 
@@ -113,6 +115,9 @@ pub struct ViewState {
     dialogs: Dialogs,
     library_query: String,
     library_shelf: Shelf,
+    projects_root: Option<std::path::PathBuf>,
+    listed: Vec<ListedProject>,
+    listed_stamp: String,
 }
 
 impl Default for ViewState {
@@ -131,6 +136,9 @@ impl Default for ViewState {
             dialogs: Dialogs::new(),
             library_query: String::new(),
             library_shelf: Shelf::Media,
+            projects_root: None,
+            listed: Vec::new(),
+            listed_stamp: String::new(),
         }
     }
 }
@@ -150,25 +158,235 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
-    let sizes = sizes(shell, full.size());
-    project_bar(shell, ui, view, full, sizes.head, parent);
-    let row = Rect::from_min_size(
-        Pos2::new(full.min.x, full.min.y + sizes.head),
-        Vec2::new(full.width(), sizes.row),
-    );
-    regions(shell, ui, view, row, sizes);
-    let timeline = Rect::from_min_size(
-        Pos2::new(full.min.x, row.max.y + tokens::SPLIT),
-        Vec2::new(full.width(), sizes.timeline),
-    );
-    timeline_panel(shell, ui, timeline);
-    if view.export_open {
-        export_dialog(shell, ui, view, parent);
+    if shell.draft().is_none() {
+        projects_home(shell, ui, view, full, parent);
+    } else {
+        view.listed.clear();
+        view.listed_stamp.clear();
+        let sizes = sizes(shell, full.size());
+        project_bar(shell, ui, view, full, sizes.head, parent);
+        let row = Rect::from_min_size(
+            Pos2::new(full.min.x, full.min.y + sizes.head),
+            Vec2::new(full.width(), sizes.row),
+        );
+        regions(shell, ui, view, row, sizes);
+        let timeline = Rect::from_min_size(
+            Pos2::new(full.min.x, row.max.y + tokens::SPLIT),
+            Vec2::new(full.width(), sizes.timeline),
+        );
+        timeline_panel(shell, ui, timeline);
+        if view.export_open {
+            export_dialog(shell, ui, view, parent);
+        }
+        shortcuts(shell, ui);
     }
-    shortcuts(shell, ui);
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
     }
+}
+
+fn projects_root(view: &ViewState) -> std::path::PathBuf {
+    view.projects_root
+        .clone()
+        .unwrap_or_else(Shell::projects_directory)
+}
+
+fn projects_home(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    full: Rect,
+    parent: Option<&eframe::Frame>,
+) {
+    let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), tokens::HEAD_HEIGHT));
+    ui.painter()
+        .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
+    shell.chrome.project_bar = true;
+    shell.chrome.projects = true;
+    #[cfg(not(target_os = "macos"))]
+    window_buttons(shell, ui, bar);
+    let menu = Rect::from_min_size(
+        bar.min + Vec2::new(78.0, 0.0),
+        Vec2::new(80.0, bar.height()),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
+        ui.horizontal_centered(|ui| {
+            ui.menu_button(RichText::new("File").color(tokens::FAINT), |ui| {
+                file_menu(shell, ui, view, parent);
+            });
+        });
+    });
+    ui.painter().text(
+        bar.center(),
+        Align2::CENTER_CENTER,
+        "Projects",
+        FontId::proportional(14.0),
+        tokens::TEXT,
+    );
+    let body = Rect::from_min_max(
+        Pos2::new(full.min.x + 28.0, bar.bottom() + 28.0),
+        Pos2::new(full.max.x - 28.0, full.max.y - 28.0),
+    );
+    let root = projects_root(view);
+    let projects = listed_projects(view);
+    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
+    ScrollArea::vertical()
+        .id_salt("projects")
+        .auto_shrink([false, false])
+        .show(&mut body_ui, |ui| {
+            if new_project_button(ui) {
+                open_created(shell, &root);
+            }
+            ui.add_space(20.0);
+            if projects.is_empty() {
+                ui.label(
+                    RichText::new("No projects yet.")
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::MUTED),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(16.0, 16.0);
+                for project in &projects {
+                    if project_card(ui, project)
+                        && let Err(error) = shell.open_folder(&project.path)
+                    {
+                        shell.set_notice(error.to_string());
+                    }
+                }
+            });
+        });
+    if !shell.notice().is_empty() {
+        paint_notice(ui, bar, shell.notice());
+    }
+}
+
+fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
+    let root = projects_root(view);
+    let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
+    if view.listed_stamp != stamp {
+        view.listed = Shell::list_projects(&root);
+        view.listed_stamp = stamp;
+    }
+    view.listed.clone()
+}
+
+fn directory_stamp(root: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return String::new();
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        names.push(format!(
+            "{}:{modified}",
+            entry.file_name().to_string_lossy()
+        ));
+    }
+    names.sort();
+    names.join("\n")
+}
+
+fn open_created(shell: &mut Shell, root: &std::path::Path) {
+    match Shell::create_project(root) {
+        Ok(path) => {
+            if let Err(error) = shell.open_folder(&path) {
+                shell.set_notice(error.to_string());
+            }
+        }
+        Err(error) => shell.set_notice(error.to_string()),
+    }
+}
+
+fn new_project_button(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(148.0, 36.0), Sense::click());
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(tokens::EXPORT_RADIUS),
+        tokens::EXPORT,
+    );
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "New project",
+        FontId::proportional(14.0),
+        tokens::EXPORT_INK,
+    );
+    response.clicked()
+}
+
+fn project_card(ui: &mut Ui, project: &ListedProject) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(220.0, 88.0), Sense::click());
+    let fill = if response.hovered() {
+        tokens::ACTIVE
+    } else {
+        tokens::PROJECT_BAR
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(12), fill);
+    ui.painter().text(
+        rect.min + Vec2::new(16.0, 18.0),
+        Align2::LEFT_TOP,
+        &project.name,
+        FontId::proportional(15.0),
+        tokens::TEXT,
+    );
+    let meta = if project.duration.0 > 0 {
+        format!(
+            "{}  {}",
+            card_meta(project.duration.0),
+            modified_label(project.modified)
+        )
+    } else {
+        modified_label(project.modified)
+    };
+    ui.painter().text(
+        rect.min + Vec2::new(16.0, 46.0),
+        Align2::LEFT_TOP,
+        meta,
+        FontId::proportional(12.0),
+        tokens::MUTED,
+    );
+    response.clicked()
+}
+
+fn modified_label(time: std::time::SystemTime) -> String {
+    let Ok(elapsed) = time.duration_since(std::time::UNIX_EPOCH) else {
+        return String::new();
+    };
+    utc_date(elapsed.as_secs())
+}
+
+fn utc_date(seconds: u64) -> String {
+    let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = u64::try_from(z - era * 146_097).unwrap_or(0);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = i64::try_from(yoe).unwrap_or(0) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn return_to_projects(shell: &mut Shell, view: &mut ViewState) {
+    if let Err(error) = shell.close_project() {
+        shell.set_notice(error.to_string());
+        return;
+    }
+    view.preview = None;
+    view.export_open = false;
+    view.library_query.clear();
 }
 
 #[derive(Clone, Copy)]
@@ -301,10 +519,16 @@ fn menus(
 ) {
     let menu = Rect::from_min_size(
         bar.min + Vec2::new(78.0, 0.0),
-        Vec2::new(160.0, bar.height()),
+        Vec2::new(240.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("Projects").color(tokens::FAINT)).frame(false))
+                .clicked()
+            {
+                return_to_projects(shell, view);
+            }
             ui.menu_button(RichText::new("File").color(tokens::FAINT), |ui| {
                 file_menu(shell, ui, view, parent);
             });
@@ -320,6 +544,9 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.dialogs.open_project(parent);
     }
+    if shell.draft().is_none() {
+        return;
+    }
     if ui.button("Save").clicked() {
         ui.close();
         if let Err(error) = shell.save() {
@@ -328,11 +555,7 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     }
     if ui.button("Import…").clicked() {
         ui.close();
-        if shell.draft().is_none() {
-            shell.set_notice(ShellError::NoProject.to_string());
-        } else {
-            view.dialogs.import(parent);
-        }
+        view.dialogs.import(parent);
     }
 }
 
@@ -1631,9 +1854,58 @@ mod tests {
     use egui::Color32;
 
     #[test]
-    fn one_frame_paints_the_shell_and_does_not_ask_to_close() {
+    fn the_first_frame_lists_projects_and_does_not_ask_to_close() {
+        let root = std::env::temp_dir().join(format!("cutlass-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.projects_root = Some(root.clone());
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        assert!(shell.chrome.project_bar);
+        assert!(shell.chrome.projects);
+        assert!(!shell.chrome.library);
+        assert!(!shell.chrome.timeline);
+        assert!(!shell.chrome.export);
+        assert!(!shell.chrome.close_requested);
+        let painted = painted_text(&output);
+        assert!(painted.contains("New project"), "{painted}");
+        assert!(painted.contains("No projects yet."), "{painted}");
+        assert!(painted.lines().any(|line| line == "Projects"), "{painted}");
+        assert!(!ctx.global_style().interaction.selectable_labels);
+        output.textures_delta.clear();
+        Shell::create_project(&root).unwrap();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let painted = painted_text(&output);
+        output.textures_delta.clear();
+        assert!(painted.lines().any(|line| line == "Project"), "{painted}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_open_project_paints_the_editor() {
+        let temp = std::env::temp_dir().join(format!("cutlass-editor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
@@ -1644,31 +1916,36 @@ mod tests {
             |ui| show(&mut shell, ui, &mut view, None),
         );
         assert!(shell.chrome.project_bar);
+        assert!(!shell.chrome.projects);
         assert!(shell.chrome.library);
         assert!(shell.chrome.preview);
         assert!(shell.chrome.inspector);
         assert!(shell.chrome.timeline);
         assert!(shell.chrome.transport);
         assert!(shell.chrome.export);
-        assert!(!shell.chrome.close_requested);
         let painted = painted_text(&output);
+        output.textures_delta.clear();
         assert!(painted.contains("Details"), "{painted}");
         assert!(painted.contains("Main"), "{painted}");
         assert!(painted.contains("Untitled"), "{painted}");
         assert!(
-            painted.contains("Open a project, then import a file."),
+            painted.contains("No media yet. Use File → Import."),
             "{painted}"
         );
-        assert!(!ctx.global_style().interaction.selectable_labels);
-        output.textures_delta.clear();
+        assert!(painted.contains("Projects"), "{painted}");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
     fn a_notice_is_painted_on_a_bar() {
+        let root = std::env::temp_dir().join(format!("cutlass-notice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
         shell.set_notice("no project is open");
         let mut view = ViewState::new();
+        view.projects_root = Some(root.clone());
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -1680,6 +1957,14 @@ mod tests {
         let painted = painted_text(&output);
         assert!(painted.contains("no project is open"), "{painted}");
         output.textures_delta.clear();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_utc_date_is_the_civil_day() {
+        assert_eq!(utc_date(0), "1970-01-01");
+        assert_eq!(utc_date(86_400), "1970-01-02");
+        assert_eq!(utc_date(946_684_800), "2000-01-01");
     }
 
     #[test]

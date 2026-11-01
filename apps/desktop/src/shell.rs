@@ -11,6 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
@@ -146,7 +147,17 @@ pub struct Chrome {
     pub timeline: bool,
     pub transport: bool,
     pub export: bool,
+    pub projects: bool,
     pub close_requested: bool,
+}
+
+/// One saved project in the launch list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedProject {
+    pub path: PathBuf,
+    pub name: String,
+    pub duration: Micros,
+    pub modified: SystemTime,
 }
 
 pub struct Shell {
@@ -235,6 +246,91 @@ impl Shell {
             .map(|session| session.draft().name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "Untitled".to_owned())
+    }
+
+    /// Where new projects are created and where the launch list looks.
+    ///
+    /// On macOS this is `~/Library/Application Support/Cutlass/Projects`.
+    /// The directory is created when the first project is saved.
+    #[must_use]
+    pub fn projects_directory() -> PathBuf {
+        application_support()
+            .map(|base| base.join("Cutlass").join("Projects"))
+            .unwrap_or_else(|| std::env::temp_dir().join("cutlass-projects"))
+    }
+
+    /// Projects under `root`, newest first. A folder without a draft is skipped.
+    #[must_use]
+    pub fn list_projects(root: &Path) -> Vec<ListedProject> {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut projects = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(folder) = Folder::read(&path) else {
+                continue;
+            };
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            let name = if folder.draft.name.is_empty() {
+                entry.file_name().to_string_lossy().into_owned()
+            } else {
+                folder.draft.name
+            };
+            projects.push(ListedProject {
+                path,
+                name,
+                duration: folder.draft.duration,
+                modified,
+            });
+        }
+        projects.sort_by(|left, right| {
+            right
+                .modified
+                .cmp(&left.modified)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        projects
+    }
+
+    /// Write a new empty project under `root` and return its folder.
+    pub fn create_project(root: &Path) -> Result<PathBuf, ShellError> {
+        std::fs::create_dir_all(root).map_err(|error| ShellError::Io(error.to_string()))?;
+        let (name, path, id) = next_project_slot(root);
+        let mut draft = Draft::empty(id);
+        draft.name = name;
+        let now = unix_millis();
+        draft.create_time = now;
+        draft.update_time = now;
+        Folder::new(draft).save(&path).map_err(ShellError::Store)?;
+        Ok(path)
+    }
+
+    /// Write the open project, then leave it so the launch list is showing.
+    pub fn close_project(&mut self) -> Result<(), ShellError> {
+        if self.session.is_some() {
+            self.save()?;
+        }
+        self.session = None;
+        self.folder = None;
+        self.hold = None;
+        self.path = None;
+        self.playhead = Micros(0);
+        self.playing = false;
+        self.selected = None;
+        self.notice.clear();
+        self.heard.clear();
+        self.output.queue(&[]);
+        Ok(())
     }
 
     pub fn playing(&self) -> bool {
@@ -1189,6 +1285,55 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
         }
     }
     Err(ShellError::Io("the project resources are full".to_owned()))
+}
+
+#[cfg(target_os = "macos")]
+fn application_support() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support"),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn application_support() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(PathBuf::from)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn application_support() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return Some(PathBuf::from(xdg));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".local").join("share"))
+}
+
+fn next_project_slot(root: &Path) -> (String, PathBuf, String) {
+    for index in 1..100_000 {
+        let name = if index == 1 {
+            "Project".to_owned()
+        } else {
+            format!("Project {index}")
+        };
+        let path = root.join(&name);
+        if !path.exists() {
+            return (name, path, format!("project-{index}"));
+        }
+    }
+    let stamp = unix_millis();
+    let name = format!("Project {stamp}");
+    let path = root.join(&name);
+    (name, path, format!("project-{stamp}"))
+}
+
+fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -2257,5 +2402,54 @@ mod tests {
             }
         }
         best.map(|(_, path)| path)
+    }
+
+    #[test]
+    fn the_launch_list_is_the_saved_projects() {
+        let root = Temp::new();
+        let missing = root.path.join("missing");
+        assert!(Shell::list_projects(&missing).is_empty());
+        assert!(!missing.exists());
+        std::fs::create_dir(root.path.join("notes")).unwrap();
+        let first = Shell::create_project(&root.path).unwrap();
+        let second = Shell::create_project(&root.path).unwrap();
+        let mut names: Vec<_> = Shell::list_projects(&root.path)
+            .into_iter()
+            .map(|project| project.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Project", "Project 2"]);
+        assert!(first.ends_with("Project"));
+        assert!(second.ends_with("Project 2"));
+        assert!(Folder::read(&first).unwrap().draft.name == "Project");
+    }
+
+    #[test]
+    fn leaving_a_project_writes_the_folder() {
+        let root = Temp::new();
+        let path = Shell::create_project(&root.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&path).unwrap();
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.close_project().unwrap();
+        assert!(desktop.draft().is_none());
+        let saved = Folder::read(&path).unwrap();
+        assert!(
+            saved.draft.tracks[0]
+                .attribute
+                .contains(TrackAttribute::LOCK)
+        );
+        assert_eq!(Shell::list_projects(&root.path).len(), 1);
+    }
+
+    #[test]
+    fn naming_the_projects_directory_does_not_create_it() {
+        let path = Shell::projects_directory();
+        let under_support = path.ends_with(Path::new("Cutlass").join("Projects"));
+        let fallback = path.ends_with("cutlass-projects");
+        assert!(under_support || fallback, "{}", path.display());
     }
 }

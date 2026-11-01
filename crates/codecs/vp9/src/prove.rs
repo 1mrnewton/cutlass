@@ -299,6 +299,66 @@ fn level_width_above_4096_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Official level bitstreams from the levels document. The WebM is copied to
+/// IVF without re-encoding. The test skips when those files are not on disk.
+#[test]
+fn official_level_stream_matches_ffmpeg_software() {
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let cases = [
+        (
+            "crowd_run_256X144_fr15_bd8_gf_dist_4_l1.webm",
+            "yuv420p",
+            PixelFormat::Yuv420p,
+            "0",
+            "1",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd10_gf_dist_4_l1.webm",
+            "yuv420p10le",
+            PixelFormat::Yuv420p10,
+            "2",
+            "1",
+        ),
+    ];
+    let mut ran = 0u32;
+    for (name, pix_fmt, format, profile, level) in cases {
+        let Some(webm) = local_level_stream(name) else {
+            continue;
+        };
+        ran += 1;
+        let dir = temp_dir("level-stream");
+        let ivf = dir.join("in.ivf");
+        copy_webm_to_ivf(&ffmpeg, &webm, &ivf);
+        let stream = read_ivf(&ivf);
+        assert!(!stream.frames.is_empty(), "{name} produced no frames");
+        let (ours, _) = decode_shown(&stream, format);
+        let oracle = ffmpeg_yuv(&ffmpeg, &ivf, pix_fmt);
+        assert_eq!(
+            ours.len(),
+            oracle.len(),
+            "{name} shown bytes differ {} vs {}",
+            ours.len(),
+            oracle.len()
+        );
+        let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{name} first mismatch at {mismatch:?}");
+        eprintln!(
+            "official profile {profile} level {level} {}x{} {} frames {} bytes",
+            stream.width,
+            stream.height,
+            stream.frames.len(),
+            ours.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    if ran == 0 {
+        eprintln!("skipped: official level streams are not in ../local-files/vp9-levels");
+    }
+}
+
 fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
     let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");
@@ -316,6 +376,29 @@ fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
         }
     }
     (packed, decoder.temporal_frames())
+}
+
+fn local_level_stream(name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../local-files/vp9-levels")
+        .join(name);
+    path.is_file().then_some(path)
+}
+
+fn copy_webm_to_ivf(ffmpeg: &Path, webm: &Path, ivf: &Path) {
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(webm)
+        .args(["-an", "-c:v", "copy", "-f", "ivf"])
+        .arg(ivf)
+        .output()
+        .expect("copy");
+    assert!(
+        status.status.success(),
+        "copy {} {}",
+        webm.display(),
+        String::from_utf8_lossy(&status.stderr)
+    );
 }
 
 fn local_video() -> Option<PathBuf> {

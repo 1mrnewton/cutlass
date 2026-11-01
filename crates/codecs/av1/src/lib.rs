@@ -20,8 +20,9 @@
 //! A superblock may add its own loop-filter delta. A sequence may use a
 //! 128×128 superblock. A switch frame is predicted as an inter frame and
 //! refreshes every reference slot. A reserved OBU is skipped. An OBU with no
-//! size field runs to the end of the packet. A segment may change the quantizer, and a
-//! later frame may keep that segment map.
+//! size field runs to the end of the packet. A frame header may be followed by
+//! tile groups. A segment may change the quantizer, and a later frame may keep
+//! that segment map.
 
 #![forbid(unsafe_code)]
 

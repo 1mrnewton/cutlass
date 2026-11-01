@@ -17,7 +17,7 @@ use crate::dims::{
     partition_subsize, subsampled_size,
 };
 use crate::header::{
-    CdefParams, FrameInfo, SEG_ALT_Q, SEG_GLOBALMV, SEG_REF_FRAME, SEG_SKIP, Sequence,
+    CdefParams, FrameInfo, SEG_ALT_Q, SEG_GLOBALMV, SEG_REF_FRAME, SEG_SKIP, Sequence, TilePart,
 };
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
 use crate::idct::{InverseScratch, inverse_2d_into, inverse_wht4};
@@ -94,6 +94,17 @@ pub fn decode_with_refs(
     refs: &[Option<RefView<'_>>],
     carried: Option<&Cdfs>,
 ) -> Result<Reconstructed, CodecError> {
+    let parts = crate::header::tile_parts(frame)?;
+    decode_tile_parts(sequence, frame, refs, carried, &parts)
+}
+
+pub(crate) fn decode_tile_parts(
+    sequence: &Sequence,
+    frame: &FrameInfo,
+    refs: &[Option<RefView<'_>>],
+    carried: Option<&Cdfs>,
+    parts: &[TilePart],
+) -> Result<Reconstructed, CodecError> {
     if frame.width > 4096 || frame.height > 4096 {
         return Err(CodecError::Limit { what: "frame size" });
     }
@@ -107,7 +118,6 @@ pub fn decode_with_refs(
     }
     let buf_w = (frame.mi_cols as usize).saturating_mul(4);
     let buf_h = (frame.mi_rows as usize).saturating_mul(4);
-    let parts = crate::header::tile_parts(frame)?;
     if parts.is_empty() {
         return Err(CodecError::Truncated {
             at_bit: 0,
@@ -119,7 +129,7 @@ pub fn decode_with_refs(
     let mut lr = restore::Grid::new(frame)?;
     let mut end_cdfs = None;
     let mut tile = if parts.len() > 1 && !lr.active() {
-        let (tile, end) = decode_tiles(sequence, frame, &parts, buf_w, buf_h, refs, &initial)?;
+        let (tile, end) = decode_tiles(sequence, frame, parts, buf_w, buf_h, refs, &initial)?;
         end_cdfs = end;
         tile
     } else {
@@ -369,7 +379,7 @@ fn quantizer_context(base_q: u8) -> usize {
     }
 }
 
-fn part_tile_num(frame: &FrameInfo, part: &crate::header::TilePart) -> Result<usize, CodecError> {
+fn part_tile_num(frame: &FrameInfo, part: &TilePart) -> Result<usize, CodecError> {
     let cols = frame.tile_cols as usize;
     if cols == 0 {
         return Err(CodecError::Malformed {
@@ -400,7 +410,7 @@ fn part_tile_num(frame: &FrameInfo, part: &crate::header::TilePart) -> Result<us
 fn decode_tiles<'a, 'r>(
     sequence: &Sequence,
     frame: &FrameInfo,
-    parts: &'a [crate::header::TilePart],
+    parts: &'a [TilePart],
     buf_w: usize,
     buf_h: usize,
     refs: &[Option<RefView<'r>>],
@@ -992,7 +1002,7 @@ impl<'a, 'r> Tile<'a, 'r> {
     fn decode_part(
         &mut self,
         frame: &FrameInfo,
-        part: &crate::header::TilePart,
+        part: &TilePart,
         sb: usize,
         lr: &mut restore::Grid,
     ) -> Result<(), CodecError> {

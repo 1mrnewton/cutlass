@@ -48,7 +48,7 @@ The decoder's scope is progressive 8-bit 4:2:0, `seq_profile` 0, one operating p
 
 Implemented for that scope, and matched against dav1d on the keyframe fixtures named in `STATUS.md`:
 
-- Sequence headers, frame headers, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped.
+- Sequence headers, frame headers, tile groups that follow a frame header, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped.
 - Eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0` returns no picture).
 - Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
 - Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe or an inter frame may select its transform size.
@@ -118,7 +118,7 @@ Refused with a typed error before a picture is published:
 
 - 10-bit, 12-bit, monochrome, 4:2:2, and 4:4:4.
 - A profile other than 0, a second operating point, and the decoder model.
-- Large-scale tile lists, and a tile group outside a frame.
+- Large-scale tile lists. A tile group that does not follow a frame header.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.

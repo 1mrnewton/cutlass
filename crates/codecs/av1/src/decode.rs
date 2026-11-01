@@ -7,11 +7,11 @@ use cutlass_decode::{
 use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{
-    FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, header_is_addressable,
-    parse_with_motion, unit_obus,
+    FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, header_is_addressable,
+    obu_payload, parse_with_motion, tile_span, unit_obus,
 };
 use crate::inter::{RefView, SavedMotion};
-use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_with_refs};
+use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_tile_parts, decode_with_refs};
 
 use std::sync::Arc;
 
@@ -35,6 +35,15 @@ struct Held {
     segments: Arc<Vec<u8>>,
     mi_cols: u32,
     mi_rows: u32,
+}
+
+/// A frame header waiting for its tile groups. Nothing is stored until the groups cover every tile.
+struct PendingTiles {
+    sequence: Sequence,
+    frame: FrameInfo,
+    next: usize,
+    count: usize,
+    parts: Vec<TilePart>,
 }
 
 struct KeptSlot {
@@ -127,26 +136,109 @@ impl Av1Decoder {
         let mut prefix = Vec::new();
         let mut shown = Vec::new();
         let mut saw_frame = false;
+        let mut pending: Option<PendingTiles> = None;
         for obu in obus {
             match obu.kind {
-                // Padding, metadata, a temporal delimiter, and a reserved type
-                // carry no frame. A reserved payload is not inspected.
-                0 | 2 | 5 | 9..=14 | 15 => {}
-                1 => prefix.extend_from_slice(obu.bytes),
-                3 | 6 | 7 => {
+                // Padding, metadata, and a reserved type carry no frame.
+                // A reserved payload is not inspected.
+                0 | 5 | 9..=14 | 15 => {}
+                2 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                }
+                1 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                    prefix.extend_from_slice(obu.bytes);
+                }
+                6 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
                     saw_frame = true;
                     let mut bytes = std::mem::take(&mut prefix);
                     bytes.extend_from_slice(obu.bytes);
-                    let (picture, frame_undo) = self.decode_frame(&bytes, packet)?;
-                    undo.push(frame_undo);
-                    if let Some(picture) = picture {
-                        shown.push(Output::Picture(picture));
+                    record(&mut shown, undo, self.decode_frame(&bytes, packet)?);
+                }
+                3 => {
+                    if pending.is_some() {
+                        return Err(unfinished_tiles());
+                    }
+                    saw_frame = true;
+                    let mut bytes = std::mem::take(&mut prefix);
+                    bytes.extend_from_slice(obu.bytes);
+                    let (sequence, frame) = self.read_header(&bytes, None)?;
+                    if frame.show_existing {
+                        record(
+                            &mut shown,
+                            undo,
+                            self.commit_frame(packet, sequence, frame, None)?,
+                        );
+                    } else {
+                        let count =
+                            (frame.tile_cols as usize).saturating_mul(frame.tile_rows as usize);
+                        if count == 0 {
+                            return Err(CodecError::Malformed {
+                                at_bit: 0,
+                                what: "tile grid",
+                            });
+                        }
+                        pending = Some(PendingTiles {
+                            sequence,
+                            frame,
+                            next: 0,
+                            count,
+                            parts: Vec::new(),
+                        });
                     }
                 }
+                7 => {
+                    let Some(open) = pending.as_ref() else {
+                        return Err(CodecError::Malformed {
+                            at_bit: 0,
+                            what: "redundant frame header",
+                        });
+                    };
+                    // A redundant header repeats the open frame. It adds no tiles.
+                    self.read_header(obu.bytes, Some(&open.sequence))?;
+                }
                 4 => {
-                    return Err(CodecError::Unsupported {
-                        what: "tile group outside a frame",
-                    });
+                    let payload = obu_payload(obu.bytes)?;
+                    let done = {
+                        let Some(open) = pending.as_mut() else {
+                            return Err(CodecError::Unsupported {
+                                what: "tile group outside a frame",
+                            });
+                        };
+                        let span = tile_span(&open.frame, payload)?;
+                        let covered = span.end.saturating_sub(span.start).saturating_add(1);
+                        if span.start != open.next
+                            || span.end >= open.count
+                            || span.parts.len() != covered
+                        {
+                            return Err(unfinished_tiles());
+                        }
+                        open.next = span.end + 1;
+                        open.parts.extend(span.parts);
+                        open.next == open.count
+                    };
+                    if done {
+                        let Some(open) = pending.take() else {
+                            return Err(unfinished_tiles());
+                        };
+                        record(
+                            &mut shown,
+                            undo,
+                            self.commit_frame(
+                                packet,
+                                open.sequence,
+                                open.frame,
+                                Some(&open.parts),
+                            )?,
+                        );
+                    }
                 }
                 8 => {
                     return Err(CodecError::Unsupported {
@@ -159,6 +251,9 @@ impl Av1Decoder {
                     });
                 }
             }
+        }
+        if pending.is_some() {
+            return Err(unfinished_tiles());
         }
         if !saw_frame {
             return Err(CodecError::InvalidApi {
@@ -174,6 +269,15 @@ impl Av1Decoder {
         bytes: &[u8],
         packet: &Packet,
     ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
+        let (sequence, frame) = self.read_header(bytes, None)?;
+        self.commit_frame(packet, sequence, frame, None)
+    }
+
+    fn read_header(
+        &self,
+        bytes: &[u8],
+        stored: Option<&Sequence>,
+    ) -> Result<(Sequence, FrameInfo), CodecError> {
         let saved_motion =
             std::array::from_fn(|slot| self.refs[slot].as_ref().map(|reference| reference.gm));
         let ref_sizes = std::array::from_fn(|slot| {
@@ -192,7 +296,7 @@ impl Av1Decoder {
         });
         let (sequence, mut frame) = parse_with_motion(
             bytes,
-            self.sequence.as_ref(),
+            stored.or(self.sequence.as_ref()),
             &saved_motion,
             &self.order_hints,
             &ref_sizes,
@@ -200,8 +304,18 @@ impl Av1Decoder {
         )?;
         self.attach_prev_segments(&mut frame);
         header_is_addressable(&sequence, &frame)?;
+        Ok((sequence, frame))
+    }
+
+    fn commit_frame(
+        &mut self,
+        packet: &Packet,
+        sequence: Sequence,
+        frame: FrameInfo,
+        parts: Option<&[TilePart]>,
+    ) -> Result<(Option<PictureOutput>, FrameUndo), CodecError> {
         let stale = self.take_stale_refs(&frame);
-        let held = match self.picture_before_grain(&sequence, &frame) {
+        let held = match self.picture_before_grain(&sequence, &frame, parts) {
             Ok(decoded) => decoded,
             Err(error) => {
                 self.restore_refs(stale);
@@ -230,9 +344,14 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
+        parts: Option<&[TilePart]>,
     ) -> Result<Reconstructed, CodecError> {
         let carried = self.carried_cdf(frame)?;
-        decode_with_refs(sequence, frame, &self.ref_views(), carried.as_deref())
+        let views = self.ref_views();
+        match parts {
+            Some(parts) => decode_tile_parts(sequence, frame, &views, carried.as_deref(), parts),
+            None => decode_with_refs(sequence, frame, &views, carried.as_deref()),
+        }
     }
 
     /// `load_cdfs(ref_frame_idx[primary_ref_frame])` when the frame names a primary reference.
@@ -336,6 +455,7 @@ impl Av1Decoder {
         &self,
         sequence: &Sequence,
         frame: &FrameInfo,
+        parts: Option<&[TilePart]>,
     ) -> Result<Held, CodecError> {
         if frame.show_existing {
             let Some(stored) = self.refs[usize::from(frame.frame_to_show)].as_ref() else {
@@ -354,7 +474,7 @@ impl Av1Decoder {
                 mi_rows: stored.mi_rows,
             });
         }
-        let reconstructed = self.decode_picture(sequence, frame)?;
+        let reconstructed = self.decode_picture(sequence, frame, parts)?;
         Ok(Held {
             picture: owned(reconstructed.picture)?,
             cdfs: Arc::new(reconstructed.cdfs),
@@ -385,6 +505,25 @@ impl Av1Decoder {
                 self.refs[slot] = Some(reference);
             }
         }
+    }
+}
+
+fn unfinished_tiles() -> CodecError {
+    CodecError::Malformed {
+        at_bit: 0,
+        what: "tile group",
+    }
+}
+
+fn record(
+    shown: &mut Vec<Output>,
+    undo: &mut Vec<FrameUndo>,
+    decoded: (Option<PictureOutput>, FrameUndo),
+) {
+    let (picture, frame_undo) = decoded;
+    undo.push(frame_undo);
+    if let Some(picture) = picture {
+        shown.push(Output::Picture(picture));
     }
 }
 
@@ -612,6 +751,20 @@ mod tests {
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }
         hash
+    }
+
+    fn push_error(decoder: &mut Av1Decoder, data: &[u8], pts: i64) -> cutlass_decode::CodecError {
+        decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: data.to_vec(),
+                pts,
+                duration: 1,
+                timescale: 30,
+                keyframe: pts == 0,
+                side: Vec::new(),
+            })
+            .expect_err("packet")
     }
 
     fn push_frame(decoder: &mut Av1Decoder, data: &[u8], pts: i64) -> Vec<u8> {
@@ -1850,6 +2003,93 @@ mod tests {
         let packed = push_frame(&mut decoder, frames[1], 1);
         assert_eq!(frame_digest(&packed), digests[1]);
     }
+
+    #[test]
+    fn tile_groups_match_dav1d() {
+        // 128×128, four tiles. The frame header is its own OBU and each tile is
+        // its own group. The second frame is inter and has no sequence header.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/tg_0.obu"),
+            include_bytes!("../fixtures/tg_1.obu"),
+        ];
+        let expected = [0xb1a2_c0fe_a403_1499, 0xc653_6a11_a972_4b1c];
+        let first = crate::header::unit_obus(frames[0]).expect("obus");
+        let second = crate::header::unit_obus(frames[1]).expect("obus");
+        assert_eq!(
+            first.iter().map(|obu| obu.kind).collect::<Vec<_>>(),
+            vec![2, 1, 3, 4, 4, 4, 4]
+        );
+        assert_eq!(
+            second.iter().map(|obu| obu.kind).collect::<Vec<_>>(),
+            vec![2, 3, 4, 4, 4, 4]
+        );
+        let mut header = Vec::new();
+        for obu in first.iter().filter(|obu| obu.kind == 1 || obu.kind == 3) {
+            header.extend_from_slice(obu.bytes);
+        }
+        let (_sequence, frame) = crate::header::parse_unit(&header, None).expect("header");
+        assert_eq!(frame.tile_cols, 2);
+        assert_eq!(frame.tile_rows, 2);
+        assert!(frame.tile.is_empty());
+
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let mut groups = Vec::new();
+        for obu in first.iter().filter(|obu| obu.kind == 4) {
+            groups.extend_from_slice(obu.bytes);
+        }
+        let missing = push_error(&mut decoder, &groups, 0);
+        assert!(matches!(
+            missing,
+            cutlass_decode::CodecError::Unsupported {
+                what: "tile group outside a frame",
+            }
+        ));
+        let mut short = Vec::new();
+        for obu in first.iter().take(first.len() - 1) {
+            short.extend_from_slice(obu.bytes);
+        }
+        let short = push_error(&mut decoder, &short, 0);
+        assert!(matches!(
+            short,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile group",
+                ..
+            }
+        ));
+        let mut gap = Vec::new();
+        let mut skipped = false;
+        for obu in &first {
+            if obu.kind == 4 && !skipped {
+                skipped = true;
+                continue;
+            }
+            gap.extend_from_slice(obu.bytes);
+        }
+        let gap = push_error(&mut decoder, &gap, 0);
+        assert!(matches!(
+            gap,
+            cutlass_decode::CodecError::Malformed {
+                what: "tile group",
+                ..
+            }
+        ));
+
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[0]);
+        let again = push_error(&mut decoder, &groups, 1);
+        assert!(matches!(
+            again,
+            cutlass_decode::CodecError::Unsupported {
+                what: "tile group outside a frame",
+            }
+        ));
+        let packed = push_frame(&mut decoder, frames[1], 1);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[1]);
+    }
+
     #[test]
     fn nonuniform_tiles_match_dav1d() {
         // 320×192 keyframes. Superblocks are 64 pixels, so the grid is five by

@@ -591,11 +591,8 @@ fn parse_frame_header_only(
 ) -> Result<FrameInfo, CodecError> {
     let frame = uncompressed(bits, sequence, saved, order_hints, ref_sizes, inherited)?;
     trailing(bits, payload_end)?;
-    if !frame.show_existing && frame.tile.is_empty() {
-        return Err(CodecError::Unsupported {
-            what: "separate tile group",
-        });
-    }
+    // The tile bytes live in the tile-group OBUs that follow this header.
+    // A show-existing header has no tiles either.
     Ok(frame)
 }
 
@@ -1459,8 +1456,20 @@ fn mi_starts(sb_count: u32, log: u32, mi_total: u32, sb_shift: u32) -> Vec<u32> 
     starts
 }
 
+/// Tiles from one `tile_group_obu`, inclusive of `start` and `end`.
+pub(crate) struct TileSpan {
+    pub start: usize,
+    pub end: usize,
+    pub parts: Vec<TilePart>,
+}
+
 /// Split a frame OBU's tile group into one byte range per tile.
 pub fn tile_parts(frame: &FrameInfo) -> Result<Vec<TilePart>, CodecError> {
+    Ok(tile_span(frame, &frame.tile)?.parts)
+}
+
+/// Parse one tile-group payload. The caller checks that groups cover the frame in order.
+pub(crate) fn tile_span(frame: &FrameInfo, payload: &[u8]) -> Result<TileSpan, CodecError> {
     let cols = frame.mi_col_starts.len().saturating_sub(1);
     let rows = frame.mi_row_starts.len().saturating_sub(1);
     if cols == 0
@@ -1475,15 +1484,19 @@ pub fn tile_parts(frame: &FrameInfo) -> Result<Vec<TilePart>, CodecError> {
     }
     let num = cols * rows;
     if num == 1 {
-        return Ok(vec![TilePart {
-            row: 0,
-            row_end: frame.mi_rows as usize,
-            col: 0,
-            col_end: frame.mi_cols as usize,
-            data: frame.tile.clone(),
-        }]);
+        return Ok(TileSpan {
+            start: 0,
+            end: 0,
+            parts: vec![TilePart {
+                row: 0,
+                row_end: frame.mi_rows as usize,
+                col: 0,
+                col_end: frame.mi_cols as usize,
+                data: payload.to_vec(),
+            }],
+        });
     }
-    let mut bits = BitReader::new(&frame.tile);
+    let mut bits = BitReader::new(payload);
     let present = bits.read_bool()?;
     let (group_start, group_end) = if present {
         let width = frame.tile_cols_log + frame.tile_rows_log;
@@ -1559,7 +1572,36 @@ pub fn tile_parts(frame: &FrameInfo) -> Result<Vec<TilePart>, CodecError> {
             data,
         });
     }
-    Ok(parts)
+    Ok(TileSpan {
+        start: group_start,
+        end: group_end,
+        parts,
+    })
+}
+
+/// Payload of one OBU. The size field is a byte count; without one the payload
+/// runs to the end of `bytes`.
+pub(crate) fn obu_payload(bytes: &[u8]) -> Result<&[u8], CodecError> {
+    let mut bits = BitReader::new(bytes);
+    let header = bits.read(8)?;
+    if header & 0x80 != 0 {
+        return Err(malformed(&bits, "obu forbidden"));
+    }
+    let extension = (header >> 2) & 1 == 1;
+    let has_size = (header >> 1) & 1 == 1;
+    if extension {
+        let _ = bits.read(8)?;
+    }
+    let payload_end = obu_payload_end(&mut bits, bytes, has_size)?;
+    if !bits.position().is_multiple_of(8) || !payload_end.is_multiple_of(8) {
+        return Err(malformed(&bits, "obu"));
+    }
+    let start = bits.position() / 8;
+    let end = payload_end / 8;
+    bytes.get(start..end).ok_or(CodecError::Truncated {
+        at_bit: bits.position() as u64,
+        what: "obu",
+    })
 }
 
 fn tile_log2(block: u32, target: u32) -> u32 {

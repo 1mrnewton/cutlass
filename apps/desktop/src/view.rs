@@ -1206,6 +1206,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                             let active = match *name {
                                 "split" => shell.blade(),
                                 "marker" => shell.marking(),
+                                "beat" => shell.beating(),
                                 "guides" => shell.guides_shown(),
                                 "lock" => shell.guides_locked(),
                                 "linkage" => shell.linkage_enabled(),
@@ -1276,7 +1277,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
         "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
         | "lock" | "linkage" => true,
-        "split" | "marker" => shell.has_clip(),
+        "split" | "marker" | "beat" => shell.has_clip(),
         _ => false,
     }
 }
@@ -1285,6 +1286,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
     if name == "select" {
         shell.clear_blade();
         shell.clear_marker();
+        shell.clear_beat();
         return;
     }
     if !tool_enabled(shell, name) {
@@ -1303,6 +1305,10 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         }
         "marker" => {
             shell.toggle_marker();
+            Ok(())
+        }
+        "beat" => {
+            shell.toggle_beat();
             Ok(())
         }
         "guides" => {
@@ -2473,6 +2479,24 @@ fn paint_clip(
                 shell.set_notice(error.to_string());
             }
         }
+    } else if body.width() > 0.0 && shell.beating() {
+        let response = ui.interact(
+            body,
+            ui.scope_id().with(("clip", index, clip.id.as_str())),
+            Sense::click(),
+        );
+        response.clone().on_hover_text(span.clone());
+        if response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked()
+            && let Some(pos) = pointer_pos(ui, &response)
+        {
+            let x = f64::from(pos.x - lanes_left).max(0.0);
+            if let Err(error) = shell.drop_beat(clip.id.clone(), x, editor_lane_y(index)) {
+                shell.set_notice(error.to_string());
+            }
+        }
     } else if body.width() > 0.0 {
         let response = ui.interact(
             body,
@@ -2529,6 +2553,7 @@ fn paint_clip(
         index,
     );
     paint_clip_markers(shell, ui, clip, lanes_left, row);
+    paint_clip_beats(shell, ui, clip, lanes_left, row);
 }
 
 fn drag_clip_edge(
@@ -2661,6 +2686,49 @@ fn paint_marker_flag(
         return true;
     }
     false
+}
+
+fn paint_clip_beats(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    lanes_left: f32,
+    row: Rect,
+) {
+    let beats: Vec<_> = shell
+        .beats()
+        .into_iter()
+        .filter(|beat| beat.segment_id == clip.id)
+        .collect();
+    for beat in beats {
+        let x = lane_x(
+            lanes_left,
+            shell.pixel_size(),
+            shell.view_origin().0,
+            beat.time.0,
+        );
+        let hit = Rect::from_center_size(Pos2::new(x, row.center().y), Vec2::new(12.0, 16.0));
+        if !row.intersects(hit) {
+            continue;
+        }
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with(("beat", clip.id.as_str(), beat.source)),
+            Sense::click(),
+        );
+        let selected = shell.beat_selected(&clip.id, beat.source);
+        let center = Pos2::new(x, row.center().y);
+        ui.painter()
+            .circle_filled(center, 4.0, Color32::from_rgb(0xF4, 0xFB, 0xF8));
+        if selected {
+            ui.painter()
+                .circle_stroke(center, 6.0, egui::Stroke::new(1.5, tokens::SELECTED));
+        }
+        response.clone().on_hover_text("Beat");
+        if response.clicked() {
+            shell.select_beat(clip.id.clone(), beat.source);
+        }
+    }
 }
 
 fn marker_tip(title: &str) -> &str {
@@ -4048,6 +4116,69 @@ mod tests {
         );
         assert!(marks[0].stored_start > 0);
         assert!(marks[0].stored_start < 2_000_000);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_beat_drops_on_the_audio_clip_under_the_pointer() {
+        let temp = std::env::temp_dir().join(format!("cutlass-trim-{}-beat", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "picture",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        let mut sound = cutlass_model::Track::main("sound");
+        sound.kind = cutlass_model::TrackType::Audio;
+        sound.segments.push(cutlass_model::Segment::new(
+            "tone",
+            "tone",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks.push(sound);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        shell.toggle_beat();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let text = text_pos(&output, "tone").expect("audio clip");
+        output.textures_delta.clear();
+        let width = (2_000_000_f32 * shell.pixel_size() as f32).max(8.0);
+        let center = Pos2::new(text.x - 8.0 + width / 2.0, text.y);
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(center), press(true), press(false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let beats = shell.beats();
+        assert_eq!(beats.len(), 1, "notice {}", shell.notice());
+        assert_eq!(beats[0].segment_id.as_str(), "tone");
+        assert!(beats[0].source > 0);
+        assert!(beats[0].source < 2_000_000);
+        assert_eq!(beats[0].time.0, beats[0].source);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

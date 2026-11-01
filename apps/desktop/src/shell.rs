@@ -24,7 +24,8 @@ use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
     Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialTransition, MaterialVideo,
     MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute,
-    TrackId, TrackType, linkage_from_biz, segment_time_mark, time_mark_items, visible_marks,
+    TrackId, TrackType, beat_timeline_time, linkage_from_biz, segment_beats, segment_time_mark,
+    source_time_at, time_mark_items, track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -109,6 +110,8 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::DuplicateMark) => {
                 formatter.write_str("a marker is already there")
             }
+            Self::Edit(EditError::DuplicateBeat) => formatter.write_str("a beat is already there"),
+            Self::Edit(EditError::NotAudio) => formatter.write_str("a beat belongs on audio"),
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -237,6 +240,23 @@ struct CopiedClip {
     segment: Segment,
     /// Offsets from the clip start. The paste stores them on a new material.
     marks: Vec<TimeMarkItem>,
+    /// Source times. The paste stores them on a new material.
+    beats: Vec<i64>,
+}
+
+/// A beat the timeline draws. `source` is the stored source time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeatView {
+    pub segment_id: SegmentId,
+    pub source: i64,
+    pub time: Micros,
+}
+
+/// The beat Delete will remove.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BeatPick {
+    segment_id: SegmentId,
+    source: i64,
 }
 
 /// A marker the timeline draws. `stored_start` is the file value.
@@ -322,6 +342,9 @@ pub struct Shell {
     /// The marker tool drops a mark on the ruler or on a clip.
     marking: bool,
     selected_marker: Option<MarkerPick>,
+    /// The beat tool drops a mark on an audio clip.
+    beating: bool,
+    selected_beat: Option<BeatPick>,
     clip_drag: Option<ClipDrag>,
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<PendingMove>,
@@ -376,6 +399,8 @@ impl Shell {
             blade: false,
             marking: false,
             selected_marker: None,
+            beating: false,
+            selected_beat: None,
             clip_drag: None,
             pending_trim: None,
             pending_moves: Vec::new(),
@@ -506,6 +531,8 @@ impl Shell {
         self.blade = false;
         self.marking = false;
         self.selected_marker = None;
+        self.beating = false;
+        self.selected_beat = None;
         self.cancel_clip_drag();
         self.fit_on_layout = false;
         self.notice.clear();
@@ -612,6 +639,8 @@ impl Shell {
         self.blade = false;
         self.marking = false;
         self.selected_marker = None;
+        self.beating = false;
+        self.selected_beat = None;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fit_on_layout = self.cut_duration().0 > 0;
@@ -1516,6 +1545,7 @@ impl Shell {
     pub fn select(&mut self, id: Option<SegmentId>) {
         self.selected_mark = None;
         self.selected_marker = None;
+        self.selected_beat = None;
         self.selection.clear();
         if let Some(id) = id {
             self.selection.push(id);
@@ -1526,6 +1556,7 @@ impl Shell {
     pub fn toggle_selected(&mut self, id: SegmentId) {
         self.selected_mark = None;
         self.selected_marker = None;
+        self.selected_beat = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
             self.selection.remove(index);
         } else {
@@ -1537,6 +1568,7 @@ impl Shell {
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
         self.selected_mark = None;
         self.selected_marker = None;
+        self.selected_beat = None;
         if !keep {
             self.selection.clear();
         }
@@ -1568,6 +1600,9 @@ impl Shell {
             }
             if self.selected_marker.is_some() {
                 return self.remove_selected_marker();
+            }
+            if self.selected_beat.is_some() {
+                return self.remove_selected_beat();
             }
             return Ok(());
         }
@@ -1647,6 +1682,7 @@ impl Shell {
             self.guides.sort_by_key(|guide| guide.0);
         }
         self.selected_marker = None;
+        self.selected_beat = None;
         self.selected_mark = Some(GuideMark::Time(time.0));
         Ok(())
     }
@@ -1655,6 +1691,7 @@ impl Shell {
         if self.guides.iter().any(|guide| guide.0 == time.0) {
             self.selected_mark = Some(GuideMark::Time(time.0));
             self.selected_marker = None;
+            self.selected_beat = None;
             self.selection.clear();
         }
     }
@@ -1682,6 +1719,7 @@ impl Shell {
             self.horizontal.sort_unstable();
         }
         self.selected_marker = None;
+        self.selected_beat = None;
         self.selected_mark = Some(GuideMark::Row(row));
         Ok(())
     }
@@ -1718,6 +1756,7 @@ impl Shell {
         if self.horizontal.contains(&row) {
             self.selected_mark = Some(GuideMark::Row(row));
             self.selected_marker = None;
+            self.selected_beat = None;
             self.selection.clear();
         }
     }
@@ -1868,6 +1907,7 @@ impl Shell {
         if !self.has_clip() {
             self.blade = false;
             self.marking = false;
+            self.beating = false;
         }
         Ok(())
     }
@@ -1891,8 +1931,19 @@ impl Shell {
                 let marks = segment_time_mark(&draft.materials, segment)
                     .map(time_mark_items)
                     .unwrap_or_default();
+                let beat_owned = segment_beats(&draft.materials, segment).map(|raw| raw.id.clone());
+                let beats = if track_holds_beats(&track.kind) {
+                    segment_beats(&draft.materials, segment)
+                        .map(user_beats)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let mut segment = segment.clone();
                 if let Some(id) = owned {
+                    segment.extra_material_refs.retain(|ref_id| ref_id != &id);
+                }
+                if let Some(id) = beat_owned {
                     segment.extra_material_refs.retain(|ref_id| ref_id != &id);
                 }
                 copies.push(CopiedClip {
@@ -1900,6 +1951,7 @@ impl Shell {
                     offset: segment.target.start.0,
                     segment,
                     marks,
+                    beats,
                 });
             }
         }
@@ -1944,6 +1996,7 @@ impl Shell {
         let mut requests = Vec::new();
         let mut ids = Vec::new();
         let mut marks = Vec::new();
+        let mut beats = Vec::new();
         for item in copies {
             let mut segment = item.segment.clone();
             let id = SegmentId::new(self.fresh("seg"));
@@ -1951,6 +2004,12 @@ impl Shell {
             let start = playhead.saturating_add(item.offset);
             segment.target = TimeRange::new(start, segment.target.duration.0);
             let duration = segment.target.duration.0;
+            let beat_sources: Vec<i64> = item
+                .beats
+                .iter()
+                .copied()
+                .filter(|source| beat_timeline_time(&segment, *source).is_some())
+                .collect();
             requests.push(Request::Place {
                 track_id: item.track_id.clone(),
                 segment: Box::new(segment),
@@ -1962,6 +2021,9 @@ impl Shell {
                 let at = start.saturating_add(mark.start.0);
                 marks.push((id.clone(), at, mark.color));
             }
+            for source in beat_sources {
+                beats.push((id.clone(), source));
+            }
             ids.push(id);
         }
         for (segment_id, at, color) in marks {
@@ -1970,6 +2032,13 @@ impl Shell {
                 at: Micros(at),
                 color,
                 material_id: MaterialId::new(self.fresh("time-mark")),
+            });
+        }
+        for (segment_id, source) in beats {
+            requests.push(Request::AddBeat {
+                segment_id,
+                source: Micros(source),
+                material_id: MaterialId::new(self.fresh("beats")),
             });
         }
         self.apply_requests(&requests)?;
@@ -2006,6 +2075,7 @@ impl Shell {
         self.blade = !self.blade && self.has_clip();
         if self.blade {
             self.marking = false;
+            self.beating = false;
         }
     }
 
@@ -2024,6 +2094,7 @@ impl Shell {
         self.marking = !self.marking && self.has_clip();
         if self.marking {
             self.blade = false;
+            self.beating = false;
         }
     }
 
@@ -2069,6 +2140,7 @@ impl Shell {
             segment_id,
             stored_start,
         });
+        self.selected_beat = None;
         self.selected_mark = None;
         self.selection.clear();
     }
@@ -2135,6 +2207,122 @@ impl Shell {
             start: Micros(pick.stored_start),
         })?;
         self.selected_marker = None;
+        Ok(())
+    }
+
+    /// The beat tool is armed. A click on an audio clip drops a beat.
+    #[must_use]
+    pub fn beating(&self) -> bool {
+        self.beating
+    }
+
+    pub fn toggle_beat(&mut self) {
+        self.beating = !self.beating && self.has_clip();
+        if self.beating {
+            self.blade = false;
+            self.marking = false;
+        }
+    }
+
+    /// Turn the beat tool off. Select uses this.
+    pub fn clear_beat(&mut self) {
+        self.beating = false;
+    }
+
+    /// Beats currently drawn. A beat outside the clip is omitted.
+    #[must_use]
+    pub fn beats(&self) -> Vec<BeatView> {
+        let Some(draft) = self.draft() else {
+            return Vec::new();
+        };
+        visible_beats(draft)
+            .into_iter()
+            .map(|beat| BeatView {
+                segment_id: beat.segment_id,
+                source: beat.source,
+                time: beat.time,
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn beat_selected(&self, segment_id: &SegmentId, source: i64) -> bool {
+        self.selected_beat
+            .as_ref()
+            .is_some_and(|pick| &pick.segment_id == segment_id && pick.source == source)
+    }
+
+    pub fn select_beat(&mut self, segment_id: SegmentId, source: i64) {
+        let present = self
+            .beats()
+            .iter()
+            .any(|beat| beat.segment_id == segment_id && beat.source == source);
+        if !present {
+            return;
+        }
+        self.selected_beat = Some(BeatPick { segment_id, source });
+        self.selected_marker = None;
+        self.selected_mark = None;
+        self.selection.clear();
+    }
+
+    /// Drop a beat on an audio clip. The stored time is the source time, so a
+    /// later move carries the mark.
+    pub fn drop_beat(&mut self, segment_id: SegmentId, x: f64, y: f64) -> Result<(), ShellError> {
+        if !self.has_clip() {
+            return Err(ShellError::Unavailable("beat is not available".to_owned()));
+        }
+        let x = self.time_zero_x(x);
+        let scale = self.scale();
+        let source = {
+            let draft = self.session_draft()?;
+            let hit = hit_test(draft, scale, Pointer { x, y })
+                .map_err(|_| ShellError::Unavailable("the beat missed the clip".to_owned()))?;
+            let Some(hit) = hit else {
+                return Err(ShellError::Unavailable(
+                    "the beat missed the clip".to_owned(),
+                ));
+            };
+            if hit.segment_id.as_ref() != Some(&segment_id) {
+                return Err(ShellError::Unavailable(
+                    "the beat missed the clip".to_owned(),
+                ));
+            }
+            if !track_holds_beats(&hit.lane.kind) {
+                return Err(ShellError::Unavailable(
+                    "a beat belongs on audio".to_owned(),
+                ));
+            }
+            let (segment, _) = locate(draft, &segment_id)
+                .ok_or_else(|| ShellError::Unavailable("the beat missed the clip".to_owned()))?;
+            source_time_at(segment, Micros(hit.time.0.max(0)))
+                .ok_or_else(|| ShellError::Unavailable("the beat missed the clip".to_owned()))?
+        };
+        let material_id = MaterialId::new(self.fresh("beats"));
+        self.apply(Request::AddBeat {
+            segment_id,
+            source: Micros(source),
+            material_id,
+        })
+    }
+
+    fn remove_selected_beat(&mut self) -> Result<(), ShellError> {
+        let Some(pick) = self.selected_beat.clone() else {
+            return Ok(());
+        };
+        let present = self
+            .beats()
+            .iter()
+            .any(|beat| beat.segment_id == pick.segment_id && beat.source == pick.source);
+        if !present {
+            self.selected_beat = None;
+            return Ok(());
+        }
+        self.apply(Request::RemoveBeat {
+            segment_id: pick.segment_id,
+            source: Micros(pick.source),
+        })?;
+        self.selected_beat = None;
         Ok(())
     }
 
@@ -3757,6 +3945,116 @@ mod tests {
         assert_eq!(clips[1].stored_start, 400_000);
         assert_ne!(clips[0].segment_id, clips[1].segment_id);
         assert_ne!(clips[0].time, clips[1].time);
+    }
+
+    #[test]
+    fn a_beat_lands_on_an_audio_clip() {
+        let mut bare = shell();
+        bare.toggle_beat();
+        assert!(!bare.beating());
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "media",
+            TimeRange::new(0, 2_000_000),
+        ));
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        desktop.toggle_beat();
+        assert!(desktop.beating());
+        desktop.toggle_marker();
+        assert!(desktop.marking());
+        assert!(!desktop.beating());
+        desktop.clear_marker();
+        desktop.toggle_beat();
+        desktop.toggle_blade();
+        assert!(desktop.blade());
+        assert!(!desktop.beating());
+        desktop.clear_blade();
+        desktop.toggle_beat();
+
+        let picture = crate::tokens::LANE_HEIGHT / 2.0;
+        let audio = crate::tokens::LANE_HEIGHT * 1.5;
+        let refused = desktop
+            .drop_beat(
+                SegmentId::new("picture"),
+                lane_time(&desktop, 400_000.0),
+                picture,
+            )
+            .unwrap_err();
+        assert_eq!(refused.to_string(), "a beat belongs on audio");
+        assert!(desktop.beats().is_empty());
+
+        let tone = SegmentId::new("tone");
+        desktop
+            .drop_beat(tone.clone(), lane_time(&desktop, 400_000.0), audio)
+            .unwrap();
+        let beats = desktop.beats();
+        assert_eq!(beats.len(), 1);
+        assert_eq!(beats[0].segment_id, tone);
+        assert_eq!(beats[0].source, 400_000);
+        assert_eq!(beats[0].time, Micros(400_000));
+        desktop.undo().unwrap();
+        assert!(desktop.beats().is_empty());
+        desktop.redo().unwrap();
+        let again = desktop
+            .drop_beat(tone.clone(), lane_time(&desktop, 400_000.0), audio)
+            .unwrap_err();
+        assert_eq!(again.to_string(), "a beat is already there");
+
+        let track_id = desktop.draft().unwrap().tracks[1].id.clone();
+        desktop
+            .toggle_attribute(track_id.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop
+            .drop_beat(tone.clone(), lane_time(&desktop, 800_000.0), audio)
+            .unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        desktop
+            .toggle_attribute(track_id, TrackAttribute::LOCK)
+            .unwrap();
+
+        desktop.select_beat(tone.clone(), 400_000);
+        desktop.delete_target().unwrap();
+        assert!(desktop.beats().is_empty());
+        desktop
+            .drop_beat(tone.clone(), lane_time(&desktop, 400_000.0), audio)
+            .unwrap();
+        desktop
+            .drag_segment(tone.clone(), lane_time(&desktop, 1_000_000.0), audio)
+            .unwrap();
+        let moved = desktop.beats();
+        assert_eq!(moved.len(), 1);
+        let start = desktop.draft().unwrap().tracks[1].segments[0]
+            .target
+            .start
+            .0;
+        assert_eq!(moved[0].source, 400_000);
+        assert_eq!(moved[0].time.0, start + 400_000);
+        assert!(start > 0, "the clip did not move");
+
+        desktop.seek(Micros(start.saturating_add(2_000_000)));
+        desktop.select(Some(tone));
+        desktop.copy_selected().unwrap();
+        desktop.paste().unwrap();
+        let copied = desktop.beats();
+        assert_eq!(copied.len(), 2);
+        assert_eq!(copied[0].source, 400_000);
+        assert_eq!(copied[1].source, 400_000);
+        assert_ne!(copied[0].segment_id, copied[1].segment_id);
+        assert_ne!(copied[0].time, copied[1].time);
     }
 
     fn touching_cut(dir: &Path) {

@@ -465,7 +465,19 @@ pub(crate) fn decode_mbs<S: Sample>(
             break;
         }
         fresh(pic, addr, mbaff, !next.is_empty())?;
-        qp = if slice.base_mode {
+        let base_mode = if slice.adaptive_base {
+            match &mut entropy {
+                Entropy::Cavlc(bits) => bits.bit()?,
+                Entropy::Cabac(_) => {
+                    return Err(CodecError::Unsupported {
+                        what: "inter-layer prediction",
+                    });
+                }
+            }
+        } else {
+            slice.base_mode
+        };
+        qp = if base_mode {
             let Some(layer) = layer else {
                 return Err(CodecError::Unsupported {
                     what: "inter-layer prediction",

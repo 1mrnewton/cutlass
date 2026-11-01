@@ -1731,8 +1731,11 @@ pub(crate) struct Slice<'a> {
     /// QSY. Zero when the slice is not SP or SI.
     qs: i32,
     /// Base mode. Intra reference-layer macroblocks are copied. Inter ones
-    /// inherit list-0 motion.
+    /// inherit list-0 motion. When `adaptive_base` is set, each macroblock
+    /// carries its own flag and this default is unused.
     base_mode: bool,
+    /// `adaptive_base_mode_flag`. The macroblock layer reads `base_mode_flag`.
+    adaptive_base: bool,
     /// Add the reference layer's list-0 residual after this slice's prediction.
     residual_pred: bool,
 }
@@ -2047,7 +2050,10 @@ struct Header {
     /// `output_flag` of a slice extension. An Annex A slice is displayed.
     output: bool,
     /// Intra reference-layer macroblocks are copied. Inter ones inherit list-0 motion.
+    /// When `adaptive_base` is set, each macroblock carries its own flag.
     base_mode: bool,
+    /// `adaptive_base_mode_flag`. The macroblock layer reads `base_mode_flag`.
+    adaptive_base: bool,
     /// The reference layer's list-0 residual is added after prediction.
     residual_pred: bool,
     /// Annex H `view_id`. Zero for an Annex A picture.
@@ -2408,9 +2414,9 @@ fn read_header(
             };
         }
     }
-    let (base_mode, residual_pred) = match svc {
+    let (adaptive_base, base_mode, residual_pred) = match svc {
         Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
-        _ => (false, false),
+        _ => (false, false, false),
     };
     if svc.is_some() && !restriction {
         let start = bits.u(4)?;
@@ -2459,6 +2465,7 @@ fn read_header(
         subset: svc.is_some() || mvc.is_some(),
         output: svc.is_none_or(|svc| svc.output),
         base_mode,
+        adaptive_base,
         residual_pred,
         view_id,
         inter_view,
@@ -2471,13 +2478,14 @@ fn read_header(
 /// is used. Same-size intra base mode, list-0 motion, and that layer's list-0
 /// residual are reconstructed, including both tools on one macroblock and a
 /// list-0 index other than 0. A reference macroblock can use list 1, and both
-/// lists are averaged.
+/// lists are averaged. `adaptive_base_mode_flag` selects base mode per
+/// macroblock.
 /// Resampling and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
     svc: nal::SvcHeader,
-) -> Result<(bool, bool), CodecError> {
+) -> Result<(bool, bool, bool), CodecError> {
     if svc.quality_id != 0 || sps.svc_spatial != 0 || !sps.inter_layer_deblock {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -2516,8 +2524,9 @@ fn read_inter_layer(
     } else {
         bits.bit()?
     };
-    // Neither tool is not a prediction. Adaptive flags stay out.
-    if adaptive_base || adaptive_residual || !(default_base || default_residual) {
+    // A slice with neither tool is not inter-layer prediction. Residual
+    // prediction stays a slice default; the per-macroblock flag is still open.
+    if adaptive_residual || (!adaptive_base && !(default_base || default_residual)) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2532,7 +2541,7 @@ fn read_inter_layer(
             what: "inter-layer prediction",
         });
     }
-    Ok((default_base, default_residual))
+    Ok((adaptive_base, default_base, default_residual))
 }
 
 fn read_list_mod(bits: &mut Bits<'_>) -> Result<Vec<Mod>, CodecError> {
@@ -2852,6 +2861,7 @@ fn make_slice<'a, S: Sample>(
         sp_switch: header.sp_switch,
         qs: header.qs,
         base_mode: header.base_mode,
+        adaptive_base: header.adaptive_base,
         residual_pred: header.residual_pred,
     })
 }
@@ -3259,6 +3269,7 @@ mod tests {
             subset: false,
             output: true,
             base_mode: false,
+            adaptive_base: false,
             residual_pred: false,
             view_id: 0,
             inter_view: true,

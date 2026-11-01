@@ -12,6 +12,7 @@
 //! A non-base view can predict from the base view at the same order count.
 //! An Annex I depth view that is intra is reconstructed.
 //! An inter-layer macroblock, intra or inter, can add an 8×8 residual.
+//! `adaptive_base_mode_flag` selects base mode per macroblock.
 //! Resampling and a 3D-AVC extension header are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

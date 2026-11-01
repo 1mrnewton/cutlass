@@ -405,6 +405,33 @@ fn inter_layer_intra_adds_an_8x8_residual() {
 }
 
 #[test]
+fn adaptive_base_mode_chooses_per_macroblock() {
+    let picture = decode(&adaptive_annex());
+    assert_eq!(picture.picture.width(), 32);
+    let y = picture.picture.y();
+    for row in 0..16 {
+        for col in 0..32 {
+            let want = if col < 16 { 100 } else { 40 };
+            assert_eq!(y[row * 32 + col], want, "{row},{col}");
+        }
+    }
+    for plane in [picture.picture.u(), picture.picture.v()] {
+        for row in 0..8 {
+            for col in 0..16 {
+                let want = if col < 8 { 90 } else { 40 };
+                assert_eq!(plane[row * 16 + col], want, "{row},{col}");
+            }
+        }
+    }
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &adaptive_annex());
+        assert_eq!(raw.len(), 32 * 16 + 16 * 8 * 2);
+        assert_ne!(raw, planes_of(&picture));
+        assert_eq!(&raw[..32], &paint_row(100, 180));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -1912,18 +1939,77 @@ fn eight_residual(w: &mut Writer) {
     w.bit(true);
 }
 
+fn adaptive_annex() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps_width(1));
+    out.extend(annex_b_nal(3, 15, &high_subset_width(1)));
+    out.extend(annex_b_nal(3, 8, &pps_8x8()));
+    out.extend(annex_b_nal(3, 5, &wide_pcm()));
+    out.extend(annex_b_extension(3, 20, &ilp_header(), &adaptive_slice()));
+    out
+}
+
+fn wide_pcm() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    for luma in [100u8, 180] {
+        w.ue(25);
+        w.align_zeros();
+        w.bytes.extend(std::iter::repeat_n(luma, 256));
+        w.bytes.extend(std::iter::repeat_n(90, 128));
+        w.bit = w.bytes.len() * 8;
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn adaptive_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(3);
+    w.bit(false);
+    w.ue(25);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(40, 256));
+    w.bytes.extend(std::iter::repeat_n(40, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn paint_row(left: u8, right: u8) -> Vec<u8> {
+    let mut row = vec![left; 16];
+    row.extend(std::iter::repeat_n(right, 16));
+    row
+}
+
 fn high_sps() -> Vec<u8> {
+    high_sps_width(0)
+}
+
+fn high_sps_width(width_minus1: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(100, 8);
-    high_body(&mut w);
+    high_body(&mut w, width_minus1);
     w.trailing();
     w.bytes
 }
 
 fn high_subset() -> Vec<u8> {
+    high_subset_width(0)
+}
+
+fn high_subset_width(width_minus1: u32) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(86, 8);
-    high_body(&mut w);
+    high_body(&mut w, width_minus1);
     w.bit(true);
     w.bits(0, 2);
     w.bit(false);
@@ -1936,7 +2022,7 @@ fn high_subset() -> Vec<u8> {
     w.bytes
 }
 
-fn high_body(w: &mut Writer) {
+fn high_body(w: &mut Writer, width_minus1: u32) {
     w.bits(0, 8);
     w.bits(30, 8);
     w.ue(0);
@@ -1950,7 +2036,7 @@ fn high_body(w: &mut Writer) {
     w.ue(0);
     w.ue(1);
     w.bit(false);
-    w.ue(0);
+    w.ue(width_minus1);
     w.ue(0);
     w.bit(true);
     w.bit(true);

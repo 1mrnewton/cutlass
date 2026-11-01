@@ -145,6 +145,25 @@ pub enum Request {
         segment_id: SegmentId,
         content: String,
     },
+    /// Store the text size. An empty face path is filled when `face` is not.
+    SetTextSize {
+        segment_id: SegmentId,
+        size: f64,
+        face: String,
+    },
+    /// Store the text color. An empty string is white. An empty face path is filled.
+    SetTextColor {
+        segment_id: SegmentId,
+        color: String,
+        face: String,
+    },
+    /// Store left, center, or right. An empty line width takes `line_width`.
+    SetTextAlign {
+        segment_id: SegmentId,
+        alignment: i32,
+        face: String,
+        line_width: f64,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

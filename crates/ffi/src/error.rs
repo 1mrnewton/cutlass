@@ -116,6 +116,10 @@ fn edit_cause(error: EditError) -> String {
         EditError::Scale => "the scale must be greater than zero".to_owned(),
         EditError::Fade => "a fade cannot be negative".to_owned(),
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
+        EditError::NotText => "a text style belongs on text".to_owned(),
+        EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
+        EditError::TextColor => "the text color is not a hex color".to_owned(),
+        EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
     }
 }
 
@@ -171,6 +175,22 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::Opacity).to_string(),
             "the opacity must be from zero to one"
+        );
+        assert_eq!(
+            FfiError::from(EditError::NotText).to_string(),
+            "a text style belongs on text"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextSize).to_string(),
+            "the text size must be greater than zero and at most 512"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextColor).to_string(),
+            "the text color is not a hex color"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextAlign).to_string(),
+            "text alignment is not left, center, or right"
         );
     }
 

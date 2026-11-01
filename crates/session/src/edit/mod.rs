@@ -94,6 +94,14 @@ pub enum EditError {
     Fade,
     /// Opacity is not finite or is outside zero to one.
     Opacity,
+    /// The segment is not a text clip.
+    NotText,
+    /// Text size is not finite, or it is outside zero to 512.
+    TextSize,
+    /// Text color is not empty and not a hex color.
+    TextColor,
+    /// Text alignment is not left, center, or right.
+    TextAlign,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -188,6 +196,22 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             content,
         } => text::set_text(draft, segment_id, content),
+        Request::SetTextSize {
+            segment_id,
+            size,
+            face,
+        } => text::set_text_size(draft, segment_id, *size, face),
+        Request::SetTextColor {
+            segment_id,
+            color,
+            face,
+        } => text::set_text_color(draft, segment_id, color, face),
+        Request::SetTextAlign {
+            segment_id,
+            alignment,
+            face,
+            line_width,
+        } => text::set_text_align(draft, segment_id, *alignment, face, *line_width),
         Request::SetKeyframes {
             segment_id,
             keyframes,

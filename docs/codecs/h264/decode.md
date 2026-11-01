@@ -24,19 +24,19 @@ Official ITU conformance bitstreams were not obtained. That gap stays open until
 
 ## Caps today
 
-These are the current code limits, not Annex A. A picture inside a level the recommendation defines, and outside this table, is a spec miss. Raise a cap when that step needs it. Do not raise one so a broken or endless stream can allocate like FFmpeg.
+Picture size follows Annex A. The other rows are code limits. Do not raise one so a broken or endless stream can allocate past every defined level.
 
 | Cap | Value now |
 | --- | --- |
-| Coded edge | 4096 |
-| Coded pixels | 8,388,608 |
+| Coded edge | 16,880 (1,055 macroblocks) |
+| Coded macroblocks | 139,264 |
 | Reference frames | 16 |
 | One NAL | 8 MiB |
 | SPS ids | 32 |
 | PPS ids | 256 |
 | CPB count in the HRD | 32 |
 
-3840×2160 is 8,294,400 pixels, so that size already fits. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg inside the cropped rectangle: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro. 4096×2160 is 8,847,360 pixels. Annex A level 5.2 allows it. This decoder refuses it. The earlier measured run is 1280×720.
+3840×2160 is 24,300 macroblocks. Level 5.1 and level 5.2 allow it. `12471039-uhd_3840_2160_24fps.mp4` matches FFmpeg inside the cropped rectangle: 351 pictures, 21348 ms, 16.4 fps, release, Apple M5 Pro. 4096×2160 is 34,560 macroblocks. Level 5.2 allows it. Levels 6, 6.1, and 6.2 share MaxFS 139,264 and an edge of 1,055 macroblocks. A picture past those is refused. The earlier measured run is 1280×720.
 
 ## Head to head
 
@@ -76,7 +76,7 @@ Rows are the software decoder. “FFmpeg” means `libavcodec`’s `h264` decode
 | SEI that changes the output picture or timing | Annex D, V16 | Picture timing, recovery point, buffering period. Film grain can change the displayed picture. | Picture timing changes the output time. Film grain changes the displayed picture and stays off the reference. Other SEI leaves the samples alone. | Done |
 | VUI colour, range, matrix | Annex E | Exported | Every defined colour, transfer, and matrix idc is a tag on the picture. Reserved values stay unspecified. | Done |
 | VUI sample aspect and timing | Annex E | Exported | Sample aspect and the sequence clock are on the picture. | Done |
-| `level_idc` and MaxFS | Annex A | Recorded. A larger legal picture still decodes. | Read and ignored. 4096×2160 is refused. | Yet |
+| `level_idc` and MaxFS | Annex A | Recorded. A larger legal picture still decodes. | `level_idc` is stored. A picture inside any defined level is decoded, including one larger than the level the SPS names. A picture outside every level is refused. | Done |
 | Error concealment | Not in the decoding process | Conceals missing slices | An incomplete picture is an error. The next good IDR still decodes. | Out. Do not conceal. |
 | Frame threads and slice threads | Not in the decoding process | Both, from a shared pool in `libavcodec`. `-threads 1` forces one thread. Omitting `-threads` uses FFmpeg’s own count. | One thread. The decoder does not spawn. | Later. A shared Cutlass pool, not a pool inside this crate. |
 | 1280×720 High, one thread | — | 140 ms, 849 fps, 120 frames | 420 ms, 286 fps, 120 frames | Speed |
@@ -88,7 +88,7 @@ The 720p numbers are the recorded `against_ffmpeg` run: median of 3 after one wa
 
 - One access unit in, pictures in output order out. Annex B, or a 1-, 2-, or 4-byte length prefix. `avcC` in `CodecParams.extra`.
 - NAL types 1, 2, and 5 are slices. 3 and 4 complete a data-partitioned slice. 7 and 8 are parameter sets. 6 is SEI. 9, 10, 11, and 12 are skipped. Types 14, 15, 20, and 21 fail at the NAL header. Any other type fails while the access unit is walked.
-- SPS and PPS, including High-profile fields, scaling lists, and frame crop. `level_idc` is not stored.
+- SPS and PPS, including High-profile fields, scaling lists, and frame crop. `level_idc` is stored. The picture must fit a level in Table A-1.
 - Slice header for I, P, B, SP, and SI, including list modification, weights, decoded-reference marking, and `slice_qs_delta`.
 - Macroblocks: I 4×4, I 8×8, I 16×16, I_PCM, P partitions and P skip, B partitions, B skip, B direct 16×16 and 8×8, spatial and temporal direct. An SP P macroblock and an SI macroblock are reconstructed by clause 8.6.
 - Reconstruction: inverse 4×4 and 8×8, intra and inter prediction, weighted prediction, deblock, then crop to the visible size. 4:2:0, 4:2:2, and 4:4:4 samples are 8 through 14 bits. Field pictures weave into a frame. An MBAFF pair is two frame macroblocks or a top field and a bottom field. Slice groups use the map in clause 8.2.2. One group stays raster order.
@@ -112,7 +112,7 @@ The oracle command is `ffmpeg -hwaccel none -threads 1`. That is one software th
 8. **Data partitions, SP, and SI.** Done. NAL type 2 carries the slice header, `slice_id`, and the category-2 syntax. Type 3 carries intra residual and PCM. Type 4 carries inter residual. A 16×16 Extended CAVLC picture follows the recommendation: I_PCM, a flat I_16×16, a P skip of that picture, and a P macroblock whose only luma DC coefficient is +1. At QP 26 with deblock off, that 4×4 is 131 and the rest of the picture stays 128. FFmpeg 8.1.1 does not decode data partitions. The tree under `../pub-packages/ffmpeg` still has that decoder, and this machine has no built copy of it, so the recommendation is the oracle. An orphan partition, a partition out of order, a mismatched `slice_id`, an unused partition, CABAC with data partitioning, and a QS outside 0..=51 are errors. A later IDR still decodes. An SP P skip at QSY 0 stays 128. At QSY 26 the luma becomes 127 and the chroma stays 128. The same macroblock with a +1 luma DC coefficient is 131 when `sp_for_switch_flag` is 0 and 128 when it is 1. An SI macroblock with no residual is luma 127 and chroma 128. I_PCM inside SP and inside SI matches `ffmpeg -hwaccel none -threads 1`. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
 9. **Annex D and the V16 SEI that changes output.** Done. NAL type 6 is parsed. Picture timing sets the output duration from Table D-1: `pic_struct` 0, 3, and 4 keep one frame, 1 and 2 are one field, 5 and 6 are one and a half frames, 7 is two frames, and 8 is three. `dpb_output_delay` shifts the presentation time only when `num_units_in_tick` and `time_scale` divide the packet timescale exactly. A delay that is not an integer number of packet ticks leaves the packet time. A flat 16×16 picture with picture timing, and one whose SEI is filler or an unknown payload type, match `ffmpeg -hwaccel none -threads 1` as `yuv420p`. Film grain follows H.274 equations 22–32 on a copy of the reconstructed picture. The reference stays clean, so a following P skip is still 128. Frequency filtering and auto-regression both change the luma and leave the chroma. The same message on the same picture is deterministic. FFmpeg's grain synthesis is a different approximation, and H.274 does not require the display method to match that approximation, so grain pictures follow the recommendation. Model 2, blending mode 2, a depth that does not match the picture, and a cancel flag leave the samples alone. Period 0 applies to that picture only. Period 1 persists until the next grain message or an IDR. A truncated payload, `pic_struct` past 8, a model value out of range, and a repetition period above 16384 are errors. A later IDR still decodes. Source picture timing and the other V16 messages are consumed by size and do not replace the decoded samples or the output time. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
 10. **Annex E.** Done. Table E-1 sample aspect is on the picture. An absent flag, idc 0, an idc the table does not list, and an extended ratio with a zero edge are unspecified, width 0 and height 1. idc 1 is square, idc 2 is 12:11, idc 14 is 4:3, idc 16 is 2:1, and idc 255 carries the explicit width and height. `num_units_in_tick`, `time_scale`, and `fixed_frame_rate_flag` are on the picture. Absent timing information is zeros. A flat 16×16 picture with aspect 12:11, BT.709 tags, and a 60 000/1 001 clock matches `ffmpeg -hwaccel none -threads 1` as `yuv420p`, and `ffprobe` reports `12:11` and `bt709`. The defined colour, transfer, and matrix idc values are tags. Values 5 and 6 share BT.601. Transfer values 1 and 6 are BT.709. Transfer 16 is the perceptual quantizer and 18 is hybrid log-gamma. Transfer 14 and 15 stay BT.2020. Reserved idc values stay unspecified. The colour crate converts SMPTE 240M primaries as SMPTE 170M. A primary it has no chromaticities for follows the unspecified matrix. A transfer it does not implement stays an unspecified curve. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
-11. **Annex A.** A picture the declared level allows is decoded, including 4096×2160 at level 5.2 and the level 6 sizes. A picture past every defined level is refused.
+11. **Annex A.** Done. `level_idc` is stored. Table A-1's greatest MaxFS is 139,264 macroblocks, shared by levels 6, 6.1, and 6.2. The edge is 1,055 macroblocks, 16,880 samples. A picture inside any defined level is decoded, including one larger than the level named in the SPS. A picture outside every level is refused before a frame is allocated. A later 16×16 IDR still decodes. Flat CAVLC pictures match `ffmpeg -hwaccel none -threads 1` as `yuv420p`: 480×16 at level 1, which is past that level's edge, 8,704×16 at level 5.2, which is past that level's edge, 16,880×16 at level 6.2, 4,096×2,160 at level 5.2, and 8,688×1,088 at level 6, which is past level 5.2's MaxFS. A width of 1,056 macroblocks, 1,024×137 macroblocks, a field whose frame height is 1,056 macroblocks, and a width of 1,000,000 macroblocks are refused. The stored picture edge is 16,880. The 3840×2160 High file still matches: 351 pictures. No new 4K timing.
 12. **Annexes G, H, and I.** SVC, then MVC, then 3D. Only after the single-layer steps match.
 13. **Conformance streams.** When an ITU stream is obtained, run it and record the clause. Until then that stream stays not available. A self-encoded file does not close that line.
 

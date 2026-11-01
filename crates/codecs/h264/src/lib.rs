@@ -1,7 +1,7 @@
 //! H.264 / AVC, 4:2:0, 4:2:2, and 4:4:4 at 8 through 14 bits, including
 //! separate colour planes, field pictures, macroblock-adaptive frames, slice groups,
 //! data partitions, SP and SI slices, picture timing, film grain, and Annex E
-//! sample aspect, timing, and colour tags.
+//! sample aspect, timing, colour tags, and Annex A picture sizes.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is
@@ -26,6 +26,8 @@ mod tables;
 pub use dec::{H264Decoder, register_decoders};
 pub use enc::{H264Encoder, register_encoders};
 
+#[cfg(test)]
+mod annex_a;
 #[cfg(test)]
 mod annex_e;
 #[cfg(test)]

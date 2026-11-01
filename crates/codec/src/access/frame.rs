@@ -149,6 +149,9 @@ impl VideoFrame {
     }
 }
 
+/// Longest edge a stored picture allows. H.264 level 6.2's coded edge is 16,880.
+const MAX_EDGE: u32 = 16_880;
+
 /// Why a 4:2:0 picture could not be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -158,7 +161,7 @@ pub enum FrameError {
     Odd,
     /// A plane length does not match the size.
     Length,
-    /// The picture would pass 8192 on an edge, or the product overflowed.
+    /// The picture would pass 16,880 on an edge, or the product overflowed.
     Limit,
 }
 
@@ -190,7 +193,7 @@ pub struct Yuv420p {
 }
 
 impl Yuv420p {
-    /// Both edges must be even, non-zero, and at most 8192.
+    /// Both edges must be even, non-zero, and at most 16,880.
     pub fn try_new(
         width: u32,
         height: u32,
@@ -201,7 +204,7 @@ impl Yuv420p {
         if width == 0 || height == 0 {
             return Err(FrameError::Empty);
         }
-        if width > 8192 || height > 8192 {
+        if width > MAX_EDGE || height > MAX_EDGE {
             return Err(FrameError::Limit);
         }
         if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
@@ -300,7 +303,7 @@ pub struct Yuv420p10 {
 }
 
 impl Yuv420p10 {
-    /// Both edges must be even, non-zero, and at most 8192.
+    /// Both edges must be even, non-zero, and at most 16,880.
     pub fn try_new(
         width: u32,
         height: u32,
@@ -311,7 +314,7 @@ impl Yuv420p10 {
         if width == 0 || height == 0 {
             return Err(FrameError::Empty);
         }
-        if width > 8192 || height > 8192 {
+        if width > MAX_EDGE || height > MAX_EDGE {
             return Err(FrameError::Limit);
         }
         if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
@@ -377,7 +380,7 @@ pub struct Yuv420High {
 }
 
 impl Yuv420High {
-    /// `bit_depth` is 9 through 14. Both edges must be even, non-zero, and at most 8192.
+    /// `bit_depth` is 9 through 14. Both edges must be even, non-zero, and at most 16,880.
     pub fn try_new(
         bit_depth: u8,
         width: u32,
@@ -392,7 +395,7 @@ impl Yuv420High {
         if width == 0 || height == 0 {
             return Err(FrameError::Empty);
         }
-        if width > 8192 || height > 8192 {
+        if width > MAX_EDGE || height > MAX_EDGE {
             return Err(FrameError::Limit);
         }
         if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
@@ -460,7 +463,7 @@ fn checked_chroma(
     if width == 0 || height == 0 {
         return Err(FrameError::Empty);
     }
-    if width > 8192 || height > 8192 {
+    if width > MAX_EDGE || height > MAX_EDGE {
         return Err(FrameError::Limit);
     }
     if sub_w == 2 && !width.is_multiple_of(2) {
@@ -492,7 +495,7 @@ pub struct Yuv422p {
 }
 
 impl Yuv422p {
-    /// Width is even, non-zero, and at most 8192. Height is non-zero and at most 8192.
+    /// Width is even, non-zero, and at most 16,880. Height is non-zero and at most 16,880.
     pub fn try_new(
         width: u32,
         height: u32,
@@ -547,7 +550,7 @@ pub struct Yuv444p {
 }
 
 impl Yuv444p {
-    /// Both edges are non-zero and at most 8192.
+    /// Both edges are non-zero and at most 16,880.
     pub fn try_new(
         width: u32,
         height: u32,
@@ -606,7 +609,7 @@ pub struct Yuv422High {
 }
 
 impl Yuv422High {
-    /// `bit_depth` is 9 through 14. Width is even. Both edges are non-zero and at most 8192.
+    /// `bit_depth` is 9 through 14. Width is even. Both edges are non-zero and at most 16,880.
     pub fn try_new(
         bit_depth: u8,
         width: u32,
@@ -675,7 +678,7 @@ pub struct Yuv444High {
 }
 
 impl Yuv444High {
-    /// `bit_depth` is 9 through 14. Both edges are non-zero and at most 8192.
+    /// `bit_depth` is 9 through 14. Both edges are non-zero and at most 16,880.
     pub fn try_new(
         bit_depth: u8,
         width: u32,
@@ -821,6 +824,19 @@ mod tests {
         assert_eq!(high.bit_depth(), 10);
         assert_eq!(
             Yuv444High::try_new(8, 2, 2, vec![0; 4], vec![0; 4], vec![0; 4]),
+            Err(FrameError::Limit)
+        );
+    }
+
+    #[test]
+    fn the_stored_edge_reaches_the_level_6_picture() {
+        let y = vec![0u8; 16_880 * 16];
+        let chroma = vec![0u8; 8_440 * 8];
+        assert!(Yuv420p::try_new(16_880, 16, y, chroma.clone(), chroma).is_ok());
+        let y = vec![0u8; 16_896 * 16];
+        let chroma = vec![0u8; 8_448 * 8];
+        assert_eq!(
+            Yuv420p::try_new(16_896, 16, y, chroma.clone(), chroma),
             Err(FrameError::Limit)
         );
     }

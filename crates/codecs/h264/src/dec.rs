@@ -2863,6 +2863,7 @@ mod tests {
         use cutlass_decode::{ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
         super::Sps {
             id: 0,
+            level_idc: 0,
             log2_max_frame_num: 4,
             poc_type: 1,
             log2_max_poc_lsb: 0,
@@ -3347,7 +3348,9 @@ mod tests {
                         let w = u64::from(frame.picture.width());
                         let h = u64::from(frame.picture.height());
                         let pixels = w.saturating_mul(h);
-                        assert!(w <= 4096 && h <= 4096 && pixels <= 8_388_608);
+                        let edge = u64::from(crate::set::max_coded_edge());
+                        let mbs = u64::from(crate::set::max_coded_mbs());
+                        assert!(w <= edge && h <= edge && pixels <= mbs.saturating_mul(256));
                         assert_eq!(
                             frame.picture.y().len(),
                             usize::try_from(pixels).unwrap_or(0)
@@ -3520,7 +3523,7 @@ mod tests {
                 SpsTail::Wide => {
                     bits.ue(1);
                     bits.bit(false);
-                    bits.ue(256);
+                    bits.ue(1055);
                     bits.ue(0);
                 }
                 SpsTail::Interlaced => {

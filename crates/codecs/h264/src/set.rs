@@ -4,7 +4,7 @@
 //! separate colour planes, field pictures, macroblock-adaptive frame-field,
 //! QP′Y-zero transform bypass, and slice groups of every map type.
 //! A bit depth outside 8 through 14, or a luma depth that differs from chroma,
-//! is refused.
+//! is refused. A picture that fits no level in Annex A is refused.
 
 use cutlass_decode::{CodecError, ColorMatrix, ColorPrimaries, ColorRange, SampleAspect, Transfer};
 
@@ -17,6 +17,8 @@ const MAX_REFS: u32 = 16;
 #[derive(Clone, Debug)]
 pub struct Sps {
     pub id: u8,
+    /// `level_idc`. Ten times the level number, or 9 for level 1b.
+    pub level_idc: u8,
     pub log2_max_frame_num: u8,
     pub poc_type: u8,
     pub log2_max_poc_lsb: u8,
@@ -161,13 +163,180 @@ impl Sps {
         }
         Ok((width, height))
     }
+
+    /// The coded picture fits the level named in the SPS, or a higher defined level.
+    fn within_level(&self) -> bool {
+        let Ok(width_mbs) = u32::try_from(self.mb_width) else {
+            return false;
+        };
+        let Ok(height_mbs) = u32::try_from(self.mb_height) else {
+            return false;
+        };
+        let named = level_max_fs(self.level_idc)
+            .is_some_and(|max_fs| macroblocks_fit(width_mbs, height_mbs, max_fs));
+        named || frame_within_levels(width_mbs, height_mbs)
+    }
+}
+
+struct Level {
+    idc: u8,
+    max_fs: u32,
+}
+
+/// Table A-1 `MaxFS`, in macroblocks.
+///
+/// `level_idc` 9 is level 1b. Level 1b is also `level_idc` 11 with
+/// `constraint_set3_flag` on Baseline, Main, and Extended, and that row's
+/// MaxFS is 99, the same as level 1. The `level_idc` 11 row here is level 1.1.
+const LEVELS: &[Level] = &[
+    Level {
+        idc: 10,
+        max_fs: 99,
+    },
+    Level { idc: 9, max_fs: 99 },
+    Level {
+        idc: 11,
+        max_fs: 396,
+    },
+    Level {
+        idc: 12,
+        max_fs: 396,
+    },
+    Level {
+        idc: 13,
+        max_fs: 396,
+    },
+    Level {
+        idc: 20,
+        max_fs: 396,
+    },
+    Level {
+        idc: 21,
+        max_fs: 792,
+    },
+    Level {
+        idc: 22,
+        max_fs: 1_620,
+    },
+    Level {
+        idc: 30,
+        max_fs: 1_620,
+    },
+    Level {
+        idc: 31,
+        max_fs: 3_600,
+    },
+    Level {
+        idc: 32,
+        max_fs: 5_120,
+    },
+    Level {
+        idc: 40,
+        max_fs: 8_192,
+    },
+    Level {
+        idc: 41,
+        max_fs: 8_192,
+    },
+    Level {
+        idc: 42,
+        max_fs: 8_704,
+    },
+    Level {
+        idc: 50,
+        max_fs: 22_080,
+    },
+    Level {
+        idc: 51,
+        max_fs: 36_864,
+    },
+    Level {
+        idc: 52,
+        max_fs: 36_864,
+    },
+    Level {
+        idc: 60,
+        max_fs: 139_264,
+    },
+    Level {
+        idc: 61,
+        max_fs: 139_264,
+    },
+    Level {
+        idc: 62,
+        max_fs: 139_264,
+    },
+];
+
+fn greatest_max_fs() -> u32 {
+    LEVELS.iter().map(|level| level.max_fs).max().unwrap_or(0)
+}
+
+/// `MaxFS` for `level_idc` when level 1b's constraint flag is clear.
+pub(crate) fn level_max_fs(level_idc: u8) -> Option<u32> {
+    LEVELS
+        .iter()
+        .find(|level| level.idc == level_idc)
+        .map(|level| level.max_fs)
+}
+
+/// Annex A.3.1 e–g against one level's `MaxFS`.
+pub(crate) fn macroblocks_fit(width_mbs: u32, height_mbs: u32, max_fs: u32) -> bool {
+    let Some(area) = width_mbs.checked_mul(height_mbs) else {
+        return false;
+    };
+    if area == 0 || area > max_fs {
+        return false;
+    }
+    let Some(bound) = max_fs.checked_mul(8) else {
+        return false;
+    };
+    let Some(wide) = width_mbs.checked_mul(width_mbs) else {
+        return false;
+    };
+    let Some(high) = height_mbs.checked_mul(height_mbs) else {
+        return false;
+    };
+    wide <= bound && high <= bound
+}
+
+/// The picture fits at least one level in Table A-1.
+pub(crate) fn frame_within_levels(width_mbs: u32, height_mbs: u32) -> bool {
+    macroblocks_fit(width_mbs, height_mbs, greatest_max_fs())
+}
+
+#[cfg(test)]
+fn floor_sqrt(n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    loop {
+        let next = x.saturating_add(n / x) / 2;
+        if next >= x {
+            return x;
+        }
+        x = next;
+    }
+}
+
+/// Longest coded edge, in samples, that Table A-1 allows.
+#[cfg(test)]
+pub(crate) fn max_coded_edge() -> u32 {
+    floor_sqrt(greatest_max_fs().saturating_mul(8)).saturating_mul(16)
+}
+
+/// Greatest `MaxFS` in Table A-1.
+#[cfg(test)]
+pub(crate) fn max_coded_mbs() -> u32 {
+    greatest_max_fs()
 }
 
 pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     let mut bits = Bits::new(rbsp);
     let profile = bits.u(8)? as u8;
     let _constraint = bits.u(8)? as u8;
-    let _level = bits.u(8)? as u8;
+    let level_idc = bits.u(8)? as u8;
     let id = bits.ue()?;
     if id >= MAX_SPS as u32 {
         return Err(CodecError::Malformed {
@@ -250,7 +419,8 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     let gaps_allowed = bits.bit()?;
     let width_mbs = bits.ue()?.saturating_add(1);
     let height_map = bits.ue()?.saturating_add(1);
-    if width_mbs > 256 || height_map > 256 {
+    // Reject an edge no level allows before reading the rest of the SPS.
+    if !frame_within_levels(width_mbs, 1) || !frame_within_levels(1, height_map) {
         return Err(CodecError::Limit {
             what: "picture size",
         });
@@ -264,9 +434,6 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     };
     let width = width_mbs.saturating_mul(16);
     let height = height_mbs.saturating_mul(16);
-    if width > 4096 || height > 4096 || width.saturating_mul(height) > 8_388_608 {
-        return Err(CodecError::Limit { what: "coded size" });
-    }
     let direct_8x8_inference = bits.bit()?;
     if !frame_mbs_only && !direct_8x8_inference {
         return Err(bits.malformed("direct 8x8 inference"));
@@ -289,6 +456,7 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
     let _ = bits.rbsp_trailing();
     let sps = Sps {
         id: id as u8,
+        level_idc,
         log2_max_frame_num,
         poc_type,
         log2_max_poc_lsb,
@@ -329,6 +497,11 @@ pub fn parse_sps(rbsp: &[u8]) -> Result<Sps, CodecError> {
         dpb_delay_bits: vui.dpb_delay_bits,
         time_offset_bits: vui.time_offset_bits,
     };
+    if !sps.within_level() {
+        return Err(CodecError::Limit {
+            what: "picture size",
+        });
+    }
     sps.visible()?;
     Ok(sps)
 }

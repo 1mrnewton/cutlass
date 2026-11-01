@@ -1,7 +1,7 @@
 //! AV1 encoder and decoder.
 //!
 //! The support record is `STATUS.md` next to this crate. Loop restoration and
-//! film grain are applied for 8-bit 4:2:0. Self-guided restoration also matches on 8-bit 4:4:4 and 4:2:2 when a chroma plane has more than one unit. A 4:2:0 chroma restoration stripe is 32 samples tall. 10-bit restoration matches on 4:4:4, including switchable chroma, and on 4:2:2. 12-bit self-guided luma restoration matches on 4:2:0. A restoration frame keeps the updated type CDF for the next unit, including a Wiener frame with four units. A block wider than 64 copies its CDEF index across each 64×64 unit. 8-bit and 10-bit film grain is also applied for 4:4:4 and 4:2:2. A single-reference frame may carry
+//! film grain are applied for 8-bit 4:2:0. Self-guided restoration also matches on 8-bit 4:4:4 and 4:2:2 when a chroma plane has more than one unit. A 4:2:0 chroma restoration stripe is 32 samples tall. 10-bit restoration matches on 4:4:4, including switchable chroma, and on 4:2:2. 12-bit self-guided luma restoration matches on 4:2:0. A 512×128 12-bit 4:2:0 frame is Wiener on every plane. A restoration frame keeps the updated type CDF for the next unit, including a Wiener frame with four units. A block wider than 64 copies its CDEF index across each 64×64 unit. 8-bit and 10-bit film grain is also applied for 4:4:4 and 4:2:2. A single-reference frame may carry
 //! an order hint. A frame may use a uniform or non-uniform tile grid, a quantizer matrix,
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter. Filter intra reconstructs a luma block no larger than 32.

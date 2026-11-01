@@ -5598,6 +5598,52 @@ mod tests {
     }
 
     #[test]
+    fn twelve_bit_wiener_matches_dav1d() {
+        // aomenc --profile=2 --bit-depth=12 --sharpness=5 --cq-level=32, 512×128
+        // 4:2:0. Every plane is Wiener with 256-sample units. Luma has two
+        // units. Chroma is half resolution, so each chroma plane has one unit
+        // and the 12-bit Wiener filter still runs. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p12le`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-wiener-12.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.width, 512);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.restoration.plane, [crate::header::RESTORE_WIENER; 3]);
+        assert_eq!(frame.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("frame");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p12);
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 512 * 128 * 3);
+        assert_eq!(frame_digest(bytes), 0x2622_3364_b08f_a147);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn wiener_units_keep_the_updated_cdf() {
         // aomenc --sharpness=5 --cq-level=32, 512×128. Every plane is Wiener
         // with 128-sample units. Luma has four units and the frame updates

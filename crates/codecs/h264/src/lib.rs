@@ -36,6 +36,8 @@
 //! that texture as luma 180 and chroma 90.
 //! A P_L0_L0_16×8 picture samples each partition: the near half stays the
 //! split and the far half shifts four pixels.
+//! A P_L0_L0_8×16 picture reads a depth sample the 16×16 corners miss, so the
+//! left half shifts four pixels and the right half stays 180.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

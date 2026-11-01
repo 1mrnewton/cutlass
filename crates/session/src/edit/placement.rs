@@ -37,6 +37,22 @@ pub fn set_scale(draft: &mut Draft, segment_id: &SegmentId, scale: f64) -> Resul
     Ok(())
 }
 
+/// Store the picture's opacity. `1` is solid and `0` is clear.
+/// Position, scale, rotation, and flip stay as they were.
+pub fn set_opacity(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    opacity: f64,
+) -> Result<(), EditError> {
+    if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+        return Err(EditError::Opacity);
+    }
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    draft.tracks[track_index].segments[segment_index].clip.alpha = opacity;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{Draft, Segment, TimeRange, TrackAttribute, TrackId};
@@ -178,5 +194,83 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LockedTrack);
         assert_eq!(session.draft(), &locked);
+    }
+
+    #[test]
+    fn an_opacity_dims_the_picture_and_leaves_the_rest() {
+        let (mut session, track) = open();
+        session
+            .apply(
+                1,
+                &[Request::SetOpacity {
+                    segment_id: "a".into(),
+                    opacity: 0.5,
+                }],
+            )
+            .unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert_eq!(segment.clip.alpha, 0.5);
+        assert_eq!(segment.clip.rotation, 90.0);
+        assert!(segment.clip.flip.horizontal);
+        assert_eq!(segment.uniform_scale.value, 1.0);
+        assert_eq!(segment.clip.transform.x, 0.0);
+        assert_eq!(segment.volume, 0.4);
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks[0].segments[0].clip.alpha, 1.0);
+
+        session
+            .apply(
+                3,
+                &[Request::SetOpacity {
+                    segment_id: "a".into(),
+                    opacity: 0.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().tracks[0].segments[0].clip.alpha, 0.0);
+        let clear = session.draft().clone();
+        let error = session
+            .apply(
+                4,
+                &[Request::SetOpacity {
+                    segment_id: "a".into(),
+                    opacity: 1.1,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::Opacity);
+        let error = session
+            .apply(
+                4,
+                &[Request::SetOpacity {
+                    segment_id: "a".into(),
+                    opacity: f64::NAN,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::Opacity);
+        assert_eq!(session.draft(), &clear);
+
+        session
+            .apply(
+                4,
+                &[Request::SetTrackAttribute {
+                    track_id: track,
+                    bit: TrackAttribute::LOCK,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        let error = session
+            .apply(
+                5,
+                &[Request::SetOpacity {
+                    segment_id: "a".into(),
+                    opacity: 1.0,
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LockedTrack);
+        assert_eq!(session.draft().tracks[0].segments[0].clip.alpha, 0.0);
     }
 }

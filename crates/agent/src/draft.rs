@@ -440,6 +440,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetRotation { .. } => "set_rotation",
         Request::SetPosition { .. } => "set_position",
         Request::SetScale { .. } => "set_scale",
+        Request::SetOpacity { .. } => "set_opacity",
         Request::SetVolume { .. } => "set_volume",
         Request::SetFade { .. } => "set_fade",
         Request::SetCrop { .. } => "set_crop",

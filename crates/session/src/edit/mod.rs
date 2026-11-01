@@ -92,6 +92,8 @@ pub enum EditError {
     Scale,
     /// A fade duration is negative.
     Fade,
+    /// Opacity is not finite or is outside zero to one.
+    Opacity,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -170,6 +172,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             placement::set_position(draft, segment_id, *x, *y)
         }
         Request::SetScale { segment_id, scale } => placement::set_scale(draft, segment_id, *scale),
+        Request::SetOpacity {
+            segment_id,
+            opacity,
+        } => placement::set_opacity(draft, segment_id, *opacity),
         Request::SetVolume { segment_id, volume } => volume::set_volume(draft, segment_id, *volume),
         Request::SetFade {
             segment_id,

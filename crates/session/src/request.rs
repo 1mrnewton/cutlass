@@ -127,6 +127,8 @@ pub enum Request {
     },
     /// Store the picture scale on the uniform value and on both axes.
     SetScale { segment_id: SegmentId, scale: f64 },
+    /// Store the picture opacity. `1` is solid and `0` is clear.
+    SetOpacity { segment_id: SegmentId, opacity: f64 },
     /// Set the segment gain. This is not mute, solo, or a fade.
     SetVolume { segment_id: SegmentId, volume: f64 },
     /// Store fade-in and fade-out durations. The segment volume stays.

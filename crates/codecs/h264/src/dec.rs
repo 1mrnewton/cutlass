@@ -2550,10 +2550,9 @@ fn read_header(
 /// Picture-level intra resampling is reconstructed. A zero-offset inter base
 /// layer scales its motion onto the enhancement, and its residual is resampled
 /// with the transform-block residual filter. A non-negative crop insets that
-/// window, and motion inside it uses the window size. A negative offset, a crop
-/// that differs on the reference picture, residual resampling with a non-zero
-/// offset, macroblock-level spatial scalability, and coefficient prediction
-/// are refused.
+/// window, and motion inside it uses the window size. Residual resampling uses
+/// that window. A negative offset, a crop that differs on the reference picture,
+/// macroblock-level spatial scalability, and coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,

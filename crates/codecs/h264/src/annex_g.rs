@@ -647,6 +647,40 @@ fn a_crop_scales_motion_inside_the_window() {
     }
 }
 
+#[test]
+fn residual_resampling_respects_the_crop() {
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &crop_idr());
+    pictures.extend(push_pictures(&mut decoder, &crop_residual_p()));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    assert!(cropped_reference(&pictures[0]));
+    let picture = &pictures[1];
+    assert!(
+        cropped_residual(picture),
+        "row {:?} row4 {:?} chroma {:?}",
+        &picture.picture.y()[..48],
+        &picture.picture.y()[4 * 48..5 * 48],
+        &picture.picture.u()[..24]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = crop_idr();
+        annex.extend(crop_residual_p());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let base = decode(&resample_base());
+        let mut second = planes_of(&base);
+        for row in 0..4 {
+            for col in 0..4 {
+                second[row * 16 + col] = 43;
+            }
+        }
+        let mut want = planes_of(&base);
+        want.extend(second);
+        assert_eq!(raw, want);
+        assert_ne!(planes_of(picture), &raw[raw.len() / 2..]);
+    }
+}
+
 fn push_pictures(decoder: &mut H264Decoder, annex: &[u8]) -> Vec<VideoOutput> {
     decoder
         .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
@@ -2647,6 +2681,63 @@ fn cropped_reference(picture: &VideoOutput) -> bool {
             && y[row * 48 + 32..row * 48 + 48]
                 .iter()
                 .all(|sample| *sample == 128)
+    });
+    let chroma_ok = |plane: &[u8]| {
+        (0..8).all(|row| {
+            plane[row * 24..row * 24 + 16] == chroma
+                && plane[row * 24 + 16..row * 24 + 24]
+                    .iter()
+                    .all(|sample| *sample == 128)
+        })
+    };
+    luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
+}
+
+fn crop_residual_p() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &residual_scale_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &crop_residual_enhancement(),
+    ));
+    out
+}
+
+fn crop_residual_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    for _ in 0..2 {
+        w.ue(0);
+        w.bit(true);
+        w.ue(0);
+    }
+    w.ue(1);
+    w.trailing();
+    w.bytes
+}
+
+fn cropped_residual(picture: &VideoOutput) -> bool {
+    let luma = upsampled_luma();
+    let chroma = upsampled_chroma();
+    let y = picture.picture.y();
+    let luma_ok = (0..16).all(|row| {
+        (0..48).all(|col| {
+            let mut want = if col < 32 { luma[col] } else { 128 };
+            if row < 4 && col < 8 {
+                want = 43;
+            }
+            y[row * 48 + col] == want
+        })
     });
     let chroma_ok = |plane: &[u8]| {
         (0..8).all(|row| {

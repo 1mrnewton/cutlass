@@ -1202,7 +1202,7 @@ pub(crate) struct ResidualPlanes {
     pub(crate) v: Vec<i32>,
 }
 
-/// Upsample a zero-offset inter-layer residual onto the enhancement picture.
+/// Upsample an inter-layer residual onto the cropped enhancement window.
 pub(crate) fn resample_residual<S: Sample>(
     layer: &Frame<S>,
     dpb: &[Frame<S>],
@@ -1219,11 +1219,15 @@ pub(crate) fn resample_residual<S: Sample>(
         });
     }
     let crop = &slice.sps.svc_scale;
-    if crop.left != 0 || crop.top != 0 || crop.right != 0 || crop.bottom != 0 {
+    if crop.left < 0 || crop.top < 0 || crop.right < 0 || crop.bottom < 0 {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
     }
+    let left = sample_offset(crop.left)?;
+    let top = sample_offset(crop.top)?;
+    let right = sample_offset(crop.right)?;
+    let bottom = sample_offset(crop.bottom)?;
     let base = base_residual(layer, dpb)?;
     let out_w = i32::try_from(slice.sps.width).map_err(|_| CodecError::Unsupported {
         what: "inter-layer prediction",
@@ -1231,6 +1235,23 @@ pub(crate) fn resample_residual<S: Sample>(
     let out_h = i32::try_from(slice.sps.height).map_err(|_| CodecError::Unsupported {
         what: "inter-layer prediction",
     })?;
+    let scaled_w = out_w
+        .checked_sub(left)
+        .and_then(|width| width.checked_sub(right))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    let scaled_h = out_h
+        .checked_sub(top)
+        .and_then(|height| height.checked_sub(bottom))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    if scaled_w <= 0 || scaled_h <= 0 || scaled_w % 2 != 0 || scaled_h % 2 != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
     let base_w = i32::try_from(layer.w).map_err(|_| CodecError::Unsupported {
         what: "inter-layer prediction",
     })?;
@@ -1244,6 +1265,10 @@ pub(crate) fn resample_residual<S: Sample>(
         base_h,
         out_w,
         out_h,
+        scaled_w,
+        scaled_h,
+        left,
+        top,
         phase_x: 0,
         phase_y: 0,
         ref_phase_x: 0,
@@ -1265,6 +1290,10 @@ pub(crate) fn resample_residual<S: Sample>(
         base_h: base_h / 2,
         out_w: out_w / 2,
         out_h: out_h / 2,
+        scaled_w: scaled_w / 2,
+        scaled_h: scaled_h / 2,
+        left: crop.left,
+        top: crop.top,
         phase_x: chroma.0,
         phase_y: chroma.1,
         ref_phase_x: chroma.2,
@@ -1280,6 +1309,10 @@ pub(crate) fn resample_residual<S: Sample>(
         base_h: base_h / 2,
         out_w: out_w / 2,
         out_h: out_h / 2,
+        scaled_w: scaled_w / 2,
+        scaled_h: scaled_h / 2,
+        left: crop.left,
+        top: crop.top,
         phase_x: chroma.0,
         phase_y: chroma.1,
         ref_phase_x: chroma.2,
@@ -1406,6 +1439,10 @@ struct ResidualUp<'a> {
     base_h: i32,
     out_w: i32,
     out_h: i32,
+    scaled_w: i32,
+    scaled_h: i32,
+    left: i32,
+    top: i32,
     phase_x: i32,
     phase_y: i32,
     ref_phase_x: i32,
@@ -1423,6 +1460,10 @@ fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
         base_h,
         out_w,
         out_h,
+        scaled_w,
+        scaled_h,
+        left,
+        top,
         phase_x,
         phase_y,
         ref_phase_x,
@@ -1432,7 +1473,31 @@ fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
         mb_w,
         chroma,
     } = up;
-    if base_w <= 0 || base_h <= 0 || out_w <= 0 || out_h <= 0 {
+    if base_w <= 0
+        || base_h <= 0
+        || out_w <= 0
+        || out_h <= 0
+        || scaled_w <= 0
+        || scaled_h <= 0
+        || left < 0
+        || top < 0
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let right = out_w
+        .checked_sub(left)
+        .and_then(|width| width.checked_sub(scaled_w));
+    let bottom = out_h
+        .checked_sub(top)
+        .and_then(|height| height.checked_sub(scaled_h));
+    let (Some(right), Some(bottom)) = (right, bottom) else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    if right < 0 || bottom < 0 {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -1450,9 +1515,9 @@ fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
         });
     }
     let (scale_x, add_x, shift_x, delta_x) =
-        resample_axis(base_w, out_w, phase_x, ref_phase_x, level)?;
+        resample_axis(base_w, scaled_w, phase_x, ref_phase_x, level)?;
     let (scale_y, add_y, shift_y, delta_y) =
-        resample_axis(base_h, out_h, phase_y, ref_phase_y, level)?;
+        resample_axis(base_h, scaled_h, phase_y, ref_phase_y, level)?;
     let out_stride = usize::try_from(out_w).map_err(|_| CodecError::Unsupported {
         what: "inter-layer prediction",
     })?;
@@ -1460,9 +1525,14 @@ fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
         what: "inter-layer prediction",
     })?;
     let mut horizontal = vec![0i32; base_rows.saturating_mul(out_stride)];
+    let inside = |at: i32, origin: i32, span: i32| at >= origin && at < origin + span;
     for row in 0..base_h {
         for col in 0..out_w {
-            let (tap, reference) = resample_pos(col, 0, scale_x, add_x, shift_x, delta_x)?;
+            if !inside(col, left, scaled_w) {
+                *plane_at_mut(&mut horizontal, out_stride, row, col)? = 0;
+                continue;
+            }
+            let (tap, reference) = resample_pos(col, left, scale_x, add_x, shift_x, delta_x)?;
             let x0 = reference.clamp(0, base_w - 1);
             let x1 = (reference + 1).clamp(0, base_w - 1);
             let s0 = *plane_at(src, base_stride, row, x0)?;
@@ -1484,10 +1554,20 @@ fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
     }
     let mut output = vec![0i32; out_rows.saturating_mul(out_stride)];
     for col in 0..out_w {
-        let (tap_x, reference_x) = resample_pos(col, 0, scale_x, add_x, shift_x, delta_x)?;
+        if !inside(col, left, scaled_w) {
+            for row in 0..out_h {
+                *plane_at_mut(&mut output, out_stride, row, col)? = 0;
+            }
+            continue;
+        }
+        let (tap_x, reference_x) = resample_pos(col, left, scale_x, add_x, shift_x, delta_x)?;
         let ref_x = (reference_x + (tap_x >> 3)).clamp(0, base_w - 1);
         for row in 0..out_h {
-            let (tap, reference) = resample_pos(row, 0, scale_y, add_y, shift_y, delta_y)?;
+            if !inside(row, top, scaled_h) {
+                *plane_at_mut(&mut output, out_stride, row, col)? = 0;
+                continue;
+            }
+            let (tap, reference) = resample_pos(row, top, scale_y, add_y, shift_y, delta_y)?;
             let y0 = reference.clamp(0, base_h - 1);
             let y1 = (reference + 1).clamp(0, base_h - 1);
             let h0 = *plane_at(&horizontal, out_stride, y0, col)?;

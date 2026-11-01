@@ -182,6 +182,40 @@ fn an_uncoded_enhancement_rescales_at_the_base_qp() {
 }
 
 #[test]
+fn a_chroma_dc_level_is_rescaled_at_the_enhancement_qp() {
+    let idr = tcoeff_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(split_luma(&first, 100, 180));
+    let base = decode_with(&mut decoder, &annex_b_nal(0, 1, &chroma_coeff_base()));
+    assert!(
+        chroma_dc_base(&base),
+        "luma {:?} u {:?}",
+        &base.picture.y()[..16],
+        &base.picture.u()[..8]
+    );
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &chroma_coeff_packet());
+    assert!(
+        chroma_dc_enhanced(&picture),
+        "luma {:?} u {:?}",
+        &picture.picture.y()[..16],
+        &picture.picture.u()[..8]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(chroma_coeff_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_ne!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
 fn an_8x8_base_level_is_rescaled_at_the_enhancement_qp() {
     let parsed = parse_subset_sps(&high_tcoeff_subset()).expect("subset");
     assert!(parsed.seq_tcoeff);
@@ -4702,6 +4736,95 @@ fn still_coeff_base() -> Vec<u8> {
     w.bit(true);
     w.trailing();
     w.bytes
+}
+
+fn chroma_coeff_packet() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &chroma_coeff_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &chroma_coeff_enhancement(),
+    ));
+    out
+}
+
+fn chroma_coeff_base() -> Vec<u8> {
+    let mut w = Writer::new();
+    qp_header(&mut w, 0);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(32);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(true);
+    w.bits(1, 2);
+    w.trailing();
+    w.bytes
+}
+
+fn chroma_coeff_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    qp_header(&mut w, -4);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn chroma_dc_base(picture: &VideoOutput) -> bool {
+    luma_corner(picture, 103)
+        && picture.picture.u().iter().all(|sample| *sample == 92)
+        && picture.picture.v().iter().all(|sample| *sample == 90)
+}
+
+fn chroma_dc_enhanced(picture: &VideoOutput) -> bool {
+    luma_corner(picture, 102)
+        && picture.picture.u().iter().all(|sample| *sample == 91)
+        && picture.picture.v().iter().all(|sample| *sample == 90)
+}
+
+fn luma_corner(picture: &VideoOutput, corner: u8) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let want = if row < 4 && col < 4 {
+                corner
+            } else if col < 8 {
+                100
+            } else {
+                180
+            };
+            y[row * 16 + col] == want
+        })
+    })
 }
 
 fn tcoeff_enhancement() -> Vec<u8> {

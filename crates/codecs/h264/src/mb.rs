@@ -2249,9 +2249,9 @@ fn add_layer_residual<S: Sample>(
 }
 
 /// G.8.5.2 then G.8.5.1 for one inter macroblock. The reference layer's luma
-/// levels are rescaled from its QP to this macroblock's QP, this slice's levels
-/// are added, and one inverse 4×4 or 8×8 transform updates the prediction.
-/// A macroblock that codes no residual keeps the reference QP.
+/// and 4:2:0 chroma levels are rescaled from its QP to this macroblock's QP,
+/// this slice's levels are added, and one inverse transform updates the
+/// prediction. A macroblock that codes no residual keeps the reference QP.
 fn add_tcoeff_residual<S: Sample>(
     pic: &mut Frame<S>,
     layer: &Frame<S>,
@@ -2284,8 +2284,9 @@ fn add_tcoeff_residual<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    let start = slot.saturating_mul(256);
-    if layer.levels.len() < start + 256 || pic.levels.len() < start + 256 {
+    let stride = pic.level_stride();
+    let start = slot.saturating_mul(stride);
+    if layer.levels.len() < start + stride || pic.levels.len() < start + stride {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "inter-layer prediction",
@@ -2333,29 +2334,95 @@ fn add_tcoeff_residual<S: Sample>(
                 span.step,
             );
         }
-        return Ok(());
-    }
-    let weight = slice.pps.weight4[3];
-    for i in 0..16 {
-        let mut block = [0i32; 16];
-        for k in 0..16 {
-            let at = start + i * 16 + k;
-            let level =
-                rescale_level(layer.levels[at], ref_qp, cur_qp)?.saturating_add(pic.levels[at]);
-            let (ry, rx) = (k / 4, k % 4);
-            block[k] = recon::scale4(level, cur_qp + S::QP_BD, rx, ry, i32::from(weight[k]));
+    } else {
+        let weight = slice.pps.weight4[3];
+        for i in 0..16 {
+            let mut block = [0i32; 16];
+            for k in 0..16 {
+                let at = start + i * 16 + k;
+                let level =
+                    rescale_level(layer.levels[at], ref_qp, cur_qp)?.saturating_add(pic.levels[at]);
+                let (ry, rx) = (k / 4, k % 4);
+                block[k] = recon::scale4(level, cur_qp + S::QP_BD, rx, ry, i32::from(weight[k]));
+            }
+            recon::idct4(&mut block);
+            let span = luma_span(my, false);
+            recon::add_block(
+                &mut pic.y,
+                pic.w,
+                mx * 16 + blk_x(i) * 4,
+                span.at(blk_y(i) * 4),
+                &block,
+                4,
+                span.step,
+            );
         }
-        recon::idct4(&mut block);
-        let span = luma_span(my, false);
-        recon::add_block(
-            &mut pic.y,
-            pic.w,
-            mx * 16 + blk_x(i) * 4,
-            span.at(blk_y(i) * 4),
-            &block,
-            4,
-            span.step,
-        );
+    }
+    add_tcoeff_chroma(pic, layer, slice, (mx, my, start), (ref_qp, cur_qp))?;
+    Ok(())
+}
+
+/// G.8.5.1.2.2 for 4:2:0. DC levels take the chroma Hadamard. AC levels take
+/// the ordinary 4×4 scale. Both use the chroma QP that belongs to `cur_qp`.
+fn add_tcoeff_chroma<S: Sample>(
+    pic: &mut Frame<S>,
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    at: (usize, usize, usize),
+    qp: (i32, i32),
+) -> Result<(), CodecError> {
+    let (mx, my, start) = at;
+    let (ref_qp, cur_qp) = qp;
+    let chroma_stride = pic.w / 2;
+    let offsets = [
+        slice.pps.chroma_qp_offset,
+        slice.pps.second_chroma_qp_offset,
+    ];
+    for (plane, offset) in offsets.into_iter().enumerate() {
+        let (ref_c, _) = recon::chroma_qps(ref_qp, offset, S::QP_BD);
+        let (cur_c, _) = recon::chroma_qps(cur_qp, offset, S::QP_BD);
+        let list = 4 + plane;
+        let weight = slice.pps.weight4[list];
+        let origin = start + 256 + plane * 64;
+        let mut dc = [0i32; 4];
+        let mut ac = [[0i32; 16]; 4];
+        for block in 0..4 {
+            let coeffs = &mut ac[block];
+            for (k, coeff) in coeffs.iter_mut().enumerate() {
+                let index = origin + block * 16 + k;
+                let level = rescale_level(layer.levels[index], ref_c, cur_c)?
+                    .saturating_add(pic.levels[index]);
+                if k == 0 {
+                    dc[block] = level;
+                } else {
+                    *coeff = level;
+                }
+            }
+        }
+        let scaled = recon::chroma_dc(dc[0], dc[1], dc[2], dc[3], cur_c, i32::from(weight[0]));
+        let plane_samples = if plane == 0 { &mut pic.u } else { &mut pic.v };
+        let span = chroma_span(my, 8, false);
+        for i in 0..4 {
+            let mut block = [0i32; 16];
+            for k in 0..16 {
+                let (ry, rx) = (k / 4, k % 4);
+                block[k] = if k == 0 {
+                    scaled[i]
+                } else {
+                    recon::scale4(ac[i][k], cur_c, rx, ry, i32::from(weight[k]))
+                };
+            }
+            recon::idct4(&mut block);
+            recon::add_block(
+                plane_samples,
+                chroma_stride,
+                mx * 8 + (i & 1) * 4,
+                span.at((i >> 1) * 4),
+                &block,
+                4,
+                span.step,
+            );
+        }
     }
     Ok(())
 }
@@ -6890,20 +6957,27 @@ fn decode_inter<S: Sample>(
         recon_444(pic, entropy, slice, Place { mx, my }, mb, *qp, None)?;
     } else {
         let chroma_res = read_chroma(pic, entropy, mx, my, chroma_cbp, mb)?;
-        recon_chroma(
-            pic,
-            slice,
-            Place { mx, my },
-            0,
-            ChromaPaint {
-                cb_dc: &chroma_res.cb_dc,
-                cr_dc: &chroma_res.cr_dc,
-                cb_ac: &chroma_res.cb_ac,
-                cr_ac: &chroma_res.cr_ac,
-            },
-            (*qp, false, mb.slice),
-            false,
-        );
+        if !pic.levels.is_empty() {
+            let slot = my * pic.mb_w + mx;
+            pic.note_chroma(slot, 0, &chroma_res.cb_dc, &chroma_res.cb_ac);
+            pic.note_chroma(slot, 1, &chroma_res.cr_dc, &chroma_res.cr_ac);
+        }
+        if !merge {
+            recon_chroma(
+                pic,
+                slice,
+                Place { mx, my },
+                0,
+                ChromaPaint {
+                    cb_dc: &chroma_res.cb_dc,
+                    cr_dc: &chroma_res.cr_dc,
+                    cb_ac: &chroma_res.cb_ac,
+                    cr_ac: &chroma_res.cr_ac,
+                },
+                (*qp, false, mb.slice),
+                false,
+            );
+        }
     }
     Ok(residual)
 }

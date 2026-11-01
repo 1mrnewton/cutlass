@@ -272,13 +272,21 @@ impl<S: Sample> Frame<S> {
         }
     }
 
+    /// Luma levels, then Cb, then Cr. 4:2:0 stores 64 coefficients per chroma
+    /// component after the 256 luma coefficients.
+    pub(crate) fn level_stride(&self) -> usize {
+        if self.chroma() == 1 { 384 } else { 256 }
+    }
+
     /// Raster luma levels for one 4×4. Empty unless a stored subset asks for
     /// coefficient prediction. `coeffs` is zigzag order.
     pub(crate) fn note_luma4(&mut self, slot: usize, block: usize, coeffs: &[i32]) {
         if block >= 16 {
             return;
         }
-        let base = slot.saturating_mul(256).saturating_add(block * 16);
+        let base = slot
+            .saturating_mul(self.level_stride())
+            .saturating_add(block * 16);
         if self.levels.len() < base + 16 {
             return;
         }
@@ -293,12 +301,36 @@ impl<S: Sample> Frame<S> {
         if block >= 4 {
             return;
         }
-        let base = slot.saturating_mul(256).saturating_add(block * 64);
+        let base = slot
+            .saturating_mul(self.level_stride())
+            .saturating_add(block * 64);
         if self.levels.len() < base + 64 {
             return;
         }
         for (n, &pos) in ZIGZAG8.iter().enumerate() {
             self.levels[base + pos] = coeffs.get(n).copied().unwrap_or(0);
+        }
+    }
+
+    /// Raster 4:2:0 chroma levels. `dc` is the four DC levels in block order.
+    /// Each `ac` row is the 15 AC levels in scan order, starting at scan index 1.
+    pub(crate) fn note_chroma(&mut self, slot: usize, plane: usize, dc: &[i32], ac: &[[i32; 16]]) {
+        if self.chroma() != 1 || plane > 1 {
+            return;
+        }
+        let base = slot
+            .saturating_mul(self.level_stride())
+            .saturating_add(256 + plane * 64);
+        if self.levels.len() < base + 64 {
+            return;
+        }
+        for block in 0..4 {
+            let at = base + block * 16;
+            self.levels[at] = dc.get(block).copied().unwrap_or(0);
+            let row = ac.get(block).copied().unwrap_or([0; 16]);
+            for (&pos, level) in ZIGZAG4.iter().skip(1).zip(row) {
+                self.levels[at + pos] = level;
+            }
         }
     }
 }
@@ -3089,9 +3121,9 @@ struct InterLayer {
 /// that window. A negative offset shifts it. A crop that differs on the reference
 /// picture adds that difference to the scaled vector. Macroblock-level spatial
 /// scalability reads the crop from the slice. A sequence coefficient flag
-/// rescales a reference-layer 4×4 or 8×8 luma level. An uncoded enhancement
-/// keeps the reference QP. An adaptive flag that is set stays refused. Chroma
-/// and Intra_16×16 levels stay on the sample residual.
+/// rescales a reference-layer 4×4 or 8×8 luma level and a 4:2:0 chroma level.
+/// An uncoded enhancement keeps the reference QP. An adaptive flag that is set
+/// stays refused. Intra_16×16 levels stay on the sample residual.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
@@ -3484,7 +3516,8 @@ fn new_frame<S: Sample>(
         svc_right: mb::sample_offset(header.scale.right)?,
         svc_bottom: mb::sample_offset(header.scale.bottom)?,
         levels: if keep_levels {
-            vec![0; mb_w.saturating_mul(mb_h).saturating_mul(256)]
+            let stride = if sps.chroma == 1 { 384 } else { 256 };
+            vec![0; mb_w.saturating_mul(mb_h).saturating_mul(stride)]
         } else {
             Vec::new()
         },

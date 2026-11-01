@@ -75,8 +75,11 @@
 //! enhancement at QP 22 rescales the base's 8×8 DC level of 1. The base is flat
 //! luma 150 and chroma 90, so its top-left 8×8 is 152. The enhancement's
 //! bottom-right 8×8 codes a DC level of 1 and is 151. The rescaled top-left
-//! 8×8 is 151. The other two blocks stay 150. Chroma stays 90. FFmpeg emits
-//! the base and does not decode the enhancement.
+//! 8×8 is 151. The other two blocks stay 150. Chroma stays 90. A base chroma
+//! DC level of 1 at QP 26 makes Cb 92 and leaves Cr 90. An enhancement that
+//! codes an empty luma residual at QP 22 rescales that chroma level. Cb becomes
+//! 91 and the top-left 4×4 becomes 102. FFmpeg emits the base and does not
+//! decode the enhancement.
 //! A depth P slice copies a later texture header. That source is intra, so the
 //! slice uses the picture's one reference. Motion of eight pixels makes that
 //! picture luma 220 and chroma 50. The texture picture between them is luma 10

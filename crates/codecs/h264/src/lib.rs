@@ -38,6 +38,8 @@
 //! split and the far half shifts four pixels.
 //! A P_L0_L0_8×16 picture reads a depth sample the 16×16 corners miss, so the
 //! left half shifts four pixels and the right half stays 180.
+//! A P_8×8 picture reads a depth sample only its top-left block includes, so
+//! that block shifts four pixels and the other three stay still.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

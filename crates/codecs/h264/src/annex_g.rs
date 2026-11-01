@@ -1222,6 +1222,48 @@ fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
 }
 
 #[test]
+fn an_8x8_view_synthesis_block_shifts_only_its_own_corner() {
+    let base = dmvp_base_idr();
+    let depth = vsp_block_depth();
+    let view = vsp_8x8_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| top_left_block_shift(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| depth_block(picture))
+            .count(),
+        1
+    );
+    assert!(pictures.iter().all(|picture| !four_pixel_shift(picture)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn an_8x16_view_synthesis_partition_shifts_the_left_half() {
     let base = dmvp_base_idr();
     let depth = vsp_column_depth();
@@ -1575,6 +1617,12 @@ fn vsp_column_depth() -> Vec<u8> {
     vsp_depth_annex(&view_synthesis_pair(0, 0, 3968, 0), &luma)
 }
 
+fn vsp_block_depth() -> Vec<u8> {
+    let mut luma = vec![0; 256];
+    luma[14 * 16 + 14] = 64;
+    vsp_depth_annex(&view_synthesis_pair(0, 0, 3968, 0), &luma)
+}
+
 fn vsp_depth_annex(sps: &[u8], luma: &[u8]) -> Vec<u8> {
     let mut out = annex_b_nal(3, 15, sps);
     out.extend(annex_b_nal(3, 8, &pps()));
@@ -1589,6 +1637,29 @@ fn vsp_depth_annex(sps: &[u8], luma: &[u8]) -> Vec<u8> {
 
 fn vsp_texture() -> Vec<u8> {
     annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_p_slice())
+}
+
+fn vsp_8x8_texture() -> Vec<u8> {
+    annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_8x8_slice())
+}
+
+fn vsp_8x8_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(3);
+    for _ in 0..4 {
+        w.ue(0);
+    }
+    for _ in 0..4 {
+        w.bit(true);
+        w.bit(true);
+    }
+    w.ue(0);
+    w.trailing();
+    w.bytes
 }
 
 fn vsp_8x16_texture() -> Vec<u8> {
@@ -1690,6 +1761,43 @@ fn four_pixel_shift(picture: &VideoOutput) -> bool {
         .iter()
         .chain(picture.picture.v())
         .all(|sample| *sample == 90)
+}
+
+fn top_left_block_shift(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let top = (0..8).all(|row| {
+        let start = row * 16;
+        y[start..start + 4].iter().all(|sample| *sample == 100)
+            && y[start + 4..start + 16].iter().all(|sample| *sample == 180)
+    });
+    let bottom = (8..16).all(|row| {
+        let start = row * 16;
+        y[start..start + 8].iter().all(|sample| *sample == 100)
+            && y[start + 8..start + 16].iter().all(|sample| *sample == 180)
+    });
+    top && bottom
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
+}
+
+fn depth_block(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let at = 14 * 16 + 14;
+    y.len() == 256
+        && y[at] == 64
+        && y.iter()
+            .enumerate()
+            .all(|(index, sample)| index == at || *sample == 0)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 40)
 }
 
 fn depth_column(picture: &VideoOutput) -> bool {

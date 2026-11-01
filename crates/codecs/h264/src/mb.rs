@@ -6465,8 +6465,8 @@ fn decode_inter<S: Sample>(
     } else {
         spec == 3 || spec == 4
     };
-    let vsp_block = (slice.kind == 0 && matches!(spec, 0..=2)) || (slice.kind == 1 && spec == 1);
-    if slice.vsp && (sub || !vsp_block) {
+    let vsp_block = (slice.kind == 0 && matches!(spec, 0..=3)) || (slice.kind == 1 && spec == 1);
+    if slice.vsp && !vsp_block {
         return Err(CodecError::Unsupported { what: "3d" });
     }
     if (slice.adaptive_motion || slice.motion_pred) && (sub || (slice.kind == 1 && spec == 0)) {
@@ -7480,7 +7480,18 @@ fn read_sub<S: Sample>(
     }
     let ref0_forced = spec == 4;
     let direct = |kind: u32| kind == 0 && slice.kind == 1;
-    // Clause 7.3.5.2: list 0 references, list 1 references, list 0 deltas, list 1 deltas.
+    if slice.vsp {
+        for kind in kinds {
+            let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
+            if w != 8 || h != 8 {
+                return Err(CodecError::Unsupported { what: "3d" });
+            }
+        }
+    }
+    let mut synthesis0 = [false; 4];
+    let mut synthesis1 = [false; 4];
+    // Clause 7.3.5.2 and J.7.3.6.2: list 0 references, list 1 references, then deltas.
+    // `bvsp_flag` follows the reference it belongs to.
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
             continue;
@@ -7496,9 +7507,19 @@ fn read_sub<S: Sample>(
         } else {
             read_te(entropy, slice.num_ref_l0, ref_ctx(pic, mx, my, x, y, 0, mb))? as i8
         };
-        let part = (y / 2) * 2 + (x / 2);
-        mb.ref0[part] = r;
-        mb.uses0 |= 1 << part;
+        let index = (y / 2) * 2 + (x / 2);
+        mb.ref0[index] = r;
+        mb.uses0 |= 1 << index;
+        if slice.vsp {
+            let block = part(x * 4, y * 4, 8, 8, true, false);
+            if interview_reference(pic, dpb, slice, mb, &block, 0) {
+                synthesis0[i] = if ref0_forced || slice.num_ref_l0 <= 1 {
+                    true
+                } else {
+                    read_flag(entropy)?
+                };
+            }
+        }
     }
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
@@ -7515,9 +7536,19 @@ fn read_sub<S: Sample>(
         } else {
             read_te(entropy, slice.num_ref_l1, ref_ctx(pic, mx, my, x, y, 1, mb))? as i8
         };
-        let part = (y / 2) * 2 + (x / 2);
-        mb.ref1[part] = r;
-        mb.uses1 |= 1 << part;
+        let index = (y / 2) * 2 + (x / 2);
+        mb.ref1[index] = r;
+        mb.uses1 |= 1 << index;
+        if slice.vsp {
+            let block = part(x * 4, y * 4, 8, 8, false, true);
+            if interview_reference(pic, dpb, slice, mb, &block, 1) {
+                synthesis1[i] = if slice.num_ref_l1 <= 1 {
+                    true
+                } else {
+                    read_flag(entropy)?
+                };
+            }
+        }
     }
     for (i, kind) in kinds.iter().copied().enumerate() {
         if direct(kind) {
@@ -7551,6 +7582,15 @@ fn read_sub<S: Sample>(
             let y0 = (i >> 1) * 8;
             for (px, py) in sub_origins(x0, y0, w, h) {
                 let part = part(px, py, w, h, list == 0, list == 1);
+                let synthesis = if list == 0 {
+                    synthesis0[i]
+                } else {
+                    synthesis1[i]
+                };
+                if synthesis {
+                    store_mv(mb, &part, synthesis_motion(pic, dpb, slice, &part)?, list);
+                    continue;
+                }
                 let predicted = if slice.dmvp && list == 0 {
                     if !same_view_reference(pic, dpb, slice, mb, &part) {
                         return Err(CodecError::Unsupported { what: "3d" });

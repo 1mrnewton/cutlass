@@ -594,7 +594,9 @@ mod tests {
                 keyframe: false,
                 side: Vec::new(),
             };
-            assert!(decoder.push(&packet).is_err());
+            // A buffer with no size field may be a legal show-existing frame.
+            // Either way the stored reference has to survive.
+            let _ = decoder.push(&packet);
         }
         let again = decoder.push(&repeat[0]).expect("reference still there");
         assert_eq!(
@@ -3022,6 +3024,58 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn an_obu_without_a_size_uses_the_packet_end() {
+        // The last OBU of the flat 128 superblock keyframe drops its size
+        // field. The packet length is the size. A missing trailing byte fails.
+        // The digest is dav1d 1.5.3.
+        let frame = include_bytes!("../fixtures/sb128_flat_0.obu");
+        let expected = 0xf206_7a5e_2040_2325;
+        let open = without_last_size(frame);
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, &open, 0);
+        assert_eq!(packed.len(), 256 * 256 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected);
+
+        let mut short = open;
+        short.pop();
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        assert!(
+            decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: short,
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .is_err()
+        );
+    }
+
+    fn without_last_size(packet: &[u8]) -> Vec<u8> {
+        let mut index = 0;
+        let mut last = 0;
+        while index < packet.len() {
+            last = index;
+            let header = packet[index];
+            assert_eq!(header & 0x04, 0, "extension");
+            assert_ne!(header & 0x02, 0, "size");
+            index += 1;
+            let size = usize::from(packet[index]);
+            assert!(packet[index] < 128, "leb128");
+            index += 1 + size;
+        }
+        assert_eq!(index, packet.len());
+        let mut out = packet[..last].to_vec();
+        out.push(packet[last] & !0x02);
+        out.extend_from_slice(&packet[last + 2..]);
+        out
     }
 
     fn reserved_obu(kind: u8, payload: &[u8]) -> Vec<u8> {

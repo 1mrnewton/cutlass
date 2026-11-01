@@ -88,6 +88,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc --sb-size=128` set of 256×256 streams: a flat keyframe, a two-frame partition stream, a two-frame stream with CDEF, and a two-frame stream with a superblock quantizer delta. A block wider than 64 is residual-coded in 64×64 chunks. A skipped inter transform edge that is not a prediction edge is left unfiltered. All seven pictures match dav1d.
 - One embedded 128×128 six-frame stream with a switch frame. That frame is predicted as an inter frame, is error resilient, and refreshes every reference slot. The frames after it use those slots. All six pictures match dav1d.
 - A reserved OBU before that flat 128 superblock keyframe is skipped. The shown picture still matches dav1d. A reserved OBU whose size runs past the packet is truncated.
+- The same keyframe with the size field removed from its last OBU still matches dav1d. The packet length is the size. Dropping the last byte fails.
 - Chroma decoded-neighbor flags use the chroma superblock grid. An extended intra edge stops at the tile boundary. A 2160p keyframe from `../local-files` matches dav1d when that file and dav1d are present.
 - When the files are present: `aomenc` streams for a step, a ramp, chroma-from-luma, AB partitions, angle delta, rectangular transforms, and 64-point transforms. Deblocking runs on the constrained keyframe (loop-filter levels are non-zero there) and those samples match.
 

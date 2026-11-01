@@ -229,23 +229,10 @@ pub fn parse_with_motion(
         let obu_type = ((header >> 3) & 0xf) as u8;
         let extension = (header >> 2) & 1 == 1;
         let has_size = (header >> 1) & 1 == 1;
-        if !has_size {
-            return Err(CodecError::Unsupported {
-                what: "obu without a size",
-            });
-        }
         if extension {
             let _ = bits.read(8)?;
         }
-        let size = read_leb128(&mut bits)? as usize;
-        let payload_bits = size.saturating_mul(8);
-        if bits.bits_left() < payload_bits {
-            return Err(CodecError::Truncated {
-                at_bit: bits.position() as u64,
-                what: "obu",
-            });
-        }
-        let payload_end = bits.position() + payload_bits;
+        let payload_end = obu_payload_end(&mut bits, bytes, has_size)?;
         match obu_type {
             1 => {
                 seq = Some(parse_sequence(&mut bits)?);
@@ -329,6 +316,33 @@ pub(crate) struct UnitObu<'a> {
     pub bytes: &'a [u8],
 }
 
+/// Where this OBU's payload ends, in bits.
+///
+/// A size field is a leb128 byte count. Without one, the payload runs to the
+/// end of the packet. That is legal when the caller already knows the packet
+/// length. The low-overhead sequence still writes a size on every OBU.
+fn obu_payload_end(
+    bits: &mut BitReader<'_>,
+    bytes: &[u8],
+    has_size: bool,
+) -> Result<usize, CodecError> {
+    if !has_size {
+        if !bits.position().is_multiple_of(8) {
+            return Err(malformed(bits, "obu"));
+        }
+        return Ok(bytes.len().saturating_mul(8));
+    }
+    let size = read_leb128(bits)? as usize;
+    let payload_bits = size.saturating_mul(8);
+    if bits.bits_left() < payload_bits {
+        return Err(CodecError::Truncated {
+            at_bit: bits.position() as u64,
+            what: "obu",
+        });
+    }
+    Ok(bits.position() + payload_bits)
+}
+
 /// Split a temporal unit into OBUs. A pyramid puts several frame OBUs in one unit.
 pub(crate) fn unit_obus(bytes: &[u8]) -> Result<Vec<UnitObu<'_>>, CodecError> {
     let mut bits = BitReader::new(bytes);
@@ -342,22 +356,11 @@ pub(crate) fn unit_obus(bytes: &[u8]) -> Result<Vec<UnitObu<'_>>, CodecError> {
         let kind = ((header >> 3) & 0xf) as u8;
         let extension = (header >> 2) & 1 == 1;
         let has_size = (header >> 1) & 1 == 1;
-        if !has_size {
-            return Err(CodecError::Unsupported {
-                what: "obu without a size",
-            });
-        }
         if extension {
             let _ = bits.read(8)?;
         }
-        let size = read_leb128(&mut bits)? as usize;
-        let payload_bits = size.saturating_mul(8);
-        if bits.bits_left() < payload_bits {
-            return Err(CodecError::Truncated {
-                at_bit: bits.position() as u64,
-                what: "obu",
-            });
-        }
+        let payload_end = obu_payload_end(&mut bits, bytes, has_size)?;
+        let payload_bits = payload_end.saturating_sub(bits.position());
         bits.skip(payload_bits)?;
         let end = bits.position() / 8;
         let Some(slice) = bytes.get(start..end) else {

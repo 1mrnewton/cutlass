@@ -5598,6 +5598,44 @@ mod tests {
     }
 
     #[test]
+    fn chroma_quantizer_delta_matches_dav1d() {
+        // aomenc --enable-chroma-deltaq=1, 128×128, two frames. Both headers
+        // add 2 to the chroma DC and AC quantizers and leave the luma DC delta
+        // at 0. U and V share that offset. No quantizer matrix. Ignoring the
+        // chroma offsets changes both pictures. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/chroma-delta.ivf"));
+        assert_eq!(frames.len(), 2);
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (parsed, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("frame");
+            assert!(!parsed.separate_uv_delta_q);
+            assert!(!frame.using_qmatrix, "frame {index}");
+            assert_eq!(frame.delta_y_dc, 0, "frame {index}");
+            assert_eq!(frame.delta_u_dc, 2, "frame {index}");
+            assert_eq!(frame.delta_u_ac, 2, "frame {index}");
+            assert_eq!(frame.delta_v_dc, 2, "frame {index}");
+            assert_eq!(frame.delta_v_ac, 2, "frame {index}");
+            assert_eq!(frame.width, 128);
+            assert_eq!(frame.height, 128);
+            if index == 1 {
+                assert!(!frame.intra);
+            }
+            sequence = Some(parsed);
+        }
+        let expected = [0x7855_dec8_88da_0fbd, 0xc5a0_e4b9_172b_f474];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn reduced_transform_set_matches_dav1d() {
         // aomenc --reduced-tx-type-set=1, 256×256, two frames. Both headers
         // select the transform size and the reduced set. Reading the full set

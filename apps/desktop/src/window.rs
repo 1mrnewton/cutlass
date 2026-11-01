@@ -5,10 +5,21 @@ use crate::tokens;
 use crate::view::{ViewState, show};
 
 pub fn run() -> eframe::Result {
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT])
-        .with_decorations(false);
+        .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT]);
+    #[cfg(target_os = "macos")]
+    {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        viewport = viewport.with_decorations(false);
+    }
     eframe::run_native(
         "Cutlass",
         eframe::NativeOptions {

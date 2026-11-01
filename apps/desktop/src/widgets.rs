@@ -56,23 +56,20 @@ pub fn toolbar_button(ui: &mut Ui, label: &str) -> egui::Response {
 }
 
 pub fn export_button(ui: &mut Ui) -> egui::Response {
-    let font = FontId::proportional(tokens::TYPE_SIZE);
-    let galley = ui
-        .ctx()
-        .fonts_mut(|fonts| fonts.layout_no_wrap("Export".to_owned(), font, tokens::EXPORT_INK));
-    let pad = Vec2::new(
-        f32::from(tokens::EXPORT_PAD_X),
-        f32::from(tokens::EXPORT_PAD_Y),
-    );
-    let (rect, response) = ui.allocate_exact_size(galley.size() + pad * 2.0, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(72.0, 26.0), Sense::click());
     if ui.is_rect_visible(rect) {
         ui.painter().rect_filled(
             rect,
             CornerRadius::same(tokens::EXPORT_RADIUS),
             tokens::EXPORT,
         );
-        ui.painter()
-            .galley(rect.min + pad, galley, tokens::EXPORT_INK);
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Export",
+            FontId::proportional(tokens::TYPE_SIZE),
+            tokens::EXPORT_INK,
+        );
     }
     response.on_hover_text("Export")
 }

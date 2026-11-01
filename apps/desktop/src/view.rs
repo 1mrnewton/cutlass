@@ -10,7 +10,7 @@ use crate::dialogs::{Dialogs, Finished, Picker};
 use crate::icons;
 use crate::shell::{ExportRequest, Shell, ShellError};
 use crate::tokens;
-use crate::widgets::{self, HeaderFlags};
+use crate::widgets;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -153,7 +153,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     let sizes = sizes(shell, full.size());
     project_bar(shell, ui, view, full, sizes.head, parent);
     let row = Rect::from_min_size(
-        Pos2::new(full.min.x, full.min.y + sizes.head + tokens::SPLIT),
+        Pos2::new(full.min.x, full.min.y + sizes.head),
         Vec2::new(full.width(), sizes.row),
     );
     regions(shell, ui, view, row, sizes);
@@ -164,18 +164,6 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     timeline_panel(shell, ui, timeline);
     if view.export_open {
         export_dialog(shell, ui, view, parent);
-    }
-    if !shell.notice().is_empty() {
-        let bar = Rect::from_min_max(Pos2::new(full.min.x, full.max.y - 32.0), full.max);
-        ui.painter()
-            .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
-        ui.painter().text(
-            bar.left_center() + Vec2::new(12.0, 0.0),
-            Align2::LEFT_CENTER,
-            shell.notice(),
-            FontId::proportional(tokens::TYPE_SIZE),
-            tokens::TEXT,
-        );
     }
     shortcuts(shell, ui);
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
@@ -197,10 +185,9 @@ fn sizes(shell: &Shell, window: Vec2) -> Sizes {
     let head = tokens::HEAD_HEIGHT;
     let timeline = shell.timeline_height().clamp(
         tokens::TIMELINE_MIN,
-        (window.y - head - tokens::SPLIT * 2.0 - tokens::PREVIEW_MIN_HEIGHT)
-            .max(tokens::TIMELINE_MIN),
+        (window.y - head - tokens::SPLIT - tokens::PREVIEW_MIN_HEIGHT).max(tokens::TIMELINE_MIN),
     );
-    let row = (window.y - head - tokens::SPLIT * 2.0 - timeline).max(0.0);
+    let row = (window.y - head - tokens::SPLIT - timeline).max(0.0);
     let library = shell.library_width();
     let inspector = shell.inspector_width();
     let preview = (window.x - library - inspector - tokens::SPLIT * 2.0).max(0.0);
@@ -215,27 +202,31 @@ fn sizes(shell: &Shell, window: Vec2) -> Sizes {
 }
 
 fn style(ui: &mut Ui) {
+    ui.ctx().set_theme(egui::ThemePreference::Dark);
     ui.style_mut().interaction.selectable_labels = false;
-    ui.style_mut().visuals.override_text_color = Some(tokens::TEXT);
-    ui.style_mut().text_styles.insert(
+    ui.ctx().global_style_mut(install_style);
+    ui.ctx().style_mut_of(egui::Theme::Dark, install_style);
+}
+
+fn install_style(style: &mut egui::Style) {
+    style.interaction.selectable_labels = false;
+    style.visuals.override_text_color = Some(tokens::TEXT);
+    style.visuals.panel_fill = tokens::PANEL;
+    style.visuals.window_fill = tokens::PANEL;
+    style.visuals.extreme_bg_color = tokens::GAP;
+    style.visuals.faint_bg_color = tokens::PROJECT_BAR;
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+    style.text_styles.insert(
         egui::TextStyle::Body,
         FontId::proportional(tokens::TYPE_SIZE),
     );
-    ui.style_mut().text_styles.insert(
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, FontId::proportional(14.0));
+    style.text_styles.insert(
         egui::TextStyle::Monospace,
         FontId::monospace(tokens::TIMECODE_SIZE),
     );
-    ui.ctx().global_style_mut(|style| {
-        style.interaction.selectable_labels = false;
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            FontId::proportional(tokens::TYPE_SIZE),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Monospace,
-            FontId::monospace(tokens::TIMECODE_SIZE),
-        );
-    });
 }
 
 fn project_bar(
@@ -250,28 +241,24 @@ fn project_bar(
     ui.painter()
         .rect_filled(bar, CornerRadius::ZERO, tokens::PROJECT_BAR);
     shell.chrome.project_bar = true;
+    #[cfg(not(target_os = "macos"))]
     window_buttons(shell, ui, bar);
     menus(shell, ui, view, bar, parent);
     ui.painter().text(
         bar.center(),
         Align2::CENTER_CENTER,
         shell.project_name(),
-        FontId::proportional(tokens::TYPE_SIZE),
-        tokens::MUTED,
+        FontId::proportional(14.0),
+        tokens::TEXT,
+    );
+    let export = Rect::from_min_size(
+        bar.right_center() - Vec2::new(12.0 + 72.0, 13.0),
+        Vec2::new(72.0, 26.0),
     );
     let response = ui
-        .scope_builder(
-            egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                bar.right_top() - Vec2::new(96.0, 0.0),
-                Vec2::new(88.0, bar.height()),
-            )),
-            |ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    widgets::export_button(ui)
-                })
-                .inner
-            },
-        )
+        .scope_builder(egui::UiBuilder::new().max_rect(export), |ui| {
+            widgets::export_button(ui)
+        })
         .inner;
     if response.clicked() {
         view.export_open = true;
@@ -279,6 +266,7 @@ fn project_bar(
     shell.chrome.export = true;
 }
 
+#[cfg(not(target_os = "macos"))]
 fn window_buttons(shell: &mut Shell, ui: &mut Ui, bar: Rect) {
     let colors = [tokens::CLOSE, tokens::MINIMIZE, tokens::MAXIMIZE];
     for (index, color) in colors.into_iter().enumerate() {
@@ -317,8 +305,12 @@ fn menus(
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
-            ui.menu_button("File", |ui| file_menu(shell, ui, view, parent));
-            ui.menu_button("Edit", |ui| edit_menu(shell, ui));
+            ui.menu_button(RichText::new("File").color(tokens::FAINT), |ui| {
+                file_menu(shell, ui, view, parent);
+            });
+            ui.menu_button(RichText::new("Edit").color(tokens::FAINT), |ui| {
+                edit_menu(shell, ui);
+            });
         });
     });
 }
@@ -642,10 +634,15 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Pos2::new(rect.min.x, rect.max.y - tokens::TRANSPORT_HEIGHT),
         rect.max,
     );
-    let picture = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, transport.min.y));
+    let frame = Rect::from_min_max(
+        rect.min + Vec2::new(16.0, 16.0),
+        Pos2::new(rect.max.x - 16.0, transport.min.y - 8.0),
+    );
+    ui.painter()
+        .rect_filled(frame, CornerRadius::same(12), tokens::GAP);
     match shell.preview_bytes() {
-        Ok(frame) => {
-            if let Some(image) = raster(&frame) {
+        Ok(picture) => {
+            if let Some(image) = raster(&picture) {
                 let texture = if let Some(texture) = &mut view.preview {
                     texture.set(image, egui::TextureOptions::LINEAR);
                     texture
@@ -656,7 +653,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                         egui::TextureOptions::LINEAR,
                     ))
                 };
-                let fitted = fit_texture(picture, texture.size_vec2());
+                let fitted = fit_texture(frame, texture.size_vec2());
                 ui.painter().image(
                     texture.id(),
                     fitted,
@@ -668,7 +665,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Err(error) => {
             if shell.draft().is_some() {
                 ui.painter().text(
-                    picture.center(),
+                    frame.center(),
                     Align2::CENTER_CENTER,
                     error.to_string(),
                     FontId::proportional(tokens::TYPE_SIZE),
@@ -677,124 +674,219 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
             }
         }
     }
+    ui.painter().text(
+        frame.left_top() + Vec2::new(12.0, 12.0),
+        Align2::LEFT_TOP,
+        shell.timecode(),
+        FontId::monospace(11.0),
+        tokens::TEXT,
+    );
     transport_bar(shell, ui, transport);
 }
 
 fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
-    ui.painter()
-        .rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    let live = shell.draft().is_some();
+    let ink = if live { tokens::TEXT } else { tokens::MUTED };
     ui.painter().text(
-        rect.left_center() + Vec2::new(12.0, 0.0),
+        Pos2::new(rect.left() + 16.0, rect.center().y),
         Align2::LEFT_CENTER,
-        shell.timecode(),
+        format!("{}  /  {}", shell.timecode(), duration_label(shell)),
         FontId::monospace(tokens::TIMECODE_SIZE),
-        tokens::TEXT,
+        ink,
     );
-    let play = if shell.playing() { "pause" } else { "play" };
-    let tip = if shell.playing() { "Pause" } else { "Play" };
-    let center = Rect::from_center_size(rect.center(), Vec2::splat(tokens::ICON_BUTTON_SIZE));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(center), |ui| {
-        if widgets::icon_button(ui, play, tip).clicked() {
-            if shell.playing() {
-                shell.pause();
-            } else {
-                shell.play();
-            }
+    let play = Rect::from_center_size(rect.center(), Vec2::splat(36.0));
+    let play_response = ui.interact(play, ui.scope_id().with("play"), Sense::click());
+    if play_response.clicked() {
+        if shell.playing() {
+            shell.pause();
+        } else {
+            shell.play();
         }
-    });
+    }
+    ui.painter()
+        .circle_filled(play.center(), 18.0, tokens::TEXT);
+    let mark = Rect::from_center_size(play.center(), Vec2::splat(16.0));
+    let glyph = if shell.playing() { "pause" } else { "play" };
+    let _ = icons::paint(
+        ui.painter(),
+        mark,
+        glyph,
+        Color32::from_rgb(0x12, 0x13, 0x0f),
+    );
+    play_response.on_hover_text(if shell.playing() { "Pause" } else { "Play" });
+
     let still = Rect::from_center_size(
-        rect.right_center() - Vec2::new(24.0, 0.0),
-        Vec2::splat(tokens::ICON_BUTTON_SIZE),
+        Pos2::new(rect.right() - 28.0, rect.center().y),
+        Vec2::splat(32.0),
     );
-    ui.scope_builder(egui::UiBuilder::new().max_rect(still), |ui| {
-        if widgets::icon_button(ui, "camera", "Still").clicked() {
-            shell.unavailable("still");
-        }
-    });
+    let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
+    if still_response.clicked() {
+        shell.unavailable("still");
+    }
+    ui.painter()
+        .circle_filled(still.center(), 16.0, tokens::ICON_BUTTON);
+    let camera = Rect::from_center_size(still.center(), Vec2::splat(16.0));
+    let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
+    still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
 }
 
+fn duration_label(shell: &Shell) -> String {
+    let end = shell
+        .draft()
+        .map(|draft| draft.duration)
+        .unwrap_or(cutlass_model::Micros(0));
+    shell.timecode_at(end)
+}
+
 fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(12.0)), |ui| {
-        ui.label(
-            RichText::new("Inspector")
-                .size(tokens::TYPE_SIZE)
-                .color(tokens::MUTED),
+    let padded = rect.shrink2(Vec2::new(16.0, 0.0));
+    let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
+    details.set_clip_rect(padded);
+    ScrollArea::vertical()
+        .id_salt("inspector")
+        .show(&mut details, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.add_space(14.0);
+            if let Some(inspection) = shell.inspection() {
+                section_title(ui, "Clip");
+                fact(ui, "Name", &inspection.material);
+                fact(ui, "Start", &shell.timecode_at(inspection.start));
+                fact(ui, "Duration", &card_meta(inspection.duration.0));
+                ui.add_space(12.0);
+                clip_fields(shell, ui, view, &inspection);
+            } else {
+                section_title(ui, "Details");
+                project_facts(shell, ui);
+            }
+        });
+}
+
+fn section_title(ui: &mut Ui, title: &str) {
+    ui.label(
+        RichText::new(title)
+            .size(15.0)
+            .strong()
+            .color(tokens::EXPORT),
+    );
+    ui.add_space(14.0);
+}
+
+fn project_facts(shell: &Shell, ui: &mut Ui) {
+    fact(ui, "Name", &shell.project_name());
+    let saved = shell
+        .project_folder()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "No project".to_owned());
+    fact(ui, "Saved", &saved);
+    let Some(draft) = shell.draft() else {
+        return;
+    };
+    ui.add_space(8.0);
+    let span = ui.available_rect_before_wrap().x_range();
+    let y = ui.cursor().min.y;
+    ui.painter().hline(
+        span,
+        y,
+        egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
+    );
+    ui.add_space(16.0);
+    fact(ui, "Ratio", &ratio_label(&draft.canvas_config.ratio));
+    fact(
+        ui,
+        "Resolution",
+        &format!(
+            "{}×{}",
+            draft.canvas_config.width, draft.canvas_config.height
+        ),
+    );
+    fact(ui, "Frame rate", &format!("{:.2}fps", draft.fps));
+}
+
+fn fact(ui: &mut Ui, label: &str, value: &str) {
+    let width = ui.available_width();
+    ui.horizontal(|ui| {
+        ui.set_max_width(width);
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.add_sized(
+            [108.0, 18.0],
+            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
-        let Some(inspection) = shell.inspection() else {
-            ui.label(RichText::new("Nothing selected").color(tokens::FAINT));
-            return;
-        };
-        ui.label(format!(
-            "{}  {}",
-            shell.timecode_at(inspection.start),
-            format_duration(inspection.duration.0)
-        ));
-        ui.label(format!("Speed {}", inspection.speed));
-        ui.label(format!("Volume {}", inspection.volume));
-        ui.label(format!(
-            "Scale {:.2}, {:.2}   rotate {:.1}   move {:.1}, {:.1}",
-            inspection.scale_x,
-            inspection.scale_y,
-            inspection.rotation,
-            inspection.transform_x,
-            inspection.transform_y
-        ));
-        ui.label(inspection.material.clone());
-        if widgets::toolbar_button(ui, "Transform").clicked()
-            && let Err(error) = shell.edit_transform()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(text) = inspection.text.clone() {
-            if view.text_for != inspection.segment_id.as_str() {
-                view.text_buffer = text;
-                view.text_for = inspection.segment_id.as_str().to_owned();
-            }
-            let response = widgets::field(ui, &mut view.text_buffer);
-            if response.lost_focus()
-                && !inspection.locked
-                && let Err(error) = shell.set_text(view.text_buffer.clone())
-            {
-                shell.set_notice(error.to_string());
-            }
-            if widgets::toolbar_button(ui, "Style").clicked()
-                && let Err(error) = shell.edit_style()
-            {
-                shell.set_notice(error.to_string());
-            }
-        }
-        view.volume_buffer = format!("{}", inspection.volume);
-        if widgets::field(ui, &mut view.volume_buffer).lost_focus()
-            && let Ok(volume) = view.volume_buffer.parse()
-            && let Err(error) = shell.set_volume(volume)
-        {
-            shell.set_notice(error.to_string());
-        }
-        view.speed_buffer = format!("{}", inspection.speed);
-        if widgets::field(ui, &mut view.speed_buffer).lost_focus()
-            && let Ok(speed) = view.speed_buffer.parse()
-            && let Err(error) = shell.set_speed(speed)
-        {
-            shell.set_notice(error.to_string());
-        }
+        ui.vertical(|ui| {
+            ui.set_width((width - 120.0).max(40.0));
+            ui.add(egui::Label::new(RichText::new(value).size(13.0).color(tokens::TEXT)).wrap());
+        });
     });
+    ui.add_space(4.0);
+}
+
+fn ratio_label(ratio: &str) -> String {
+    if ratio.eq_ignore_ascii_case("original") {
+        "Original".to_owned()
+    } else {
+        ratio.to_owned()
+    }
+}
+
+fn clip_fields(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    inspection: &crate::shell::Inspection,
+) {
+    if widgets::toolbar_button(ui, "Transform").clicked()
+        && let Err(error) = shell.edit_transform()
+    {
+        shell.set_notice(error.to_string());
+    }
+    if let Some(text) = inspection.text.clone() {
+        if view.text_for != inspection.segment_id.as_str() {
+            view.text_buffer = text;
+            view.text_for = inspection.segment_id.as_str().to_owned();
+        }
+        let response = widgets::field(ui, &mut view.text_buffer);
+        if response.lost_focus()
+            && !inspection.locked
+            && let Err(error) = shell.set_text(view.text_buffer.clone())
+        {
+            shell.set_notice(error.to_string());
+        }
+        if widgets::toolbar_button(ui, "Style").clicked()
+            && let Err(error) = shell.edit_style()
+        {
+            shell.set_notice(error.to_string());
+        }
+    }
+    view.volume_buffer = format!("{}", inspection.volume);
+    if widgets::field(ui, &mut view.volume_buffer).lost_focus()
+        && let Ok(volume) = view.volume_buffer.parse()
+        && let Err(error) = shell.set_volume(volume)
+    {
+        shell.set_notice(error.to_string());
+    }
+    view.speed_buffer = format!("{}", inspection.speed);
+    if widgets::field(ui, &mut view.speed_buffer).lost_focus()
+        && let Ok(speed) = view.speed_buffer.parse()
+        && let Err(error) = shell.set_speed(speed)
+    {
+        shell.set_notice(error.to_string());
+    }
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     panel(ui, rect);
     shell.chrome.timeline = true;
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::TOOLBAR_HEIGHT));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(toolbar.shrink(4.0)), |ui| {
-        ui.horizontal(|ui| toolbar_icons(shell, ui));
-    });
-    let hairline = Rect::from_min_size(
-        Pos2::new(rect.min.x, toolbar.max.y),
-        Vec2::new(rect.width(), tokens::HAIRLINE),
+    paint_toolbar(shell, ui, toolbar);
+    if !shell.notice().is_empty() {
+        paint_notice(ui, toolbar, shell.notice());
+    }
+    ui.painter().hline(
+        toolbar.x_range(),
+        toolbar.bottom(),
+        egui::Stroke::new(1.0, tokens::GAP),
     );
-    ui.painter()
-        .rect_filled(hairline, CornerRadius::ZERO, tokens::GAP);
-    let body = Rect::from_min_max(Pos2::new(rect.min.x, hairline.max.y), rect.max);
+    let body = Rect::from_min_max(toolbar.left_bottom(), rect.max);
     ruler_and_lanes(shell, ui, body);
     let handle = Rect::from_min_size(
         Pos2::new(rect.min.x, rect.min.y - tokens::SPLIT),
@@ -806,15 +898,72 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     });
 }
 
-fn toolbar_icons(shell: &mut Shell, ui: &mut Ui) {
-    for (name, tip) in TOOLS {
-        if widgets::icon_button(ui, name, tip).clicked() {
-            tool_clicked(shell, name);
-        }
+fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+    let mut bar = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(Vec2::new(10.0, 4.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    ScrollArea::horizontal()
+        .id_salt("timeline-toolbar")
+        .auto_shrink([false, true])
+        .show(&mut bar, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for item in TOOLS {
+                    match item {
+                        None => toolbar_separator(ui),
+                        Some((name, tip)) => {
+                            if toolbar_button(ui, name, tip).clicked() {
+                                tool_clicked(shell, name);
+                            }
+                        }
+                    }
+                }
+            });
+        });
+}
+
+fn toolbar_separator(ui: &mut Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 28.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        (rect.center().y - 8.0)..=(rect.center().y + 8.0),
+        egui::Stroke::new(1.0, tokens::GAP),
+    );
+}
+
+fn toolbar_button(ui: &mut Ui, name: &str, tip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
+    let color = if tool_enabled(name) {
+        tokens::MUTED
+    } else {
+        tokens::FAINT
+    };
+    let mark = Rect::from_center_size(rect.center(), Vec2::splat(16.0));
+    if let Err(error) = icons::paint(ui.painter(), mark, name, color) {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            error.to_string(),
+            FontId::proportional(8.0),
+            tokens::FAINT,
+        );
     }
+    response.on_hover_text(tip)
+}
+
+fn tool_enabled(name: &str) -> bool {
+    matches!(
+        name,
+        "undo" | "redo" | "select" | "split" | "delete" | "zoomIn" | "zoomOut" | "zoomFit"
+    )
 }
 
 fn tool_clicked(shell: &mut Shell, name: &str) {
+    if !tool_enabled(name) || name == "select" {
+        return;
+    }
     let result = match name {
         "undo" => shell.undo(),
         "redo" => shell.redo(),
@@ -823,162 +972,487 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "zoomFit" => shell.zoom_fit(),
         "delete" => shell.remove_selected(),
         "split" => shell.split_selected(),
-        _ => {
-            shell.unavailable(name);
-            Ok(())
-        }
+        _ => Ok(()),
     };
     if let Err(error) = result {
         shell.set_notice(error.to_string());
     }
 }
 
-const TOOLS: &[(&str, &str)] = &[
-    ("undo", "Undo"),
-    ("redo", "Redo"),
-    ("select", "Select"),
-    ("split", "Split"),
-    ("delete", "Delete"),
-    ("freeze", "Freeze"),
-    ("reverse", "Reverse"),
-    ("mirror", "Mirror"),
-    ("rotate", "Rotate"),
-    ("crop", "Crop"),
-    ("transcribe", "Transcribe"),
-    ("splitScenes", "Split scenes"),
-    ("snap", "Snap"),
-    ("magnet", "Magnet"),
-    ("linkage", "Linkage"),
-    ("marker", "Marker"),
-    ("beat", "Beat"),
-    ("zoomIn", "Zoom in"),
-    ("zoomOut", "Zoom out"),
-    ("zoomFit", "Zoom to fit"),
-    ("guides", "Guides"),
-    ("lock", "Lock"),
+const TOOLS: &[Option<(&str, &str)>] = &[
+    Some(("undo", "Undo")),
+    Some(("redo", "Redo")),
+    None,
+    Some(("select", "Select")),
+    Some(("split", "Split")),
+    Some(("delete", "Delete")),
+    None,
+    Some(("freeze", "Freeze")),
+    Some(("reverse", "Reverse")),
+    Some(("mirror", "Mirror")),
+    Some(("rotate", "Rotate")),
+    Some(("crop", "Crop")),
+    Some(("transcribe", "Transcribe")),
+    Some(("splitScenes", "Split scenes")),
+    None,
+    Some(("marker", "Marker")),
+    Some(("beat", "Beat")),
+    None,
+    Some(("snap", "Snap")),
+    Some(("magnet", "Magnet")),
+    Some(("linkage", "Linkage")),
+    Some(("guides", "Guides")),
+    Some(("lock", "Lock")),
+    None,
+    Some(("zoomFit", "Zoom to fit")),
+    Some(("zoomOut", "Zoom out")),
+    Some(("zoomIn", "Zoom in")),
 ];
 
+fn paint_notice(ui: &Ui, toolbar: Rect, notice: &str) {
+    let galley = ui.ctx().fonts_mut(|fonts| {
+        fonts.layout_no_wrap(
+            notice.to_owned(),
+            FontId::proportional(12.0),
+            Color32::from_rgb(0x14, 0x14, 0x14),
+        )
+    });
+    let size = galley.size() + Vec2::new(24.0, 12.0);
+    let rect = Rect::from_center_size(
+        Pos2::new(toolbar.center().x, toolbar.bottom() + 18.0 + size.y / 2.0),
+        size,
+    );
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(99), Color32::WHITE);
+    ui.painter().galley(
+        rect.left_center() + Vec2::new(12.0, -galley.size().y / 2.0),
+        galley,
+        Color32::from_rgb(0x14, 0x14, 0x14),
+    );
+}
+
 fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
-    let cover = tokens::COVER_WIDTH;
     let ruler = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::RULER_HEIGHT));
-    let response = ui.allocate_rect(ruler, Sense::click());
-    if response.clicked() {
-        let x = f64::from(
-            response
-                .interact_pointer_pos()
-                .map(|pos| pos.x)
-                .unwrap_or(ruler.min.x)
-                - ruler.min.x
-                - cover,
+    let tracks = Rect::from_min_max(ruler.left_bottom(), rect.max);
+    let lanes_left = tracks.left() + tokens::TRACK_HEAD + tokens::COVER_WIDTH;
+    let lane_area = Rect::from_min_max(Pos2::new(lanes_left, tracks.top()), tracks.max);
+    paint_ticks(ui, ruler, lanes_left, shell.pixel_size());
+    let rows = shell.lanes();
+    let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
+    let boxes = lane_rects(flags, lane_area);
+    if rows.is_empty() {
+        paint_empty_main(ui, lane_area);
+    }
+    for (index, lane) in rows.iter().enumerate() {
+        let Some(row) = boxes.get(index).copied() else {
+            continue;
+        };
+        paint_lane(shell, ui, lane, row, lanes_left, index);
+    }
+    let playhead_x = lanes_left + shell.playhead().0 as f32 * shell.pixel_size() as f32;
+    if (lanes_left..=tracks.right()).contains(&playhead_x) {
+        let mark = Rect::from_center_size(
+            Pos2::new(playhead_x, ruler.bottom() - 6.0),
+            Vec2::new(11.0, 12.0),
         );
-        if let Err(error) = shell.seek_ruler(x.max(0.0)) {
+        let response = ui.interact(mark, ui.scope_id().with("playhead"), Sense::drag());
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let x = f64::from(pointer.x - lanes_left).max(0.0);
+            if let Err(error) = shell.seek_ruler(x) {
+                shell.set_notice(error.to_string());
+            }
+        }
+        ui.painter()
+            .rect_filled(mark, CornerRadius::same(2), tokens::PLAYHEAD);
+        ui.painter().vline(
+            playhead_x,
+            tracks.y_range(),
+            egui::Stroke::new(1.0, tokens::PLAYHEAD),
+        );
+        response.on_hover_text("Playhead");
+    }
+    let ruler_hit = ui.interact(
+        lane_ruler(ruler, lanes_left),
+        ui.scope_id().with("ruler"),
+        Sense::click(),
+    );
+    if ruler_hit.clicked()
+        && let Some(pointer) = ruler_hit.interact_pointer_pos()
+    {
+        let x = f64::from(pointer.x - lanes_left).max(0.0);
+        if let Err(error) = shell.seek_ruler(x) {
             shell.set_notice(error.to_string());
         }
     }
+    shell.set_lane_width(lane_area.width().max(1.0));
+}
+
+fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
+    Rect::from_min_max(Pos2::new(lanes_left, ruler.top()), ruler.max)
+}
+
+fn paint_ticks(ui: &Ui, ruler: Rect, lanes_left: f32, pixel_size: f64) {
+    if !pixel_size.is_finite() || pixel_size <= 0.0 {
+        return;
+    }
+    let step = tick_step(pixel_size);
+    let width = f64::from(ruler.right() - lanes_left);
+    let mut time = 0.0;
+    while time * pixel_size <= width {
+        let x = lanes_left + (time * pixel_size) as f32;
+        ui.painter().vline(
+            x,
+            (ruler.bottom() - 12.0)..=ruler.bottom(),
+            egui::Stroke::new(1.0, tokens::MUTED),
+        );
+        ui.painter().text(
+            Pos2::new(x + 4.0, ruler.bottom() - 14.0),
+            Align2::LEFT_BOTTOM,
+            ruler_label(time),
+            FontId::proportional(10.0),
+            tokens::FAINT,
+        );
+        let minor = time + step / 2.0;
+        let minor_x = lanes_left + (minor * pixel_size) as f32;
+        if minor * pixel_size <= width && minor_x - x >= 8.0 {
+            ui.painter().vline(
+                minor_x,
+                (ruler.bottom() - 6.0)..=ruler.bottom(),
+                egui::Stroke::new(1.0, tokens::MUTED),
+            );
+        }
+        time += step;
+        if step <= 0.0 {
+            break;
+        }
+    }
+}
+
+fn tick_step(pixel_size: f64) -> f64 {
+    const STEPS: [f64; 12] = [
+        1_000_000.0 / 30.0,
+        1_000_000.0 / 15.0,
+        1_000_000.0 / 6.0,
+        1_000_000.0,
+        2_000_000.0,
+        5_000_000.0,
+        10_000_000.0,
+        30_000_000.0,
+        60_000_000.0,
+        300_000_000.0,
+        600_000_000.0,
+        1_800_000_000.0,
+    ];
+    STEPS
+        .into_iter()
+        .find(|step| step * pixel_size >= 72.0)
+        .unwrap_or(STEPS[STEPS.len() - 1])
+}
+
+fn ruler_label(micros: f64) -> String {
+    let total = (micros / 1_000_000.0).floor();
+    if !total.is_finite() || total < 0.0 {
+        return String::new();
+    }
+    let total = total as i64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn paint_empty_main(ui: &Ui, area: Rect) {
+    let height = 64.0;
+    let lane = Rect::from_min_size(
+        Pos2::new(area.left(), area.center().y - height / 2.0),
+        Vec2::new(area.width(), height),
+    );
+    ui.painter()
+        .rect_filled(lane, CornerRadius::ZERO, tokens::LANE);
+    ui.painter().rect_stroke(
+        lane,
+        CornerRadius::ZERO,
+        egui::Stroke::new(1.0, tokens::LANE_LINE),
+        egui::StrokeKind::Inside,
+    );
     ui.painter().text(
-        ruler.left_center() + Vec2::new(8.0, 0.0),
+        lane.left_center() + Vec2::new(14.0, 0.0),
         Align2::LEFT_CENTER,
-        shell.timecode(),
-        FontId::monospace(tokens::TIMECODE_SIZE),
+        "Import a file",
+        FontId::proportional(12.0),
         tokens::MUTED,
     );
-    let mut y = ruler.max.y;
-    for lane in shell.lanes() {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.min.x, y),
-            Vec2::new(rect.width(), tokens::LANE_HEIGHT as f32),
+    paint_lane_head(ui, lane, "media", "Main");
+}
+
+fn paint_lane(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    lanes_left: f32,
+    index: usize,
+) {
+    let fill = if lane.main {
+        tokens::LANE
+    } else {
+        tokens::PANEL
+    };
+    ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
+    if lane.main && lane.clips.is_empty() {
+        ui.painter().rect_stroke(
+            row,
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, tokens::LANE_LINE),
+            egui::StrokeKind::Inside,
         );
-        let header = Rect::from_min_size(row.min, Vec2::new(cover, row.height()));
-        ui.scope_builder(egui::UiBuilder::new().max_rect(header.shrink(2.0)), |ui| {
-            let press = widgets::lane_header(
-                ui,
-                HeaderFlags {
-                    mute: lane.mute,
-                    hide: lane.hide,
-                    lock: lane.lock,
-                    solo: lane.solo,
-                },
-            );
-            let track = lane.track_id.clone();
-            if press.mute
-                && let Err(error) =
-                    shell.toggle_attribute(track.clone(), cutlass_model::TrackAttribute::MUTE)
-            {
-                shell.set_notice(error.to_string());
-            }
-            if press.hide
-                && let Err(error) =
-                    shell.toggle_attribute(track.clone(), cutlass_model::TrackAttribute::HIDE)
-            {
-                shell.set_notice(error.to_string());
-            }
-            if press.lock
-                && let Err(error) =
-                    shell.toggle_attribute(track.clone(), cutlass_model::TrackAttribute::LOCK)
-            {
-                shell.set_notice(error.to_string());
-            }
-            if press.solo
-                && let Err(error) =
-                    shell.toggle_attribute(track, cutlass_model::TrackAttribute::SOLO)
-            {
-                shell.set_notice(error.to_string());
-            }
-        });
-        for clip in lane.clips {
-            let x = rect.min.x + cover + (clip.start.0 as f32) * shell.pixel_size() as f32;
-            let width = (clip.duration.0 as f32) * shell.pixel_size() as f32;
-            let clip_rect = Rect::from_min_size(
-                Pos2::new(x, row.min.y + 6.0),
-                Vec2::new(width.max(8.0), row.height() - 12.0),
-            );
-            let selected = shell.selected().is_some_and(|id| id == &clip.id);
-            let stroke = if selected {
-                egui::Stroke::new(tokens::SELECTED_EDGE, tokens::SELECTED)
-            } else {
-                egui::Stroke::NONE
-            };
-            ui.painter().rect(
-                clip_rect,
-                CornerRadius::same(4),
-                tokens::ICON_BUTTON,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            let response = ui.allocate_rect(clip_rect, Sense::click_and_drag());
-            let span = format!(
-                "{}  {}–{}",
-                clip.name,
-                shell.timecode_at(clip.start),
-                shell.timecode_at(cutlass_model::Micros(
-                    clip.start.0.saturating_add(clip.duration.0)
-                ))
-            );
-            response.clone().on_hover_text(span);
-            if response.clicked() {
-                shell.select(Some(clip.id.clone()));
-            }
-            if response.drag_stopped()
-                && let Some(pos) = response.interact_pointer_pos()
-            {
-                let x = f64::from(pos.x - rect.min.x - cover).max(0.0);
-                let y = f64::from(pos.y - ruler.max.y).max(0.0);
-                if let Err(error) = shell.drag_segment(clip.id.clone(), x, y) {
-                    shell.set_notice(error.to_string());
-                }
-            }
-        }
-        y += tokens::LANE_HEIGHT as f32;
+        ui.painter().text(
+            row.left_center() + Vec2::new(14.0, 0.0),
+            Align2::LEFT_CENTER,
+            "Import a file",
+            FontId::proportional(12.0),
+            tokens::MUTED,
+        );
     }
-    let playhead_x = rect.min.x + cover + shell.playhead().0 as f32 * shell.pixel_size() as f32;
-    ui.painter().line_segment(
-        [
-            Pos2::new(playhead_x, rect.min.y),
-            Pos2::new(playhead_x, rect.max.y),
-        ],
-        egui::Stroke::new(1.0, tokens::PLAYHEAD),
+    let name = lane_name(&lane.kind, lane.main);
+    paint_lane_head(ui, row, lane_icon(&lane.kind), &name);
+    let lock = Rect::from_center_size(
+        Pos2::new(row.left() - tokens::COVER_WIDTH - 18.0, row.center().y),
+        Vec2::splat(24.0),
     );
-    shell.set_lane_width((rect.width() - cover).max(1.0));
+    let lock_response = ui.interact(lock, ui.scope_id().with(("lock", index)), Sense::click());
+    if lock_response.clicked()
+        && let Err(error) =
+            shell.toggle_attribute(lane.track_id.clone(), cutlass_model::TrackAttribute::LOCK)
+    {
+        shell.set_notice(error.to_string());
+    }
+    let _ = icons::paint(
+        ui.painter(),
+        Rect::from_center_size(lock.center(), Vec2::splat(14.0)),
+        "lock",
+        if lane.lock {
+            tokens::TEXT
+        } else {
+            tokens::FAINT
+        },
+    );
+    lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
+    lane_switches(shell, ui, lane, row, index);
+    for clip in &lane.clips {
+        paint_clip(shell, ui, lane, clip, row, lanes_left, index);
+    }
+}
+
+fn paint_lane_head(ui: &Ui, row: Rect, icon: &str, label: &str) {
+    let center = Pos2::new(
+        row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH + 22.0,
+        row.center().y,
+    );
+    let _ = icons::paint(
+        ui.painter(),
+        Rect::from_center_size(center, Vec2::splat(16.0)),
+        icon,
+        tokens::MUTED,
+    );
+    ui.painter().text(
+        Pos2::new(center.x + 14.0, center.y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        tokens::MUTED,
+    );
+}
+
+fn lane_switches(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    index: usize,
+) {
+    let origin = Pos2::new(row.left() - tokens::COVER_WIDTH + 4.0, row.center().y - 8.0);
+    for (offset, label, on, bit) in [
+        (0.0, "M", lane.mute, cutlass_model::TrackAttribute::MUTE),
+        (18.0, "H", lane.hide, cutlass_model::TrackAttribute::HIDE),
+        (36.0, "S", lane.solo, cutlass_model::TrackAttribute::SOLO),
+    ] {
+        let rect = Rect::from_min_size(origin + Vec2::new(offset, 0.0), Vec2::splat(16.0));
+        let response = ui.interact(rect, ui.scope_id().with((label, index)), Sense::click());
+        if response.clicked()
+            && let Err(error) = shell.toggle_attribute(lane.track_id.clone(), bit)
+        {
+            shell.set_notice(error.to_string());
+        }
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(10.0),
+            if on { tokens::TEXT } else { tokens::FAINT },
+        );
+        response.on_hover_text(match label {
+            "M" => "Mute",
+            "H" => "Hide",
+            _ => "Solo",
+        });
+    }
+}
+
+fn paint_clip(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    lane: &crate::shell::LaneView,
+    clip: &crate::shell::ClipSpan,
+    row: Rect,
+    lanes_left: f32,
+    index: usize,
+) {
+    let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let x = lanes_left + clip.start.0 as f32 * shell.pixel_size() as f32;
+    let width = (clip.duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
+    let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
+    let selected = shell.selected().is_some_and(|id| id == &clip.id);
+    ui.painter()
+        .rect_filled(clip_rect, CornerRadius::same(7), lane_color(&lane.kind));
+    if selected {
+        ui.painter().rect_stroke(
+            clip_rect,
+            CornerRadius::same(7),
+            egui::Stroke::new(1.5, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let painter = ui.painter().with_clip_rect(clip_rect.shrink(6.0));
+    painter.text(
+        clip_rect.left_center() + Vec2::new(8.0, 0.0),
+        Align2::LEFT_CENTER,
+        &clip.name,
+        FontId::proportional(11.0),
+        Color32::WHITE,
+    );
+    let response = ui.interact(
+        clip_rect,
+        ui.scope_id().with(("clip", index, clip.id.as_str())),
+        Sense::click_and_drag(),
+    );
+    let span = format!(
+        "{} · {}–{}",
+        clip.name,
+        shell.timecode_at(clip.start),
+        shell.timecode_at(cutlass_model::Micros(
+            clip.start.0.saturating_add(clip.duration.0)
+        ))
+    );
+    response.clone().on_hover_text(span);
+    if response.clicked() {
+        shell.select(Some(clip.id.clone()));
+    }
+    if response.drag_stopped()
+        && let Some(pos) = response.interact_pointer_pos()
+    {
+        let x = f64::from(pos.x - lanes_left).max(0.0);
+        let y = f64::from(u32::try_from(index).unwrap_or(0)) * tokens::LANE_HEIGHT
+            + tokens::LANE_HEIGHT / 2.0;
+        if let Err(error) = shell.drag_segment(clip.id.clone(), x, y) {
+            shell.set_notice(error.to_string());
+        }
+    }
+}
+
+fn lane_rects(main_flags: Vec<bool>, area: Rect) -> Vec<Rect> {
+    let Some(main) = main_flags.iter().position(|main| *main) else {
+        return main_flags
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Rect::from_min_size(
+                    Pos2::new(area.left(), area.top() + index as f32 * 48.0),
+                    Vec2::new(area.width(), 40.0),
+                )
+            })
+            .collect();
+    };
+    let height = |index: usize| if main_flags[index] { 64.0 } else { 40.0 };
+    let mut tops = vec![0.0; main_flags.len()];
+    tops[main] = area.center().y - height(main) / 2.0;
+    let mut y = tops[main];
+    for index in (0..main).rev() {
+        y -= 8.0 + height(index);
+        tops[index] = y;
+    }
+    y = tops[main] + height(main);
+    let mut index = main + 1;
+    while index < main_flags.len() {
+        y += 8.0;
+        tops[index] = y;
+        y += height(index);
+        index += 1;
+    }
+    tops.into_iter()
+        .enumerate()
+        .map(|(index, top)| {
+            Rect::from_min_size(
+                Pos2::new(area.left(), top),
+                Vec2::new(area.width().max(0.0), height(index)),
+            )
+        })
+        .collect()
+}
+
+fn lane_name(kind: &cutlass_model::TrackType, main: bool) -> String {
+    if main {
+        return "Main".to_owned();
+    }
+    match kind {
+        cutlass_model::TrackType::Audio => "Audio",
+        cutlass_model::TrackType::Text
+        | cutlass_model::TrackType::TextToVideoText
+        | cutlass_model::TrackType::TextToVideoTextAudio => "Text",
+        cutlass_model::TrackType::Sticker => "Sticker",
+        cutlass_model::TrackType::Effect | cutlass_model::TrackType::PluginEffect => "Effect",
+        cutlass_model::TrackType::Filter => "Filter",
+        cutlass_model::TrackType::Adjust => "Adjust",
+        cutlass_model::TrackType::Other(name) => return name.clone(),
+        _ => "Video",
+    }
+    .to_owned()
+}
+
+fn lane_icon(kind: &cutlass_model::TrackType) -> &'static str {
+    match kind {
+        cutlass_model::TrackType::Audio => "audio",
+        cutlass_model::TrackType::Text
+        | cutlass_model::TrackType::TextToVideoText
+        | cutlass_model::TrackType::TextToVideoTextAudio => "text",
+        cutlass_model::TrackType::Sticker => "stickers",
+        cutlass_model::TrackType::Effect | cutlass_model::TrackType::PluginEffect => "effects",
+        cutlass_model::TrackType::Filter => "filters",
+        cutlass_model::TrackType::Adjust => "adjustments",
+        _ => "media",
+    }
+}
+
+fn lane_color(kind: &cutlass_model::TrackType) -> Color32 {
+    match kind {
+        cutlass_model::TrackType::Audio => Color32::from_rgb(0x4e, 0x8f, 0x7c),
+        cutlass_model::TrackType::Text
+        | cutlass_model::TrackType::TextToVideoText
+        | cutlass_model::TrackType::TextToVideoTextAudio => Color32::from_rgb(0x9a, 0x86, 0xb0),
+        cutlass_model::TrackType::Sticker => Color32::from_rgb(0xc4, 0xa1, 0x5a),
+        cutlass_model::TrackType::Effect | cutlass_model::TrackType::PluginEffect => {
+            Color32::from_rgb(0xc4, 0x7a, 0x5a)
+        }
+        cutlass_model::TrackType::Filter => Color32::from_rgb(0x6a, 0x8f, 0x72),
+        cutlass_model::TrackType::Adjust => Color32::from_rgb(0x8a, 0x7e, 0x9a),
+        _ => Color32::from_rgb(0x5b, 0x8a, 0xa3),
+    }
 }
 
 fn export_dialog(
@@ -1150,10 +1624,6 @@ fn file_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
-fn format_duration(micros: i64) -> String {
-    format!("{micros} µs")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1181,12 +1651,15 @@ mod tests {
         assert!(shell.chrome.transport);
         assert!(shell.chrome.export);
         assert!(!shell.chrome.close_requested);
-        assert!(!ctx.global_style().interaction.selectable_labels);
         let painted = painted_text(&output);
+        assert!(painted.contains("Details"), "{painted}");
+        assert!(painted.contains("Main"), "{painted}");
+        assert!(painted.contains("Untitled"), "{painted}");
         assert!(
             painted.contains("Open a project, then import a file."),
             "{painted}"
         );
+        assert!(!ctx.global_style().interaction.selectable_labels);
         output.textures_delta.clear();
     }
 

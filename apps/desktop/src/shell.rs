@@ -93,6 +93,7 @@ pub struct Picture {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaneView {
     pub track_id: TrackId,
+    pub kind: TrackType,
     pub main: bool,
     pub mute: bool,
     pub hide: bool,
@@ -222,6 +223,10 @@ impl Shell {
 
     pub fn set_scrub_audio(&mut self, value: bool) {
         self.settings.playback.scrub_audio = value;
+    }
+
+    pub fn project_folder(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     pub fn project_name(&self) -> String {
@@ -362,6 +367,7 @@ impl Shell {
                     .collect();
                 Some(LaneView {
                     track_id: lane.track_id,
+                    kind: lane.kind,
                     main: lane.main,
                     mute: bit(track.attribute, TrackAttribute::MUTE),
                     hide: bit(track.attribute, TrackAttribute::HIDE),
@@ -756,7 +762,7 @@ impl Shell {
     }
 
     pub fn drag_timeline(&mut self, delta_y: f32, window_height: f32) {
-        let chrome = tokens::HEAD_HEIGHT + tokens::SPLIT * 2.0 + tokens::PREVIEW_MIN_HEIGHT;
+        let chrome = tokens::HEAD_HEIGHT + tokens::SPLIT + tokens::PREVIEW_MIN_HEIGHT;
         let max_timeline = (window_height - chrome).max(tokens::TIMELINE_MIN);
         self.timeline_height =
             (self.timeline_height - delta_y).clamp(tokens::TIMELINE_MIN, max_timeline);

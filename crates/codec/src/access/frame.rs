@@ -121,6 +121,10 @@ pub struct VideoFrame {
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
     pub matrix: MatrixCoefficients,
+    /// Display width. Equal to [`Self::width`] when the frame names no other size.
+    pub render_width: u32,
+    /// Display height. Equal to [`Self::height`] when the frame names no other size.
+    pub render_height: u32,
 }
 
 impl VideoFrame {
@@ -164,6 +168,8 @@ impl VideoFrame {
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
             matrix: MatrixCoefficients::Unspecified,
+            render_width: width,
+            render_height: height,
         })
     }
 
@@ -211,6 +217,8 @@ impl VideoFrame {
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
             matrix: MatrixCoefficients::Unspecified,
+            render_width: width,
+            render_height: height,
         })
     }
 

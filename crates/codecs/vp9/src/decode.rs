@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_decode::video::{VideoDecoder, VideoOutput};
-use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, Plane, VideoFrame};
+use cutlass_decode::{
+    CodecError, CodecId, CodecParams, ColorPrimaries, ColorRange, MatrixCoefficients, Packet,
+    Plane, Transfer, VideoFrame,
+};
 use cutlass_encode::PixelFormat;
 
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
@@ -263,6 +266,8 @@ fn picture_from<P: Pix>(reference: &Reference<P>) -> Picture {
         color_space: reference.color_space,
         color_range: reference.color_range,
         bit_depth: reference.bit_depth,
+        render_width: reference.render_width,
+        render_height: reference.render_height,
     }
 }
 
@@ -446,14 +451,58 @@ fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
             Plane::bytes(width, height, sample_bytes, samples)
         }
     };
-    VideoFrame::planar(
+    let mut frame = VideoFrame::planar(
         format,
         picture.width,
         picture.height,
         plane(picture.width, picture.height, picture.y.clone())?,
         plane(chroma_w, chroma_h, picture.u.clone())?,
         plane(chroma_w, chroma_h, picture.v.clone())?,
-    )
+    )?;
+    let (range, primaries, transfer, matrix) = color_of(picture.color_space, picture.color_range);
+    frame.range = range;
+    frame.primaries = primaries;
+    frame.transfer = transfer;
+    frame.matrix = matrix;
+    frame.render_width = picture.render_width;
+    frame.render_height = picture.render_height;
+    Ok(frame)
+}
+
+fn color_of(space: u8, range: u8) -> (ColorRange, ColorPrimaries, Transfer, MatrixCoefficients) {
+    let range = if range == 0 {
+        ColorRange::Studio
+    } else {
+        ColorRange::Full
+    };
+    let (primaries, transfer, matrix) = match space {
+        1 | 3 => (
+            ColorPrimaries::Bt601,
+            Transfer::Bt601,
+            MatrixCoefficients::Bt601,
+        ),
+        2 => (
+            ColorPrimaries::Bt709,
+            Transfer::Bt709,
+            MatrixCoefficients::Bt709,
+        ),
+        5 => (
+            ColorPrimaries::Bt2020,
+            Transfer::Bt2020,
+            MatrixCoefficients::Bt2020,
+        ),
+        7 => (
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+            MatrixCoefficients::Rgb,
+        ),
+        _ => (
+            ColorPrimaries::Unspecified,
+            Transfer::Unspecified,
+            MatrixCoefficients::Unspecified,
+        ),
+    };
+    (range, primaries, transfer, matrix)
 }
 
 fn split_superframe(data: &[u8]) -> Result<Vec<&[u8]>, CodecError> {

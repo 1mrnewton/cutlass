@@ -91,6 +91,8 @@ pub enum MatrixCoefficients {
     Bt709,
     /// ITU-R BT.601.
     Bt601,
+    /// ITU-R BT.2020.
+    Bt2020,
     /// Identity / RGB, stored only as a tag.
     Rgb,
 }

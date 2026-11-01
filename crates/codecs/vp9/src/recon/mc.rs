@@ -50,6 +50,8 @@ pub struct Reference<P: Pix = u8> {
     pub color_space: u8,
     pub color_range: u8,
     pub bit_depth: u8,
+    pub render_width: u32,
+    pub render_height: u32,
 }
 
 pub struct RefSlots<'a, P: Pix = u8> {
@@ -85,6 +87,8 @@ impl<P: Pix> Reference<P> {
             color_space: pic.color_space,
             color_range: pic.color_range,
             bit_depth: pic.bit_depth,
+            render_width: pic.render_width,
+            render_height: pic.render_height,
         })
     }
 }

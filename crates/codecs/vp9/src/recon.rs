@@ -62,6 +62,8 @@ pub struct Picture {
     pub color_space: u8,
     pub color_range: u8,
     pub bit_depth: u8,
+    pub render_width: u32,
+    pub render_height: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1436,6 +1438,8 @@ impl<'a, P: Pix> Scratch<'a, P> {
             color_space: self.header.color_space,
             color_range: self.header.color_range,
             bit_depth: self.header.bit_depth,
+            render_width: self.header.render_width,
+            render_height: self.header.render_height,
         })
     }
 }

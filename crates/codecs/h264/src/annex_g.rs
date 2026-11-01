@@ -1072,6 +1072,48 @@ fn a_coded_depth_motion_vector_cancels_the_base_motion() {
 }
 
 #[test]
+fn a_b_slice_depth_motion_vector_cancels_the_base_motion() {
+    let base_idr = dmvp_base_idr();
+    let other_idr = dmvp_other_idr();
+    let base_p = dmvp_base_p();
+    let coded = dmvp_coded_b(true);
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base_idr, &other_idr, &base_p, &coded] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| copied_depth(picture))
+            .count(),
+        2
+    );
+    assert!(pictures.iter().any(shifted_residual_picture));
+    assert!(pictures.iter().all(|picture| !painted(picture, 220, 50)));
+    assert!(pictures.iter().all(|picture| !painted(picture, 40, 50)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &coded).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let mut decoder = open();
+    for annex in [&base_idr, &other_idr, &base_p] {
+        let _ = push_pictures(&mut decoder, annex);
+    }
+    let err = decoder
+        .push(&Packet::video(dmvp_coded_b(false), 0, 1, 30, false))
+        .expect_err("flag");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn an_8x8_depth_motion_vector_cancels_the_base_motion() {
     let base_idr = dmvp_base_idr();
     let other_idr = dmvp_other_idr();
@@ -1265,6 +1307,37 @@ fn dmvp_skip(flag: bool) -> Vec<u8> {
         w.ue(0);
     }
     w.ue(1);
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn dmvp_b_header(w: &mut Writer, frame_num: u32, poc: u32) {
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.bits(frame_num, 4);
+    w.bits(poc, 4);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+}
+
+fn dmvp_coded_b(flag: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    dmvp_b_header(&mut w, 1, 1);
+    w.bit(flag);
+    if flag {
+        w.ue(0);
+        w.ue(0);
+        w.ue(1);
+        w.se(-32);
+        w.se(0);
+        w.ue(0);
+    }
     w.trailing();
     annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
 }

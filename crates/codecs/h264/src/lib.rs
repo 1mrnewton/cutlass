@@ -25,7 +25,7 @@
 //! An intra 3D-AVC picture is reconstructed. A predicted depth picture copies
 //! its reference when `depth_weighted_pred_flag` is 0. A different depth range
 //! scales that luma. An intra depth slice can copy its header from the texture
-//! slice. A one-macroblock texture P picture can use the base view's motion,
+//! slice. A one-macroblock texture P or B picture can use the base view's motion,
 //! including an 8×8, 8×4, 4×8, or 4×4 partition, and a coded difference is added to that predictor.
 //! The other 3D tools stay refused.
 //!

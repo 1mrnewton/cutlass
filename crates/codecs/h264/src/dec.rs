@@ -2596,7 +2596,7 @@ fn read_header(
     if let Some(three) = three {
         // A texture slice that is not intra carries DMVP. A depth slice that
         // is not intra carries `depth_weighted_pred_flag` after this header.
-        if !sps.avc_3d || (!three.depth && !intra_slice(kind) && kind != 0) {
+        if !sps.avc_3d || (!three.depth && !intra_slice(kind) && kind > 1) {
             return Err(CodecError::Unsupported { what: "3d" });
         }
         let index = usize::from(three.view_idx);
@@ -2645,8 +2645,8 @@ fn read_header(
         }
     }
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
-    // depth slice. The ranges scale list-0 luma. A texture P slice reads
-    // `dmvp_flag` instead. Flag 0 and a B slice stay refused.
+    // depth slice. The ranges scale list-0 luma. A texture P or B slice reads
+    // `dmvp_flag` instead. Flag 0 stays refused.
     let mut depth_weight = false;
     let mut dps_id = 0u8;
     let mut dmvp = false;
@@ -2668,7 +2668,7 @@ fn read_header(
             }
         }
     }
-    if three.is_some_and(|header| !header.depth) && kind == 0 {
+    if three.is_some_and(|header| !header.depth) && kind <= 1 {
         dmvp = bits.bit()?;
         if !dmvp {
             return Err(CodecError::Unsupported { what: "3d" });

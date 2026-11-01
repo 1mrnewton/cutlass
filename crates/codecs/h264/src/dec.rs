@@ -286,6 +286,21 @@ impl<S: Sample> Frame<S> {
             self.levels[base + pos] = coeffs.get(n).copied().unwrap_or(0);
         }
     }
+
+    /// Raster luma levels for one 8×8. `coeffs` is zigzag order. The four
+    /// blocks occupy the same 256 slots as the 4×4 levels.
+    pub(crate) fn note_luma8(&mut self, slot: usize, block: usize, coeffs: &[i32]) {
+        if block >= 4 {
+            return;
+        }
+        let base = slot.saturating_mul(256).saturating_add(block * 64);
+        if self.levels.len() < base + 64 {
+            return;
+        }
+        for (n, &pos) in ZIGZAG8.iter().enumerate() {
+            self.levels[base + pos] = coeffs.get(n).copied().unwrap_or(0);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3074,9 +3089,9 @@ struct InterLayer {
 /// that window. A negative offset shifts it. A crop that differs on the reference
 /// picture adds that difference to the scaled vector. Macroblock-level spatial
 /// scalability reads the crop from the slice. A sequence coefficient flag
-/// rescales a reference-layer 4×4 luma level at this slice's QP. An adaptive
-/// flag that is set stays refused. Chroma, 8×8, and Intra_16×16 levels stay
-/// on the sample residual.
+/// rescales a reference-layer 4×4 or 8×8 luma level. An uncoded enhancement
+/// keeps the reference QP. An adaptive flag that is set stays refused. Chroma
+/// and Intra_16×16 levels stay on the sample residual.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,

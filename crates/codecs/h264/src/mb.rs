@@ -2248,9 +2248,10 @@ fn add_layer_residual<S: Sample>(
     Ok(())
 }
 
-/// G.8.5.2 then G.8.5.1 for one inter 4×4 macroblock. The reference layer's luma
-/// levels are rescaled from its QP to this macroblock's QP, this slice's 4×4
-/// levels are added, and one inverse transform updates the prediction.
+/// G.8.5.2 then G.8.5.1 for one inter macroblock. The reference layer's luma
+/// levels are rescaled from its QP to this macroblock's QP, this slice's levels
+/// are added, and one inverse 4×4 or 8×8 transform updates the prediction.
+/// A macroblock that codes no residual keeps the reference QP.
 fn add_tcoeff_residual<S: Sample>(
     pic: &mut Frame<S>,
     layer: &Frame<S>,
@@ -2278,7 +2279,7 @@ fn add_tcoeff_residual<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if reference_mb.intra || reference_mb.transform8 || reference_mb.intra16 {
+    if reference_mb.intra || reference_mb.intra16 {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2296,13 +2297,44 @@ fn add_tcoeff_residual<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if current.transform8 || current.intra16 {
+    if current.intra16 || reference_mb.transform8 != current.transform8 {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
     }
     let ref_qp = i32::from(reference_mb.qp);
-    let cur_qp = i32::from(current.qp);
+    // No coded residual: tQPY is the reference macroblock's QP.
+    let cur_qp = if current.cbp == 0 {
+        ref_qp
+    } else {
+        i32::from(current.qp)
+    };
+    let eight = current.transform8;
+    if eight {
+        let weight = slice.pps.weight8[1];
+        for i in 0..4 {
+            let mut block = [0i32; 64];
+            for k in 0..64 {
+                let at = start + i * 64 + k;
+                let level =
+                    rescale_level(layer.levels[at], ref_qp, cur_qp)?.saturating_add(pic.levels[at]);
+                let (ry, rx) = (k / 8, k % 8);
+                block[k] = recon::scale8(level, cur_qp + S::QP_BD, rx, ry, i32::from(weight[k]));
+            }
+            recon::idct8(&mut block);
+            let span = luma_span(my, false);
+            recon::add_block(
+                &mut pic.y,
+                pic.w,
+                mx * 16 + (i & 1) * 8,
+                span.at((i >> 1) * 8),
+                &block,
+                8,
+                span.step,
+            );
+        }
+        return Ok(());
+    }
     let weight = slice.pps.weight4[3];
     for i in 0..16 {
         let mut block = [0i32; 16];
@@ -6777,7 +6809,7 @@ fn decode_inter<S: Sample>(
     mb.qpd = delta as i8;
     predict_inter(pic, dpb, slice, mx, my, mb)?;
     let merge = residual && slice.tcoeff;
-    if merge && (mb.transform8 || mb.field_mb || slice.sps.chroma != 1) {
+    if merge && (mb.field_mb || slice.sps.chroma != 1) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -6804,15 +6836,20 @@ fn decode_inter<S: Sample>(
                 let bx = (i & 1) * 8;
                 let by = (i >> 1) * 8;
                 let span = luma_span(my, mb.field_mb);
-                super::add_scaled(
-                    &mut pic.y,
-                    pic.w,
-                    (mx * 16 + bx, span.at(by), span.step),
-                    &block,
-                    (*qp, qp_bypass::<S>(slice, *qp)),
-                    &slice.pps.weight8[1],
-                    8,
-                );
+                if !pic.levels.is_empty() {
+                    pic.note_luma8(my * pic.mb_w + mx, i, &block);
+                }
+                if !merge {
+                    super::add_scaled(
+                        &mut pic.y,
+                        pic.w,
+                        (mx * 16 + bx, span.at(by), span.step),
+                        &block,
+                        (*qp, qp_bypass::<S>(slice, *qp)),
+                        &slice.pps.weight8[1],
+                        8,
+                    );
+                }
             }
         }
     } else {

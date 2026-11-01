@@ -155,7 +155,7 @@ fn inter_layer_motion_predicts_from_the_reference() {
 }
 
 #[test]
-fn a_base_coefficient_is_rescaled_at_the_enhancement_qp() {
+fn an_uncoded_enhancement_rescales_at_the_base_qp() {
     let parsed = parse_subset_sps(&tcoeff_layer()).expect("subset");
     assert!(parsed.seq_tcoeff);
     assert!(!parsed.adaptive_tcoeff);
@@ -168,10 +168,45 @@ fn a_base_coefficient_is_rescaled_at_the_enhancement_qp() {
     let mut decoder = open();
     let _ = decode_with(&mut decoder, &idr);
     let picture = decode_with(&mut decoder, &tcoeff_packet());
-    assert!(tcoeff_picture(&picture));
+    assert!(base_residual_picture(&picture));
     if let Some(ffmpeg) = ffmpeg_bin() {
         let mut layered = idr.clone();
         layered.extend(tcoeff_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_eq!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
+fn an_8x8_base_level_is_rescaled_at_the_enhancement_qp() {
+    let parsed = parse_subset_sps(&high_tcoeff_subset()).expect("subset");
+    assert!(parsed.seq_tcoeff);
+    assert!(!parsed.adaptive_tcoeff);
+    let idr = eight_tcoeff_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(painted(&first, 150, 90));
+    let base = decode_with(&mut decoder, &annex_b_nal(0, 1, &eight_p_slice()));
+    assert!(
+        eight_base_picture(&base),
+        "row {:?}",
+        &base.picture.y()[..16]
+    );
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &eight_tcoeff_packet());
+    assert!(
+        eight_tcoeff_picture(&picture),
+        "row {:?}",
+        &picture.picture.y()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(eight_tcoeff_packet());
         let raw = ffmpeg_raw(&ffmpeg, &layered);
         let frame = 16 * 16 + 8 * 8 * 2;
         assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
@@ -4725,25 +4760,36 @@ fn residual_enhancement() -> Vec<u8> {
     w.bytes
 }
 
-fn tcoeff_picture(picture: &VideoOutput) -> bool {
+fn eight_block(y: &[u8], row0: usize, col0: usize, sample: u8) -> bool {
+    (0..8).all(|row| (0..8).all(|col| y[(row0 + row) * 16 + col0 + col] == sample))
+}
+
+fn eight_base_picture(picture: &VideoOutput) -> bool {
     let y = picture.picture.y();
-    (0..16).all(|row| {
-        (0..16).all(|col| {
-            let want = if row < 4 && col < 4 {
-                102
-            } else if col < 8 {
-                100
-            } else {
-                180
-            };
-            y[row * 16 + col] == want
-        })
-    }) && picture
-        .picture
-        .u()
-        .iter()
-        .chain(picture.picture.v())
-        .all(|sample| *sample == 90)
+    eight_block(y, 0, 0, 152)
+        && eight_block(y, 0, 8, 150)
+        && eight_block(y, 8, 0, 150)
+        && eight_block(y, 8, 8, 150)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
+}
+
+fn eight_tcoeff_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    eight_block(y, 0, 0, 151)
+        && eight_block(y, 0, 8, 150)
+        && eight_block(y, 8, 0, 150)
+        && eight_block(y, 8, 8, 151)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
 }
 
 fn split_luma(picture: &VideoOutput, left: u8, right: u8) -> bool {
@@ -5734,6 +5780,55 @@ fn eight_base_slice() -> Vec<u8> {
     w.se(0);
     w.se(0);
     w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn eight_tcoeff_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &high_tcoeff_subset()));
+    out.extend(annex_b_nal(3, 8, &pps_8x8()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(150, 90)));
+    out
+}
+
+fn eight_tcoeff_packet() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &eight_p_slice());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &eight_tcoeff_enhancement(),
+    ));
+    out
+}
+
+fn eight_tcoeff_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    qp_header(&mut w, -4);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(5);
+    w.bit(true);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
     w.trailing();
     w.bytes
 }
@@ -6838,6 +6933,23 @@ fn high_sps_width(width_minus1: u32) -> Vec<u8> {
 
 fn high_subset() -> Vec<u8> {
     high_subset_width(0)
+}
+
+fn high_tcoeff_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(86, 8);
+    high_body(&mut w, 0);
+    w.bit(true);
+    w.bits(0, 2);
+    w.bit(false);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
 }
 
 fn high_subset_width(width_minus1: u32) -> Vec<u8> {

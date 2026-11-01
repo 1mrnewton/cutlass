@@ -69,11 +69,14 @@
 //! A 48×16 B picture copies its reference from one skip bin. That reference is
 //! luma 40, then 180, then 40, and chroma 90. A skip flag on every macroblock
 //! runs out of bins.
-//! A same-size enhancement with `seq_tcoeff_level_prediction_flag` 1 rescales
-//! the base's luma DC level of 1 from QP 26 to QP 22. The level stays 1 and the
-//! top-left 4×4 becomes 102. The rest of the luma stays 100 and 180, and chroma
-//! stays 90. The base's top-left 4×4 is 103. FFmpeg emits the base and does not
-//! decode the enhancement.
+//! A same-size enhancement that codes no residual keeps the base QP. The
+//! rescaled DC level stays 1, so the top-left 4×4 stays 103, the rest of the
+//! luma stays 100 and 180, and chroma stays 90. The slice QP is 22. An 8×8
+//! enhancement at QP 22 rescales the base's 8×8 DC level of 1. The base is flat
+//! luma 150 and chroma 90, so its top-left 8×8 is 152. The enhancement's
+//! bottom-right 8×8 codes a DC level of 1 and is 151. The rescaled top-left
+//! 8×8 is 151. The other two blocks stay 150. Chroma stays 90. FFmpeg emits
+//! the base and does not decode the enhancement.
 //! A depth P slice copies a later texture header. That source is intra, so the
 //! slice uses the picture's one reference. Motion of eight pixels makes that
 //! picture luma 220 and chroma 50. The texture picture between them is luma 10

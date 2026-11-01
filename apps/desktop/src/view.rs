@@ -1587,6 +1587,9 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     let width = 132.0;
     let row_height = 28.0;
     let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
+    if shell.extract_audio_enabled() {
+        labels.insert(0, "Extract audio");
+    }
     if shell.split_scenes_enabled() {
         labels.insert(0, "Split scenes");
     }
@@ -1654,6 +1657,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
                 "Crop" => shell.toggle_crop(),
                 "Transcribe" => shell.transcribe(),
                 "Split scenes" => shell.split_scenes(),
+                "Extract audio" => shell.extract_audio(),
                 _ => shell.remove_selected(),
             };
             if let Err(error) = result {

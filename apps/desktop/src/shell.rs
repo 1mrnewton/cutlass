@@ -116,6 +116,14 @@ impl std::fmt::Display for ShellError {
             }
             Self::Edit(EditError::DuplicateBeat) => formatter.write_str("a beat is already there"),
             Self::Edit(EditError::NotAudio) => formatter.write_str("a beat belongs on audio"),
+            Self::Edit(EditError::NotVideo) => formatter.write_str("an extract belongs on video"),
+            Self::Edit(EditError::NoSound) => formatter.write_str("the clip has no sound"),
+            Self::Edit(EditError::AlreadyExtracted) => {
+                formatter.write_str("the sound is already on its own clip")
+            }
+            Self::Edit(EditError::AlreadyLinked) => {
+                formatter.write_str("the clip is already linked")
+            }
             Self::Edit(EditError::Angle) => {
                 formatter.write_str("the rotation is not a finite number of degrees")
             }
@@ -2313,6 +2321,126 @@ impl Shell {
             segment_id,
             material_id,
             words,
+        })
+    }
+
+    /// The selected clip is a video, so its sound can be placed on its own clip.
+    #[must_use]
+    pub fn extract_audio_enabled(&self) -> bool {
+        self.selected_video().is_some()
+    }
+
+    /// Place the selected video's sound on an audio track, lined up with that
+    /// clip. One undo removes the sound. The window checks the file first.
+    pub fn extract_audio(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.extract_segment()?;
+        let path = {
+            let draft = self.session_draft()?;
+            let (segment, _) = locate(draft, &segment_id).ok_or_else(|| {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            })?;
+            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
+            else {
+                return Err(ShellError::Unavailable(
+                    "an extract belongs on video".to_owned(),
+                ));
+            };
+            if segment.reverse && !video.reverse_path.is_empty() {
+                video.reverse_path.clone()
+            } else {
+                video.path.clone()
+            }
+        };
+        let file = self.sound_file(&path)?;
+        let heard = self.readers.carries_sound(&file).map_err(|_| {
+            ShellError::Unavailable("the clip's sound could not be read".to_owned())
+        })?;
+        if !heard {
+            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
+        }
+        self.place_extracted(&segment_id)
+    }
+
+    /// Place the selected video's sound without opening the file. Tests use this
+    /// so a stand-in path does not have to be a movie.
+    #[cfg(test)]
+    fn extract_sound(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.extract_segment()?;
+        self.place_extracted(&segment_id)
+    }
+
+    fn extract_segment(&self) -> Result<SegmentId, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = locate(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        if !matches!(
+            draft.materials.get(segment.material_id.as_str()),
+            Some(MaterialRef::Video(_))
+        ) {
+            return Err(ShellError::Unavailable(
+                "an extract belongs on video".to_owned(),
+            ));
+        }
+        self.refuse_locked(&segment_id)?;
+        Ok(segment_id)
+    }
+
+    fn sound_file(&self, stored: &str) -> Result<PathBuf, ShellError> {
+        let path = Path::new(stored);
+        if stored.is_empty()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
+        }
+        if path.is_absolute() {
+            return Ok(path.to_path_buf());
+        }
+        Ok(match &self.path {
+            Some(root) => root.join(path),
+            None => path.to_path_buf(),
+        })
+    }
+
+    fn place_extracted(&mut self, source_id: &SegmentId) -> Result<(), ShellError> {
+        let existing = {
+            let draft = self.session_draft()?;
+            let (segment, _) = locate(draft, source_id).ok_or_else(|| {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            })?;
+            let target = segment.target.clone();
+            draft
+                .tracks
+                .iter()
+                .find(|track| {
+                    track.kind == TrackType::Audio
+                        && !track.attribute.contains(TrackAttribute::LOCK)
+                        && track
+                            .segments
+                            .iter()
+                            .all(|other| other.target.overlaps(&target).ok() == Some(false))
+                })
+                .map(|track| track.id.clone())
+        };
+        let track_id = existing.unwrap_or_else(|| TrackId::new(self.fresh("sound")));
+        let segment_id = SegmentId::new(self.fresh("sound"));
+        let material_id = MaterialId::new(self.fresh("sound"));
+        self.apply(Request::ExtractAudio {
+            source_id: source_id.clone(),
+            track_id,
+            segment_id,
+            material_id,
         })
     }
 
@@ -6679,6 +6807,146 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn extract_audio_places_the_sound_on_its_own_clip() {
+        let mut bare = shell();
+        assert!(!bare.extract_audio_enabled());
+        assert_eq!(
+            bare.extract_audio().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.duration = Micros(1_000_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 1_000_000));
+        picture.source_range = Some(TimeRange::new(0, 1_000_000));
+        picture.speed = 2.0;
+        draft.tracks[0].segments.push(picture);
+        let mut silent = MaterialVideo::new("silent");
+        silent.duration = Micros(500_000);
+        draft.materials.videos.push(silent);
+        draft.tracks[0].segments.push(Segment::new(
+            "silent",
+            "silent",
+            TimeRange::new(2_000_000, 500_000),
+        ));
+        let mut parent = MaterialVideo::new("parent");
+        parent.path = "../clip.mp4".to_owned();
+        parent.duration = Micros(500_000);
+        draft.materials.videos.push(parent);
+        draft.tracks[0].segments.push(Segment::new(
+            "parent",
+            "parent",
+            TimeRange::new(3_000_000, 500_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(4_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("tone");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 500_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 500_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        assert_eq!(
+            desktop.extract_audio().unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.extract_audio_enabled());
+        assert_eq!(
+            desktop.extract_audio().unwrap_err().to_string(),
+            "an extract belongs on video"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.extract_audio_enabled());
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.extract_audio_enabled());
+
+        desktop.select(Some(SegmentId::new("silent")));
+        assert!(desktop.extract_audio_enabled());
+        assert_eq!(
+            desktop.extract_audio().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+        desktop.select(Some(SegmentId::new("parent")));
+        assert_eq!(
+            desktop.extract_audio().unwrap_err().to_string(),
+            "the clip has no sound"
+        );
+
+        let main = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(main.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.extract_sound().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        desktop
+            .toggle_attribute(main, TrackAttribute::LOCK)
+            .unwrap();
+
+        desktop.extract_sound().unwrap();
+        let draft = desktop.draft().unwrap();
+        let lane = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackType::Audio && track.id.as_str() != "tone")
+            .expect("sound");
+        assert_eq!(lane.segments.len(), 1);
+        assert_eq!(lane.segments[0].target, TimeRange::new(0, 1_000_000));
+        assert_eq!(lane.segments[0].speed, 2.0);
+        assert_eq!(draft.materials.audios.len(), 2);
+        assert!(
+            draft
+                .materials
+                .audios
+                .iter()
+                .any(|audio| audio.kind == "video_original_sound"
+                    && audio.video_id.as_str() == "picture")
+        );
+        assert_eq!(
+            desktop.extract_sound().unwrap_err().to_string(),
+            "the sound is already on its own clip"
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().materials.audios.len(), 1);
+        desktop.extract_sound().unwrap();
+        assert_eq!(desktop.draft().unwrap().materials.audios.len(), 2);
     }
 
     #[test]

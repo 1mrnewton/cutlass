@@ -1,4 +1,5 @@
 mod beat;
+mod canvas;
 mod crop;
 mod extract;
 mod fade;
@@ -108,6 +109,8 @@ pub enum EditError {
     LineSpacing,
     /// The wrap width is negative or past the picture edge.
     LineWidth,
+    /// The canvas color is not empty and not a color the preview paints.
+    CanvasColor,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -255,6 +258,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         } => beat::add_beat(draft, segment_id, *source, material_id),
         Request::RemoveBeat { segment_id, source } => beat::remove_beat(draft, segment_id, *source),
         Request::SetMagnet { on } => magnet::set_magnet(draft, *on),
+        Request::SetCanvasBackground { color } => canvas::set_background(draft, color),
     }
 }
 

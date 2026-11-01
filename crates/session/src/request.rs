@@ -219,4 +219,6 @@ pub enum Request {
     },
     /// Turn main-track packing on or off. Turning it on closes gaps.
     SetMagnet { on: bool },
+    /// Store the project canvas color. An empty string clears it.
+    SetCanvasBackground { color: String },
 }

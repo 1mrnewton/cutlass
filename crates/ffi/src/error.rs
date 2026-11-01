@@ -123,6 +123,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
+        EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
     }
 }
 
@@ -206,6 +207,10 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::LineWidth).to_string(),
             "the line width must be from zero through 8192"
+        );
+        assert_eq!(
+            FfiError::from(EditError::CanvasColor).to_string(),
+            "the canvas color is not a hex color"
         );
     }
 

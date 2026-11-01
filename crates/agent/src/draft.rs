@@ -459,6 +459,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::AddBeat { .. } => "add_beat",
         Request::RemoveBeat { .. } => "remove_beat",
         Request::SetMagnet { .. } => "set_magnet",
+        Request::SetCanvasBackground { .. } => "set_canvas_background",
     }
 }
 

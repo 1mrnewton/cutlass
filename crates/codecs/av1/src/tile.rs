@@ -17,7 +17,7 @@ use crate::dims::{
     partition_subsize, subsampled_size,
 };
 use crate::header::{
-    CdefParams, FrameInfo, INTER_FRAME, SEG_ALT_Q, SEG_GLOBALMV, SEG_REF_FRAME, SEG_SKIP, Sequence,
+    CdefParams, FrameInfo, SEG_ALT_Q, SEG_GLOBALMV, SEG_REF_FRAME, SEG_SKIP, Sequence,
 };
 use crate::header::{RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER};
 use crate::idct::{InverseScratch, inverse_2d_into, inverse_wht4};
@@ -903,7 +903,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             max_luma_h: 0,
             sub_x: sequence.subsampling_x,
             sub_y: sequence.subsampling_y,
-            inter_frame: frame.frame_type == INTER_FRAME,
+            inter_frame: !frame.intra,
             force_integer: frame.force_integer_mv,
             allow_hp: frame.allow_high_precision_mv,
             filter_switchable: frame.filter_switchable,

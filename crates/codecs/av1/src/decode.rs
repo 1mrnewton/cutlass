@@ -2927,4 +2927,59 @@ mod tests {
             assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
         }
     }
+
+    #[test]
+    fn switch_frame_matches_dav1d() {
+        // SVT-AV1 low delay, with a switch frame at index 3. That frame is
+        // predicted as an inter frame, is error resilient, and refreshes every
+        // reference slot. The frames after it use those slots. Digests are
+        // dav1d 1.5.3 with in-loop filters.
+        let frames: [&[u8]; 6] = [
+            include_bytes!("../fixtures/sw_0.obu"),
+            include_bytes!("../fixtures/sw_1.obu"),
+            include_bytes!("../fixtures/sw_2.obu"),
+            include_bytes!("../fixtures/sw_3.obu"),
+            include_bytes!("../fixtures/sw_4.obu"),
+            include_bytes!("../fixtures/sw_5.obu"),
+        ];
+        let expected = [
+            0x832d_5f10_e25b_b379,
+            0xe711_b7e7_2938_348c,
+            0x148f_178d_d2f4_1d6c,
+            0x82c3_51a8_c80f_9fbe,
+            0x4814_1f75_474a_da47,
+            0x7c8f_46f6_4e71_07c6,
+        ];
+        let sizes = [Some((128, 128)); 8];
+        let saved = [None; 8];
+        let hints = [0; 8];
+        let inherited = [crate::header::Inherited::defaults(); 8];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) = crate::header::parse_with_motion(
+                payload,
+                sequence.as_ref(),
+                &saved,
+                &hints,
+                &sizes,
+                &inherited,
+            )
+            .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            if index == 3 {
+                assert_eq!(frame.frame_type, crate::header::SWITCH_FRAME);
+                assert!(!frame.intra);
+                assert!(frame.error_resilient);
+                assert_eq!(frame.refresh_flags, 0xff);
+                assert!(frame.primary_ref >= 7);
+            }
+            sequence = Some(seq);
+        }
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
 }

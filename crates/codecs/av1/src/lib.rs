@@ -18,8 +18,9 @@
 //! size from a reference. A warp of a scaled reference is rejected. A frame
 //! may replace a loop-filter reference or mode delta, and a later frame keeps it.
 //! A superblock may add its own loop-filter delta. A sequence may use a
-//! 128×128 superblock. A segment may change the quantizer, and a later frame
-//! may keep that segment map.
+//! 128×128 superblock. A switch frame is predicted as an inter frame and
+//! refreshes every reference slot. A segment may change the quantizer, and a
+//! later frame may keep that segment map.
 
 #![forbid(unsafe_code)]
 

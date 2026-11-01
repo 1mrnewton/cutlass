@@ -34,3 +34,53 @@ pub use cutlass_model::Micros;
 pub use frame::{EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, wait_export_frame};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
+
+/// The source timestamp Freeze stores so the clip keeps showing `time`.
+///
+/// The stored value is the position before reverse. Playback flips it when
+/// the clip is reversed, and a stored freeze replaces this map. `None` when
+/// `time` is outside the clip or the clip has no source range.
+#[must_use]
+pub fn freeze_timestamp(
+    draft: &cutlass_model::Draft,
+    segment: &cutlass_model::Segment,
+    time: Micros,
+) -> Option<Micros> {
+    let mut map = cutlass_engine::placement_of(draft, segment).ok()?;
+    map.freeze = None;
+    map.reverse = false;
+    cutlass_engine::map_timeline(&map, time).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_model::{Draft, Micros, Segment, TimeRange};
+
+    use super::freeze_timestamp;
+
+    #[test]
+    fn a_freeze_timestamp_follows_speed_and_stays_before_reverse() {
+        let draft = Draft::empty("D");
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));
+        segment.source_range = Some(TimeRange::new(0, 2_000_000));
+        assert_eq!(
+            freeze_timestamp(&draft, &segment, Micros(500_000)),
+            Some(Micros(500_000))
+        );
+        assert_eq!(freeze_timestamp(&draft, &segment, Micros(2_000_000)), None);
+        segment.speed = 2.0;
+        segment.target.duration = Micros(1_000_000);
+        assert_eq!(
+            freeze_timestamp(&draft, &segment, Micros(400_000)),
+            Some(Micros(800_000))
+        );
+        segment.reverse = true;
+        segment.speed = 1.0;
+        segment.target.duration = Micros(1_000);
+        segment.source_range = Some(TimeRange::new(0, 1_000));
+        assert_eq!(
+            freeze_timestamp(&draft, &segment, Micros(250)),
+            Some(Micros(250))
+        );
+    }
+}

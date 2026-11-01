@@ -99,9 +99,17 @@ Recorded line:
 
 The run finished in 1800.03 seconds with exit 0. Mutated buffers produced no picture. The key-after-noise check did not fail.
 
-## Not exercised
+## Accepted, with no picture
 
-The segmentation temporal-update bit is implemented. The aq-mode 1 fixture (`segmentation_matches_libvpx`) uses map copy with `update_map` clear, including a predicted segment id of 4 on the inter frames. That fixture does not read the temporal bit.
+The decoder accepts these. No produced file turns the case on, so the picture was not compared.
+
+- Compound prediction stays unused. Encodes remain single-reference.
+- A 16× reference upscale is not produced. libvpx writes a keyframe when the size changes. 1/2 and 4/5 are compared.
+- Loop-filter mode deltas, and the frame quantizer deltas `y_dc`, `uv_dc`, and `uv_ac`, stay zero.
+- `reset_frame_context` of 2 resets one context, and 3 resets all four. No file makes those contexts diverge and then resets one of them.
+- Official level streams above level 1 are not on disk. Level 1, profile 0 and profile 2, is compared when `../local-files/vp9-levels` holds those files.
+
+The aq-mode 1 fixture (`segmentation_matches_libvpx`) uses map copy with `update_map` clear. A separate 320×240 aq-mode 3 encode is what sets the segmentation temporal-update bit.
 
 ## Still required before calling this complete
 

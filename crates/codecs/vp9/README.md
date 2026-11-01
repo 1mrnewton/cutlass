@@ -83,6 +83,16 @@ cargo run --release -p cutlass-vp9 --example roundtrip
 32x32 frames 1
 ```
 
+## Decoder cases with no picture
+
+The decoder accepts these. No file this crate can produce turns the case on, so a test does not compare that picture with another decoder.
+
+- Compound prediction. A block can come from two references at once. The encodes used here stay in single-reference mode.
+- A reference upscale of 16× on each axis. 1/2 and 4/5 are compared. libvpx writes a keyframe when the size changes, so the inter frame for the full step is not produced.
+- Loop-filter mode deltas, and the frame quantizer deltas `y_dc`, `uv_dc`, and `uv_ac`. libvpx leaves them at zero.
+- `reset_frame_context` of 2, which resets one probability context, and of 3, which resets all four. A later picture changes only after the contexts have diverged.
+- Official level streams above level 1. The level 1 set can live in `../local-files/vp9-levels`. The higher sets are not in that folder here. A picture a defined level allows is still accepted, through a side of 16832 and 35,651,584 luma samples.
+
 ## Gaps
 
 - The encoder does not emit show-existing frames, hidden frames, more than one tile, a loop filter, segmentation, compound prediction, or sub-pixel motion. Intra blocks are DC. Inter motion is an integer LAST vector. Transforms are no larger than 8×8. Quantizer 0 uses a 4×4 Walsh-Hadamard transform.

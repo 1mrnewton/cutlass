@@ -5623,6 +5623,29 @@ mod tests {
     }
 
     #[test]
+    fn grain_sample_shift_matches_dav1d() {
+        // aomenc --film-grain-test=3, 128×128. The grain sample shift is 1.
+        // The filter lag is 3 and clipping is restricted. Ignoring the shift
+        // changes the picture. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-shift.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert_eq!(frame.grain.grain_scale_shift, 1);
+        assert_eq!(frame.grain.ar_lag, 3);
+        assert!(frame.grain.clip_restricted);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xa9a5_24f8_4c39_a52b);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn full_still_picture_header_matches_dav1d() {
         // aomenc --limit=1 --full-still-picture-hdr, 128×128. The sequence is a
         // still picture and uses the full header, not the reduced one. Rejecting

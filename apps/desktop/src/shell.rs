@@ -166,6 +166,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::CanvasRatio) => {
                 formatter.write_str("the canvas ratio is not a project ratio")
             }
+            Self::Edit(EditError::Letterbox) => {
+                formatter.write_str("a letterbox belongs on a picture")
+            }
             Self::Edit(EditError::FrameRate) => {
                 formatter.write_str("the frame rate is not a project rate")
             }
@@ -237,6 +240,7 @@ pub struct Inspection {
     pub letter_spacing: f64,
     pub line_spacing: f64,
     pub line_width: f64,
+    pub letterbox: String,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -2035,6 +2039,7 @@ impl Shell {
             letter_spacing,
             line_spacing,
             line_width,
+            letterbox: letterbox_color(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -2328,6 +2333,41 @@ impl Shell {
         };
         self.refuse_locked(&segment_id)?;
         self.apply(Request::SetCrop { segment_id, crop })
+    }
+
+    /// Store the color around the fitted picture. An empty string uses the
+    /// project color. One undo restores the previous color. The crop stays.
+    pub fn set_letterbox(&mut self, color: &str) -> Result<(), ShellError> {
+        let segment_id = self.letterbox_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let canvas_id = MaterialId::new(self.fresh("canvas"));
+        self.apply(Request::SetLetterbox {
+            segment_id,
+            color: color.to_owned(),
+            canvas_id,
+        })
+    }
+
+    fn letterbox_segment(&self) -> Result<SegmentId, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = placed(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        if stored_crop(draft, segment).is_none() {
+            return Err(ShellError::Unavailable(
+                "a letterbox belongs on a picture".to_owned(),
+            ));
+        }
+        Ok(segment_id)
     }
 
     /// The selected clip is a picture or a sound, so Transcribe can hear it.
@@ -4459,6 +4499,17 @@ fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32, f64
             )
         })
         .unwrap_or((0.0, String::new(), 0, 0.0, 0.0, 0.0))
+}
+
+fn letterbox_color(draft: &Draft, segment: &Segment) -> String {
+    segment
+        .extra_material_refs
+        .iter()
+        .find_map(|id| match draft.materials.get(id.as_str()) {
+            Some(MaterialRef::Canvas(canvas)) => Some(canvas.color.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn fade_durations(draft: &Draft, segment: &Segment) -> (i64, i64) {
@@ -7133,6 +7184,77 @@ mod tests {
             .unwrap();
         desktop.cycle_frame_rate().unwrap();
         assert_eq!(desktop.frame_rate_label(), "59.94 fps");
+    }
+
+    #[test]
+    fn a_letterbox_color_fills_the_bars_around_the_picture() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.set_letterbox("#FF0000").unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 18;
+        draft.canvas_config.background = Some("#0000FF".to_owned());
+        let mut video = MaterialVideo::new("still");
+        video.path = picture.display().to_string();
+        video.duration = Micros(1_000_000);
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        draft.materials.texts.push(MaterialText::new("caption"));
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("caption")));
+        assert_eq!(
+            desktop.set_letterbox("#FF0000").unwrap_err().to_string(),
+            "a letterbox belongs on a picture"
+        );
+
+        desktop.select(Some(SegmentId::new("still")));
+        let before = desktop.preview_bytes().unwrap();
+        assert_eq!(&before.rgba[..4], &[0x00, 0x00, 0xFF, 0xFF]);
+        desktop.set_letterbox("#FF0000").unwrap();
+        assert_eq!(desktop.inspection().unwrap().letterbox, "#FF0000");
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.0);
+        let colored = desktop.preview_bytes().unwrap();
+        assert_eq!((colored.width, colored.height), (16, 18));
+        assert_eq!(&colored.rgba[..4], &[0xFF, 0x00, 0x00, 0xFF]);
+        assert_ne!(&colored.rgba[64..68], &[0xFF, 0x00, 0x00, 0xFF]);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().letterbox, "");
+        let restored = desktop.preview_bytes().unwrap();
+        assert_eq!(&restored.rgba[..4], &[0x00, 0x00, 0xFF, 0xFF]);
+        assert_eq!(
+            desktop.set_letterbox("white").unwrap_err().to_string(),
+            "the canvas color is not a hex color"
+        );
+
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.set_letterbox("#00FF00").unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.inspection().unwrap().letterbox, "");
     }
 
     #[test]

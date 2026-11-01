@@ -123,6 +123,7 @@ pub struct ViewState {
     y_buffer: String,
     scale_buffer: String,
     opacity_buffer: String,
+    letterbox_buffer: String,
     volume_buffer: String,
     fade_in_buffer: String,
     fade_out_buffer: String,
@@ -158,6 +159,7 @@ impl Default for ViewState {
             y_buffer: String::new(),
             scale_buffer: String::new(),
             opacity_buffer: String::new(),
+            letterbox_buffer: String::new(),
             volume_buffer: String::new(),
             fade_in_buffer: String::new(),
             fade_out_buffer: String::new(),
@@ -1205,6 +1207,19 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
+    }
+    if shell.crop_enabled()
+        && let Some(color) = color_field(
+            ui,
+            "Letterbox",
+            &mut view.letterbox_buffer,
+            &inspection.letterbox,
+            "Around the picture. Empty uses the project color",
+        )
+        && !inspection.locked
+        && let Err(error) = shell.set_letterbox(&color)
+    {
+        shell.set_notice(error.to_string());
     }
     if let Some(text) = inspection.text.clone() {
         if view.text_for != inspection.segment_id.as_str() {

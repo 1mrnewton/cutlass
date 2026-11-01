@@ -1237,6 +1237,18 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
+        let label = if shell.flipped() {
+            "Flipped"
+        } else {
+            "Upright"
+        };
+        let flip = widgets::toolbar_button(ui, label).on_hover_text("Top to bottom");
+        if flip.clicked()
+            && !inspection.locked
+            && let Err(error) = shell.toggle_vertical_flip()
+        {
+            shell.set_notice(error.to_string());
+        }
         if let Some(opacity) =
             number_field(ui, "Opacity", &mut view.opacity_buffer, inspection.opacity)
             && !inspection.locked

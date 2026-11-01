@@ -2282,6 +2282,30 @@ impl Shell {
         })
     }
 
+    /// The selected picture is flipped top to bottom.
+    #[must_use]
+    pub fn flipped(&self) -> bool {
+        self.mirror_enabled()
+            && self
+                .selected_segment()
+                .is_some_and(|segment| segment.clip.flip.vertical)
+    }
+
+    /// Flip the selected picture top to bottom. A second click restores it.
+    /// The clip stays where it is. One undo restores the previous direction.
+    pub fn toggle_vertical_flip(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a flip belongs on a picture")?;
+        let vertical = self
+            .selected_segment()
+            .map(|segment| !segment.clip.flip.vertical)
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetVerticalFlip {
+            segment_id,
+            vertical,
+        })
+    }
+
     /// The selected clip is a picture that can turn.
     #[must_use]
     pub fn rotate_enabled(&self) -> bool {
@@ -9272,6 +9296,110 @@ mod tests {
         desktop.select(Some(SegmentId::new("compound")));
         assert!(desktop.mirror_enabled());
         assert!(!desktop.mirrored());
+    }
+
+    #[test]
+    fn a_vertical_flip_turns_the_picture_over() {
+        let mut bare = shell();
+        assert!(!bare.flipped());
+        assert_eq!(
+            bare.toggle_vertical_flip().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 16;
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("still");
+        video.path = picture.display().to_string();
+        video.duration = Micros(1_000_000);
+        draft.materials.videos.push(video);
+        let mut segment = Segment::new("still", "still", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            duration: Micros(1_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.flipped());
+        assert_eq!(
+            desktop.toggle_vertical_flip().unwrap_err().to_string(),
+            "a flip belongs on a picture"
+        );
+
+        desktop.select(Some(SegmentId::new("still")));
+        assert!(desktop.mirror_enabled());
+        assert!(!desktop.flipped());
+        let before = desktop.preview_bytes().unwrap();
+        assert_eq!((before.width, before.height), (16, 16));
+        let row = (before.width as usize) * 4;
+        let last = before.rgba.len() - row;
+        assert_ne!(&before.rgba[..row], &before.rgba[last..]);
+        desktop.toggle_vertical_flip().unwrap();
+        assert!(desktop.flipped());
+        assert!(!desktop.mirrored());
+        let clip = &desktop.draft().unwrap().tracks[0].segments[0].clip;
+        assert!(clip.flip.vertical);
+        assert!(!clip.flip.horizontal);
+        assert_eq!(clip.transform.x, 0.0);
+        assert_eq!(clip.scale.x, 1.0);
+        let turned = desktop.preview_bytes().unwrap();
+        assert_eq!(&turned.rgba[..row], &before.rgba[last..]);
+        assert_eq!(&turned.rgba[last..], &before.rgba[..row]);
+        desktop.toggle_vertical_flip().unwrap();
+        assert!(!desktop.flipped());
+        let restored = desktop.preview_bytes().unwrap();
+        assert_eq!(restored.rgba, before.rgba);
+        desktop.undo().unwrap();
+        assert!(desktop.flipped());
+        desktop.undo().unwrap();
+        assert!(!desktop.flipped());
+
+        desktop.select(Some(SegmentId::new("caption")));
+        desktop.toggle_vertical_flip().unwrap();
+        assert!(desktop.flipped());
+        assert!(!desktop.mirrored());
+
+        desktop.select(Some(SegmentId::new("still")));
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.toggle_vertical_flip().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert!(!desktop.flipped());
     }
 
     #[test]

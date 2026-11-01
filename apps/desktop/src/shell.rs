@@ -17,7 +17,7 @@ use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Pointer, TimelineScale,
     TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category,
-    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, snap, trim_gesture,
+    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
@@ -240,6 +240,12 @@ pub struct Shell {
     selection: Vec<SegmentId>,
     clipboard: Vec<CopiedClip>,
     clip_menu: Option<ClipMenu>,
+    /// Vertical guides for this session. They are not stored in the draft.
+    guides: Vec<Micros>,
+    guide_preview: Option<Micros>,
+    selected_guide: Option<i64>,
+    guides_shown: bool,
+    guides_locked: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
     clip_drag: Option<ClipDrag>,
@@ -286,6 +292,11 @@ impl Shell {
             selection: Vec::new(),
             clipboard: Vec::new(),
             clip_menu: None,
+            guides: Vec::new(),
+            guide_preview: None,
+            selected_guide: None,
+            guides_shown: true,
+            guides_locked: false,
             blade: false,
             clip_drag: None,
             pending_trim: None,
@@ -411,6 +422,7 @@ impl Shell {
         self.selection.clear();
         self.clipboard.clear();
         self.clip_menu = None;
+        self.clear_guides();
         self.blade = false;
         self.cancel_clip_drag();
         self.fit_on_layout = false;
@@ -506,6 +518,7 @@ impl Shell {
         self.selection.clear();
         self.clipboard.clear();
         self.clip_menu = None;
+        self.clear_guides();
         self.blade = false;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
@@ -756,12 +769,7 @@ impl Shell {
             }
             Some("frame_back") => self.step_frame(-1),
             Some("frame_forward") => self.step_frame(1),
-            Some("delete") => {
-                if self.selection.is_empty() {
-                    return Ok(());
-                }
-                self.remove_selected()
-            }
+            Some("delete") => self.delete_target(),
             Some("split") => self.split_playhead(),
             Some("copy") => self.copy_selected(),
             Some("cut") => self.cut_selected(),
@@ -1001,6 +1009,7 @@ impl Shell {
             scale: self.scale(),
             playhead: self.playhead,
             snap_threshold: snap_window(self.pixel_size),
+            guides: self.guide_times(),
         };
         let draft = self.session_draft()?;
         trim_gesture(draft, &gesture).map_err(|error| match error {
@@ -1022,12 +1031,14 @@ impl Shell {
         let x = self.time_zero_x(x);
         let scale = self.scale();
         let pointer = Pointer { x, y };
+        let guides = self.guide_times();
         let gesture = MoveGesture {
             segment_id: segment_id.clone(),
             pointer,
             scale,
             playhead: self.playhead,
             snap_threshold: snap_window(self.pixel_size),
+            guides: guides.clone(),
         };
         let draft = self.session_draft()?;
         let raw = match hit_test(draft, scale, pointer) {
@@ -1044,12 +1055,13 @@ impl Shell {
             }
         };
         if self.is_selected(&segment_id) && self.selection.len() > 1 {
-            let snapped = snap(
+            let snapped = snap_guides(
                 draft,
                 raw,
                 self.playhead,
                 snap_window(self.pixel_size),
                 Some(&segment_id),
+                &guides,
             );
             let start = snapped.map(|target| target.time).unwrap_or(raw);
             let start = Micros(start.0.max(0));
@@ -1230,6 +1242,7 @@ impl Shell {
                 scale: self.scale(),
                 playhead: self.playhead,
                 snap_threshold: snap_window(self.pixel_size),
+                guides: self.guide_times(),
             };
             let draft = self.session_draft()?;
             drop_gesture(draft, &gesture)
@@ -1334,6 +1347,7 @@ impl Shell {
     }
 
     pub fn select(&mut self, id: Option<SegmentId>) {
+        self.selected_guide = None;
         self.selection.clear();
         if let Some(id) = id {
             self.selection.push(id);
@@ -1342,6 +1356,7 @@ impl Shell {
 
     /// Add `id` to the selection, or drop it when it is already there.
     pub fn toggle_selected(&mut self, id: SegmentId) {
+        self.selected_guide = None;
         if let Some(index) = self.selection.iter().position(|item| item == &id) {
             self.selection.remove(index);
         } else {
@@ -1351,6 +1366,7 @@ impl Shell {
 
     /// Replace the selection with `ids`. `keep` adds them to the clips already selected.
     pub fn select_box(&mut self, ids: impl IntoIterator<Item = SegmentId>, keep: bool) {
+        self.selected_guide = None;
         if !keep {
             self.selection.clear();
         }
@@ -1372,6 +1388,129 @@ impl Shell {
     #[must_use]
     pub fn is_selected(&self, id: &SegmentId) -> bool {
         self.selection.iter().any(|item| item == id)
+    }
+
+    /// Remove the selected clips, or the selected guide when no clip is selected.
+    pub fn delete_target(&mut self) -> Result<(), ShellError> {
+        if self.selection.is_empty() {
+            if self.selected_guide.is_some() {
+                return self.remove_selected_guide();
+            }
+            return Ok(());
+        }
+        self.remove_selected()
+    }
+
+    /// Guides currently drawn. A hidden list is empty here and is not a snap target.
+    #[must_use]
+    pub fn guides(&self) -> &[Micros] {
+        if self.guides_shown { &self.guides } else { &[] }
+    }
+
+    #[must_use]
+    pub fn guide_preview(&self) -> Option<Micros> {
+        self.guide_preview
+    }
+
+    #[must_use]
+    pub fn guides_shown(&self) -> bool {
+        self.guides_shown
+    }
+
+    #[must_use]
+    pub fn guides_locked(&self) -> bool {
+        self.guides_locked
+    }
+
+    pub fn toggle_guides(&mut self) {
+        self.guides_shown = !self.guides_shown;
+    }
+
+    pub fn toggle_guide_lock(&mut self) {
+        self.guides_locked = !self.guides_locked;
+    }
+
+    pub fn preview_guide(&mut self, time: Micros) {
+        self.guide_preview = Some(Micros(time.0.max(0)));
+    }
+
+    pub fn clear_guide_preview(&mut self) {
+        self.guide_preview = None;
+    }
+
+    pub fn take_guide_preview(&mut self) -> Option<Micros> {
+        self.guide_preview.take()
+    }
+
+    /// Leave a vertical guide. A time already present is selected again.
+    pub fn add_guide(&mut self, time: Micros) -> Result<(), ShellError> {
+        if self.session.is_none() {
+            return Err(ShellError::NoProject);
+        }
+        if self.guides_locked {
+            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
+        }
+        let time = Micros(time.0.max(0));
+        if !self.guides.iter().any(|guide| guide.0 == time.0) {
+            self.guides.push(time);
+            self.guides.sort_by_key(|guide| guide.0);
+        }
+        self.selected_guide = Some(time.0);
+        Ok(())
+    }
+
+    pub fn select_guide(&mut self, time: Micros) {
+        if self.guides.iter().any(|guide| guide.0 == time.0) {
+            self.selected_guide = Some(time.0);
+            self.selection.clear();
+        }
+    }
+
+    #[must_use]
+    pub fn selected_guide(&self) -> Option<Micros> {
+        self.selected_guide.map(Micros)
+    }
+
+    pub fn remove_selected_guide(&mut self) -> Result<(), ShellError> {
+        if self.guides_locked {
+            return Err(ShellError::Unavailable("the guides are locked".to_owned()));
+        }
+        let Some(time) = self.selected_guide else {
+            return Ok(());
+        };
+        self.guides.retain(|guide| guide.0 != time);
+        self.selected_guide = None;
+        Ok(())
+    }
+
+    /// Timeline time for a pixel measured from the left of the lanes.
+    #[must_use]
+    pub fn lane_time_at(&self, x_in_view: f64) -> Option<Micros> {
+        let x = self.time_zero_x(x_in_view);
+        if !self.pixel_size.is_finite() || self.pixel_size <= 0.0 || !x.is_finite() {
+            return None;
+        }
+        let micros = (x / self.pixel_size).round();
+        if !(0.0..=i64::MAX as f64).contains(&micros) {
+            return None;
+        }
+        Some(Micros(micros as i64))
+    }
+
+    fn guide_times(&self) -> Vec<Micros> {
+        if self.guides_shown {
+            self.guides.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn clear_guides(&mut self) {
+        self.guides.clear();
+        self.guide_preview = None;
+        self.selected_guide = None;
+        self.guides_shown = true;
+        self.guides_locked = false;
     }
 
     pub fn inspection(&self) -> Option<Inspection> {
@@ -3791,6 +3930,72 @@ mod tests {
     fn lane_time(desktop: &Shell, time: f64) -> f64 {
         let origin = desktop.view_origin().0 as f64;
         (time - origin) * desktop.pixel_size()
+    }
+
+    #[test]
+    fn a_guide_pulls_a_move_and_delete_removes_it() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_guide(Micros(1_500_000)).unwrap();
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        desktop.preview_move(id.clone(), lane_time(&desktop, 1_501_000.0), 24.0);
+        let preview = desktop.move_preview().expect("preview");
+        assert_eq!(preview.start, Micros(1_500_000));
+        desktop
+            .trim_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_501_000.0))
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(1_500_000)
+        );
+        desktop.undo().unwrap();
+        desktop.select(Some(id));
+        desktop.select_guide(Micros(1_500_000));
+        assert!(desktop.selection().is_empty());
+        desktop.run_shortcut("delete").unwrap();
+        assert!(desktop.guides().is_empty());
+        desktop.add_guide(Micros(2_000_000)).unwrap();
+        desktop.toggle_guide_lock();
+        let locked = desktop.add_guide(Micros(2_100_000)).unwrap_err();
+        assert_eq!(locked.to_string(), "the guides are locked");
+        assert_eq!(desktop.guides(), &[Micros(2_000_000)]);
+        desktop.toggle_guide_lock();
+        desktop.toggle_guides();
+        assert!(desktop.guides().is_empty());
+        desktop
+            .trim_edge(
+                desktop.draft().unwrap().tracks[0].segments[0].id.clone(),
+                TrimEdge::End,
+                lane_time(&desktop, 2_001_000.0),
+            )
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(2_001_000)
+        );
+        desktop.toggle_guides();
+        desktop
+            .trim_edge(
+                desktop.draft().unwrap().tracks[0].segments[0].id.clone(),
+                TrimEdge::End,
+                lane_time(&desktop, 2_000_500.0),
+            )
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(2_000_000)
+        );
+        desktop.close_project().unwrap();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.guides().is_empty());
     }
 
     #[test]

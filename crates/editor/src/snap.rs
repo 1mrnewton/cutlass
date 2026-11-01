@@ -11,6 +11,8 @@ pub enum SnapKind {
     Marker,
     Beat,
     TransitionMiddle,
+    /// A vertical guide left on the timeline.
+    Guide,
     /// The start of the timeline, or its stored duration.
     TimelineEnd,
 }
@@ -35,6 +37,19 @@ pub fn snap(
     threshold: Micros,
     ignore: Option<&SegmentId>,
 ) -> Option<SnapTarget> {
+    snap_guides(draft, time, playhead, threshold, ignore, &[])
+}
+
+/// [`snap`] plus vertical guide times. A guide is a target like a marker.
+#[must_use]
+pub fn snap_guides(
+    draft: &Draft,
+    time: Micros,
+    playhead: Micros,
+    threshold: Micros,
+    ignore: Option<&SegmentId>,
+    guides: &[Micros],
+) -> Option<SnapTarget> {
     let limit = u64::try_from(threshold.0).ok()?;
     let mut best: Option<Best> = None;
     consider(&mut best, playhead, SnapKind::Playhead, time.0, limit);
@@ -47,6 +62,9 @@ pub fn snap(
         }
     }
     collect_markers(draft, &mut best, time.0, limit);
+    for guide in guides {
+        consider(&mut best, *guide, SnapKind::Guide, time.0, limit);
+    }
     consider(&mut best, Micros(0), SnapKind::TimelineEnd, time.0, limit);
     consider(
         &mut best,
@@ -119,7 +137,8 @@ impl SnapKind {
             Self::Marker => 3,
             Self::Beat => 4,
             Self::TransitionMiddle => 5,
-            Self::TimelineEnd => 6,
+            Self::Guide => 6,
+            Self::TimelineEnd => 7,
         }
     }
 }
@@ -477,6 +496,28 @@ mod tests {
         let target = snap(&draft, Micros(4_900_000), Micros(0), Micros(200_000), None).unwrap();
         assert_eq!(target.time, Micros(5_000_000));
         assert_eq!(target.kind, SnapKind::TimelineEnd);
+        let guide = snap_guides(
+            &draft,
+            Micros(1_500_000),
+            Micros(0),
+            Micros(2_000),
+            None,
+            &[Micros(1_501_000)],
+        )
+        .unwrap();
+        assert_eq!(guide.kind, SnapKind::Guide);
+        assert_eq!(guide.time, Micros(1_501_000));
+        assert!(
+            snap_guides(
+                &draft,
+                Micros(1_500_000),
+                Micros(0),
+                Micros(2_000),
+                None,
+                &[Micros(1_600_000)],
+            )
+            .is_none()
+        );
     }
 
     #[test]

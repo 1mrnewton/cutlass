@@ -1191,7 +1191,12 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                         None => toolbar_separator(ui),
                         Some((name, tip)) => {
                             let enabled = tool_enabled(shell, name);
-                            let active = *name == "split" && shell.blade();
+                            let active = match *name {
+                                "split" => shell.blade(),
+                                "guides" => shell.guides_shown(),
+                                "lock" => shell.guides_locked(),
+                                _ => false,
+                            };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
                                 tool_clicked(shell, name);
                             }
@@ -1246,7 +1251,8 @@ fn toolbar_button(
 
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
-        "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" => true,
+        "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
+        | "lock" => true,
         "split" => shell.has_clip(),
         _ => false,
     }
@@ -1266,9 +1272,17 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "zoomIn" => shell.zoom_in(),
         "zoomOut" => shell.zoom_out(),
         "zoomFit" => shell.zoom_fit(),
-        "delete" => shell.remove_selected(),
+        "delete" => shell.delete_target(),
         "split" => {
             shell.toggle_blade();
+            Ok(())
+        }
+        "guides" => {
+            shell.toggle_guides();
+            Ok(())
+        }
+        "lock" => {
+            shell.toggle_guide_lock();
             Ok(())
         }
         _ => Ok(()),
@@ -1406,12 +1420,35 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         );
         response.on_hover_text("Playhead");
     }
+    paint_guides(shell, ui, lanes_left, tracks);
     let ruler_hit = ui.interact(
         lane_ruler(ruler, lanes_left),
         ui.scope_id().with("ruler"),
         Sense::click_and_drag(),
     );
-    if (ruler_hit.clicked() || ruler_hit.dragged())
+    let below_ruler = ruler.bottom() + 8.0;
+    if ruler_hit.dragged()
+        && let Some(pointer) = ruler_hit.interact_pointer_pos()
+    {
+        let x = f64::from(pointer.x - lanes_left).max(0.0);
+        if pointer.y > below_ruler {
+            if let Some(time) = shell.lane_time_at(x) {
+                shell.preview_guide(time);
+            }
+        } else {
+            shell.clear_guide_preview();
+            if let Err(error) = shell.seek_ruler(x) {
+                shell.set_notice(error.to_string());
+            }
+        }
+    }
+    if ruler_hit.drag_stopped()
+        && let Some(time) = shell.take_guide_preview()
+        && let Err(error) = shell.add_guide(time)
+    {
+        shell.set_notice(error.to_string());
+    }
+    if ruler_hit.clicked()
         && let Some(pointer) = ruler_hit.interact_pointer_pos()
     {
         let x = f64::from(pointer.x - lanes_left).max(0.0);
@@ -1662,6 +1699,44 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
         meta: card_meta(audio.duration.0),
         on_timeline: used.contains(audio.id.as_str()),
     })
+}
+
+fn paint_guides(shell: &mut Shell, ui: &mut Ui, lanes_left: f32, tracks: Rect) {
+    let pixel_size = shell.pixel_size();
+    let origin = shell.view_origin().0;
+    let selected = shell.selected_guide().map(|time| time.0);
+    let times: Vec<i64> = shell.guides().iter().map(|time| time.0).collect();
+    for time in times {
+        let x = lane_x(lanes_left, pixel_size, origin, time);
+        if x < lanes_left - 4.0 || x > tracks.right() + 4.0 {
+            continue;
+        }
+        let hit = Rect::from_center_size(
+            Pos2::new(x, tracks.center().y),
+            Vec2::new(8.0, tracks.height()),
+        );
+        let response = ui.interact(hit, ui.scope_id().with(("guide", time)), Sense::click());
+        if response.clicked() {
+            shell.select_guide(Micros(time));
+        }
+        let color = if selected == Some(time) {
+            tokens::SELECTED
+        } else {
+            tokens::EXPORT
+        };
+        ui.painter()
+            .vline(x, tracks.y_range(), egui::Stroke::new(1.0, color));
+    }
+    if let Some(preview) = shell.guide_preview() {
+        let x = lane_x(lanes_left, pixel_size, origin, preview.0);
+        if (lanes_left..=tracks.right()).contains(&x) {
+            ui.painter().vline(
+                x,
+                tracks.y_range(),
+                egui::Stroke::new(1.0, tokens::EXPORT.gamma_multiply(0.55)),
+            );
+        }
+    }
 }
 
 fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
@@ -3281,6 +3356,54 @@ mod tests {
             "the ruler drag did not seek, playhead {}",
             shell.playhead().0
         );
+        assert!(shell.guides().is_empty());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_drag_down_from_the_ruler_leaves_a_guide() {
+        let (mut shell, temp) = open_span("guide", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let start = text_pos(&output, "00:00:00")
+            .or_else(|| text_pos(&output, "00:00"))
+            .expect("ruler");
+        output.textures_delta.clear();
+        drag(
+            &ctx,
+            start,
+            start + Vec2::new(40.0, 90.0),
+            &mut shell,
+            &mut view,
+        );
+        assert_eq!(shell.guides().len(), 1);
+        assert!(shell.selected_guide().is_some());
+        assert_eq!(shell.playhead(), Micros(0));
+        let key = |pressed: bool| egui::Event::Key {
+            key: egui::Key::Delete,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![key(true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.guides().is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

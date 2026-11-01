@@ -1570,6 +1570,82 @@ mod tests {
     }
 
     #[test]
+    fn restoration_on_444_and_422_matches_dav1d() {
+        // aomenc --enable-restoration=1 --enable-cdef=0, one frame, cq 40.
+        // Profile 1 is 512×128 4:4:4. Chroma is full size, so each chroma plane
+        // has two 256-wide restoration units. Profile 2 is 256×512 4:2:2.
+        // Chroma keeps the full height, so each chroma plane has two 256-tall
+        // units, and the unit row follows the luma sample eight rows above
+        // the block. Both frames select self-guided restoration on every plane.
+        // Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/restore-444.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                512u32,
+                128u32,
+                cutlass_decode::PixelFormat::Yuv444p,
+                512 * 128 * 3,
+                0x390e_7514_ad62_fb6d,
+            ),
+            (
+                include_bytes!("../fixtures/restore-422.ivf").as_slice(),
+                2,
+                true,
+                false,
+                256,
+                512,
+                cutlass_decode::PixelFormat::Yuv422p,
+                256 * 512 + 128 * 512 * 2,
+                0xd3c2_410f_120e_df46,
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, width, height, pixel, length, digest) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 1, "profile {profile}");
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert_eq!(key.width, width);
+            assert_eq!(key.height, height);
+            assert_eq!(
+                key.restoration.plane,
+                [crate::header::RESTORE_SGRPROJ; 3],
+                "profile {profile}"
+            );
+            assert_eq!(key.restoration.unit, [256; 3], "profile {profile}");
+            let params = CodecParams::video(CodecId::Av1, width, height);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("profile {profile}: {error:?}"));
+            assert_eq!(shown.len(), 1, "profile {profile}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, pixel, "profile {profile}");
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), length, "profile {profile}");
+            assert_eq!(frame_digest(bytes), digest, "profile {profile}");
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
     fn cdef_index_covers_a_block_wider_than_64() {
         // aomenc --sb-size=128 --min-partition-size=128 --max-partition-size=128.
         // The 128×128 block reads one CDEF index and that index covers all four

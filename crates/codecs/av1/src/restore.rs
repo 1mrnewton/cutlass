@@ -61,11 +61,18 @@ pub struct Grid {
     reference: [[i32; 2]; 3],
     wiener_ref: [[[i32; 3]; 2]; 3],
     bit_depth: u8,
+    sub_x: bool,
+    sub_y: bool,
     active: bool,
 }
 
 impl Grid {
-    pub fn new(frame: &FrameInfo, bit_depth: u8) -> Result<Self, CodecError> {
+    pub fn new(
+        frame: &FrameInfo,
+        bit_depth: u8,
+        sub_x: bool,
+        sub_y: bool,
+    ) -> Result<Self, CodecError> {
         let mut cols = [0usize; 3];
         let mut rows = [0usize; 3];
         let mut unit_size = [0usize; 3];
@@ -80,9 +87,10 @@ impl Grid {
                     what: "loop restoration",
                 });
             }
-            let sub = usize::from(plane > 0);
-            let width = (frame.upscaled_width as usize).div_ceil(1 << sub);
-            let height = (frame.height as usize).div_ceil(1 << sub);
+            let shift_x = usize::from(plane > 0 && sub_x);
+            let shift_y = usize::from(plane > 0 && sub_y);
+            let width = (frame.upscaled_width as usize).div_ceil(1usize << shift_x);
+            let height = (frame.height as usize).div_ceil(1usize << shift_y);
             let size = usize::from(frame.restoration.unit[plane]).max(1);
             cols[plane] = count_units(size, width);
             rows[plane] = count_units(size, height);
@@ -105,6 +113,8 @@ impl Grid {
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
             bit_depth,
+            sub_x,
+            sub_y,
             active: count > 0,
         })
     }
@@ -160,12 +170,13 @@ pub fn read_superblock(
         if kind != RESTORE_SGRPROJ && kind != RESTORE_WIENER && kind != RESTORE_SWITCHABLE {
             continue;
         }
-        let sub = usize::from(plane > 0);
+        let shift_x = usize::from(plane > 0 && grid.sub_x);
+        let shift_y = usize::from(plane > 0 && grid.sub_y);
         let unit = grid.unit_size[plane].max(1);
-        let row_start = (row * (4 >> sub)).div_ceil(unit);
-        let row_end = grid.rows[plane].min(((row + blocks) * (4 >> sub)).div_ceil(unit));
-        let col_start = (col * (4 >> sub)).div_ceil(unit);
-        let col_end = grid.cols[plane].min(((col + blocks) * (4 >> sub)).div_ceil(unit));
+        let row_start = (row * (4 >> shift_y)).div_ceil(unit);
+        let row_end = grid.rows[plane].min(((row + blocks) * (4 >> shift_y)).div_ceil(unit));
+        let col_start = (col * (4 >> shift_x)).div_ceil(unit);
+        let col_end = grid.cols[plane].min(((col + blocks) * (4 >> shift_x)).div_ceil(unit));
         for unit_row in row_start..row_end {
             for unit_col in col_start..col_end {
                 let decoded = match kind {
@@ -389,6 +400,14 @@ fn inverse_recenter(reference: i32, value: i32) -> i32 {
     }
 }
 
+/// Section 7.17.1. The unit row is measured from the luma sample eight
+/// rows above the block, then shifted into this plane.
+fn restoration_unit_row(grid: &Grid, plane: usize, y: usize) -> usize {
+    let sub_y = usize::from(plane > 0 && grid.sub_y);
+    let size = grid.unit_size[plane].max(1);
+    ((y + (8 >> sub_y)) / size).min(grid.rows[plane].saturating_sub(1))
+}
+
 fn clip3(min: i32, max: i32, value: i32) -> i32 {
     if value < min {
         min
@@ -477,8 +496,7 @@ fn filter_rows<S: Pix>(rows: &mut Rows<'_, S>, span: Span) {
             }
             x1 += 1;
         }
-        let unit_row =
-            (span.y0 / rows.grid.unit_size[rows.plane].max(1)).min(rows.grid.rows[rows.plane] - 1);
+        let unit_row = restoration_unit_row(rows.grid, rows.plane, span.y0);
         let Some(slot) = rows.grid.index(rows.plane, unit_row, unit_col) else {
             x = x1;
             continue;
@@ -728,7 +746,7 @@ pub fn apply_wiener<S: Pix>(
             while x1 < width && (x1 / size).min(grid.cols[plane] - 1) == unit_col {
                 x1 += 1;
             }
-            let unit_row = (y / size).min(grid.rows[plane] - 1);
+            let unit_row = restoration_unit_row(grid, plane, y);
             if let Some(slot) = grid.index(plane, unit_row, unit_col) {
                 let unit = grid.units[slot];
                 if unit.kind == RESTORE_WIENER {
@@ -867,6 +885,8 @@ mod tests {
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
             bit_depth: 8,
+            sub_x: true,
+            sub_y: true,
             active: true,
         };
         let out = apply_sgr(&samples, &samples, width, height, &grid, 0, 8);
@@ -900,6 +920,8 @@ mod tests {
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
             bit_depth: 8,
+            sub_x: true,
+            sub_y: true,
             active: true,
         };
         let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 8);
@@ -924,6 +946,8 @@ mod tests {
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
             bit_depth: 10,
+            sub_x: true,
+            sub_y: true,
             active: true,
         };
         let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 10);

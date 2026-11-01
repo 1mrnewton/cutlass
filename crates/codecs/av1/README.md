@@ -16,7 +16,7 @@ This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the pa
 
 Film grain synthesis is part of the output process in that specification. When a frame sends its own grain parameters, the noise is added to the shown picture. The reference keeps the picture from before that step.
 
-Main profile allows 10-bit 4:2:0 and monochrome. Profile 1 is 4:4:4 at 8-bit and at 10-bit. Profile 2 is 4:2:2 at 8-bit and at 10-bit. 12-bit 4:2:0, 4:2:2, and 4:4:4 match dav1d. Film grain at 12-bit is refused, and so is 12-bit monochrome. Restoration was off in those pairs. An 8-bit or 10-bit monochrome picture is one gray plane. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 picture keeps native samples, including a frame shown wider than it was coded, a keyframe restored by Wiener or self-guided filtering, and film grain on the shown picture. This is not yet a Main-profile-compliant decoder.
+Main profile allows 10-bit 4:2:0 and monochrome. Profile 1 is 4:4:4 at 8-bit and at 10-bit. Profile 2 is 4:2:2 at 8-bit and at 10-bit. 12-bit 4:2:0, 4:2:2, and 4:4:4 match dav1d. Film grain at 12-bit is refused, and so is 12-bit monochrome. 8-bit self-guided restoration matches on 4:4:4 and on 4:2:2. It was off in the 10-bit and 12-bit pairs. An 8-bit or 10-bit monochrome picture is one gray plane. The 10-bit monochrome pair leaves film grain off. A 10-bit 4:2:0 picture keeps native samples, including a frame shown wider than it was coded, a keyframe restored by Wiener or self-guided filtering, and film grain on the shown picture. This is not yet a Main-profile-compliant decoder.
 
 ## API
 
@@ -55,7 +55,7 @@ Implemented for that scope, and matched against dav1d on the keyframe fixtures n
 - Deblocking when the luma loop-filter levels are non-zero. A frame whose two luma levels are zero stays unfiltered.
 - CDEF, including one index copied across every 64×64 unit of a 128×128 block. Uniform and non-uniform tiles, a quantizer matrix, and a superblock quantizer delta.
 - Super resolution on a keyframe: reconstruction uses the coded width, and the shown picture is the upscaled width.
-- Wiener, self-guided, and switchable loop restoration on a keyframe.
+- Wiener, self-guided, and switchable loop restoration on a keyframe. Self-guided restoration also matches on 8-bit 4:4:4 and 4:2:2 when a chroma plane has more than one unit.
 - Film grain on the shown picture: luma, chroma, overlap, chroma grain scaled from luma, and parameters copied from a reference. The reference is stored before grain.
 
 Within-frame CDF adaptation is implemented, including the restoration type read for each unit. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.

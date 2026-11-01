@@ -140,7 +140,12 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     }
     let sb = if sequence.use_128 { 32 } else { SB4 };
     let initial = frame_cdfs(frame, carried)?;
-    let mut lr = restore::Grid::new(frame, sequence.bit_depth)?;
+    let mut lr = restore::Grid::new(
+        frame,
+        sequence.bit_depth,
+        sequence.subsampling_x,
+        sequence.subsampling_y,
+    )?;
     let mut end_cdfs = None;
     let mut tile = if parts.len() > 1 && !lr.active() {
         let (tile, end) = decode_tiles(sequence, frame, parts, buf_w, buf_h, refs, &initial)?;
@@ -536,7 +541,12 @@ fn decode_tiles<'a, 'r, S: Pix>(
         for part in parts {
             joins.push(scope.spawn(|| {
                 let mut tile = Tile::new(sequence, frame, &part.data, buf_w, buf_h, refs, initial)?;
-                let mut grid = restore::Grid::new(frame, sequence.bit_depth)?;
+                let mut grid = restore::Grid::new(
+                    frame,
+                    sequence.bit_depth,
+                    sequence.subsampling_x,
+                    sequence.subsampling_y,
+                )?;
                 tile.decode_part(frame, part, sb, &mut grid)?;
                 Ok(tile)
             }));

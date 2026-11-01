@@ -1409,6 +1409,39 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         }
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
+    pan_timeline(shell, ui, lane_area);
+}
+
+fn scroll_with_drag(shell: &mut Shell, ui: &Ui, x_in_view: f64) {
+    if shell.drag_scroll(x_in_view) {
+        ui.ctx().request_repaint();
+    }
+}
+
+/// A wheel or a sideways swipe over the lanes moves the visible span.
+fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
+    let (delta, command, pos) = ui.input(|input| {
+        (
+            input.smooth_scroll_delta,
+            input.modifiers.command || input.modifiers.ctrl,
+            input.pointer.hover_pos(),
+        )
+    });
+    if command || delta == Vec2::ZERO {
+        return;
+    }
+    let Some(pos) = pos else {
+        return;
+    };
+    if !lane_area.contains(pos) {
+        return;
+    }
+    let pixels = if delta.x.abs() >= delta.y.abs() {
+        delta.x
+    } else {
+        delta.y
+    };
+    shell.pan_pixels(-f64::from(pixels));
 }
 
 fn release_library_drop(
@@ -1824,6 +1857,10 @@ fn paint_lane(
     );
     lock_response.on_hover_text(if lane.lock { "Locked" } else { "Lock" });
     lane_switches(shell, ui, lane, row, index);
+    let background = ui.interact(row, ui.scope_id().with(("lane", index)), Sense::click());
+    if background.clicked() {
+        shell.select(None);
+    }
     let follower = shell
         .move_preview()
         .filter(|preview| preview.track_id == lane.track_id);
@@ -1994,6 +2031,7 @@ fn paint_clip(
             && let Some(pos) = pos
         {
             let x = f64::from(pos.x - lanes_left).max(0.0);
+            scroll_with_drag(shell, ui, x);
             shell.preview_move(clip.id.clone(), x, editor_lane_y(index));
         }
         if response.drag_stopped() && !moved {
@@ -2054,6 +2092,7 @@ fn drag_clip_edge(
         && let Some(pos) = pointer_pos(ui, &response)
     {
         let x = f64::from(pos.x - lanes_left).max(0.0);
+        scroll_with_drag(shell, ui, x);
         shell.preview_edge(clip.id.clone(), edge, x);
     }
     finish_clip_pointer(
@@ -3268,6 +3307,94 @@ mod tests {
         assert_eq!(
             segments[0].target.duration.0 + segments[1].target.duration.0,
             2_000_000
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_click_on_empty_lane_clears_the_selection_and_the_wheel_scrolls() {
+        let (mut shell, temp) = open_span("scroll", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(text), press(text, true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(text), press(text, false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.selected().is_some());
+        let width = (2_000_000_f32 * shell.pixel_size() as f32).max(8.0);
+        let empty = Pos2::new(text.x - 8.0 + width + 24.0, text.y);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::PointerMoved(empty),
+                    press(empty, true),
+                    press(empty, false),
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(shell.selected().is_none());
+        shell.zoom_in().unwrap();
+        let before = shell.view_origin();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![
+                    egui::Event::PointerMoved(text),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -120.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(
+            shell.view_origin().0 > before.0,
+            "the wheel did not scroll, origin {}",
+            shell.view_origin().0
         );
         let _ = std::fs::remove_dir_all(&temp);
     }

@@ -1605,6 +1605,61 @@ impl Shell {
         self.view_origin = origin.max(0);
     }
 
+    /// Scroll while a drag sits against the side of the lanes.
+    ///
+    /// `x` is pixels from the left of the lanes. The left side shows earlier
+    /// time. A cut that already fits does not move.
+    pub fn drag_scroll(&mut self, x_in_view: f64) -> bool {
+        const EDGE: f64 = 36.0;
+        let width = self.lane_width;
+        if !x_in_view.is_finite() || !width.is_finite() || width <= EDGE * 2.0 {
+            return false;
+        }
+        let (sign, depth) = if x_in_view < EDGE {
+            (-1.0, ((EDGE - x_in_view) / EDGE).clamp(0.0, 1.0))
+        } else if x_in_view > width - EDGE {
+            (1.0, ((x_in_view - (width - EDGE)) / EDGE).clamp(0.0, 1.0))
+        } else {
+            return false;
+        };
+        let Some(visible) = self.visible_micros() else {
+            return false;
+        };
+        let step = ((visible as f64) * 0.08 * depth).round() as i64;
+        let delta = if sign < 0.0 {
+            -step.max(1)
+        } else {
+            step.max(1)
+        };
+        self.pan_micros(delta)
+    }
+
+    /// Pan the lanes. Positive pixels show later time.
+    pub fn pan_pixels(&mut self, delta_px: f64) -> bool {
+        if !delta_px.is_finite() || !self.pixel_size.is_finite() || self.pixel_size <= 0.0 {
+            return false;
+        }
+        let micros = (delta_px / self.pixel_size).round() as i64;
+        if micros == 0 {
+            return false;
+        }
+        self.pan_micros(micros)
+    }
+
+    fn pan_micros(&mut self, delta: i64) -> bool {
+        let Some(visible) = self.visible_micros() else {
+            return false;
+        };
+        let end = self.cut_duration().0.max(0);
+        let max_origin = end.saturating_sub(visible).max(0);
+        let next = self.view_origin.saturating_add(delta).clamp(0, max_origin);
+        if next == self.view_origin {
+            return false;
+        }
+        self.view_origin = next;
+        true
+    }
+
     fn attribute_on(&self, track_id: &TrackId, flag: i32) -> bool {
         self.draft()
             .and_then(|draft| draft.tracks.iter().find(|track| &track.id == track_id))
@@ -3586,6 +3641,43 @@ mod tests {
         let error = desktop.split_playhead().unwrap_err();
         assert_eq!(error.to_string(), "the track is locked");
         assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+    }
+
+    #[test]
+    fn a_drag_at_the_lane_edge_scrolls_and_stops_at_the_cut() {
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.set_lane_width(800.0);
+        assert!(!desktop.drag_scroll(400.0));
+        assert_eq!(desktop.view_origin(), Micros(0));
+        assert!(desktop.drag_scroll(790.0));
+        let scrolled = desktop.view_origin().0;
+        assert!(scrolled > 0);
+        assert!(desktop.drag_scroll(0.0));
+        assert!(desktop.view_origin().0 < scrolled);
+        for _ in 0..8 {
+            if desktop.view_origin().0 == 0 {
+                break;
+            }
+            let _ = desktop.drag_scroll(0.0);
+        }
+        assert_eq!(desktop.view_origin(), Micros(0));
+        assert!(!desktop.drag_scroll(0.0));
+        let mut reached_end = false;
+        for _ in 0..2_000 {
+            if !desktop.drag_scroll(800.0) {
+                reached_end = true;
+                break;
+            }
+        }
+        assert!(reached_end);
+        assert!(!desktop.drag_scroll(800.0));
+        assert!(desktop.view_origin().0 > 0);
+        let at_end = desktop.view_origin();
+        assert!(desktop.pan_pixels(-4_000.0));
+        assert!(desktop.view_origin().0 < at_end.0);
     }
 
     #[test]

@@ -22,9 +22,9 @@ use cutlass_editor::{
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
-    Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType, Micros,
-    Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
-    linkage_from_biz,
+    Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialTransition, MaterialVideo,
+    MetaType, Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId,
+    TrackType, linkage_from_biz,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -39,6 +39,40 @@ use crate::tokens;
 
 /// Long-side steps the export dialog offers.
 pub const LONG_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
+
+/// A blend the Transitions shelf can drop onto a main-track cut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransitionOffer {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Preset length in microseconds. A short clip stores a shorter blend.
+    pub duration: i64,
+    /// `true` splits the window across the cut. `false` keeps it on the outgoing clip.
+    pub overlap: bool,
+}
+
+impl TransitionOffer {
+    #[must_use]
+    pub fn card_id(self) -> String {
+        format!("transition:{}", self.id)
+    }
+}
+
+/// Dissolve crosses the cut. Dip stays on the outgoing clip.
+pub const TRANSITION_OFFERS: &[TransitionOffer] = &[
+    TransitionOffer {
+        id: "dissolve",
+        name: "Dissolve",
+        duration: 500_000,
+        overlap: true,
+    },
+    TransitionOffer {
+        id: "dip",
+        name: "Dip",
+        duration: 400_000,
+        overlap: false,
+    },
+];
 
 #[derive(Debug)]
 pub enum ShellError {
@@ -1337,6 +1371,54 @@ impl Shell {
         Ok(())
     }
 
+    /// Store a blend on the main-track cut nearest the pointer.
+    ///
+    /// The two clips must touch. The blend does not open a lane and does not
+    /// move either clip. A preset longer than the clips is shortened to fit.
+    pub fn drop_transition(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let offer = TRANSITION_OFFERS
+            .iter()
+            .find(|offer| offer.card_id() == card_id)
+            .copied()
+            .ok_or_else(|| {
+                ShellError::Unavailable("the transition is not in the library".to_owned())
+            })?;
+        let x = self.time_zero_x(x);
+        let scale = self.scale();
+        let threshold = snap_window(self.pixel_size);
+        let (segment_id, fitted) = {
+            let draft = self.session_draft()?;
+            let hit = hit_test(draft, scale, Pointer { x, y })
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?;
+            let Some(hit) = hit else {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            };
+            if !hit.lane.main {
+                return Err(ShellError::Unavailable(
+                    "a transition sits on the main track".to_owned(),
+                ));
+            }
+            let (segment_id, outgoing, incoming) = main_cut(draft, hit.time, threshold)?;
+            let fitted = fit_transition(offer.duration, outgoing, incoming, offer.overlap)
+                .ok_or_else(|| ShellError::Unavailable("the clips are too short".to_owned()))?;
+            (segment_id, fitted)
+        };
+        let transition = MaterialTransition {
+            id: MaterialId::new(self.fresh("transition")),
+            kind: "transition".to_owned(),
+            name: offer.name.to_owned(),
+            duration: Micros(fitted),
+            is_overlap: offer.overlap,
+            ..Default::default()
+        };
+        self.apply(Request::SetTransition {
+            segment_id,
+            transition: Box::new(transition),
+        })
+    }
+
     pub fn zoom_in(&mut self) -> Result<(), ShellError> {
         self.pixel_size = self
             .stored_zoom()?
@@ -2429,6 +2511,74 @@ fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
 }
 
+/// The outgoing clip of the touching main-track cut nearest `time`.
+///
+/// A gap is not a cut. The last two numbers are the outgoing and incoming
+/// durations.
+fn main_cut(
+    draft: &Draft,
+    time: Micros,
+    threshold: Micros,
+) -> Result<(SegmentId, i64, i64), ShellError> {
+    let track = draft
+        .tracks
+        .iter()
+        .find(|track| track.is_main())
+        .ok_or_else(|| ShellError::Unavailable("the drop missed the cut".to_owned()))?;
+    if track.attribute.contains(TrackAttribute::LOCK) {
+        return Err(ShellError::Locked);
+    }
+    let mut ordered: Vec<_> = track.segments.iter().collect();
+    ordered.sort_by_key(|segment| segment.target.start.0);
+    let mut best: Option<(i64, SegmentId, i64, i64)> = None;
+    for pair in ordered.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if left.target.duration.0 <= 0 || right.target.duration.0 <= 0 {
+            continue;
+        }
+        let cut = left.target.end().0;
+        if right.target.start.0 != cut {
+            continue;
+        }
+        let distance = (time.0 - cut).saturating_abs();
+        if distance > threshold.0 {
+            continue;
+        }
+        let closer = best
+            .as_ref()
+            .is_none_or(|(best_distance, _, _, _)| distance < *best_distance);
+        if closer {
+            best = Some((
+                distance,
+                left.id.clone(),
+                left.target.duration.0,
+                right.target.duration.0,
+            ));
+        }
+    }
+    best.map(|(_, id, outgoing, incoming)| (id, outgoing, incoming))
+        .ok_or_else(|| ShellError::Unavailable("the drop missed the cut".to_owned()))
+}
+
+/// Shorten `preset` so the blend window stays inside both clips.
+fn fit_transition(preset: i64, outgoing: i64, incoming: i64, overlap: bool) -> Option<i64> {
+    if preset <= 0 || outgoing <= 0 || incoming <= 0 {
+        return None;
+    }
+    let fitted = if overlap {
+        let even = outgoing.min(incoming).saturating_mul(2);
+        let odd = outgoing
+            .min(incoming.saturating_sub(1))
+            .saturating_mul(2)
+            .saturating_add(1);
+        even.max(odd).min(preset)
+    } else {
+        preset.min(outgoing)
+    };
+    if fitted <= 0 { None } else { Some(fitted) }
+}
+
 /// The one main-track clip `span` sits on, when it sits on no other.
 /// A locked main lane is not an owner. Touching at an endpoint is not an overlap.
 fn exclusive_main_owner(draft: &Draft, start: Micros, duration: Micros) -> Option<SegmentId> {
@@ -3293,6 +3443,166 @@ mod tests {
             .unwrap();
         assert!(desktop.draft().unwrap().relationships.is_empty());
         assert_eq!(desktop.draft().unwrap().tracks.len(), 2);
+    }
+
+    fn touching_cut(dir: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("left", "media", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "right",
+            "media",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    #[test]
+    fn a_transition_lands_on_the_main_cut_and_undo_lifts_it() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        let card = super::TRANSITION_OFFERS[0].card_id();
+        let missed = desktop
+            .drop_transition(&card, lane_time(&desktop, 100_000.0), y)
+            .unwrap_err();
+        assert_eq!(missed.to_string(), "the drop missed the cut");
+        assert!(desktop.draft().unwrap().materials.transitions.is_empty());
+        desktop
+            .drop_transition(&card, lane_time(&desktop, 1_000_000.0), y)
+            .unwrap();
+        let draft = desktop.draft().unwrap();
+        assert_eq!(draft.tracks.len(), 1);
+        assert_eq!(
+            draft.tracks[0].segments[0].target,
+            TimeRange::new(0, 1_000_000)
+        );
+        assert_eq!(
+            draft.tracks[0].segments[1].target,
+            TimeRange::new(1_000_000, 1_000_000)
+        );
+        assert_eq!(draft.materials.transitions.len(), 1);
+        assert_eq!(draft.materials.transitions[0].name, "Dissolve");
+        assert_eq!(draft.materials.transitions[0].duration, Micros(500_000));
+        assert!(draft.materials.transitions[0].is_overlap);
+        assert_eq!(
+            draft.tracks[0].segments[0].extra_material_refs,
+            vec![draft.materials.transitions[0].id.clone()]
+        );
+        let error = desktop
+            .split_clip(SegmentId::new("left"), Micros(800_000))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "a transition cannot be split");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        desktop.undo().unwrap();
+        assert!(desktop.draft().unwrap().materials.transitions.is_empty());
+        assert!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .extra_material_refs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_transition_refuses_a_gap_another_lane_and_a_locked_main_track() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("left", "media", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "right",
+            "media",
+            TimeRange::new(2_000_000, 1_000_000),
+        ));
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone-a", "tone", TimeRange::new(0, 1_000_000)));
+        sound.segments.push(Segment::new(
+            "tone-b",
+            "tone",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let card = super::TRANSITION_OFFERS[1].card_id();
+        let gap = desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 1_000_000.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap_err();
+        assert_eq!(gap.to_string(), "the drop missed the cut");
+        let other = desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 1_000_000.0),
+                crate::tokens::LANE_HEIGHT + crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap_err();
+        assert_eq!(other.to_string(), "a transition sits on the main track");
+        assert!(desktop.draft().unwrap().materials.transitions.is_empty());
+
+        let short = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("left", "media", TimeRange::new(0, 100)));
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("right", "media", TimeRange::new(100, 100)));
+        Folder::new(draft).save(&short.path).unwrap();
+        desktop.open_folder(&short.path).unwrap();
+        desktop.pixel_size = 1.0;
+        desktop
+            .drop_transition(
+                &super::TRANSITION_OFFERS[0].card_id(),
+                lane_time(&desktop, 100.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        let blend = &desktop.draft().unwrap().materials.transitions[0];
+        assert_eq!(blend.duration, Micros(200));
+        assert!(blend.is_overlap);
+        desktop.undo().unwrap();
+        desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 100.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        let blend = &desktop.draft().unwrap().materials.transitions[0];
+        assert_eq!(blend.name, "Dip");
+        assert_eq!(blend.duration, Micros(100));
+        assert!(!blend.is_overlap);
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop
+            .drop_transition(
+                &card,
+                lane_time(&desktop, 100.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap_err();
+        assert!(matches!(locked, ShellError::Locked));
     }
 
     #[test]

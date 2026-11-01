@@ -816,10 +816,22 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                 );
             }
         }
+        Shelf::Transitions => {
+            for offer in crate::shell::TRANSITION_OFFERS {
+                if !query.is_empty() && !offer.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(BinCard {
+                    id: offer.card_id(),
+                    name: offer.name.to_owned(),
+                    meta: card_meta(offer.duration),
+                    on_timeline: false,
+                });
+            }
+        }
         Shelf::Text
         | Shelf::Stickers
         | Shelf::Effects
-        | Shelf::Transitions
         | Shelf::Filters
         | Shelf::Adjustments
         | Shelf::Templates => {}
@@ -1670,7 +1682,12 @@ fn release_library_drop(
     let x = f64::from((pos.x - lanes_left).max(0.0));
     let row = u32::try_from(index).unwrap_or(0);
     let y = f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0;
-    if let Err(error) = shell.drop_medium(&material_id, x, y) {
+    let landed = if material_id.starts_with("transition:") {
+        shell.drop_transition(&material_id, x, y)
+    } else {
+        shell.drop_medium(&material_id, x, y)
+    };
+    if let Err(error) = landed {
         shell.set_notice(error.to_string());
     }
 }
@@ -1706,6 +1723,17 @@ fn paint_library_ghost(shell: &Shell, ui: &Ui) {
 }
 
 fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
+    if let Some(offer) = crate::shell::TRANSITION_OFFERS
+        .iter()
+        .find(|offer| offer.card_id() == material_id)
+    {
+        return Some(BinCard {
+            id: offer.card_id(),
+            name: offer.name.to_owned(),
+            meta: card_meta(offer.duration),
+            on_timeline: false,
+        });
+    }
     let draft = shell.draft()?;
     let used: std::collections::HashSet<&str> = draft
         .tracks
@@ -2131,6 +2159,7 @@ fn paint_lane(
     for clip in &lane.clips {
         paint_clip(shell, ui, lane, clip, row, lanes_left, index);
     }
+    paint_transitions(shell, ui, lane, row, lanes_left);
     for preview in &followers {
         paint_move_follower(shell, ui, lane, preview, row, lanes_left);
     }
@@ -2281,6 +2310,55 @@ fn clip_bounds(
     );
     let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
     Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height))
+}
+
+fn paint_transitions(
+    shell: &Shell,
+    ui: &Ui,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    lanes_left: f32,
+) {
+    let Some(draft) = shell.draft() else {
+        return;
+    };
+    let Some(track) = draft.tracks.iter().find(|track| track.id == lane.track_id) else {
+        return;
+    };
+    for segment in &track.segments {
+        let Some(transition) = segment.extra_material_refs.iter().find_map(|id| {
+            draft
+                .materials
+                .transitions
+                .iter()
+                .find(|item| &item.id == id)
+        }) else {
+            continue;
+        };
+        let Some((start, end)) = cutlass_model::blend_window(
+            segment.target.end(),
+            transition.duration,
+            transition.is_overlap,
+        ) else {
+            continue;
+        };
+        let x0 = lane_x(
+            lanes_left,
+            shell.pixel_size(),
+            shell.view_origin().0,
+            start.0,
+        );
+        let x1 = lane_x(lanes_left, shell.pixel_size(), shell.view_origin().0, end.0);
+        if x1 <= x0 {
+            continue;
+        }
+        let mark = Rect::from_min_max(
+            Pos2::new(x0, row.bottom() - 6.0),
+            Pos2::new(x1, row.bottom() - 2.0),
+        );
+        ui.painter()
+            .rect_filled(mark.intersect(row), CornerRadius::ZERO, tokens::EXPORT);
+    }
 }
 
 fn paint_clip(
@@ -3029,6 +3107,17 @@ mod tests {
         assert!(cards[0].on_timeline);
         assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
+        let blends = bin_cards(&draft, Shelf::Transitions, "");
+        assert_eq!(
+            blends
+                .iter()
+                .map(|card| card.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Dissolve", "Dip"]
+        );
+        assert_eq!(blends[0].meta, "0.5s");
+        assert!(!blends[0].on_timeline);
+        assert_eq!(bin_cards(&draft, Shelf::Transitions, "dip").len(), 1);
     }
 
     #[test]

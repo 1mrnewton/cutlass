@@ -132,4 +132,15 @@ pub enum Request {
         segment_id: Option<SegmentId>,
         start: Micros,
     },
+    /// Store a beat on an audio segment. `source` is the source time.
+    AddBeat {
+        segment_id: SegmentId,
+        source: Micros,
+        material_id: MaterialId,
+    },
+    /// Remove one beat. `source` is the stored source time.
+    RemoveBeat {
+        segment_id: SegmentId,
+        source: Micros,
+    },
 }

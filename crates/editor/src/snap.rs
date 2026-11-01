@@ -1,6 +1,7 @@
 use cutlass_model::{
-    Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange, clip_mark_time,
-    referenced_time_marks, segment_time_mark, time_mark_items,
+    Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange,
+    beat_timeline_time, clip_mark_time, referenced_time_marks, segment_beats, segment_time_mark,
+    time_mark_items, user_beats,
 };
 
 /// What a drag lined up with. The time is on the timeline, in microseconds.
@@ -177,21 +178,13 @@ fn collect_keyframes(segment: &Segment, note: &mut impl FnMut(Micros, SnapKind))
 }
 
 fn collect_beats(draft: &Draft, segment: &Segment, note: &mut impl FnMut(Micros, SnapKind)) {
-    for id in &segment.extra_material_refs {
-        let Some(MaterialRef::Other(raw)) = draft.materials.get(id.as_str()) else {
-            continue;
-        };
-        if raw.kind != "beats" {
-            continue;
+    let Some(raw) = segment_beats(&draft.materials, segment) else {
+        return;
+    };
+    for beat in user_beats(raw) {
+        if let Some(time) = beat_timeline_time(segment, beat) {
+            note(time, SnapKind::Beat);
         }
-        let Some(beats) = raw.fields.get("user_beats") else {
-            continue;
-        };
-        each_integer(beats, &mut |beat| {
-            if let Some(time) = beat_on_timeline(segment, beat) {
-                note(time, SnapKind::Beat);
-            }
-        });
     }
 }
 
@@ -269,54 +262,6 @@ fn one_mark(item: &serde_json::Value, note: &mut impl FnMut(Micros)) {
         return;
     };
     note(Micros(start));
-}
-
-fn each_integer(value: &serde_json::Value, note: &mut impl FnMut(i64)) {
-    if let Some(beat) = value.as_i64() {
-        note(beat);
-        return;
-    }
-    let Some(items) = value.as_array() else {
-        return;
-    };
-    for item in items {
-        if let Some(beat) = item.as_i64() {
-            note(beat);
-        }
-    }
-}
-
-/// A beat is a source time. It lands on the timeline at the segment start
-/// plus that offset through the source range. Speed other than 1 divides
-/// the source offset, toward zero.
-fn beat_on_timeline(segment: &Segment, beat: i64) -> Option<Micros> {
-    let (source_start, source_end) = if let Some(source) = &segment.source_range {
-        let end = positive_end(source)?;
-        (source.start.0, end)
-    } else {
-        (0, segment.target.duration.0)
-    };
-    if beat < source_start || beat >= source_end {
-        return None;
-    }
-    let delta = beat.checked_sub(source_start)?;
-    let delta_target = if segment.speed == 1.0 {
-        delta
-    } else {
-        speed_offset(delta, segment.speed)?
-    };
-    segment.target.start.0.checked_add(delta_target).map(Micros)
-}
-
-fn speed_offset(delta: i64, speed: f64) -> Option<i64> {
-    if delta < 0 || !speed.is_finite() || speed <= 0.0 {
-        return None;
-    }
-    let mapped = (delta as f64) / speed;
-    if !mapped.is_finite() || mapped < 0.0 || mapped >= (1_u64 << 63) as f64 {
-        return None;
-    }
-    Some(mapped.trunc() as i64)
 }
 
 fn positive_end(range: &TimeRange) -> Option<i64> {

@@ -400,8 +400,13 @@ fn remove_segment(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditE
         &draft.materials,
         &draft.tracks[track_index].segments[segment_index],
     );
+    let beat_ids = super::beat::beat_ids(
+        &draft.materials,
+        &draft.tracks[track_index].segments[segment_index],
+    );
     draft.tracks[track_index].segments.remove(segment_index);
     super::mark::drop_unreferenced_time_marks(draft, &mark_ids);
+    super::beat::drop_unreferenced_beats(draft, &beat_ids);
     Ok(())
 }
 

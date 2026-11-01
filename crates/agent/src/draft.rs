@@ -443,6 +443,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::InsertTrack { .. } => "insert_track",
         Request::AddTimeMark { .. } => "add_time_mark",
         Request::RemoveTimeMark { .. } => "remove_time_mark",
+        Request::AddBeat { .. } => "add_beat",
+        Request::RemoveBeat { .. } => "remove_beat",
     }
 }
 

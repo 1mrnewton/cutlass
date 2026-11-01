@@ -1,3 +1,4 @@
+mod beat;
 mod crop;
 mod fade;
 mod freeze;
@@ -66,6 +67,10 @@ pub enum EditError {
     AlreadyLinked,
     /// A marker is already stored at that time.
     DuplicateMark,
+    /// A beat is already stored at that source time.
+    DuplicateBeat,
+    /// A beat can be stored only on an audio segment.
+    NotAudio,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
 }
@@ -141,6 +146,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::RemoveTimeMark { segment_id, start } => {
             mark::remove_time_mark(draft, segment_id.as_ref(), *start)
         }
+        Request::AddBeat {
+            segment_id,
+            source,
+            material_id,
+        } => beat::add_beat(draft, segment_id, *source, material_id),
+        Request::RemoveBeat { segment_id, source } => beat::remove_beat(draft, segment_id, *source),
     }
 }
 

@@ -21,7 +21,8 @@
 //! A non-negative crop insets that window, and motion inside it uses the window size.
 //! Residual resampling uses that window. A negative offset shifts it.
 //! A crop that differs on the reference picture adds that difference to the scaled vector.
-//! Macroblock-level spatial scalability and a 3D-AVC extension header are refused.
+//! Macroblock-level spatial scalability reads that crop from the slice.
+//! A 3D-AVC extension header is refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

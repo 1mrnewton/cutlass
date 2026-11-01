@@ -755,6 +755,57 @@ fn a_reference_crop_changes_the_scaled_vector() {
     }
 }
 
+#[test]
+fn a_slice_crop_shifts_the_scaled_window() {
+    let parsed = parse_subset_sps(&slice_crop_subset()).expect("subset");
+    assert_eq!(parsed.svc_spatial, 2);
+    assert_eq!(
+        (
+            parsed.svc_scale.left,
+            parsed.svc_scale.top,
+            parsed.svc_scale.right,
+            parsed.svc_scale.bottom,
+        ),
+        (0, 0, 0, 0)
+    );
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &slice_crop_idr());
+    pictures.extend(push_pictures(&mut decoder, &slice_crop_p()));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    let reference = &pictures[0];
+    assert!(
+        shifted_reference(reference),
+        "row {:?} chroma {:?}",
+        &reference.picture.y()[..32],
+        &reference.picture.u()[..16]
+    );
+    let picture = &pictures[1];
+    assert!(
+        shifted_residual(picture),
+        "row {:?} row8 {:?} chroma {:?}",
+        &picture.picture.y()[..32],
+        &picture.picture.y()[8 * 32..9 * 32],
+        &picture.picture.u()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = slice_crop_idr();
+        annex.extend(slice_crop_p());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let base = decode(&resample_base());
+        let mut second = planes_of(&base);
+        for row in 0..4 {
+            for col in 0..4 {
+                second[row * 16 + col] = 43;
+            }
+        }
+        let mut want = planes_of(&base);
+        want.extend(second);
+        assert_eq!(raw, want);
+        assert_ne!(planes_of(picture), &raw[raw.len() / 2..]);
+    }
+}
+
 fn push_pictures(decoder: &mut H264Decoder, annex: &[u8]) -> Vec<VideoOutput> {
     decoder
         .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
@@ -2845,6 +2896,92 @@ fn crop_change_reference(picture: &VideoOutput) -> bool {
         })
     };
     luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
+}
+
+fn slice_crop(w: &mut Writer) {
+    w.bit(true);
+    w.bits(1, 2);
+    w.se(8);
+    w.se(0);
+    w.se(-8);
+    w.se(0);
+}
+
+fn slice_crop_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(86, 8);
+    high_body_size(&mut w, 1, 1);
+    w.bit(true);
+    w.bits(2, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn slice_crop_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &slice_crop_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &resample_pcm()));
+    out.extend(annex_b_extension(3, 20, &ilp_header(), &slice_crop_intra()));
+    out
+}
+
+fn slice_crop_intra() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    slice_crop(&mut w);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    for _ in 0..4 {
+        w.ue(3);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn slice_crop_p() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &residual_scale_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &slice_crop_enhancement(),
+    ));
+    out
+}
+
+fn slice_crop_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    slice_crop(&mut w);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(true);
+    w.ue(0);
+    w.trailing();
+    w.bytes
 }
 
 fn shifted_idr() -> Vec<u8> {

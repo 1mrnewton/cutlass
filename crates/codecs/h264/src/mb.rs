@@ -891,7 +891,7 @@ fn motion_base<S: Sample>(
         mb.mv1 = reference.mv1;
         mb.ref0 = reference.ref0;
         mb.ref1 = reference.ref1;
-    } else if slice.sps.svc_spatial == 1 {
+    } else if matches!(slice.sps.svc_spatial, 1 | 2) {
         scaled_layer_motion(&mut mb, layer, dpb, slice, mx, my)?;
     } else {
         return Err(CodecError::Unsupported {
@@ -997,7 +997,7 @@ fn scaled_layer_motion<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    let crop = &slice.sps.svc_scale;
+    let crop = &slice.scale;
     let left = sample_offset(crop.left)?;
     let top = sample_offset(crop.top)?;
     let right = sample_offset(crop.right)?;
@@ -1330,7 +1330,7 @@ pub(crate) fn resample_residual<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    let crop = &slice.sps.svc_scale;
+    let crop = &slice.scale;
     let left = sample_offset(crop.left)?;
     let top = sample_offset(crop.top)?;
     let right = sample_offset(crop.right)?;
@@ -8516,6 +8516,7 @@ fn filter_boundary<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, vertical: bo
 pub(crate) fn resample_intra<S: Sample>(
     base: &Frame<S>,
     sps: &Sps,
+    scale: &crate::set::SvcScale,
 ) -> Result<Frame<S>, CodecError> {
     if base.field
         || base.mbaff
@@ -8532,7 +8533,6 @@ pub(crate) fn resample_intra<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    let scale = &sps.svc_scale;
     let out_w = sps.width as usize;
     let out_h = sps.height as usize;
     if out_w == 0 || out_h == 0 || !out_w.is_multiple_of(16) || !out_h.is_multiple_of(16) {

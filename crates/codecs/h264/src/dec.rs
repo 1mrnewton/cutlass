@@ -1774,6 +1774,8 @@ pub(crate) struct Slice<'a> {
     residual_pred: bool,
     /// `adaptive_residual_prediction_flag`. The macroblock layer reads `residual_prediction_flag`.
     adaptive_residual: bool,
+    /// Crop used to resample this slice. A sequence crop is copied here.
+    scale: set::SvcScale,
     /// Upsampled reference-layer residual. Empty unless the layers differ in size.
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
@@ -1913,10 +1915,11 @@ fn decode_slice<S: Sample>(
     if wrong_start {
         return Err(bits.malformed("first macroblock"));
     }
-    let upsampled = if sps.svc_spatial == 1 {
+    let spatial = matches!(sps.svc_spatial, 1 | 2);
+    let upsampled = if spatial {
         match layer {
             Some(base) if !base.mb.is_empty() && base.mb.iter().all(|mb| mb.intra) => {
-                Some(mb::resample_intra(base, &sps)?)
+                Some(mb::resample_intra(base, &sps, &slice.scale)?)
             }
             _ => None,
         }
@@ -1924,7 +1927,7 @@ fn decode_slice<S: Sample>(
         None
     };
     let layer = upsampled.as_ref().or(layer);
-    if sps.svc_spatial == 1
+    if spatial
         && (slice.residual_pred || slice.adaptive_residual)
         && layer.is_some_and(|base| base.w != pic.w || base.h != pic.h)
     {
@@ -2134,6 +2137,9 @@ struct Header {
     interview_l0: Vec<u16>,
     /// Interview reference views for list 1.
     interview_l1: Vec<u16>,
+    /// Crop of this slice. Picture-level scalability copies the sequence crop.
+    /// Macroblock-level scalability reads it from the slice header.
+    scale: set::SvcScale,
 }
 
 struct Mod {
@@ -2484,11 +2490,18 @@ fn read_header(
             };
         }
     }
-    let (adaptive_base, base_mode, adaptive_motion, motion_pred, adaptive_residual, residual_pred) =
-        match svc {
-            Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
-            _ => (false, false, false, false, false, false),
-        };
+    let layer = match svc {
+        Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
+        _ => InterLayer {
+            adaptive_base: false,
+            base_mode: false,
+            adaptive_motion: false,
+            motion_pred: false,
+            adaptive_residual: false,
+            residual_pred: false,
+            scale: sps.svc_scale.clone(),
+        },
+    };
     if svc.is_some() && !restriction {
         let start = bits.u(4)?;
         let end = bits.u(4)?;
@@ -2535,17 +2548,28 @@ fn read_header(
         qs,
         subset: svc.is_some() || mvc.is_some(),
         output: svc.is_none_or(|svc| svc.output),
-        base_mode,
-        adaptive_base,
-        adaptive_motion,
-        motion_pred,
-        residual_pred,
-        adaptive_residual,
+        base_mode: layer.base_mode,
+        adaptive_base: layer.adaptive_base,
+        adaptive_motion: layer.adaptive_motion,
+        motion_pred: layer.motion_pred,
+        residual_pred: layer.residual_pred,
+        adaptive_residual: layer.adaptive_residual,
         view_id,
         inter_view,
         interview_l0,
         interview_l1,
+        scale: layer.scale,
     })
+}
+
+struct InterLayer {
+    adaptive_base: bool,
+    base_mode: bool,
+    adaptive_motion: bool,
+    motion_pred: bool,
+    adaptive_residual: bool,
+    residual_pred: bool,
+    scale: set::SvcScale,
 }
 
 /// Slice-header fields that follow the Annex A tail when inter-layer prediction
@@ -2562,13 +2586,13 @@ fn read_header(
 /// window, and motion inside it uses the window size. Residual resampling uses
 /// that window. A negative offset shifts it. A crop that differs on the reference
 /// picture adds that difference to the scaled vector. Macroblock-level spatial
-/// scalability and coefficient prediction are refused.
+/// scalability reads the crop from the slice. Coefficient prediction is refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
     svc: nal::SvcHeader,
-) -> Result<(bool, bool, bool, bool, bool, bool), CodecError> {
-    if svc.quality_id != 0 || sps.svc_spatial > 1 || !sps.inter_layer_deblock {
+) -> Result<InterLayer, CodecError> {
+    if svc.quality_id != 0 || !sps.inter_layer_deblock {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2592,8 +2616,15 @@ fn read_inter_layer(
             what: "inter-layer prediction",
         });
     }
-    // `constrained_intra_resampling_flag` and `slice_skip_flag`.
-    if bits.bit()? || bits.bit()? {
+    // `constrained_intra_resampling_flag`. The slice crop follows it when
+    // spatial scalability is signalled per slice, then `slice_skip_flag`.
+    if bits.bit()? {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let scale = slice_scale(bits, sps)?;
+    if bits.bit()? {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2635,14 +2666,37 @@ fn read_inter_layer(
             what: "inter-layer prediction",
         });
     }
-    Ok((
+    Ok(InterLayer {
         adaptive_base,
-        default_base,
+        base_mode: default_base,
         adaptive_motion,
-        default_motion,
+        motion_pred: default_motion,
         adaptive_residual,
-        default_residual,
-    ))
+        residual_pred: default_residual,
+        scale,
+    })
+}
+
+/// `scaled_ref_layer_*_offset` when `extended_spatial_scalability_idc` is 2.
+/// Otherwise the sequence crop.
+fn slice_scale(bits: &mut Bits<'_>, sps: &Sps) -> Result<set::SvcScale, CodecError> {
+    if sps.svc_spatial != 2 {
+        return Ok(sps.svc_scale.clone());
+    }
+    let mut scale = sps.svc_scale.clone();
+    if sps.chroma > 0 {
+        scale.ref_chroma_x = if bits.bit()? { 0 } else { -1 };
+        let plus1 = bits.u(2)?;
+        if plus1 > 2 {
+            return Err(bits.malformed("chroma phase"));
+        }
+        scale.ref_chroma_y = plus1 as i8 - 1;
+    }
+    scale.left = bits.se()?;
+    scale.top = bits.se()?;
+    scale.right = bits.se()?;
+    scale.bottom = bits.se()?;
+    Ok(scale)
 }
 
 fn read_list_mod(bits: &mut Bits<'_>) -> Result<Vec<Mod>, CodecError> {
@@ -2890,10 +2944,10 @@ fn new_frame<S: Sample>(
         view_id: header.view_id,
         inter_view: header.inter_view,
         shown: Shown::from_sps(packet.pts, packet.duration, sps),
-        svc_left: mb::sample_offset(sps.svc_scale.left)?,
-        svc_top: mb::sample_offset(sps.svc_scale.top)?,
-        svc_right: mb::sample_offset(sps.svc_scale.right)?,
-        svc_bottom: mb::sample_offset(sps.svc_scale.bottom)?,
+        svc_left: mb::sample_offset(header.scale.left)?,
+        svc_top: mb::sample_offset(header.scale.top)?,
+        svc_right: mb::sample_offset(header.scale.right)?,
+        svc_bottom: mb::sample_offset(header.scale.bottom)?,
     })
 }
 
@@ -2977,6 +3031,7 @@ fn make_slice<'a, S: Sample>(
         motion_pred: header.motion_pred,
         residual_pred: header.residual_pred,
         adaptive_residual: header.adaptive_residual,
+        scale: header.scale.clone(),
         residual_y: Vec::new(),
         residual_u: Vec::new(),
         residual_v: Vec::new(),
@@ -3395,6 +3450,7 @@ mod tests {
             inter_view: true,
             interview_l0: Vec::new(),
             interview_l1: Vec::new(),
+            scale: crate::set::SvcScale::default(),
         }
     }
 

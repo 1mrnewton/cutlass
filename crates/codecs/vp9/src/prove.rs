@@ -313,18 +313,88 @@ fn official_level_stream_matches_ffmpeg_software() {
             "yuv420p",
             PixelFormat::Yuv420p,
             "0",
-            "1",
+            "gf_dist",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd8_sub8X8_l1.webm",
+            "yuv420p",
+            PixelFormat::Yuv420p,
+            "0",
+            "sub8x8",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd8_8buf_l1.webm",
+            "yuv420p",
+            PixelFormat::Yuv420p,
+            "0",
+            "buf",
+        ),
+        (
+            "crowd_run_248X144_fr15_bd8_odd_size_l1.webm",
+            "yuv420p",
+            PixelFormat::Yuv420p,
+            "0",
+            "odd_size",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd8_frm_resize_l1.webm",
+            "yuv420p",
+            PixelFormat::Yuv420p,
+            "0",
+            "frm_resize",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd8_sub8x8_sf_l1.webm",
+            "yuv420p",
+            PixelFormat::Yuv420p,
+            "0",
+            "sub8x8_sf",
         ),
         (
             "crowd_run_256X144_fr15_bd10_gf_dist_4_l1.webm",
             "yuv420p10le",
             PixelFormat::Yuv420p10,
             "2",
-            "1",
+            "gf_dist",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd10_sub8X8_l1.webm",
+            "yuv420p10le",
+            PixelFormat::Yuv420p10,
+            "2",
+            "sub8x8",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd10_8buf_l1.webm",
+            "yuv420p10le",
+            PixelFormat::Yuv420p10,
+            "2",
+            "buf",
+        ),
+        (
+            "crowd_run_248X144_fr15_bd10_odd_size_l1.webm",
+            "yuv420p10le",
+            PixelFormat::Yuv420p10,
+            "2",
+            "odd_size",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd10_frm_resize_l1.webm",
+            "yuv420p10le",
+            PixelFormat::Yuv420p10,
+            "2",
+            "frm_resize",
+        ),
+        (
+            "crowd_run_256X144_fr15_bd10_sub8x8_sf_l1.webm",
+            "yuv420p10le",
+            PixelFormat::Yuv420p10,
+            "2",
+            "sub8x8_sf",
         ),
     ];
     let mut ran = 0u32;
-    for (name, pix_fmt, format, profile, level) in cases {
+    for (name, pix_fmt, format, profile, kind) in cases {
         let Some(webm) = local_level_stream(name) else {
             continue;
         };
@@ -346,7 +416,7 @@ fn official_level_stream_matches_ffmpeg_software() {
         let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
         assert_eq!(mismatch, None, "{name} first mismatch at {mismatch:?}");
         eprintln!(
-            "official profile {profile} level {level} {}x{} {} frames {} bytes",
+            "official profile {profile} level 1 {kind} {}x{} {} frames {} bytes",
             stream.width,
             stream.height,
             stream.frames.len(),
@@ -627,7 +697,7 @@ fn ffmpeg_yuv(ffmpeg: &Path, ivf: &Path, pix_fmt: &str) -> Vec<u8> {
             "-i",
         ])
         .arg(ivf)
-        .args(["-f", "rawvideo", "-pix_fmt", pix_fmt])
+        .args(["-noautoscale", "-f", "rawvideo", "-pix_fmt", pix_fmt])
         .arg(&output)
         .output()
         .expect("ffmpeg");

@@ -60,6 +60,15 @@ pub enum Request {
         material_id: MaterialId,
         words: WordColumns,
     },
+    /// Place the picture's sound on an audio clip linked to `source_id`.
+    ///
+    /// `track_id` is created when it is missing. The picture stays where it is.
+    ExtractAudio {
+        source_id: SegmentId,
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+    },
     /// Turn one track-attribute bit on or off. Mute and solo are not gains.
     SetTrackAttribute {
         track_id: TrackId,

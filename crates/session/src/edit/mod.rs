@@ -1,5 +1,6 @@
 mod beat;
 mod crop;
+mod extract;
 mod fade;
 mod freeze;
 mod import;
@@ -74,6 +75,12 @@ pub enum EditError {
     DuplicateBeat,
     /// A beat can be stored only on an audio segment.
     NotAudio,
+    /// Extract audio applies to a video clip.
+    NotVideo,
+    /// The picture has no sound to place.
+    NoSound,
+    /// The picture's sound is already its own clip.
+    AlreadyExtracted,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
     /// The rotation is not a finite number of degrees.
@@ -108,6 +115,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             words.clone(),
         ),
+        Request::ExtractAudio {
+            source_id,
+            track_id,
+            segment_id,
+            material_id,
+        } => extract::extract_audio(draft, source_id, track_id, segment_id, material_id),
         Request::SetTrackAttribute { track_id, bit, on } => {
             track::set_track_attribute(draft, track_id, *bit, *on)
         }

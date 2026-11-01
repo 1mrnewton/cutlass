@@ -108,6 +108,9 @@ fn edit_cause(error: EditError) -> String {
         EditError::DuplicateMark => "a marker is already there".to_owned(),
         EditError::DuplicateBeat => "a beat is already there".to_owned(),
         EditError::NotAudio => "a beat belongs on audio".to_owned(),
+        EditError::NotVideo => "an extract belongs on video".to_owned(),
+        EditError::NoSound => "the clip has no sound".to_owned(),
+        EditError::AlreadyExtracted => "the sound is already on its own clip".to_owned(),
         EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
     }
 }
@@ -133,6 +136,22 @@ mod tests {
         ));
         assert_eq!(error.to_string(), "revision 0 is not the open revision 2");
         assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn extract_audio_names_why_it_was_refused() {
+        assert_eq!(
+            FfiError::from(EditError::NotVideo).to_string(),
+            "an extract belongs on video"
+        );
+        assert_eq!(
+            FfiError::from(EditError::NoSound).to_string(),
+            "the clip has no sound"
+        );
+        assert_eq!(
+            FfiError::from(EditError::AlreadyExtracted).to_string(),
+            "the sound is already on its own clip"
+        );
     }
 
     #[test]

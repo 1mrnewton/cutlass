@@ -623,9 +623,9 @@ fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i1
     }
 }
 
-/// Intra base mode. The macroblock is the co-located reference-layer samples,
-/// then `coded_block_pattern`. A coded residual is refused until that addition
-/// is implemented. Motion prediction and resampling are refused earlier.
+/// Intra base mode. The prediction is the co-located reference-layer samples.
+/// A coded residual is the ordinary intra 4×4 residual added to that prediction.
+/// An 8×8 transform, motion prediction, and resampling are refused.
 fn intra_base<S: Sample>(
     pic: &mut Frame<S>,
     layer: &Frame<S>,
@@ -643,17 +643,70 @@ fn intra_base<S: Sample>(
     let (mx, my) = locate(pic, addr, false);
     let slot = my * pic.mb_w + mx;
     copy_reference(pic, layer, mx, my)?;
-    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, true, slice_id, slice.sps.chroma)?;
-    if luma_cbp != 0 || chroma_cbp != 0 {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
     let mut mb = Mb::new(slice_id);
     mb.intra = true;
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
+    pic.mb[slot] = mb.clone();
+    let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, true, slice_id, slice.sps.chroma)?;
+    if luma_cbp > 0 && slice.pps.transform_8x8 && transform8_flag(pic, entropy, mx, my, slice_id)? {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let mut qp = qp;
+    if luma_cbp > 0 || chroma_cbp > 0 {
+        let delta = qp_delta(entropy, prev_qpd(pic, mx, my, slice_id))?;
+        qp = next_qp::<S>(qp, delta);
+        mb.qpd = delta as i8;
+    }
+    mb.cbp = luma_cbp | (chroma_cbp << 4);
+    for i in 0..16 {
+        let bit = 1 << ((blk_y(i) / 2) * 2 + blk_x(i) / 2);
+        if luma_cbp & bit == 0 {
+            continue;
+        }
+        let block = read_block(
+            pic,
+            entropy,
+            (2, 16, false),
+            Place { mx, my },
+            Cell {
+                bx: blk_x(i),
+                by: blk_y(i),
+            },
+            &mut mb,
+            0,
+        )?;
+        let span = luma_span(my, false);
+        super::add_scaled(
+            &mut pic.y,
+            pic.w,
+            (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
+            &block,
+            (qp, qp_bypass::<S>(slice, qp)),
+            &slice.pps.weight4[0],
+            4,
+        );
+    }
+    let chroma = read_chroma(pic, entropy, mx, my, chroma_cbp, &mut mb)?;
+    if chroma_cbp != 0 {
+        recon_chroma(
+            pic,
+            slice,
+            Place { mx, my },
+            0,
+            ChromaPaint {
+                cb_dc: &chroma.cb_dc,
+                cr_dc: &chroma.cr_dc,
+                cb_ac: &chroma.cb_ac,
+                cr_ac: &chroma.cr_ac,
+            },
+            (qp, true, slice_id),
+            false,
+        );
+    }
     mb.qp = qp as i8;
     mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
     mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
@@ -2446,6 +2499,7 @@ fn recon_intra<S: Sample>(
                 cr_ac,
             },
             (qp, true, mb.slice),
+            true,
         );
     }
 }
@@ -2854,10 +2908,11 @@ fn recon_chroma<S: Sample>(
     mode: u8,
     paint: ChromaPaint<'_>,
     flags: (i32, bool, u16),
+    spatial: bool,
 ) {
     let Place { mx, my } = at;
     if pic.chroma() == 2 {
-        recon_chroma422(pic, slice, at, mode, paint, flags);
+        recon_chroma422(pic, slice, at, mode, paint, flags, spatial);
         return;
     }
     let ChromaPaint {
@@ -2880,7 +2935,7 @@ fn recon_chroma<S: Sample>(
         (true, cb_dc, cb_ac, qp_cb, base),
         (false, cr_dc, cr_ac, qp_cr, base + 1),
     ] {
-        let pred = if intra {
+        let pred = if intra && spatial {
             let (above, left, above_ok, left_ok) =
                 edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 8);
             let plane = if cb { &pic.u } else { &pic.v };
@@ -2946,6 +3001,7 @@ fn recon_chroma422<S: Sample>(
     mode: u8,
     paint: ChromaPaint<'_>,
     flags: (i32, bool, u16),
+    spatial: bool,
 ) {
     let Place { mx, my } = at;
     let ChromaPaint {
@@ -2967,7 +3023,7 @@ fn recon_chroma422<S: Sample>(
         (true, cb_dc, cb_ac, qp_cb, base),
         (false, cr_dc, cr_ac, qp_cr, base + 1),
     ] {
-        if intra {
+        if intra && spatial {
             let (above, left, above_ok, left_ok) =
                 edge_chroma(pic, mx, my, cb, slice_id, slice.pps.constrained_intra, 16);
             let (samples, stride, height) = if cb {
@@ -5013,6 +5069,7 @@ fn decode_inter<S: Sample>(
                 cr_ac: &chroma_res.cr_ac,
             },
             (*qp, false, mb.slice),
+            false,
         );
     }
     Ok(())

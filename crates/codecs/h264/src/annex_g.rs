@@ -86,6 +86,34 @@ fn inter_layer_intra_prediction_copies_the_base() {
 }
 
 #[test]
+fn intra_base_adds_the_coded_residual() {
+    let annex = residual_annex();
+    let picture = decode(&annex);
+    assert_eq!(picture.picture.width(), 16);
+    let y = picture.picture.y();
+    for row in 0..16 {
+        for col in 0..16 {
+            let want = if row < 4 && col < 4 { 203 } else { 200 };
+            assert_eq!(y[row * 16 + col], want, "{row},{col}");
+        }
+    }
+    assert!(
+        picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 40)
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert_eq!(ffmpeg_raw(&ffmpeg, &annex), paint(16, 200, 40));
+    }
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &annex);
+    assert!(flat(&decode_with(&mut decoder, &base_idr())));
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -465,6 +493,20 @@ fn inter_layer_annex() -> Vec<u8> {
     out
 }
 
+fn residual_annex() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &uncropped_layer()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &pcm_slice(200, 40)));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &ilp_header(),
+        &base_mode_residual(),
+    ));
+    out
+}
+
 fn residual_layer() -> Vec<u8> {
     let mut out = annex_b_nal(3, 7, &baseline_sps());
     out.extend(annex_b_nal(3, 15, &layer_subset()));
@@ -534,6 +576,65 @@ fn pcm_slice(luma: u8, chroma: u8) -> Vec<u8> {
     w.bytes.extend(std::iter::repeat_n(luma, 256));
     w.bytes.extend(std::iter::repeat_n(chroma, 128));
     w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn uncropped_layer() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(83, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bits(0, 2);
+    w.bit(false);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn base_mode_residual() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    // Intra coded-block pattern 1: the top-left 8×8. QP delta 0.
+    w.ue(29);
+    w.se(0);
+    // Trailing +1 at DC of the first 4×4, then three empty blocks.
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
     w.trailing();
     w.bytes
 }

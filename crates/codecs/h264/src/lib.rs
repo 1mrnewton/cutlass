@@ -3,7 +3,7 @@
 //! data partitions, SP and SI slices, picture timing, film grain, Annex E
 //! sample aspect, timing, colour tags, and Annex A picture sizes.
 //! A slice extension with no inter-layer prediction is reconstructed.
-//! Same-size inter-layer intra prediction copies the reference layer.
+//! Same-size inter-layer intra prediction copies the reference layer and adds a coded residual.
 //! An MVC non-base view that is intra is reconstructed.
 //! An Annex I depth view that is intra is reconstructed.
 //! Motion prediction, residual prediction, resampling, inter-view prediction,

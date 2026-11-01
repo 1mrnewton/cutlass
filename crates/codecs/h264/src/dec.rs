@@ -1880,6 +1880,15 @@ fn decode_slice<S: Sample>(
     if wrong_start {
         return Err(bits.malformed("first macroblock"));
     }
+    let upsampled = if sps.svc_spatial == 1 {
+        match layer {
+            Some(base) => Some(mb::resample_intra(base, &sps)?),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let layer = upsampled.as_ref().or(layer);
     if slice.cabac {
         let _ = (part_intra, part_inter);
         let mut cab = Cabac::start(&mut bits, slice.qp, cabac_init(&header))?;
@@ -2500,13 +2509,15 @@ fn read_header(
 /// macroblock. `adaptive_motion_prediction_flag` selects the reference layer's
 /// vector as the motion predictor. `adaptive_residual_prediction_flag` selects
 /// residual prediction per macroblock.
-/// Resampling and coefficient prediction are refused.
+/// Picture-level intra resampling is reconstructed. Motion resampling,
+/// residual resampling, macroblock-level spatial scalability, and coefficient
+/// prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
     svc: nal::SvcHeader,
 ) -> Result<(bool, bool, bool, bool, bool, bool), CodecError> {
-    if svc.quality_id != 0 || sps.svc_spatial != 0 || !sps.inter_layer_deblock {
+    if svc.quality_id != 0 || sps.svc_spatial > 1 || !sps.inter_layer_deblock {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -3418,6 +3429,7 @@ mod tests {
             slice_header_restriction: true,
             inter_layer_deblock: false,
             svc_spatial: 0,
+            svc_scale: crate::set::SvcScale::default(),
             seq_tcoeff: false,
             adaptive_tcoeff: false,
             views: Vec::new(),

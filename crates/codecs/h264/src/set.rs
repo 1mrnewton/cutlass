@@ -78,6 +78,9 @@ pub struct Sps {
     pub inter_layer_deblock: bool,
     /// `extended_spatial_scalability_idc`. 0 is the same size as the reference.
     pub svc_spatial: u8,
+    /// Picture-level spatial offsets and chroma phases. Each offset is the
+    /// coded value; the luma sample offset is twice that value.
+    pub svc_scale: SvcScale,
     /// `seq_tcoeff_level_prediction_flag`.
     pub seq_tcoeff: bool,
     /// `adaptive_tcoeff_level_prediction_flag`.
@@ -90,6 +93,23 @@ pub struct Sps {
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
+}
+
+/// Picture-level extended spatial scalability. Offsets are `se` syntax values.
+#[derive(Clone, Debug, Default)]
+pub struct SvcScale {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    /// `chroma_phase_x_plus1_flag` minus 1.
+    pub chroma_x: i8,
+    /// `chroma_phase_y_plus1` minus 1.
+    pub chroma_y: i8,
+    /// `seq_ref_layer_chroma_phase_x_plus1_flag` minus 1.
+    pub ref_chroma_x: i8,
+    /// `seq_ref_layer_chroma_phase_y_plus1` minus 1.
+    pub ref_chroma_y: i8,
 }
 
 /// Interview reference views for one view. Annex H.
@@ -504,6 +524,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         seq_tcoeff: false,
         adaptive_tcoeff: false,
         restriction: true,
+        scale: SvcScale::default(),
     };
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
@@ -584,6 +605,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         slice_header_restriction: svc.restriction,
         inter_layer_deblock: svc.inter_layer_deblock,
         svc_spatial: svc.spatial,
+        svc_scale: svc.scale,
         seq_tcoeff: svc.seq_tcoeff,
         adaptive_tcoeff: svc.adaptive_tcoeff,
         views,
@@ -605,6 +627,7 @@ struct SvcSyntax {
     seq_tcoeff: bool,
     adaptive_tcoeff: bool,
     restriction: bool,
+    scale: SvcScale,
 }
 
 /// `seq_parameter_set_svc_extension`.
@@ -618,21 +641,30 @@ fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<SvcSyntax, Cod
             return Err(bits.malformed("extended spatial scalability"));
         }
     };
+    let mut chroma_x = -1i8;
+    let mut chroma_y = 0i8;
     if chroma_array == 1 || chroma_array == 2 {
-        let _ = bits.bit()?;
+        chroma_x = if bits.bit()? { 0 } else { -1 };
     }
     if chroma_array == 1 {
-        let _ = bits.u(2)?;
+        chroma_y = chroma_phase_y(bits)?;
     }
+    let mut scale = SvcScale {
+        chroma_x,
+        chroma_y,
+        ref_chroma_x: chroma_x,
+        ref_chroma_y: chroma_y,
+        ..SvcScale::default()
+    };
     if spatial == 1 {
         if chroma_array > 0 {
-            let _ = bits.bit()?;
-            let _ = bits.u(2)?;
+            scale.ref_chroma_x = if bits.bit()? { 0 } else { -1 };
+            scale.ref_chroma_y = chroma_phase_y(bits)?;
         }
-        let _ = bits.se()?;
-        let _ = bits.se()?;
-        let _ = bits.se()?;
-        let _ = bits.se()?;
+        scale.left = bits.se()?;
+        scale.top = bits.se()?;
+        scale.right = bits.se()?;
+        scale.bottom = bits.se()?;
     }
     let seq_tcoeff = bits.bit()?;
     let adaptive_tcoeff = if seq_tcoeff { bits.bit()? } else { false };
@@ -643,7 +675,17 @@ fn svc_extension(bits: &mut Bits<'_>, chroma_array: u8) -> Result<SvcSyntax, Cod
         seq_tcoeff,
         adaptive_tcoeff,
         restriction,
+        scale,
     })
+}
+
+/// `chroma_phase_y_plus1` is 0, 1, or 2. The phase is that value minus 1.
+fn chroma_phase_y(bits: &mut Bits<'_>) -> Result<i8, CodecError> {
+    let plus1 = bits.u(2)?;
+    if plus1 > 2 {
+        return Err(bits.malformed("chroma phase"));
+    }
+    Ok(plus1 as i8 - 1)
 }
 
 fn mvc_limit(bits: &mut Bits<'_>, max: u32) -> Result<u32, CodecError> {

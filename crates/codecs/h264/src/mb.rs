@@ -6,7 +6,7 @@ use cutlass_decode::CodecError;
 use crate::cabac::{self, Cabac};
 use crate::cavlc;
 use crate::recon::{self, Sample};
-use crate::set::{ZIGZAG4, ZIGZAG8};
+use crate::set::{Sps, ZIGZAG4, ZIGZAG8};
 
 use super::{Entropy, Frame, Header, Mb, Mod, Slice, blk_x, blk_y, put_block};
 
@@ -7643,6 +7643,378 @@ fn filter_boundary<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, vertical: bo
         (mx as i32, above_my(pic, mx, my))
     };
     coded_mb(pic, nx, ny).is_some_and(|other| other.slice == mb.slice)
+}
+
+/// Picture-level intra resampling. The reference layer is an intra picture,
+/// and each enhancement sample is the 16-phase intra filter of that picture.
+/// Motion and residual resampling stay unsupported.
+pub(crate) fn resample_intra<S: Sample>(
+    base: &Frame<S>,
+    sps: &Sps,
+) -> Result<Frame<S>, CodecError> {
+    if base.field
+        || base.mbaff
+        || base.mb.is_empty()
+        || sps.mbaff
+        || !sps.frame_mbs_only
+        || sps.separate
+        || sps.chroma != 1
+        || base.w == 0
+        || base.h == 0
+        || base.mb.iter().any(|mb| !mb.intra)
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let scale = &sps.svc_scale;
+    if scale.left < 0 || scale.top < 0 || scale.right < 0 || scale.bottom < 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let out_w = sps.width as usize;
+    let out_h = sps.height as usize;
+    if out_w == 0 || out_h == 0 || !out_w.is_multiple_of(16) || !out_h.is_multiple_of(16) {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    }
+    let left = sample_offset(scale.left)?;
+    let top = sample_offset(scale.top)?;
+    let right = sample_offset(scale.right)?;
+    let bottom = sample_offset(scale.bottom)?;
+    let scaled_w = i64::from(sps.width) - i64::from(left) - i64::from(right);
+    let scaled_h = i64::from(sps.height) - i64::from(top) - i64::from(bottom);
+    let (Ok(scaled_w), Ok(scaled_h)) = (i32::try_from(scaled_w), i32::try_from(scaled_h)) else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    if scaled_w <= 0 || scaled_h <= 0 || scaled_w % 2 != 0 || scaled_h % 2 != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let y = resample_plane(
+        &base.y,
+        Plane {
+            base_w: base.w,
+            base_h: base.h,
+            out_w,
+            out_h,
+            left,
+            top,
+            scaled_w,
+            scaled_h,
+            phase_x: 0,
+            phase_y: 0,
+            ref_phase_x: 0,
+            ref_phase_y: 0,
+            chroma: false,
+            level: sps.level_idc,
+        },
+    )?;
+    let u = resample_plane(
+        &base.u,
+        Plane {
+            base_w: base.w / 2,
+            base_h: base.h / 2,
+            out_w: out_w / 2,
+            out_h: out_h / 2,
+            left: scale.left,
+            top: scale.top,
+            scaled_w: scaled_w / 2,
+            scaled_h: scaled_h / 2,
+            phase_x: i32::from(scale.chroma_x),
+            phase_y: i32::from(scale.chroma_y),
+            ref_phase_x: i32::from(scale.ref_chroma_x),
+            ref_phase_y: i32::from(scale.ref_chroma_y),
+            chroma: true,
+            level: sps.level_idc,
+        },
+    )?;
+    let v = resample_plane(
+        &base.v,
+        Plane {
+            base_w: base.w / 2,
+            base_h: base.h / 2,
+            out_w: out_w / 2,
+            out_h: out_h / 2,
+            left: scale.left,
+            top: scale.top,
+            scaled_w: scaled_w / 2,
+            scaled_h: scaled_h / 2,
+            phase_x: i32::from(scale.chroma_x),
+            phase_y: i32::from(scale.chroma_y),
+            ref_phase_x: i32::from(scale.ref_chroma_x),
+            ref_phase_y: i32::from(scale.ref_chroma_y),
+            chroma: true,
+            level: sps.level_idc,
+        },
+    )?;
+    let mb_w = out_w / 16;
+    let mb_h = out_h / 16;
+    let mut intra = Mb::new(0);
+    intra.intra = true;
+    let mut frame = base.clone();
+    frame.y = y;
+    frame.u = u;
+    frame.v = v;
+    frame.w = out_w;
+    frame.h = out_h;
+    frame.mb_w = mb_w;
+    frame.mb = vec![intra; mb_w.saturating_mul(mb_h)];
+    Ok(frame)
+}
+
+struct Plane {
+    base_w: usize,
+    base_h: usize,
+    out_w: usize,
+    out_h: usize,
+    left: i32,
+    top: i32,
+    scaled_w: i32,
+    scaled_h: i32,
+    phase_x: i32,
+    phase_y: i32,
+    ref_phase_x: i32,
+    ref_phase_y: i32,
+    chroma: bool,
+    level: u8,
+}
+
+/// 16-phase luma taps for intra resampling. Each phase sums to 32.
+const LUMA_PHASE: [[i32; 4]; 16] = [
+    [0, 32, 0, 0],
+    [-1, 32, 2, -1],
+    [-2, 31, 4, -1],
+    [-3, 30, 6, -1],
+    [-3, 28, 8, -1],
+    [-4, 26, 11, -1],
+    [-4, 24, 14, -2],
+    [-3, 22, 16, -3],
+    [-3, 19, 19, -3],
+    [-3, 16, 22, -3],
+    [-2, 14, 24, -4],
+    [-1, 11, 26, -4],
+    [-1, 8, 28, -3],
+    [-1, 6, 30, -3],
+    [-1, 4, 31, -2],
+    [-1, 2, 32, -1],
+];
+
+fn resample_plane<S: Sample>(samples: &[S], plane: Plane) -> Result<Vec<S>, CodecError> {
+    if plane.base_w == 0 || plane.base_h == 0 || plane.out_w == 0 || plane.out_h == 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (scale_x, add_x, shift_x, delta_x) = resample_axis(
+        plane.base_w as i32,
+        plane.scaled_w,
+        plane.phase_x,
+        plane.ref_phase_x,
+        plane.level,
+    )?;
+    let (scale_y, add_y, shift_y, delta_y) = resample_axis(
+        plane.base_h as i32,
+        plane.scaled_h,
+        plane.phase_y,
+        plane.ref_phase_y,
+        plane.level,
+    )?;
+    let right = plane.out_w as i32 - plane.left - plane.scaled_w;
+    let bottom = plane.out_h as i32 - plane.top - plane.scaled_h;
+    let mut horizontal = vec![0i32; plane.base_h.saturating_mul(plane.out_w)];
+    for row in 0..plane.base_h {
+        for col in 0..plane.out_w {
+            let at = row * plane.out_w + col;
+            let x = col as i32;
+            if x < plane.left || x >= plane.out_w as i32 - right {
+                horizontal[at] = S::MID;
+                continue;
+            }
+            let (phase, reference) = resample_pos(x, plane.left, scale_x, add_x, shift_x, delta_x)?;
+            horizontal[at] = if plane.chroma {
+                let taps = chroma_phase(phase);
+                taps[0] * plane_sample(samples, plane.base_w, plane.base_h, reference, row as i32)?
+                    + taps[1]
+                        * plane_sample(
+                            samples,
+                            plane.base_w,
+                            plane.base_h,
+                            reference + 1,
+                            row as i32,
+                        )?
+            } else {
+                let taps = LUMA_PHASE[phase as usize];
+                (0..4).try_fold(0i32, |sum, tap| {
+                    Ok(sum
+                        + taps[tap]
+                            * plane_sample(
+                                samples,
+                                plane.base_w,
+                                plane.base_h,
+                                reference + tap as i32 - 1,
+                                row as i32,
+                            )?)
+                })?
+            };
+        }
+    }
+    let mut output = vec![S::mid(); plane.out_w.saturating_mul(plane.out_h)];
+    for row in 0..plane.out_h {
+        for col in 0..plane.out_w {
+            let x = col as i32;
+            let y = row as i32;
+            if x < plane.left
+                || x >= plane.out_w as i32 - right
+                || y < plane.top
+                || y >= plane.out_h as i32 - bottom
+            {
+                continue;
+            }
+            let (phase, reference) = resample_pos(y, plane.top, scale_y, add_y, shift_y, delta_y)?;
+            let acc = if plane.chroma {
+                let taps = chroma_phase(phase);
+                taps[0] * horizontal_sample(&horizontal, plane.out_w, plane.base_h, col, reference)?
+                    + taps[1]
+                        * horizontal_sample(
+                            &horizontal,
+                            plane.out_w,
+                            plane.base_h,
+                            col,
+                            reference + 1,
+                        )?
+            } else {
+                let taps = LUMA_PHASE[phase as usize];
+                (0..4).try_fold(0i32, |sum, tap| {
+                    Ok(sum
+                        + taps[tap]
+                            * horizontal_sample(
+                                &horizontal,
+                                plane.out_w,
+                                plane.base_h,
+                                col,
+                                reference + tap as i32 - 1,
+                            )?)
+                })?
+            };
+            output[row * plane.out_w + col] = S::clip((acc + 512) >> 10);
+        }
+    }
+    Ok(output)
+}
+
+fn chroma_phase(phase: i32) -> [i32; 2] {
+    let phase = phase.clamp(0, 15);
+    [32 - 2 * phase, 2 * phase]
+}
+
+fn resample_axis(
+    reference: i32,
+    scaled: i32,
+    phase: i32,
+    ref_phase: i32,
+    level: u8,
+) -> Result<(i64, i64, i32, i32), CodecError> {
+    if reference <= 0 || scaled <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let shift = if level <= 30 {
+        16
+    } else {
+        31 - ceil_log2(reference)
+    };
+    if shift < 5 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let scale = ((i64::from(reference) << shift) + i64::from(scaled >> 1)) / i64::from(scaled);
+    let scaled_phase = (i64::from(reference) * i64::from(2 + phase)) << (shift - 2);
+    let add = (scaled_phase + i64::from(scaled >> 1)) / i64::from(scaled) + (1i64 << (shift - 5));
+    let delta = 4 * (2 + ref_phase);
+    Ok((scale, add, shift - 4, delta))
+}
+
+fn sample_offset(coded: i32) -> Result<i32, CodecError> {
+    i32::try_from(i64::from(coded) * 2).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })
+}
+
+fn resample_pos(
+    at: i32,
+    offset: i32,
+    scale: i64,
+    add: i64,
+    shift: i32,
+    delta: i32,
+) -> Result<(i32, i32), CodecError> {
+    let pre = (i64::from(at - offset) * scale + add) >> shift;
+    let pre = i32::try_from(pre).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    let pos = pre.checked_sub(delta).ok_or(CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })?;
+    Ok((pos & 15, pos >> 4))
+}
+
+fn ceil_log2(value: i32) -> i32 {
+    let Ok(value) = u32::try_from(value) else {
+        return 0;
+    };
+    if value <= 1 {
+        return 0;
+    }
+    let floor = 31 - value.leading_zeros() as i32;
+    if value.is_power_of_two() {
+        floor
+    } else {
+        floor + 1
+    }
+}
+
+fn plane_sample<S: Sample>(
+    samples: &[S],
+    width: usize,
+    height: usize,
+    x: i32,
+    y: i32,
+) -> Result<i32, CodecError> {
+    let x = x.clamp(0, width as i32 - 1) as usize;
+    let y = y.clamp(0, height as i32 - 1) as usize;
+    samples
+        .get(y * width + x)
+        .map(|sample| (*sample).into())
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        })
+}
+
+fn horizontal_sample(
+    samples: &[i32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: i32,
+) -> Result<i32, CodecError> {
+    let y = y.clamp(0, height as i32 - 1) as usize;
+    samples
+        .get(y * width + x)
+        .copied()
+        .ok_or(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        })
 }
 
 fn coded_mb<S: Sample>(pic: &Frame<S>, mx: i32, my: i32) -> Option<&Mb> {

@@ -495,6 +495,47 @@ fn motion_prediction_flag_uses_the_reference_vector() {
 }
 
 #[test]
+fn intra_resampling_upsamples_the_base_layer() {
+    let parsed = parse_subset_sps(&spatial_subset()).expect("subset");
+    assert_eq!(parsed.svc_spatial, 1);
+    assert_eq!(parsed.width, 32);
+    assert_eq!(parsed.height, 32);
+    assert_eq!(
+        (
+            parsed.svc_scale.left,
+            parsed.svc_scale.top,
+            parsed.svc_scale.right,
+            parsed.svc_scale.bottom,
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(parsed.svc_scale.chroma_x, 0);
+    assert_eq!(parsed.svc_scale.chroma_y, 0);
+    assert_eq!(parsed.svc_scale.ref_chroma_x, 0);
+    assert_eq!(parsed.svc_scale.ref_chroma_y, 0);
+    let base = decode(&resample_base());
+    assert!(
+        resample_base_picture(&base),
+        "base {:?}",
+        &base.picture.y()[..16]
+    );
+    let picture = decode(&resample_annex());
+    assert_eq!(picture.picture.width(), 32);
+    assert_eq!(picture.picture.height(), 32);
+    assert!(
+        resampled(&picture),
+        "row {:?} chroma {:?}",
+        &picture.picture.y()[..32],
+        &picture.picture.u()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &resample_annex());
+        assert_eq!(raw, planes_of(&base));
+        assert_ne!(raw, planes_of(&picture));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -2289,6 +2330,131 @@ fn paint_row(left: u8, right: u8) -> Vec<u8> {
     row
 }
 
+fn spatial_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(86, 8);
+    high_body_size(&mut w, 1, 1);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn resample_base() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &resample_pcm()));
+    out
+}
+
+fn resample_annex() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &spatial_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &resample_pcm()));
+    out.extend(annex_b_extension(3, 20, &ilp_header(), &resample_slice()));
+    out
+}
+
+fn resample_pcm() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(25);
+    w.align_zeros();
+    for _ in 0..16 {
+        w.bytes.extend(std::iter::repeat_n(40, 8));
+        w.bytes.extend(std::iter::repeat_n(200, 8));
+    }
+    for _ in 0..2 {
+        for _ in 0..8 {
+            w.bytes.extend(std::iter::repeat_n(40, 4));
+            w.bytes.extend(std::iter::repeat_n(200, 4));
+        }
+    }
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn resample_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.ue(29);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    for _ in 0..4 {
+        w.bit(true);
+    }
+    for _ in 0..3 {
+        w.ue(3);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn resample_base_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let chroma = |plane: &[u8]| {
+        (0..8).all(|row| {
+            plane[row * 8..row * 8 + 4]
+                .iter()
+                .all(|sample| *sample == 40)
+                && plane[row * 8 + 4..row * 8 + 8]
+                    .iter()
+                    .all(|sample| *sample == 200)
+        })
+    };
+    (0..16).all(|row| {
+        y[row * 16..row * 16 + 8].iter().all(|sample| *sample == 40)
+            && y[row * 16 + 8..row * 16 + 16]
+                .iter()
+                .all(|sample| *sample == 200)
+    }) && chroma(picture.picture.u())
+        && chroma(picture.picture.v())
+}
+
+fn resampled(picture: &VideoOutput) -> bool {
+    let luma = [
+        40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 35, 25, 75, 165, 215, 205, 200, 200,
+        200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
+    ];
+    let chroma = [
+        40, 40, 40, 40, 40, 40, 40, 80, 160, 200, 200, 200, 200, 200, 200, 200,
+    ];
+    let y = picture.picture.y();
+    let luma_ok = (0..32).all(|row| {
+        (0..32).all(|col| {
+            let mut want = luma[col];
+            if row < 4 && col < 4 {
+                want = 43;
+            }
+            y[row * 32 + col] == want
+        })
+    });
+    let chroma_ok = |plane: &[u8]| (0..16).all(|row| plane[row * 16..row * 16 + 16] == chroma);
+    luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
+}
+
 fn high_sps() -> Vec<u8> {
     high_sps_width(0)
 }
@@ -2322,6 +2488,10 @@ fn high_subset_width(width_minus1: u32) -> Vec<u8> {
 }
 
 fn high_body(w: &mut Writer, width_minus1: u32) {
+    high_body_size(w, width_minus1, 0);
+}
+
+fn high_body_size(w: &mut Writer, width_minus1: u32, height_minus1: u32) {
     w.bits(0, 8);
     w.bits(30, 8);
     w.ue(0);
@@ -2336,7 +2506,7 @@ fn high_body(w: &mut Writer, width_minus1: u32) {
     w.ue(1);
     w.bit(false);
     w.ue(width_minus1);
-    w.ue(0);
+    w.ue(height_minus1);
     w.bit(true);
     w.bit(true);
     w.bit(false);

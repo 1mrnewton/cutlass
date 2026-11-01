@@ -285,6 +285,168 @@ fn lossless_high_depth_matches_ffmpeg_software() {
     }
 }
 
+/// Sharpness above 4 shifts the loop-filter limit and clamps it.
+/// The field is three bits, so rewriting it leaves the rest of the frame aligned.
+#[test]
+fn sharp_loop_filter_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no loop-filter source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("sharpness");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &["-frames:v", "4", "-vf", "scale=320:240", "-b:v", "80k"],
+    );
+    let stream = read_ivf(&ivf);
+    assert_eq!(stream.width, 320);
+    assert_eq!(stream.height, 240);
+    assert!(stream.frames.len() > 1, "sharpness needs an inter frame");
+    let rewritten: Vec<Vec<u8>> = stream
+        .frames
+        .iter()
+        .map(|frame| force_sharpness(frame, 7))
+        .collect();
+    assert!(
+        rewritten_sharpness_filters(&rewritten),
+        "no frame combined sharpness 7 with a loop-filter level"
+    );
+    let (plain_pic, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let sharp_ivf = dir.join("sharp7.ivf");
+    write_same_ivf(&ivf, &sharp_ivf, &rewritten);
+    let sharp_stream = read_ivf(&sharp_ivf);
+    let (sharp_pic, _) = decode_shown(&sharp_stream, PixelFormat::Yuv420p);
+    assert_ne!(plain_pic, sharp_pic, "sharpness 7 did not change a sample");
+    let oracle = ffmpeg_yuv(&ffmpeg, &sharp_ivf, "yuv420p");
+    assert_eq!(sharp_pic.len(), oracle.len());
+    let mismatch = sharp_pic
+        .iter()
+        .zip(oracle.iter())
+        .position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "sharpness 7 {}x{} {} frames {} bytes",
+        sharp_stream.width,
+        sharp_stream.height,
+        sharp_stream.frames.len(),
+        sharp_pic.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn rewritten_sharpness_filters(frames: &[Vec<u8>]) -> bool {
+    let mut state = crate::header::Persist::new();
+    let mut active = false;
+    for (index, frame) in frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("sharpness frame {index} header: {err}"));
+        assert_eq!(parsed.header.sharpness, 7, "frame {index} sharpness");
+        active |= parsed.header.filter_level > 0;
+        remember_header(&mut state, &parsed);
+    }
+    active
+}
+
+fn force_sharpness(frame: &[u8], sharpness: u8) -> Vec<u8> {
+    let Some(at) = sharpness_bit(frame) else {
+        return frame.to_vec();
+    };
+    let mut out = frame.to_vec();
+    for shift in 0..3 {
+        let one = (u32::from(sharpness) >> (2 - shift)) & 1 == 1;
+        set_msb_bit(&mut out, at + shift, one);
+    }
+    out
+}
+
+fn sharpness_bit(frame: &[u8]) -> Option<usize> {
+    let mut bits = crate::bits::BitReader::new(frame);
+    if bits.read(2).ok()? != 2 {
+        return None;
+    }
+    let mut profile = bits.read(1).ok()?;
+    profile |= bits.read(1).ok()? << 1;
+    if profile > 2 {
+        bits.read(1).ok()?;
+    }
+    if bits.read(1).ok()? == 1 {
+        return None;
+    }
+    let key_frame = bits.read(1).ok()? == 0;
+    let show_frame = bits.read(1).ok()? == 1;
+    let error_resilient = bits.read(1).ok()? == 1;
+    if key_frame {
+        bits.read(24).ok()?;
+        if profile >= 2 {
+            bits.read(1).ok()?;
+        }
+        let space = bits.read(3).ok()?;
+        if space == 7 {
+            if profile & 1 == 0 {
+                return None;
+            }
+            bits.read(1).ok()?;
+        } else {
+            bits.read(1).ok()?;
+            if profile & 1 == 1 {
+                bits.read(1).ok()?;
+                bits.read(1).ok()?;
+            }
+        }
+        bits.read(16).ok()?;
+        bits.read(16).ok()?;
+        if bits.read(1).ok()? == 1 {
+            bits.read(16).ok()?;
+            bits.read(16).ok()?;
+        }
+    } else {
+        if !show_frame && bits.read(1).ok()? == 1 {
+            return None;
+        }
+        if !error_resilient {
+            bits.read(2).ok()?;
+        }
+        bits.read(8).ok()?;
+        for _ in 0..3 {
+            bits.read(3).ok()?;
+            bits.read(1).ok()?;
+        }
+        let mut found = false;
+        for _ in 0..3 {
+            if bits.read(1).ok()? == 1 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            bits.read(16).ok()?;
+            bits.read(16).ok()?;
+        }
+        if bits.read(1).ok()? == 1 {
+            bits.read(16).ok()?;
+            bits.read(16).ok()?;
+        }
+        bits.read(1).ok()?;
+        if bits.read(1).ok()? == 0 {
+            bits.read(2).ok()?;
+        }
+    }
+    if !error_resilient {
+        bits.read(1).ok()?;
+        bits.read(1).ok()?;
+    }
+    bits.read(2).ok()?;
+    bits.read(6).ok()?;
+    Some(bits.position())
+}
+
 fn assert_lossless(stream: &Ivf, depth: u8, pix_fmt: &str) {
     let mut state = crate::header::Persist::new();
     for (index, frame) in stream.frames.iter().enumerate() {

@@ -102,6 +102,13 @@ pub struct Sps {
     pub depth_far: Vec<i32>,
     /// `slice_header_prediction_flag`. A 3D slice copies header fields.
     pub header_prediction: bool,
+    /// `seq_view_synthesis_flag`. A texture partition can copy an interview picture.
+    pub view_synthesis: bool,
+    /// `DisparityScale` for depth-view pair `(source, reference)`, row-major.
+    /// Empty means every entry is zero.
+    pub disparity_scale: Vec<i32>,
+    /// `DisparityOffset`, same layout as `disparity_scale`.
+    pub disparity_offset: Vec<i32>,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
@@ -544,6 +551,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut depth_near = Vec::new();
     let mut depth_far = Vec::new();
     let mut header_prediction = false;
+    let mut view_synthesis = false;
+    let mut disparity_scale = Vec::new();
+    let mut disparity_offset = Vec::new();
     let mut texture_views = Vec::new();
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
@@ -580,11 +590,20 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         depth_near = axis.near;
         depth_far = axis.far;
         header_prediction = axis.header_prediction;
+        view_synthesis = axis.view_synthesis;
+        disparity_scale = axis.disparity_scale;
+        disparity_offset = axis.disparity_offset;
         avc_3d = true;
         texture_views = mvcd.texture_views;
         let views = mvcd.views;
         let depth_views = mvcd.depth_views;
-        (plain, views, depth_views, Vec::new())
+        let paired = depth_views
+            .iter()
+            .zip(&texture_views)
+            .skip(1)
+            .all(|(depth, texture)| *depth && *texture);
+        let interview = if paired { mvcd.interview } else { Vec::new() };
+        (plain, views, depth_views, interview)
     } else if subset {
         if !bits.bit()? {
             return Err(bits.malformed("mvcd"));
@@ -662,6 +681,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         depth_near,
         depth_far,
         header_prediction,
+        view_synthesis,
+        disparity_scale,
+        disparity_offset,
         interview,
     };
     if !sps.within_level() {
@@ -808,12 +830,13 @@ fn read_view_refs(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
     Ok(refs)
 }
 
-/// `seq_parameter_set_mvcd_extension`. Depth-view ids are kept. Interview
-/// reference lists and the level operation points are consumed.
+/// `seq_parameter_set_mvcd_extension`. Depth-view ids and their interview
+/// lists are kept. The level operation points are consumed.
 struct MvcdViews {
     views: Vec<u16>,
     depth_views: Vec<bool>,
     texture_views: Vec<bool>,
+    interview: Vec<Interview>,
 }
 
 fn mvcd_extension(bits: &mut Bits<'_>) -> Result<MvcdViews, CodecError> {
@@ -821,6 +844,7 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<MvcdViews, CodecError> {
     let mut views = Vec::new();
     let mut depth_views = Vec::new();
     let mut texture_views = Vec::new();
+    let mut interview = Vec::new();
     for _ in 0..=views_minus1 {
         let id = mvc_limit(bits, 1023)?;
         let Ok(id) = u16::try_from(id) else {
@@ -834,19 +858,26 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<MvcdViews, CodecError> {
         views.push(id);
         depth_views.push(depth);
         texture_views.push(texture);
+        interview.push(Interview::default());
     }
     for index in 1..=views_minus1 {
         let depth = depth_views.get(index as usize).copied().unwrap_or(false);
         if depth {
-            let _ = read_view_refs(bits)?;
-            let _ = read_view_refs(bits)?;
+            let Some(refs) = interview.get_mut(index as usize) else {
+                return Err(bits.malformed("mvcd"));
+            };
+            refs.anchor_l0 = read_view_refs(bits)?;
+            refs.anchor_l1 = read_view_refs(bits)?;
         }
     }
     for index in 1..=views_minus1 {
         let depth = depth_views.get(index as usize).copied().unwrap_or(false);
         if depth {
-            let _ = read_view_refs(bits)?;
-            let _ = read_view_refs(bits)?;
+            let Some(refs) = interview.get_mut(index as usize) else {
+                return Err(bits.malformed("mvcd"));
+            };
+            refs.non_anchor_l0 = read_view_refs(bits)?;
+            refs.non_anchor_l1 = read_view_refs(bits)?;
         }
     }
     let levels = mvc_limit(bits, 63)?;
@@ -869,6 +900,7 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<MvcdViews, CodecError> {
         views,
         depth_views,
         texture_views,
+        interview,
     })
 }
 
@@ -877,10 +909,14 @@ struct DepthAxis {
     near: Vec<i32>,
     far: Vec<i32>,
     header_prediction: bool,
+    view_synthesis: bool,
+    disparity_scale: Vec<i32>,
+    disparity_offset: Vec<i32>,
 }
 
-/// `seq_parameter_set_3davc_extension`. `slice_header_prediction_flag` is stored.
-/// The other tools stay refused. Acquisition 1 and 2 store integer depth ranges.
+/// `seq_parameter_set_3davc_extension`. Header prediction and view synthesis are
+/// stored. Acquisition 1 and 2 store integer depth ranges and the disparity pair.
+/// Reduced resolution, cropping, a grid, ALC, and RLE stay refused.
 fn three_d_extension(
     bits: &mut Bits<'_>,
     views: &[u16],
@@ -897,6 +933,9 @@ fn three_d_extension(
         near: Vec::new(),
         far: Vec::new(),
         header_prediction: false,
+        view_synthesis: false,
+        disparity_scale: Vec::new(),
+        disparity_offset: Vec::new(),
     };
     if !depth_ids.is_empty() {
         let acquisition = bits.ue()?;
@@ -912,17 +951,17 @@ fn three_d_extension(
         }
         if acquisition != 0 {
             let (near, far) = depth_ranges(bits, depth_ids.len())?;
-            view_synthesis(bits, depth_ids.len())?;
+            let (scale, offset) = view_synthesis(bits, depth_ids.len())?;
             axis.near = near;
             axis.far = far;
+            axis.disparity_scale = scale;
+            axis.disparity_offset = offset;
         }
         if bits.bit()? || bits.bit()? || bits.ue()? != 0 {
             return Err(CodecError::Unsupported { what: "3d" });
         }
         axis.header_prediction = bits.bit()?;
-        if bits.bit()? {
-            return Err(CodecError::Unsupported { what: "3d" });
-        }
+        axis.view_synthesis = bits.bit()?;
     }
     if bits.bit()? || bits.bit()? {
         return Err(CodecError::Unsupported { what: "3d" });
@@ -1036,16 +1075,38 @@ fn depth_value(sign: bool, exp: u32, mantissa: u32, man_len: u32) -> Result<i32,
     i32::try_from(value).map_err(|_| CodecError::Unsupported { what: "3d" })
 }
 
-/// `vsp_param`. One depth view writes no bits.
-fn view_synthesis(bits: &mut Bits<'_>, views: usize) -> Result<(), CodecError> {
-    for left in 0..views {
-        for _right in 0..left {
-            for _ in 0..4 {
-                let _ = bits.ue()?;
+/// `vsp_param`. One depth view writes no bits. A pair stores the four differences.
+fn view_synthesis(bits: &mut Bits<'_>, views: usize) -> Result<(Vec<i32>, Vec<i32>), CodecError> {
+    let mut scale = vec![0; views.saturating_mul(views)];
+    let mut offset = vec![0; views.saturating_mul(views)];
+    for i in 0..views {
+        for j in 0..i {
+            let wji = signed_ue(bits)?;
+            let oji = signed_ue(bits)?;
+            let wij = signed_ue(bits)?;
+            let oij = signed_ue(bits)?;
+            let forward = j.saturating_mul(views).saturating_add(i);
+            let back = i.saturating_mul(views).saturating_add(j);
+            if let Some(slot) = scale.get_mut(forward) {
+                *slot = wji;
+            }
+            if let Some(slot) = offset.get_mut(forward) {
+                *slot = oji;
+            }
+            if let Some(slot) = scale.get_mut(back) {
+                *slot = wij.saturating_sub(wji);
+            }
+            if let Some(slot) = offset.get_mut(back) {
+                *slot = oij.saturating_sub(oji);
             }
         }
     }
-    Ok(())
+    Ok((scale, offset))
+}
+
+fn signed_ue(bits: &mut Bits<'_>) -> Result<i32, CodecError> {
+    let value = bits.ue()?;
+    i32::try_from(value).map_err(|_| CodecError::Unsupported { what: "3d" })
 }
 
 struct Vui {

@@ -180,6 +180,8 @@ pub(crate) struct Frame<S: Sample = u8> {
     view_id: u16,
     /// This picture may be an interview reference. The base view is.
     inter_view: bool,
+    /// Depth view component. Texture of the same view and order count is separate.
+    depth: bool,
     /// Depth parameter set active for this picture. 0 is the sequence range.
     dps_id: u8,
     /// Display time and film grain. Reconstruction keeps `pts` and the planes.
@@ -1449,6 +1451,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         max_fn: 1u32 << sps.log2_max_frame_num,
         view_id: 0,
         inter_view: false,
+        depth: false,
         dps_id: 0,
         shown: Shown::plain(0, 0),
         svc_left: 0,
@@ -1839,6 +1842,10 @@ pub(crate) struct Slice<'a> {
     scale: set::SvcScale,
     /// `dmvp_flag`. A one-macroblock P picture uses the base view's motion.
     dmvp: bool,
+    /// `slice_vsp_flag`. An interview partition copies that picture at the disparity.
+    vsp: bool,
+    /// Depth parameter set. 0 uses the sequence disparity pair.
+    dps_id: u8,
     /// Upsampled reference-layer residual. Empty unless the layers differ in size.
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
@@ -2210,6 +2217,10 @@ struct Header {
     dps_id: u8,
     /// `dmvp_flag`. A texture P picture uses the base view's motion.
     dmvp: bool,
+    /// `slice_vsp_flag`.
+    vsp: bool,
+    /// This picture is a depth view component.
+    depth: bool,
     /// Crop of this slice. Picture-level scalability copies the sequence crop.
     /// Macroblock-level scalability reads it from the slice header.
     scale: set::SvcScale,
@@ -2646,10 +2657,12 @@ fn read_header(
     }
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
     // depth slice. The ranges scale list-0 luma. A texture P or B slice reads
-    // `dmvp_flag` instead. Flag 0 stays refused.
+    // `dmvp_flag`, then `slice_vsp_flag` when view synthesis is enabled.
+    // Both flags clear stays refused.
     let mut depth_weight = false;
     let mut dps_id = 0u8;
     let mut dmvp = false;
+    let mut vsp = false;
     if three.is_some_and(|header| header.depth) && !intra_slice(kind) {
         depth_weight = bits.bit()?;
         if depth_weight {
@@ -2670,10 +2683,16 @@ fn read_header(
     }
     if three.is_some_and(|header| !header.depth) && kind <= 1 {
         dmvp = bits.bit()?;
-        if !dmvp {
+        if sps.view_synthesis {
+            vsp = bits.bit()?;
+        }
+        if vsp && kind != 0 {
             return Err(CodecError::Unsupported { what: "3d" });
         }
-        if sps.acquisition != 1 {
+        if !dmvp && !vsp {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        if dmvp && sps.acquisition != 1 {
             let id = bits.ue()?;
             if id > 63 {
                 return Err(bits.malformed("3d"));
@@ -2733,6 +2752,8 @@ fn read_header(
         depth_weight,
         dps_id,
         dmvp,
+        vsp,
+        depth: three.is_some_and(|header| header.depth),
         scale: layer.scale,
     };
     Ok(header)
@@ -2939,6 +2960,8 @@ fn predicted_header(
         depth_weight: source.depth_weight,
         dps_id: source.dps_id,
         dmvp: false,
+        vsp: false,
+        depth: true,
         scale: sps.svc_scale.clone(),
     };
     Ok(header)
@@ -3325,6 +3348,7 @@ fn new_frame<S: Sample>(
         max_fn: 1u32 << sps.log2_max_frame_num,
         view_id: header.view_id,
         inter_view: header.inter_view,
+        depth: header.depth,
         dps_id: header.dps_id,
         shown: Shown::from_sps(packet.pts, packet.duration, sps),
         svc_left: mb::sample_offset(header.scale.left)?,
@@ -3561,6 +3585,8 @@ fn make_slice<'a, S: Sample>(
         residual_pred: header.residual_pred,
         adaptive_residual: header.adaptive_residual,
         dmvp: header.dmvp,
+        vsp: header.vsp,
+        dps_id: header.dps_id,
         scale: header.scale.clone(),
         residual_y: Vec::new(),
         residual_u: Vec::new(),
@@ -3983,6 +4009,8 @@ mod tests {
             depth_weight: false,
             dps_id: 0,
             dmvp: false,
+            vsp: false,
+            depth: false,
             scale: crate::set::SvcScale::default(),
         }
     }
@@ -4031,6 +4059,7 @@ mod tests {
             max_fn: 16,
             view_id: 0,
             inter_view: true,
+            depth: false,
             dps_id: 0,
             shown: super::Shown::plain(0, 1),
             svc_left: 0,
@@ -4098,6 +4127,9 @@ mod tests {
             depth_near: Vec::new(),
             depth_far: Vec::new(),
             header_prediction: false,
+            view_synthesis: false,
+            disparity_scale: Vec::new(),
+            disparity_offset: Vec::new(),
             interview: Vec::new(),
         }
     }

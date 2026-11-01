@@ -422,7 +422,7 @@ pub(crate) fn decode_mbs<S: Sample>(
     layer: Option<&Frame<S>>,
 ) -> Result<(), CodecError> {
     let total = pic.mb_w.saturating_mul(pic.h / 16);
-    if slice.dmvp && total != 1 {
+    if (slice.dmvp || slice.vsp) && total != 1 {
         return Err(CodecError::Unsupported { what: "3d" });
     }
     let mbaff = slice.sps.mbaff && !pic.field;
@@ -638,6 +638,9 @@ fn skip_mb<S: Sample>(
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
     if super::syntax_kind(slice.kind) == 0 {
+        if slice.vsp {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
         let (mv, reference) = if slice.dmvp {
             dmvp_skip_motion(pic, dpb, slice)
                 .unwrap_or_else(|| (p_skip_mv(pic, mx, my, slice_id), 0))
@@ -4938,6 +4941,7 @@ mod intra8 {
             max_fn: 16,
             view_id: 0,
             inter_view: true,
+            depth: false,
             dps_id: 0,
             shown: super::super::Shown::plain(0, 0),
             svc_left: 0,
@@ -6458,6 +6462,9 @@ fn decode_inter<S: Sample>(
     } else {
         spec == 3 || spec == 4
     };
+    if slice.vsp && (slice.kind != 0 || sub || spec != 0) {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
     if (slice.adaptive_motion || slice.motion_pred) && (sub || (slice.kind == 1 && spec == 0)) {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -6586,6 +6593,8 @@ fn read_parts<S: Sample>(
     let parts = partitions(super::syntax_kind(slice.kind), spec);
     let mut from_layer0 = vec![false; parts.len()];
     let mut from_layer1 = vec![false; parts.len()];
+    let mut synthesis0 = vec![false; parts.len()];
+    let mut synthesis1 = vec![false; parts.len()];
     if slice.adaptive_motion || slice.motion_pred {
         for (index, part) in parts.iter().enumerate() {
             if part.l0 {
@@ -6614,6 +6623,9 @@ fn read_parts<S: Sample>(
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 0, mb),
             )?;
             fill_ref(&mut mb.ref0, &mut mb.uses0, part, r as i8);
+            if slice.vsp && interview_reference(pic, dpb, slice, mb, part, 0) {
+                synthesis0[index] = read_flag(entropy)?;
+            }
         } else {
             fill_ref(&mut mb.ref0, &mut mb.uses0, part, 0);
         }
@@ -6632,6 +6644,9 @@ fn read_parts<S: Sample>(
                 ref_ctx(pic, mx, my, part.x / 4, part.y / 4, 1, mb),
             )?;
             fill_ref(&mut mb.ref1, &mut mb.uses1, part, r as i8);
+            if slice.vsp && interview_reference(pic, dpb, slice, mb, part, 1) {
+                synthesis1[index] = read_flag(entropy)?;
+            }
         } else {
             fill_ref(&mut mb.ref1, &mut mb.uses1, part, 0);
         }
@@ -6644,6 +6659,10 @@ fn read_parts<S: Sample>(
         }
     }
     for (index, part) in parts.iter().enumerate() {
+        if part.l0 && synthesis0[index] {
+            store_mv(mb, part, synthesis_motion(pic, dpb, slice, part)?, 0);
+            continue;
+        }
         if part.l0 {
             let predicted = if from_layer0[index] {
                 Some(layer_motion(layer, mx, my, part, 0)?.0)
@@ -6674,6 +6693,10 @@ fn read_parts<S: Sample>(
         }
     }
     for (index, part) in parts.iter().enumerate() {
+        if part.l1 && synthesis1[index] {
+            store_mv(mb, part, synthesis_motion(pic, dpb, slice, part)?, 1);
+            continue;
+        }
         if part.l1 {
             let predicted = if from_layer1[index] {
                 Some(layer_motion(layer, mx, my, part, 1)?.0)
@@ -6692,6 +6715,160 @@ fn read_parts<S: Sample>(
         }
     }
     Ok(())
+}
+
+fn read_flag(entropy: &mut Entropy<'_, '_>) -> Result<bool, CodecError> {
+    match entropy {
+        Entropy::Cavlc(bits) => bits.bit(),
+        Entropy::Cabac(_) => Err(CodecError::Unsupported { what: "3d" }),
+    }
+}
+
+fn interview_reference<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    mb: &Mb,
+    part: &Part,
+    list: usize,
+) -> bool {
+    let Ok(index) = usize::try_from(ref_of(mb, part.x / 4, part.y / 4, list)) else {
+        return false;
+    };
+    let refs = if list == 0 { &slice.ref0 } else { &slice.ref1 };
+    let Some(&slot) = refs.get(index) else {
+        return false;
+    };
+    if slot == NO_PICTURE {
+        return false;
+    }
+    dpb.get(slot)
+        .is_some_and(|frame| frame.view_id != pic.view_id)
+}
+
+fn store_mv(mb: &mut Mb, part: &Part, mv: [i16; 2], list: usize) {
+    let x = part.x / 4;
+    let y = part.y / 4;
+    for by in 0..(part.h / 4) {
+        for bx in 0..(part.w / 4) {
+            let index = (y + by) * 4 + x + bx;
+            if list == 0 {
+                mb.mv0[index] = mv;
+                mb.mvd0[index] = [0, 0];
+            } else {
+                mb.mv1[index] = mv;
+                mb.mvd1[index] = [0, 0];
+            }
+            mb.ready |= 1 << index;
+        }
+    }
+}
+
+/// J.8.2.1 with `bvsp_flag` 1 and `TextureFirstFlag` 1. The disparity is the
+/// motion vector. `refViewId` is 0, and the depth picture is the base view.
+fn synthesis_motion<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    part: &Part,
+) -> Result<[i16; 2], CodecError> {
+    if slice.dps_id != 0 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let Some(base_id) = slice.sps.views.first().copied() else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    let Some(depth) = dpb.iter().find(|frame| {
+        frame.depth
+            && frame.referenced
+            && !frame.nonexisting
+            && frame.view_id == base_id
+            && frame.poc == pic.poc
+            && frame.w == pic.w
+            && frame.h == pic.h
+    }) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    let views = slice.sps.depth_views.iter().filter(|flag| **flag).count();
+    let Some(src) = depth_param_index(&slice.sps.views, &slice.sps.depth_views, pic.view_id) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    let Some(reference) = depth_param_index(&slice.sps.views, &slice.sps.depth_views, 0) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    let scale = disparity_term(&slice.sps.disparity_scale, src, reference, views);
+    let offset = disparity_term(&slice.sps.disparity_offset, src, reference, views);
+    let max_depth = max_depth(depth, part);
+    Ok([disparity_value(max_depth, scale, offset), 0])
+}
+
+/// J.8.2.1.1 corners. Reduced resolution is refused, so the inferred multipliers are 2
+/// and the shifts are 0. A full-frame block clips to the depth picture corners.
+fn max_depth<S: Sample>(depth: &Frame<S>, part: &Part) -> i32 {
+    let right = depth.w.saturating_sub(1);
+    let bottom = depth.h.saturating_sub(1);
+    let x0 = (part.x.saturating_mul(2)).min(right);
+    let y0 = (part.y.saturating_mul(2)).min(bottom);
+    let x1 = part
+        .x
+        .saturating_add(part.w)
+        .saturating_sub(1)
+        .saturating_mul(2)
+        .min(right);
+    let y1 = part
+        .y
+        .saturating_add(part.h)
+        .saturating_sub(1)
+        .saturating_mul(2)
+        .min(bottom);
+    let mut max = depth_sample(depth, x0, y0);
+    for (x, y) in [(x1, y0), (x0, y1), (x1, y1)] {
+        max = max.max(depth_sample(depth, x, y));
+    }
+    max
+}
+
+fn depth_sample<S: Sample>(frame: &Frame<S>, x: usize, y: usize) -> i32 {
+    frame
+        .y
+        .get(y.saturating_mul(frame.w).saturating_add(x))
+        .copied()
+        .map(Into::into)
+        .unwrap_or(0)
+}
+
+fn depth_param_index(views: &[u16], depth_views: &[bool], view_id: u16) -> Option<usize> {
+    views
+        .iter()
+        .zip(depth_views)
+        .filter(|(_, depth)| **depth)
+        .position(|(id, _)| *id == view_id)
+}
+
+fn disparity_term(values: &[i32], src: usize, reference: usize, views: usize) -> i32 {
+    values
+        .get(src.saturating_mul(views).saturating_add(reference))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn disparity_value(depth: i32, scale: i32, offset: i32) -> i16 {
+    let sum = i64::from(depth) * i64::from(scale) + (i64::from(offset) << 8) + (1 << 13);
+    let shifted = sum >> 14;
+    let value = i32::try_from(shifted).unwrap_or(if shifted < 0 { i32::MIN } else { i32::MAX });
+    super::clip_ref(value)
 }
 
 /// `motion_prediction_flag`. The reference layer supplies the predictor.

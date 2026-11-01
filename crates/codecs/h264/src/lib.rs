@@ -27,6 +27,9 @@
 //! scales that luma. An intra depth slice can copy its header from the texture
 //! slice. A one-macroblock texture P or B picture can use the base view's motion,
 //! including an 8×8, 8×4, 4×8, or 4×4 partition, and a coded difference is added to that predictor.
+//! A one-macroblock texture P picture copies the base texture at a disparity of 32 when
+//! `slice_vsp_flag` and `bvsp_flag` are 1. The scale is 0 and the offset is 2016, so that
+//! picture is luma 180 and chroma 90. A missing base depth picture is an error.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

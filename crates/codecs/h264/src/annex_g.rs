@@ -1114,6 +1114,64 @@ fn a_b_slice_depth_motion_vector_cancels_the_base_motion() {
 }
 
 #[test]
+fn a_view_synthesis_disparity_shifts_the_base_texture() {
+    let base = dmvp_base_idr();
+    let depth = vsp_depth();
+    let view = vsp_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| painted(picture, 180, 90))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| painted(picture, 128, 40))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame, "ffmpeg picture count");
+        let decoded = pictures
+            .iter()
+            .find(|picture| split_luma(picture, 100, 180))
+            .expect("base");
+        assert_eq!(raw, planes_of(decoded));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let mut decoder = open();
+    let _ = push_pictures(&mut decoder, &base);
+    let err = decoder
+        .push(&Packet::video(vsp_without_depth(), 0, 1, 30, false))
+        .expect_err("depth");
+    assert!(
+        matches!(err, CodecError::Malformed { what: "3d", .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn an_8x8_depth_motion_vector_cancels_the_base_motion() {
     let base_idr = dmvp_base_idr();
     let other_idr = dmvp_other_idr();
@@ -1324,6 +1382,130 @@ fn dmvp_b_header(w: &mut Writer, frame_num: u32, poc: u32) {
     w.bit(false);
     w.se(0);
     w.ue(1);
+}
+
+fn vsp_depth() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &view_synthesis_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0x60], &vsp_depth_slice()));
+    out
+}
+
+fn vsp_texture() -> Vec<u8> {
+    annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_p_slice())
+}
+
+fn vsp_without_depth() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &view_synthesis_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(vsp_texture());
+    out
+}
+
+fn vsp_depth_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(0);
+    w.ue(2);
+    w.ue(0);
+    w.bits(0, 4);
+    w.bits(0, 4);
+    w.bit(false);
+    w.se(0);
+    w.ue(1);
+    w.ue(25);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(128, 256));
+    w.bytes.extend(std::iter::repeat_n(40, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn vsp_p_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+/// Two paired views. List 0 names view 0. Scale 0 and offset 2016 make disparity 32.
+fn view_synthesis_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(139, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(30, 8);
+    w.ue(0);
+    w.bits(0, 3);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.ue(2);
+    w.ue(0);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    write_depth_value(&mut w, 31);
+    w.bit(true);
+    write_depth_value(&mut w, 32);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(2016);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
 }
 
 fn dmvp_coded_b(flag: bool) -> Vec<u8> {

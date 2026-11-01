@@ -5621,6 +5621,47 @@ mod tests {
     }
 
     #[test]
+    fn vertical_chroma_position_matches_dav1d() {
+        // aomenc --chroma-sample-position=vertical, 128×128. The published chroma
+        // position is vertical. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/chroma-vert.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert_eq!(sequence.chroma_sample_position, 1);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("push");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(
+            info.chroma_position,
+            cutlass_decode::ChromaSamplePosition::Vertical
+        );
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(bytes), 0xee51_8a06_f71e_a2a3);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn intra_edge_filter_off_matches_dav1d() {
         // aomenc --enable-intra-edge-filter=0 --usage=2, 128×128. Directional
         // prediction does not filter the edge. Turning that filter on changes

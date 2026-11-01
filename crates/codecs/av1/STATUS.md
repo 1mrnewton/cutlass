@@ -87,6 +87,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` 64×64 eight-frame stream of a rotating ramp. Local warp is on and overlapped motion is off. A block warps from the neighboring motion. All eight pictures match dav1d.
 - One embedded `aomenc` 64×64 eight-frame stream of that ramp with overlapped motion on and local warp off. A block blends the neighboring predictors. All eight pictures match dav1d.
 - One embedded `aomenc` 64×64 eight-frame stream of a translating ramp. Order hint and reference motion vectors are on. A block's candidate stack includes the field projected from an earlier frame. All eight pictures match dav1d. Short reference signaling is not in that stream.
+- One embedded `aomenc` 128×128 four-frame stream with order hint on and reference motion vectors off. The inter frames match dav1d. Treating the tool as on desynchronizes those frames.
 - One embedded `aomenc` four-frame stream shown at 64×64 with super resolution on. The inter frames reconstruct at the coded width and sample the upscaled reference. All four pictures match dav1d.
 - One embedded `aomenc` four-frame stream whose sequence is 64×64 and whose frames are 32×32. A later frame copies that size from a reference. All four pictures match dav1d.
 - One embedded `aomenc` four-frame stream whose key is 32×32 and whose later frames are 64×64. The first inter frame samples the smaller reference. All four pictures match dav1d.

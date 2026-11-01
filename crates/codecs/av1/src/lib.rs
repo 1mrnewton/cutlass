@@ -21,7 +21,7 @@
 //! difference mask. A skip-mode block uses the nearest compound pair and
 //! writes no residual. A local warp fits the neighboring motion, and overlapped
 //! motion blends those neighboring predictors. A block may take a motion
-//! candidate from the field projected out of an earlier frame. An inter frame
+//! candidate from the field projected out of an earlier frame. A 128×128 inter frame leaves reference motion vectors off while order hint stays on. An inter frame
 //! may sample a reference of a different size, and it may copy its upscaled
 //! size from a reference. A global-motion block on a scaled reference uses
 //! the scaled motion filter. A 3840×2160 inter frame uses the eight-tap sharp filter. A

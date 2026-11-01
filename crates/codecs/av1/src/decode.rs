@@ -5688,6 +5688,39 @@ mod tests {
     }
 
     #[test]
+    fn reference_motion_off_matches_dav1d() {
+        // aomenc --enable-ref-frame-mvs=0, 128×128, four frames. Order hint
+        // stays on, so the sequence still carries the reference-motion bit,
+        // and that bit is off. Treating it as on desynchronizes the inter
+        // frames. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/ref-mvs-off.ivf"));
+        assert_eq!(frames.len(), 4);
+        let expected = [
+            0x3d7e_585c_ce95_455d,
+            0x68b4_88cc_c368_159c,
+            0x4939_5fa6_15a9_9864,
+            0x2b44_f78e_5285_725b,
+        ];
+        let mut sequence = None;
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            assert!(seq.enable_order_hint);
+            assert!(!seq.enable_ref_mvs);
+            if index > 0 {
+                assert!(!frame.intra);
+            }
+            sequence = Some(seq);
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn intra_edge_filter_off_matches_dav1d() {
         // aomenc --enable-intra-edge-filter=0 --usage=2, 128×128. Directional
         // prediction does not filter the edge. Turning that filter on changes

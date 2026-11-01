@@ -5598,6 +5598,55 @@ mod tests {
     }
 
     #[test]
+    fn twelve_bit_restoration_matches_dav1d() {
+        // aomenc --bit-depth=12, 256×128 4:2:0. Luma is self-guided. Chroma
+        // restoration is off. CDEF is off. Samples stay in the low 12 bits.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p12le`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-12.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 12);
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert_eq!(frame.width, 256);
+        assert_eq!(frame.height, 128);
+        assert_eq!(
+            frame.restoration.plane,
+            [
+                crate::header::RESTORE_SGRPROJ,
+                crate::header::RESTORE_NONE,
+                crate::header::RESTORE_NONE,
+            ]
+        );
+        assert_eq!(frame.restoration.unit, [256, 256, 256]);
+        let params = CodecParams::video(CodecId::Av1, 256, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("frame");
+        assert_eq!(shown.len(), 1);
+        let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+            panic!("picture");
+        };
+        let info = picture.info();
+        assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p12);
+        let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 256 * 128 * 3);
+        assert_eq!(frame_digest(bytes), 0x4969_32d8_3fe2_20c9);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn a_twelve_bit_profile_two_picture_matches_dav1d() {
         // aomenc --profile=2 --i420 --bit-depth=12, 64×64, one keyframe and one
         // inter frame. Restoration, super resolution, filter intra, and an

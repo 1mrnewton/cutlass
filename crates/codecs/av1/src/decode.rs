@@ -5598,6 +5598,30 @@ mod tests {
     }
 
     #[test]
+    fn wiener_units_keep_the_updated_cdf() {
+        // aomenc --sharpness=5 --cq-level=32, 512×128. Every plane is Wiener
+        // with 128-sample units. Luma has four units and the frame updates
+        // that CDF. Chroma is 4:2:0, so each chroma plane has two units and a
+        // stripe is 32 samples. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-wiener.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.width, 512);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.restoration.plane, [crate::header::RESTORE_WIENER; 3]);
+        assert_eq!(frame.restoration.unit, [128; 3]);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 512 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xdf63_3cd9_dfae_14d3);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn twelve_bit_restoration_matches_dav1d() {
         // aomenc --bit-depth=12, 256×128 4:2:0. Luma is self-guided. Chroma
         // restoration is off. CDEF is off. Samples stay in the low 12 bits.

@@ -1185,7 +1185,9 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                     match item {
                         None => toolbar_separator(ui),
                         Some((name, tip)) => {
-                            if toolbar_button(ui, name, tip).clicked() {
+                            let enabled = tool_enabled(shell, name);
+                            let active = *name == "split" && shell.blade();
+                            if toolbar_button(ui, name, tip, enabled, active).clicked() {
                                 tool_clicked(shell, name);
                             }
                         }
@@ -1204,9 +1206,22 @@ fn toolbar_separator(ui: &mut Ui) {
     );
 }
 
-fn toolbar_button(ui: &mut Ui, name: &str, tip: &str) -> egui::Response {
+fn toolbar_button(
+    ui: &mut Ui,
+    name: &str,
+    tip: &str,
+    enabled: bool,
+    active: bool,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
-    let color = if tool_enabled(name) {
+    if active {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(tokens::ICON_RADIUS),
+            tokens::ICON_BUTTON,
+        );
+    }
+    let color = if enabled || active {
         tokens::MUTED
     } else {
         tokens::FAINT
@@ -1224,15 +1239,20 @@ fn toolbar_button(ui: &mut Ui, name: &str, tip: &str) -> egui::Response {
     response.on_hover_text(tip)
 }
 
-fn tool_enabled(name: &str) -> bool {
-    matches!(
-        name,
-        "undo" | "redo" | "select" | "split" | "delete" | "zoomIn" | "zoomOut" | "zoomFit"
-    )
+fn tool_enabled(shell: &Shell, name: &str) -> bool {
+    match name {
+        "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" => true,
+        "split" => shell.has_clip(),
+        _ => false,
+    }
 }
 
 fn tool_clicked(shell: &mut Shell, name: &str) {
-    if !tool_enabled(name) || name == "select" {
+    if name == "select" {
+        shell.clear_blade();
+        return;
+    }
+    if !tool_enabled(shell, name) {
         return;
     }
     let result = match name {
@@ -1242,7 +1262,10 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "zoomOut" => shell.zoom_out(),
         "zoomFit" => shell.zoom_fit(),
         "delete" => shell.remove_selected(),
-        "split" => shell.split_selected(),
+        "split" => {
+            shell.toggle_blade();
+            Ok(())
+        }
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -1932,7 +1955,25 @@ fn paint_clip(
         Pos2::new(left_edge.right(), visible.top()),
         Pos2::new(right_edge.left(), visible.bottom()),
     );
-    if body.width() > 0.0 {
+    if body.width() > 0.0 && shell.blade() {
+        let response = ui.interact(
+            body,
+            ui.scope_id().with(("clip", index, clip.id.as_str())),
+            Sense::click(),
+        );
+        response.clone().on_hover_text(span.clone());
+        if response.hovered() {
+            ui.set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if response.clicked()
+            && let Some(pos) = pointer_pos(ui, &response)
+        {
+            let x = f64::from(pos.x - lanes_left).max(0.0);
+            if let Err(error) = shell.split_pointer(clip.id.clone(), x, editor_lane_y(index)) {
+                shell.set_notice(error.to_string());
+            }
+        }
+    } else if body.width() > 0.0 {
         let response = ui.interact(
             body,
             ui.scope_id().with(("clip", index, clip.id.as_str())),
@@ -2355,9 +2396,10 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::ArrowLeft => "left",
         egui::Key::ArrowRight => "right",
         egui::Key::Delete | egui::Key::Backspace => "delete",
+        egui::Key::S => "s",
         _ => return None,
     };
-    if matches!(name, "space" | "left" | "right" | "delete")
+    if matches!(name, "space" | "left" | "right" | "delete" | "s")
         && (input.modifiers.command || input.modifiers.alt || input.modifiers.shift)
     {
         return None;
@@ -3175,6 +3217,59 @@ mod tests {
         assert_eq!(segment.target.duration.0, 2_000_000);
         let _ = std::fs::remove_dir_all(&temp);
         let _ = std::fs::remove_dir_all(&temp_move);
+    }
+
+    #[test]
+    fn the_blade_cuts_the_clip_under_the_pointer() {
+        let (mut shell, temp) = open_span("blade", 2_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        shell.toggle_blade();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let id = shell.draft().unwrap().tracks[0].segments[0]
+            .id
+            .as_str()
+            .to_owned();
+        let text = text_pos(&output, &id).expect("clip");
+        output.textures_delta.clear();
+        let width = (2_000_000_f32 * shell.pixel_size() as f32).max(8.0);
+        let center = Pos2::new(text.x - 8.0 + width / 2.0, text.y);
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(center), press(true), press(false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let segments = &shell.draft().unwrap().tracks[0].segments;
+        assert_eq!(
+            segments.len(),
+            2,
+            "the blade click did not cut the clip ({})",
+            shell.notice()
+        );
+        assert!(segments[0].target.duration.0 > 0);
+        assert!(segments[1].target.duration.0 > 0);
+        assert_eq!(
+            segments[0].target.duration.0 + segments[1].target.duration.0,
+            2_000_000
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

@@ -64,6 +64,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::EmptyUndo) => formatter.write_str("the undo stack is empty"),
             Self::Edit(EditError::EmptyRedo) => formatter.write_str("the redo stack is empty"),
             Self::Edit(EditError::LockedTrack) => formatter.write_str("the track is locked"),
+            Self::Edit(EditError::TransitionWindow) => {
+                formatter.write_str("a transition cannot be split")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -218,6 +221,8 @@ pub struct Shell {
     inspector_width: f32,
     timeline_height: f32,
     selected: Option<SegmentId>,
+    /// The split tool cuts a clip at the pointer instead of moving it.
+    blade: bool,
     clip_drag: Option<ClipDrag>,
     pending_trim: Option<PendingTrim>,
     pending_move: Option<PendingMove>,
@@ -234,6 +239,7 @@ impl Shell {
         ensure_shortcut(&mut settings, "frame_back", "left");
         ensure_shortcut(&mut settings, "frame_forward", "right");
         ensure_shortcut(&mut settings, "delete", "delete");
+        ensure_shortcut(&mut settings, "split", "s");
         Self {
             decoders,
             encoders,
@@ -256,6 +262,7 @@ impl Shell {
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
             selected: None,
+            blade: false,
             clip_drag: None,
             pending_trim: None,
             pending_move: None,
@@ -378,6 +385,7 @@ impl Shell {
         self.playing = false;
         self.view_origin = 0;
         self.selected = None;
+        self.blade = false;
         self.cancel_clip_drag();
         self.fit_on_layout = false;
         self.notice.clear();
@@ -470,6 +478,7 @@ impl Shell {
         self.playing = false;
         self.view_origin = 0;
         self.selected = None;
+        self.blade = false;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
         self.fit_on_layout = self.cut_duration().0 > 0;
@@ -725,6 +734,7 @@ impl Shell {
                 }
                 self.remove_selected()
             }
+            Some("split") => self.split_playhead(),
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -1226,24 +1236,106 @@ impl Shell {
         if self.selected.as_ref() == Some(&segment_id) {
             self.selected = None;
         }
+        if !self.has_clip() {
+            self.blade = false;
+        }
         Ok(())
     }
 
+    /// The split tool is armed. A click on a clip cuts it at that time.
+    #[must_use]
+    pub fn blade(&self) -> bool {
+        self.blade
+    }
+
+    pub fn toggle_blade(&mut self) {
+        self.blade = !self.blade && self.has_clip();
+    }
+
+    /// Turn the blade off. Select uses this.
+    pub fn clear_blade(&mut self) {
+        self.blade = false;
+    }
+
+    /// Any lane has a clip. An empty cut leaves the blade off.
+    #[must_use]
+    pub fn has_clip(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| draft.tracks.iter().any(|track| !track.segments.is_empty()))
+    }
+
+    /// Cut the selected clip at the playhead.
     pub fn split_selected(&mut self) -> Result<(), ShellError> {
         let segment_id = self.selected.clone().ok_or(ShellError::NoProject)?;
-        self.refuse_locked(&segment_id)?;
-        let inspection = self.inspection().ok_or(ShellError::NoProject)?;
+        self.split_clip(segment_id, self.playhead)
+    }
+
+    /// Cut the clip under the playhead. The selection wins when it covers that time.
+    pub fn split_playhead(&mut self) -> Result<(), ShellError> {
         let at = self.playhead;
-        let end = inspection.start.0.saturating_add(inspection.duration.0);
-        if at.0 <= inspection.start.0 || at.0 >= end {
+        let segment_id = self
+            .clip_under(at)
+            .ok_or_else(|| ShellError::Unavailable("split is not available".to_owned()))?;
+        self.split_clip(segment_id, at)
+    }
+
+    /// Cut one clip at a lane pixel. `x` is from the left of the lanes.
+    pub fn split_pointer(
+        &mut self,
+        segment_id: SegmentId,
+        x: f64,
+        y: f64,
+    ) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
+        let draft = self.session_draft()?;
+        let time = match hit_test(draft, self.scale(), Pointer { x, y }) {
+            Ok(Some(hit)) => hit.time,
+            Ok(None) | Err(_) => {
+                return Err(ShellError::Unavailable("split is not available".to_owned()));
+            }
+        };
+        self.split_clip(segment_id, time)
+    }
+
+    fn clip_under(&self, time: Micros) -> Option<SegmentId> {
+        let draft = self.draft()?;
+        if let Some(id) = &self.selected
+            && locate(draft, id).is_some_and(|(segment, _)| covers(segment, time))
+        {
+            return Some(id.clone());
+        }
+        if let Some(id) = draft
+            .main_track()
+            .and_then(|track| clip_on_track(track, time))
+        {
+            return Some(id);
+        }
+        draft
+            .tracks
+            .iter()
+            .find_map(|track| clip_on_track(track, time))
+    }
+
+    /// Cut one clip. Each piece must keep at least one frame. The original id stays selected.
+    pub fn split_clip(&mut self, segment_id: SegmentId, at: Micros) -> Result<(), ShellError> {
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let (segment, _) = locate(draft, &segment_id)
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        let start = segment.target.start.0;
+        let end = start.saturating_add(segment.target.duration.0);
+        let margin = split_margin(draft);
+        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
             return Err(ShellError::Unavailable("split is not available".to_owned()));
         }
         let right_id = SegmentId::new(self.fresh("seg"));
         self.apply(Request::Split {
-            segment_id,
+            segment_id: segment_id.clone(),
             at,
             right_id,
-        })
+        })?;
+        self.selected = Some(segment_id);
+        Ok(())
     }
 
     pub fn set_notice(&mut self, message: impl Into<String>) {
@@ -1698,6 +1790,28 @@ fn trim_is_current(draft: &Draft, plan: &TrimPlan) -> bool {
         TrimEdge::Start => segment.target.start == plan.time,
         TrimEdge::End => segment.target.end() == plan.time,
     }
+}
+
+fn split_margin(draft: &Draft) -> i64 {
+    draft
+        .frame_rate()
+        .and_then(|rate| rate.frame_start(1))
+        .map(|time| time.0.max(1))
+        .unwrap_or(1)
+}
+
+fn covers(segment: &Segment, time: Micros) -> bool {
+    let start = segment.target.start.0;
+    let end = start.saturating_add(segment.target.duration.0);
+    time.0 >= start && time.0 < end
+}
+
+fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId> {
+    track
+        .segments
+        .iter()
+        .find(|segment| covers(segment, time))
+        .map(|segment| segment.id.clone())
 }
 
 fn locate<'a>(draft: &'a Draft, id: &SegmentId) -> Option<(&'a Segment, bool)> {
@@ -3397,6 +3511,81 @@ mod tests {
             desktop.draft().unwrap().tracks[0].segments[0].target.start,
             Micros(500_000)
         );
+    }
+
+    #[test]
+    fn splitting_keeps_a_frame_on_each_piece_and_the_key_uses_the_playhead() {
+        let mut desktop = shell();
+        desktop.toggle_blade();
+        assert!(!desktop.blade());
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        desktop.open_folder(&temp.path).unwrap();
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        let margin = desktop
+            .draft()
+            .unwrap()
+            .frame_rate()
+            .unwrap()
+            .frame_start(1)
+            .unwrap();
+        desktop.toggle_blade();
+        assert!(desktop.blade());
+        desktop.clear_blade();
+        desktop.select(Some(id.clone()));
+        desktop.seek(Micros(margin.0 - 1));
+        let revision = desktop.revision();
+        let error = desktop.split_selected().unwrap_err();
+        assert_eq!(error.to_string(), "split is not available");
+        assert_eq!(desktop.revision(), revision);
+        desktop.seek(Micros(500_000));
+        desktop.split_selected().unwrap();
+        {
+            let segments = &desktop.draft().unwrap().tracks[0].segments;
+            assert_eq!(segments.len(), 3);
+            assert_eq!(segments[0].target, TimeRange::new(0, 500_000));
+            assert_eq!(segments[0].source_range, Some(TimeRange::new(0, 500_000)));
+            assert_eq!(segments[1].target, TimeRange::new(500_000, 500_000));
+            assert_eq!(
+                segments[1].source_range,
+                Some(TimeRange::new(500_000, 500_000))
+            );
+        }
+        assert_eq!(desktop.selected(), Some(&id));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
+        desktop.select(None);
+        desktop.seek(Micros(2_000_000));
+        let error = desktop.run_shortcut("s").unwrap_err();
+        assert_eq!(error.to_string(), "split is not available");
+        desktop.seek(Micros(500_000));
+        desktop.run_shortcut("s").unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 3);
+        desktop.undo().unwrap();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .split_pointer(id.clone(), lane_time(&desktop, 500_000.0), y)
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0]
+                .target
+                .duration,
+            Micros(500_000)
+        );
+        desktop.undo().unwrap();
+        assert_eq!(
+            ShellError::Edit(EditError::TransitionWindow).to_string(),
+            "a transition cannot be split"
+        );
+        let track = desktop.lanes()[0].track_id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.seek(Micros(500_000));
+        desktop.select(Some(id));
+        let error = desktop.split_playhead().unwrap_err();
+        assert_eq!(error.to_string(), "the track is locked");
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 2);
     }
 
     #[test]

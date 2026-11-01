@@ -231,6 +231,43 @@ fn inter_layer_base_mode_adds_the_residual_and_its_own() {
 }
 
 #[test]
+fn inter_layer_prediction_uses_the_older_reference() {
+    let older = older_idr();
+    let recent = recent_reference();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &older);
+    assert!(split_luma(&first, 100, 180));
+    let second = decode_with(&mut decoder, &recent);
+    assert!(painted(&second, 40, 90));
+    let base = decode_with(&mut decoder, &older_base_packet());
+    assert!(base_residual_picture(&base));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &older);
+    let _ = decode_with(&mut decoder, &recent);
+    let inherited = decode_with(&mut decoder, &older_inherit_packet());
+    assert!(split_luma(&inherited, 100, 180));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &older);
+    let _ = decode_with(&mut decoder, &recent);
+    let added = decode_with(&mut decoder, &older_residual_packet());
+    assert!(
+        corner_on_flat(&added, 43, 40, 90),
+        "row {:?}",
+        &added.picture.y()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = older.clone();
+        layered.extend(recent);
+        layered.extend(older_residual_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 3, "ffmpeg picture count");
+        assert_eq!(&raw[frame * 2..], &planes_of(&base));
+        assert_ne!(&raw[frame * 2..], &planes_of(&added));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -771,6 +808,168 @@ fn shifted_residual_picture(picture: &VideoOutput) -> bool {
         .iter()
         .chain(picture.picture.v())
         .all(|sample| *sample == 90)
+}
+
+fn older_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &two_ref_sps());
+    out.extend(annex_b_nal(3, 15, &uncropped_layer()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &residual_pcm()));
+    out
+}
+
+fn recent_reference() -> Vec<u8> {
+    annex_b_nal(3, 1, &recent_slice())
+}
+
+fn older_base_packet() -> Vec<u8> {
+    annex_b_nal(0, 1, &older_base_slice())
+}
+
+fn older_inherit_packet() -> Vec<u8> {
+    let mut out = older_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &older_inherit(),
+    ));
+    out
+}
+
+fn older_residual_packet() -> Vec<u8> {
+    let mut out = older_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &older_residual(),
+    ));
+    out
+}
+
+fn two_ref_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(2);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn ref_p_header(w: &mut Writer, frame_num: u32, poc: u32, referenced: bool, two_refs: bool) {
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(frame_num, 4);
+    w.bits(poc, 4);
+    w.bit(two_refs);
+    if two_refs {
+        w.ue(1);
+    }
+    w.bit(false);
+    if referenced {
+        w.bit(false);
+    }
+    w.se(0);
+    w.ue(1);
+}
+
+fn recent_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.ue(0);
+    w.ue(30);
+    w.align_zeros();
+    w.bytes.extend(std::iter::repeat_n(40, 256));
+    w.bytes.extend(std::iter::repeat_n(90, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn older_base_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 2, 2, false, true);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn older_inherit() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 2, 2, false, true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn older_residual() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 2, 2, false, false);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn corner_on_flat(picture: &VideoOutput, corner: u8, flat: u8, chroma: u8) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let want = if row < 4 && col < 4 { corner } else { flat };
+            y[row * 16 + col] == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == chroma)
 }
 
 fn motion_idr() -> Vec<u8> {

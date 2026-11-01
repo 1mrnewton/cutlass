@@ -780,7 +780,7 @@ fn motion_base<S: Sample>(
             what: "inter-layer prediction",
         });
     };
-    if reference.ref0.iter().any(|index| *index != 0)
+    if reference.ref0.iter().any(|index| *index < 0)
         || reference.ref1.iter().any(|index| *index >= 0)
     {
         return Err(CodecError::Unsupported {
@@ -788,11 +788,12 @@ fn motion_base<S: Sample>(
         });
     }
     let motion = reference.mv0;
+    let refs = reference.ref0;
     let mut mb = Mb::new(slice_id);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    mb.ref0 = [0; 4];
+    mb.ref0 = refs;
     mb.mv0 = motion;
     bind_refs(&mut mb, slice);
     pic.mb[slot] = mb.clone();
@@ -890,7 +891,7 @@ fn add_layer_residual<S: Sample>(
         });
     };
     if reference_mb.intra
-        || reference_mb.ref0.iter().any(|index| *index != 0)
+        || reference_mb.ref0.iter().any(|index| *index < 0)
         || reference_mb.ref1.iter().any(|index| *index >= 0)
     {
         return Err(CodecError::Unsupported {
@@ -898,11 +899,13 @@ fn add_layer_residual<S: Sample>(
         });
     }
     let motion = reference_mb.mv0;
-    let frame = reference_frame(dpb, slice, 0, 0)?;
+    let slots = reference_mb.slot0;
     let chroma_stride = pic.w / 2;
     for by in 0..4 {
         for bx in 0..4 {
             let mv = motion[by * 4 + bx];
+            let part = (by / 2) * 2 + (bx / 2);
+            let frame = dpb_slot(dpb, slots[part])?;
             let x = mx * 16 + bx * 4;
             let y = my * 16 + by * 4;
             let mut pred = [S::default(); 16];
@@ -918,6 +921,27 @@ fn add_layer_residual<S: Sample>(
         }
     }
     Ok(())
+}
+
+fn dpb_slot<S: Sample>(dpb: &[Frame<S>], slot: i8) -> Result<&Frame<S>, CodecError> {
+    let Ok(index) = usize::try_from(slot) else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    let Some(frame) = dpb.get(index) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    if frame.nonexisting {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    }
+    Ok(frame)
 }
 
 fn add_predicted<S: Sample>(

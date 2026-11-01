@@ -197,6 +197,9 @@ pub(crate) struct Frame<S: Sample = u8> {
     svc_top: i32,
     svc_right: i32,
     svc_bottom: i32,
+    /// Luma 4×4 levels, 256 per macroblock, raster inside each block.
+    /// Empty unless a stored subset has `seq_tcoeff_level_prediction_flag`.
+    levels: Vec<i32>,
 }
 
 /// Output time and the grain blended at emit. `pts` on the frame stays the
@@ -266,6 +269,21 @@ impl<S: Sample> Frame<S> {
             self.h / 2
         } else {
             self.h
+        }
+    }
+
+    /// Raster luma levels for one 4×4. Empty unless a stored subset asks for
+    /// coefficient prediction. `coeffs` is zigzag order.
+    pub(crate) fn note_luma4(&mut self, slot: usize, block: usize, coeffs: &[i32]) {
+        if block >= 16 {
+            return;
+        }
+        let base = slot.saturating_mul(256).saturating_add(block * 16);
+        if self.levels.len() < base + 16 {
+            return;
+        }
+        for (n, &pos) in ZIGZAG4.iter().enumerate() {
+            self.levels[base + pos] = coeffs.get(n).copied().unwrap_or(0);
         }
     }
 }
@@ -1464,6 +1482,7 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         svc_top: 0,
         svc_right: 0,
         svc_bottom: 0,
+        levels: Vec::new(),
     }
 }
 
@@ -1842,6 +1861,9 @@ pub(crate) struct Slice<'a> {
     /// Add the reference layer's residual after this slice's prediction.
     /// When `adaptive_residual` is set, each inter macroblock carries its own flag.
     residual_pred: bool,
+    /// `tcoeff_level_prediction_flag`. Residual prediction rescales the reference
+    /// layer's 4×4 luma levels at this slice's QP.
+    tcoeff: bool,
     /// `adaptive_residual_prediction_flag`. The macroblock layer reads `residual_prediction_flag`.
     adaptive_residual: bool,
     /// Crop used to resample this slice. A sequence crop is copied here.
@@ -1964,7 +1986,8 @@ fn decode_slice<S: Sample>(
             }
             prior.extend(take_output(dpb, 0));
         }
-        *picture = Some(new_frame(&sps, &header, poc, packet, idr)?);
+        let keep_levels = sets.subset.iter().flatten().any(|sps| sps.seq_tcoeff);
+        *picture = Some(new_frame(&sps, &header, poc, packet, idr, keep_levels)?);
         *next_mb = 0;
         if header.nal_ref {
             poc_state.prev_frame_num = header.frame_num;
@@ -2217,6 +2240,8 @@ struct Header {
     /// The reference layer's residual is added after prediction.
     /// When `adaptive_residual` is set, each inter macroblock carries its own flag.
     residual_pred: bool,
+    /// `tcoeff_level_prediction_flag`.
+    tcoeff: bool,
     /// `adaptive_residual_prediction_flag`. The macroblock layer reads `residual_prediction_flag`.
     adaptive_residual: bool,
     /// Annex H `view_id`. Zero for an Annex A picture.
@@ -2656,6 +2681,7 @@ fn read_header(
             motion_pred: false,
             adaptive_residual: false,
             residual_pred: false,
+            tcoeff: false,
             scale: sps.svc_scale.clone(),
         },
     };
@@ -2753,6 +2779,7 @@ fn read_header(
         adaptive_motion: layer.adaptive_motion,
         motion_pred: layer.motion_pred,
         residual_pred: layer.residual_pred,
+        tcoeff: layer.tcoeff,
         adaptive_residual: layer.adaptive_residual,
         view_id,
         inter_view,
@@ -3005,6 +3032,7 @@ fn predicted_header(
         adaptive_motion: false,
         motion_pred: false,
         residual_pred: false,
+        tcoeff: false,
         adaptive_residual: false,
         view_id,
         inter_view: three.inter_view,
@@ -3027,6 +3055,7 @@ struct InterLayer {
     motion_pred: bool,
     adaptive_residual: bool,
     residual_pred: bool,
+    tcoeff: bool,
     scale: set::SvcScale,
 }
 
@@ -3044,7 +3073,10 @@ struct InterLayer {
 /// window, and motion inside it uses the window size. Residual resampling uses
 /// that window. A negative offset shifts it. A crop that differs on the reference
 /// picture adds that difference to the scaled vector. Macroblock-level spatial
-/// scalability reads the crop from the slice. Coefficient prediction is refused.
+/// scalability reads the crop from the slice. A sequence coefficient flag
+/// rescales a reference-layer 4×4 luma level at this slice's QP. An adaptive
+/// flag that is set stays refused. Chroma, 8×8, and Intra_16×16 levels stay
+/// on the sample residual.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
@@ -3114,16 +3146,16 @@ fn read_inter_layer(
             what: "inter-layer prediction",
         });
     }
-    if sps.adaptive_tcoeff && bits.bit()? {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
-    if sps.seq_tcoeff && !sps.adaptive_tcoeff {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
+    let tcoeff = if sps.adaptive_tcoeff {
+        if bits.bit()? {
+            return Err(CodecError::Unsupported {
+                what: "inter-layer prediction",
+            });
+        }
+        false
+    } else {
+        sps.seq_tcoeff
+    };
     Ok(InterLayer {
         adaptive_base,
         base_mode: default_base,
@@ -3131,6 +3163,7 @@ fn read_inter_layer(
         motion_pred: default_motion,
         adaptive_residual,
         residual_pred: default_residual,
+        tcoeff,
         scale,
     })
 }
@@ -3324,6 +3357,7 @@ fn new_frame<S: Sample>(
     poc: i32,
     packet: &Packet,
     idr: bool,
+    keep_levels: bool,
 ) -> Result<Frame<S>, CodecError> {
     let (mut vis_w, mut vis_h) = sps.visible()?;
     let field_pic = header.field;
@@ -3434,6 +3468,11 @@ fn new_frame<S: Sample>(
         svc_top: mb::sample_offset(header.scale.top)?,
         svc_right: mb::sample_offset(header.scale.right)?,
         svc_bottom: mb::sample_offset(header.scale.bottom)?,
+        levels: if keep_levels {
+            vec![0; mb_w.saturating_mul(mb_h).saturating_mul(256)]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -3663,6 +3702,7 @@ fn make_slice<'a, S: Sample>(
         adaptive_motion: header.adaptive_motion,
         motion_pred: header.motion_pred,
         residual_pred: header.residual_pred,
+        tcoeff: header.tcoeff,
         adaptive_residual: header.adaptive_residual,
         dmvp: header.dmvp,
         vsp: header.vsp,
@@ -4119,6 +4159,7 @@ mod tests {
             adaptive_motion: false,
             motion_pred: false,
             residual_pred: false,
+            tcoeff: false,
             adaptive_residual: false,
             view_id: 0,
             inter_view: true,
@@ -4184,6 +4225,7 @@ mod tests {
             svc_top: 0,
             svc_right: 0,
             svc_bottom: 0,
+            levels: Vec::new(),
         }
     }
 

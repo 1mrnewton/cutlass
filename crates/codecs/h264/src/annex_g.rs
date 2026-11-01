@@ -155,6 +155,33 @@ fn inter_layer_motion_predicts_from_the_reference() {
 }
 
 #[test]
+fn a_base_coefficient_is_rescaled_at_the_enhancement_qp() {
+    let parsed = parse_subset_sps(&tcoeff_layer()).expect("subset");
+    assert!(parsed.seq_tcoeff);
+    assert!(!parsed.adaptive_tcoeff);
+    let idr = tcoeff_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(split_luma(&first, 100, 180));
+    let base = decode_with(&mut decoder, &annex_b_nal(0, 1, &still_coeff_base()));
+    assert!(base_residual_picture(&base));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &tcoeff_packet());
+    assert!(tcoeff_picture(&picture));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(tcoeff_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_ne!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
 fn inter_layer_residual_adds_the_base_difference() {
     let idr = residual_idr();
     let mut decoder = open();
@@ -4569,6 +4596,113 @@ fn still_enhancement() -> Vec<u8> {
     w.bytes
 }
 
+fn tcoeff_layer() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(83, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bits(0, 2);
+    w.bit(false);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn tcoeff_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &tcoeff_layer()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &residual_pcm()));
+    out
+}
+
+fn tcoeff_packet() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &still_coeff_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &tcoeff_enhancement(),
+    ));
+    out
+}
+
+fn still_coeff_base() -> Vec<u8> {
+    let mut w = Writer::new();
+    qp_header(&mut w, 0);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
+fn tcoeff_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    qp_header(&mut w, -4);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn qp_header(w: &mut Writer, delta: i32) {
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(1, 4);
+    w.bits(1, 4);
+    w.bit(false);
+    w.bit(false);
+    w.se(delta);
+    w.ue(1);
+}
+
 fn residual_enhancement() -> Vec<u8> {
     let mut w = Writer::new();
     motion_p_header(&mut w);
@@ -4589,6 +4723,27 @@ fn residual_enhancement() -> Vec<u8> {
     w.ue(0);
     w.trailing();
     w.bytes
+}
+
+fn tcoeff_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let want = if row < 4 && col < 4 {
+                102
+            } else if col < 8 {
+                100
+            } else {
+                180
+            };
+            y[row * 16 + col] == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
 }
 
 fn split_luma(picture: &VideoOutput, left: u8, right: u8) -> bool {

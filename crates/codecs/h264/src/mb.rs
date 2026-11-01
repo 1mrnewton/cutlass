@@ -516,6 +516,11 @@ pub(crate) fn decode_mbs<S: Sample>(
             let residual = coded_residual_flag(slice, &mut entropy)?;
             let qp = inferred_base(pic, dpb, layer, slice, &mut entropy, addr, (slice_id, qp))?;
             if residual {
+                if slice.tcoeff {
+                    return Err(CodecError::Unsupported {
+                        what: "inter-layer prediction",
+                    });
+                }
                 add_layer_residual(pic, dpb, layer, slice, addr)?;
             }
             qp
@@ -528,7 +533,11 @@ pub(crate) fn decode_mbs<S: Sample>(
                         what: "inter-layer prediction",
                     });
                 };
-                add_layer_residual(pic, dpb, layer, slice, addr)?;
+                if slice.tcoeff {
+                    add_tcoeff_residual(pic, layer, slice, addr)?;
+                } else {
+                    add_layer_residual(pic, dpb, layer, slice, addr)?;
+                }
             }
             qp
         };
@@ -2237,6 +2246,107 @@ fn add_layer_residual<S: Sample>(
         }
     }
     Ok(())
+}
+
+/// G.8.5.2 then G.8.5.1 for one inter 4×4 macroblock. The reference layer's luma
+/// levels are rescaled from its QP to this macroblock's QP, this slice's 4×4
+/// levels are added, and one inverse transform updates the prediction.
+fn add_tcoeff_residual<S: Sample>(
+    pic: &mut Frame<S>,
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    addr: usize,
+) -> Result<(), CodecError> {
+    if slice.sps.mbaff
+        || pic.field
+        || pic.separate_plane
+        || pic.chroma() != 1
+        || S::BITS != 8
+        || layer.w != pic.w
+        || layer.h != pic.h
+        || layer.mb_w != pic.mb_w
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (mx, my) = locate(pic, addr, false);
+    let slot = my.saturating_mul(pic.mb_w).saturating_add(mx);
+    let Some(reference_mb) = layer.mb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    if reference_mb.intra || reference_mb.transform8 || reference_mb.intra16 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let start = slot.saturating_mul(256);
+    if layer.levels.len() < start + 256 || pic.levels.len() < start + 256 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    }
+    let Some(current) = pic.mb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    if current.transform8 || current.intra16 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let ref_qp = i32::from(reference_mb.qp);
+    let cur_qp = i32::from(current.qp);
+    let weight = slice.pps.weight4[3];
+    for i in 0..16 {
+        let mut block = [0i32; 16];
+        for k in 0..16 {
+            let at = start + i * 16 + k;
+            let level =
+                rescale_level(layer.levels[at], ref_qp, cur_qp)?.saturating_add(pic.levels[at]);
+            let (ry, rx) = (k / 4, k % 4);
+            block[k] = recon::scale4(level, cur_qp + S::QP_BD, rx, ry, i32::from(weight[k]));
+        }
+        recon::idct4(&mut block);
+        let span = luma_span(my, false);
+        recon::add_block(
+            &mut pic.y,
+            pic.w,
+            mx * 16 + blk_x(i) * 4,
+            span.at(blk_y(i) * 4),
+            &block,
+            4,
+            span.step,
+        );
+    }
+    Ok(())
+}
+
+/// Table G-6 and equation G-172. The shift divides toward zero.
+fn rescale_level(level: i32, ref_qp: i32, cur_qp: i32) -> Result<i32, CodecError> {
+    const SCALE: [i32; 6] = [8, 9, 10, 11, 13, 14];
+    let delta = ref_qp - cur_qp + 54;
+    if !(0..108).contains(&delta) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let index = usize::try_from(delta.rem_euclid(6)).unwrap_or(0);
+    let shift = delta.div_euclid(6);
+    if !(0..32).contains(&shift) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let magnitude = (i64::from(SCALE[index]) * i64::from(level.unsigned_abs())) << shift;
+    let scaled = i32::try_from(magnitude >> 12).unwrap_or(i32::MAX);
+    Ok(if level < 0 { -scaled } else { scaled })
 }
 
 fn has_prediction(mb: &Mb) -> bool {
@@ -5110,6 +5220,7 @@ mod intra8 {
             svc_top: 0,
             svc_right: 0,
             svc_bottom: 0,
+            levels: Vec::new(),
         }
     }
 
@@ -6665,6 +6776,12 @@ fn decode_inter<S: Sample>(
     }
     mb.qpd = delta as i8;
     predict_inter(pic, dpb, slice, mx, my, mb)?;
+    let merge = residual && slice.tcoeff;
+    if merge && (mb.transform8 || mb.field_mb || slice.sps.chroma != 1) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
     if slice.kind == 3 {
         sp_inter(
             pic,
@@ -6715,15 +6832,20 @@ fn decode_inter<S: Sample>(
                     0,
                 )?;
                 let span = luma_span(my, mb.field_mb);
-                super::add_scaled(
-                    &mut pic.y,
-                    pic.w,
-                    (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
-                    &block,
-                    (*qp, qp_bypass::<S>(slice, *qp)),
-                    &slice.pps.weight4[3],
-                    4,
-                );
+                if !pic.levels.is_empty() {
+                    pic.note_luma4(my * pic.mb_w + mx, i, &block);
+                }
+                if !merge {
+                    super::add_scaled(
+                        &mut pic.y,
+                        pic.w,
+                        (mx * 16 + blk_x(i) * 4, span.at(blk_y(i) * 4), span.step),
+                        &block,
+                        (*qp, qp_bypass::<S>(slice, *qp)),
+                        &slice.pps.weight4[3],
+                        4,
+                    );
+                }
             }
         }
     }

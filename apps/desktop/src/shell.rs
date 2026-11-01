@@ -635,7 +635,7 @@ impl Shell {
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
         let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
-        let time = self.playhead;
+        let time = self.sample_time();
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
         let picture = self
@@ -1152,6 +1152,20 @@ impl Shell {
     }
 
     /// `x` is pixels from the left of the lanes. Hit testing counts from time zero.
+    /// The picture at the cut's end is the last included microsecond.
+    ///
+    /// A segment covers `[start, end)`. Stopping on the end would sample past
+    /// the clip. The playhead stays on the end so the timecode still reads it.
+    fn sample_time(&self) -> Micros {
+        let time = self.playhead.0.max(0);
+        let end = self.cut_duration().0;
+        if end > 0 && time >= end {
+            Micros(end - 1)
+        } else {
+            Micros(time)
+        }
+    }
+
     fn time_zero_x(&self, x_in_view: f64) -> f64 {
         let shift = self.view_origin.max(0) as f64 * self.pixel_size;
         if shift.is_finite() {
@@ -2217,6 +2231,21 @@ mod tests {
             Micros(0),
             "a cut that fits the lane stays at the start"
         );
+    }
+
+    #[test]
+    fn the_end_of_the_cut_keeps_the_last_picture() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let start = desktop.preview_bytes().unwrap();
+        desktop.seek(desktop.cut_duration());
+        assert_eq!(desktop.playhead(), Micros(1_000_000));
+        let end = desktop.preview_bytes().unwrap();
+        assert_eq!(end.width, start.width);
+        assert_eq!(end.height, start.height);
+        assert_eq!(end.rgba, start.rgba);
     }
 
     #[test]

@@ -554,8 +554,8 @@ impl Av1Decoder {
         })
     }
 
-    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Super resolution, restoration,
-    /// film grain, and monochrome at this depth are still refused.
+    /// Profile 0 `high_bitdepth`. Samples stay in `u16`. Restoration, film grain,
+    /// and monochrome at this depth are still refused.
     fn hold_wide(
         &self,
         sequence: &Sequence,
@@ -4355,6 +4355,48 @@ mod tests {
                 .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
             assert_eq!(shown.len(), 1, "frame {index}");
             assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv420p10);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 3, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_ten_bit_superres_picture_matches_dav1d() {
+        // aomenc profile 0, 10-bit, shown 64×64, coded narrower. The inter
+        // frame samples the upscaled reference. Restoration and film grain
+        // are off. Digests are `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p10le`.
+        let file = include_bytes!("../fixtures/ten-sr.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0x5b6c_62a7_42d3_8e10, 0x4eb2_aa07_fece_99cb];
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.bit_depth, 10);
+        assert!(sequence.enable_superres);
+        assert!(frame.upscaled_width > frame.width);
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
             let cutlass_decode::Output::Picture(picture) = &shown[0] else {
                 panic!("picture");
             };

@@ -16,7 +16,7 @@ This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the pa
 
 Film grain synthesis is part of the output process in that specification. When a frame sends its own grain parameters, the noise is added to the shown picture. The reference keeps the picture from before that step.
 
-Main profile allows 10-bit 4:2:0 and monochrome. An 8-bit monochrome picture is one gray plane. A 10-bit 4:2:0 picture keeps native samples. 10-bit monochrome, and restoration, super resolution, and film grain at 10-bit, are still rejected, so this is not yet a Main-profile-compliant decoder.
+Main profile allows 10-bit 4:2:0 and monochrome. An 8-bit monochrome picture is one gray plane. A 10-bit 4:2:0 picture keeps native samples, including a frame shown wider than it was coded. 10-bit monochrome, and restoration and film grain at 10-bit, are still rejected, so this is not yet a Main-profile-compliant decoder.
 
 ## API
 
@@ -66,7 +66,7 @@ The encoder emits keyframes only. Its quality and rate tests passed in `cargo te
 
 `cargo test -p cutlass-av1` on this machine passed 61 tests. The embedded keyframe fixtures in that suite match dav1d byte for byte on the tools listed above, including CDEF, film grain, uniform tiles, a quantizer matrix, a superblock quantizer delta, super resolution, Wiener, self-guided, and switchable restoration, the recursive intra filter, and selectable transform sizes.
 
-`a_production_av1_keyframe_matches_dav1d_when_present` passed. `a_monochrome_picture_matches_dav1d` matches a 128×128 three-frame monochrome stream as one gray plane. `a_ten_bit_picture_matches_dav1d` matches a 64×64 10-bit keyframe and inter frame as little-endian samples. The bench below also printed `pixels: match` for that same 3840×2160 keyframe, compared with FFmpeg's libdav1d before either time was taken. `every_shown_frame_of_a_real_file_matches_dav1d` compares every shown frame of that file with `ffmpeg -c:v libdav1d -threads 1`. Both sides show 2797 frames. One release run on this machine spent 466.1 s in `Av1Decoder::push` and 481.9 s of wall time. The debug workspace run of that compare finished in 17787.6 s.
+`a_production_av1_keyframe_matches_dav1d_when_present` passed. `a_monochrome_picture_matches_dav1d` matches a 128×128 three-frame monochrome stream as one gray plane. `a_ten_bit_picture_matches_dav1d` matches a 64×64 10-bit keyframe and inter frame as little-endian samples. `a_ten_bit_superres_picture_matches_dav1d` matches a 10-bit pair that is coded narrower than the 64×64 picture it shows. The bench below also printed `pixels: match` for that same 3840×2160 keyframe, compared with FFmpeg's libdav1d before either time was taken. `every_shown_frame_of_a_real_file_matches_dav1d` compares every shown frame of that file with `ffmpeg -c:v libdav1d -threads 1`. Both sides show 2797 frames. One release run on this machine spent 466.1 s in `Av1Decoder::push` and 481.9 s of wall time. The debug workspace run of that compare finished in 17787.6 s.
 
 `single_reference_frames_match_dav1d` matches dav1d on error-resilient frames that keep the largest transform and leave compound, warped, overlapped, reference-motion, order hint, CDEF, restoration, and film grain off. `rotzoom_global_motion_matches_dav1d` matches a rotation-zoom model with high-precision motion vectors and two filter directions. `smooth_interintra_matches_dav1d` matches a DC interintra blend. `average_compound_matches_dav1d` matches frames that average two references. `distance_compound_matches_dav1d` matches frames that weight two references by order-hint distance. `masked_compound_matches_dav1d` matches a wedge blend. `difference_compound_matches_dav1d` matches a difference-weight blend. `skip_mode_matches_dav1d` matches a pyramid where a skip-mode block uses the nearest compound pair. `local_warp_matches_dav1d` matches a block that warps from its neighbors. `overlapped_motion_matches_dav1d` matches a block that blends the neighboring predictors. The other compound streams do not signal skip mode. `order_hint_frames_match_dav1d` matches with order hint on, each frame repeating the eight reference hints. `switch_frame_matches_dav1d` matches a switch frame and the frames that follow it. `film_grain_stays_off_the_reference` predicts a second frame from the picture stored before grain.
 
@@ -116,7 +116,7 @@ If ffmpeg is missing, the example prints `skip: ffmpeg is not installed` and exi
 
 Refused with a typed error before a picture is published:
 
-- 10-bit monochrome, 10-bit restoration, 10-bit super resolution, 10-bit film grain, 12-bit, 4:2:2, and 4:4:4. Monochrome 8-bit is one gray plane. 10-bit 4:2:0 is little-endian samples.
+- 10-bit monochrome, 10-bit restoration, 10-bit film grain, 12-bit, 4:2:2, and 4:4:4. Monochrome 8-bit is one gray plane. 10-bit 4:2:0 is little-endian samples, including super resolution.
 - A profile other than 0, a second operating point, and the decoder model.
 - A tile group that does not follow a frame header. A large-scale tile anchor of 8 or more, or an empty reference slot.
 - A show-existing frame shows the stored picture and does not re-apply grain.

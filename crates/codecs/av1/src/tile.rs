@@ -228,7 +228,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     let chroma_w = visible_w.div_ceil(2);
     let chroma_h = visible_h.div_ceil(2);
     let up_w = frame.upscaled_width as usize;
-    if sequence.bit_depth != 8 && postprocess && (up_w > visible_w || lr.active()) {
+    if sequence.bit_depth != 8 && postprocess && lr.active() {
         return Err(CodecError::Unsupported { what: "bit depth" });
     }
     let (y, u, v, out_w) = if postprocess && up_w > visible_w {
@@ -241,6 +241,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
                 up_w,
                 visible_h,
                 buf_w.saturating_sub(1),
+                sequence.bit_depth,
             ),
             S::upscale(
                 &tile.u,
@@ -249,6 +250,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
                 up_chroma,
                 chroma_h,
                 tile.chroma_w.saturating_sub(1),
+                sequence.bit_depth,
             ),
             S::upscale(
                 &tile.v,
@@ -257,6 +259,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
                 up_chroma,
                 chroma_h,
                 tile.chroma_w.saturating_sub(1),
+                sequence.bit_depth,
             ),
             up_w,
         )
@@ -279,6 +282,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
                     up_w,
                     visible_h,
                     buf_w.saturating_sub(1),
+                    sequence.bit_depth,
                 ),
                 S::upscale(
                     &pre_u,
@@ -287,6 +291,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
                     up_chroma,
                     chroma_h,
                     tile.chroma_w.saturating_sub(1),
+                    sequence.bit_depth,
                 ),
                 S::upscale(
                     &pre_v,
@@ -295,6 +300,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
                     up_chroma,
                     chroma_h,
                     tile.chroma_w.saturating_sub(1),
+                    sequence.bit_depth,
                 ),
             )
         } else {
@@ -360,6 +366,7 @@ pub(crate) trait FinishPlane: Pix {
         up_w: usize,
         height: usize,
         max_x: usize,
+        bit_depth: u8,
     ) -> Vec<Self>;
 
     fn restore_plane(
@@ -381,8 +388,9 @@ impl FinishPlane for u8 {
         up_w: usize,
         height: usize,
         max_x: usize,
+        bit_depth: u8,
     ) -> Vec<Self> {
-        superres::upscale(src, stride, down_w, up_w, height, max_x)
+        superres::upscale(src, stride, down_w, up_w, height, max_x, bit_depth)
     }
 
     fn restore_plane(
@@ -406,9 +414,9 @@ impl FinishPlane for u16 {
         up_w: usize,
         height: usize,
         max_x: usize,
+        bit_depth: u8,
     ) -> Vec<Self> {
-        let _ = (src, stride, down_w, up_w, height, max_x);
-        Vec::new()
+        superres::upscale(src, stride, down_w, up_w, height, max_x, bit_depth)
     }
 
     fn restore_plane(

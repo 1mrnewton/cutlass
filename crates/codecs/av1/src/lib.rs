@@ -6,9 +6,9 @@
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
 //! An 8-bit monochrome sequence is published as one gray plane. A 10-bit
-//! 4:2:0 sequence is published as little-endian samples. 10-bit monochrome,
-//! 10-bit restoration, 10-bit super resolution, 10-bit film grain, and 12-bit
-//! are rejected. A frame with `base_q_idx` 0 uses a
+//! 4:2:0 sequence is published as little-endian samples, including a frame
+//! that is upscaled after reconstruction. 10-bit monochrome, 10-bit
+//! restoration, 10-bit film grain, and 12-bit are rejected. A frame with `base_q_idx` 0 uses a
 //! 4×4 Walsh-Hadamard transform. A palette block and an intra block copy are
 //! reconstructed, and an inter frame may be forced to integer motion vectors.
 //! Two references may be

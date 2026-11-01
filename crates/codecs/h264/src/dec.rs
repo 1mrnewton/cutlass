@@ -2669,7 +2669,8 @@ fn read_header(
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
     // depth slice. The ranges scale list-0 luma. A texture P or B slice reads
     // `dmvp_flag`, then `slice_vsp_flag` when view synthesis is enabled.
-    // Both flags clear stays refused unless adaptive luminance compensation is on.
+    // Both flags clear stays refused unless adaptive luminance compensation is
+    // on, or this is a B slice with run-length skip.
     let mut depth_weight = false;
     let mut dps_id = 0u8;
     let mut dmvp = false;
@@ -2697,7 +2698,7 @@ fn read_header(
         if sps.view_synthesis {
             vsp = bits.bit()?;
         }
-        if !dmvp && !vsp && !sps.alc {
+        if !dmvp && !vsp && !sps.alc && !(sps.rle && kind == 1) {
             return Err(CodecError::Unsupported { what: "3d" });
         }
         if dmvp && sps.acquisition != 1 {
@@ -4255,6 +4256,7 @@ mod tests {
             depth_hor_rsh: 0,
             depth_ver_rsh: 0,
             alc: false,
+            rle: false,
             interview: Vec::new(),
         }
     }

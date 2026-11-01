@@ -5,6 +5,9 @@ use cutlass_decode::CodecError;
 use crate::bits::Bits;
 use crate::tables::{CABAC_MN, LAST_8X8, RANGE_LPS, SIG_8X8, TRANS_LPS, TRANS_MPS};
 
+/// Contexts 0..1023 are clause 9.3. Context 1040 is `mb_skip_run_type`.
+pub(crate) const CONTEXTS: usize = 1053;
+
 pub struct Cabac<'a> {
     data: &'a [u8],
     /// Next byte that has not been pulled into `cache`.
@@ -14,8 +17,8 @@ pub struct Cabac<'a> {
     bits: u32,
     range: u32,
     offset: u32,
-    state: [u8; 1024],
-    mps: [u8; 1024],
+    state: [u8; CONTEXTS],
+    mps: [u8; CONTEXTS],
 }
 
 impl<'a> Cabac<'a> {
@@ -32,26 +35,11 @@ impl<'a> Cabac<'a> {
             bits: 0,
             range: 510,
             offset: 0,
-            state: [0; 1024],
-            mps: [0; 1024],
+            state: [0; CONTEXTS],
+            mps: [0; CONTEXTS],
         };
         eng.offset = eng.read_bits(9)?;
-        let slice_qp = qp.clamp(0, 51);
-        for (ctx, &(m, n)) in CABAC_MN[init].iter().enumerate() {
-            if ctx == 276 {
-                eng.state[276] = 63;
-                eng.mps[276] = 0;
-                continue;
-            }
-            let pre = (((i32::from(m) * slice_qp) >> 4) + i32::from(n)).clamp(1, 126);
-            if pre <= 63 {
-                eng.state[ctx] = (63 - pre) as u8;
-                eng.mps[ctx] = 0;
-            } else {
-                eng.state[ctx] = (pre - 64) as u8;
-                eng.mps[ctx] = 1;
-            }
-        }
+        eng.init_states(qp, init);
         Ok(eng)
     }
 
@@ -152,8 +140,8 @@ impl<'a> Cabac<'a> {
             bits: 0,
             range: 510,
             offset: 0,
-            state: [0; 1024],
-            mps: [0; 1024],
+            state: [0; CONTEXTS],
+            mps: [0; CONTEXTS],
         };
         eng.offset = eng.read_bits(9)?;
         eng.init_states(qp, init);
@@ -183,6 +171,26 @@ impl<'a> Cabac<'a> {
                 self.mps[ctx] = 1;
             }
         }
+        init_rle(&mut self.state, &mut self.mps, slice_qp);
+    }
+}
+
+/// Table J-7. `mb_skip_run_type` is context 1040, `m` 18 and `n` 64, for every
+/// `cabac_init_idc`.
+pub(crate) fn init_rle(state: &mut [u8], mps: &mut [u8], qp: i32) {
+    let Some(slot) = state.get_mut(1040) else {
+        return;
+    };
+    let Some(bit) = mps.get_mut(1040) else {
+        return;
+    };
+    let pre = ((18 * qp) >> 4) + 64;
+    if pre <= 63 {
+        *slot = u8::try_from(63 - pre).unwrap_or(0);
+        *bit = 0;
+    } else {
+        *slot = u8::try_from(pre - 64).unwrap_or(0);
+        *bit = 1;
     }
 }
 

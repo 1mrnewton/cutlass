@@ -126,6 +126,8 @@ pub struct Sps {
     pub depth_ver_rsh: u32,
     /// `alc_sps_enable_flag`. A texture P macroblock may carry adaptive luminance compensation.
     pub alc: bool,
+    /// `enable_rle_skip_flag`. A CABAC B slice may code a run of skipped macroblocks.
+    pub rle: bool,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
@@ -579,6 +581,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut depth_hor_rsh = 0u32;
     let mut depth_ver_rsh = 0u32;
     let mut alc = false;
+    let mut rle = false;
     let mut texture_views = Vec::new();
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
@@ -619,6 +622,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         header_prediction = axis.header_prediction;
         view_synthesis = axis.view_synthesis;
         alc = axis.alc;
+        rle = axis.rle;
         disparity_scale = axis.disparity_scale;
         disparity_offset = axis.disparity_offset;
         if axis.reduced {
@@ -729,6 +733,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         depth_hor_rsh,
         depth_ver_rsh,
         alc,
+        rle,
         interview,
     };
     if !sps.within_level() {
@@ -965,6 +970,7 @@ struct DepthAxis {
     hor_rsh: u32,
     ver_rsh: u32,
     alc: bool,
+    rle: bool,
 }
 
 struct ReducedDepth {
@@ -1017,8 +1023,8 @@ fn depth_factor(bits: &mut Bits<'_>, limit: u32) -> Result<u32, CodecError> {
 
 /// `seq_parameter_set_3davc_extension`. Header prediction, view synthesis, and a
 /// half-resolution depth picture are stored. Acquisition 1 and 2 store integer
-/// depth ranges and the disparity pair. Adaptive luminance compensation is stored.
-/// Cropping, a grid, and RLE stay refused.
+/// depth ranges and the disparity pair. Adaptive luminance compensation and
+/// run-length skip are stored. Cropping and a grid stay refused.
 fn three_d_extension(
     bits: &mut Bits<'_>,
     views: &[u16],
@@ -1048,6 +1054,7 @@ fn three_d_extension(
         hor_rsh: 0,
         ver_rsh: 0,
         alc: false,
+        rle: false,
     };
     if !depth_ids.is_empty() {
         let acquisition = bits.ue()?;
@@ -1089,9 +1096,7 @@ fn three_d_extension(
         axis.view_synthesis = bits.bit()?;
     }
     axis.alc = bits.bit()?;
-    if bits.bit()? {
-        return Err(CodecError::Unsupported { what: "3d" });
-    }
+    axis.rle = bits.bit()?;
     let paired = depth_views
         .iter()
         .zip(texture_views)

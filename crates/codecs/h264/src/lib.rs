@@ -66,6 +66,9 @@
 //! reference is luma 100 and the neighbors are luma 80, so the top 16×8
 //! becomes 80. The bottom 16×8 meets the picture edge, so that half is luma 0.
 //! Chroma stays 90.
+//! A 48×16 B picture copies its reference from one skip bin. That reference is
+//! luma 40, then 180, then 40, and chroma 90. A skip flag on every macroblock
+//! runs out of bins.
 //! A depth P slice copies a later texture header. That source is intra, so the
 //! slice uses the picture's one reference. Motion of eight pixels makes that
 //! picture luma 220 and chroma 50. The texture picture between them is luma 10

@@ -546,6 +546,22 @@ struct Flags<'a> {
 /// P slice, cabac_init_idc 0. Every macroblock is skipped, so the decoder copies
 /// the previous reference. FFmpeg's skip context is 11 when both neighbours are
 /// skipped or absent, which is this whole picture.
+/// One `mb_skip_run_type` 1 bin, then an end-of-slice bin per macroblock.
+/// The run infers every skip flag, so a second skip bin is not written.
+#[cfg(test)]
+pub(crate) fn rle_skip_payload(qp: i32, init: usize, count: u32) -> Vec<u8> {
+    let mut bits = Writer::new();
+    {
+        let mut cab = CabacEnc::start(&mut bits, qp, init);
+        cab.decision(1040, 1);
+        for addr in 0..count {
+            cab.terminate(addr + 1 == count);
+        }
+    }
+    bits.pad_byte();
+    bits.bytes
+}
+
 fn p_skip_slice(mb_w: u32, mb_h: u32, frame_num: u32, poc: u32, qp: i32) -> Vec<u8> {
     let mut bits = Writer::new();
     bits.ue(0);
@@ -2952,8 +2968,8 @@ struct CabacEnc<'a> {
     range: u32,
     outstanding: u32,
     first: bool,
-    state: [u8; 1024],
-    mps: [u8; 1024],
+    state: [u8; crate::cabac::CONTEXTS],
+    mps: [u8; crate::cabac::CONTEXTS],
 }
 
 impl<'a> CabacEnc<'a> {
@@ -2964,8 +2980,8 @@ impl<'a> CabacEnc<'a> {
             range: 510,
             outstanding: 0,
             first: true,
-            state: [0; 1024],
-            mps: [0; 1024],
+            state: [0; crate::cabac::CONTEXTS],
+            mps: [0; crate::cabac::CONTEXTS],
         };
         let slice_qp = qp.clamp(0, 51);
         let init = init.min(3);
@@ -2984,11 +3000,12 @@ impl<'a> CabacEnc<'a> {
                 eng.mps[ctx] = 1;
             }
         }
+        crate::cabac::init_rle(&mut eng.state, &mut eng.mps, slice_qp);
         eng
     }
 
     fn decision(&mut self, ctx: usize, bin: u8) {
-        let ctx = ctx.min(1023);
+        let ctx = ctx.min(crate::cabac::CONTEXTS - 1);
         let state = usize::from(self.state[ctx]);
         let mps = self.mps[ctx];
         let zone = usize::try_from((self.range >> 6) & 3).unwrap_or(0);

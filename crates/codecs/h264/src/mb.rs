@@ -437,6 +437,10 @@ pub(crate) fn decode_mbs<S: Sample>(
     };
     let mut decoded = *next_mb;
     let mut qp = slice.qp;
+    let mut rle = Rle {
+        run: 0,
+        kind: false,
+    };
     while addr < total {
         if !super::intra_slice(slice.kind) {
             match &mut entropy {
@@ -468,14 +472,7 @@ pub(crate) fn decode_mbs<S: Sample>(
                     }
                 }
                 Entropy::Cabac(cab) => {
-                    let skipped = cabac_skip(
-                        pic,
-                        cab,
-                        super::syntax_kind(slice.kind),
-                        slice_id,
-                        addr,
-                        mbaff,
-                    )?;
+                    let skipped = rle_skip(pic, cab, slice, slice_id, addr, mbaff, &mut rle)?;
                     if skipped {
                         fresh(pic, addr, mbaff, !next.is_empty())?;
                         let flag = cabac_skip_field(pic, cab, slice_id, addr, mbaff)?;
@@ -600,6 +597,65 @@ fn step(
 
 fn pair_bottom<S: Sample>(pic: &Frame<S>, addr: usize, mbaff: bool) -> bool {
     locate(pic, addr, mbaff).1 % 2 == 1
+}
+
+/// `RunLength` and `mb_skip_run_type` for one slice. Both start clear.
+struct Rle {
+    run: u32,
+    kind: bool,
+}
+
+/// J.7.3.4.1. A B slice with `enable_rle_skip_flag` reads `mb_skip_run_type`
+/// when both neighbours are skipped or unavailable and the run has ended.
+/// Type 1 infers the next skips. Type 0 still reads each `mb_skip_flag`.
+fn rle_skip<S: Sample>(
+    pic: &Frame<S>,
+    cab: &mut Cabac<'_>,
+    slice: &Slice<'_>,
+    slice_id: u16,
+    addr: usize,
+    mbaff: bool,
+    rle: &mut Rle,
+) -> Result<bool, CodecError> {
+    let ctx = rle_context(pic, slice, slice_id, addr, mbaff);
+    if ctx && rle.run == 0 {
+        rle.kind = cab.decision(1040)? == 1;
+        rle.run = 16;
+    } else if !ctx {
+        rle.run = 0;
+    }
+    if ctx && rle.kind {
+        rle.run = rle.run.saturating_sub(1);
+        return Ok(true);
+    }
+    let skipped = cabac_skip(
+        pic,
+        cab,
+        super::syntax_kind(slice.kind),
+        slice_id,
+        addr,
+        mbaff,
+    )?;
+    if ctx && !skipped {
+        rle.run = 0;
+    }
+    Ok(skipped)
+}
+
+fn rle_context<S: Sample>(
+    pic: &Frame<S>,
+    slice: &Slice<'_>,
+    slice_id: u16,
+    addr: usize,
+    mbaff: bool,
+) -> bool {
+    if !slice.sps.rle || slice.kind != 1 {
+        return false;
+    }
+    let (mx, my) = locate(pic, addr, mbaff);
+    let left = neighbor(pic, mx as i32 - 1, my as i32, slice_id);
+    let above = neighbor(pic, mx as i32, above_my(pic, mx, my), slice_id);
+    left.is_none_or(|mb| mb.skip) && above.is_none_or(|mb| mb.skip)
 }
 
 fn cabac_skip<S: Sample>(

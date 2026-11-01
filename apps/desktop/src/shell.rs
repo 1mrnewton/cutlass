@@ -22,7 +22,7 @@ use cutlass_editor::{
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
-    Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
+    Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
     MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
     TrackAttribute, TrackId, TrackType, beat_timeline_time, linkage_from_biz, segment_beats,
     segment_time_mark, source_time_at, time_mark_items, track_holds_beats, user_beats,
@@ -2118,6 +2118,65 @@ impl Shell {
         })
     }
 
+    /// The selected clip is a video or a composition, so Crop can inset it.
+    #[must_use]
+    pub fn crop_enabled(&self) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        let Some(segment) = self.selected_segment() else {
+            return false;
+        };
+        stored_crop(draft, segment).is_some()
+    }
+
+    /// The selected picture is keeping less than the whole frame.
+    #[must_use]
+    pub fn cropped(&self) -> bool {
+        let Some(draft) = self.draft() else {
+            return false;
+        };
+        let Some(segment) = self.selected_segment() else {
+            return false;
+        };
+        stored_crop(draft, segment).is_some_and(|crop| crop != Crop::default())
+    }
+
+    /// Keep the middle of the selected picture. A second click restores the
+    /// whole frame. The clip stays where it is. One undo restores the quad.
+    ///
+    /// The quad is stored on the video, or on the compound. Another clip that
+    /// uses that same material keeps the same middle.
+    pub fn toggle_crop(&mut self) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let crop = {
+            let draft = self.session_draft()?;
+            let Some((segment, _)) = placed(draft, &segment_id) else {
+                return Err(ShellError::Unavailable(
+                    "the clip is not on the timeline".to_owned(),
+                ));
+            };
+            let Some(current) = stored_crop(draft, segment) else {
+                return Err(ShellError::Unavailable(
+                    "a crop belongs on a picture".to_owned(),
+                ));
+            };
+            if current == Crop::default() {
+                center_crop()
+            } else {
+                Crop::default()
+            }
+        };
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetCrop { segment_id, crop })
+    }
+
     fn selection_can_turn(&self) -> bool {
         let Some(draft) = self.draft() else {
             return false;
@@ -3403,6 +3462,28 @@ fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
 }
 
 /// One clockwise quarter turn. The preview's positive angle is the other way.
+fn stored_crop(draft: &Draft, segment: &Segment) -> Option<Crop> {
+    match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(video)) => Some(video.crop),
+        Some(MaterialRef::Draft(compound)) => Some(compound.crop),
+        _ => None,
+    }
+}
+
+/// The middle half of the picture. Coordinates are fractions, Y downward.
+fn center_crop() -> Crop {
+    Crop {
+        upper_left_x: 0.25,
+        upper_left_y: 0.25,
+        upper_right_x: 0.75,
+        upper_right_y: 0.25,
+        lower_left_x: 0.25,
+        lower_left_y: 0.75,
+        lower_right_x: 0.75,
+        lower_right_y: 0.75,
+    }
+}
+
 fn clockwise_quarter(degrees: f64) -> f64 {
     let current = if degrees.is_finite() { degrees } else { 0.0 };
     (current - 90.0).rem_euclid(360.0)
@@ -3587,7 +3668,7 @@ mod tests {
     };
     use cutlass_eval::ReaderFactory;
     use cutlass_model::{
-        Draft, FrameRate, MaterialAudio, MaterialColorConfig, MaterialDraft, MaterialId,
+        Crop, Draft, FrameRate, MaterialAudio, MaterialColorConfig, MaterialDraft, MaterialId,
         MaterialText, MaterialVideo, Micros, RawMaterial, Segment, SegmentId, TimeRange, Track,
         TrackAttribute, TrackType,
     };
@@ -5750,6 +5831,144 @@ mod tests {
                 .target
                 .duration,
             Micros(1_000_000)
+        );
+    }
+
+    #[test]
+    fn crop_keeps_the_middle_of_a_picture() {
+        let mut bare = shell();
+        assert!(!bare.crop_enabled());
+        assert_eq!(
+            bare.toggle_crop().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 4;
+        draft.canvas_config.height = 4;
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(2_000_000);
+        video.crop_ratio = "16:9".to_owned();
+        video.crop_scale = 2.0;
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 2_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "again",
+            "picture",
+            TimeRange::new(3_000_000, 1_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(5_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        draft.materials.drafts.push(MaterialDraft {
+            id: MaterialId::new("compound"),
+            ..MaterialDraft::default()
+        });
+        let mut compound = Track::main("compound");
+        compound.kind = TrackType::Composition;
+        compound.segments.push(Segment::new(
+            "compound",
+            "compound",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(compound);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.crop_enabled());
+        assert_eq!(
+            desktop.toggle_crop().unwrap_err().to_string(),
+            "a crop belongs on a picture"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.crop_enabled());
+        assert!(desktop.reverse_enabled());
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(desktop.rotate_enabled());
+        assert!(!desktop.crop_enabled());
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.crop_enabled());
+        assert!(!desktop.cropped());
+        desktop.toggle_crop().unwrap();
+        assert!(desktop.cropped());
+        let video = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(video.crop, super::center_crop());
+        assert_eq!(video.crop_ratio, "16:9");
+        assert_eq!(video.crop_scale, 2.0);
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        desktop.select(Some(SegmentId::new("again")));
+        assert!(desktop.cropped());
+        desktop.undo().unwrap();
+        assert!(!desktop.cropped());
+        desktop.redo().unwrap();
+        desktop.toggle_crop().unwrap();
+        assert!(!desktop.cropped());
+        assert_eq!(
+            desktop.draft().unwrap().materials.videos[0].crop,
+            Crop::default()
+        );
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop.toggle_crop().unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        assert!(!desktop.cropped());
+
+        desktop.select(Some(SegmentId::new("compound")));
+        assert!(desktop.crop_enabled());
+        assert!(desktop.mirror_enabled());
+        assert!(!desktop.freeze_enabled());
+        desktop.toggle_crop().unwrap();
+        assert!(desktop.cropped());
+        assert_eq!(
+            desktop.draft().unwrap().materials.drafts[0].crop,
+            super::center_crop()
+        );
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+        desktop.toggle_crop().unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().materials.drafts[0].crop,
+            Crop::default()
         );
     }
 

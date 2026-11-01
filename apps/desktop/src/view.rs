@@ -1216,6 +1216,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "reverse" => shell.reversed(),
                                 "mirror" => shell.mirrored(),
                                 "rotate" => shell.rotated(),
+                                "crop" => shell.cropped(),
                                 _ => false,
                             };
                             let tip = match *name {
@@ -1233,6 +1234,8 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "mirror" => "Mirror",
                                 "rotate" if shell.rotated() => "Rotated",
                                 "rotate" => "Rotate",
+                                "crop" if shell.cropped() => "Cropped",
+                                "crop" => "Crop",
                                 _ => tip,
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
@@ -1296,6 +1299,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
         "reverse" => shell.reverse_enabled(),
         "mirror" => shell.mirror_enabled(),
         "rotate" => shell.rotate_enabled(),
+        "crop" => shell.crop_enabled(),
         _ => false,
     }
 }
@@ -1347,6 +1351,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "reverse" => shell.toggle_reverse(),
         "mirror" => shell.toggle_mirror(),
         "rotate" => shell.turn_clockwise(),
+        "crop" => shell.toggle_crop(),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -1578,6 +1583,9 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     let width = 132.0;
     let row_height = 28.0;
     let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
+    if shell.crop_enabled() {
+        labels.insert(0, "Crop");
+    }
     if shell.rotate_enabled() {
         labels.insert(0, "Rotate");
     }
@@ -1633,6 +1641,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
                 "Reverse" => shell.toggle_reverse(),
                 "Mirror" => shell.toggle_mirror(),
                 "Rotate" => shell.turn_clockwise(),
+                "Crop" => shell.toggle_crop(),
                 _ => shell.remove_selected(),
             };
             if let Err(error) = result {

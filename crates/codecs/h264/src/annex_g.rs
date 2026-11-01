@@ -1071,6 +1071,48 @@ fn a_coded_depth_motion_vector_cancels_the_base_motion() {
     }
 }
 
+#[test]
+fn an_8x8_depth_motion_vector_cancels_the_base_motion() {
+    let base_idr = dmvp_base_idr();
+    let other_idr = dmvp_other_idr();
+    let base_p = dmvp_base_p();
+    let coded = dmvp_coded_8x8();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base_idr, &other_idr, &base_p, &coded] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 4, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| copied_depth(picture))
+            .count(),
+        2
+    );
+    assert!(pictures.iter().any(shifted_residual_picture));
+    assert!(pictures.iter().all(|picture| !painted(picture, 220, 50)));
+    assert!(pictures.iter().all(|picture| !painted(picture, 40, 50)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &coded).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let mut decoder = open();
+    for annex in [&base_idr, &other_idr, &base_p] {
+        let _ = push_pictures(&mut decoder, annex);
+    }
+    let err = decoder
+        .push(&Packet::video(dmvp_coded_4x4(), 0, 1, 30, false))
+        .expect_err("4x4");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+}
+
 fn dmvp_base_idr() -> Vec<u8> {
     let mut out = annex_b_nal(3, 7, &four_ref_sps());
     out.extend(annex_b_nal(3, 8, &pps()));
@@ -1146,6 +1188,44 @@ fn dmvp_coded() -> Vec<u8> {
     w.se(-32);
     w.se(0);
     w.ue(0);
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn dmvp_coded_8x8() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.ue(3);
+    for _sub in 0..4 {
+        w.ue(0);
+    }
+    // Top row medians are the eight-pixel base vector. Bottom row medians are zero.
+    w.se(-32);
+    w.se(0);
+    w.se(-32);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn dmvp_coded_4x4() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.ue(3);
+    for _sub in 0..4 {
+        w.ue(3);
+    }
     w.trailing();
     annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
 }

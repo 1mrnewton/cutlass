@@ -26,7 +26,8 @@
 //! its reference when `depth_weighted_pred_flag` is 0. A different depth range
 //! scales that luma. An intra depth slice can copy its header from the texture
 //! slice. A one-macroblock texture P picture can use the base view's motion,
-//! and a coded difference is added to that predictor. The other 3D tools stay refused.
+//! including an 8×8 partition, and a coded difference is added to that predictor.
+//! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

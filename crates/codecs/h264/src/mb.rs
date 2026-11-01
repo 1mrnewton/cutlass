@@ -6436,9 +6436,6 @@ fn decode_inter<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    if slice.dmvp && sub {
-        return Err(CodecError::Unsupported { what: "3d" });
-    }
     if slice.kind == 1 && spec == 0 {
         direct_16(pic, dpb, slice, mx, my, mb)?;
     } else if sub {
@@ -7273,6 +7270,14 @@ fn read_sub<S: Sample>(
             mb.partition8 = false;
         }
     }
+    if slice.dmvp {
+        for kind in kinds {
+            let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
+            if w != 8 || h != 8 {
+                return Err(CodecError::Unsupported { what: "3d" });
+            }
+        }
+    }
     let ref0_forced = spec == 4;
     let direct = |kind: u32| kind == 0 && slice.kind == 1;
     // Clause 7.3.5.2: list 0 references, list 1 references, list 0 deltas, list 1 deltas.
@@ -7346,13 +7351,28 @@ fn read_sub<S: Sample>(
             let y0 = (i >> 1) * 8;
             for (px, py) in sub_origins(x0, y0, w, h) {
                 let part = part(px, py, w, h, list == 0, list == 1);
+                let predicted = if slice.dmvp && list == 0 {
+                    if !same_view_reference(pic, dpb, slice, mb, &part) {
+                        return Err(CodecError::Unsupported { what: "3d" });
+                    }
+                    Some(dmvp_temporal_mvp(
+                        pic,
+                        dpb,
+                        slice,
+                        Place { mx, my },
+                        &part,
+                        mb,
+                    ))
+                } else {
+                    None
+                };
                 read_mvd_part(
                     pic,
                     entropy,
                     slice,
                     Place { mx, my },
                     &part,
-                    (list, None),
+                    (list, predicted),
                     mb,
                 )?;
             }

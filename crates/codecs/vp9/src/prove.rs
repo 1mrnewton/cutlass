@@ -406,6 +406,71 @@ fn sharp_high_depth_matches_ffmpeg_software() {
     }
 }
 
+/// Parallel mode keeps the probability context from being adapted for the next frame.
+#[test]
+fn frame_parallel_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no parallel source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("parallel");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &[
+            "-frames:v",
+            "8",
+            "-vf",
+            "scale=320:240",
+            "-frame-parallel",
+            "1",
+            "-threads",
+            "1",
+        ],
+    );
+    let stream = read_ivf(&ivf);
+    assert_eq!(stream.width, 320);
+    assert_eq!(stream.height, 240);
+    let parallel = parallel_inter_frames(&stream);
+    assert!(
+        parallel >= 2,
+        "need two inter frames with parallel mode, found {parallel}"
+    );
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    eprintln!(
+        "frame parallel {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn parallel_inter_frames(stream: &Ivf) -> usize {
+    let mut state = crate::header::Persist::new();
+    let mut count = 0usize;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("parallel frame {index} header: {err}"));
+        if !parsed.header.key_frame && !parsed.header.intra_only && parsed.header.frame_parallel {
+            count += 1;
+        }
+        remember_header(&mut state, &parsed);
+    }
+    count
+}
+
 fn rewritten_sharpness_filters(frames: &[Vec<u8>]) -> bool {
     let mut state = crate::header::Persist::new();
     let mut active = false;

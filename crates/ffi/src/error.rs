@@ -114,6 +114,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
         EditError::Position => "the position is not a finite number".to_owned(),
         EditError::Scale => "the scale must be greater than zero".to_owned(),
+        EditError::Fade => "a fade cannot be negative".to_owned(),
     }
 }
 
@@ -161,6 +162,10 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::Scale).to_string(),
             "the scale must be greater than zero"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Fade).to_string(),
+            "a fade cannot be negative"
         );
     }
 

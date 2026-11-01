@@ -90,6 +90,8 @@ pub enum EditError {
     Position,
     /// Scale is not finite and greater than zero.
     Scale,
+    /// A fade duration is negative.
+    Fade,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {

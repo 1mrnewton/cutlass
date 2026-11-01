@@ -7273,7 +7273,8 @@ fn read_sub<S: Sample>(
     if slice.dmvp {
         for kind in kinds {
             let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
-            if w != h || (w != 8 && w != 4) {
+            let square = w == h && (w == 8 || w == 4);
+            if !square && (w != 4 || h != 8) {
                 return Err(CodecError::Unsupported { what: "3d" });
             }
         }

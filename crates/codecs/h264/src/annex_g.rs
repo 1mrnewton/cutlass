@@ -1222,6 +1222,47 @@ fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
 }
 
 #[test]
+fn a_skipped_view_synthesis_macroblock_uses_four_8x8_disparities() {
+    let base = dmvp_base_idr();
+    let depth = vsp_block_depth();
+    let view = vsp_skip_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| top_left_block_shift(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| depth_block(picture))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_4x4_view_synthesis_sub_partition_uses_the_8x8_corners() {
     let base = dmvp_base_idr();
     let depth = vsp_block_depth();
@@ -1772,6 +1813,21 @@ fn vsp_depth_annex(sps: &[u8], luma: &[u8]) -> Vec<u8> {
 
 fn vsp_texture() -> Vec<u8> {
     annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_p_slice())
+}
+
+fn vsp_skip_texture() -> Vec<u8> {
+    annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_skip_slice())
+}
+
+fn vsp_skip_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.bit(true);
+    w.trailing();
+    w.bytes
 }
 
 fn vsp_4x4_texture() -> Vec<u8> {

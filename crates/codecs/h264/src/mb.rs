@@ -445,13 +445,25 @@ pub(crate) fn decode_mbs<S: Sample>(
             match &mut entropy {
                 Entropy::Cavlc(bits) => {
                     let run = bits.ue()? as usize;
+                    let vs_skip = if slice.vsp && run > 0 && vsp_ref_exist(pic, dpb, slice) {
+                        bits.bit()?
+                    } else {
+                        false
+                    };
                     for left in 0..run {
                         if addr >= total {
                             return Err(bits.malformed("skip run"));
                         }
                         fresh(pic, addr, mbaff, !next.is_empty())?;
                         let flag = skip_field_flag(pic, bits, slice_id, addr, mbaff, run - left)?;
-                        skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
+                        if vs_skip {
+                            if slice.kind != 0 {
+                                return Err(CodecError::Unsupported { what: "3d" });
+                            }
+                            vsp_skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
+                        } else {
+                            skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
+                        }
                         addr = step(next, addr, &mut decoded, total)?;
                     }
                     if addr >= total || (run > 0 && !bits.more_rbsp()) {
@@ -686,6 +698,88 @@ fn skip_mb<S: Sample>(
     let slot = my * pic.mb_w + mx;
     pic.mb[slot] = mb;
     Ok(())
+}
+
+/// J.7.3.4.1. `mb_skip_type_flag` is present when a skip run has an interview reference.
+fn vsp_ref_exist<S: Sample>(pic: &Frame<S>, dpb: &[Frame<S>], slice: &Slice<'_>) -> bool {
+    let listed = |list: &[usize]| {
+        list.iter().any(|&slot| {
+            slot != NO_PICTURE
+                && dpb
+                    .get(slot)
+                    .is_some_and(|frame| frame.view_id != pic.view_id)
+        })
+    };
+    listed(&slice.ref0) || (slice.kind == 1 && listed(&slice.ref1))
+}
+
+/// J.8.2.1.3. `MbVSSkipFlag` 1 splits the skip into four 8×8 disparities.
+fn vsp_skip_mb<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    slice_id: u16,
+    addr: usize,
+    qp: i32,
+    field_mb: bool,
+) -> Result<(), CodecError> {
+    let mbaff = slice.sps.mbaff && !pic.field;
+    let (mx, my) = locate(pic, addr, mbaff);
+    let mut mb = Mb::new(slice_id);
+    mb.field_mb = field_mb;
+    mb.skip = true;
+    mb.qp = qp as i8;
+    mb.qp_c = chroma_deblock::<S>(qp, slice.pps.chroma_qp_offset);
+    mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
+    mb.off_a = slice.off_a as i8;
+    mb.off_b = slice.off_b as i8;
+    mb.deblock = slice.deblock;
+    let reference = first_interview(pic, dpb, slice)?;
+    for index in 0..4 {
+        let part = Part {
+            x: (index & 1) * 8,
+            y: (index >> 1) * 8,
+            w: 8,
+            h: 8,
+            l0: true,
+            l1: false,
+        };
+        fill_ref(&mut mb.ref0, &mut mb.uses0, &part, reference);
+        store_mv(&mut mb, &part, synthesis_motion(pic, dpb, slice, &part)?, 0);
+    }
+    predict_inter(pic, dpb, slice, mx, my, &mb)?;
+    bind_refs(&mut mb, slice);
+    let slot = my * pic.mb_w + mx;
+    pic.mb[slot] = mb;
+    Ok(())
+}
+
+fn first_interview<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+) -> Result<i8, CodecError> {
+    for (index, &slot) in slice.ref0.iter().enumerate() {
+        if slot == NO_PICTURE {
+            continue;
+        }
+        if dpb
+            .get(slot)
+            .is_some_and(|frame| frame.view_id != pic.view_id)
+        {
+            let Ok(reference) = i8::try_from(index) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "3d",
+                });
+            };
+            return Ok(reference);
+        }
+    }
+    Err(CodecError::Malformed {
+        at_bit: 0,
+        what: "3d",
+    })
 }
 
 /// J.8.2.1.2 for one macroblock. `TextureFirstFlag` is 1, so the disparity

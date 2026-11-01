@@ -43,6 +43,8 @@
 //! An 8×4 sub-partition of that block uses the 8×8 corners, so both halves
 //! shift. A 4×8 sub-partition uses that same 8×8, so both columns shift.
 //! A 4×4 sub-partition uses that same 8×8, so all four blocks shift.
+//! A skipped P macroblock with `mb_skip_type_flag` 1 is four 8×8 disparities,
+//! so that same top-left block shifts and the other three stay still.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

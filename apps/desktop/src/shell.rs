@@ -157,6 +157,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::LineWidth) => {
                 formatter.write_str("the line width must be from zero through 8192")
             }
+            Self::Edit(EditError::CanvasColor) => {
+                formatter.write_str("the canvas color is not a hex color")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -1763,6 +1766,14 @@ impl Shell {
         }
         let on = !session.draft().config.maintrack_adsorb;
         self.apply(Request::SetMagnet { on })
+    }
+
+    /// Store the color under every layer. An empty string clears it.
+    /// One undo restores the previous color. The canvas size stays.
+    pub fn set_canvas_background(&mut self, color: &str) -> Result<(), ShellError> {
+        self.apply(Request::SetCanvasBackground {
+            color: color.to_owned(),
+        })
     }
 
     /// Turn follow on or off. Stored pairs stay either way. This is not an undo step.
@@ -6873,6 +6884,57 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().line_spacing, 1.0);
+    }
+
+    #[test]
+    fn the_canvas_color_fills_the_frame_and_an_empty_color_clears_it() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.set_canvas_background("#336699")
+                .unwrap_err()
+                .to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let clear = desktop.preview_bytes().unwrap();
+        assert_eq!(clear.rgba, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+        desktop.set_canvas_background("  #336699  ").unwrap();
+        let colored = desktop.preview_bytes().unwrap();
+        assert_eq!(colored.width, 2);
+        assert_eq!(colored.height, 1);
+        assert_eq!(colored.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(2));
+        assert_eq!(desktop.draft().unwrap().canvas_config.width, 2);
+        assert_eq!(desktop.draft().unwrap().canvas_config.height, 1);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.preview_bytes().unwrap().rgba, vec![0; 8]);
+
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.set_canvas_background("0xFF336699").unwrap();
+        assert_eq!(
+            desktop.preview_bytes().unwrap().rgba,
+            [0x33, 0x66, 0x99, 0xFF].repeat(2)
+        );
+        desktop.set_canvas_background("").unwrap();
+        assert_eq!(desktop.preview_bytes().unwrap().rgba, vec![0; 8]);
+        assert_eq!(
+            desktop
+                .set_canvas_background("white")
+                .unwrap_err()
+                .to_string(),
+            "the canvas color is not a hex color"
+        );
+        assert_eq!(desktop.draft().unwrap().canvas_config.background, None);
     }
 
     #[test]

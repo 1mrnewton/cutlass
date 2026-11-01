@@ -127,6 +127,7 @@ pub struct ViewState {
     fade_in_buffer: String,
     fade_out_buffer: String,
     speed_buffer: String,
+    background_buffer: String,
     dialogs: Dialogs,
     library_query: String,
     library_shelf: Shelf,
@@ -161,6 +162,7 @@ impl Default for ViewState {
             fade_in_buffer: String::new(),
             fade_out_buffer: String::new(),
             speed_buffer: String::new(),
+            background_buffer: String::new(),
             dialogs: Dialogs::new(),
             library_query: String::new(),
             library_shelf: Shelf::Media,
@@ -1049,7 +1051,7 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
                 clip_fields(shell, ui, view, &inspection);
             } else {
                 section_title(ui, "Details");
-                project_facts(shell, ui, content_width);
+                project_facts(shell, ui, view, content_width);
             }
         });
 }
@@ -1064,14 +1066,22 @@ fn section_title(ui: &mut Ui, title: &str) {
     ui.add_space(14.0);
 }
 
-fn project_facts(shell: &Shell, ui: &mut Ui, width: f32) {
+fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f32) {
     fact(ui, "Name", &shell.project_name(), width);
     let saved = shell
         .project_folder()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "No project".to_owned());
     fact(ui, "Saved", &saved, width);
-    let Some(draft) = shell.draft() else {
+    let Some((ratio, canvas_width, canvas_height, fps, background)) = shell.draft().map(|draft| {
+        (
+            ratio_label(&draft.canvas_config.ratio),
+            draft.canvas_config.width,
+            draft.canvas_config.height,
+            draft.fps,
+            draft.canvas_config.background.clone().unwrap_or_default(),
+        )
+    }) else {
         return;
     };
     ui.add_space(8.0);
@@ -1083,17 +1093,24 @@ fn project_facts(shell: &Shell, ui: &mut Ui, width: f32) {
         egui::Stroke::new(1.0, Color32::from_white_alpha(20)),
     );
     ui.add_space(16.0);
-    fact(ui, "Ratio", &ratio_label(&draft.canvas_config.ratio), width);
+    fact(ui, "Ratio", &ratio, width);
     fact(
         ui,
         "Resolution",
-        &format!(
-            "{}×{}",
-            draft.canvas_config.width, draft.canvas_config.height
-        ),
+        &format!("{canvas_width}×{canvas_height}"),
         width,
     );
-    fact(ui, "Frame rate", &format!("{:.2}fps", draft.fps), width);
+    fact(ui, "Frame rate", &format!("{fps:.2}fps"), width);
+    if let Some(color) = color_field(
+        ui,
+        "Background",
+        &mut view.background_buffer,
+        &background,
+        "Hex color. Empty is clear",
+    ) && let Err(error) = shell.set_canvas_background(&color)
+    {
+        shell.set_notice(error.to_string());
+    }
 }
 
 fn fact(ui: &mut Ui, label: &str, value: &str, row_width: f32) {
@@ -1184,8 +1201,13 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
-        if let Some(color) = color_field(ui, &mut view.text_color_buffer, &inspection.text_color)
-            && !inspection.locked
+        if let Some(color) = color_field(
+            ui,
+            "Color",
+            &mut view.text_color_buffer,
+            &inspection.text_color,
+            "Hex color",
+        ) && !inspection.locked
             && let Err(error) = shell.set_text_color(&color)
         {
             shell.set_notice(error.to_string());
@@ -1294,13 +1316,19 @@ fn fade_seconds(microseconds: i64) -> f64 {
     microseconds as f64 / 1_000_000.0
 }
 
-fn color_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+fn color_field(
+    ui: &mut Ui,
+    label: &str,
+    text: &mut String,
+    stored: &str,
+    hover: &str,
+) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
         ui.set_min_width(ui.available_width());
         ui.add_sized(
             [108.0, 18.0],
-            egui::Label::new(RichText::new("Color").size(13.0).color(tokens::MUTED)),
+            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text);
         if response.lost_focus() {
@@ -1309,7 +1337,7 @@ fn color_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
         if !response.has_focus() {
             *text = stored.to_owned();
         }
-        response.on_hover_text("Hex color");
+        response.on_hover_text(hover);
     });
     ui.add_space(4.0);
     edited.filter(|value| value != stored)

@@ -3134,11 +3134,14 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
         } else {
             None
         };
+        // A scaled reference never warps. Section 7.11.3.1 leaves use_warp at 0
+        // and the block samples the projected global vector through the scaled filter.
         let global = block.y_mode == GLOBALMV
             && gm_kind > GM_TRANSLATION
             && w >= 8
             && h >= 8
             && !self.force_integer
+            && !self.ref_is_scaled(frame_ref)
             && global_shear_valid(gm_params);
         let warp_params = local.or(global.then_some(gm_params));
         if ii >= 0 {
@@ -3822,6 +3825,7 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             && w >= 8
             && h >= 8
             && !self.force_integer
+            && !self.ref_is_scaled(reference)
             && global_shear_valid(gm_params);
         let reference_plane = self.ref_plane(slot, block.plane);
         if warp {

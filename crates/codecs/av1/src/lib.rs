@@ -23,7 +23,8 @@
 //! motion blends those neighboring predictors. A block may take a motion
 //! candidate from the field projected out of an earlier frame. An inter frame
 //! may sample a reference of a different size, and it may copy its upscaled
-//! size from a reference. A warp of a scaled reference is rejected. A
+//! size from a reference. A global-motion block on a scaled reference uses
+//! the scaled motion filter. A
 //! single-reference block may blend intra through a luma wedge. A frame
 //! may replace a loop-filter reference or mode delta, and a later frame keeps it.
 //! A superblock may add its own loop-filter delta. A sequence may use a

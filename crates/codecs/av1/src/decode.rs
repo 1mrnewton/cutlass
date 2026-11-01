@@ -3816,6 +3816,45 @@ mod tests {
     }
 
     #[test]
+    fn a_scaled_reference_global_motion_picture_matches_dav1d() {
+        // aomenc, error resilient, 64×64 superblocks. The key is 64×64 and the
+        // inter frames are 128×128, so the reference is scaled. The first inter
+        // frame's global model is rotation-zoom. Those blocks sample the
+        // projected vector through the scaled motion filter. Local warp,
+        // restoration, CDEF, and super resolution are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/scaled-warp.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 3);
+        let mut sequence = None;
+        let mut sizes = Vec::new();
+        for payload in &frames {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            sizes.push((frame.width, frame.height, frame.gm_type));
+            sequence = Some(seq);
+        }
+        assert_eq!(sizes[0].0, 64);
+        assert_eq!(sizes[0].1, 64);
+        assert_eq!(sizes[1].0, 128);
+        assert_eq!(sizes[1].1, 128);
+        assert_eq!(sizes[1].2[1], 2);
+        let expected = [
+            (64 * 64 * 3 / 2, 0x8419_0e04_1574_0ec3),
+            (128 * 128 * 3 / 2, 0xf311_8759_99f9_2b97),
+            (128 * 128 * 3 / 2, 0xd8ec_38de_6d66_7c35),
+        ];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), expected[index].0, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn an_interintra_wedge_picture_matches_dav1d() {
         // aomenc 64×64. Six blocks on the inter frame blend one reference with
         // intra through a luma wedge. The wedge sign is 0. Restoration, CDEF,

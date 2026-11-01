@@ -1,13 +1,12 @@
 //! Preview audio.
 //!
-//! On Apple the callback copies one pipeline sample into a Core Audio queue
-//! buffer. Linux has no output device, so playback stays silent until one
-//! exists. That silence is not a missing build, and opening the preview is
-//! not a failed open. WASAPI and AAudio are not in this pass.
+//! The mix at the playhead is one interleaved stereo slice. On Apple the
+//! callback walks that slice. Linux has no output device, so playback stays
+//! silent until one exists. That silence is not a missing build, and opening
+//! the preview is not a failed open. WASAPI and AAudio are not in this pass.
 //!
-//! Eval's picture call does not hand back PCM. The slice queued with a frame
-//! is empty, and the callback copies that as one silent sample. Playback does
-//! not mix.
+//! [`copy_pipeline_sample`](crate::Player::copy_pipeline_sample) still copies
+//! the sample the caller passes. The queued mix is a separate buffer.
 
 use std::fmt;
 
@@ -92,6 +91,7 @@ pub enum CopyOutcome {
 /// The bytes the callback last copied, and the Apple queue when one is open.
 struct SampleBuffer {
     copied: Vec<u8>,
+    queued: Vec<u8>,
     #[cfg(target_vendor = "apple")]
     live: Option<cutlass_platform_apple::OutputQueue>,
 }
@@ -100,6 +100,7 @@ impl SampleBuffer {
     fn software() -> Self {
         Self {
             copied: Vec::new(),
+            queued: Vec::new(),
             #[cfg(target_vendor = "apple")]
             live: None,
         }
@@ -109,6 +110,7 @@ impl SampleBuffer {
     fn core_audio(queue: cutlass_platform_apple::OutputQueue) -> Self {
         Self {
             copied: Vec::new(),
+            queued: Vec::new(),
             live: Some(queue),
         }
     }
@@ -126,7 +128,17 @@ impl SampleBuffer {
     }
 
     fn set_slice(&mut self, sample: &[u8]) {
+        if sample.len() > MAX_SLICE_BYTES
+            || (!sample.is_empty() && !sample.len().is_multiple_of(FRAME_BYTES))
+        {
+            return;
+        }
+        self.queued = sample.to_vec();
         let _ = self.store_live(sample);
+    }
+
+    fn queued(&self) -> &[u8] {
+        &self.queued
     }
 
     fn store_live(&self, sample: &[u8]) -> Result<(), PlayheadError> {
@@ -185,9 +197,20 @@ impl AudioOutput {
         }
     }
 
-    pub(crate) fn set_slice(&mut self, sample: &[u8]) {
+    /// Replace the slice the callback walks. An empty slice is silence.
+    /// A silent host keeps the previous gap and stores nothing.
+    pub fn queue(&mut self, sample: &[u8]) {
         if let OutputKind::Buffer(queue) = &mut self.kind {
             queue.set_slice(sample);
+        }
+    }
+
+    /// The slice [`Self::queue`] stored. Empty when this host is silent.
+    #[must_use]
+    pub fn queued(&self) -> &[u8] {
+        match &self.kind {
+            OutputKind::Buffer(queue) => queue.queued(),
+            OutputKind::Silent(_) => &[],
         }
     }
 

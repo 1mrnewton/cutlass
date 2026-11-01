@@ -1001,11 +1001,14 @@ dependencies = [
 name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
+ "cutlass-container",
  "cutlass-eval",
  "cutlass-gpu",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-platform-apple",
  "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
 ]
 

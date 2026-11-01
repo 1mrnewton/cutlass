@@ -697,6 +697,13 @@ fn decode_au<S: Sample>(
                         if built {
                             slice_id = slice_id.saturating_add(1);
                         }
+                        let keep_base = picture.as_ref().is_some_and(|enhancement| {
+                            base.referenced && (base.w != enhancement.w || base.h != enhancement.h)
+                        });
+                        if keep_base {
+                            base.output = false;
+                            dpb.push(base);
+                        }
                         index += 1;
                     }
                     Layer::View(mvc) => {
@@ -1076,11 +1083,18 @@ fn pic_reorder<S: Sample>(pic: &Frame<S>) -> usize {
 }
 
 fn mark_ref<S: Sample>(dpb: &mut [Frame<S>], pic: &Frame<S>, max_ref: usize) {
-    let mut short = dpb.iter().filter(|f| f.referenced && !f.long_term).count();
-    let long = dpb.iter().filter(|f| f.referenced && f.long_term).count();
+    let same = |frame: &&Frame<S>| frame.w == pic.w && frame.h == pic.h;
+    let mut short = dpb
+        .iter()
+        .filter(|frame| frame.referenced && !frame.long_term && same(frame))
+        .count();
+    let long = dpb
+        .iter()
+        .filter(|frame| frame.referenced && frame.long_term && same(frame))
+        .count();
     short += 1;
     while short + long > max_ref && short > 0 {
-        if let Some(pos) = oldest_short(dpb, pic.frame_num, pic.max_fn) {
+        if let Some(pos) = oldest_short(dpb, pic.frame_num, pic.max_fn, (pic.w, pic.h)) {
             dpb[pos].referenced = false;
             short -= 1;
         } else {
@@ -1248,10 +1262,16 @@ fn assign_long<S: Sample>(
     Ok(())
 }
 
-fn oldest_short<S: Sample>(dpb: &[Frame<S>], current: u32, max_fn: u32) -> Option<usize> {
+fn oldest_short<S: Sample>(
+    dpb: &[Frame<S>],
+    current: u32,
+    max_fn: u32,
+    size: (usize, usize),
+) -> Option<usize> {
+    let (w, h) = size;
     dpb.iter()
         .enumerate()
-        .filter(|(_, frame)| frame.referenced && !frame.long_term)
+        .filter(|(_, frame)| frame.referenced && !frame.long_term && frame.w == w && frame.h == h)
         .min_by_key(|(_, frame)| wrapped(frame, current, max_fn))
         .map(|(index, _)| index)
 }
@@ -1882,8 +1902,10 @@ fn decode_slice<S: Sample>(
     }
     let upsampled = if sps.svc_spatial == 1 {
         match layer {
-            Some(base) => Some(mb::resample_intra(base, &sps)?),
-            None => None,
+            Some(base) if !base.mb.is_empty() && base.mb.iter().all(|mb| mb.intra) => {
+                Some(mb::resample_intra(base, &sps)?)
+            }
+            _ => None,
         }
     } else {
         None
@@ -2509,9 +2531,10 @@ fn read_header(
 /// macroblock. `adaptive_motion_prediction_flag` selects the reference layer's
 /// vector as the motion predictor. `adaptive_residual_prediction_flag` selects
 /// residual prediction per macroblock.
-/// Picture-level intra resampling is reconstructed. Motion resampling,
-/// residual resampling, macroblock-level spatial scalability, and coefficient
-/// prediction are refused.
+/// Picture-level intra resampling is reconstructed. A zero-offset inter base
+/// layer scales its motion onto the enhancement. Residual resampling, a crop
+/// change, macroblock-level spatial scalability, and coefficient prediction
+/// are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
@@ -2861,7 +2884,13 @@ fn make_slice<'a, S: Sample>(
         });
     };
     let max_fn = 1u32 << sps.log2_max_frame_num;
-    let (ref0, ref1) = mb::reference_lists(dpb, header, poc, max_fn)?;
+    let (ref0, ref1) = mb::reference_lists(
+        dpb,
+        header,
+        poc,
+        max_fn,
+        (sps.width as usize, sps.height as usize),
+    )?;
     let (poc0, long0) = ref_marks(dpb, &ref0);
     let (poc1, long1) = ref_marks(dpb, &ref1);
     let origin = if sps.mbaff && !header.field {
@@ -3268,7 +3297,7 @@ mod tests {
                 super::Mod { idc: 0, arg: 0 },
             ],
         );
-        let (list0, list1) = super::mb::reference_lists(&dpb, &header, 4, 16).unwrap();
+        let (list0, list1) = super::mb::reference_lists(&dpb, &header, 4, 16, (16, 16)).unwrap();
         assert!(list1.is_empty());
         let frames: Vec<u32> = list0.iter().map(|&index| dpb[index].frame_num).collect();
         assert_eq!(frames, vec![1, 1, 0]);
@@ -3278,7 +3307,7 @@ mod tests {
     fn a_reordered_picture_that_is_not_in_the_dpb_is_malformed() {
         let dpb = vec![held(0)];
         let header = p_header(1, 1, vec![super::Mod { idc: 0, arg: 5 }]);
-        assert!(super::mb::reference_lists(&dpb, &header, 0, 16).is_err());
+        assert!(super::mb::reference_lists(&dpb, &header, 0, 16, (16, 16)).is_err());
     }
 
     fn p_header(frame_num: u32, num_ref_l0: usize, ref_mod_l0: Vec<super::Mod>) -> super::Header {

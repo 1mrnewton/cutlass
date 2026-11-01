@@ -16,7 +16,8 @@
 //! `adaptive_motion_prediction_flag` uses the reference layer's vector as the predictor.
 //! `adaptive_residual_prediction_flag` selects residual prediction per macroblock.
 //! Picture-level intra resampling upsamples the reference layer with the 16-phase intra filter.
-//! Motion and residual resampling, macroblock-level spatial scalability, and a 3D-AVC extension header are refused.
+//! A zero-offset inter base layer scales its motion onto the enhancement.
+//! Residual resampling, a crop change, macroblock-level spatial scalability, and a 3D-AVC extension header are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

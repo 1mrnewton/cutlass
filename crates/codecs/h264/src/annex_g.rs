@@ -536,6 +536,51 @@ fn intra_resampling_upsamples_the_base_layer() {
 }
 
 #[test]
+fn motion_resampling_scales_the_base_vector() {
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &motion_scale_idr());
+    pictures.extend(push_pictures(&mut decoder, &motion_scale_p()));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    let reference = &pictures[0];
+    assert_eq!(reference.picture.width(), 32);
+    assert_eq!(reference.picture.height(), 32);
+    assert!(
+        upsampled_reference(reference),
+        "row {:?} chroma {:?}",
+        &reference.picture.y()[..32],
+        &reference.picture.u()[..16]
+    );
+    let picture = &pictures[1];
+    assert_eq!(picture.picture.width(), 32);
+    assert_eq!(picture.picture.height(), 32);
+    assert!(
+        scaled_motion_picture(picture),
+        "row {:?} chroma {:?}",
+        &picture.picture.y()[..32],
+        &picture.picture.u()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = motion_scale_idr();
+        annex.extend(motion_scale_p());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let base = decode(&resample_base());
+        let mut flat = vec![200u8; 16 * 16];
+        flat.extend(std::iter::repeat_n(200, 8 * 8 * 2));
+        let mut want = planes_of(&base);
+        want.extend(flat);
+        assert_eq!(raw, want);
+        assert_ne!(planes_of(picture), &raw[raw.len() / 2..]);
+    }
+}
+
+fn push_pictures(decoder: &mut H264Decoder, annex: &[u8]) -> Vec<VideoOutput> {
+    decoder
+        .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
+        .expect("decode")
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -2431,6 +2476,116 @@ fn resample_base_picture(picture: &VideoOutput) -> bool {
                 .all(|sample| *sample == 200)
     }) && chroma(picture.picture.u())
         && chroma(picture.picture.v())
+}
+
+fn motion_scale_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &spatial_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &resample_pcm()));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &ilp_header(),
+        &motion_scale_intra(),
+    ));
+    out
+}
+
+fn motion_scale_intra() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    for _ in 0..4 {
+        w.ue(3);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn motion_scale_p() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &motion_scale_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &motion_scale_enhancement(),
+    ));
+    out
+}
+
+fn motion_scale_base() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(0);
+    w.se(32);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn motion_scale_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    for _ in 0..4 {
+        w.ue(0);
+        w.ue(0);
+    }
+    w.trailing();
+    w.bytes
+}
+
+fn upsampled_reference(picture: &VideoOutput) -> bool {
+    let luma = upsampled_luma();
+    let chroma = upsampled_chroma();
+    let y = picture.picture.y();
+    (0..32).all(|row| y[row * 32..row * 32 + 32] == luma)
+        && (0..16).all(|row| picture.picture.u()[row * 16..row * 16 + 16] == chroma)
+        && (0..16).all(|row| picture.picture.v()[row * 16..row * 16 + 16] == chroma)
+}
+
+fn scaled_motion_picture(picture: &VideoOutput) -> bool {
+    let luma = [
+        165, 215, 205, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
+        200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
+    ];
+    let chroma = [
+        160, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
+    ];
+    let y = picture.picture.y();
+    (0..32).all(|row| y[row * 32..row * 32 + 32] == luma)
+        && (0..16).all(|row| picture.picture.u()[row * 16..row * 16 + 16] == chroma)
+        && (0..16).all(|row| picture.picture.v()[row * 16..row * 16 + 16] == chroma)
+}
+
+fn upsampled_luma() -> [u8; 32] {
+    [
+        40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 35, 25, 75, 165, 215, 205, 200, 200,
+        200, 200, 200, 200, 200, 200, 200, 200, 200, 200, 200,
+    ]
+}
+
+fn upsampled_chroma() -> [u8; 16] {
+    [
+        40, 40, 40, 40, 40, 40, 40, 80, 160, 200, 200, 200, 200, 200, 200, 200,
+    ]
 }
 
 fn resampled(picture: &VideoOutput) -> bool {

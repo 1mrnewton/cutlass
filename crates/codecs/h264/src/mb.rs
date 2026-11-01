@@ -63,10 +63,17 @@ pub(crate) fn reference_lists<S: Sample>(
     header: &Header,
     poc: i32,
     max_fn: u32,
+    size: (usize, usize),
 ) -> Result<(Vec<usize>, Vec<usize>), CodecError> {
     let view = header.view_id;
+    let (width, height) = size;
     let short = |frame: &&Frame<S>| {
-        frame.referenced && !frame.long_term && !frame.nonexisting && frame.view_id == view
+        frame.referenced
+            && !frame.long_term
+            && !frame.nonexisting
+            && frame.view_id == view
+            && frame.w == width
+            && frame.h == height
     };
     let mut shorts: Vec<usize> = dpb
         .iter()
@@ -78,7 +85,12 @@ pub(crate) fn reference_lists<S: Sample>(
         .iter()
         .enumerate()
         .filter(|(_, frame)| {
-            frame.referenced && frame.long_term && !frame.nonexisting && frame.view_id == view
+            frame.referenced
+                && frame.long_term
+                && !frame.nonexisting
+                && frame.view_id == view
+                && frame.w == width
+                && frame.h == height
         })
         .map(|(index, _)| index)
         .collect();
@@ -92,7 +104,7 @@ pub(crate) fn reference_lists<S: Sample>(
         });
         let mut list = shorts;
         list.extend(longs);
-        append_interview(&mut list, dpb, poc, &header.interview_l0);
+        append_interview(&mut list, dpb, poc, &header.interview_l0, size);
         let list = reorder(
             list,
             header.num_ref_l0,
@@ -126,8 +138,8 @@ pub(crate) fn reference_lists<S: Sample>(
     if list0 == list1 && list1.len() > 1 {
         list1.swap(0, 1);
     }
-    append_interview(&mut list0, dpb, poc, &header.interview_l0);
-    append_interview(&mut list1, dpb, poc, &header.interview_l1);
+    append_interview(&mut list0, dpb, poc, &header.interview_l0, size);
+    append_interview(&mut list1, dpb, poc, &header.interview_l1, size);
     let list0 = reorder(
         list0,
         header.num_ref_l0,
@@ -147,7 +159,14 @@ pub(crate) fn reference_lists<S: Sample>(
     Ok((list0, list1))
 }
 
-fn append_interview<S: Sample>(list: &mut Vec<usize>, dpb: &[Frame<S>], poc: i32, views: &[u16]) {
+fn append_interview<S: Sample>(
+    list: &mut Vec<usize>,
+    dpb: &[Frame<S>],
+    poc: i32,
+    views: &[u16],
+    size: (usize, usize),
+) {
+    let (width, height) = size;
     for view in views {
         let Some(index) = dpb.iter().position(|frame| {
             frame.referenced
@@ -155,6 +174,8 @@ fn append_interview<S: Sample>(list: &mut Vec<usize>, dpb: &[Frame<S>], poc: i32
                 && frame.inter_view
                 && frame.view_id == *view
                 && frame.poc == poc
+                && frame.w == width
+                && frame.h == height
         }) else {
             continue;
         };
@@ -827,6 +848,8 @@ fn intra_base<S: Sample>(
 
 /// Inter base mode. Motion is the reference layer's vectors. The samples come
 /// from the decoded picture buffer. A coded residual is a 4×4 or an 8×8.
+/// A smaller reference layer scales those vectors onto this picture when the
+/// spatial offsets are zero.
 fn motion_base<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -842,36 +865,40 @@ fn motion_base<S: Sample>(
             what: "inter-layer prediction",
         });
     }
-    if layer.w != pic.w || layer.h != pic.h || layer.mb_w != pic.mb_w {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
     let (mx, my) = locate(pic, addr, false);
     let slot = my.saturating_mul(pic.mb_w).saturating_add(mx);
-    let Some(reference) = layer.mb.get(slot) else {
-        return Err(CodecError::Malformed {
-            at_bit: 0,
-            what: "inter-layer prediction",
-        });
-    };
-    if !has_prediction(reference) {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
-    let motion0 = reference.mv0;
-    let motion1 = reference.mv1;
-    let refs0 = reference.ref0;
-    let refs1 = reference.ref1;
     let mut mb = Mb::new(slice_id);
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    mb.ref0 = refs0;
-    mb.ref1 = refs1;
-    mb.mv0 = motion0;
-    mb.mv1 = motion1;
+    if layer.w == pic.w && layer.h == pic.h {
+        if layer.mb_w != pic.mb_w {
+            return Err(CodecError::Unsupported {
+                what: "inter-layer prediction",
+            });
+        }
+        let Some(reference) = layer.mb.get(slot) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        if !has_prediction(reference) {
+            return Err(CodecError::Unsupported {
+                what: "inter-layer prediction",
+            });
+        }
+        mb.mv0 = reference.mv0;
+        mb.mv1 = reference.mv1;
+        mb.ref0 = reference.ref0;
+        mb.ref1 = reference.ref1;
+    } else if slice.sps.svc_spatial == 1 {
+        scaled_layer_motion(&mut mb, layer, slice, mx, my)?;
+    } else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
     bind_refs(&mut mb, slice);
     pic.mb[slot] = mb.clone();
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, slice_id, slice.sps.chroma)?;
@@ -955,6 +982,170 @@ fn motion_base<S: Sample>(
     mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
     pic.mb[slot] = mb;
     Ok(qp)
+}
+
+/// A zero-offset reference-layer vector scaled by the picture-size ratio.
+fn scaled_layer_motion<S: Sample>(
+    mb: &mut Mb,
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    mx: usize,
+    my: usize,
+) -> Result<(), CodecError> {
+    if layer.field || layer.mbaff || layer.w == 0 || layer.h == 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let crop = &slice.sps.svc_scale;
+    if crop.left != 0 || crop.top != 0 || crop.right != 0 || crop.bottom != 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (Ok(base_w), Ok(base_h), Ok(scaled_w), Ok(scaled_h)) = (
+        i32::try_from(layer.w),
+        i32::try_from(layer.h),
+        i32::try_from(slice.sps.width),
+        i32::try_from(slice.sps.height),
+    ) else {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    };
+    let x_axis = motion_axis(base_w, scaled_w, slice.sps.level_idc)?;
+    let y_axis = motion_axis(base_h, scaled_h, slice.sps.level_idc)?;
+    mb.mv0 = [[0; 2]; 16];
+    mb.mv1 = [[0; 2]; 16];
+    mb.ref0 = [-1; 4];
+    mb.ref1 = [-1; 4];
+    let mut seen = [false; 4];
+    for by in 0..4 {
+        for bx in 0..4 {
+            let curr_x = sample_index(mx, bx)?;
+            let curr_y = sample_index(my, by)?;
+            let pos_x = base_sample(curr_x, x_axis)?;
+            let pos_y = base_sample(curr_y, y_axis)?;
+            let mb_x = (pos_x as usize) / 16;
+            let mb_y = (pos_y as usize) / 16;
+            let slot = mb_y.saturating_mul(layer.mb_w).saturating_add(mb_x);
+            let Some(reference) = layer.mb.get(slot) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "inter-layer prediction",
+                });
+            };
+            if reference.intra {
+                return Err(CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                });
+            }
+            let inside_x = (pos_x as usize) & 15;
+            let inside_y = (pos_y as usize) & 15;
+            let blk = (inside_y / 4) * 4 + (inside_x / 4);
+            let part = (inside_y / 8) * 2 + (inside_x / 8);
+            let index = by * 4 + bx;
+            let source0 = reference.mv0[blk];
+            let source1 = reference.mv1[blk];
+            mb.mv0[index] = [
+                scale_vector(source0[0], base_w, scaled_w)?,
+                scale_vector(source0[1], base_h, scaled_h)?,
+            ];
+            mb.mv1[index] = [
+                scale_vector(source1[0], base_w, scaled_w)?,
+                scale_vector(source1[1], base_h, scaled_h)?,
+            ];
+            let enh = (by / 2) * 2 + (bx / 2);
+            if !seen[enh] {
+                mb.ref0[enh] = reference.ref0[part];
+                mb.ref1[enh] = reference.ref1[part];
+                seen[enh] = true;
+            } else if mb.ref0[enh] != reference.ref0[part] || mb.ref1[enh] != reference.ref1[part] {
+                return Err(CodecError::Unsupported {
+                    what: "inter-layer prediction",
+                });
+            }
+        }
+    }
+    if !has_prediction(mb) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    Ok(())
+}
+
+fn sample_index(mb: usize, block: usize) -> Result<i32, CodecError> {
+    i32::try_from(mb * 16 + block * 4 + 1).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })
+}
+
+#[derive(Clone, Copy)]
+struct MotionAxis {
+    scale: i64,
+    add: i64,
+    shift: i32,
+    limit: i32,
+}
+
+fn motion_axis(reference: i32, scaled: i32, level: u8) -> Result<MotionAxis, CodecError> {
+    if reference <= 0 || scaled <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let shift = if level <= 30 {
+        16
+    } else {
+        31 - ceil_log2(reference)
+    };
+    if !(1..=30).contains(&shift) {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let scale = ((i64::from(reference) << shift) + i64::from(scaled >> 1)) / i64::from(scaled);
+    Ok(MotionAxis {
+        scale,
+        add: 1i64 << (shift - 1),
+        shift,
+        limit: reference,
+    })
+}
+
+fn base_sample(curr: i32, axis: MotionAxis) -> Result<i32, CodecError> {
+    let pos = i64::from(curr)
+        .checked_mul(axis.scale)
+        .and_then(|value| value.checked_add(axis.add))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    let pos = i32::try_from(pos >> axis.shift).unwrap_or(i32::MAX);
+    if axis.limit <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    Ok(pos.clamp(0, axis.limit - 1))
+}
+
+fn scale_vector(mv: i16, reference: i32, scaled: i32) -> Result<i16, CodecError> {
+    if reference <= 0 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let ratio = ((i64::from(scaled) << 16) + i64::from(reference >> 1)) / i64::from(reference);
+    let value = i64::from(mv)
+        .checked_mul(ratio)
+        .and_then(|product| product.checked_add(32_768))
+        .ok_or(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        })?;
+    i16::try_from(value >> 16).map_err(|_| CodecError::Unsupported {
+        what: "inter-layer prediction",
+    })
 }
 
 /// Inter-layer residual prediction. The residual is the reference-layer

@@ -112,35 +112,69 @@ impl TextSource {
     }
 
     fn splat(&self, rgba: &mut [u8], record: &GlyphRecord) {
-        if record.width <= 0.0 || record.height <= 0.0 {
-            return;
-        }
         let Some(image) = self.atlas.image(record.glyph_id) else {
             return;
         };
-        if image.width == 0 || image.height == 0 || !drawable(image) {
-            return;
-        }
-        let left = record.x - self.origin_x;
-        let top = record.y - self.origin_y;
-        let Some((x0, x1)) = span(left, left + record.width, self.width) else {
-            return;
-        };
-        let Some((y0, y1)) = span(top, top + record.height, self.height) else {
-            return;
-        };
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let u = (pixel(x) + 0.5 - left) / record.width;
-                let v = (pixel(y) + 0.5 - top) / record.height;
-                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-                    continue;
-                }
-                let Some(ink) = ink_at(image, u, v, self.fill) else {
-                    continue;
-                };
-                blend_at(rgba, self.width, x, y, ink);
+        blit(Blit {
+            rgba,
+            picture_w: self.width,
+            picture_h: self.height,
+            record,
+            image,
+            fill: self.fill,
+            origin_x: self.origin_x,
+            origin_y: self.origin_y,
+        });
+    }
+}
+
+pub(crate) struct Blit<'a> {
+    pub(crate) rgba: &'a mut [u8],
+    pub(crate) picture_w: u32,
+    pub(crate) picture_h: u32,
+    pub(crate) record: &'a GlyphRecord,
+    pub(crate) image: &'a crate::GlyphImage,
+    pub(crate) fill: [u8; 4],
+    pub(crate) origin_x: f32,
+    pub(crate) origin_y: f32,
+}
+
+pub(crate) fn blit(draw: Blit<'_>) {
+    let Blit {
+        rgba,
+        picture_w,
+        picture_h,
+        record,
+        image,
+        fill,
+        origin_x,
+        origin_y,
+    } = draw;
+    if record.width <= 0.0 || record.height <= 0.0 {
+        return;
+    }
+    if image.width == 0 || image.height == 0 || !drawable(image) {
+        return;
+    }
+    let left = record.x - origin_x;
+    let top = record.y - origin_y;
+    let Some((x0, x1)) = span(left, left + record.width, picture_w) else {
+        return;
+    };
+    let Some((y0, y1)) = span(top, top + record.height, picture_h) else {
+        return;
+    };
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let u = (pixel(x) + 0.5 - left) / record.width;
+            let v = (pixel(y) + 0.5 - top) / record.height;
+            if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                continue;
             }
+            let Some(ink) = ink_at(image, u, v, fill) else {
+                continue;
+            };
+            blend_at(rgba, picture_w, x, y, ink);
         }
     }
 }
@@ -340,7 +374,12 @@ fn blend_at(rgba: &mut [u8], width: u32, x: u32, y: u32, source: [u8; 4]) {
     }
 }
 
-fn fill_rgba(material: &MaterialText) -> Result<[u8; 4], TextError> {
+/// The ink color of `material`, including its alpha.
+pub fn text_fill(material: &MaterialText) -> Result<[u8; 4], TextError> {
+    fill_rgba(material)
+}
+
+pub(crate) fn fill_rgba(material: &MaterialText) -> Result<[u8; 4], TextError> {
     let text_alpha = unit_u8(material.text_alpha)?;
     let global_alpha = unit_u8(material.global_alpha)?;
     let (rgb, extra) = parse_hex(material.text_color.trim())?;

@@ -1,14 +1,15 @@
 //! Text runs: glyph positions, line layout, and a picture sampled from a
 //! glyph atlas.
 //!
-//! Rich-text commands, stroke, shadow, background, and caption curves are
-//! not implemented here.
+//! Rich-text commands, stroke, shadow, and background are not implemented
+//! here. [`paint_glyphs`] draws glyphs a caption sampler has already placed.
 
 #![forbid(unsafe_code)]
 
 mod atlas;
 mod layout;
 mod mesh;
+mod paint;
 mod richtext;
 mod shape;
 mod source;
@@ -16,8 +17,9 @@ mod source;
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};
 pub use mesh::{GlyphRecord, TextMesh, build, build_text};
+pub use paint::{DrawnGlyph, paint_glyphs};
 pub use shape::{MAX_CHARS, ShapeItem, Shaped, ShapedGlyph, shape, shape_text};
-pub use source::TextSource;
+pub use source::{TextSource, text_fill};
 
 use std::error::Error;
 use std::fmt;

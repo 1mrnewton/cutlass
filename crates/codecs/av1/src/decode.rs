@@ -5598,6 +5598,80 @@ mod tests {
     }
 
     #[test]
+    fn twelve_bit_wiener_on_444_and_422_matches_dav1d() {
+        // aomenc --bit-depth=12 --sharpness=5 --cq-level=32. Both frames are
+        // Wiener on every plane, in 256-sample units, and the frame updates
+        // that CDF. 4:4:4 is 512×128, so each plane has two units across.
+        // 4:2:2 is 256×512. Chroma is full height, so each chroma plane has
+        // two unit rows. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/restore-wiener-444-12.ivf").as_slice(),
+                false,
+                false,
+                512u32,
+                128u32,
+                cutlass_decode::PixelFormat::Yuv444p12,
+                512 * 128 * 6,
+                0xb10d_17f1_9bc2_8df3,
+            ),
+            (
+                include_bytes!("../fixtures/restore-wiener-422-12.ivf").as_slice(),
+                true,
+                false,
+                256,
+                512,
+                cutlass_decode::PixelFormat::Yuv422p12,
+                256 * 512 * 4,
+                0x03a3_63f6_1bf7_e7bc,
+            ),
+        ];
+        for (file, sub_x, sub_y, width, height, pixel, length, digest) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 1, "{pixel:?}");
+            let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, 2, "{pixel:?}");
+            assert_eq!(sequence.bit_depth, 12, "{pixel:?}");
+            assert_eq!(sequence.subsampling_x, sub_x, "{pixel:?}");
+            assert_eq!(sequence.subsampling_y, sub_y, "{pixel:?}");
+            assert!(sequence.enable_cdef, "{pixel:?}");
+            assert!(!frame.disable_cdf_update, "{pixel:?}");
+            assert_eq!(frame.width, width, "{pixel:?}");
+            assert_eq!(frame.height, height, "{pixel:?}");
+            assert_eq!(
+                frame.restoration.plane,
+                [crate::header::RESTORE_WIENER; 3],
+                "{pixel:?}"
+            );
+            assert_eq!(frame.restoration.unit, [256; 3], "{pixel:?}");
+            let params = CodecParams::video(CodecId::Av1, width, height);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("{pixel:?}: {error:?}"));
+            assert_eq!(shown.len(), 1, "{pixel:?}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            assert_eq!(picture.info().pixel, pixel, "{pixel:?}");
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), length, "{pixel:?}");
+            assert_eq!(frame_digest(bytes), digest, "{pixel:?}");
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
     fn restoration_cdf_is_kept_for_the_next_frame() {
         // aomenc --cpu-used=0 --sharpness=5 --cq-level=32, 512×128, two frames.
         // The key is Wiener on every plane, with 128-sample units, and it

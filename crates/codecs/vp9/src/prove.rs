@@ -530,6 +530,100 @@ fn loop_filter_delta_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A hidden alternate reference is coded with context 1, and later frames
+/// mark that reference as backward.
+#[test]
+fn altref_context_matches_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no alternate-reference source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("altref-ctx");
+    let ivf = dir.join("in.ivf");
+    encode_two_pass(&ffmpeg, &source, &dir, &ivf);
+    let stream = read_ivf(&ivf);
+    assert_eq!((stream.width, stream.height), (160, 96));
+    let (context, backward) = altref_marks(&stream);
+    assert!(context, "no hidden frame used context 1");
+    assert!(
+        backward,
+        "no shown frame marked the alternate reference backward"
+    );
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len());
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "first mismatch at {mismatch:?}");
+    assert_eq!(ours.len(), 160 * 96 * 3 / 2 * 16);
+    eprintln!(
+        "alternate reference context {}x{} {} frames {} bytes",
+        stream.width,
+        stream.height,
+        stream.frames.len(),
+        ours.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn encode_two_pass(ffmpeg: &Path, source: &Path, dir: &Path, ivf: &Path) {
+    let common = [
+        "-frames:v",
+        "16",
+        "-vf",
+        "scale=160:96",
+        "-deadline",
+        "good",
+        "-cpu-used",
+        "1",
+        "-lag-in-frames",
+        "16",
+        "-auto-alt-ref",
+        "1",
+        "-passlogfile",
+        "pass",
+    ];
+    for (pass, output) in [("1", None), ("2", Some(ivf))] {
+        let mut command = Command::new(ffmpeg);
+        command
+            .current_dir(dir)
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(source)
+            .args(["-an", "-c:v", "libvpx-vp9", "-b:v", "200k"])
+            .args(common)
+            .args(["-pass", pass]);
+        if let Some(ivf) = output {
+            command.args(["-f", "ivf"]).arg(ivf);
+        } else {
+            command.args(["-f", "null", "-"]);
+        }
+        let status = command.output().expect("two-pass encode");
+        assert!(
+            status.status.success(),
+            "pass {pass} {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+}
+
+fn altref_marks(stream: &Ivf) -> (bool, bool) {
+    let mut state = crate::header::Persist::new();
+    let mut context = false;
+    let mut backward = false;
+    for (index, frame) in stream.frames.iter().enumerate() {
+        let parsed = crate::header::parse(&state, frame)
+            .unwrap_or_else(|err| panic!("alt-ref frame {index} header: {err}"));
+        let header = &parsed.header;
+        context |= !header.show_frame && header.context_idx == 1;
+        backward |= header.show_frame && !header.key_frame && header.sign_bias[3] == 1;
+        remember_header(&mut state, &parsed);
+    }
+    (context, backward)
+}
+
 /// A relative segment quantizer step above 63 is added to the base index and clamped.
 #[test]
 fn segment_quant_delta_matches_ffmpeg_software() {

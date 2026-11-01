@@ -5,8 +5,8 @@ use cutlass_decode::CodecError;
 use crate::cdef::{self, CdefInput};
 use crate::deblock::{Edges, Picture, deblock_picture};
 use crate::dims::{
-    ADJUSTED_TX_SIZE, ADST_FLIPADST, BLOCK_8X8, BLOCK_128X128, COEFF_BASE_CTX_OFFSET, DC_PRED,
-    DCT_DCT, DCT_FLIPADST, FLIPADST_ADST, FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT,
+    ADJUSTED_TX_SIZE, ADST_FLIPADST, BLOCK_8X8, BLOCK_64X64, BLOCK_128X128, COEFF_BASE_CTX_OFFSET,
+    DC_PRED, DCT_DCT, DCT_FLIPADST, FLIPADST_ADST, FLIPADST_DCT, FLIPADST_FLIPADST, H_ADST, H_DCT,
     H_FLIPADST, IDTX, MAX_TX_DEPTH, MAX_TX_SIZE_RECT, MI_HEIGHT_LOG2, MI_WIDTH_LOG2, MODE_TO_TXFM,
     NUM_4X4_HIGH, NUM_4X4_WIDE, PARTITION_HORZ, PARTITION_HORZ_4, PARTITION_HORZ_A,
     PARTITION_HORZ_B, PARTITION_NONE, PARTITION_SPLIT, PARTITION_VERT, PARTITION_VERT_4,
@@ -151,6 +151,7 @@ pub fn decode_with_refs(
     let sizes = tile.sizes.clone();
     let tx_sizes = tile.tx_sizes.clone();
     let refs = tile.block_ref.clone();
+    let skips = tile.skips.clone();
     let modes = tile.y_mode.clone();
     let lf = tile.lf_delta.clone();
     let segments = tile.seg_ids.clone();
@@ -158,6 +159,7 @@ pub fn decode_with_refs(
         sizes: &sizes,
         tx: &tx_sizes,
         refs: &refs,
+        skips: &skips,
         modes: &modes,
         lf: &lf,
         segments: &segments,
@@ -574,6 +576,8 @@ struct Tile<'a, 'r> {
     chroma_h: usize,
     mi_cols: usize,
     mi_rows: usize,
+    /// Mode-info units on one side of a superblock. 16 for 64, 32 for 128.
+    sb4: usize,
     tile_row: usize,
     tile_col: usize,
     tile_row_end: usize,
@@ -828,6 +832,7 @@ impl<'a, 'r> Tile<'a, 'r> {
             chroma_h,
             mi_cols,
             mi_rows,
+            sb4: if sequence.use_128 { 32 } else { SB4 },
             tile_row: 0,
             tile_col: 0,
             tile_row_end: frame.mi_rows as usize,
@@ -1049,8 +1054,8 @@ impl<'a, 'r> Tile<'a, 'r> {
             let (sub_x, sub_y) = self.subsampling(plane);
             let sb_w = (self.mi_cols - mi_col) >> sub_x;
             let sb_h = (self.mi_rows - mi_row) >> sub_y;
-            let sb_x = SB4 >> sub_x;
-            let sb_y = SB4 >> sub_y;
+            let sb_x = self.sb4 >> sub_x;
+            let sb_y = self.sb4 >> sub_y;
             // Prediction stops at the tile. The row above this superblock is
             // already decoded, but it must not include the next tile's columns.
             let tile_x1 = (self.tile_col_end >> sub_x) as i32;
@@ -3743,8 +3748,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         h: usize,
     ) -> Result<(), CodecError> {
         let (sub_x, sub_y) = self.subsampling(block.plane);
-        let row_mask = (SB4 >> sub_y) - 1;
-        let col_mask = (SB4 >> sub_x) - 1;
+        let row_mask = (self.sb4 >> sub_y) - 1;
+        let col_mask = (self.sb4 >> sub_x) - 1;
         let local_row = ((y >> 2) & row_mask) as i32;
         let local_col = ((x >> 2) & col_mask) as i32;
         let above_right = self.decoded_at(block.plane, local_row - 1, local_col + (w / 4) as i32);
@@ -4864,49 +4869,6 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
-    fn reconstruct_variable_luma(&mut self, coded: &CodedBlock) -> Result<(), CodecError> {
-        let origins = std::mem::take(&mut self.tx_origins);
-        let mut result = Ok(());
-        for &(mi_row, mi_col, tx) in &origins {
-            let tx = usize::from(tx);
-            if tx >= TX_WIDTH.len() {
-                result = Err(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "tx size",
-                });
-                break;
-            }
-            let x4 = usize::from(mi_col).saturating_sub(coded.col);
-            let y4 = usize::from(mi_row).saturating_sub(coded.row);
-            if let Err(error) = self.transform_block(Block {
-                plane: 0,
-                row: coded.row,
-                col: coded.col,
-                bsize: coded.bsize,
-                y_mode: coded.y_mode,
-                uv_mode: coded.uv_mode,
-                angle_y: coded.angle_y,
-                angle_uv: coded.angle_uv,
-                tx,
-                skip: coded.skip,
-                avail_u: coded.avail_u,
-                avail_l: coded.avail_l,
-                x4,
-                y4,
-                sub_x: 0,
-                sub_y: 0,
-                step_x: (TX_WIDTH[tx] / 4).max(1),
-                step_y: (TX_HEIGHT[tx] / 4).max(1),
-                inter: true,
-            }) {
-                result = Err(error);
-                break;
-            }
-        }
-        self.tx_origins = origins;
-        result
-    }
-
     fn tx_depth_ctx(&self, row: usize, col: usize, max_rect: usize) -> usize {
         // An inter neighbor contributes its block size. An intra neighbor contributes its transform.
         let above = if !self.above_mi(row) {
@@ -5063,66 +5025,145 @@ impl<'a, 'r> Tile<'a, 'r> {
 
     fn predict_and_residual(&mut self, coded: &CodedBlock) -> Result<(), CodecError> {
         self.blend_ready = false;
-        let CodedBlock {
-            row,
-            col,
-            bsize,
-            y_mode,
-            uv_mode,
-            angle_y,
-            angle_uv,
-            tx,
-            skip,
-            has_chroma,
-            avail_u,
-            avail_l,
-            ..
-        } = *coded;
-        let planes = if has_chroma { 3 } else { 1 };
-        if coded.var_tx {
-            self.reconstruct_variable_luma(coded)?;
-        }
-        for plane in usize::from(coded.var_tx)..planes {
-            let plane_size = if plane == 0 {
-                bsize
-            } else {
-                subsampled_size(bsize, self.sub_x, self.sub_y)
-            };
-            let tx_size = self.plane_tx(plane, bsize, tx);
-            let step_x = TX_WIDTH[tx_size] >> 2;
-            let step_y = TX_HEIGHT[tx_size] >> 2;
-            let num_w = NUM_4X4_WIDE[plane_size];
-            let num_h = NUM_4X4_HIGH[plane_size];
-            let (sub_x, sub_y) = self.subsampling(plane);
-            let mut y4 = 0;
-            while y4 < num_h {
-                let mut x4 = 0;
-                while x4 < num_w {
-                    self.transform_block(Block {
-                        plane,
-                        row,
-                        col,
-                        bsize,
-                        y_mode,
-                        uv_mode,
-                        angle_y,
-                        angle_uv,
-                        tx: tx_size,
-                        skip,
-                        avail_u,
-                        avail_l,
-                        x4,
-                        y4,
-                        sub_x,
-                        sub_y,
-                        step_x,
-                        step_y,
-                        inter: coded.inter,
-                    })?;
-                    x4 += step_x;
+        // A block wider or taller than 64 is residual-coded as 64×64 chunks.
+        // Each chunk writes its luma transforms, then its chroma, before the next chunk.
+        let bw = block_width(coded.bsize);
+        let bh = block_height(coded.bsize);
+        let width_chunks = (bw >> 6).max(1);
+        let height_chunks = (bh >> 6).max(1);
+        let chunk_size = if width_chunks > 1 || height_chunks > 1 {
+            BLOCK_64X64
+        } else {
+            coded.bsize
+        };
+        let planes = if coded.has_chroma { 3 } else { 1 };
+        let origins = if coded.var_tx {
+            std::mem::take(&mut self.tx_origins)
+        } else {
+            Vec::new()
+        };
+        let mut result = Ok(());
+        for chunk_y in 0..height_chunks {
+            for chunk_x in 0..width_chunks {
+                if result.is_err() {
+                    break;
                 }
-                y4 += step_y;
+                for plane in 0..planes {
+                    let step = if coded.var_tx && plane == 0 {
+                        self.variable_luma_chunk(coded, &origins, chunk_x, chunk_y)
+                    } else {
+                        self.residual_plane_chunk(coded, plane, chunk_size, chunk_x, chunk_y)
+                    };
+                    if let Err(error) = step {
+                        result = Err(error);
+                        break;
+                    }
+                }
             }
+        }
+        if coded.var_tx {
+            self.tx_origins = origins;
+        }
+        result
+    }
+
+    /// Luma transforms whose origin sits in this 64×64 chunk, in tree order.
+    fn variable_luma_chunk(
+        &mut self,
+        coded: &CodedBlock,
+        origins: &[(u16, u16, u8)],
+        chunk_x: usize,
+        chunk_y: usize,
+    ) -> Result<(), CodecError> {
+        let row0 = coded.row + chunk_y * 16;
+        let col0 = coded.col + chunk_x * 16;
+        for &(mi_row, mi_col, tx) in origins {
+            let mi_row = usize::from(mi_row);
+            let mi_col = usize::from(mi_col);
+            if mi_row < row0 || mi_row >= row0 + 16 || mi_col < col0 || mi_col >= col0 + 16 {
+                continue;
+            }
+            let tx = usize::from(tx);
+            if tx >= TX_WIDTH.len() {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "tx size",
+                });
+            }
+            self.transform_block(Block {
+                plane: 0,
+                row: coded.row,
+                col: coded.col,
+                bsize: coded.bsize,
+                y_mode: coded.y_mode,
+                uv_mode: coded.uv_mode,
+                angle_y: coded.angle_y,
+                angle_uv: coded.angle_uv,
+                tx,
+                skip: coded.skip,
+                avail_u: coded.avail_u,
+                avail_l: coded.avail_l,
+                x4: mi_col.saturating_sub(coded.col),
+                y4: mi_row.saturating_sub(coded.row),
+                sub_x: 0,
+                sub_y: 0,
+                step_x: (TX_WIDTH[tx] / 4).max(1),
+                step_y: (TX_HEIGHT[tx] / 4).max(1),
+                inter: true,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn residual_plane_chunk(
+        &mut self,
+        coded: &CodedBlock,
+        plane: usize,
+        chunk_size: usize,
+        chunk_x: usize,
+        chunk_y: usize,
+    ) -> Result<(), CodecError> {
+        let plane_size = if plane == 0 {
+            chunk_size
+        } else {
+            subsampled_size(chunk_size, self.sub_x, self.sub_y)
+        };
+        let tx_size = self.plane_tx(plane, coded.bsize, coded.tx);
+        let step_x = TX_WIDTH[tx_size] >> 2;
+        let step_y = TX_HEIGHT[tx_size] >> 2;
+        let num_w = NUM_4X4_WIDE[plane_size];
+        let num_h = NUM_4X4_HIGH[plane_size];
+        let (sub_x, sub_y) = self.subsampling(plane);
+        let x_off = (chunk_x << 4) >> sub_x;
+        let y_off = (chunk_y << 4) >> sub_y;
+        let mut y4 = 0;
+        while y4 < num_h {
+            let mut x4 = 0;
+            while x4 < num_w {
+                self.transform_block(Block {
+                    plane,
+                    row: coded.row,
+                    col: coded.col,
+                    bsize: coded.bsize,
+                    y_mode: coded.y_mode,
+                    uv_mode: coded.uv_mode,
+                    angle_y: coded.angle_y,
+                    angle_uv: coded.angle_uv,
+                    tx: tx_size,
+                    skip: coded.skip,
+                    avail_u: coded.avail_u,
+                    avail_l: coded.avail_l,
+                    x4: x4 + x_off,
+                    y4: y4 + y_off,
+                    sub_x,
+                    sub_y,
+                    step_x,
+                    step_y,
+                    inter: coded.inter,
+                })?;
+                x4 += step_x;
+            }
+            y4 += step_y;
         }
         Ok(())
     }
@@ -5165,8 +5206,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.cur_luma_col = block.col + (block.x4 << block.sub_x);
         // The decoded-neighbor grid is one superblock. Chroma 4:2:0 has half
         // as many 4×4 cells on each axis as luma, so the mask follows the plane.
-        let row_mask = (SB4 >> block.sub_y) - 1;
-        let col_mask = (SB4 >> block.sub_x) - 1;
+        let row_mask = (self.sb4 >> block.sub_y) - 1;
+        let col_mask = (self.sb4 >> block.sub_x) - 1;
         let local_row = ((start_y >> 2) & row_mask) as i32;
         let local_col = ((start_x >> 2) & col_mask) as i32;
         if !block.inter {

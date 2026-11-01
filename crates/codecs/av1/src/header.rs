@@ -441,11 +441,6 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         id_len = extra + delta_id + 3;
     }
     let use_128 = bits.read_bool()?;
-    if use_128 {
-        return Err(CodecError::Unsupported {
-            what: "128 superblock",
-        });
-    }
     let enable_filter_intra = bits.read_bool()?;
     let enable_intra_edge = bits.read_bool()?;
     if !reduced {
@@ -536,7 +531,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         frame_id_present,
         id_len,
         delta_frame_id_len: delta_id,
-        use_128: false,
+        use_128,
     })
 }
 
@@ -752,8 +747,13 @@ fn uncompressed(
         bits.read_bool()?
     };
     // One superblock each way can use non-uniform spacing: ns(1) reads no bits.
-    let sb_cols = width.div_ceil(64);
-    let sb_rows = height.div_ceil(64);
+    // A 128 superblock covers 32 mode-info units. A 64 superblock covers 16.
+    let sb_px = if sequence.use_128 { 128 } else { 64 };
+    let sb_shift = if sequence.use_128 { 5 } else { 4 };
+    let sb_cols = width.div_ceil(sb_px);
+    let sb_rows = height.div_ceil(sb_px);
+    let max_tile_width_sb = 4096 / sb_px;
+    let max_tile_area_sb = (4096 / sb_px) * (2304 / sb_px);
     let uniform = bits.read_bool()?;
     let mut tile_cols_log = 0u32;
     let mut tile_rows_log = 0u32;
@@ -763,7 +763,7 @@ fn uncompressed(
     let mut mi_row_starts = vec![0, 2 * ((height + 7) >> 3)];
     if uniform {
         let max_tile_cols_log = tile_log2(1, sb_cols.min(64));
-        let min_tile_cols_log = tile_log2(4096 / 64, sb_cols);
+        let min_tile_cols_log = tile_log2(max_tile_width_sb, sb_cols);
         let mut cols_log = min_tile_cols_log;
         while cols_log < max_tile_cols_log {
             if !bits.read_bool()? {
@@ -771,8 +771,7 @@ fn uncompressed(
             }
             cols_log += 1;
         }
-        let min_tiles_log =
-            tile_log2(4096 * 2304 / (64 * 64), sb_rows * sb_cols).max(min_tile_cols_log);
+        let min_tiles_log = tile_log2(max_tile_area_sb, sb_rows * sb_cols).max(min_tile_cols_log);
         let mut rows_log = min_tiles_log.saturating_sub(cols_log);
         let max_tile_rows_log = tile_log2(1, sb_rows.min(64));
         while rows_log < max_tile_rows_log {
@@ -785,8 +784,8 @@ fn uncompressed(
         tile_rows_log = rows_log;
         let mi_cols_now = 2 * ((width + 7) >> 3);
         let mi_rows_now = 2 * ((height + 7) >> 3);
-        mi_col_starts = mi_starts(sb_cols, cols_log, mi_cols_now);
-        mi_row_starts = mi_starts(sb_rows, rows_log, mi_rows_now);
+        mi_col_starts = mi_starts(sb_cols, cols_log, mi_cols_now, sb_shift);
+        mi_row_starts = mi_starts(sb_rows, rows_log, mi_rows_now, sb_shift);
         if cols_log > 0 || rows_log > 0 {
             context_update = bits.read(rows_log + cols_log)?;
             tile_size_bytes = bits.read(2)? + 1;
@@ -1377,12 +1376,12 @@ fn read_delta_q(bits: &mut BitReader<'_>) -> Result<i32, CodecError> {
     }
 }
 
-fn mi_starts(sb_count: u32, log: u32, mi_total: u32) -> Vec<u32> {
+fn mi_starts(sb_count: u32, log: u32, mi_total: u32, sb_shift: u32) -> Vec<u32> {
     let tile_sb = ((sb_count + (1 << log) - 1) >> log).max(1);
     let mut starts = Vec::new();
     let mut sb = 0u32;
     while sb < sb_count {
-        starts.push(sb << 4);
+        starts.push(sb << sb_shift);
         sb += tile_sb;
     }
     if starts.is_empty() {

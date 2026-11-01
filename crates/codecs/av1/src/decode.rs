@@ -782,6 +782,48 @@ mod tests {
     }
 
     #[test]
+    fn superblock_128_matches_dav1d() {
+        // aomenc --sb-size=128. Digests are dav1d 1.5.3 with in-loop filters.
+        expect_superblock_128(
+            &[include_bytes!("../fixtures/sb128_flat_0.obu")],
+            &[0xf206_7a5e_2040_2325],
+        );
+        expect_superblock_128(
+            &[
+                include_bytes!("../fixtures/sb128_0.obu"),
+                include_bytes!("../fixtures/sb128_1.obu"),
+            ],
+            &[0x4d41_30d9_78c5_115f, 0xcdad_99ad_6d88_94d9],
+        );
+        expect_superblock_128(
+            &[
+                include_bytes!("../fixtures/sb128_cdef_0.obu"),
+                include_bytes!("../fixtures/sb128_cdef_1.obu"),
+            ],
+            &[0x1fef_bc5c_9457_b890, 0xfb94_9310_8fde_56d6],
+        );
+        expect_superblock_128(
+            &[
+                include_bytes!("../fixtures/sb128_delta_0.obu"),
+                include_bytes!("../fixtures/sb128_delta_1.obu"),
+            ],
+            &[0x6aa5_395a_d395_4f83, 0xdd97_7f4a_be1b_1ff2],
+        );
+    }
+
+    fn expect_superblock_128(frames: &[&[u8]], expected: &[u64]) {
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("parse");
+        assert!(sequence.use_128);
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 256 * 256 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
     fn palette_screen_matches_dav1d() {
         // aomenc --tune-content=screen, from a scaled screen recording.
         // The keyframe uses palette colors. Digests are dav1d 1.5.3.

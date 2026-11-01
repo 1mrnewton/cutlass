@@ -4,7 +4,9 @@
 //! reference and mode deltas, a superblock may add its own delta, and a segment
 //! may add one more.
 
-use crate::dims::{MAX_TX_SIZE_RECT, TX_HEIGHT, TX_WIDTH, subsampled_size};
+use crate::dims::{
+    MAX_TX_SIZE_RECT, TX_HEIGHT, TX_WIDTH, block_height, block_width, subsampled_size,
+};
 use crate::header::{FrameInfo, SEG_ALT_LF_Y_V};
 use crate::inter::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV};
 
@@ -14,6 +16,7 @@ pub struct Edges<'a> {
     pub sizes: &'a [u8],
     pub tx: &'a [u8],
     pub refs: &'a [i8],
+    pub skips: &'a [u8],
     pub modes: &'a [u8],
     /// Four loop-filter deltas per 4×4, in superblock order.
     pub lf: &'a [i8],
@@ -379,8 +382,8 @@ fn filter_edge(samples: &mut [u8], job: &Job<'_>, band_y: usize, band_h: usize, 
     } else {
         y_p.is_multiple_of(TX_HEIGHT[tx])
     };
-    // Intra frames filter every transform edge. Inter prediction boundaries are not used here.
-    if !tx_edge {
+    // A transform edge inside a skipped inter block is not filtered.
+    if !tx_edge || !apply_filter(job.edges, job.plane, job.pass, row, col, x_p, y_p) {
         return;
     }
     let filter_size = filter_size(job.pass, job.plane, tx, prev_tx);
@@ -449,6 +452,32 @@ fn on_screen(x: usize, y: usize, frame_w: usize, frame_h: usize, pass: usize) ->
         return false;
     }
     true
+}
+
+fn apply_filter(
+    edges: &Edges<'_>,
+    plane: usize,
+    pass: usize,
+    row: usize,
+    col: usize,
+    x_p: usize,
+    y_p: usize,
+) -> bool {
+    let at = row * edges.mi_cols + col;
+    let skip = edges.skips.get(at).copied().unwrap_or(0) != 0;
+    let intra = edges.refs.get(at).copied().unwrap_or(INTRA_FRAME) <= INTRA_FRAME;
+    let bsize = edges.sizes.get(at).copied().unwrap_or(0) as usize;
+    let plane_size = if plane == 0 {
+        bsize
+    } else {
+        subsampled_size(bsize, edges.sub_x, edges.sub_y)
+    };
+    let block_edge = if pass == 0 {
+        x_p.is_multiple_of(block_width(plane_size).max(1))
+    } else {
+        y_p.is_multiple_of(block_height(plane_size).max(1))
+    };
+    block_edge || !skip || intra
 }
 
 fn tx_at(edges: &Edges<'_>, plane: usize, row: usize, col: usize) -> usize {

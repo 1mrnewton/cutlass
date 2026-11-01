@@ -118,7 +118,7 @@ Refused with a typed error before a picture is published:
 
 - 10-bit, 12-bit, monochrome, 4:2:2, and 4:4:4.
 - A profile other than 0, a second operating point, and the decoder model.
-- 128×128 superblocks, large-scale tile lists, a tile group outside a frame, and non-uniform tile spacing.
+- Large-scale tile lists, a tile group outside a frame, and non-uniform tile spacing.
 - An OBU without a size field, and a reserved OBU type.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
 - Short reference signaling.

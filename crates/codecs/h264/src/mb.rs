@@ -7483,7 +7483,7 @@ fn read_sub<S: Sample>(
     if slice.vsp {
         for kind in kinds {
             let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
-            if w != 8 || h != 8 {
+            if w != 8 || (h != 8 && h != 4) {
                 return Err(CodecError::Unsupported { what: "3d" });
             }
         }
@@ -7588,7 +7588,17 @@ fn read_sub<S: Sample>(
                     synthesis1[i]
                 };
                 if synthesis {
-                    store_mv(mb, &part, synthesis_motion(pic, dpb, slice, &part)?, list);
+                    // J.8.2.1 derives the disparity from the macroblock partition.
+                    // An 8×4 sub-partition still samples its 8×8.
+                    let parent = Part {
+                        x: x0,
+                        y: y0,
+                        w: 8,
+                        h: 8,
+                        l0: list == 0,
+                        l1: list == 1,
+                    };
+                    store_mv(mb, &part, synthesis_motion(pic, dpb, slice, &parent)?, list);
                     continue;
                 }
                 let predicted = if slice.dmvp && list == 0 {

@@ -569,8 +569,7 @@ fn obu_length_matches(obu: &[u8]) -> Result<(), CodecError> {
 
 fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let profile = bits.read(3)? as u8;
-    // Profile 2 is 4:2:2 and 12-bit. That color config is still unread.
-    if profile > 1 {
+    if profile > 2 {
         return Err(CodecError::Unsupported { what: "profile" });
     }
     let still = bits.read_bool()?;
@@ -684,8 +683,10 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         separate_uv_delta_q,
     ) = if profile == 0 {
         read_profile0_color(bits)?
-    } else {
+    } else if profile == 1 {
         read_profile1_color(bits)?
+    } else {
+        read_profile2_color(bits)?
     };
     let film_grain = bits.read_bool()?;
     Ok(Sequence {
@@ -785,6 +786,66 @@ fn read_profile1_color(
         false,
         false,
         false,
+        color_range_full,
+        separate_uv_delta_q,
+    ))
+}
+
+/// Profile 2 at 8-bit and 10-bit is 4:2:2. `twelve_bit` selects 12-bit and then
+/// reads the subsampling flags. Chroma sample position is present only for 4:2:0.
+fn read_profile2_color(
+    bits: &mut BitReader<'_>,
+) -> Result<(u8, bool, bool, bool, bool, bool), CodecError> {
+    let high = bits.read_bool()?;
+    let bit_depth = if high {
+        if bits.read_bool()? { 12 } else { 10 }
+    } else {
+        8
+    };
+    let monochrome = bits.read_bool()?;
+    let described = bits.read_bool()?;
+    let (primaries, transfer, matrix) = if described {
+        (
+            bits.read(8)? as u8,
+            bits.read(8)? as u8,
+            bits.read(8)? as u8,
+        )
+    } else {
+        (2, 2, 2)
+    };
+    if monochrome {
+        let color_range_full = bits.read_bool()?;
+        return Ok((bit_depth, true, true, true, color_range_full, false));
+    }
+    let identity = primaries == 1 && transfer == 13 && matrix == 0;
+    if identity {
+        if bit_depth != 12 {
+            return Err(malformed(bits, "color config"));
+        }
+        let separate_uv_delta_q = bits.read_bool()?;
+        return Ok((bit_depth, false, false, false, true, separate_uv_delta_q));
+    }
+    let color_range_full = bits.read_bool()?;
+    let (subsampling_x, subsampling_y) = if bit_depth == 12 {
+        let subsampling_x = bits.read_bool()?;
+        let subsampling_y = if subsampling_x {
+            bits.read_bool()?
+        } else {
+            false
+        };
+        (subsampling_x, subsampling_y)
+    } else {
+        (true, false)
+    };
+    if subsampling_x && subsampling_y {
+        let _ = bits.read(2)?;
+    }
+    let separate_uv_delta_q = bits.read_bool()?;
+    Ok((
+        bit_depth,
+        false,
+        subsampling_x,
+        subsampling_y,
         color_range_full,
         separate_uv_delta_q,
     ))

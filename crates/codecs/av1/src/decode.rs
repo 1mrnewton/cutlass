@@ -84,6 +84,7 @@ impl Av1Decoder {
         if params.pixel != PixelFormat::None
             && params.pixel != PixelFormat::Yuv420p
             && params.pixel != PixelFormat::Yuv420p10
+            && params.pixel != PixelFormat::Yuv422p
             && params.pixel != PixelFormat::Yuv444p
             && params.pixel != PixelFormat::Yuv444p10
             && params.pixel != PixelFormat::Gray8
@@ -524,6 +525,9 @@ impl Av1Decoder {
         parts: Option<&[TilePart]>,
     ) -> Result<Held, CodecError> {
         if sequence.bit_depth == 10 {
+            if sequence.subsampling_x && !sequence.subsampling_y {
+                return Err(CodecError::Unsupported { what: "chroma" });
+            }
             return self.hold_wide(sequence, frame, parts);
         }
         if frame.show_existing {
@@ -4430,6 +4434,56 @@ mod tests {
                 panic!("cpu");
             };
             assert_eq!(bytes.len(), 128 * 128 * 2, "frame {index}");
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_profile_two_picture_matches_dav1d() {
+        // aomenc --profile=2 --i422, 64×64, one keyframe and one inter frame.
+        // Restoration, super resolution, filter intra, and an interintra wedge
+        // are off. Film grain is off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv422p`.
+        let file = include_bytes!("../fixtures/yuv422.ivf");
+        let frames = ivf_payloads(file);
+        let expected = [0xce61_9143_3646_31bb, 0x5e03_15f4_b833_cd90];
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.profile, 2);
+        assert_eq!(sequence.bit_depth, 8);
+        assert!(sequence.subsampling_x);
+        assert!(!sequence.subsampling_y);
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(!inter.intra);
+        let wide =
+            CodecParams::with_format(CodecId::Av1, 64, 64, cutlass_decode::PixelFormat::Yuv422p);
+        assert!(Av1Decoder::open(&wide).is_ok());
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            assert!(shown[0].as_video().is_none(), "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, cutlass_decode::PixelFormat::Yuv422p);
+            assert_eq!((info.width, info.height), (64, 64));
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 64 * 64 * 2, "frame {index}");
             assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
         }
         assert!(decoder.drain().expect("drain").is_empty());

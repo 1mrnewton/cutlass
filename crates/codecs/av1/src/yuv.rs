@@ -288,6 +288,8 @@ pub fn picture_output(
             height,
             pixel: if picture.u.width() == width && picture.u.height() == height {
                 PixelFormat::Yuv444p
+            } else if picture.u.width() == width.div_ceil(2) && picture.u.height() == height {
+                PixelFormat::Yuv422p
             } else {
                 PixelFormat::Yuv420p
             },

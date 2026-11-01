@@ -227,6 +227,14 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
             .ok_or(CodecError::Limit { what: "frame size" }),
         PixelFormat::Yuv420p => yuv420_len(width, height, pixels, 1),
         PixelFormat::Yuv420p10 => yuv420_len(width, height, pixels, 2),
+        PixelFormat::Yuv422p => {
+            if !width.is_multiple_of(2) {
+                return Err(CodecError::InvalidApi { what: "4:2:2 size" });
+            }
+            pixels
+                .checked_mul(2)
+                .ok_or(CodecError::Limit { what: "frame size" })
+        }
         PixelFormat::Yuv444p => pixels
             .checked_mul(3)
             .ok_or(CodecError::Limit { what: "frame size" }),

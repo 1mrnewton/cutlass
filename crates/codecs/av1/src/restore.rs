@@ -408,6 +408,20 @@ fn restoration_unit_row(grid: &Grid, plane: usize, y: usize) -> usize {
     ((y + (8 >> sub_y)) / size).min(grid.rows[plane].saturating_sub(1))
 }
 
+/// Section 7.17.1. A stripe is 64 luma samples, offset up by 8, then shifted
+/// into this plane. Chroma with vertical subsampling is 32 samples tall.
+fn stripe_bounds(grid: &Grid, plane: usize, y: usize) -> (i32, i32) {
+    let sub_y = i32::from(plane > 0 && grid.sub_y);
+    let Ok(plane_y) = i32::try_from(y) else {
+        return (0, -1);
+    };
+    let luma_y = plane_y << sub_y;
+    let stripe = (luma_y + 8) / 64;
+    let start = ((stripe * 64) - 8) >> sub_y;
+    let end = start + (64 >> sub_y) - 1;
+    (start, end)
+}
+
 fn clip3(min: i32, max: i32, value: i32) -> i32 {
     if value < min {
         min
@@ -435,9 +449,7 @@ pub fn apply_sgr<S: Pix>(
     }
     let mut y = 0usize;
     while y < height {
-        let stripe = (y + 8) / 64;
-        let start = stripe as i32 * 64 - 8;
-        let end = start + 63;
+        let (start, end) = stripe_bounds(grid, plane, y);
         let last = (end.max(0) as usize).min(height - 1);
         if last < y {
             break;
@@ -731,9 +743,7 @@ pub fn apply_wiener<S: Pix>(
     }
     let mut y = 0usize;
     while y < height {
-        let stripe = (y + 8) / 64;
-        let start = stripe as i32 * 64 - 8;
-        let end = start + 63;
+        let (start, end) = stripe_bounds(grid, plane, y);
         let last = (end.max(0) as usize).min(height - 1);
         if last < y {
             break;

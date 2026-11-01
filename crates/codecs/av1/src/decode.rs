@@ -1570,6 +1570,28 @@ mod tests {
     }
 
     #[test]
+    fn chroma_restoration_stripes_match_dav1d() {
+        // aomenc, 256×128 4:2:0. CDEF is on, and every plane selects self-guided
+        // restoration with 256-sample units. A chroma stripe is 32 samples
+        // tall. The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-420.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.subsampling_x && sequence.subsampling_y);
+        assert!(sequence.enable_cdef);
+        assert_eq!(frame.width, 256);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.restoration.plane, [crate::header::RESTORE_SGRPROJ; 3]);
+        assert_eq!(frame.restoration.unit, [256; 3]);
+        let params = CodecParams::video(CodecId::Av1, 256, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 256 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x0102_7216_ee37_1c58);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn restoration_on_444_and_422_matches_dav1d() {
         // aomenc --enable-restoration=1 --enable-cdef=0, one frame, cq 40.
         // Profile 1 is 512×128 4:4:4. Chroma is full size, so each chroma plane

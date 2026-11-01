@@ -10,7 +10,8 @@
 //! clip.
 
 use cutlass_engine::{
-    ClipPcm, ClockKind, Mix, MixResult, is_graphic, map_timeline, mix_inputs, placement_of, render,
+    ClipPcm, ClockKind, Mix, MixResult, contributes_sound, map_timeline, mix_inputs, placement_of,
+    render,
 };
 use cutlass_model::{Draft, DraftId, MaterialRef, Micros, Segment, SegmentId};
 
@@ -179,7 +180,7 @@ fn audible(draft: &Draft, time: Micros) -> Vec<&Segment> {
     let mut segments = Vec::new();
     for track in &draft.tracks {
         for segment in &track.segments {
-            if is_graphic(draft, segment) {
+            if !contributes_sound(draft, segment) {
                 continue;
             }
             let end = segment
@@ -200,8 +201,9 @@ mod tests {
     use cutlass_codec::access::{ChannelLayout, Pcm};
     use cutlass_engine::{ClipPcm, ClockKind, MixResult};
     use cutlass_model::{
-        Draft, MaterialAudioFade, MaterialDraft, Micros, Segment, SegmentId, TimeRange, Track,
-        TrackAttribute, TrackType,
+        Draft, LinkPair, MaterialAudio, MaterialAudioFade, MaterialDraft, MaterialId,
+        MaterialVideo, Micros, Relationship, Segment, SegmentId, TimeRange, Track, TrackAttribute,
+        TrackType,
     };
 
     use super::{AudioError, MixWindow, audio_slice};
@@ -296,6 +298,60 @@ mod tests {
         assert!(!asked);
         assert_eq!(mixed.contributed, 0);
         assert_eq!(mixed.pcm.samples, 0);
+    }
+
+    #[test]
+    fn a_separated_picture_sound_is_heard_once() {
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("sound"),
+            kind: "video_original_sound".to_owned(),
+            path: "clip.mp4".to_owned(),
+            video_id: MaterialId::new("picture"),
+            ..MaterialAudio::default()
+        });
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        let mut lane = Track::main("sound");
+        lane.kind = TrackType::Audio;
+        lane.segments
+            .push(Segment::new("sound", "sound", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(lane);
+        draft.relationships.push(Relationship {
+            kind: "linkage".to_owned(),
+            id_to_id: vec![LinkPair {
+                owner: SegmentId::new("picture"),
+                dependent: SegmentId::new("sound"),
+            }],
+            ..Relationship::default()
+        });
+        let window = MixWindow {
+            rate: 4_000,
+            limiter: 0,
+            frames: 4,
+        };
+        let mut asked = 0;
+        let mixed = audio_slice(
+            &Snapshot::new(&draft),
+            Micros(0),
+            window,
+            ClockKind::Playback,
+            |segment, _, _, _| {
+                asked += 1;
+                assert_eq!(segment.as_str(), "sound");
+                Ok(ClipPcm::Ready(tone(1.0)))
+            },
+        )
+        .expect("mix");
+        assert_eq!(asked, 1);
+        assert_eq!(mixed.contributed, 1);
+        assert_eq!(mixed.pcm.as_f32(), Some(&[1.0, 1.0, 1.0, 1.0][..]));
     }
 
     fn window() -> MixWindow {

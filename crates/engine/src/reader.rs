@@ -155,6 +155,15 @@ impl ReaderFactory {
         Ok(info)
     }
 
+    /// Whether `path` has an audio stream. This reads the header and does not decode.
+    pub fn carries_sound(&self, path: &Path) -> Result<bool, EngineError> {
+        let info = self.probe(path)?;
+        Ok(info
+            .streams
+            .iter()
+            .any(|stream| stream.sample_rate.is_some_and(|rate| rate > 0)))
+    }
+
     /// Opens the container and a decoder for each picture or audio stream.
     pub fn open(&self, path: &Path) -> Result<Media, EngineError> {
         let info = self.probe(path)?;

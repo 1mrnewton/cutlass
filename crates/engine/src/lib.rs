@@ -26,8 +26,8 @@ pub use cutlass_container::DisplayQuarter;
 pub use error::EngineError;
 pub use filmstrip::{MAX_EDGE, MAX_STRIP, StripCell};
 pub use map::{
-    MapError, MapSpeed, TimelineMap, is_graphic, map_timeline, media_path, micros_to_ticks,
-    placement_of, speed_at, ticks_to_micros, timeline_for_source,
+    MapError, MapSpeed, TimelineMap, contributes_sound, is_graphic, map_timeline, media_path,
+    micros_to_ticks, placement_of, speed_at, ticks_to_micros, timeline_for_source,
 };
 pub use mix::{
     AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, mix_inputs, render, volume_at,

@@ -7,7 +7,8 @@
 
 use cutlass_codec::Timescale;
 use cutlass_model::{
-    Draft, MaterialRef, MaterialSpeed, Micros, Segment, SpeedMode, SpeedPoint, TimeRange, TrackType,
+    Draft, MaterialId, MaterialRef, MaterialSpeed, Micros, Segment, SegmentId, SpeedMode,
+    SpeedPoint, TimeRange, TrackType,
 };
 
 /// Why a timeline time did not become a source microsecond.
@@ -171,6 +172,48 @@ pub fn media_path<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a str> {
         return Some(audio.path.as_str());
     }
     None
+}
+
+/// Whether the mix should read this segment.
+///
+/// A graphic is silent. A picture whose own sound has been placed on a linked
+/// clip is silent too, so that sound is not played twice.
+#[must_use]
+pub fn contributes_sound(draft: &Draft, segment: &Segment) -> bool {
+    if is_graphic(draft, segment) {
+        return false;
+    }
+    !original_sound_is_separate(draft, segment)
+}
+
+fn original_sound_is_separate(draft: &Draft, segment: &Segment) -> bool {
+    if !matches!(material(draft, segment), Some(MaterialRef::Video(_))) {
+        return false;
+    }
+    draft
+        .relationships
+        .iter()
+        .filter(|relationship| relationship.kind == "linkage")
+        .flat_map(|relationship| &relationship.id_to_id)
+        .any(|pair| {
+            pair.owner == segment.id && sound_for(draft, &pair.dependent, &segment.material_id)
+        })
+}
+
+fn sound_for(draft: &Draft, id: &SegmentId, video_id: &MaterialId) -> bool {
+    let Some(segment) = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| &segment.id == id)
+    else {
+        return false;
+    };
+    matches!(
+        material(draft, segment),
+        Some(MaterialRef::Audio(audio))
+            if &audio.video_id == video_id && audio.kind == "video_original_sound"
+    )
 }
 
 /// Text, a sticker, a shape, or a solid color is not a decoder input.

@@ -225,15 +225,15 @@ pub fn gray_wide(
     )
 }
 
-/// Pack 10-bit 4:2:0. Each sample is a little-endian `u16` in the low 10 bits.
+/// Pack 10-bit or 12-bit planes. Each sample is a little-endian `u16`.
 pub fn wide_output(
     y: &[u16],
     u: &[u16],
     v: &[u16],
     width: u32,
     height: u32,
-    pts: i64,
-    timescale: u32,
+    bit_depth: u8,
+    when: (i64, u32),
 ) -> Result<PictureOutput, CodecError> {
     let mut bytes = Vec::new();
     pack_le(y, &mut bytes);
@@ -245,10 +245,21 @@ pub fn wide_output(
     let chroma_422 = usize::try_from(width.div_ceil(2))
         .unwrap_or(0)
         .saturating_mul(usize::try_from(height).unwrap_or(0));
+    let twelve = bit_depth == 12;
     let pixel = if u.len() == luma && v.len() == luma {
-        PixelFormat::Yuv444p10
+        if twelve {
+            PixelFormat::Yuv444p12
+        } else {
+            PixelFormat::Yuv444p10
+        }
     } else if u.len() == chroma_422 && v.len() == chroma_422 {
-        PixelFormat::Yuv422p10
+        if twelve {
+            PixelFormat::Yuv422p12
+        } else {
+            PixelFormat::Yuv422p10
+        }
+    } else if twelve {
+        PixelFormat::Yuv420p12
     } else {
         PixelFormat::Yuv420p10
     };
@@ -261,8 +272,8 @@ pub fn wide_output(
             transfer: Transfer::Unspecified,
         },
         bytes,
-        pts,
-        timescale,
+        when.0,
+        when.1,
     )
 }
 

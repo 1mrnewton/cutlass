@@ -1691,6 +1691,7 @@ fn warp_section<S: Pix>(
     let sx4 = (x4 & ((1i64 << WARPED_PREC_BITS) - 1)) as i32;
     let iy4 = (y4 >> WARPED_PREC_BITS) as i32;
     let sy4 = (y4 & ((1i64 << WARPED_PREC_BITS) - 1)) as i32;
+    let (round0, round1) = single_rounds(sample.bit_depth);
     let mut intermediate = [[0i32; 8]; 15];
     for i1 in -7..8 {
         for i2 in -4..4 {
@@ -1702,7 +1703,7 @@ fn warp_section<S: Pix>(
                 let sx = ix4 + i2 - 3 + i3 as i32;
                 sum += i32::from(*coeff) * ref_sample(sample, last_x, last_y, sx, iy4 + i1);
             }
-            intermediate[(i1 + 7) as usize][(i2 + 4) as usize] = round2(sum, 3);
+            intermediate[(i1 + 7) as usize][(i2 + 4) as usize] = round2(sum, round0);
         }
     }
     let row_limit = 4.min(sample.h as i32 - i8 * 8 - 4);
@@ -1718,7 +1719,7 @@ fn warp_section<S: Pix>(
                 let col = (i2 + 4) as usize;
                 sum += i32::from(*coeff) * intermediate[row][col];
             }
-            let pred = S::from_i32(clip_sample(round2(sum, 11), sample.bit_depth));
+            let pred = S::from_i32(clip_sample(round2(sum, round1), sample.bit_depth));
             let y = sample.write_y + (i8 * 8 + i1 + 4) as usize;
             let x = sample.write_x + (j8 * 8 + i2 + 4) as usize;
             if x < sample.stride {
@@ -1783,21 +1784,24 @@ struct VerticalPass {
     rows: Vec<i32>,
 }
 
-/// `COMPOUND_AVERAGE`: `Clip1(Round2(a + b, 1 + InterPostRound))` with `InterPostRound` 4.
+/// `COMPOUND_AVERAGE`: `Clip1(Round2(a + b, 1 + InterPostRound))`.
+/// `InterPostRound` is 4 at 8-bit and 10-bit, and 2 at 12-bit.
 pub fn average_compound(a: i32, b: i32, depth: u8) -> i32 {
-    clip_sample(round2(a.saturating_add(b), 5), depth)
+    clip_sample(round2(a.saturating_add(b), compound_shift(1, depth)), depth)
 }
 
 /// `COMPOUND_DISTANCE`: `Clip1(Round2(fwd * a + bck * b, 4 + InterPostRound))`.
 pub fn distance_compound(a: i32, b: i32, fwd: i32, bck: i32, depth: u8) -> i32 {
     let sum = a.saturating_mul(fwd).saturating_add(b.saturating_mul(bck));
-    clip_sample(round2(sum, 8), depth)
+    clip_sample(round2(sum, compound_shift(4, depth)), depth)
 }
 
 /// `COMPOUND_WEDGE` and `COMPOUND_DIFFWTD`: `Clip1(Round2(m * a + (64 - m) * b, 6 + InterPostRound))`.
 pub fn mask_compound(a: i32, b: i32, weight: i32, depth: u8) -> i32 {
+    let shift = compound_shift(6, depth);
+    let bias = 1i64 << (shift - 1);
     let sum = i64::from(weight) * i64::from(a) + i64::from(64 - weight) * i64::from(b);
-    let mixed = i32::try_from((sum + 512) >> 10).unwrap_or(i32::MAX);
+    let mixed = i32::try_from((sum + bias) >> shift).unwrap_or(i32::MAX);
     clip_sample(mixed, depth)
 }
 
@@ -2067,6 +2071,7 @@ fn horizontal<S: Pix>(
 ) {
     let last_x = plane_last(sample.ref_w, sample.sub_x, sample.plane_w);
     let last_y = plane_last(sample.ref_h, sample.sub_y, sample.plane_h);
+    let (round0, _) = single_rounds(sample.bit_depth);
     let base_row = (start_y >> 10) as i32;
     for row in 0..rows {
         for col in 0..sample.w {
@@ -2078,7 +2083,7 @@ fn horizontal<S: Pix>(
                 let sx = (p >> 10) as i32 + tap as i32 - 3;
                 sum += i32::from(*coeff) * ref_sample(sample, last_x, last_y, sx, sy);
             }
-            intermediate[row * sample.w + col] = round2(sum, 3);
+            intermediate[row * sample.w + col] = round2(sum, round0);
         }
     }
 }
@@ -2129,10 +2134,11 @@ fn prepare<S: Pix>(sample: &InterSample<'_, S>) -> Result<Option<VerticalPass>, 
 
 fn vertical_pixels<S: Pix>(sample: &mut InterSample<'_, S>, pass: &VerticalPass) {
     let frac = pass.start_y & 1023;
+    let (_, round1) = single_rounds(sample.bit_depth);
     for row in 0..sample.h {
         for col in 0..sample.w {
             let sum = vertical_sum(sample, pass, frac, row, col);
-            let pred = S::from_i32(clip_sample(round2(sum, 11), sample.bit_depth));
+            let pred = S::from_i32(clip_sample(round2(sum, round1), sample.bit_depth));
             let y = sample.write_y + row;
             let x = sample.write_x + col;
             if x < sample.stride {
@@ -2217,6 +2223,17 @@ fn filter_taps(filter: u8, phase: usize) -> &'static [i16] {
 
 fn phase(position: i64) -> usize {
     ((position >> 6) & 15) as usize
+}
+
+/// Section 7.11.3.2. `InterRound0` then `InterRound1` for one predictor.
+/// Eight-bit and ten-bit stay `(3, 11)`. Twelve-bit is `(5, 9)`.
+fn single_rounds(bit_depth: u8) -> (u32, u32) {
+    if bit_depth == 12 { (5, 9) } else { (3, 11) }
+}
+
+/// `extra + InterPostRound`. The post round is 4 at 8-bit and 10-bit, and 2 at 12-bit.
+fn compound_shift(extra: u32, bit_depth: u8) -> u32 {
+    extra + if bit_depth == 12 { 2 } else { 4 }
 }
 
 fn round2(value: i32, n: u32) -> i32 {

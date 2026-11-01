@@ -11,8 +11,9 @@
 //! plane. A
 //! 10-bit 4:2:0 sequence is published as little-endian samples, including a
 //! frame that is upscaled after reconstruction, a keyframe restored by Wiener
-//! or self-guided filtering, and film grain on the shown picture. 12-bit is
-//! rejected. A frame with `base_q_idx` 0 uses a
+//! or self-guided filtering, and film grain on the shown picture. A 12-bit
+//! profile 2 picture is little-endian samples for 4:2:0, 4:2:2, and 4:4:4.
+//! Film grain at 12-bit is refused, and so is 12-bit monochrome. A frame with `base_q_idx` 0 uses a
 //! 4×4 Walsh-Hadamard transform. A palette block and an intra block copy are
 //! reconstructed, and an inter frame may be forced to integer motion vectors.
 //! Two references may be

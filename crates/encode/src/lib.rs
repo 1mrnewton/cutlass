@@ -226,13 +226,13 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
             .checked_mul(4)
             .ok_or(CodecError::Limit { what: "frame size" }),
         PixelFormat::Yuv420p => yuv420_len(width, height, pixels, 1),
-        PixelFormat::Yuv420p10 => yuv420_len(width, height, pixels, 2),
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => yuv420_len(width, height, pixels, 2),
         PixelFormat::Yuv422p => yuv422_len(width, pixels, 1),
-        PixelFormat::Yuv422p10 => yuv422_len(width, pixels, 2),
+        PixelFormat::Yuv422p10 | PixelFormat::Yuv422p12 => yuv422_len(width, pixels, 2),
         PixelFormat::Yuv444p => pixels
             .checked_mul(3)
             .ok_or(CodecError::Limit { what: "frame size" }),
-        PixelFormat::Yuv444p10 => pixels
+        PixelFormat::Yuv444p10 | PixelFormat::Yuv444p12 => pixels
             .checked_mul(6)
             .ok_or(CodecError::Limit { what: "frame size" }),
         PixelFormat::Gray8 => Ok(pixels),

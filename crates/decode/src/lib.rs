@@ -153,16 +153,16 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
                 what: "picture bytes",
             }),
         PixelFormat::Yuv420p => yuv420_bytes(width, height, 1),
-        PixelFormat::Yuv420p10 => yuv420_bytes(width, height, 2),
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => yuv420_bytes(width, height, 2),
         PixelFormat::Yuv422p => yuv422_bytes(width, height, 1),
-        PixelFormat::Yuv422p10 => yuv422_bytes(width, height, 2),
+        PixelFormat::Yuv422p10 | PixelFormat::Yuv422p12 => yuv422_bytes(width, height, 2),
         PixelFormat::Yuv444p => width
             .checked_mul(height)
             .and_then(|pixels| pixels.checked_mul(3))
             .ok_or(CodecError::Limit {
                 what: "picture bytes",
             }),
-        PixelFormat::Yuv444p10 => width
+        PixelFormat::Yuv444p10 | PixelFormat::Yuv444p12 => width
             .checked_mul(height)
             .and_then(|pixels| pixels.checked_mul(6))
             .ok_or(CodecError::Limit {
@@ -902,6 +902,18 @@ mod tests {
         );
         assert_eq!(
             picture_byte_len(2, 2, PixelFormat::Yuv444p10).expect("444-10"),
+            24
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv420p12).expect("12-bit"),
+            12
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv422p12).expect("422-12"),
+            16
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv444p12).expect("444-12"),
             24
         );
     }

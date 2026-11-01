@@ -60,11 +60,12 @@ pub struct Grid {
     units: Vec<Unit>,
     reference: [[i32; 2]; 3],
     wiener_ref: [[[i32; 3]; 2]; 3],
+    bit_depth: u8,
     active: bool,
 }
 
 impl Grid {
-    pub fn new(frame: &FrameInfo) -> Result<Self, CodecError> {
+    pub fn new(frame: &FrameInfo, bit_depth: u8) -> Result<Self, CodecError> {
         let mut cols = [0usize; 3];
         let mut rows = [0usize; 3];
         let mut unit_size = [0usize; 3];
@@ -103,12 +104,18 @@ impl Grid {
             ],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth,
             active: count > 0,
         })
     }
 
     pub fn active(&self) -> bool {
         self.active
+    }
+
+    /// Sequence bit depth. Wiener rounding is 5 then 9 at 12-bit, and 3 then 11 otherwise.
+    pub(crate) fn bit_depth(&self) -> u8 {
+        self.bit_depth
     }
 
     fn index(&self, plane: usize, row: usize, col: usize) -> Option<usize> {
@@ -749,6 +756,7 @@ fn wiener_block<S: Pix>(
 ) {
     let hfilter = wiener_taps(horizontal);
     let vfilter = wiener_taps(vertical);
+    let (round0, round1) = wiener_rounds(source.bit_depth);
     let rows = block.h + 6;
     let mut intermediate = vec![0i32; rows.saturating_mul(block.w)];
     for row in 0..rows {
@@ -761,7 +769,7 @@ fn wiener_block<S: Pix>(
                 );
                 sum += *tap * sample;
             }
-            let rounded = round2(i64::from(sum), 3) as i32;
+            let rounded = round2(i64::from(sum), round0) as i32;
             if let Some(slot) = intermediate.get_mut(row * block.w + col) {
                 let (low, high) = wiener_intermediate(source.bit_depth);
                 *slot = clip3(low, high, rounded);
@@ -778,12 +786,18 @@ fn wiener_block<S: Pix>(
                     .unwrap_or(0);
                 sum += *tap * above;
             }
-            let rounded = round2(i64::from(sum), 11);
+            let rounded = round2(i64::from(sum), round1);
             if let Some(slot) = out.get_mut((block.y + row) * source.width + block.x + col) {
                 *slot = S::from_i32(clip_sample(i32_from_i64(rounded), source.bit_depth));
             }
         }
     }
+}
+
+/// Section 7.16. Horizontal then vertical Wiener rounding.
+/// Eight-bit and ten-bit stay `(3, 11)`. Twelve-bit is `(5, 9)`.
+fn wiener_rounds(bit_depth: u8) -> (i32, i32) {
+    if bit_depth == 12 { (5, 9) } else { (3, 11) }
 }
 
 /// Horizontal Wiener intermediate range. At 8-bit this is `-2048..=6143`.
@@ -837,6 +851,7 @@ mod tests {
             }],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth: 8,
             active: true,
         };
         let out = apply_sgr(&samples, &samples, width, height, &grid, 0, 8);
@@ -869,6 +884,7 @@ mod tests {
             }],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth: 8,
             active: true,
         };
         let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 8);
@@ -892,6 +908,7 @@ mod tests {
             }],
             reference: [XQD_REF; 3],
             wiener_ref: [[WIENER_MID; 2]; 3],
+            bit_depth: 10,
             active: true,
         };
         let out = apply_wiener(&samples, &samples, width, height, &grid, 0, 10);

@@ -107,10 +107,10 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     parts: &[TilePart],
     postprocess: bool,
 ) -> Result<Reconstructed<S>, CodecError> {
-    if sequence.bit_depth != 8 && sequence.bit_depth != 10 {
+    if sequence.bit_depth != 8 && sequence.bit_depth != 10 && sequence.bit_depth != 12 {
         return Err(CodecError::Unsupported { what: "bit depth" });
     }
-    if sequence.bit_depth == 10 && size_of::<S>() != 2 {
+    if sequence.bit_depth != 8 && size_of::<S>() != 2 {
         return Err(CodecError::Unsupported { what: "bit depth" });
     }
     if sequence.bit_depth == 8 && size_of::<S>() != 1 {
@@ -137,7 +137,7 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     }
     let sb = if sequence.use_128 { 32 } else { SB4 };
     let initial = frame_cdfs(frame, carried)?;
-    let mut lr = restore::Grid::new(frame)?;
+    let mut lr = restore::Grid::new(frame, sequence.bit_depth)?;
     let mut end_cdfs = None;
     let mut tile = if parts.len() > 1 && !lr.active() {
         let (tile, end) = decode_tiles(sequence, frame, parts, buf_w, buf_h, refs, &initial)?;
@@ -419,10 +419,10 @@ impl FinishPlane for u8 {
     ) -> Vec<Self> {
         match frame.restoration.plane.get(plane).copied() {
             Some(RESTORE_WIENER) => {
-                restore::apply_wiener(cdef, before, width, height, lr, plane, 8)
+                restore::apply_wiener(cdef, before, width, height, lr, plane, lr.bit_depth())
             }
             Some(RESTORE_SGRPROJ) | Some(RESTORE_SWITCHABLE) => {
-                restore::apply_sgr(cdef, before, width, height, lr, plane, 8)
+                restore::apply_sgr(cdef, before, width, height, lr, plane, lr.bit_depth())
             }
             _ => cdef.to_vec(),
         }
@@ -453,10 +453,10 @@ impl FinishPlane for u16 {
     ) -> Vec<Self> {
         match frame.restoration.plane.get(plane).copied() {
             Some(RESTORE_WIENER) => {
-                restore::apply_wiener(cdef, before, width, height, lr, plane, 10)
+                restore::apply_wiener(cdef, before, width, height, lr, plane, lr.bit_depth())
             }
             Some(RESTORE_SGRPROJ) | Some(RESTORE_SWITCHABLE) => {
-                restore::apply_sgr(cdef, before, width, height, lr, plane, 10)
+                restore::apply_sgr(cdef, before, width, height, lr, plane, lr.bit_depth())
             }
             _ => cdef.to_vec(),
         }
@@ -533,7 +533,7 @@ fn decode_tiles<'a, 'r, S: Pix>(
         for part in parts {
             joins.push(scope.spawn(|| {
                 let mut tile = Tile::new(sequence, frame, &part.data, buf_w, buf_h, refs, initial)?;
-                let mut grid = restore::Grid::new(frame)?;
+                let mut grid = restore::Grid::new(frame, sequence.bit_depth)?;
                 tile.decode_part(frame, part, sb, &mut grid)?;
                 Ok(tile)
             }));

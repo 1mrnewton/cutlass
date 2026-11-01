@@ -7,7 +7,7 @@ This record is the scope written before the implementation. The readiness sectio
 ## Specifications
 
 - AOMedia AV1 Bitstream & Decoding Process Specification, version 1.0.0 with Errata 1 (8 January 2019). Tag `v1.0.0-errata1`. This supersedes 1.0.0. The syntax, decoding process, parsing process, and the default CDF, scan, quantizer, and block-size tables in that document are normative.
-- Annex A of that specification for Main profile and levels. Annex B is the length-delimited temporal-unit format. This crate reads low-overhead OBUs (`obu_has_size_field = 1`), which is what an IVF frame and an ISOBMFF sample carry after the container strips its own length.
+- Annex A of that specification for Main profile and levels. Annex B is the length-delimited temporal-unit format. This crate reads low-overhead OBUs (`obu_has_size_field = 1`), which is what an IVF frame and an ISOBMFF sample carry after the container strips its own length. It also reads one Annex B temporal unit as a packet.
 - There is no later AV1 bitstream amendment that changes the 1.0.0-errata1 decoding process. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska are container bindings. They are out of this crate. Film grain synthesis is part of the output process in that specification. It is applied to output pictures and is not stored in reference frames.
 
 ## Sources read before the Cutlass code
@@ -64,6 +64,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` 128×128 keyframe in a uniform 2×2 tile grid. Each tile is its own entropy stream. Prediction does not cross a tile edge. The shown picture matches dav1d.
 - Two embedded `aomenc` 320×192 keyframes with non-uniform tile spacing. The columns are 2, 2, and 1 superblocks wide and the rows are 2 and 1 superblocks tall. Both pictures match dav1d. A 4-row chroma block just inside the shorter row does not read the tile above.
 - Two embedded `aomenc` 128×128 frames whose headers and tiles are separate OBUs. Each frame is a 2×2 grid and each tile is its own group. The second frame is inter. Both pictures match dav1d. A tile group with no header, a short frame, or a gap in the tile numbers is refused, and the stored reference stays.
+- Those same two frames wrapped as Annex B temporal units. Each unit, and both frame units in one temporal unit, match dav1d. A length that disagrees with `obu_size`, or a short unit, is refused, and the stored reference stays.
 - One embedded `aomenc` 64×64 keyframe whose chroma is not flat. Chroma above-right availability is taken in the chroma 4×4 grid. The shown picture matches dav1d.
 - One embedded `aomenc` 64×64 keyframe that names a quantizer matrix. Luma and chroma both use level 3. The shown picture matches dav1d.
 - One embedded `aomenc` 128×128 keyframe whose header signals a superblock quantizer delta. The running index moves at the first coded block of a superblock. The shown picture matches dav1d.

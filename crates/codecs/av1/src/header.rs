@@ -374,6 +374,199 @@ pub(crate) fn unit_obus(bytes: &[u8]) -> Result<Vec<UnitObu<'_>>, CodecError> {
     Ok(obus)
 }
 
+/// Annex B temporal unit, or `None` when the packet is low-overhead OBUs.
+///
+/// The packet is one temporal unit. Annex B prefixes that unit, each frame
+/// unit, and each OBU with a leb128 length. The first OBU is a temporal delimiter.
+pub(crate) fn annex_b_obus(bytes: &[u8]) -> Result<Option<Vec<UnitObu<'_>>>, CodecError> {
+    let Ok((tu_size, consumed)) = read_leb_at(bytes, 0) else {
+        return Ok(None);
+    };
+    if tu_size as usize != bytes.len().saturating_sub(consumed) {
+        return Ok(None);
+    }
+    let Some(body) = bytes.get(consumed..) else {
+        return Ok(None);
+    };
+    if !annex_b_starts_with_delimiter(body) {
+        return Ok(None);
+    }
+    Ok(Some(unpack_annex_b(body)?))
+}
+
+fn annex_b_starts_with_delimiter(body: &[u8]) -> bool {
+    let Ok((frame_size, at)) = read_leb_at(body, 0) else {
+        return false;
+    };
+    if frame_size == 0 {
+        return false;
+    }
+    // The frame unit may run past the buffer. The delimiter only has to be visible.
+    let Some(rest) = body.get(at..) else {
+        return false;
+    };
+    let Ok((obu_len, oat)) = read_leb_at(rest, 0) else {
+        return false;
+    };
+    if obu_len == 0 {
+        return false;
+    }
+    let Some(&header) = rest.get(oat) else {
+        return false;
+    };
+    obu_kind(&[header]) == Some(2)
+}
+
+fn unpack_annex_b(body: &[u8]) -> Result<Vec<UnitObu<'_>>, CodecError> {
+    let mut at = 0usize;
+    let mut obus = Vec::new();
+    let mut first_unit = true;
+    while at < body.len() {
+        let (frame_size, next) = read_leb_at(body, at)?;
+        if frame_size == 0 {
+            return Err(CodecError::Malformed {
+                at_bit: (at as u64).saturating_mul(8),
+                what: "annex b",
+            });
+        }
+        let Some(frame_end) = next.checked_add(frame_size as usize) else {
+            return Err(CodecError::Limit { what: "annex b" });
+        };
+        if frame_end > body.len() {
+            return Err(CodecError::Truncated {
+                at_bit: (next as u64).saturating_mul(8),
+                what: "annex b",
+            });
+        }
+        let frame = &body[next..frame_end];
+        let mut fat = 0usize;
+        let mut headers = 0u32;
+        let mut saw_header = false;
+        while fat < frame.len() {
+            let (obu_len, onext) = read_leb_at(frame, fat)?;
+            if obu_len == 0 {
+                return Err(CodecError::Malformed {
+                    at_bit: (fat as u64).saturating_mul(8),
+                    what: "annex b",
+                });
+            }
+            let Some(obu_end) = onext.checked_add(obu_len as usize) else {
+                return Err(CodecError::Limit { what: "annex b" });
+            };
+            if obu_end > frame.len() {
+                return Err(CodecError::Truncated {
+                    at_bit: (onext as u64).saturating_mul(8),
+                    what: "annex b",
+                });
+            }
+            let obu_bytes = &frame[onext..obu_end];
+            obu_length_matches(obu_bytes)?;
+            let Some(kind) = obu_kind(obu_bytes) else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "annex b",
+                });
+            };
+            if kind == 2 && (!first_unit || !obus.is_empty() || fat != 0) {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "temporal delimiter",
+                });
+            }
+            if kind == 3 || kind == 6 {
+                headers += 1;
+                saw_header = true;
+            }
+            if kind == 4 && !saw_header {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "tile group",
+                });
+            }
+            obus.push(UnitObu {
+                kind,
+                bytes: obu_bytes,
+            });
+            fat = obu_end;
+        }
+        if headers > 1 {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "frame unit",
+            });
+        }
+        at = frame_end;
+        first_unit = false;
+    }
+    if obus.first().is_none_or(|obu| obu.kind != 2) {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "temporal delimiter",
+        });
+    }
+    Ok(obus)
+}
+
+fn read_leb_at(bytes: &[u8], at: usize) -> Result<(u32, usize), CodecError> {
+    let Some(rest) = bytes.get(at..) else {
+        return Err(CodecError::Truncated {
+            at_bit: (at as u64).saturating_mul(8),
+            what: "leb128",
+        });
+    };
+    let mut bits = BitReader::new(rest);
+    let value = read_leb128(&mut bits)?;
+    if !bits.position().is_multiple_of(8) {
+        return Err(malformed(&bits, "leb128"));
+    }
+    Ok((value, at + bits.position() / 8))
+}
+
+fn obu_kind(bytes: &[u8]) -> Option<u8> {
+    let header = *bytes.first()?;
+    if header & 0x80 != 0 {
+        return None;
+    }
+    Some((header >> 3) & 0xf)
+}
+
+/// `obu_length` counts the whole OBU. A size field inside it has to agree.
+fn obu_length_matches(obu: &[u8]) -> Result<(), CodecError> {
+    let Some(&header) = obu.first() else {
+        return Err(CodecError::Truncated {
+            at_bit: 0,
+            what: "obu",
+        });
+    };
+    if header & 0x80 != 0 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "obu forbidden",
+        });
+    }
+    let extension = (header >> 2) & 1 == 1;
+    let has_size = (header >> 1) & 1 == 1;
+    if !has_size {
+        return Ok(());
+    }
+    let mut bits = BitReader::new(obu);
+    let _ = bits.read(8)?;
+    if extension {
+        let _ = bits.read(8)?;
+    }
+    let size_at = bits.position();
+    let obu_size = read_leb128(&mut bits)? as usize;
+    let size_bytes = bits.position().saturating_sub(size_at) / 8;
+    let header_bytes = 1 + usize::from(extension);
+    if header_bytes + size_bytes + obu_size != obu.len() {
+        return Err(CodecError::Malformed {
+            at_bit: size_at as u64,
+            what: "obu length",
+        });
+    }
+    Ok(())
+}
+
 fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let profile = bits.read(3)? as u8;
     if profile != 0 {

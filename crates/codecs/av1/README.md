@@ -12,7 +12,7 @@ A frame the decoder does not implement returns `CodecError` before a picture is 
 
 The normative document is the AOMedia AV1 Bitstream & Decoding Process Specification, version 1.0.0 with Errata 1, 8 January 2019, tag `v1.0.0-errata1`. Syntax, the decoding process, the parsing process, and the default CDF, scan, quantizer, and block-size tables in that document are the rules this crate implements. Annex A names Main profile and levels. Annex B is the length-delimited temporal-unit format.
 
-This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the payload an IVF frame or an ISOBMFF sample carries after the container removes its own length. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska stay in the container crates.
+This crate reads low-overhead OBUs with `obu_has_size_field = 1`. That is the payload an IVF frame or an ISOBMFF sample carries after the container removes its own length. A packet may instead be one Annex B temporal unit, with a leb128 length on the unit, on each frame unit, and on each OBU. AV1 in ISOBMFF (`av1C`) and AV1 in Matroska stay in the container crates.
 
 Film grain synthesis is part of the output process in that specification. When a frame sends its own grain parameters, the noise is added to the shown picture. The reference keeps the picture from before that step.
 
@@ -48,7 +48,7 @@ The decoder's scope is progressive 8-bit 4:2:0, `seq_profile` 0, one operating p
 
 Implemented for that scope, and matched against dav1d on the keyframe fixtures named in `STATUS.md`:
 
-- Sequence headers, frame headers, tile groups that follow a frame header, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped.
+- Sequence headers, frame headers, tile groups that follow a frame header, temporal delimiters, frame OBUs, padding, and metadata OBUs that are skipped. An Annex B temporal unit is accepted as one packet.
 - Eight reference slots, `show_existing_frame`, and a hidden frame (`show_frame = 0` returns no picture).
 - Intra prediction, including the recursive filter on DC luma, chroma-from-luma, and directional modes.
 - Inverse DCT through 64 points, identity and 1D transforms, and an extended intra transform set on a keyframe. A keyframe or an inter frame may select its transform size.

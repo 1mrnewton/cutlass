@@ -7,8 +7,8 @@ use cutlass_decode::{
 use crate::yuv::{Plane, Yuv420, picture_output};
 
 use crate::header::{
-    FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, header_is_addressable,
-    obu_payload, parse_with_motion, tile_span, unit_obus,
+    FrameInfo, Inherited, SavedLoopFilter, Segmentation, Sequence, TilePart, annex_b_obus,
+    header_is_addressable, obu_payload, parse_with_motion, tile_span, unit_obus,
 };
 use crate::inter::{RefView, SavedMotion};
 use crate::tile::{Cdfs, DecodedPicture, Reconstructed, decode_tile_parts, decode_with_refs};
@@ -132,7 +132,15 @@ impl Av1Decoder {
         packet: &Packet,
         undo: &mut Vec<FrameUndo>,
     ) -> Result<Vec<Output>, CodecError> {
-        let obus = unit_obus(&packet.data)?;
+        let annex = annex_b_obus(&packet.data)?;
+        let low;
+        let obus = match &annex {
+            Some(obus) => obus.as_slice(),
+            None => {
+                low = unit_obus(&packet.data)?;
+                low.as_slice()
+            }
+        };
         let mut prefix = Vec::new();
         let mut shown = Vec::new();
         let mut saw_frame = false;
@@ -751,6 +759,59 @@ mod tests {
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }
         hash
+    }
+
+    fn leb128(mut value: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            byte |= 0x80;
+            out.push(byte);
+        }
+    }
+
+    fn leb_read(bytes: &[u8]) -> (usize, usize) {
+        let mut value = 0usize;
+        for (index, byte) in bytes.iter().take(8).enumerate() {
+            value |= usize::from(byte & 0x7f) << (index * 7);
+            if byte & 0x80 == 0 {
+                return (value, index + 1);
+            }
+        }
+        panic!("leb128");
+    }
+
+    fn frame_unit(obus: &[&[u8]]) -> Vec<u8> {
+        let mut unit = Vec::new();
+        for obu in obus {
+            unit.extend(leb128(obu.len()));
+            unit.extend_from_slice(obu);
+        }
+        let mut out = Vec::new();
+        out.extend(leb128(unit.len()));
+        out.extend(unit);
+        out
+    }
+
+    fn annex_b_temporal(units: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for unit in units {
+            body.extend_from_slice(unit);
+        }
+        let mut out = Vec::new();
+        out.extend(leb128(body.len()));
+        out.extend(body);
+        out
+    }
+
+    fn annex_b_packet(obus: &[crate::header::UnitObu<'_>]) -> Vec<u8> {
+        let bytes: Vec<&[u8]> = obus.iter().map(|obu| obu.bytes).collect();
+        annex_b_temporal(&[frame_unit(&bytes)])
     }
 
     fn push_error(decoder: &mut Av1Decoder, data: &[u8], pts: i64) -> cutlass_decode::CodecError {
@@ -2088,6 +2149,85 @@ mod tests {
         let packed = push_frame(&mut decoder, frames[1], 1);
         assert_eq!(packed.len(), 128 * 128 * 3 / 2);
         assert_eq!(frame_digest(&packed), expected[1]);
+    }
+
+    #[test]
+    fn annex_b_lengths_match_dav1d() {
+        // The same 128×128 frames, each wrapped as one Annex B temporal unit.
+        // Lengths sit in front of the temporal unit, the frame unit, and every OBU.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/tg_0.obu"),
+            include_bytes!("../fixtures/tg_1.obu"),
+        ];
+        let expected = [0xb1a2_c0fe_a403_1499, 0xc653_6a11_a972_4b1c];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let first = crate::header::unit_obus(frames[0]).expect("obus");
+        let wrapped = annex_b_packet(&first);
+        let packed = push_frame(&mut decoder, &wrapped, 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[0]);
+
+        let (size, used) = leb_read(&wrapped);
+        assert_eq!(size, wrapped.len() - used);
+        let mut inconsistent = wrapped.clone();
+        let (_, frame_at) = leb_read(&inconsistent[used..]);
+        let (_, obu_at) = leb_read(&inconsistent[used + frame_at..]);
+        let size_at = used + frame_at + obu_at + 1;
+        assert_eq!(inconsistent[size_at - 1], 0x12);
+        assert_eq!(inconsistent[size_at], 0x00);
+        inconsistent[size_at] = 0x01;
+        let error = push_error(&mut decoder, &inconsistent, 1);
+        assert!(matches!(
+            error,
+            cutlass_decode::CodecError::Malformed {
+                what: "obu length",
+                ..
+            }
+        ));
+        let mut body = wrapped[used..].to_vec();
+        body.pop();
+        let mut short = leb128(body.len());
+        short.extend_from_slice(&body);
+        let error = push_error(&mut decoder, &short, 1);
+        assert!(matches!(
+            error,
+            cutlass_decode::CodecError::Truncated {
+                what: "annex b",
+                ..
+            }
+        ));
+
+        let second = crate::header::unit_obus(frames[1]).expect("obus");
+        let packed = push_frame(&mut decoder, &annex_b_packet(&second), 1);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), expected[1]);
+
+        // One temporal unit, two frame units. The second unit has no delimiter.
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let first_bytes: Vec<&[u8]> = first.iter().map(|obu| obu.bytes).collect();
+        let second_bytes: Vec<&[u8]> = second.iter().skip(1).map(|obu| obu.bytes).collect();
+        assert_eq!((second[0].bytes[0] >> 3) & 0xf, 2);
+        let both = annex_b_temporal(&[frame_unit(&first_bytes), frame_unit(&second_bytes)]);
+        let shown = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: both,
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect("two frame units");
+        assert_eq!(shown.len(), 2);
+        for (index, output) in shown.iter().enumerate() {
+            let picture = &output.as_video().expect("video").picture;
+            let mut packed = picture.y.samples().to_vec();
+            packed.extend_from_slice(picture.u.samples());
+            packed.extend_from_slice(picture.v.samples());
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
     }
 
     #[test]

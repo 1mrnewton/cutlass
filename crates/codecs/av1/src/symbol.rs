@@ -85,6 +85,21 @@ impl<'a> SymbolDecoder<'a> {
         Ok(value)
     }
 
+    /// `NS(n)`. A value in `0..n`.
+    pub fn read_ns(&mut self, n: u32) -> Result<u32, CodecError> {
+        if n < 2 {
+            return Ok(0);
+        }
+        let w = floor_log2(n) + 1;
+        let m = (1u32 << w) - n;
+        let v = self.read_literal(w - 1)?;
+        if v < m {
+            return Ok(v);
+        }
+        let extra = u32::from(self.read_bool()?);
+        Ok((v << 1).wrapping_sub(m).wrapping_add(extra))
+    }
+
     /// Checks the tile trailing bit required by `exit_symbol`.
     pub fn finish(&mut self) -> Result<(), CodecError> {
         if self.max_bits < -14 {

@@ -94,11 +94,6 @@ pub fn decode_with_refs(
     refs: &[Option<RefView<'_>>],
     carried: Option<&Cdfs>,
 ) -> Result<Reconstructed, CodecError> {
-    if frame.allow_screen {
-        return Err(CodecError::Unsupported {
-            what: "screen content",
-        });
-    }
     if frame.width > 4096 || frame.height > 4096 {
         return Err(CodecError::Limit { what: "frame size" });
     }
@@ -619,6 +614,20 @@ struct Tile<'a, 'r> {
     filter_intra: bool,
     filter_mode: Option<u8>,
     screen: bool,
+    allow_intrabc: bool,
+    predict_intrabc: bool,
+    pal_size_y: Vec<u8>,
+    pal_size_uv: Vec<u8>,
+    pal_color_y: Vec<u16>,
+    pal_color_u: Vec<u16>,
+    pal_n: [usize; 2],
+    pal_colors_y: [u16; 8],
+    pal_colors_u: [u16; 8],
+    pal_colors_v: [u16; 8],
+    pal_map_y: Vec<u8>,
+    pal_map_uv: Vec<u8>,
+    pal_stride_y: usize,
+    pal_stride_uv: usize,
     cfl_u: i32,
     cfl_v: i32,
     max_luma_w: usize,
@@ -753,6 +762,13 @@ pub(crate) struct Cdfs {
     skip_mode: Vec<u16>,
     motion_mode: Vec<u16>,
     obmc: Vec<u16>,
+    pal_y: Vec<u16>,
+    pal_uv: Vec<u16>,
+    pal_size_y: Vec<u16>,
+    pal_size_uv: Vec<u16>,
+    color_y: [Vec<u16>; 7],
+    color_uv: [Vec<u16>; 7],
+    intrabc: Vec<u16>,
 }
 
 impl<'a, 'r> Tile<'a, 'r> {
@@ -862,6 +878,20 @@ impl<'a, 'r> Tile<'a, 'r> {
             filter_intra: sequence.enable_filter_intra,
             filter_mode: None,
             screen: frame.allow_screen,
+            allow_intrabc: frame.allow_intrabc,
+            predict_intrabc: false,
+            pal_size_y: vec![0; cells],
+            pal_size_uv: vec![0; cells],
+            pal_color_y: vec![0; cells.saturating_mul(8)],
+            pal_color_u: vec![0; cells.saturating_mul(8)],
+            pal_n: [0, 0],
+            pal_colors_y: [0; 8],
+            pal_colors_u: [0; 8],
+            pal_colors_v: [0; 8],
+            pal_map_y: Vec::new(),
+            pal_map_uv: Vec::new(),
+            pal_stride_y: 0,
+            pal_stride_uv: 0,
             cfl_u: 0,
             cfl_v: 0,
             max_luma_w: 0,
@@ -1232,21 +1262,33 @@ impl<'a, 'r> Tile<'a, 'r> {
         }
         self.read_cdef(row, col, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
-        let y_mode = self.read_y_mode(row, col, avail_u, avail_l)?;
-        let angle_y = self.read_angle(y_mode, bsize, true)?;
-        let (uv_mode, angle_uv) = if has_chroma {
-            let mode = self.read_uv_mode(bsize, y_mode)?;
-            if mode == UV_CFL_PRED {
-                (self.cfl_u, self.cfl_v) = self.read_cfl_alphas()?;
-            }
-            let angle = self.read_angle(mode, bsize, false)?;
-            (mode, angle)
-        } else {
-            (DC_PRED, 0)
-        };
-        self.read_palette_gate(bsize)?;
-        self.filter_mode = self.read_filter_intra(bsize, y_mode)?;
-        let tx = self.read_tx_size(row, col, bsize, skip, false)?;
+        self.pal_n = [0, 0];
+        self.predict_intrabc = false;
+        let (y_mode, angle_y, uv_mode, angle_uv, mv) =
+            if self.allow_intrabc && self.read_use_intrabc()? {
+                self.predict_intrabc = true;
+                let mv = self.read_intrabc_mv(row, col, bsize, has_chroma)?;
+                (DC_PRED, 0, DC_PRED, 0, mv)
+            } else {
+                let y_mode = self.read_y_mode(row, col, avail_u, avail_l)?;
+                let angle_y = self.read_angle(y_mode, bsize, true)?;
+                let (uv_mode, angle_uv) = if has_chroma {
+                    let mode = self.read_uv_mode(bsize, y_mode)?;
+                    if mode == UV_CFL_PRED {
+                        (self.cfl_u, self.cfl_v) = self.read_cfl_alphas()?;
+                    }
+                    let angle = self.read_angle(mode, bsize, false)?;
+                    (mode, angle)
+                } else {
+                    (DC_PRED, 0)
+                };
+                self.read_palette_mode(row, col, bsize, y_mode, uv_mode, has_chroma)?;
+                self.filter_mode = self.read_filter_intra(bsize, y_mode)?;
+                self.read_palette_tokens(row, col, bsize)?;
+                (y_mode, angle_y, uv_mode, angle_uv, Motion::default())
+            };
+        let (tx, var_tx) = self.read_block_tx_size(row, col, bsize, skip, self.predict_intrabc)?;
+        self.stamp_palette(row, col, bw4, bh4);
         if skip {
             self.reset_context(row, col, bw4, bh4, has_chroma);
         }
@@ -1265,14 +1307,14 @@ impl<'a, 'r> Tile<'a, 'r> {
             has_chroma,
             avail_u,
             avail_l,
-            inter: false,
-            var_tx: false,
-            mv: Motion::default(),
+            inter: self.predict_intrabc,
+            var_tx,
+            mv,
             mv1: Motion::default(),
             ref0: 0,
             ref1: NONE_FRAME,
             ii: -1,
-            interp: [0, 0],
+            interp: if self.predict_intrabc { [3, 3] } else { [0, 0] },
             compound_idx: 1,
             compound_mask: 0,
             skip_mode: false,
@@ -1309,6 +1351,8 @@ impl<'a, 'r> Tile<'a, 'r> {
         self.read_cdef(row, col, skip)?;
         self.read_quantizer_delta(bsize, skip)?;
         self.filter_mode = None;
+        self.pal_n = [0, 0];
+        self.predict_intrabc = false;
         let inter = if skip_mode {
             true
         } else {
@@ -1317,9 +1361,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         let chosen = if inter {
             self.read_inter_block(row, col, bsize, skip_mode)?
         } else {
-            self.read_intra_in_inter(bsize, has_chroma)?
+            self.read_intra_in_inter(row, col, bsize, has_chroma)?
         };
+        if !inter {
+            self.read_palette_tokens(row, col, bsize)?;
+        }
         let (tx, var_tx) = self.read_block_tx_size(row, col, bsize, skip, inter)?;
+        self.stamp_palette(row, col, bw4, bh4);
         if skip {
             self.reset_context(row, col, bw4, bh4, has_chroma);
         }
@@ -1560,6 +1608,8 @@ impl<'a, 'r> Tile<'a, 'r> {
 
     fn read_intra_in_inter(
         &mut self,
+        row: usize,
+        col: usize,
         bsize: usize,
         has_chroma: bool,
     ) -> Result<Chosen, CodecError> {
@@ -1581,7 +1631,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         } else {
             (DC_PRED, 0)
         };
-        self.read_palette_gate(bsize)?;
+        self.read_palette_mode(row, col, bsize, y_mode, uv_mode, has_chroma)?;
         self.filter_mode = self.read_filter_intra(bsize, y_mode)?;
         Ok(Chosen {
             y_mode,
@@ -2854,7 +2904,23 @@ impl<'a, 'r> Tile<'a, 'r> {
         ctx
     }
 
+    /// Pixel rectangle of this plane. Chroma uses the subsampled block size, which
+    /// stays 4×4 when a 4×4 luma block is 4:2:0.
+    fn plane_rect(&self, block: &Block) -> (usize, usize, usize, usize) {
+        let x = (block.col >> block.sub_x) * 4;
+        let y = (block.row >> block.sub_y) * 4;
+        let bsize = if block.plane == 0 {
+            block.bsize
+        } else {
+            subsampled_size(block.bsize, self.sub_x, self.sub_y)
+        };
+        (x, y, block_width(bsize), block_height(bsize))
+    }
+
     fn predict_inter_plane(&mut self, block: &Block) -> Result<(), CodecError> {
+        if self.predict_intrabc {
+            return self.predict_intrabc_plane(block);
+        }
         let at = block.row * self.mi_cols + block.col;
         let frame_ref = self.block_ref[at];
         if frame_ref < LAST_FRAME {
@@ -2877,10 +2943,7 @@ impl<'a, 'r> Tile<'a, 'r> {
         let frame_w = self.visible_w;
         let frame_h = self.visible_h;
         let (sub_x, sub_y) = (block.sub_x != 0, block.sub_y != 0);
-        let x = (block.col >> block.sub_x) * 4;
-        let y = (block.row >> block.sub_y) * 4;
-        let w = block_width(block.bsize) >> block.sub_x;
-        let h = block_height(block.bsize) >> block.sub_y;
+        let (x, y, w, h) = self.plane_rect(block);
         let second = self.block_ref1[at];
         if second > INTRA_FRAME {
             return self.predict_compound(
@@ -2957,6 +3020,9 @@ impl<'a, 'r> Tile<'a, 'r> {
             self.blend_interintra(block.plane, ii as u8, (x, y, w, h), &packed);
             return Ok(());
         }
+        if self.predict_sub8x8_chroma(block)? {
+            return Ok(());
+        }
         let stride = if block.plane == 0 {
             self.width
         } else {
@@ -3009,6 +3075,151 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
+    /// A 4:2:0 block that is 4 luma samples wide or tall predicts chroma as 2×2
+    /// pieces, each with that 4×4's own motion vector. One vector is used when
+    /// any of those neighbors is intra.
+    fn predict_sub8x8_chroma(&mut self, block: &Block) -> Result<bool, CodecError> {
+        if block.plane == 0 {
+            return Ok(false);
+        }
+        let split_x = self.sub_x && block_width(block.bsize) == 4;
+        let split_y = self.sub_y && block_height(block.bsize) == 4;
+        if !split_x && !split_y {
+            return Ok(false);
+        }
+        let row = block.row;
+        let col = block.col;
+        if split_x && !self.piece_inter(row, col.wrapping_sub(1)) {
+            return Ok(false);
+        }
+        if split_y && !self.piece_inter(row.wrapping_sub(1), col) {
+            return Ok(false);
+        }
+        if split_x && split_y && !self.piece_inter(row.wrapping_sub(1), col.wrapping_sub(1)) {
+            return Ok(false);
+        }
+        let (x, y, w, h) = self.plane_rect(block);
+        let pw = if split_x { w / 2 } else { w };
+        let ph = if split_y { h / 2 } else { h };
+        if pw == 0 || ph == 0 {
+            return Ok(false);
+        }
+        let sub_x = block.sub_x != 0;
+        let sub_y = block.sub_y != 0;
+        let piece = |px, py| PlaneRect {
+            x: px,
+            y: py,
+            w: pw,
+            h: ph,
+            sub_x,
+            sub_y,
+        };
+        if split_x && split_y {
+            self.predict_mi_piece(block, row - 1, col - 1, piece(x, y))?;
+        }
+        if split_x {
+            let piece_y = y + usize::from(split_y) * ph;
+            self.predict_mi_piece(block, row, col - 1, piece(x, piece_y))?;
+        }
+        if split_y {
+            let piece_x = x + usize::from(split_x) * pw;
+            self.predict_mi_piece(block, row - 1, col, piece(piece_x, y))?;
+        }
+        let piece_x = x + usize::from(split_x) * pw;
+        let piece_y = y + usize::from(split_y) * ph;
+        self.predict_mi_piece(block, row, col, piece(piece_x, piece_y))?;
+        Ok(true)
+    }
+
+    fn piece_inter(&self, row: usize, col: usize) -> bool {
+        let Some(at) = self.mi_at(row, col) else {
+            return false;
+        };
+        let frame_ref = self.block_ref[at];
+        if frame_ref < LAST_FRAME {
+            return false;
+        }
+        let slot = usize::from(self.frame_refs[frame_ref as usize - 1]);
+        slot < 8 && self.ref_ok[slot]
+    }
+
+    fn predict_mi_piece(
+        &mut self,
+        block: &Block,
+        mi_row: usize,
+        mi_col: usize,
+        place: PlaneRect,
+    ) -> Result<(), CodecError> {
+        let Some(at) = self.mi_at(mi_row, mi_col) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "chroma motion",
+            });
+        };
+        let frame_ref = self.block_ref[at];
+        if frame_ref < LAST_FRAME {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "chroma motion",
+            });
+        }
+        let slot = usize::from(self.frame_refs[frame_ref as usize - 1]);
+        if slot >= 8 || !self.ref_ok[slot] {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "chroma motion",
+            });
+        }
+        let mv = self.mvs[at];
+        let filter = self.interp[at];
+        let ref_w = self.ref_w[slot];
+        let ref_h = self.ref_h[slot];
+        let plane_w = ref_w.div_ceil(2);
+        let plane_h = ref_h.div_ceil(2);
+        let stride = self.chroma_w;
+        let reference: &[u8] = if block.plane == 1 {
+            self.ref_u[slot]
+        } else {
+            self.ref_v[slot]
+        };
+        let dst: &mut [u8] = if block.plane == 1 {
+            &mut self.u
+        } else {
+            &mut self.v
+        };
+        let PlaneRect {
+            x,
+            y,
+            w,
+            h,
+            sub_x,
+            sub_y,
+        } = place;
+        let mut sample = InterSample {
+            dst,
+            stride,
+            x,
+            y,
+            w,
+            h,
+            sub_x,
+            sub_y,
+            mv,
+            filter,
+            reference,
+            ref_stride: plane_w,
+            plane_w,
+            plane_h,
+            frame_w: self.visible_w,
+            frame_h: self.visible_h,
+            ref_w,
+            ref_h,
+            write_x: x,
+            write_y: y,
+        };
+        predict(&mut sample)
+    }
+
     fn motion_at(&self, row: usize, col: usize) -> u8 {
         self.mi_at(row, col)
             .and_then(|at| self.motion_modes.get(at).copied())
@@ -3050,8 +3261,7 @@ impl<'a, 'r> Tile<'a, 'r> {
     fn overlapped(&mut self, block: &Block) -> Result<(), CodecError> {
         let sub_x = block.sub_x;
         let sub_y = block.sub_y;
-        let w = block_width(block.bsize) >> block.sub_x;
-        let h = block_height(block.bsize) >> block.sub_y;
+        let (_, _, w, h) = self.plane_rect(block);
         let plane_bsize = if block.plane == 0 {
             block.bsize
         } else {
@@ -3539,7 +3749,13 @@ impl<'a, 'r> Tile<'a, 'r> {
         let local_col = ((x >> 2) & col_mask) as i32;
         let above_right = self.decoded_at(block.plane, local_row - 1, local_col + (w / 4) as i32);
         let below_left = self.decoded_at(block.plane, local_row + (h / 4) as i32, local_col - 1);
-        let filter_type = self.smooth_neighbor(block.plane, block.row, block.col);
+        let filter_type = self.smooth_neighbor(
+            block.plane,
+            block.row,
+            block.col,
+            NUM_4X4_WIDE[block.bsize],
+            NUM_4X4_HIGH[block.bsize],
+        );
         let edge_filter = self.edge_filter;
         let (plane_w, plane_h, stride) = if block.plane == 0 {
             (self.width, self.height, self.width)
@@ -3681,7 +3897,7 @@ impl<'a, 'r> Tile<'a, 'r> {
     }
 
     fn read_cdef(&mut self, row: usize, col: usize, skip: bool) -> Result<(), CodecError> {
-        if skip || self.lossless || !self.cdef_on {
+        if skip || self.lossless || self.allow_intrabc || !self.cdef_on {
             return Ok(());
         }
         let aligned_row = row & !15;
@@ -3737,20 +3953,621 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
-    /// Palette is signaled before filter intra when screen tools are on.
-    fn read_palette_gate(&self, bsize: usize) -> Result<(), CodecError> {
-        if self.screen
-            && bsize >= BLOCK_8X8
-            && block_width(bsize) <= 64
-            && block_height(bsize) <= 64
+    fn palette_allowed(&self, bsize: usize) -> bool {
+        self.screen && bsize >= BLOCK_8X8 && block_width(bsize) <= 64 && block_height(bsize) <= 64
+    }
+
+    fn read_use_intrabc(&mut self) -> Result<bool, CodecError> {
+        let used = read_sym(
+            &mut self.symbols,
+            self.update,
+            &mut self.cdfs.intrabc,
+            &[3],
+            &[],
+        )? == 1;
+        Ok(used)
+    }
+
+    fn read_intrabc_mv(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        has_chroma: bool,
+    ) -> Result<Motion, CodecError> {
+        let bw4 = NUM_4X4_WIDE[bsize];
+        let bh4 = NUM_4X4_HIGH[bsize];
+        let stack = find_stack(
+            &MotionGrid {
+                cols: self.mi_cols,
+                rows: self.mi_rows,
+                inter: &self.inter_flag,
+                refs: &self.block_ref,
+                refs1: &self.block_ref1,
+                mvs: &self.mvs,
+                mvs1: &self.mvs1,
+                modes: &self.y_mode,
+                sizes: &self.sizes,
+            },
+            &BlockPlace {
+                row,
+                col,
+                bw4,
+                bh4,
+                bsize,
+                reference: INTRA_FRAME,
+                reference1: NONE_FRAME,
+                compound: false,
+                global1: Motion::default(),
+                affine1: false,
+                bias: self.sign_bias,
+            },
+            Motion::default(),
+            false,
+            true,
+            false,
+            None,
+        );
+        let mut pred = stack.mv[0];
+        if pred.row == 0 && pred.col == 0 {
+            pred = stack.mv[1];
+        }
+        if pred.row == 0 && pred.col == 0 {
+            let sb4 = 16i32;
+            if row as i32 - sb4 < self.tile_row as i32 {
+                pred.col = -((sb4 * 4 + 256) * 8);
+            } else {
+                pred.row = -(sb4 * 4 * 8);
+            }
+        }
+        let diff = self.read_mv_delta()?;
+        let mv = Motion {
+            row: pred.row.wrapping_add(diff.row),
+            col: pred.col.wrapping_add(diff.col),
+        };
+        if !self.intrabc_mv_ok(row, col, bsize, mv, has_chroma) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "intrabc motion",
+            });
+        }
+        Ok(mv)
+    }
+
+    fn intrabc_mv_ok(
+        &self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        mv: Motion,
+        has_chroma: bool,
+    ) -> bool {
+        if mv.row.unsigned_abs() >= (1 << 14) || mv.col.unsigned_abs() >= (1 << 14) {
+            return false;
+        }
+        if mv.row & 7 != 0 || mv.col & 7 != 0 {
+            return false;
+        }
+        let bw = block_width(bsize) as i32;
+        let bh = block_height(bsize) as i32;
+        let src_top = row as i32 * 4 + (mv.row >> 3);
+        let src_left = col as i32 * 4 + (mv.col >> 3);
+        let src_bottom = src_top + bh;
+        let src_right = src_left + bw;
+        let mut top_edge = src_top;
+        let mut left_edge = src_left;
+        if has_chroma && self.sub_x && bw < 8 {
+            left_edge -= 4;
+        }
+        if has_chroma && self.sub_y && bh < 8 {
+            top_edge -= 4;
+        }
+        let row_start = self.tile_row as i32 * 4;
+        let col_start = self.tile_col as i32 * 4;
+        let row_end = self.tile_row_end as i32 * 4;
+        let col_end = self.tile_col_end as i32 * 4;
+        if top_edge < row_start
+            || left_edge < col_start
+            || src_bottom > row_end
+            || src_right > col_end
         {
-            return Err(CodecError::Unsupported { what: "palette" });
+            return false;
+        }
+        let sb_h = 64i32;
+        let active_row = (row as i32 * 4) / sb_h;
+        let active_col = (col as i32 * 4) >> 6;
+        let src_row = (src_bottom - 1) / sb_h;
+        let src_col = (src_right - 1) >> 6;
+        let total = ((self
+            .tile_col_end
+            .saturating_sub(self.tile_col)
+            .saturating_sub(1))
+            >> 4)
+            + 1;
+        let active = active_row * total as i32 + active_col;
+        let src = src_row * total as i32 + src_col;
+        const DELAY: i32 = 4;
+        if src >= active - DELAY {
+            return false;
+        }
+        let wave = (1 + DELAY) * (active_row - src_row);
+        src_row <= active_row && src_col < active_col - DELAY + wave
+    }
+
+    fn predict_intrabc_plane(&mut self, block: &Block) -> Result<(), CodecError> {
+        let at = block.row * self.mi_cols + block.col;
+        let Some(mv) = self.mvs.get(at).copied() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "intrabc motion",
+            });
+        };
+        let sub_x = block.sub_x != 0;
+        let sub_y = block.sub_y != 0;
+        let (x, y, w, h) = self.plane_rect(block);
+        let stride = if block.plane == 0 {
+            self.width
+        } else {
+            self.chroma_w
+        };
+        let plane_h = if block.plane == 0 {
+            self.height
+        } else {
+            self.chroma_h
+        };
+        let reference = match block.plane {
+            0 => self.y.clone(),
+            1 => self.u.clone(),
+            _ => self.v.clone(),
+        };
+        let dst = match block.plane {
+            0 => self.y.as_mut_slice(),
+            1 => self.u.as_mut_slice(),
+            _ => self.v.as_mut_slice(),
+        };
+        predict(&mut InterSample {
+            dst,
+            stride,
+            x,
+            y,
+            w,
+            h,
+            sub_x,
+            sub_y,
+            mv,
+            filter: [3, 3],
+            reference: &reference,
+            ref_stride: stride,
+            plane_w: stride,
+            plane_h,
+            frame_w: self.visible_w,
+            frame_h: self.visible_h,
+            ref_w: self.visible_w,
+            ref_h: self.visible_h,
+            write_x: x,
+            write_y: y,
+        })
+    }
+
+    fn read_palette_mode(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+        y_mode: u8,
+        uv_mode: u8,
+        has_chroma: bool,
+    ) -> Result<(), CodecError> {
+        self.pal_n = [0, 0];
+        if !self.palette_allowed(bsize) {
+            return Ok(());
+        }
+        let ctx = self.palette_bsize_ctx(bsize)?;
+        if y_mode == DC_PRED {
+            let neighbors = self.palette_mode_ctx(row, col);
+            let has = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.pal_y,
+                &[7, 3, 3],
+                &[ctx, neighbors],
+            )? == 1;
+            if has {
+                self.pal_n[0] = self.read_palette_size(ctx, false)?;
+                self.read_palette_colors(row, col, 0)?;
+            }
+        }
+        if has_chroma && uv_mode == DC_PRED {
+            let has = read_sym(
+                &mut self.symbols,
+                self.update,
+                &mut self.cdfs.pal_uv,
+                &[2, 3],
+                &[usize::from(self.pal_n[0] > 0)],
+            )? == 1;
+            if has {
+                self.pal_n[1] = self.read_palette_size(ctx, true)?;
+                self.read_palette_colors(row, col, 1)?;
+                self.read_palette_v()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn palette_bsize_ctx(&self, bsize: usize) -> Result<usize, CodecError> {
+        let width = MI_WIDTH_LOG2.get(bsize).copied().unwrap_or(0);
+        let height = MI_HEIGHT_LOG2.get(bsize).copied().unwrap_or(0);
+        let sum = width + height;
+        if sum < 2 || sum - 2 > 6 {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "palette",
+            });
+        }
+        Ok(sum - 2)
+    }
+
+    fn palette_mode_ctx(&self, row: usize, col: usize) -> usize {
+        let mut ctx = 0;
+        if self.above_mi(row) {
+            let at = (row - 1) * self.mi_cols + col;
+            ctx += usize::from(self.pal_size_y.get(at).copied().unwrap_or(0) > 0);
+        }
+        if self.left_mi(col) {
+            let at = row * self.mi_cols + col - 1;
+            ctx += usize::from(self.pal_size_y.get(at).copied().unwrap_or(0) > 0);
+        }
+        ctx
+    }
+
+    fn read_palette_size(&mut self, ctx: usize, uv: bool) -> Result<usize, CodecError> {
+        let table = if uv {
+            &mut self.cdfs.pal_size_uv
+        } else {
+            &mut self.cdfs.pal_size_y
+        };
+        let symbol = read_sym(&mut self.symbols, self.update, table, &[7, 8], &[ctx])?;
+        Ok(symbol as usize + 2)
+    }
+
+    fn read_palette_colors(
+        &mut self,
+        row: usize,
+        col: usize,
+        plane: usize,
+    ) -> Result<(), CodecError> {
+        let size = self.pal_n[plane];
+        let (above_n, above) = self.palette_neighbor(row, col, plane, true);
+        let (left_n, left) = self.palette_neighbor(row, col, plane, false);
+        let (cache_n, cache) = crate::palette::merge_cache(&above[..above_n], &left[..left_n]);
+        let mut colors = [0u16; 8];
+        let mut idx = 0usize;
+        let mut cache_i = 0usize;
+        while cache_i < cache_n && idx < size {
+            if self.symbols.read_bool()? {
+                colors[idx] = cache[cache_i];
+                idx += 1;
+            }
+            cache_i += 1;
+        }
+        if idx < size {
+            colors[idx] = self.symbols.read_literal(8)? as u16;
+            idx += 1;
+        }
+        if idx < size {
+            let mut bits = 5 + self.symbols.read_literal(2)?;
+            while idx < size {
+                let mut delta = self.symbols.read_literal(bits)?;
+                if plane == 0 {
+                    delta += 1;
+                }
+                let color = u32::from(colors[idx - 1]).saturating_add(delta).min(255);
+                colors[idx] = color as u16;
+                let range = if plane == 0 { 255 - color } else { 256 - color };
+                bits = bits.min(crate::palette::ceil_log2(range));
+                idx += 1;
+            }
+        }
+        colors[..size].sort_unstable();
+        if plane == 0 {
+            self.pal_colors_y = colors;
+        } else {
+            self.pal_colors_u = colors;
+        }
+        Ok(())
+    }
+
+    fn read_palette_v(&mut self) -> Result<(), CodecError> {
+        let size = self.pal_n[1];
+        let mut colors = [0u16; 8];
+        if self.symbols.read_bool()? {
+            let bits = 4 + self.symbols.read_literal(2)?;
+            colors[0] = self.symbols.read_literal(8)? as u16;
+            for idx in 1..size {
+                let magnitude = self.symbols.read_literal(bits)? as i32;
+                let delta = if magnitude == 0 {
+                    0
+                } else if self.symbols.read_bool()? {
+                    -magnitude
+                } else {
+                    magnitude
+                };
+                let mut val = i32::from(colors[idx - 1]) + delta;
+                if val < 0 {
+                    val += 256;
+                }
+                if val >= 256 {
+                    val -= 256;
+                }
+                colors[idx] = val.clamp(0, 255) as u16;
+            }
+        } else {
+            for color in colors.iter_mut().take(size) {
+                *color = self.symbols.read_literal(8)? as u16;
+            }
+        }
+        self.pal_colors_v = colors;
+        Ok(())
+    }
+
+    fn palette_neighbor(
+        &self,
+        row: usize,
+        col: usize,
+        plane: usize,
+        above: bool,
+    ) -> (usize, [u16; 8]) {
+        let mut colors = [0u16; 8];
+        let (at_row, at_col, ok) = if above {
+            (row.wrapping_sub(1), col, row > 0 && !row.is_multiple_of(16))
+        } else {
+            (row, col.wrapping_sub(1), self.left_mi(col))
+        };
+        if !ok || at_row >= self.mi_rows || at_col >= self.mi_cols {
+            return (0, colors);
+        }
+        let at = at_row * self.mi_cols + at_col;
+        let n = usize::from(if plane == 0 {
+            self.pal_size_y.get(at).copied().unwrap_or(0)
+        } else {
+            self.pal_size_uv.get(at).copied().unwrap_or(0)
+        })
+        .min(8);
+        let src = if plane == 0 {
+            &self.pal_color_y
+        } else {
+            &self.pal_color_u
+        };
+        let base = at * 8;
+        if let Some(stored) = src.get(base..base + n) {
+            colors[..n].copy_from_slice(stored);
+        }
+        (n, colors)
+    }
+
+    fn read_palette_tokens(
+        &mut self,
+        row: usize,
+        col: usize,
+        bsize: usize,
+    ) -> Result<(), CodecError> {
+        self.pal_map_y.clear();
+        self.pal_map_uv.clear();
+        self.pal_stride_y = 0;
+        self.pal_stride_uv = 0;
+        if self.pal_n[0] == 0 && self.pal_n[1] == 0 {
+            return Ok(());
+        }
+        let bw = block_width(bsize);
+        let bh = block_height(bsize);
+        let on_w = bw.min(self.mi_cols.saturating_sub(col).saturating_mul(4));
+        let on_h = bh.min(self.mi_rows.saturating_sub(row).saturating_mul(4));
+        if self.pal_n[0] > 0 {
+            let (map, stride) = self.read_color_map(bw, bh, on_w, on_h, self.pal_n[0], false)?;
+            self.pal_stride_y = stride;
+            self.pal_map_y = map;
+        }
+        if self.pal_n[1] > 0 {
+            let mut block_w = bw >> usize::from(self.sub_x);
+            let mut block_h = bh >> usize::from(self.sub_y);
+            let mut seen_w = on_w >> usize::from(self.sub_x);
+            let mut seen_h = on_h >> usize::from(self.sub_y);
+            if block_w < 4 {
+                block_w += 2;
+                seen_w += 2;
+            }
+            if block_h < 4 {
+                block_h += 2;
+                seen_h += 2;
+            }
+            let (map, stride) =
+                self.read_color_map(block_w, block_h, seen_w, seen_h, self.pal_n[1], true)?;
+            self.pal_stride_uv = stride;
+            self.pal_map_uv = map;
+        }
+        Ok(())
+    }
+
+    fn read_color_map(
+        &mut self,
+        width: usize,
+        height: usize,
+        on_w: usize,
+        on_h: usize,
+        n: usize,
+        uv: bool,
+    ) -> Result<(Vec<u8>, usize), CodecError> {
+        if width == 0 || height == 0 || on_w == 0 || on_h == 0 || !(2..=8).contains(&n) {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "palette",
+            });
+        }
+        let mut map = vec![0u8; width.saturating_mul(height)];
+        let first = self.symbols.read_ns(n as u32)?;
+        map[0] = u8::try_from(first).unwrap_or(0);
+        let mut i = 1usize;
+        while i + 1 < on_h + on_w {
+            let mut j = i.min(on_w - 1);
+            let stop = i.saturating_sub(on_h - 1);
+            loop {
+                let r = i - j;
+                let Some((ctx, order)) = crate::palette::color_context(&map, width, r, j, n) else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "palette",
+                    });
+                };
+                let table = if uv {
+                    &mut self.cdfs.color_uv[n - 2]
+                } else {
+                    &mut self.cdfs.color_y[n - 2]
+                };
+                let symbol = read_sym(&mut self.symbols, self.update, table, &[5, n + 1], &[ctx])?;
+                let Some(color) = order.get(symbol as usize).copied() else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "palette",
+                    });
+                };
+                let at = r * width + j;
+                if at >= map.len() {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "palette",
+                    });
+                }
+                map[at] = color;
+                if j == stop {
+                    break;
+                }
+                j -= 1;
+            }
+            i += 1;
+        }
+        for row in 0..on_h {
+            let edge = map[row * width + on_w - 1];
+            for col in on_w..width {
+                map[row * width + col] = edge;
+            }
+        }
+        if on_h < height {
+            let previous = (on_h - 1) * width;
+            let src = map
+                .get(previous..previous + width)
+                .map(|row| row.to_vec())
+                .unwrap_or_default();
+            let start = on_h * width;
+            if let Some(dst) = map.get_mut(start..height * width) {
+                for row in dst.chunks_mut(width) {
+                    if row.len() == src.len() {
+                        row.copy_from_slice(&src);
+                    }
+                }
+            }
+        }
+        Ok((map, width))
+    }
+
+    fn stamp_palette(&mut self, row: usize, col: usize, bw4: usize, bh4: usize) {
+        for y in 0..bh4 {
+            for x in 0..bw4 {
+                if row + y >= self.mi_rows || col + x >= self.mi_cols {
+                    continue;
+                }
+                let at = (row + y) * self.mi_cols + col + x;
+                if let Some(size) = self.pal_size_y.get_mut(at) {
+                    *size = self.pal_n[0] as u8;
+                }
+                if let Some(size) = self.pal_size_uv.get_mut(at) {
+                    *size = self.pal_n[1] as u8;
+                }
+                let base = at * 8;
+                for i in 0..self.pal_n[0] {
+                    if let Some(slot) = self.pal_color_y.get_mut(base + i) {
+                        *slot = self.pal_colors_y[i];
+                    }
+                }
+                for i in 0..self.pal_n[1] {
+                    if let Some(slot) = self.pal_color_u.get_mut(base + i) {
+                        *slot = self.pal_colors_u[i];
+                    }
+                }
+            }
+        }
+    }
+
+    fn paint_palette(
+        &mut self,
+        block: &Block,
+        start_x: usize,
+        start_y: usize,
+        stride: usize,
+    ) -> Result<(), CodecError> {
+        let uv = block.plane > 0;
+        let n = self.pal_n[usize::from(uv)];
+        let stride_map = if uv {
+            self.pal_stride_uv
+        } else {
+            self.pal_stride_y
+        };
+        if n == 0 || stride_map == 0 {
+            return Ok(());
+        }
+        let colors = if block.plane == 0 {
+            self.pal_colors_y
+        } else if block.plane == 1 {
+            self.pal_colors_u
+        } else {
+            self.pal_colors_v
+        };
+        let map = if uv {
+            self.pal_map_uv.clone()
+        } else {
+            self.pal_map_y.clone()
+        };
+        let tw = TX_WIDTH.get(block.tx).copied().unwrap_or(0);
+        let th = TX_HEIGHT.get(block.tx).copied().unwrap_or(0);
+        let plane_w = if block.plane == 0 {
+            self.width
+        } else {
+            self.chroma_w
+        };
+        let plane_h = if block.plane == 0 {
+            self.height
+        } else {
+            self.chroma_h
+        };
+        let x1 = (start_x + tw).min(plane_w);
+        let y1 = (start_y + th).min(plane_h);
+        let dst = match block.plane {
+            0 => self.y.as_mut_slice(),
+            1 => self.u.as_mut_slice(),
+            _ => self.v.as_mut_slice(),
+        };
+        for y in start_y..y1 {
+            for x in start_x..x1 {
+                let mr = block.y4 * 4 + y - start_y;
+                let mc = block.x4 * 4 + x - start_x;
+                let Some(index) = map.get(mr * stride_map + mc).copied() else {
+                    return Err(CodecError::Malformed {
+                        at_bit: 0,
+                        what: "palette",
+                    });
+                };
+                let color = colors.get(usize::from(index)).copied().unwrap_or(0);
+                let at = y * stride + x;
+                if let Some(sample) = dst.get_mut(at) {
+                    *sample = color as u8;
+                }
+            }
         }
         Ok(())
     }
 
     fn read_filter_intra(&mut self, bsize: usize, y_mode: u8) -> Result<Option<u8>, CodecError> {
-        if !self.filter_intra
+        if self.pal_n[0] != 0
+            || !self.filter_intra
             || y_mode != DC_PRED
             || block_width(bsize).max(block_height(bsize)) > 32
         {
@@ -4353,18 +5170,28 @@ impl<'a, 'r> Tile<'a, 'r> {
         let local_row = ((start_y >> 2) & row_mask) as i32;
         let local_col = ((start_x >> 2) & col_mask) as i32;
         if !block.inter {
-            self.predict_intra_block(
-                &block,
-                IntraAt {
-                    start_x,
-                    start_y,
-                    stride,
-                    plane_w,
-                    plane_h,
-                    local_row,
-                    local_col,
-                },
-            )?;
+            if self.pal_n[usize::from(block.plane > 0)] > 0 {
+                self.paint_palette(&block, start_x, start_y, stride)?;
+                if block.plane == 0 {
+                    let log_w = TX_WIDTH_LOG2[block.tx] as usize;
+                    let log_h = TX_HEIGHT_LOG2[block.tx] as usize;
+                    self.max_luma_w = start_x + (1 << log_w);
+                    self.max_luma_h = start_y + (1 << log_h);
+                }
+            } else {
+                self.predict_intra_block(
+                    &block,
+                    IntraAt {
+                        start_x,
+                        start_y,
+                        stride,
+                        plane_w,
+                        plane_h,
+                        local_row,
+                        local_col,
+                    },
+                )?;
+            }
         }
         if !block.skip {
             let tx_type = self.coeffs(CoeffPlace {
@@ -4424,7 +5251,13 @@ impl<'a, 'r> Tile<'a, 'r> {
             self.decoded_at(block.plane, local_row - 1, local_col + block.step_x as i32);
         let below_left =
             self.decoded_at(block.plane, local_row + block.step_y as i32, local_col - 1);
-        let filter_type = self.smooth_neighbor(block.plane, block.row, block.col);
+        let filter_type = self.smooth_neighbor(
+            block.plane,
+            block.row,
+            block.col,
+            NUM_4X4_WIDE[block.bsize],
+            NUM_4X4_HIGH[block.bsize],
+        );
         let log_w = TX_WIDTH_LOG2[block.tx] as usize;
         let log_h = TX_HEIGHT_LOG2[block.tx] as usize;
         let pred = IntraPred {
@@ -4500,28 +5333,91 @@ impl<'a, 'r> Tile<'a, 'r> {
         Ok(())
     }
 
-    fn smooth_neighbor(&self, plane: usize, row: usize, col: usize) -> bool {
-        let above = if self.above_mi(row) {
-            let mode = if plane == 0 {
-                self.y_mode[(row - 1) * self.mi_cols + col]
-            } else {
-                self.uv_mode[(row - 1) * self.mi_cols + col]
-            };
-            (9..=11).contains(&mode)
+    /// Whether the intra edge filter uses the smooth strength.
+    ///
+    /// Chroma looks at the luma sample that owns the neighboring chroma sample,
+    /// and an inter neighbor is not smooth.
+    fn smooth_neighbor(
+        &self,
+        plane: usize,
+        row: usize,
+        col: usize,
+        bw4: usize,
+        bh4: usize,
+    ) -> bool {
+        let above = if self.chroma_above(plane, row, bh4) {
+            let (r, c) = self.smooth_above(plane, row, col);
+            self.smooth_mode(plane, r, c)
         } else {
             false
         };
-        let left = if self.left_mi(col) {
-            let mode = if plane == 0 {
-                self.y_mode[row * self.mi_cols + col - 1]
-            } else {
-                self.uv_mode[row * self.mi_cols + col - 1]
-            };
-            (9..=11).contains(&mode)
+        let left = if self.chroma_left(plane, col, bw4) {
+            let (r, c) = self.smooth_left(plane, row, col);
+            self.smooth_mode(plane, r, c)
         } else {
             false
         };
         above || left
+    }
+
+    fn chroma_above(&self, plane: usize, row: usize, bh4: usize) -> bool {
+        if plane > 0 && self.sub_y && bh4 == 1 {
+            row >= 2 && self.above_mi(row - 1)
+        } else {
+            self.above_mi(row)
+        }
+    }
+
+    fn chroma_left(&self, plane: usize, col: usize, bw4: usize) -> bool {
+        if plane > 0 && self.sub_x && bw4 == 1 {
+            col >= 2 && self.left_mi(col - 1)
+        } else {
+            self.left_mi(col)
+        }
+    }
+
+    /// `get_filter_type` moves to the luma sample paired with the chroma sample.
+    fn smooth_above(&self, plane: usize, row: usize, col: usize) -> (usize, usize) {
+        let mut r = row.saturating_sub(1);
+        let mut c = col;
+        if plane > 0 {
+            if self.sub_x && col.is_multiple_of(2) {
+                c = c.saturating_add(1);
+            }
+            if self.sub_y && !row.is_multiple_of(2) {
+                r = r.saturating_sub(1);
+            }
+        }
+        (r, c)
+    }
+
+    fn smooth_left(&self, plane: usize, row: usize, col: usize) -> (usize, usize) {
+        let mut r = row;
+        let mut c = col.saturating_sub(1);
+        if plane > 0 {
+            if self.sub_x && !col.is_multiple_of(2) {
+                c = c.saturating_sub(1);
+            }
+            if self.sub_y && row.is_multiple_of(2) {
+                r = r.saturating_add(1);
+            }
+        }
+        (r, c)
+    }
+
+    fn smooth_mode(&self, plane: usize, row: usize, col: usize) -> bool {
+        let Some(at) = self.mi_at(row, col) else {
+            return false;
+        };
+        if plane > 0 && self.block_ref[at] > 0 {
+            return false;
+        }
+        let mode = if plane == 0 {
+            self.y_mode[at]
+        } else {
+            self.uv_mode[at]
+        };
+        (9..=11).contains(&mode)
     }
 
     fn coeffs(&mut self, place: CoeffPlace) -> Result<Option<u8>, CodecError> {
@@ -5845,6 +6741,17 @@ impl Cdfs {
         zero_counters(&mut self.skip_mode, 3);
         zero_counters(&mut self.motion_mode, 4);
         zero_counters(&mut self.obmc, 3);
+        zero_counters(&mut self.pal_y, 3);
+        zero_counters(&mut self.pal_uv, 3);
+        zero_counters(&mut self.pal_size_y, 8);
+        zero_counters(&mut self.pal_size_uv, 8);
+        for (index, table) in self.color_y.iter_mut().enumerate() {
+            zero_counters(table, index + 3);
+        }
+        for (index, table) in self.color_uv.iter_mut().enumerate() {
+            zero_counters(table, index + 3);
+        }
+        zero_counters(&mut self.intrabc, 3);
     }
 
     fn load(q: usize) -> Self {
@@ -5929,6 +6836,13 @@ impl Cdfs {
             skip_mode: SKIP_MODE_CDF.to_vec(),
             motion_mode: MOTION_MODE_CDF.to_vec(),
             obmc: OBMC_CDF.to_vec(),
+            pal_y: crate::palette::palette_y_cdf(),
+            pal_uv: crate::palette::palette_uv_cdf(),
+            pal_size_y: crate::palette::palette_size_y_cdf(),
+            pal_size_uv: crate::palette::palette_size_uv_cdf(),
+            color_y: crate::palette::color_map_y(),
+            color_uv: crate::palette::color_map_uv(),
+            intrabc: crate::palette::intrabc_cdf(),
         }
     }
 }

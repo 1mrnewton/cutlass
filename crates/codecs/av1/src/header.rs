@@ -702,17 +702,15 @@ fn uncompressed(
     let mut interpolation = 0u8;
     let mut motion_switchable = false;
     let mut use_ref_mvs = false;
+    let mut allow_intrabc = false;
     let (width, upscaled_width, height) = if intra {
         let size = frame_size(bits, sequence, size_override)?;
         // The sample picture stays the frame size. The display size is only
         // consumed so the rest of the header stays aligned.
         read_render_size(bits)?;
-        let mut allow_intrabc = false;
-        if allow_screen {
+        // Intra block copy is only present when the coded width is the upscaled width.
+        if allow_screen && size.0 == size.1 {
             allow_intrabc = bits.read_bool()?;
-        }
-        if allow_intrabc {
-            return Err(CodecError::Unsupported { what: "intrabc" });
         }
         size
     } else {
@@ -828,9 +826,7 @@ fn uncompressed(
     } else {
         0
     };
-    // Intra block copy was already rejected, so the delta bit is present
-    // whenever the quantizer delta is.
-    let delta_lf_present = delta_q_present && bits.read_bool()?;
+    let delta_lf_present = delta_q_present && !allow_intrabc && bits.read_bool()?;
     let delta_lf_res = if delta_lf_present {
         bits.read(2)? as u8
     } else {
@@ -847,8 +843,8 @@ fn uncompressed(
     let mut sharpness = 0u8;
     let mut lf_delta = false;
     let (mut ref_deltas, mut mode_deltas) = inherited_lf(primary_ref, &ref_frames, inherited);
-    if lossless {
-        // A lossless frame replaces whatever was inherited with the defaults.
+    if lossless || allow_intrabc {
+        // Those frames omit the levels and replace whatever was inherited.
         (ref_deltas, mode_deltas) = SavedLoopFilter::defaults().pair();
     } else {
         lf[0] = bits.read(6)? as u8;
@@ -863,12 +859,17 @@ fn uncompressed(
             read_lf_delta_update(bits, &mut ref_deltas, &mut mode_deltas)?;
         }
     }
-    let cdef = if lossless {
+    let cdef = if lossless || allow_intrabc {
         CdefParams::off()
     } else {
         read_cdef_params(bits, sequence)?
     };
-    let restoration = read_lr_params(bits, sequence, lossless && width == upscaled_width, false)?;
+    let restoration = read_lr_params(
+        bits,
+        sequence,
+        lossless && width == upscaled_width,
+        allow_intrabc,
+    )?;
     if restoration.plane.iter().any(|kind| {
         *kind != RESTORE_NONE
             && *kind != RESTORE_SGRPROJ
@@ -945,7 +946,7 @@ fn uncompressed(
         reference_select,
         skip_mode,
         skip_frames,
-        allow_intrabc: false,
+        allow_intrabc,
         allow_high_precision_mv: allow_high_precision,
         interpolation,
         filter_switchable,

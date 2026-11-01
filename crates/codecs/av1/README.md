@@ -120,7 +120,6 @@ Refused with a typed error before a picture is published:
 - A profile other than 0, a second operating point, and the decoder model.
 - 128×128 superblocks, large-scale tile lists, a tile group outside a frame, and non-uniform tile spacing.
 - An OBU without a size field, and a reserved OBU type.
-- Screen-content tools, palette, and intra block copy.
 - Film grain copied from another frame. A show-existing frame does not re-apply grain.
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.

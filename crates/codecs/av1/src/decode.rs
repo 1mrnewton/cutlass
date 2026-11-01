@@ -782,6 +782,61 @@ mod tests {
     }
 
     #[test]
+    fn palette_screen_matches_dav1d() {
+        // aomenc --tune-content=screen, from a scaled screen recording.
+        // The keyframe uses palette colors. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 4] = [
+            include_bytes!("../fixtures/sc_0.obu"),
+            include_bytes!("../fixtures/sc_1.obu"),
+            include_bytes!("../fixtures/sc_2.obu"),
+            include_bytes!("../fixtures/sc_3.obu"),
+        ];
+        let expected = [
+            0x7ea0_91e8_4fa7_1841,
+            0xe747_2a4c_3197_44ed,
+            0x9228_c426_43d5_ed6e,
+            0x8903_d6d5_9e45_fe3e,
+        ];
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
+    fn intrabc_and_integer_motion_match_dav1d() {
+        // aomenc --tune-content=screen on a 256×256 graphic, then the same
+        // picture again. The keyframe copies a block inside the frame. The
+        // inter frame forces integer motion vectors. Digests are dav1d 1.5.3.
+        let frames: [&[u8]; 2] = [
+            include_bytes!("../fixtures/ibc_0.obu"),
+            include_bytes!("../fixtures/ibc_1.obu"),
+        ];
+        let mut sequence = None;
+        for (index, payload) in frames.iter().enumerate() {
+            let (seq, frame) =
+                crate::header::parse_unit(payload, sequence.as_ref()).expect("parse");
+            if index == 0 {
+                assert!(frame.allow_intrabc, "frame {index}");
+            } else {
+                assert!(frame.force_integer_mv, "frame {index}");
+            }
+            sequence = Some(seq);
+        }
+        let expected = [0x8734_a364_5973_d327, 0x8734_a364_5973_d327];
+        let params = CodecParams::video(CodecId::Av1, 256, 256);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), 256 * 256 * 3 / 2);
+            assert_eq!(frame_digest(&packed), expected[index], "frame {index}");
+        }
+    }
+
+    #[test]
     fn lossless_walsh_hadamard_matches_dav1d() {
         // aomenc --lossless=1, from a scaled photographic frame. base_q_idx is 0,
         // so every block is a 4×4 Walsh-Hadamard transform and the frame header

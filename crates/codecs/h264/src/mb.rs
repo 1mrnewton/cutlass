@@ -488,9 +488,6 @@ pub(crate) fn decode_mbs<S: Sample>(
         if addr >= total {
             break;
         }
-        if slice.dmvp {
-            return Err(CodecError::Unsupported { what: "3d" });
-        }
         fresh(pic, addr, mbaff, !next.is_empty())?;
         let base_mode = if slice.adaptive_base {
             match &mut entropy {
@@ -693,19 +690,7 @@ fn dmvp_skip_motion<S: Sample>(
     dpb: &[Frame<S>],
     slice: &Slice<'_>,
 ) -> Option<([i16; 2], i8)> {
-    let base_id = slice.sps.views.first().copied()?;
-    if pic.view_id == base_id {
-        return None;
-    }
-    let base = dpb.iter().find(|frame| {
-        frame.referenced
-            && frame.inter_view
-            && !frame.nonexisting
-            && frame.view_id == base_id
-            && frame.poc == pic.poc
-            && frame.w == pic.w
-            && frame.h == pic.h
-    })?;
+    let base = base_texture(pic, dpb, slice)?;
     let mb = base.mb.first()?;
     if mb.intra {
         return None;
@@ -716,6 +701,136 @@ fn dmvp_skip_motion<S: Sample>(
     }
     // Disparity zero lands on sample (7, 7), the 4×4 at block 5.
     Some((mb.mv0[5], reference))
+}
+
+fn base_texture<'a, S: Sample>(
+    pic: &Frame<S>,
+    dpb: &'a [Frame<S>],
+    slice: &Slice<'_>,
+) -> Option<&'a Frame<S>> {
+    let base_id = slice.sps.views.first().copied()?;
+    if pic.view_id == base_id {
+        return None;
+    }
+    dpb.iter().find(|frame| {
+        frame.referenced
+            && frame.inter_view
+            && !frame.nonexisting
+            && frame.view_id == base_id
+            && frame.poc == pic.poc
+            && frame.w == pic.w
+            && frame.h == pic.h
+    })
+}
+
+/// The coded reference is another picture of this view, not an interview picture.
+fn same_view_reference<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    mb: &Mb,
+    part: &Part,
+) -> bool {
+    let Ok(index) = usize::try_from(ref_of(mb, part.x / 4, part.y / 4, 0)) else {
+        return false;
+    };
+    let Some(&slot) = slice.ref0.get(index) else {
+        return false;
+    };
+    dpb.get(slot)
+        .is_none_or(|frame| frame.view_id == pic.view_id)
+}
+
+/// J.8.2.1.7.2. Unavailable neighbors take the base view's motion when that
+/// motion names the same reference index. The coded difference is added later.
+fn dmvp_temporal_mvp<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    at: Place,
+    part: &Part,
+    mb: &Mb,
+) -> [i16; 2] {
+    let Place { mx, my } = at;
+    let x = part.x / 4;
+    let y = part.y / 4;
+    let reference = ref_of(mb, x, y, 0);
+    let derived = correspond_mv(pic, dpb, slice, part, reference);
+    let mut a = part_motion(pic, mx, my, x as i32 - 1, y as i32, 0, mb);
+    let mut b = part_motion(pic, mx, my, x as i32, y as i32 - 1, 0, mb);
+    let above_right = part_motion(
+        pic,
+        mx,
+        my,
+        x as i32 + (part.w / 4) as i32,
+        y as i32 - 1,
+        0,
+        mb,
+    );
+    let mut c = if above_right.available {
+        above_right
+    } else {
+        part_motion(pic, mx, my, x as i32 - 1, y as i32 - 1, 0, mb)
+    };
+    for neighbor in [&mut a, &mut b, &mut c] {
+        if !neighbor.available || neighbor.reference != reference {
+            neighbor.mv = [0, 0];
+            neighbor.reference = -1;
+            neighbor.available = false;
+        }
+    }
+    if part.w == 16 && part.h == 8 && y == 0 && b.reference == reference {
+        return b.mv;
+    }
+    if part.w == 16 && part.h == 8 && y == 2 && a.reference == reference {
+        return a.mv;
+    }
+    if part.w == 8 && part.h == 16 && x == 0 && a.reference == reference {
+        return a.mv;
+    }
+    if part.w == 8 && part.h == 16 && x == 2 && c.reference == reference {
+        return c.mv;
+    }
+    for neighbor in [&mut a, &mut b, &mut c] {
+        if !neighbor.available || neighbor.reference != reference {
+            neighbor.mv = derived;
+        }
+    }
+    [
+        median(a.mv[0], b.mv[0], c.mv[0]),
+        median(a.mv[1], b.mv[1], c.mv[1]),
+    ]
+}
+
+fn correspond_mv<S: Sample>(
+    pic: &Frame<S>,
+    dpb: &[Frame<S>],
+    slice: &Slice<'_>,
+    part: &Part,
+    reference: i8,
+) -> [i16; 2] {
+    let Some(base) = base_texture(pic, dpb, slice) else {
+        return [0, 0];
+    };
+    let Some(stored) = base.mb.first() else {
+        return [0, 0];
+    };
+    if stored.intra {
+        return [0, 0];
+    }
+    let bx = part.x / 4;
+    let by = part.y / 4;
+    let Some(mv) = stored.mv0.get(by * 4 + bx) else {
+        return [0, 0];
+    };
+    let Some(stored_ref) = stored.ref0.get((by / 2) * 2 + (bx / 2)) else {
+        return [0, 0];
+    };
+    if *stored_ref == reference {
+        *mv
+    } else {
+        [0, 0]
+    }
 }
 
 fn p_skip_mv<S: Sample>(pic: &Frame<S>, mx: usize, my: usize, slice: u16) -> [i16; 2] {
@@ -6321,12 +6436,15 @@ fn decode_inter<S: Sample>(
             what: "inter-layer prediction",
         });
     }
+    if slice.dmvp && sub {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
     if slice.kind == 1 && spec == 0 {
         direct_16(pic, dpb, slice, mx, my, mb)?;
     } else if sub {
         read_sub(pic, dpb, entropy, slice, Place { mx, my }, spec, mb)?;
     } else {
-        read_parts(pic, entropy, slice, mb, (mx, my, spec), layer)?;
+        read_parts(pic, dpb, entropy, slice, mb, (mx, my, spec), layer)?;
     }
     let residual = coded_residual_flag(slice, entropy)?;
     let (luma_cbp, chroma_cbp) = read_cbp(pic, entropy, mx, my, false, mb.slice, slice.sps.chroma)?;
@@ -6433,6 +6551,7 @@ fn decode_inter<S: Sample>(
 
 fn read_parts<S: Sample>(
     pic: &Frame<S>,
+    dpb: &[Frame<S>],
     entropy: &mut Entropy<'_, '_>,
     slice: &Slice<'_>,
     mb: &mut Mb,
@@ -6504,6 +6623,18 @@ fn read_parts<S: Sample>(
         if part.l0 {
             let predicted = if from_layer0[index] {
                 Some(layer_motion(layer, mx, my, part, 0)?.0)
+            } else if slice.dmvp {
+                if !same_view_reference(pic, dpb, slice, mb, part) {
+                    return Err(CodecError::Unsupported { what: "3d" });
+                }
+                Some(dmvp_temporal_mvp(
+                    pic,
+                    dpb,
+                    slice,
+                    Place { mx, my },
+                    part,
+                    mb,
+                ))
             } else {
                 None
             };

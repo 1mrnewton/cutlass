@@ -1837,7 +1837,7 @@ pub(crate) struct Slice<'a> {
     adaptive_residual: bool,
     /// Crop used to resample this slice. A sequence crop is copied here.
     scale: set::SvcScale,
-    /// `dmvp_flag`. A one-macroblock P skip copies the base view's motion.
+    /// `dmvp_flag`. A one-macroblock P picture uses the base view's motion.
     dmvp: bool,
     /// Upsampled reference-layer residual. Empty unless the layers differ in size.
     residual_y: Vec<i32>,
@@ -2208,7 +2208,7 @@ struct Header {
     depth_weight: bool,
     /// Depth parameter set used by this picture. 0 is the sequence range.
     dps_id: u8,
-    /// `dmvp_flag`. A texture P skip copies the base view's motion.
+    /// `dmvp_flag`. A texture P picture uses the base view's motion.
     dmvp: bool,
     /// Crop of this slice. Picture-level scalability copies the sequence crop.
     /// Macroblock-level scalability reads it from the slice header.
@@ -2646,7 +2646,7 @@ fn read_header(
     }
     // `depth_weighted_pred_flag` follows the ordinary header on a predicted
     // depth slice. The ranges scale list-0 luma. A texture P slice reads
-    // `dmvp_flag` instead. Flag 0, a B slice, and a coded partition stay refused.
+    // `dmvp_flag` instead. Flag 0 and a B slice stay refused.
     let mut depth_weight = false;
     let mut dps_id = 0u8;
     let mut dmvp = false;

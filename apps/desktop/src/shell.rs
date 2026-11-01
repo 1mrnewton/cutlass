@@ -22,10 +22,11 @@ use cutlass_editor::{
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Heard, ReaderFactory};
 use cutlass_model::{
-    Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialTransition, MaterialVideo,
-    MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute,
-    TrackId, TrackType, beat_timeline_time, linkage_from_biz, segment_beats, segment_time_mark,
-    source_time_at, time_mark_items, track_holds_beats, user_beats, visible_beats, visible_marks,
+    Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
+    MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
+    TrackAttribute, TrackId, TrackType, beat_timeline_time, linkage_from_biz, segment_beats,
+    segment_time_mark, source_time_at, time_mark_items, track_holds_beats, user_beats,
+    visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -1899,6 +1900,71 @@ impl Shell {
         self.apply(Request::SetConstantSpeed { segment_id, speed })
     }
 
+    fn selected_video(&self) -> Option<&MaterialVideo> {
+        let draft = self.draft()?;
+        let id = self.selected()?;
+        let (segment, _) = locate(draft, id)?;
+        match draft.materials.get(segment.material_id.as_str()) {
+            Some(MaterialRef::Video(video)) => Some(video),
+            _ => None,
+        }
+    }
+
+    /// The selected clip is a video, so Freeze can hold one of its frames.
+    #[must_use]
+    pub fn freeze_enabled(&self) -> bool {
+        self.selected_video().is_some()
+    }
+
+    /// The selected video is holding one frame.
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.selected_video()
+            .is_some_and(|video| video.freeze.is_some())
+    }
+
+    /// Hold the frame under the playhead, or the clip's first frame when the
+    /// playhead is elsewhere. A second click plays the clip again.
+    ///
+    /// The hold is stored on the video. Another clip that uses that same media
+    /// holds the same frame. One undo restores the previous picture.
+    pub fn toggle_freeze(&mut self) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let playhead = self.playhead;
+        let freeze = {
+            let draft = self.session_draft()?;
+            let (segment, _) = locate(draft, &segment_id).ok_or_else(|| {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            })?;
+            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
+            else {
+                return Err(ShellError::Unavailable(
+                    "a freeze belongs on video".to_owned(),
+                ));
+            };
+            if video.freeze.is_some() {
+                None
+            } else {
+                let timestamp = held_frame(draft, segment, playhead)?;
+                Some(FreezeInfo {
+                    source_material_id: video.id.as_str().to_owned(),
+                    source_material_path: video.path.clone(),
+                    reverse_material_path: video.reverse_path.clone(),
+                    timestamp,
+                    rest: Default::default(),
+                })
+            }
+        };
+        self.refuse_locked(&segment_id)?;
+        self.apply(Request::SetFreeze { segment_id, freeze })
+    }
+
     pub fn set_text(&mut self, content: String) -> Result<(), ShellError> {
         let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
         self.refuse_locked(&segment_id)?;
@@ -3069,6 +3135,18 @@ fn medium_span(draft: &Draft, id: &str) -> Option<(TrackType, Micros)> {
         .iter()
         .find(|item| item.id.as_str() == id)?;
     Some((TrackType::Audio, audio.duration))
+}
+
+fn held_frame(draft: &Draft, segment: &Segment, playhead: Micros) -> Result<Micros, ShellError> {
+    let start = segment.target.start;
+    let end = segment.target.end().0;
+    let time = if playhead.0 >= start.0 && playhead.0 < end {
+        playhead
+    } else {
+        start
+    };
+    cutlass_eval::freeze_timestamp(draft, segment, time)
+        .ok_or_else(|| ShellError::Unavailable("the clip has no frame to hold".to_owned()))
 }
 
 /// Twelve pixels, in microseconds. A bad pixel size snaps to nothing.
@@ -5461,6 +5539,105 @@ mod tests {
                 .duration,
             Micros(1_000_000)
         );
+    }
+
+    #[test]
+    fn a_freeze_holds_the_frame_under_the_playhead() {
+        let mut bare = shell();
+        assert!(!bare.freeze_enabled());
+        assert_eq!(
+            bare.toggle_freeze().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(10_000_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(picture);
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 2_000_000)));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(!desktop.freeze_enabled());
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.freeze_enabled());
+        assert_eq!(
+            desktop.toggle_freeze().unwrap_err().to_string(),
+            "a freeze belongs on video"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        assert!(desktop.freeze_enabled());
+        assert!(!desktop.frozen());
+        desktop.seek(Micros(500_000));
+        desktop.toggle_freeze().unwrap();
+        let held = desktop.draft().unwrap().materials.videos[0]
+            .freeze
+            .clone()
+            .expect("held frame");
+        assert_eq!(held.timestamp, Micros(500_000));
+        assert_eq!(held.source_material_id, "picture");
+        assert_eq!(held.source_material_path, "clip");
+        assert!(desktop.frozen());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 2_000_000)
+        );
+        desktop.undo().unwrap();
+        assert!(
+            desktop.draft().unwrap().materials.videos[0]
+                .freeze
+                .is_none()
+        );
+        desktop.redo().unwrap();
+        assert!(desktop.frozen());
+        desktop.toggle_freeze().unwrap();
+        assert!(!desktop.frozen());
+
+        desktop.seek(Micros(5_000_000));
+        desktop.toggle_freeze().unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().materials.videos[0]
+                .freeze
+                .as_ref()
+                .expect("first frame")
+                .timestamp,
+            Micros(0)
+        );
+        desktop.toggle_freeze().unwrap();
+        desktop.set_speed(2.0).unwrap();
+        desktop.seek(Micros(400_000));
+        desktop.toggle_freeze().unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().materials.videos[0]
+                .freeze
+                .as_ref()
+                .expect("sped frame")
+                .timestamp,
+            Micros(800_000)
+        );
+
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::LOCK)
+            .unwrap();
+        let locked = desktop.toggle_freeze().unwrap_err();
+        assert_eq!(locked.to_string(), "the track is locked");
+        assert!(desktop.frozen());
     }
 
     #[test]

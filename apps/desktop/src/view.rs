@@ -1212,6 +1212,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "linkage" => shell.linkage_enabled(),
                                 "magnet" => shell.magnet_enabled(),
                                 "snap" => shell.snap_enabled(),
+                                "freeze" => shell.frozen(),
                                 _ => false,
                             };
                             let tip = match *name {
@@ -1221,6 +1222,8 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "magnet" => "Magnet off",
                                 "snap" if shell.snap_enabled() => "Snap on",
                                 "snap" => "Snap off",
+                                "freeze" if shell.frozen() => "Frozen",
+                                "freeze" => "Freeze",
                                 _ => tip,
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
@@ -1280,6 +1283,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
         "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
         | "lock" | "linkage" | "magnet" | "snap" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
+        "freeze" => shell.freeze_enabled(),
         _ => false,
     }
 }
@@ -1327,6 +1331,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
             shell.toggle_snap();
             Ok(())
         }
+        "freeze" => shell.toggle_freeze(),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -1557,7 +1562,10 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     }
     let width = 132.0;
     let row_height = 28.0;
-    let labels = ["Copy", "Cut", "Delete", "Paste"];
+    let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
+    if shell.freeze_enabled() {
+        labels.insert(0, "Freeze");
+    }
     let rect = Rect::from_min_size(
         Pos2::new(menu.x, menu.y),
         Vec2::new(width, row_height * labels.len() as f32),
@@ -1597,6 +1605,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
                 "Copy" => shell.copy_selected(),
                 "Cut" => shell.cut_selected(),
                 "Paste" => shell.paste(),
+                "Freeze" => shell.toggle_freeze(),
                 _ => shell.remove_selected(),
             };
             if let Err(error) = result {

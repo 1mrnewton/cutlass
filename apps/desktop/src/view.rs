@@ -1211,6 +1211,7 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "lock" => shell.guides_locked(),
                                 "linkage" => shell.linkage_enabled(),
                                 "magnet" => shell.magnet_enabled(),
+                                "snap" => shell.snap_enabled(),
                                 _ => false,
                             };
                             let tip = match *name {
@@ -1218,6 +1219,8 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
                                 "linkage" => "Linkage off",
                                 "magnet" if shell.magnet_enabled() => "Magnet on",
                                 "magnet" => "Magnet off",
+                                "snap" if shell.snap_enabled() => "Snap on",
+                                "snap" => "Snap off",
                                 _ => tip,
                             };
                             if toolbar_button(ui, name, tip, enabled, active).clicked() {
@@ -1275,7 +1278,7 @@ fn toolbar_button(
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
         "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
-        | "lock" | "linkage" | "magnet" => true,
+        | "lock" | "linkage" | "magnet" | "snap" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
         _ => false,
     }
@@ -1320,6 +1323,10 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         }
         "linkage" => shell.toggle_linkage(),
         "magnet" => shell.toggle_magnet(),
+        "snap" => {
+            shell.toggle_snap();
+            Ok(())
+        }
         _ => Ok(()),
     };
     if let Err(error) = result {

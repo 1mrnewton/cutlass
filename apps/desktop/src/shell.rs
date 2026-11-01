@@ -337,6 +337,8 @@ pub struct Shell {
     selected_mark: Option<GuideMark>,
     guides_shown: bool,
     guides_locked: bool,
+    /// Auto snap. A new window starts on. The draft does not store it.
+    snapping: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
     /// The marker tool drops a mark on the ruler or on a clip.
@@ -396,6 +398,7 @@ impl Shell {
             selected_mark: None,
             guides_shown: true,
             guides_locked: false,
+            snapping: true,
             blade: false,
             marking: false,
             selected_marker: None,
@@ -1136,7 +1139,7 @@ impl Shell {
             pointer: Pointer { x, y: 0.0 },
             scale: self.scale(),
             playhead: self.playhead,
-            snap_threshold: snap_window(self.pixel_size),
+            snap_threshold: self.snap_threshold(),
             guides: self.guide_times(),
         };
         let draft = self.session_draft()?;
@@ -1165,7 +1168,7 @@ impl Shell {
             pointer,
             scale,
             playhead: self.playhead,
-            snap_threshold: snap_window(self.pixel_size),
+            snap_threshold: self.snap_threshold(),
             guides: guides.clone(),
         };
         let draft = self.session_draft()?;
@@ -1187,7 +1190,7 @@ impl Shell {
                 draft,
                 raw,
                 self.playhead,
-                snap_window(self.pixel_size),
+                self.snap_threshold(),
                 Some(&segment_id),
                 &guides,
             );
@@ -1369,7 +1372,7 @@ impl Shell {
                 pointer: Pointer { x, y },
                 scale: self.scale(),
                 playhead: self.playhead,
-                snap_threshold: snap_window(self.pixel_size),
+                snap_threshold: self.snap_threshold(),
                 guides: self.guide_times(),
             };
             let draft = self.session_draft()?;
@@ -1628,6 +1631,25 @@ impl Shell {
     #[must_use]
     pub fn guides_locked(&self) -> bool {
         self.guides_locked
+    }
+
+    /// Auto snap. A new window starts on. The choice lasts until the window closes.
+    #[must_use]
+    pub fn snap_enabled(&self) -> bool {
+        self.snapping
+    }
+
+    /// Turn alignment on or off. This does not move a clip and is not an undo step.
+    pub fn toggle_snap(&mut self) {
+        self.snapping = !self.snapping;
+    }
+
+    fn snap_threshold(&self) -> Micros {
+        if self.snapping {
+            snap_window(self.pixel_size)
+        } else {
+            Micros(-1)
+        }
     }
 
     pub fn toggle_guides(&mut self) {
@@ -5438,6 +5460,64 @@ mod tests {
                 .target
                 .duration,
             Micros(1_000_000)
+        );
+    }
+
+    #[test]
+    fn snapping_starts_on_and_a_drag_keeps_the_pointer_when_it_is_off() {
+        let mut bare = shell();
+        assert!(bare.snap_enabled());
+        bare.toggle_snap();
+        assert!(!bare.snap_enabled());
+
+        let temp = Temp::new();
+        trim_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.snap_enabled());
+        let id = desktop.draft().unwrap().tracks[0].segments[0].id.clone();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.seek(Micros(1_500_000));
+        desktop.preview_move(id.clone(), lane_time(&desktop, 1_501_000.0), y);
+        assert_eq!(
+            desktop.move_preview().expect("the drag is showing").start,
+            Micros(1_500_000)
+        );
+        let revision = desktop.revision();
+        desktop.toggle_snap();
+        assert!(!desktop.snap_enabled());
+        assert_eq!(desktop.revision(), revision);
+        desktop.preview_move(id.clone(), lane_time(&desktop, 1_501_000.0), y);
+        assert_eq!(
+            desktop.move_preview().expect("the drag is showing").start,
+            Micros(1_501_000)
+        );
+        assert!(desktop.snap_line().is_none());
+        desktop
+            .drag_segment(id.clone(), lane_time(&desktop, 1_501_000.0), y)
+            .unwrap();
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(1_501_000)
+        );
+        desktop.undo().unwrap();
+        assert!(!desktop.snap_enabled());
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target.start,
+            Micros(0)
+        );
+
+        desktop.preview_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_501_000.0));
+        assert_eq!(
+            desktop.preview_span(&id).expect("the edge is showing").1,
+            Micros(1_501_000)
+        );
+        desktop.toggle_snap();
+        desktop.seek(Micros(1_500_000));
+        desktop.preview_edge(id.clone(), TrimEdge::End, lane_time(&desktop, 1_501_000.0));
+        assert_eq!(
+            desktop.preview_span(&id).expect("the edge is showing").1,
+            Micros(1_500_000)
         );
     }
 

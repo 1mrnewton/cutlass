@@ -7483,9 +7483,7 @@ fn read_sub<S: Sample>(
     if slice.vsp {
         for kind in kinds {
             let (_, _, w, h) = sub_shape(super::syntax_kind(slice.kind), kind);
-            let wide = w == 8 && (h == 8 || h == 4);
-            let tall = w == 4 && h == 8;
-            if !wide && !tall {
+            if !matches!((w, h), (8, 8) | (8, 4) | (4, 8) | (4, 4)) {
                 return Err(CodecError::Unsupported { what: "3d" });
             }
         }
@@ -7591,7 +7589,7 @@ fn read_sub<S: Sample>(
                 };
                 if synthesis {
                     // J.8.2.1 derives the disparity from the macroblock partition.
-                    // An 8×4 sub-partition still samples its 8×8.
+                    // A 4×4, 4×8, or 8×4 sub-partition still samples its 8×8.
                     let parent = Part {
                         x: x0,
                         y: y0,

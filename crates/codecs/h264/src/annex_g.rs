@@ -1222,6 +1222,48 @@ fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
 }
 
 #[test]
+fn a_4x4_view_synthesis_sub_partition_uses_the_8x8_corners() {
+    let base = dmvp_base_idr();
+    let depth = vsp_block_depth();
+    let view = vsp_4x4_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| top_left_block_shift(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| depth_block(picture))
+            .count(),
+        1
+    );
+    assert!(pictures.iter().all(|picture| !corner_4x4_only(picture)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_4x8_view_synthesis_sub_partition_uses_the_8x8_corners() {
     let base = dmvp_base_idr();
     let depth = vsp_edge_depth();
@@ -1732,6 +1774,30 @@ fn vsp_texture() -> Vec<u8> {
     annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_p_slice())
 }
 
+fn vsp_4x4_texture() -> Vec<u8> {
+    annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_4x4_slice())
+}
+
+fn vsp_4x4_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(3);
+    w.ue(3);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    for _ in 0..4 {
+        w.bit(true);
+        w.bit(true);
+    }
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
 fn vsp_4x8_texture() -> Vec<u8> {
     annex_b_extension(2, 21, &[0x80, 0xA0], &vsp_4x8_slice())
 }
@@ -1902,6 +1968,34 @@ fn four_pixel_shift(picture: &VideoOutput) -> bool {
         .iter()
         .chain(picture.picture.v())
         .all(|sample| *sample == 90)
+}
+
+fn corner_4x4_only(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let upper = (0..4).all(|row| {
+        let start = row * 16;
+        y[start..start + 8].iter().all(|sample| *sample == 100)
+            && y[start + 8..start + 16].iter().all(|sample| *sample == 180)
+    });
+    let lower = (4..8).all(|row| {
+        let start = row * 16;
+        y[start..start + 4].iter().all(|sample| *sample == 100)
+            && y[start + 4..start + 16].iter().all(|sample| *sample == 180)
+    });
+    let bottom = (8..16).all(|row| {
+        let start = row * 16;
+        y[start..start + 8].iter().all(|sample| *sample == 100)
+            && y[start + 8..start + 16].iter().all(|sample| *sample == 180)
+    });
+    upper
+        && lower
+        && bottom
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
 }
 
 fn upper_8x4_stays_split(picture: &VideoOutput) -> bool {

@@ -4033,6 +4033,80 @@ mod tests {
     }
 
     #[test]
+    fn ten_bit_film_grain_on_444_and_422_matches_dav1d() {
+        // aomenc --film-grain-test=1 --bit-depth=10, 64×64, two frames. CDEF
+        // and restoration are off. One stream is profile 1 4:4:4 and one is
+        // profile 2 4:2:2. Samples stay in the low 10 bits. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/grain-444-10.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                cutlass_decode::PixelFormat::Yuv444p10,
+                64 * 64 * 6,
+                [0x97e3_411c_470e_6d86, 0xb0de_0a05_8938_67be],
+            ),
+            (
+                include_bytes!("../fixtures/grain-422-10.ivf").as_slice(),
+                2,
+                true,
+                false,
+                cutlass_decode::PixelFormat::Yuv422p10,
+                64 * 64 * 4,
+                [0x8104_4273_3a51_f53a, 0x00ea_ecc5_a61d_0d78],
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, pixel, length, expected) in cases {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 2, "profile {profile}");
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.bit_depth, 10);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert!(key.grain.apply);
+            assert_eq!(key.grain.sub_x, sub_x);
+            assert_eq!(key.grain.sub_y, sub_y);
+            let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+            assert!(!inter.intra);
+            assert!(inter.grain.apply);
+            let params = CodecParams::video(CodecId::Av1, 64, 64);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            for (index, payload) in frames.iter().enumerate() {
+                let shown = decoder
+                    .push(&cutlass_decode::Packet {
+                        stream: 0,
+                        data: payload.to_vec(),
+                        pts: index as i64,
+                        duration: 1,
+                        timescale: 30,
+                        keyframe: index == 0,
+                        side: Vec::new(),
+                    })
+                    .unwrap_or_else(|error| panic!("profile {profile} frame {index}: {error:?}"));
+                assert_eq!(shown.len(), 1, "profile {profile} frame {index}");
+                let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                    panic!("picture");
+                };
+                let info = picture.info();
+                assert_eq!(info.pixel, pixel, "profile {profile} frame {index}");
+                let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("cpu");
+                };
+                assert_eq!(bytes.len(), length, "profile {profile} frame {index}");
+                assert_eq!(
+                    frame_digest(bytes),
+                    expected[index],
+                    "profile {profile} frame {index}"
+                );
+            }
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
     fn film_grain_on_444_and_422_matches_dav1d() {
         // aomenc --film-grain-test=1, 64×64, two frames. CDEF and restoration
         // are off. One stream is profile 1 4:4:4 and one is profile 2 4:2:2.

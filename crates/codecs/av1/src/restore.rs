@@ -134,10 +134,18 @@ fn count_units(unit: usize, frame: usize) -> usize {
     (frame.saturating_add(unit >> 1) / unit.max(1)).max(1)
 }
 
+/// Restoration-type CDFs from the frame context. Later units in the tile see the update.
+pub(crate) struct RestoreCdf<'a> {
+    pub(crate) update: bool,
+    pub(crate) wiener: &'a mut [u16],
+    pub(crate) sgrproj: &'a mut [u16],
+    pub(crate) kind: &'a mut [u16],
+}
+
 /// Read the restoration units covered by one superblock.
 pub fn read_superblock(
     symbols: &mut SymbolDecoder<'_>,
-    update: bool,
+    cdf: &mut RestoreCdf<'_>,
     frame: &FrameInfo,
     grid: &mut Grid,
     row: usize,
@@ -161,16 +169,23 @@ pub fn read_superblock(
         for unit_row in row_start..row_end {
             for unit_col in col_start..col_end {
                 let decoded = match kind {
-                    RESTORE_WIENER => {
-                        read_wiener_unit(symbols, update, plane > 0, &mut grid.wiener_ref[plane])?
+                    RESTORE_WIENER => read_wiener_unit(
+                        symbols,
+                        cdf.update,
+                        plane > 0,
+                        &mut grid.wiener_ref[plane],
+                        cdf.wiener,
+                    )?,
+                    RESTORE_SGRPROJ => {
+                        read_sgr_unit(symbols, cdf.update, &mut grid.reference[plane], cdf.sgrproj)?
                     }
-                    RESTORE_SGRPROJ => read_sgr_unit(symbols, update, &mut grid.reference[plane])?,
                     _ => read_switchable_unit(
                         symbols,
-                        update,
+                        cdf.update,
                         plane > 0,
                         &mut grid.wiener_ref[plane],
                         &mut grid.reference[plane],
+                        cdf.kind,
                     )?,
                 };
                 if let Some(slot) = grid.index(plane, unit_row, unit_col) {
@@ -187,9 +202,9 @@ fn read_wiener_unit(
     update: bool,
     chroma: bool,
     reference: &mut [[i32; 3]; 2],
+    cdf: &mut [u16],
 ) -> Result<Unit, CodecError> {
-    let mut cdf = [11570u16, 32768, 0];
-    if symbols.read(&mut cdf, update)? == 0 {
+    if symbols.read(cdf, update)? == 0 {
         return Ok(empty_unit());
     }
     read_wiener_coeffs(symbols, chroma, reference)
@@ -201,9 +216,9 @@ fn read_switchable_unit(
     chroma: bool,
     wiener: &mut [[i32; 3]; 2],
     sgr: &mut [i32; 2],
+    cdf: &mut [u16],
 ) -> Result<Unit, CodecError> {
-    let mut cdf = [9413u16, 22581, 32768, 0];
-    match symbols.read(&mut cdf, update)? {
+    match symbols.read(cdf, update)? {
         1 => read_wiener_coeffs(symbols, chroma, wiener),
         2 => read_sgr_coeffs(symbols, sgr),
         _ => Ok(empty_unit()),
@@ -251,9 +266,9 @@ fn read_sgr_unit(
     symbols: &mut SymbolDecoder<'_>,
     update: bool,
     reference: &mut [i32; 2],
+    cdf: &mut [u16],
 ) -> Result<Unit, CodecError> {
-    let mut cdf = [16855u16, 32768, 0];
-    if symbols.read(&mut cdf, update)? == 0 {
+    if symbols.read(cdf, update)? == 0 {
         return Ok(empty_unit());
     }
     read_sgr_coeffs(symbols, reference)

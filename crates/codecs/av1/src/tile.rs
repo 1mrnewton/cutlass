@@ -876,6 +876,10 @@ pub(crate) struct Cdfs {
     intra_y: Vec<u16>,
     delta_q: Vec<u16>,
     delta_lf: Vec<u16>,
+    /// `use_wiener`, `use_sgrproj`, and `restoration_type`. One row each.
+    wiener: Vec<u16>,
+    sgrproj: Vec<u16>,
+    restore_type: Vec<u16>,
     segment_id: Vec<u16>,
     segment_pred: Vec<u16>,
     use_filter_intra: Vec<u16>,
@@ -1141,7 +1145,13 @@ impl<'a, 'r, S: Pix> Tile<'a, 'r, S> {
             while col < part.col_end {
                 self.clear_decoded(row, col);
                 self.read_deltas = frame.delta_q_present;
-                restore::read_superblock(&mut self.symbols, self.update, frame, lr, row, col, sb)?;
+                let mut cdf = restore::RestoreCdf {
+                    update: self.update,
+                    wiener: &mut self.cdfs.wiener,
+                    sgrproj: &mut self.cdfs.sgrproj,
+                    kind: &mut self.cdfs.restore_type,
+                };
+                restore::read_superblock(&mut self.symbols, &mut cdf, frame, lr, row, col, sb)?;
                 let root = if sb == 32 { BLOCK_128X128 } else { 12 };
                 self.decode_partition(row, col, root)?;
                 col += sb;
@@ -7010,6 +7020,9 @@ impl Cdfs {
         zero_counters(&mut self.intra_y, 14);
         zero_counters(&mut self.delta_q, 5);
         zero_counters(&mut self.delta_lf, 5);
+        zero_counters(&mut self.wiener, 3);
+        zero_counters(&mut self.sgrproj, 3);
+        zero_counters(&mut self.restore_type, 4);
         zero_counters(&mut self.segment_id, 9);
         zero_counters(&mut self.segment_pred, 3);
         zero_counters(&mut self.use_filter_intra, 3);
@@ -7105,6 +7118,9 @@ impl Cdfs {
             intra_y: DEFAULT_Y_MODE_CDF.to_vec(),
             delta_q: vec![28160, 32120, 32677, 32768, 0],
             delta_lf: [28160u16, 32120, 32677, 32768, 0].repeat(5),
+            wiener: vec![11570, 32768, 0],
+            sgrproj: vec![16855, 32768, 0],
+            restore_type: vec![9413, 22581, 32768, 0],
             segment_id: SEGMENT_ID_CDF.to_vec(),
             segment_pred: [16384u16, 32768, 0].repeat(3),
             use_filter_intra: FILTER_INTRA_CDF.to_vec(),

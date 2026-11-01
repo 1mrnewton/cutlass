@@ -58,7 +58,7 @@ Implemented for that scope, and matched against dav1d on the keyframe fixtures n
 - Wiener, self-guided, and switchable loop restoration on a keyframe.
 - Film grain on the shown picture: luma, chroma, overlap, chroma grain scaled from luma, and parameters copied from a reference. The reference is stored before grain.
 
-Within-frame CDF adaptation is implemented. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.
+Within-frame CDF adaptation is implemented, including the restoration type read for each unit. The encoder leaves CDEF, restoration, super resolution, and film grain off. The decoder applies those tools when a supported keyframe sends them.
 
 The encoder emits keyframes only. Its quality and rate tests passed in `cargo test -p cutlass-av1` on this machine. It does not emit inter frames.
 

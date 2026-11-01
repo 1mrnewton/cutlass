@@ -1570,6 +1570,28 @@ mod tests {
     }
 
     #[test]
+    fn restoration_units_keep_the_updated_cdf() {
+        // 512×128 noise. Luma is self-guided with 128×128 units, four of them.
+        // CDF update is on, so each unit after the first reads the adapted
+        // probability. Chroma selects no restoration. The digest is
+        // `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/restore-cdf.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (_, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(!frame.disable_cdf_update);
+        assert_eq!(frame.restoration.plane[0], crate::header::RESTORE_SGRPROJ);
+        assert_eq!(frame.restoration.plane[1], crate::header::RESTORE_NONE);
+        assert_eq!(frame.restoration.plane[2], crate::header::RESTORE_NONE);
+        assert_eq!(frame.restoration.unit[0], 128);
+        let params = CodecParams::video(CodecId::Av1, 512, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 512 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x9517_c294_09ce_d34f);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn single_reference_frames_match_dav1d() {
         // aomenc 64x64, tools that this decoder still rejects turned off.
         // Digests are dav1d 1.5.3 output of those three frames.

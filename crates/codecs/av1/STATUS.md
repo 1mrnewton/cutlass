@@ -60,6 +60,7 @@ Matched exactly against dav1d 1.5.3, with default in-loop filters:
 - One embedded `aomenc` keyframe whose luma uses the self-guided restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
 - One embedded `aomenc` keyframe whose luma uses the Wiener restoration filter. Chroma selects no restoration. The shown picture matches dav1d.
 - One embedded `aomenc` keyframe whose luma chooses the restoration filter per unit. Chroma selects no restoration. The shown picture matches dav1d.
+- One 512×128 keyframe whose luma uses self-guided restoration on four 128×128 units. CDF update is on, so each unit after the first reads the adapted probability. Chroma selects no restoration. The picture matches dav1d.
 - Film grain on embedded `aomenc` 64×64 frames: luma-only grain, lag-1 chroma grain with overlap, chroma grain scaled from luma at lag 2, and a second frame that predicts the first. The shown pictures match dav1d. The second frame matches only if the reference was stored before grain.
 - Three embedded `aomenc` 64×64 frames. The two inter frames copy the keyframe's grain parameters and keep their own seed. The shown pictures match dav1d. A show-existing frame shows the stored picture from before grain. Predicting the next frame after that still matches dav1d. A copy that names an empty slot is refused, and the sequence stays usable.
 - One embedded `aomenc` 128×128 keyframe in a uniform 2×2 tile grid. Each tile is its own entropy stream. Prediction does not cross a tile edge. The shown picture matches dav1d.

@@ -929,6 +929,50 @@ fn a_3d_avc_header_is_an_intra_picture() {
 }
 
 #[test]
+fn a_predicted_3d_depth_picture_copies_its_reference() {
+    let idr = three_d_pcm();
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &idr);
+    pictures.extend(push_pictures(&mut decoder, &three_d_skip(false)));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    assert!(pictures.iter().all(split_depth));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = idr.clone();
+        annex.extend(three_d_skip(false));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &annex).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+    let mut decoder = open();
+    let held = push_pictures(&mut decoder, &idr);
+    assert!(held.is_empty());
+    let err = decoder
+        .push(&Packet::video(three_d_skip(true), 0, 1, 30, false))
+        .expect_err("weighted");
+    assert!(matches!(err, CodecError::Unsupported { what: "3d" }));
+    let picture = decoder.drain().expect("drain");
+    assert_eq!(picture.len(), 1);
+    assert!(split_depth(&picture[0]));
+    let mut decoder = open();
+    assert!(push_pictures(&mut decoder, &idr).is_empty());
+    let err = decoder
+        .push(&Packet::video(
+            annex_b_extension(1, 21, &[0x80, 0x20], &three_d_skip_body(false)),
+            0,
+            1,
+            30,
+            false,
+        ))
+        .expect_err("texture");
+    assert!(
+        matches!(err, CodecError::Unsupported { what: "3d" }),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn an_annex_a_picture_survives_svc_mvc_and_3d_nal_units() {
     let annex = base_with_extensions();
     let picture = decode(&annex);
@@ -1141,6 +1185,53 @@ fn mvc_annex(header: &[u8; 3]) -> Vec<u8> {
         &idr_slice(true, true, false),
     ));
     out
+}
+
+fn split_depth(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let luma = y.chunks(16).all(|row| {
+        row[..8].iter().all(|sample| *sample == 100) && row[8..].iter().all(|sample| *sample == 180)
+    });
+    luma && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
+}
+
+fn three_d_pcm() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(25);
+    w.align_zeros();
+    for _row in 0..16 {
+        for col in 0..16 {
+            w.bytes.push(if col < 8 { 100 } else { 180 });
+        }
+    }
+    w.bytes.extend(std::iter::repeat_n(90, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    let mut out = annex_b_nal(3, 15, &three_d_subset(false));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(3, 21, &[0x80, 0x42], &w.bytes));
+    out
+}
+
+fn three_d_skip(weighted: bool) -> Vec<u8> {
+    annex_b_extension(1, 21, &[0x80, 0x60], &three_d_skip_body(weighted))
+}
+
+fn three_d_skip_body(weighted: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 1, 1, true, false);
+    w.bit(weighted);
+    if !weighted {
+        w.ue(1);
+        w.trailing();
+    }
+    w.bytes
 }
 
 fn three_d_annex(header: &[u8; 2]) -> Vec<u8> {

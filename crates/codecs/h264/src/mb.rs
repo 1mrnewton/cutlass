@@ -457,7 +457,7 @@ pub(crate) fn decode_mbs<S: Sample>(
                         fresh(pic, addr, mbaff, !next.is_empty())?;
                         let flag = skip_field_flag(pic, bits, slice_id, addr, mbaff, run - left)?;
                         if vs_skip {
-                            if slice.kind != 0 {
+                            if slice.kind > 1 {
                                 return Err(CodecError::Unsupported { what: "3d" });
                             }
                             vsp_skip_mb(pic, dpb, slice, slice_id, addr, qp, flag)?;
@@ -713,7 +713,9 @@ fn vsp_ref_exist<S: Sample>(pic: &Frame<S>, dpb: &[Frame<S>], slice: &Slice<'_>)
     listed(&slice.ref0) || (slice.kind == 1 && listed(&slice.ref1))
 }
 
-/// J.8.2.1.3. `MbVSSkipFlag` 1 splits the skip into four 8×8 disparities.
+/// J.8.2.1.3 and J.8.2.1.6. `MbVSSkipFlag` 1 splits the skip into four 8×8
+/// disparities. A B slice also fills list 1 when that list names an interview
+/// picture. `TextureFirstFlag` 1 uses reference view 0 for both lists.
 fn vsp_skip_mb<S: Sample>(
     pic: &mut Frame<S>,
     dpb: &[Frame<S>],
@@ -734,7 +736,13 @@ fn vsp_skip_mb<S: Sample>(
     mb.off_a = slice.off_a as i8;
     mb.off_b = slice.off_b as i8;
     mb.deblock = slice.deblock;
-    let reference = first_interview(pic, dpb, slice)?;
+    let reference = interview_index(pic, dpb, &slice.ref0).ok_or(CodecError::Malformed {
+        at_bit: 0,
+        what: "3d",
+    })?;
+    let reference1 = (slice.kind == 1)
+        .then(|| interview_index(pic, dpb, &slice.ref1))
+        .flatten();
     for index in 0..4 {
         let part = Part {
             x: (index & 1) * 8,
@@ -744,8 +752,18 @@ fn vsp_skip_mb<S: Sample>(
             l0: true,
             l1: false,
         };
+        let motion = synthesis_motion(pic, dpb, slice, &part)?;
         fill_ref(&mut mb.ref0, &mut mb.uses0, &part, reference);
-        store_mv(&mut mb, &part, synthesis_motion(pic, dpb, slice, &part)?, 0);
+        store_mv(&mut mb, &part, motion, 0);
+        if let Some(reference1) = reference1 {
+            let part1 = Part {
+                l0: false,
+                l1: true,
+                ..part
+            };
+            fill_ref(&mut mb.ref1, &mut mb.uses1, &part1, reference1);
+            store_mv(&mut mb, &part1, motion, 1);
+        }
     }
     predict_inter(pic, dpb, slice, mx, my, &mb)?;
     bind_refs(&mut mb, slice);
@@ -754,12 +772,8 @@ fn vsp_skip_mb<S: Sample>(
     Ok(())
 }
 
-fn first_interview<S: Sample>(
-    pic: &Frame<S>,
-    dpb: &[Frame<S>],
-    slice: &Slice<'_>,
-) -> Result<i8, CodecError> {
-    for (index, &slot) in slice.ref0.iter().enumerate() {
+fn interview_index<S: Sample>(pic: &Frame<S>, dpb: &[Frame<S>], list: &[usize]) -> Option<i8> {
+    for (index, &slot) in list.iter().enumerate() {
         if slot == NO_PICTURE {
             continue;
         }
@@ -767,19 +781,10 @@ fn first_interview<S: Sample>(
             .get(slot)
             .is_some_and(|frame| frame.view_id != pic.view_id)
         {
-            let Ok(reference) = i8::try_from(index) else {
-                return Err(CodecError::Malformed {
-                    at_bit: 0,
-                    what: "3d",
-                });
-            };
-            return Ok(reference);
+            return i8::try_from(index).ok();
         }
     }
-    Err(CodecError::Malformed {
-        at_bit: 0,
-        what: "3d",
-    })
+    None
 }
 
 /// J.8.2.1.2 for one macroblock. `TextureFirstFlag` is 1, so the disparity

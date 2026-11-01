@@ -5621,6 +5621,32 @@ mod tests {
     }
 
     #[test]
+    fn sharp_interpolation_matches_dav1d() {
+        // The first two frames of a 3840×2160 recording. The inter frame's
+        // interpolation filter is eight-tap sharp. Treating it as eight-tap
+        // regular changes the picture. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/sharp-interp.ivf"));
+        assert_eq!(frames.len(), 2);
+        let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        let (_, inter) = crate::header::parse_unit(frames[1], Some(&sequence)).expect("inter");
+        assert!(key.intra);
+        assert!(!inter.intra);
+        assert!(!inter.filter_switchable);
+        assert_eq!(inter.interpolation, 2);
+        assert_eq!(inter.width, 3840);
+        assert_eq!(inter.height, 2160);
+        let params = CodecParams::video(CodecId::Av1, 3840, 2160);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let key_pic = push_frame(&mut decoder, frames[0], 0);
+        let inter_pic = push_frame(&mut decoder, frames[1], 1);
+        assert_eq!(key_pic.len(), 3840 * 2160 * 3 / 2);
+        assert_eq!(inter_pic.len(), key_pic.len());
+        assert_eq!(frame_digest(&key_pic), 0x5ae5_a87a_c4cf_025b);
+        assert_eq!(frame_digest(&inter_pic), 0x7f8d_02fb_2db4_6dad);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn vertical_chroma_position_matches_dav1d() {
         // aomenc --chroma-sample-position=vertical, 128×128. The published chroma
         // position is vertical. The digest is `ffmpeg -c:v libdav1d -threads 1`.

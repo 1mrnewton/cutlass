@@ -44,7 +44,7 @@ fn shown_size(bytes: &[u8]) -> Result<(u32, u32), CodecError> {
 
 ## Support
 
-The decoder's scope is progressive 8-bit 4:2:0, 8-bit monochrome, and 10-bit 4:2:0, `seq_profile` 0, the selected operating point, and dimensions up to 4096×2304. An edge above 4096 is `Limit`. Monochrome output is one gray plane. 10-bit output is little-endian 4:2:0.
+The decoder's scope is progressive 8-bit 4:2:0, 8-bit monochrome, and 10-bit 4:2:0, `seq_profile` 0, the selected operating point, and a picture inside the largest defined level. That level is 6.3: width 16384, height 8704, and at most 35,651,584 luma samples. A picture past every defined level is `Limit`. Monochrome output is one gray plane. 10-bit output is little-endian 4:2:0.
 
 Implemented for that scope, and matched against dav1d on the keyframe fixtures named in `STATUS.md`:
 
@@ -122,7 +122,7 @@ Refused with a typed error before a picture is published:
 - Short reference signaling.
 - An interintra wedge, and a warp of a scaled reference.
 
-Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run.
+Colour primaries, transfer, matrix, and chroma sample position are published on the picture. A display size that differs from the frame size is published too, and the sample buffer stays the frame size. Timing info is kept. Decoder-model info is parsed and the samples still decode. The schedule is not run. `seq_level_idx` is stored. A 4352×64 level 3.0 picture matches dav1d. A picture past every defined level is `Limit` before the frame is allocated.
 
 The encoder does not emit inter frames, CDEF, restoration, super resolution, or film grain. Its blocks stay DC-predicted 4×4 and 8×8.
 

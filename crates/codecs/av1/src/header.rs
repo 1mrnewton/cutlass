@@ -98,6 +98,8 @@ pub struct Sequence {
     pub operating_points: u8,
     /// `operating_point_idc` for each point. A zero mask means every layer.
     pub operating_idc: [u16; 32],
+    /// `seq_level_idx` for each operating point. 31 means the maximum-parameters level.
+    pub seq_level_idx: [u8; 32],
     /// Present when `timing_info_present_flag` is 1.
     pub timing: Option<Timing>,
     /// Present when `decoder_model_info_present_flag` is 1.
@@ -617,6 +619,20 @@ fn obu_length_matches(obu: &[u8]) -> Result<(), CodecError> {
     Ok(())
 }
 
+/// Annex A. Level 6.3 is the largest defined picture: 16384 by 8704, and at most
+/// 35,651,584 luma samples. A lower declared level does not tighten this, and
+/// `seq_level_idx` 31 does not raise it.
+pub(crate) fn within_defined_level(width: u32, height: u32) -> bool {
+    const MAX_PIC: u64 = 35_651_584;
+    const MAX_H: u32 = 16_384;
+    const MAX_V: u32 = 8_704;
+    width > 0
+        && height > 0
+        && width <= MAX_H
+        && height <= MAX_V
+        && u64::from(width).saturating_mul(u64::from(height)) <= MAX_PIC
+}
+
 fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let profile = bits.read(3)? as u8;
     if profile > 2 {
@@ -646,10 +662,11 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
     let mut delta_id = 0u8;
     let mut operating_points = 0u8;
     let mut operating_idc = [0u16; 32];
+    let mut seq_level_idx = [0u8; 32];
     let mut timing = None;
     let mut decoder_model = None;
     if reduced {
-        let _level = bits.read(5)?;
+        seq_level_idx[0] = bits.read(5)? as u8;
     } else {
         if bits.read_bool()? {
             let num_units_in_display_tick = bits.read(32)?;
@@ -692,7 +709,8 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
                 return Err(malformed(bits, "operating point"));
             }
             operating_idc[usize::from(index)] = idc;
-            let level = bits.read(5)?;
+            let level = bits.read(5)? as u8;
+            seq_level_idx[usize::from(index)] = level;
             if level > 7 {
                 let _tier = bits.read(1)?;
             }
@@ -804,6 +822,7 @@ fn parse_sequence(bits: &mut BitReader<'_>) -> Result<Sequence, CodecError> {
         use_128,
         operating_points,
         operating_idc,
+        seq_level_idx,
         timing,
         decoder_model,
         color_primaries: color.color_primaries,
@@ -2797,6 +2816,16 @@ mod tests {
             frame.mi_cols,
             frame.mi_rows,
         );
+    }
+
+    #[test]
+    fn a_picture_past_every_defined_level_does_not_fit() {
+        assert!(super::within_defined_level(4352, 64));
+        assert!(super::within_defined_level(16_384, 2176));
+        assert!(super::within_defined_level(4096, 2304));
+        assert!(!super::within_defined_level(16_384, 2177));
+        assert!(!super::within_defined_level(16_385, 64));
+        assert!(!super::within_defined_level(64, 8705));
     }
 
     fn include_bytes_or_skip() -> &'static [u8] {

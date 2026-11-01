@@ -459,7 +459,7 @@ impl Av1Decoder {
             frame.render_height = reference.render_height;
         }
         let stored = self.store(&frame, &held);
-        let tags = shown_tags(&sequence, &frame);
+        let tags = shown_tags(&sequence, &frame, self.operating_point);
         let monochrome = sequence.monochrome;
         self.sequence = Some(sequence);
         if !frame.show_frame {
@@ -916,7 +916,7 @@ impl Av1Decoder {
             true,
             true,
         )?;
-        let tags = shown_tags(&sequence, &frame);
+        let tags = shown_tags(&sequence, &frame, self.operating_point);
         let shown = if frame.show_frame {
             Some(publish(
                 &picture,
@@ -1102,7 +1102,7 @@ fn placeholder_picture() -> Result<Yuv420, CodecError> {
     )
 }
 
-fn shown_tags(sequence: &Sequence, frame: &FrameInfo) -> ShownTags {
+fn shown_tags(sequence: &Sequence, frame: &FrameInfo, operating_point: u8) -> ShownTags {
     let (
         num_units_in_display_tick,
         time_scale,
@@ -1121,6 +1121,7 @@ fn shown_tags(sequence: &Sequence, frame: &FrameInfo) -> ShownTags {
         .decoder_model
         .map(|model| model.num_units_in_decoding_tick)
         .unwrap_or(0);
+    let seq_level_idx = sequence.seq_level_idx[usize::from(operating_point)];
     ShownTags {
         bit_depth: sequence.bit_depth,
         render_width: frame.render_width,
@@ -1134,6 +1135,7 @@ fn shown_tags(sequence: &Sequence, frame: &FrameInfo) -> ShownTags {
         equal_picture_interval,
         num_ticks_per_picture_minus_1,
         num_units_in_decoding_tick,
+        seq_level_idx,
     }
 }
 
@@ -4808,6 +4810,75 @@ mod tests {
             assert_eq!(picture.info().num_units_in_decoding_tick, 1);
         }
         assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_level_three_picture_wider_than_4096_matches_dav1d() {
+        // aomenc --target-seq-level-idx=4, 4352×64, one keyframe and one inter
+        // frame. Level 3.0 allows this edge. Restoration, super resolution,
+        // filter intra, and an interintra wedge are off. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/level.ivf");
+        let frames = ivf_payloads(file);
+        let (sequence, _) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert_eq!(sequence.seq_level_idx[0], 4);
+        let expected = [0x419d_ca99_d7ff_bfd7, 0x47af_41d4_871f_de86];
+        let params = CodecParams::video(CodecId::Av1, 4352, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: payload.to_vec(),
+                    pts: index as i64,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: index == 0,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("frame {index}: {error:?}"));
+            assert_eq!(shown.len(), 1, "frame {index}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!((info.width, info.height), (4352, 64));
+            assert_eq!(info.seq_level_idx, 4);
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), 4352 * 64 * 3 / 2);
+            assert_eq!(frame_digest(bytes), expected[index], "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
+    fn a_picture_past_every_defined_level_is_refused() {
+        // 16448×64 is wider than level 6.3. dav1d decodes it. The check runs
+        // before the frame buffer is allocated.
+        let file = include_bytes!("../fixtures/wide.ivf");
+        let frames = ivf_payloads(file);
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let error = decoder
+            .push(&cutlass_decode::Packet {
+                stream: 0,
+                data: frames[0].to_vec(),
+                pts: 0,
+                duration: 1,
+                timescale: 30,
+                keyframe: true,
+                side: Vec::new(),
+            })
+            .expect_err("past every defined level");
+        assert!(
+            matches!(
+                error,
+                cutlass_decode::CodecError::Limit { what: "frame size" }
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

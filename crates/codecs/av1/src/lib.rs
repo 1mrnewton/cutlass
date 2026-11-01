@@ -38,6 +38,9 @@
 //! chroma sample position, and the display size are published on the picture.
 //! The sample buffer stays the frame size. Timing info is kept. Decoder-model
 //! info is parsed and the samples still decode. The schedule is not run.
+//! `seq_level_idx` is stored. A picture inside the largest defined level
+//! decodes, including an edge above 4096. A picture past every defined level
+//! is refused before the frame is allocated.
 
 #![forbid(unsafe_code)]
 

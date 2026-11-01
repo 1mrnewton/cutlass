@@ -116,9 +116,6 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
     if sequence.bit_depth == 8 && size_of::<S>() != 1 {
         return Err(CodecError::Unsupported { what: "bit depth" });
     }
-    if frame.width > 4096 || frame.height > 4096 {
-        return Err(CodecError::Limit { what: "frame size" });
-    }
     let visible_w = frame.width as usize;
     let visible_h = frame.height as usize;
     if visible_w == 0 || visible_h == 0 {
@@ -126,6 +123,12 @@ pub(crate) fn decode_tile_parts<S: FinishPlane>(
             at_bit: 0,
             what: "frame size",
         });
+    }
+    // Annex A. Level 6.3 is the largest defined picture. A smaller declared
+    // level does not tighten this bound, and level 31 does not raise it.
+    let span = frame.width.max(frame.upscaled_width);
+    if !crate::header::within_defined_level(span, frame.height) {
+        return Err(CodecError::Limit { what: "frame size" });
     }
     let buf_w = (frame.mi_cols as usize).saturating_mul(4);
     let buf_h = (frame.mi_rows as usize).saturating_mul(4);

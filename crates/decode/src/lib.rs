@@ -114,6 +114,9 @@ pub struct PictureInfo {
     pub num_ticks_per_picture_minus_1: Option<u32>,
     /// `num_units_in_decoding_tick`. Zero when the sequence has no decoder model.
     pub num_units_in_decoding_tick: u32,
+    /// `seq_level_idx` of the operating point this picture was decoded under.
+    /// Other codecs leave this 0.
+    pub seq_level_idx: u8,
 }
 
 impl PictureInfo {
@@ -147,6 +150,7 @@ impl PictureInfo {
             equal_picture_interval: false,
             num_ticks_per_picture_minus_1: None,
             num_units_in_decoding_tick: 0,
+            seq_level_idx: 0,
         }
     }
 }

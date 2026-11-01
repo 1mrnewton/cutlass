@@ -65,6 +65,7 @@ Recorded line:
 | 3840×2160 profile 0 | Pictures match | n/a | `uhd_3840x2160_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no 3840×2160 source. |
 | Four tile columns and two tile rows | Pictures match | One tile | `tiled_picture_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Four tile rows | Pictures match | One tile | `four_tile_rows_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Four tile columns and four tile rows | Pictures match | Columns and rows tested apart | `four_by_four_tiles_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | Switchable, smooth, regular, sharp, and bilinear interpolation | Pictures match | Regular only | `interpolation_filters_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | 52×52 loop filter in 4:2:2, 4:4:0, 4:4:4, 10-bit and 12-bit 4:2:0, and 10-bit 4:2:2 | Pictures match | n/a | `odd_chroma_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
 | 53×53, subsampled chroma edge 27 | Pictures match | Even coded size | `odd_edge_chroma_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |

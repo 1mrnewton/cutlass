@@ -177,6 +177,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             Vec2::new(full.width(), sizes.timeline),
         );
         timeline_panel(shell, ui, timeline);
+        paint_library_ghost(shell, ui);
         if view.export_open {
             export_dialog(shell, ui, view, parent);
         }
@@ -719,14 +720,21 @@ fn card_grid(ui: &mut Ui, cards: &[BinCard]) {
             );
         let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H));
         paint_bin_card(ui, rect, card);
-        ui.interact(rect, ui.scope_id().with(&card.id), Sense::hover())
-            .on_hover_text(&card.name);
+        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::drag());
+        response.dnd_set_drag_payload(LibraryDrop {
+            material_id: card.id.clone(),
+        });
+        response.on_hover_text(&card.name);
     }
 }
 
 fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard) {
-    let swatch = swatch_color(&card.name);
     let painter = ui.painter().with_clip_rect(rect);
+    paint_card_face(&painter, rect, card);
+}
+
+fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
+    let swatch = swatch_color(&card.name);
     painter.rect_filled(rect, CornerRadius::same(12), swatch);
     painter.text(
         rect.left_bottom() + Vec2::new(8.0, -22.0),
@@ -758,6 +766,11 @@ struct BinCard {
     name: String,
     meta: String,
     on_timeline: bool,
+}
+
+#[derive(Clone, Debug)]
+struct LibraryDrop {
+    material_id: String,
 }
 
 fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
@@ -1337,7 +1350,116 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
             shell.set_notice(error.to_string());
         }
     }
+    release_library_drop(shell, ui, tracks, lanes_left, &boxes);
     shell.set_lane_width(lane_area.width().max(1.0));
+}
+
+fn release_library_drop(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    tracks: Rect,
+    lanes_left: f32,
+    boxes: &[Rect],
+) {
+    let Some(material_id) =
+        egui::DragAndDrop::payload::<LibraryDrop>(ui.ctx()).map(|drop| drop.material_id.clone())
+    else {
+        return;
+    };
+    let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
+        return;
+    };
+    if !tracks.contains(pos) {
+        return;
+    }
+    if let Some(index) = lane_under(boxes, pos)
+        && let Some(row) = boxes.get(index)
+    {
+        ui.painter().rect_stroke(
+            *row,
+            CornerRadius::same(4),
+            egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if !ui.input(|input| input.pointer.any_released()) {
+        return;
+    }
+    let _ = egui::DragAndDrop::take_payload::<LibraryDrop>(ui.ctx());
+    let Some(index) = lane_under(boxes, pos) else {
+        shell.set_notice("the drag missed the lanes".to_owned());
+        return;
+    };
+    let x = f64::from((pos.x - lanes_left).max(0.0));
+    let row = u32::try_from(index).unwrap_or(0);
+    let y = f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0;
+    if let Err(error) = shell.drop_medium(&material_id, x, y) {
+        shell.set_notice(error.to_string());
+    }
+}
+
+fn lane_under(boxes: &[Rect], pos: Pos2) -> Option<usize> {
+    if let Some(index) = boxes.iter().position(|rect| rect.contains(pos)) {
+        return Some(index);
+    }
+    boxes
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            (left.center().y - pos.y)
+                .abs()
+                .total_cmp(&(right.center().y - pos.y).abs())
+        })
+        .map(|(index, _)| index)
+}
+
+fn paint_library_ghost(shell: &Shell, ui: &Ui) {
+    let Some(payload) = egui::DragAndDrop::payload::<LibraryDrop>(ui.ctx()) else {
+        return;
+    };
+    let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
+        return;
+    };
+    let Some(card) = ghost_card(shell, &payload.material_id) else {
+        return;
+    };
+    let rect = Rect::from_center_size(pos, Vec2::new(CARD_W, CARD_H));
+    let layer = egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("library-ghost"));
+    paint_card_face(&ui.ctx().layer_painter(layer), rect, &card);
+}
+
+fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
+    let draft = shell.draft()?;
+    let used: std::collections::HashSet<&str> = draft
+        .tracks
+        .iter()
+        .flat_map(|track| track.segments.iter())
+        .map(|segment| segment.material_id.as_str())
+        .collect();
+    if let Some(video) = draft
+        .materials
+        .videos
+        .iter()
+        .find(|item| item.id.as_str() == material_id)
+    {
+        return Some(BinCard {
+            id: video.id.as_str().to_owned(),
+            name: file_label(&video.path),
+            meta: card_meta(video.duration.0),
+            on_timeline: used.contains(video.id.as_str()),
+        });
+    }
+    let audio = draft
+        .materials
+        .audios
+        .iter()
+        .find(|item| item.id.as_str() == material_id)?;
+    Some(BinCard {
+        id: audio.id.as_str().to_owned(),
+        name: file_label(&audio.path),
+        meta: card_meta(audio.duration.0),
+        on_timeline: used.contains(audio.id.as_str()),
+    })
 }
 
 fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
@@ -2192,6 +2314,93 @@ mod tests {
             notice.y > tick.y,
             "notice {notice:?} overlaps tick {tick:?}"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn releasing_a_library_card_on_the_lane_places_the_clip() {
+        let temp = std::env::temp_dir().join(format!("cutlass-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        assert!(shell.lanes().iter().all(|lane| lane.clips.is_empty()));
+        let card = text_pos(&output, "pattern.png").expect("library card");
+        let lane = text_pos(&output, "No clips").expect("lane");
+        output.textures_delta.clear();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(card), press(card, true)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(lane)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(
+            shell.lanes().iter().all(|lane| lane.clips.is_empty()),
+            "the drag has not been released"
+        );
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(lane), press(lane, false)],
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert_eq!(shell.lanes().len(), 1);
+        assert_eq!(shell.lanes()[0].clips.len(), 1);
+        assert!(shell.lanes()[0].main);
+        assert_eq!(shell.draft().unwrap().tracks.len(), 1);
+        let source = shell.draft().unwrap().tracks[0].segments[0]
+            .source_range
+            .clone();
+        let target = shell.draft().unwrap().tracks[0].segments[0].target.clone();
+        assert_eq!(source.map(|range| range.duration), Some(target.duration));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let painted = painted_text(&output);
+        output.textures_delta.clear();
+        assert!(painted.contains("On timeline"), "{painted}");
+        assert!(!painted.contains("No clips"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

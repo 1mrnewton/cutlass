@@ -1727,6 +1727,8 @@ pub(crate) struct Slice<'a> {
     /// Base mode. Intra reference-layer macroblocks are copied. Inter ones
     /// inherit list-0 motion.
     base_mode: bool,
+    /// Add the reference layer's zero-motion residual after this slice's prediction.
+    residual_pred: bool,
 }
 
 struct SliceCursor<'a> {
@@ -2038,8 +2040,10 @@ struct Header {
     subset: bool,
     /// `output_flag` of a slice extension. An Annex A slice is displayed.
     output: bool,
-    /// Every macroblock copies the reference layer. Residual is still read.
+    /// Intra reference-layer macroblocks are copied. Inter ones inherit list-0 motion.
     base_mode: bool,
+    /// The reference layer's zero-motion residual is added after prediction.
+    residual_pred: bool,
 }
 
 struct Mod {
@@ -2374,9 +2378,9 @@ fn read_header(
             return Err(bits.malformed("view id"));
         }
     }
-    let base_mode = match svc {
+    let (base_mode, residual_pred) = match svc {
         Some(svc) if !svc.no_inter_layer_pred => read_inter_layer(bits, sps, svc)?,
-        _ => false,
+        _ => (false, false),
     };
     if svc.is_some() && !restriction {
         let start = bits.u(4)?;
@@ -2425,17 +2429,19 @@ fn read_header(
         subset: svc.is_some() || mvc.is_some(),
         output: svc.is_none_or(|svc| svc.output),
         base_mode,
+        residual_pred,
     })
 }
 
 /// Slice-header fields that follow the Annex A tail when inter-layer prediction
-/// is used. Same-size intra base mode and list-0 motion are reconstructed.
-/// Resampling, residual prediction, and coefficient prediction are refused.
+/// is used. Same-size intra base mode, list-0 motion, and a zero-motion
+/// residual are reconstructed. Using both tools at once, resampling, and
+/// coefficient prediction are refused.
 fn read_inter_layer(
     bits: &mut Bits<'_>,
     sps: &Sps,
     svc: nal::SvcHeader,
-) -> Result<bool, CodecError> {
+) -> Result<(bool, bool), CodecError> {
     if svc.quality_id != 0 || sps.svc_spatial != 0 || !sps.inter_layer_deblock {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
@@ -2468,18 +2474,14 @@ fn read_inter_layer(
     }
     let adaptive_base = bits.bit()?;
     let default_base = if adaptive_base { false } else { bits.bit()? };
-    if adaptive_base || !default_base {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
     let adaptive_residual = bits.bit()?;
     let default_residual = if adaptive_residual {
         false
     } else {
         bits.bit()?
     };
-    if adaptive_residual || default_residual {
+    // One tool at a time. Both, or neither, stays out of this reconstruction.
+    if adaptive_base || adaptive_residual || default_base == default_residual {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -2494,7 +2496,7 @@ fn read_inter_layer(
             what: "inter-layer prediction",
         });
     }
-    Ok(true)
+    Ok((default_base, default_residual))
 }
 
 fn read_list_mod(bits: &mut Bits<'_>) -> Result<Vec<Mod>, CodecError> {
@@ -2812,6 +2814,7 @@ fn make_slice<'a, S: Sample>(
         sp_switch: header.sp_switch,
         qs: header.qs,
         base_mode: header.base_mode,
+        residual_pred: header.residual_pred,
     })
 }
 
@@ -3218,6 +3221,7 @@ mod tests {
             subset: false,
             output: true,
             base_mode: false,
+            residual_pred: false,
         }
     }
 

@@ -448,7 +448,16 @@ pub(crate) fn decode_mbs<S: Sample>(
             };
             inferred_base(pic, dpb, layer, slice, &mut entropy, addr, (slice_id, qp))?
         } else {
-            one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?
+            let qp = one_mb(pic, dpb, slice, slice_id, addr, qp, &mut entropy)?;
+            if slice.residual_pred {
+                let Some(layer) = layer else {
+                    return Err(CodecError::Unsupported {
+                        what: "inter-layer prediction",
+                    });
+                };
+                add_layer_residual(pic, dpb, layer, slice, addr)?;
+            }
+            qp
         };
         let bottom = !mbaff || pair_bottom(pic, addr, mbaff);
         let end = match &mut entropy {
@@ -793,6 +802,111 @@ fn motion_base<S: Sample>(
     mb.qp_cr = chroma_deblock::<S>(qp, slice.pps.second_chroma_qp_offset);
     pic.mb[slot] = mb;
     Ok(qp)
+}
+
+/// Inter-layer residual prediction. The reference layer moved by zero, so its
+/// residual is the difference from the co-located reference sample.
+fn add_layer_residual<S: Sample>(
+    pic: &mut Frame<S>,
+    dpb: &[Frame<S>],
+    layer: &Frame<S>,
+    slice: &Slice<'_>,
+    addr: usize,
+) -> Result<(), CodecError> {
+    if slice.sps.mbaff || pic.field || pic.separate_plane || pic.chroma() != 1 {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    if layer.w != pic.w || layer.h != pic.h || layer.mb_w != pic.mb_w {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let (mx, my) = locate(pic, addr, false);
+    let slot = my.saturating_mul(pic.mb_w).saturating_add(mx);
+    let Some(reference_mb) = layer.mb.get(slot) else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "inter-layer prediction",
+        });
+    };
+    if reference_mb.intra
+        || reference_mb.ref0.iter().any(|index| *index != 0)
+        || reference_mb.ref1.iter().any(|index| *index >= 0)
+        || reference_mb.mv0.iter().any(|mv| *mv != [0, 0])
+    {
+        return Err(CodecError::Unsupported {
+            what: "inter-layer prediction",
+        });
+    }
+    let reference = reference_frame(dpb, slice, 0, 0)?;
+    add_diff(
+        &mut pic.y,
+        &layer.y,
+        &reference.y,
+        pic.w,
+        mx * 16,
+        my * 16,
+        16,
+    )?;
+    let chroma_stride = pic.w / 2;
+    add_diff(
+        &mut pic.u,
+        &layer.u,
+        &reference.u,
+        chroma_stride,
+        mx * 8,
+        my * 8,
+        8,
+    )?;
+    add_diff(
+        &mut pic.v,
+        &layer.v,
+        &reference.v,
+        chroma_stride,
+        mx * 8,
+        my * 8,
+        8,
+    )?;
+    Ok(())
+}
+
+fn add_diff<S: Sample>(
+    dst: &mut [S],
+    layer: &[S],
+    reference: &[S],
+    stride: usize,
+    x: usize,
+    y: usize,
+    n: usize,
+) -> Result<(), CodecError> {
+    for row in 0..n {
+        let at = (y + row).saturating_mul(stride).saturating_add(x);
+        let Some(into) = dst.get_mut(at..at + n) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        let Some(from_layer) = layer.get(at..at + n) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        let Some(from_ref) = reference.get(at..at + n) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "inter-layer prediction",
+            });
+        };
+        for i in 0..n {
+            let delta = Into::<i32>::into(from_layer[i]) - Into::<i32>::into(from_ref[i]);
+            into[i] = S::clip(Into::<i32>::into(into[i]) + delta);
+        }
+    }
+    Ok(())
 }
 
 fn copy_reference<S: Sample>(

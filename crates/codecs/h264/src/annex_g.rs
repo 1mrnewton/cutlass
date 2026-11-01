@@ -155,6 +155,30 @@ fn inter_layer_motion_predicts_from_the_reference() {
 }
 
 #[test]
+fn inter_layer_residual_adds_the_base_difference() {
+    let idr = residual_idr();
+    let mut decoder = open();
+    let first = decode_with(&mut decoder, &idr);
+    assert!(split_luma(&first, 100, 180));
+    let base = decode_with(&mut decoder, &motion_base_packet());
+    assert!(base_residual_picture(&base));
+    let mut decoder = open();
+    let _ = decode_with(&mut decoder, &idr);
+    let picture = decode_with(&mut decoder, &residual_layer_packet());
+    assert!(shifted_residual_picture(&picture));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut layered = idr.clone();
+        layered.extend(residual_layer_packet());
+        let raw = ffmpeg_raw(&ffmpeg, &layered);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        let ffmpeg_base = &raw[frame..];
+        assert_eq!(ffmpeg_base, &planes_of(&base));
+        assert_ne!(ffmpeg_base, &planes_of(&picture));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -532,6 +556,115 @@ fn inter_layer_annex() -> Vec<u8> {
         &base_mode_slice(false),
     ));
     out
+}
+
+fn residual_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &baseline_sps());
+    out.extend(annex_b_nal(3, 15, &uncropped_layer()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &residual_pcm()));
+    out
+}
+
+fn residual_layer_packet() -> Vec<u8> {
+    let mut out = motion_base_packet();
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &residual_enhancement(),
+    ));
+    out
+}
+
+fn residual_pcm() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    w.ue(25);
+    w.align_zeros();
+    for _row in 0..16 {
+        for col in 0..16 {
+            w.bytes.push(if col < 8 { 100 } else { 180 });
+        }
+    }
+    w.bytes.extend(std::iter::repeat_n(90, 128));
+    w.bit = w.bytes.len() * 8;
+    w.trailing();
+    w.bytes
+}
+
+fn residual_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.se(32);
+    w.se(0);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn split_luma(picture: &VideoOutput, left: u8, right: u8) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        y[row * 16..row * 16 + 8]
+            .iter()
+            .all(|sample| *sample == left)
+            && y[row * 16 + 8..row * 16 + 16]
+                .iter()
+                .all(|sample| *sample == right)
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
+}
+
+fn base_residual_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let sample = y[row * 16 + col];
+            let want = if row < 4 && col < 4 {
+                103
+            } else if col < 8 {
+                100
+            } else {
+                180
+            };
+            sample == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
+}
+
+fn shifted_residual_picture(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        (0..16).all(|col| {
+            let want = if row < 4 && col < 4 { 183 } else { 180 };
+            y[row * 16 + col] == want
+        })
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
 }
 
 fn motion_idr() -> Vec<u8> {

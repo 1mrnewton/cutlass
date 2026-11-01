@@ -20,13 +20,13 @@ use cutlass_editor::{
     lanes, last_accuracy_step, minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
-use cutlass_eval::{Heard, ReaderFactory};
+use cutlass_eval::{Heard, ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
     Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
     MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
-    TrackAttribute, TrackId, TrackType, WordColumns, beat_timeline_time, linkage_from_biz,
-    segment_beats, segment_time_mark, source_time_at, time_mark_items, track_holds_beats,
-    user_beats, visible_beats, visible_marks,
+    TrackAttribute, TrackId, TrackType, WordColumns, beat_timeline_time, blend_window,
+    linkage_from_biz, segment_beats, segment_time_mark, source_time_at, time_mark_items,
+    track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
@@ -2316,6 +2316,136 @@ impl Shell {
         })
     }
 
+    /// The selected clip is a video, so Split scenes can cut it.
+    #[must_use]
+    pub fn split_scenes_enabled(&self) -> bool {
+        self.selected_video().is_some()
+    }
+
+    /// Cut the selected video where its picture changes. One undo restores
+    /// the clip. The window waits while the pictures are read.
+    pub fn split_scenes(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.scene_segment()?;
+        let (path, range) = {
+            let draft = self.session_draft()?;
+            let (segment, _) = locate(draft, &segment_id).ok_or_else(|| {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            })?;
+            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
+            else {
+                return Err(ShellError::Unavailable(
+                    "a scene split belongs on video".to_owned(),
+                ));
+            };
+            if video.freeze.is_some() {
+                return Err(ShellError::Unavailable(
+                    "a held frame has one scene".to_owned(),
+                ));
+            }
+            if video.path.is_empty() {
+                return Err(ShellError::Unavailable(
+                    "the clip has no picture".to_owned(),
+                ));
+            }
+            let range = segment
+                .source_range
+                .clone()
+                .filter(|range| range.duration.0 > 0 && range.start.0 >= 0)
+                .unwrap_or_else(|| TimeRange::new(0, segment.target.duration.0));
+            (video.path.clone(), range)
+        };
+        let file = self.opened_media(&path)?;
+        let cuts = scene_cuts(&self.readers, &file, &range).map_err(scene_message)?;
+        let times = {
+            let draft = self.session_draft()?;
+            timeline_cuts(draft, &segment_id, &range, &cuts)
+        };
+        self.split_at_times(&segment_id, &times)
+    }
+
+    /// Cut the selected video at `times` on the timeline. Tests pass known
+    /// times so they do not decode a picture.
+    #[cfg(test)]
+    fn split_scenes_at(&mut self, times: &[Micros]) -> Result<(), ShellError> {
+        let segment_id = self.scene_segment()?;
+        self.split_at_times(&segment_id, times)
+    }
+
+    fn scene_segment(&self) -> Result<SegmentId, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = locate(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        if !matches!(
+            draft.materials.get(segment.material_id.as_str()),
+            Some(MaterialRef::Video(_))
+        ) {
+            return Err(ShellError::Unavailable(
+                "a scene split belongs on video".to_owned(),
+            ));
+        }
+        Ok(segment_id)
+    }
+
+    fn opened_media(&self, stored: &str) -> Result<PathBuf, ShellError> {
+        let path = Path::new(stored);
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ShellError::Unavailable(
+                "the clip has no picture".to_owned(),
+            ));
+        }
+        if path.is_absolute() {
+            return Ok(path.to_path_buf());
+        }
+        Ok(match &self.path {
+            Some(root) => root.join(path),
+            None => path.to_path_buf(),
+        })
+    }
+
+    fn split_at_times(
+        &mut self,
+        segment_id: &SegmentId,
+        times: &[Micros],
+    ) -> Result<(), ShellError> {
+        let kept = {
+            let draft = self.session_draft()?;
+            let (segment, _) = locate(draft, segment_id).ok_or_else(|| {
+                ShellError::Unavailable("the clip is not on the timeline".to_owned())
+            })?;
+            kept_cuts(draft, segment, times)
+        };
+        if kept.is_empty() {
+            return Err(ShellError::Unavailable(
+                "no scene change was found".to_owned(),
+            ));
+        }
+        let mut requests = Vec::with_capacity(kept.len());
+        for time in kept.into_iter().rev() {
+            requests.push(Request::Split {
+                segment_id: segment_id.clone(),
+                at: time,
+                right_id: SegmentId::new(self.fresh("seg")),
+            });
+        }
+        self.apply_requests(&requests)?;
+        self.select(Some(segment_id.clone()));
+        Ok(())
+    }
+
     fn selection_can_turn(&self) -> bool {
         let Some(draft) = self.draft() else {
             return false;
@@ -3553,6 +3683,101 @@ fn split_margin(draft: &Draft) -> i64 {
         .unwrap_or(1)
 }
 
+fn scene_message(error: SceneError) -> ShellError {
+    let message = match error {
+        SceneError::Missing | SceneError::NoPicture => "the clip has no picture",
+        SceneError::Decode => "the clip's picture could not be read",
+    };
+    ShellError::Unavailable(message.to_owned())
+}
+
+fn timeline_cuts(draft: &Draft, id: &SegmentId, range: &TimeRange, cuts: &[Micros]) -> Vec<Micros> {
+    let Some((segment, _)) = locate(draft, id) else {
+        return Vec::new();
+    };
+    let mut times = Vec::new();
+    for cut in cuts {
+        let time = source_on_timeline(draft, segment, *cut)
+            .or_else(|| proportional(&segment.target, range, cut.0).map(Micros));
+        if let Some(time) = time {
+            times.push(time);
+        }
+    }
+    times
+}
+
+fn proportional(target: &TimeRange, range: &TimeRange, source: i64) -> Option<i64> {
+    let into = source.checked_sub(range.start.0)?;
+    if range.duration.0 <= 0 || into < 0 || into >= range.duration.0 {
+        return None;
+    }
+    let scaled =
+        i128::from(into).checked_mul(i128::from(target.duration.0))? / i128::from(range.duration.0);
+    target.start.0.checked_add(i64::try_from(scaled).ok()?)
+}
+
+fn kept_cuts(draft: &Draft, segment: &Segment, times: &[Micros]) -> Vec<Micros> {
+    let start = segment.target.start.0;
+    let end = start.saturating_add(segment.target.duration.0);
+    let margin = split_margin(draft);
+    let mut ordered: Vec<i64> = times.iter().map(|time| time.0).collect();
+    ordered.sort_unstable();
+    ordered.dedup();
+    let mut kept = Vec::new();
+    let mut last = start;
+    for time in ordered {
+        if time < start.saturating_add(margin) || time > end.saturating_sub(margin) {
+            continue;
+        }
+        if time < last.saturating_add(margin) {
+            continue;
+        }
+        if blend_blocks(draft, &segment.id, time) {
+            continue;
+        }
+        kept.push(Micros(time));
+        last = time;
+    }
+    kept
+}
+
+fn blend_blocks(draft: &Draft, segment_id: &SegmentId, at: i64) -> bool {
+    let Some(track) = draft.tracks.iter().find(|track| {
+        track
+            .segments
+            .iter()
+            .any(|segment| &segment.id == segment_id)
+    }) else {
+        return false;
+    };
+    for segment in &track.segments {
+        let Some(cut) = segment
+            .target
+            .start
+            .0
+            .checked_add(segment.target.duration.0)
+        else {
+            continue;
+        };
+        for material_id in &segment.extra_material_refs {
+            let Some(MaterialRef::Transition(transition)) =
+                draft.materials.get(material_id.as_str())
+            else {
+                continue;
+            };
+            let Some((window_start, window_end)) =
+                blend_window(Micros(cut), transition.duration, transition.is_overlap)
+            else {
+                continue;
+            };
+            if at >= window_start.0 && at < window_end.0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn covers(segment: &Segment, time: Micros) -> bool {
     let start = segment.target.start.0;
     let end = start.saturating_add(segment.target.duration.0);
@@ -3937,9 +4162,9 @@ mod tests {
     };
     use cutlass_eval::ReaderFactory;
     use cutlass_model::{
-        Crop, Draft, FrameRate, MaterialAudio, MaterialColorConfig, MaterialDraft, MaterialId,
-        MaterialText, MaterialVideo, Micros, RawMaterial, Segment, SegmentId, TimeRange, Track,
-        TrackAttribute, TrackType,
+        Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialColorConfig, MaterialDraft,
+        MaterialId, MaterialText, MaterialTransition, MaterialVideo, Micros, RawMaterial, Segment,
+        SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
     use cutlass_playback::AudioHost;
     use cutlass_session::{EditError, TrimEdge};
@@ -6278,6 +6503,182 @@ mod tests {
                 samples: vec![0.0; 16],
             })
         }
+    }
+
+    #[test]
+    fn split_scenes_cuts_a_video_where_the_picture_changes() {
+        let mut bare = shell();
+        assert!(!bare.split_scenes_enabled());
+        assert_eq!(
+            bare.split_scenes().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip".to_owned();
+        video.duration = Micros(1_200_000);
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 1_200_000));
+        picture.source_range = Some(TimeRange::new(0, 1_200_000));
+        draft.tracks[0].segments.push(picture);
+        let mut joined = Segment::new("joined", "picture", TimeRange::new(8_000_000, 1_200_000));
+        joined.source_range = Some(TimeRange::new(0, 1_200_000));
+        joined.extra_material_refs.push(MaterialId::new("blend"));
+        draft.tracks[0].segments.push(joined);
+        draft.materials.transitions.push(MaterialTransition {
+            id: MaterialId::new("blend"),
+            duration: Micros(500_000),
+            is_overlap: false,
+            ..MaterialTransition::default()
+        });
+        let mut held = MaterialVideo::new("held");
+        held.path = "clip".to_owned();
+        held.duration = Micros(1_000_000);
+        held.freeze = Some(FreezeInfo::default());
+        draft.materials.videos.push(held);
+        draft.tracks[0].segments.push(Segment::new(
+            "held",
+            "held",
+            TimeRange::new(2_000_000, 1_000_000),
+        ));
+        let mut silent = MaterialVideo::new("silent");
+        silent.duration = Micros(1_000_000);
+        draft.materials.videos.push(silent);
+        draft.tracks[0].segments.push(Segment::new(
+            "silent",
+            "silent",
+            TimeRange::new(4_000_000, 1_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "plain",
+            "plain",
+            TimeRange::new(6_000_000, 100_000),
+        ));
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("sound");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(sound);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "hi".to_owned(),
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        assert_eq!(
+            desktop.split_scenes().unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("plain")));
+        assert!(!desktop.split_scenes_enabled());
+        assert_eq!(
+            desktop.split_scenes().unwrap_err().to_string(),
+            "a scene split belongs on video"
+        );
+        desktop.select(Some(SegmentId::new("tone")));
+        assert!(!desktop.split_scenes_enabled());
+        desktop.select(Some(SegmentId::new("caption")));
+        assert!(!desktop.split_scenes_enabled());
+
+        desktop.select(Some(SegmentId::new("silent")));
+        assert!(desktop.split_scenes_enabled());
+        assert_eq!(
+            desktop.split_scenes().unwrap_err().to_string(),
+            "the clip has no picture"
+        );
+        desktop.select(Some(SegmentId::new("held")));
+        assert_eq!(
+            desktop.split_scenes().unwrap_err().to_string(),
+            "a held frame has one scene"
+        );
+
+        let main = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(main.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.split_scenes().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        desktop
+            .toggle_attribute(main, TrackAttribute::LOCK)
+            .unwrap();
+
+        assert_eq!(
+            desktop
+                .split_scenes_at(&[Micros(1_000)])
+                .unwrap_err()
+                .to_string(),
+            "no scene change was found"
+        );
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 5);
+
+        desktop
+            .split_scenes_at(&[Micros(400_000), Micros(800_000)])
+            .unwrap();
+        let segments = &desktop.draft().unwrap().tracks[0].segments;
+        assert_eq!(segments.len(), 7);
+        assert_eq!(segments[0].id.as_str(), "picture");
+        assert_eq!(segments[0].target, TimeRange::new(0, 400_000));
+        assert_eq!(segments[0].source_range, Some(TimeRange::new(0, 400_000)));
+        assert_eq!(segments[1].target, TimeRange::new(400_000, 400_000));
+        assert_eq!(
+            segments[1].source_range,
+            Some(TimeRange::new(400_000, 400_000))
+        );
+        assert_eq!(segments[2].target, TimeRange::new(800_000, 400_000));
+        assert_eq!(
+            segments[2].source_range,
+            Some(TimeRange::new(800_000, 400_000))
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 5);
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0].segments[0].target,
+            TimeRange::new(0, 1_200_000)
+        );
+
+        desktop.select(Some(SegmentId::new("joined")));
+        desktop
+            .split_scenes_at(&[Micros(8_400_000), Micros(8_800_000)])
+            .unwrap();
+        let joined = desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .find(|segment| segment.id.as_str() == "joined")
+            .expect("joined")
+            .clone();
+        assert_eq!(joined.target, TimeRange::new(8_000_000, 400_000));
+        assert_eq!(
+            desktop.draft().unwrap().tracks[0]
+                .segments
+                .iter()
+                .filter(|segment| segment.target.start == Micros(8_800_000))
+                .count(),
+            0
+        );
     }
 
     #[test]

@@ -20,6 +20,26 @@ use cutlass_model::{
 use cutlass_renderer_software::SoftwareDevice;
 
 #[test]
+fn a_real_movie_can_be_scanned_for_scene_changes() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    if !root.is_dir() {
+        eprintln!("skipped: ../local-files is missing");
+        return;
+    }
+    let movies = movies(&root);
+    if movies.is_empty() {
+        eprintln!("skipped: ../local-files has no small movie");
+        return;
+    }
+    let readers = crate::readers::installed_readers();
+    let cuts = cutlass_eval::scene_cuts(&readers, &movies[0], &TimeRange::new(0, 2_000_000))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    for cut in cuts {
+        assert!(cut.0 > 0 && cut.0 < 2_000_000);
+    }
+}
+
+#[test]
 fn a_real_movie_returns_a_software_picture_and_audio() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
     if !root.is_dir() {

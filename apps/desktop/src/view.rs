@@ -1301,6 +1301,7 @@ fn tool_enabled(shell: &Shell, name: &str) -> bool {
         "rotate" => shell.rotate_enabled(),
         "crop" => shell.crop_enabled(),
         "transcribe" => shell.transcribe_enabled(),
+        "splitScenes" => shell.split_scenes_enabled(),
         _ => false,
     }
 }
@@ -1354,6 +1355,7 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         "rotate" => shell.turn_clockwise(),
         "crop" => shell.toggle_crop(),
         "transcribe" => shell.transcribe(),
+        "splitScenes" => shell.split_scenes(),
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -1585,6 +1587,9 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     let width = 132.0;
     let row_height = 28.0;
     let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
+    if shell.split_scenes_enabled() {
+        labels.insert(0, "Split scenes");
+    }
     if shell.transcribe_enabled() {
         labels.insert(0, "Transcribe");
     }
@@ -1648,6 +1653,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
                 "Rotate" => shell.turn_clockwise(),
                 "Crop" => shell.toggle_crop(),
                 "Transcribe" => shell.transcribe(),
+                "Split scenes" => shell.split_scenes(),
                 _ => shell.remove_selected(),
             };
             if let Err(error) = result {

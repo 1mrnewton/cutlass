@@ -49,6 +49,8 @@
 //! list 0.
 //! A 32×16 picture samples each macroblock: the left block shifts four pixels
 //! and the right block stays the split.
+//! A depth parameter set deviation of 15 maps depth 64 to 81, so that scale
+//! shifts five pixels: three columns stay 100 and the rest are 180.
 //! The other 3D tools stay refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.

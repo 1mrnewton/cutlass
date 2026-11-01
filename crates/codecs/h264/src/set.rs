@@ -985,11 +985,16 @@ fn three_d_extension(
 }
 
 /// One depth parameter set, NAL type 16. `pred_direction` 2 stores absolute ranges.
+/// A view-synthesis pair replaces the sequence disparity, and a nonlinear model
+/// replaces the identity `NdrInverse` table.
 #[derive(Clone)]
 pub(crate) struct DepthSet {
     pub id: u8,
     pub near: Vec<i32>,
     pub far: Vec<i32>,
+    pub disparity_scale: Vec<i32>,
+    pub disparity_offset: Vec<i32>,
+    pub ndr: [u8; 256],
 }
 
 pub(crate) fn parse_dps(rbsp: &[u8]) -> Result<DepthSet, CodecError> {
@@ -1006,15 +1011,95 @@ pub(crate) fn parse_dps(rbsp: &[u8]) -> Result<DepthSet, CodecError> {
         return Err(CodecError::Limit { what: "3d" });
     }
     let (near, far) = depth_ranges(&mut bits, views)?;
-    if bits.bit()? || bits.bit()? || bits.ue()? != 0 {
+    let (disparity_scale, disparity_offset) = if bits.bit()? {
+        view_synthesis(&mut bits, views)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    if bits.bit()? {
         return Err(CodecError::Unsupported { what: "3d" });
     }
+    let count = usize::try_from(bits.ue()?).unwrap_or(usize::MAX);
+    if count > 62 {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let mut model = Vec::with_capacity(count);
+    for _ in 0..count {
+        let value = bits.ue()?;
+        if value > 65_535 {
+            return Err(CodecError::Unsupported { what: "3d" });
+        }
+        model.push(value);
+    }
+    let ndr = ndr_inverse(&model)?;
     bits.rbsp_trailing()?;
     Ok(DepthSet {
         id: id as u8,
         near,
         far,
+        disparity_scale,
+        disparity_offset,
+        ndr,
     })
+}
+
+/// J-11. `model` is `nonlinear_depth_representation_model[1..=num]`. An empty
+/// model is the identity table.
+fn ndr_inverse(model: &[u32]) -> Result<[u8; 256], CodecError> {
+    let num = model.len();
+    let mut nodes = vec![0u64; num.saturating_add(2)];
+    for (index, value) in model.iter().copied().enumerate() {
+        if let Some(slot) = nodes.get_mut(index.saturating_add(1)) {
+            *slot = u64::from(value);
+        }
+    }
+    let mut inverse = identity_ndr();
+    let segments = num.saturating_add(1);
+    for k in 0..=num {
+        let pos1 = (255 * k) / segments;
+        let pos2 = (255 * k.saturating_add(1)) / segments;
+        let dev1 = i64::try_from(nodes.get(k).copied().unwrap_or(0)).unwrap_or(0);
+        let dev2 = i64::try_from(nodes.get(k.saturating_add(1)).copied().unwrap_or(0)).unwrap_or(0);
+        let x1 = i64::try_from(pos1).unwrap_or(0) - dev1;
+        let y1 = i64::try_from(pos1).unwrap_or(0) + dev1;
+        let x2 = i64::try_from(pos2).unwrap_or(0) - dev2;
+        let y2 = i64::try_from(pos2).unwrap_or(0) + dev2;
+        if x2 < x1 || x2 < 0 || x1 > 255 {
+            continue;
+        }
+        let den = x2 - x1;
+        if den == 0 {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "3d",
+            });
+        }
+        let start = usize::try_from(x1.max(0)).unwrap_or(0);
+        let end = usize::try_from(x2.min(255)).unwrap_or(0);
+        for (x, slot) in inverse.iter_mut().enumerate().take(end + 1).skip(start) {
+            let sample = i64::try_from(x).unwrap_or(0);
+            let value = round_div((sample - x1) * (y2 - y1), den) + y1;
+            *slot = u8::try_from(value.clamp(0, 255)).unwrap_or(0);
+        }
+    }
+    Ok(inverse)
+}
+
+pub(crate) fn identity_ndr() -> [u8; 256] {
+    let mut inverse = [0u8; 256];
+    for (index, value) in inverse.iter_mut().enumerate() {
+        *value = u8::try_from(index).unwrap_or(0);
+    }
+    inverse
+}
+
+/// `Round` of an integer ratio. The denominator is positive.
+fn round_div(num: i64, den: i64) -> i64 {
+    if num >= 0 {
+        num.saturating_add(den / 2) / den
+    } else {
+        -(num.saturating_neg().saturating_add(den / 2) / den)
+    }
 }
 
 /// `depth_ranges` with `predDirection` 2. A clear flag has no value to copy.

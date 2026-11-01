@@ -6886,9 +6886,6 @@ fn synthesis_motion<S: Sample>(
     origin: (usize, usize),
     part: &Part,
 ) -> Result<[i16; 2], CodecError> {
-    if slice.dps_id != 0 {
-        return Err(CodecError::Unsupported { what: "3d" });
-    }
     let Some(base_id) = slice.sps.views.first().copied() else {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -6922,10 +6919,11 @@ fn synthesis_motion<S: Sample>(
             what: "3d",
         });
     };
-    let scale = disparity_term(&slice.sps.disparity_scale, src, reference, views);
-    let offset = disparity_term(&slice.sps.disparity_offset, src, reference, views);
+    let scale = disparity_term(&slice.disparity_scale, src, reference, views);
+    let offset = disparity_term(&slice.disparity_offset, src, reference, views);
     let max_depth = max_depth(depth, origin, part);
-    Ok([disparity_value(max_depth, scale, offset), 0])
+    let mapped = i32::from(slice.ndr[usize::try_from(max_depth).unwrap_or(0).min(255)]);
+    Ok([disparity_value(mapped, scale, offset), 0])
 }
 
 /// J.8.2.1.1 corners. Reduced resolution is refused, so the inferred multipliers are 2

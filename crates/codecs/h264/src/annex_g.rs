@@ -1222,6 +1222,56 @@ fn a_far_depth_sample_scales_the_view_synthesis_disparity() {
 }
 
 #[test]
+fn a_nonlinear_depth_maps_the_view_synthesis_sample() {
+    let base = dmvp_base_idr();
+    let depth = vsp_scaled_depth();
+    let view = nonlinear_view();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| five_pixel_shift(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| split_luma(picture, 100, 180))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| depth_corner(picture))
+            .count(),
+        1
+    );
+    assert!(pictures.iter().all(|picture| !four_pixel_shift(picture)));
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame, "ffmpeg picture count");
+        let decoded = pictures
+            .iter()
+            .find(|picture| split_luma(picture, 100, 180))
+            .expect("base");
+        assert_eq!(raw, planes_of(decoded));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_wide_view_synthesis_picture_samples_each_macroblock() {
     let base = wide_base();
     let depth = wide_vsp_depth();
@@ -2128,6 +2178,69 @@ fn near_half_still(picture: &VideoOutput) -> bool {
             .iter()
             .chain(picture.picture.v())
             .all(|sample| *sample == 90)
+}
+
+fn five_pixel_shift(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    (0..16).all(|row| {
+        let start = row * 16;
+        y[start..start + 3].iter().all(|sample| *sample == 100)
+            && y[start + 3..start + 16].iter().all(|sample| *sample == 180)
+    }) && picture
+        .picture
+        .u()
+        .iter()
+        .chain(picture.picture.v())
+        .all(|sample| *sample == 90)
+}
+
+fn nonlinear_view() -> Vec<u8> {
+    let mut out = nonlinear_dps();
+    out.extend(annex_b_extension(
+        2,
+        21,
+        &[0x80, 0xA0],
+        &nonlinear_vsp_slice(),
+    ));
+    out
+}
+
+fn nonlinear_vsp_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn nonlinear_dps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.ue(1);
+    w.ue(2);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    write_depth_value(&mut w, 31);
+    w.bit(true);
+    write_depth_value(&mut w, 32);
+    w.bit(true);
+    w.ue(0);
+    w.ue(0);
+    w.ue(3968);
+    w.ue(0);
+    w.bit(false);
+    w.ue(1);
+    w.ue(15);
+    w.trailing();
+    annex_b_nal(3, 16, &w.bytes)
 }
 
 fn four_pixel_shift(picture: &VideoOutput) -> bool {

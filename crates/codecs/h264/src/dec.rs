@@ -1844,8 +1844,12 @@ pub(crate) struct Slice<'a> {
     dmvp: bool,
     /// `slice_vsp_flag`. An interview partition copies that picture at the disparity.
     vsp: bool,
-    /// Depth parameter set. 0 uses the sequence disparity pair.
-    dps_id: u8,
+    /// `DisparityScale` for this slice. A depth parameter set replaces the sequence pair.
+    disparity_scale: Vec<i32>,
+    /// `DisparityOffset`, same layout as `disparity_scale`.
+    disparity_offset: Vec<i32>,
+    /// `NdrInverse`. Identity unless that depth parameter set carries a model.
+    ndr: [u8; 256],
     /// Upsampled reference-layer residual. Empty unless the layers differ in size.
     residual_y: Vec<i32>,
     residual_u: Vec<i32>,
@@ -3545,6 +3549,7 @@ fn make_slice<'a, S: Sample>(
         luma_denom = 5;
         chroma_denom = 0;
     }
+    let disparity = disparity_tables(sets, sps, header)?;
     Ok(Slice {
         sps,
         pps,
@@ -3583,11 +3588,49 @@ fn make_slice<'a, S: Sample>(
         adaptive_residual: header.adaptive_residual,
         dmvp: header.dmvp,
         vsp: header.vsp,
-        dps_id: header.dps_id,
+        disparity_scale: disparity.scale,
+        disparity_offset: disparity.offset,
+        ndr: disparity.ndr,
         scale: header.scale.clone(),
         residual_y: Vec::new(),
         residual_u: Vec::new(),
         residual_v: Vec::new(),
+    })
+}
+
+struct DisparityTables {
+    scale: Vec<i32>,
+    offset: Vec<i32>,
+    ndr: [u8; 256],
+}
+
+/// J-40. `dps_id` 0 keeps the sequence pair and the identity inverse.
+fn disparity_tables(
+    sets: &Sets,
+    sps: &Sps,
+    header: &Header,
+) -> Result<DisparityTables, CodecError> {
+    if !header.vsp || header.dps_id == 0 {
+        return Ok(DisparityTables {
+            scale: sps.disparity_scale.clone(),
+            offset: sps.disparity_offset.clone(),
+            ndr: set::identity_ndr(),
+        });
+    }
+    let Some(stored) = sets
+        .dps
+        .get(usize::from(header.dps_id))
+        .and_then(Option::as_ref)
+    else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "3d",
+        });
+    };
+    Ok(DisparityTables {
+        scale: stored.disparity_scale.clone(),
+        offset: stored.disparity_offset.clone(),
+        ndr: stored.ndr,
     })
 }
 

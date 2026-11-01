@@ -4033,6 +4033,93 @@ mod tests {
     }
 
     #[test]
+    fn ten_bit_restoration_on_444_and_422_matches_dav1d() {
+        // aomenc --enable-restoration=1 --bit-depth=10, one frame, cq 40.
+        // Profile 1 is 512×128 4:4:4. Luma is self-guided. Each chroma plane
+        // is switchable, in 64-sample units, and the frame updates those CDFs.
+        // Profile 2 is 256×512 4:2:2. Luma restoration is off. Each chroma
+        // plane is self-guided, in 256-sample units, so the full-height chroma
+        // has two rows. Digests are `ffmpeg -c:v libdav1d -threads 1`.
+        let cases = [
+            (
+                include_bytes!("../fixtures/restore-444-10.ivf").as_slice(),
+                1u8,
+                false,
+                false,
+                512u32,
+                128u32,
+                [
+                    crate::header::RESTORE_SGRPROJ,
+                    crate::header::RESTORE_SWITCHABLE,
+                    crate::header::RESTORE_SWITCHABLE,
+                ],
+                [64u16, 64, 64],
+                cutlass_decode::PixelFormat::Yuv444p10,
+                512 * 128 * 6,
+                0x362f_dff0_9fd5_194d,
+            ),
+            (
+                include_bytes!("../fixtures/restore-422-10.ivf").as_slice(),
+                2,
+                true,
+                false,
+                256,
+                512,
+                [
+                    crate::header::RESTORE_NONE,
+                    crate::header::RESTORE_SGRPROJ,
+                    crate::header::RESTORE_SGRPROJ,
+                ],
+                [256, 256, 256],
+                cutlass_decode::PixelFormat::Yuv422p10,
+                256 * 512 * 4,
+                0xf32e_8649_9a71_9522,
+            ),
+        ];
+        for (file, profile, sub_x, sub_y, width, height, planes, units, pixel, length, digest) in
+            cases
+        {
+            let frames = ivf_payloads(file);
+            assert_eq!(frames.len(), 1, "profile {profile}");
+            let (sequence, key) = crate::header::parse_unit(frames[0], None).expect("sequence");
+            assert_eq!(sequence.profile, profile);
+            assert_eq!(sequence.bit_depth, 10);
+            assert_eq!(sequence.subsampling_x, sub_x);
+            assert_eq!(sequence.subsampling_y, sub_y);
+            assert!(!key.disable_cdf_update, "profile {profile}");
+            assert_eq!(key.width, width);
+            assert_eq!(key.height, height);
+            assert_eq!(key.restoration.plane, planes, "profile {profile}");
+            assert_eq!(key.restoration.unit, units, "profile {profile}");
+            let params = CodecParams::video(CodecId::Av1, width, height);
+            let mut decoder = Av1Decoder::open(&params).expect("open");
+            let shown = decoder
+                .push(&cutlass_decode::Packet {
+                    stream: 0,
+                    data: frames[0].to_vec(),
+                    pts: 0,
+                    duration: 1,
+                    timescale: 30,
+                    keyframe: true,
+                    side: Vec::new(),
+                })
+                .unwrap_or_else(|error| panic!("profile {profile}: {error:?}"));
+            assert_eq!(shown.len(), 1, "profile {profile}");
+            let cutlass_decode::Output::Picture(picture) = &shown[0] else {
+                panic!("picture");
+            };
+            let info = picture.info();
+            assert_eq!(info.pixel, pixel, "profile {profile}");
+            let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            assert_eq!(bytes.len(), length, "profile {profile}");
+            assert_eq!(frame_digest(bytes), digest, "profile {profile}");
+            assert!(decoder.drain().expect("drain").is_empty());
+        }
+    }
+
+    #[test]
     fn ten_bit_film_grain_on_444_and_422_matches_dav1d() {
         // aomenc --film-grain-test=1 --bit-depth=10, 64×64, two frames. CDEF
         // and restoration are off. One stream is profile 1 4:4:4 and one is

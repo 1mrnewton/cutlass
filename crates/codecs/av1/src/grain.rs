@@ -34,7 +34,7 @@ pub struct Grain {
     cb_scaling: [u8; 10],
     cr_value: [u8; 10],
     cr_scaling: [u8; 10],
-    scaling_minus_8: u8,
+    pub(crate) scaling_minus_8: u8,
     pub(crate) ar_lag: u8,
     ar_y: [i16; 24],
     ar_cb: [i16; 25],

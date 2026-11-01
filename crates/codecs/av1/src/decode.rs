@@ -5598,6 +5598,29 @@ mod tests {
     }
 
     #[test]
+    fn grain_scaling_shift_matches_dav1d() {
+        // aomenc --film-grain-test=9, 128×128. The grain scaling shift is 10
+        // (`grain_scaling_minus_8` is 2). Treating it as 11 changes the picture.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/grain-scale.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(sequence.film_grain);
+        assert!(frame.grain.apply);
+        assert_eq!(frame.grain.scaling_minus_8, 2);
+        assert_eq!(frame.grain.ar_lag, 2);
+        assert_eq!(frame.grain.grain_scale_shift, 0);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0xe6ca_50e2_19b7_855b);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn lag3_film_grain_matches_dav1d() {
         // aomenc --film-grain-test=2, 128×128. The grain filter lag is 3, overlap
         // is on, and samples are not clipped to the restricted range. Treating

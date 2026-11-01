@@ -4104,6 +4104,197 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_shown_frame_of_a_real_file_matches_dav1d() {
+        // The file stays in ../local-files. CI skips when that folder is
+        // absent. A present file must match every shown picture from
+        // `ffmpeg -c:v libdav1d -threads 1`, including frames after the key.
+        let Some(input) = real_av1_file() else {
+            return;
+        };
+        if !ffmpeg_installed() {
+            return;
+        }
+        let ivf_path =
+            std::env::temp_dir().join(format!("cutlass-av1-real-{}.ivf", std::process::id()));
+        let extracted = std::process::Command::new("ffmpeg")
+            .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&input)
+            .args(["-map", "0:v:0", "-c:v", "copy", "-f", "ivf"])
+            .arg(&ivf_path)
+            .output()
+            .expect("ffmpeg");
+        assert!(
+            extracted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&extracted.stderr)
+        );
+        let _remove_ivf = TempFile(ivf_path.clone());
+        let file = std::fs::read(&ivf_path).expect("ivf");
+        let frames = ivf_payloads(&file);
+
+        let mut child = std::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-c:v",
+                "libdav1d",
+                "-threads",
+                "1",
+                "-i",
+            ])
+            .arg(&ivf_path)
+            .args([
+                "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("libdav1d");
+        let mut stdout = child.stdout.take().expect("stdout");
+        let mut stderr = child.stderr.take().expect("stderr");
+        let mut logged = Some(std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+            bytes
+        }));
+
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("decoder");
+        let mut oracle = Vec::new();
+        let mut shown = 0usize;
+        for (index, payload) in frames.iter().enumerate() {
+            let packet = cutlass_decode::Packet {
+                stream: 0,
+                data: payload.to_vec(),
+                pts: i64::try_from(index).unwrap_or(i64::MAX),
+                duration: 1,
+                timescale: 30,
+                keyframe: index == 0,
+                side: Vec::new(),
+            };
+            let pictures = decoder
+                .push(&packet)
+                .unwrap_or_else(|error| panic!("packet {index} failed: {error:?}"));
+            for picture in &pictures {
+                let cutlass_decode::Output::Picture(picture) = picture else {
+                    panic!("shown {shown} is not a picture");
+                };
+                let cutlass_decode::PictureSamples::Cpu(bytes) = picture.samples() else {
+                    panic!("shown {shown} is not cpu samples");
+                };
+                if oracle.len() != bytes.len() {
+                    oracle.resize(bytes.len(), 0);
+                }
+                if let Err(error) =
+                    std::io::Read::read_exact(&mut stdout, &mut oracle[..bytes.len()])
+                {
+                    panic!(
+                        "shown {shown} from packet {index}: {error}: {}",
+                        oracle_note(&mut logged)
+                    );
+                }
+                if let Some(at) = bytes
+                    .iter()
+                    .zip(oracle.iter())
+                    .position(|(left, right)| left != right)
+                {
+                    panic!(
+                        "shown {shown} from packet {index} differs at byte {at}: {:02x} vs {:02x} ({}x{})",
+                        bytes[at],
+                        oracle[at],
+                        picture.info().width,
+                        picture.info().height
+                    );
+                }
+                shown += 1;
+            }
+        }
+        let drained = decoder.drain().expect("drain");
+        assert!(drained.is_empty(), "drain returned {}", drained.len());
+        let mut extra = [0u8; 1];
+        let trailing = std::io::Read::read(&mut stdout, &mut extra).expect("trailing");
+        assert_eq!(trailing, 0, "dav1d returned another frame");
+        let status = child.wait().expect("wait");
+        assert!(status.success(), "{}", oracle_note(&mut logged));
+        assert!(shown > 1, "only the first shown frame was compared");
+    }
+
+    struct TempFile(std::path::PathBuf);
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn oracle_note(logged: &mut Option<std::thread::JoinHandle<Vec<u8>>>) -> String {
+        let Some(handle) = logged.take() else {
+            return String::new();
+        };
+        let bytes = handle.join().unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn real_av1_file() -> Option<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../local-files");
+        if !root.is_dir() {
+            return None;
+        }
+        let mut found = Vec::new();
+        let entries = std::fs::read_dir(root).ok()?;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let name = name.to_ascii_lowercase();
+            let video = name.ends_with(".mp4") || name.ends_with(".webm") || name.ends_with(".mov");
+            if video && name.contains("av1") {
+                found.push(path);
+            }
+        }
+        found.sort();
+        found.into_iter().next()
+    }
+
+    fn ffmpeg_installed() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn ivf_payloads(file: &[u8]) -> Vec<&[u8]> {
+        assert!(file.len() >= 32 && &file[..4] == b"DKIF", "ivf header");
+        let header = usize::from(u16::from_le_bytes([file[6], file[7]]));
+        assert!(header >= 32 && file.len() >= header, "ivf header length");
+        let mut offset = header;
+        let mut frames = Vec::new();
+        while offset + 12 <= file.len() {
+            let size = usize::try_from(u32::from_le_bytes([
+                file[offset],
+                file[offset + 1],
+                file[offset + 2],
+                file[offset + 3],
+            ]))
+            .expect("frame size");
+            offset += 12;
+            assert!(offset + size <= file.len(), "ivf frame ends past the file");
+            frames.push(&file[offset..offset + size]);
+            offset += size;
+        }
+        assert_eq!(offset, file.len(), "bytes after the last ivf frame");
+        frames
+    }
+
     fn without_last_size(packet: &[u8]) -> Vec<u8> {
         let mut index = 0;
         let mut last = 0;

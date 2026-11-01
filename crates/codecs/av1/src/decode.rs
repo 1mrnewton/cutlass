@@ -5598,6 +5598,28 @@ mod tests {
     }
 
     #[test]
+    fn loop_filter_sharpness_matches_dav1d() {
+        // aomenc --usage=2 --sharpness=7, 128×128. The frame header sets
+        // sharpness to 7 and keeps non-zero luma and chroma filter levels.
+        // CDEF is off. Treating the sharpness as 0 changes the picture.
+        // The digest is `ffmpeg -c:v libdav1d -threads 1`.
+        let frames = ivf_payloads(include_bytes!("../fixtures/lf-sharp.ivf"));
+        assert_eq!(frames.len(), 1);
+        let (sequence, frame) = crate::header::parse_unit(frames[0], None).expect("sequence");
+        assert!(!sequence.enable_cdef);
+        assert_eq!(frame.width, 128);
+        assert_eq!(frame.height, 128);
+        assert_eq!(frame.lf_sharpness, 7);
+        assert_eq!(frame.lf_level, [12, 7, 7, 7]);
+        let params = CodecParams::video(CodecId::Av1, 128, 128);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        let packed = push_frame(&mut decoder, frames[0], 0);
+        assert_eq!(packed.len(), 128 * 128 * 3 / 2);
+        assert_eq!(frame_digest(&packed), 0x7960_ae29_f909_5a8f);
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn ten_bit_switchable_luma_matches_dav1d() {
         // aomenc --bit-depth=10 --cpu-used=0 --cq-level=28, 512×64. Luma is
         // switchable, in 256-sample units, so the plane has two units and the

@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use cutlass_eval::{OpenClips, ReaderFactory, Snapshot};
+use cutlass_eval::{Fonts, OpenClips, ReaderFactory, Snapshot};
 use cutlass_gpu::Device;
 use cutlass_model::{DraftId, Micros};
 use cutlass_session::Session;
@@ -167,6 +167,7 @@ impl FrameCache {
         time: Micros,
         media: &ReaderFactory,
         root: Option<&Path>,
+        fonts: &dyn Fonts,
     ) -> Result<Readback, PresentError<D::Error>> {
         evaluate(
             &mut self.inner,
@@ -175,9 +176,14 @@ impl FrameCache {
             device,
             time,
             media,
-            root,
+            DrawnWith { root, fonts },
         )
     }
+}
+
+pub(crate) struct DrawnWith<'a> {
+    pub(crate) root: Option<&'a Path>,
+    pub(crate) fonts: &'a dyn Fonts,
 }
 
 impl Default for FrameCache {
@@ -193,7 +199,7 @@ pub(crate) fn evaluate<D: Device>(
     device: &mut D,
     time: Micros,
     media: &ReaderFactory,
-    root: Option<&Path>,
+    drawn: DrawnWith<'_>,
 ) -> Result<Readback, PresentError<D::Error>> {
     let draft = session.draft();
     let revision = session.revision();
@@ -203,13 +209,13 @@ pub(crate) fn evaluate<D: Device>(
         return Ok(hit);
     }
     let frame = cutlass_eval::frame_in(
-        &Snapshot::new(draft),
+        &Snapshot::with_fonts(draft, drawn.fonts),
         time,
         device,
         media,
         clips,
         revision,
-        root,
+        drawn.root,
     )
     .map_err(PresentError::Picture)?;
     let readback = Readback {

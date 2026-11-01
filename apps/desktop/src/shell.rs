@@ -39,6 +39,7 @@ use cutlass_transcription::{
     FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
 };
 
+use crate::face::FaceTable;
 use crate::probe::{self, Probed};
 use crate::tokens;
 
@@ -137,6 +138,16 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::Opacity) => {
                 formatter.write_str("the opacity must be from zero to one")
             }
+            Self::Edit(EditError::NotText) => formatter.write_str("a text style belongs on text"),
+            Self::Edit(EditError::TextSize) => {
+                formatter.write_str("the text size must be greater than zero and at most 512")
+            }
+            Self::Edit(EditError::TextColor) => {
+                formatter.write_str("the text color is not a hex color")
+            }
+            Self::Edit(EditError::TextAlign) => {
+                formatter.write_str("text alignment is not left, center, or right")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -199,6 +210,9 @@ pub struct Inspection {
     pub transform_x: f64,
     pub transform_y: f64,
     pub opacity: f64,
+    pub text_size: f64,
+    pub text_color: String,
+    pub text_align: i32,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -384,6 +398,7 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    face: FaceTable,
     pub chrome: Chrome,
 }
 
@@ -442,6 +457,7 @@ impl Shell {
             notice: String::new(),
             next_id: 0,
             speech: RefCell::new(None),
+            face: FaceTable::load(),
             chrome: Chrome::default(),
         }
     }
@@ -896,7 +912,14 @@ impl Shell {
         let picture = self
             .preview_cache
             .borrow_mut()
-            .frame(session, &mut device, time, &self.readers, root.as_deref())
+            .frame(
+                session,
+                &mut device,
+                time,
+                &self.readers,
+                root.as_deref(),
+                &self.face,
+            )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         Ok(Picture {
             width: picture.width,
@@ -1902,6 +1925,7 @@ impl Shell {
         let id = self.selected()?;
         let (segment, locked) = locate(draft, id)?;
         let (material, text, words) = material_label(draft, &segment.material_id);
+        let (text_size, text_color, text_align) = text_style(draft, &segment.material_id);
         Some(Inspection {
             segment_id: segment.id.clone(),
             start: segment.target.start,
@@ -1914,6 +1938,9 @@ impl Shell {
             transform_x: segment.clip.transform.x,
             transform_y: segment.clip.transform.y,
             opacity: segment.clip.alpha,
+            text_size,
+            text_color,
+            text_align,
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -2754,10 +2781,85 @@ impl Shell {
         Ok(segment_id)
     }
 
-    pub fn edit_style(&mut self) -> Result<(), ShellError> {
-        Err(ShellError::Unavailable(
-            "a text style edit is not available".to_owned(),
-        ))
+    /// Store the text size in pixels. One undo restores the previous size.
+    /// An empty face path takes the editor's face.
+    pub fn set_text_size(&mut self, size: f64) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextSize {
+            segment_id,
+            size,
+            face,
+        })
+    }
+
+    /// Store the text color. An empty string is white. One undo restores it.
+    pub fn set_text_color(&mut self, color: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextColor {
+            segment_id,
+            color: color.to_owned(),
+            face,
+        })
+    }
+
+    /// Cycle left, center, and right. The first step gives the line the canvas
+    /// width when it has none. One undo restores the previous alignment.
+    pub fn cycle_text_align(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let alignment = match self.inspection().map(|item| item.text_align).unwrap_or(0) {
+            0 => 1,
+            1 => 2,
+            _ => 0,
+        };
+        let line_width = f64::from(
+            self.draft()
+                .map(|draft| draft.canvas_config.width)
+                .unwrap_or(0),
+        );
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextAlign {
+            segment_id,
+            alignment,
+            face,
+            line_width,
+        })
+    }
+
+    fn text_segment(&self) -> Result<SegmentId, ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        let draft = self.session_draft()?;
+        let Some((segment, _)) = placed(draft, &segment_id) else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        if !matches!(
+            draft.materials.get(segment.material_id.as_str()),
+            Some(MaterialRef::Text(_))
+        ) {
+            return Err(ShellError::Unavailable(
+                "a text style belongs on text".to_owned(),
+            ));
+        }
+        Ok(segment_id)
+    }
+
+    /// Replace the installed face. Tests use this so a frame does not depend
+    /// on a font file outside the repo.
+    #[cfg(test)]
+    pub fn use_face(&mut self, name: &str, bytes: Vec<u8>) {
+        self.face = FaceTable::named(name, bytes);
     }
 
     pub fn remove_selected(&mut self) -> Result<(), ShellError> {
@@ -3354,6 +3456,7 @@ impl Shell {
                 mux: &mut mux,
                 destination: None,
                 root: root.as_deref(),
+                fonts: &self.face,
             },
             |_, _, _| Ok(cutlass_eval::ClipPcm::Missing),
         )
@@ -4205,6 +4308,16 @@ fn picture_scale(segment: &Segment) -> (f64, f64) {
     } else {
         (segment.clip.scale.x, segment.clip.scale.y)
     }
+}
+
+fn text_style(draft: &Draft, material_id: &MaterialId) -> (f64, String, i32) {
+    draft
+        .materials
+        .texts
+        .iter()
+        .find(|text| text.id == *material_id)
+        .map(|text| (text.font_size, text.text_color.clone(), text.alignment))
+        .unwrap_or((0.0, String::new(), 0))
 }
 
 fn fade_durations(draft: &Draft, segment: &Segment) -> (i64, i64) {
@@ -6511,6 +6624,111 @@ mod tests {
         assert_eq!(desktop.inspection().unwrap().opacity, 0.25);
     }
 
+    const SAMPLE_TTF: &[u8] = include_bytes!("../../../crates/font/fixtures/sample.ttf");
+
+    #[test]
+    fn a_text_clip_changes_size_color_and_alignment() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.set_text_size(48.0).unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A".to_owned(),
+            words: cutlass_model::WordColumns {
+                text: vec!["A".to_owned()],
+                start_time: vec![0],
+                end_time: vec![100],
+                ..cutlass_model::WordColumns::default()
+            },
+            ..MaterialText::default()
+        });
+        let mut words = Track::main("words");
+        words.kind = TrackType::Text;
+        words.segments.push(Segment::new(
+            "caption",
+            "caption",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks.push(words);
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.use_face("sample.ttf", SAMPLE_TTF.to_vec());
+        desktop.select(None);
+        assert_eq!(
+            desktop.set_text_color("#FFFFFF").unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("picture")));
+        assert_eq!(
+            desktop.set_text_size(48.0).unwrap_err().to_string(),
+            "a text style belongs on text"
+        );
+
+        desktop.select(Some(SegmentId::new("caption")));
+        let before = desktop.preview_bytes().unwrap();
+        desktop.set_text_size(64.0).unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.text_size, 64.0);
+        assert_eq!(inspection.text.as_deref(), Some("A"));
+        assert_eq!(inspection.words.text, ["A"]);
+        assert_eq!(
+            desktop.draft().unwrap().materials.texts[0].font_path,
+            "sample.ttf"
+        );
+        let sized = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&before.rgba), digest(&sized.rgba));
+
+        desktop.set_text_color("#00FF00").unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_color, "#00FF00");
+        let colored = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&sized.rgba), digest(&colored.rgba));
+
+        desktop.cycle_text_align().unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.text_align, 1);
+        assert_eq!(
+            desktop.draft().unwrap().materials.texts[0].line_max_width,
+            1920.0
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_align, 0);
+        assert_eq!(
+            desktop.set_text_size(0.0).unwrap_err().to_string(),
+            "the text size must be greater than zero and at most 512"
+        );
+        assert_eq!(
+            desktop.set_text_color("#gg0000").unwrap_err().to_string(),
+            "the text color is not a hex color"
+        );
+        assert_eq!(desktop.inspection().unwrap().text_size, 64.0);
+        assert_eq!(desktop.inspection().unwrap().words.text, ["A"]);
+
+        let lane = desktop.draft().unwrap().tracks[1].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        assert_eq!(
+            desktop.cycle_text_align().unwrap_err().to_string(),
+            "the track is locked"
+        );
+        assert_eq!(desktop.inspection().unwrap().text_align, 0);
+    }
+
     #[test]
     fn the_inspector_edits_through_requests_and_leaves_words_on_an_empty_string() {
         let temp = Temp::new();
@@ -6539,9 +6757,6 @@ mod tests {
         let inspection = desktop.inspection().unwrap();
         assert_eq!(inspection.text.as_deref(), Some(""));
         assert_eq!(inspection.words.text, ["Hello"]);
-        let error = desktop.edit_style().unwrap_err();
-        assert!(error.to_string().contains("not available"), "{error}");
-        assert_eq!(desktop.inspection().unwrap().words.text, ["Hello"]);
         desktop
             .toggle_attribute(desktop.lanes()[0].track_id.clone(), TrackAttribute::LOCK)
             .unwrap();

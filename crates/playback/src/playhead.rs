@@ -171,7 +171,10 @@ impl Player {
             device,
             time,
             &self.readers,
-            None,
+            present::DrawnWith {
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+            },
         )?;
         self.queue_window(session, time);
         let presentation = present::accept(self.audio_time, time, readback);
@@ -279,7 +282,10 @@ impl Player {
             device,
             time,
             &self.readers,
-            None,
+            present::DrawnWith {
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+            },
         )?;
         self.queue_window(session, time);
         if commit_time {

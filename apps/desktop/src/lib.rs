@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod dialogs;
+mod face;
 pub mod icons;
 pub mod probe;
 mod readers;

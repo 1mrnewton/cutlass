@@ -114,6 +114,8 @@ pub struct ViewState {
     export_path: String,
     text_buffer: String,
     text_for: String,
+    text_size_buffer: String,
+    text_color_buffer: String,
     x_buffer: String,
     y_buffer: String,
     scale_buffer: String,
@@ -143,6 +145,8 @@ impl Default for ViewState {
             export_path: String::new(),
             text_buffer: String::new(),
             text_for: String::new(),
+            text_size_buffer: String::new(),
+            text_color_buffer: String::new(),
             x_buffer: String::new(),
             y_buffer: String::new(),
             scale_buffer: String::new(),
@@ -1167,8 +1171,24 @@ fn clip_fields(
         {
             shell.set_notice(error.to_string());
         }
-        if widgets::toolbar_button(ui, "Style").clicked()
-            && let Err(error) = shell.edit_style()
+        if let Some(size) =
+            number_field(ui, "Size", &mut view.text_size_buffer, inspection.text_size)
+            && !inspection.locked
+            && let Err(error) = shell.set_text_size(size)
+        {
+            shell.set_notice(error.to_string());
+        }
+        if let Some(color) = color_field(ui, &mut view.text_color_buffer, &inspection.text_color)
+            && !inspection.locked
+            && let Err(error) = shell.set_text_color(&color)
+        {
+            shell.set_notice(error.to_string());
+        }
+        let align = widgets::toolbar_button(ui, align_name(inspection.text_align))
+            .on_hover_text("Left, center, or right");
+        if align.clicked()
+            && !inspection.locked
+            && let Err(error) = shell.cycle_text_align()
         {
             shell.set_notice(error.to_string());
         }
@@ -1226,6 +1246,8 @@ fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Opt
             response.on_hover_text("1 is the fitted picture");
         } else if label == "Opacity" {
             response.on_hover_text("1 is solid");
+        } else if label == "Size" {
+            response.on_hover_text("Pixels");
         } else if label.starts_with("Fade") {
             response.on_hover_text("Seconds");
         }
@@ -1236,6 +1258,35 @@ fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Opt
 
 fn fade_seconds(microseconds: i64) -> f64 {
     microseconds as f64 / 1_000_000.0
+}
+
+fn color_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
+    let mut edited = None;
+    ui.horizontal(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.add_sized(
+            [108.0, 18.0],
+            egui::Label::new(RichText::new("Color").size(13.0).color(tokens::MUTED)),
+        );
+        let response = widgets::field(ui, text);
+        if response.lost_focus() {
+            edited = Some(text.clone());
+        }
+        if !response.has_focus() {
+            *text = stored.to_owned();
+        }
+        response.on_hover_text("Hex color");
+    });
+    ui.add_space(4.0);
+    edited.filter(|value| value != stored)
+}
+
+fn align_name(alignment: i32) -> &'static str {
+    match alignment {
+        1 => "Center",
+        2 => "Right",
+        _ => "Left",
+    }
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {

@@ -96,6 +96,42 @@ pub fn set_text_align(
     Ok(())
 }
 
+/// Extra space between letters, as a fraction of the text size.
+/// `-1` removes one size of gap. `0` is the normal gap. `4` is the widest.
+pub fn set_letter_spacing(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    spacing: f64,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    if !spacing.is_finite() || !(-1.0..=4.0).contains(&spacing) {
+        return Err(EditError::LetterSpacing);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.letter_spacing = spacing;
+    fill_face(text, face);
+    Ok(())
+}
+
+/// Extra space between lines, as a fraction of the text size.
+/// The gap must stay open, so `-1` is refused. `0` is the normal gap.
+pub fn set_line_spacing(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    spacing: f64,
+    face: &str,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    if !spacing.is_finite() || spacing <= -1.0 || spacing > 4.0 {
+        return Err(EditError::LineSpacing);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.line_spacing = spacing;
+    fill_face(text, face);
+    Ok(())
+}
+
 fn text_index(draft: &Draft, segment_id: &SegmentId) -> Result<usize, EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
@@ -315,5 +351,69 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LockedTrack);
         assert_eq!(session.draft().materials.texts[0].font_size, 0.0);
+    }
+
+    #[test]
+    fn spacing_opens_the_gaps_and_a_closed_line_is_refused() {
+        let mut session = open();
+        session
+            .apply(
+                0,
+                &[Request::SetLetterSpacing {
+                    segment_id: "a".into(),
+                    spacing: 1.0,
+                    face: "face.ttf".to_owned(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.letter_spacing, 1.0);
+        assert_eq!(text.line_spacing, 0.0);
+        assert_eq!(text.font_path, "face.ttf");
+        assert_eq!(text.font_size, 0.0);
+        assert_eq!(text.words.text, ["A"]);
+
+        session
+            .apply(
+                1,
+                &[Request::SetLineSpacing {
+                    segment_id: "a".into(),
+                    spacing: 0.5,
+                    face: "other.ttf".to_owned(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(text.line_spacing, 0.5);
+        assert_eq!(text.letter_spacing, 1.0);
+        assert_eq!(text.font_path, "face.ttf");
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.texts[0].line_spacing, 0.0);
+        assert_eq!(session.draft().materials.texts[0].letter_spacing, 1.0);
+
+        let before = session.draft().clone();
+        let error = session
+            .apply(
+                3,
+                &[Request::SetLetterSpacing {
+                    segment_id: "a".into(),
+                    spacing: 4.1,
+                    face: "face.ttf".to_owned(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LetterSpacing);
+        let error = session
+            .apply(
+                3,
+                &[Request::SetLineSpacing {
+                    segment_id: "a".into(),
+                    spacing: -1.0,
+                    face: "face.ttf".to_owned(),
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error, EditError::LineSpacing);
+        assert_eq!(session.draft(), &before);
     }
 }

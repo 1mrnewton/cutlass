@@ -164,6 +164,18 @@ pub enum Request {
         face: String,
         line_width: f64,
     },
+    /// Store extra space between letters, as a fraction of the text size.
+    SetLetterSpacing {
+        segment_id: SegmentId,
+        spacing: f64,
+        face: String,
+    },
+    /// Store extra space between lines, as a fraction of the text size.
+    SetLineSpacing {
+        segment_id: SegmentId,
+        spacing: f64,
+        face: String,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

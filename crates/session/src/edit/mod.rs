@@ -102,6 +102,10 @@ pub enum EditError {
     TextColor,
     /// Text alignment is not left, center, or right.
     TextAlign,
+    /// Letter spacing is not a fraction from -1 through 4.
+    LetterSpacing,
+    /// Line spacing is not greater than -1 and at most 4.
+    LineSpacing,
 }
 
 pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditError> {
@@ -212,6 +216,16 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
             line_width,
         } => text::set_text_align(draft, segment_id, *alignment, face, *line_width),
+        Request::SetLetterSpacing {
+            segment_id,
+            spacing,
+            face,
+        } => text::set_letter_spacing(draft, segment_id, *spacing, face),
+        Request::SetLineSpacing {
+            segment_id,
+            spacing,
+            face,
+        } => text::set_line_spacing(draft, segment_id, *spacing, face),
         Request::SetKeyframes {
             segment_id,
             keyframes,

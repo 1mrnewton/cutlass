@@ -120,6 +120,8 @@ fn edit_cause(error: EditError) -> String {
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),
         EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
+        EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
+        EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
     }
 }
 
@@ -191,6 +193,14 @@ mod tests {
         assert_eq!(
             FfiError::from(EditError::TextAlign).to_string(),
             "text alignment is not left, center, or right"
+        );
+        assert_eq!(
+            FfiError::from(EditError::LetterSpacing).to_string(),
+            "letter spacing must be from -1 to 4"
+        );
+        assert_eq!(
+            FfiError::from(EditError::LineSpacing).to_string(),
+            "line spacing must be greater than -1 and at most 4"
         );
     }
 

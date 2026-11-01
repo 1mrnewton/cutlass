@@ -118,7 +118,10 @@ pub enum Request {
         horizontal: bool,
     },
     /// Store a top-to-bottom flip on the segment. The clip stays where it is.
-    SetVerticalFlip { segment_id: SegmentId, vertical: bool },
+    SetVerticalFlip {
+        segment_id: SegmentId,
+        vertical: bool,
+    },
     /// Store the clip rotation in degrees. The clip stays where it is.
     SetRotation { segment_id: SegmentId, degrees: f64 },
     /// Store the picture position. `x` and `y` are fractions of half the canvas.

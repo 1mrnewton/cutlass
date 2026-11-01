@@ -6,7 +6,7 @@
 //! and a superblock quantizer delta. DC luma may use the recursive intra
 //! filter.
 //! A profile 1 sequence is published as 4:4:4 at 8-bit and at 10-bit. An 8-bit
-//! profile 2 sequence is published as 4:2:2. An 8-bit
+//! profile 2 sequence is published as 4:2:2 at 8-bit and at 10-bit. An 8-bit
 //! or 10-bit monochrome sequence is published as one gray
 //! plane. A
 //! 10-bit 4:2:0 sequence is published as little-endian samples, including a

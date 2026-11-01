@@ -242,8 +242,13 @@ pub fn wide_output(
     let luma = usize::try_from(width)
         .unwrap_or(0)
         .saturating_mul(usize::try_from(height).unwrap_or(0));
+    let chroma_422 = usize::try_from(width.div_ceil(2))
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0));
     let pixel = if u.len() == luma && v.len() == luma {
         PixelFormat::Yuv444p10
+    } else if u.len() == chroma_422 && v.len() == chroma_422 {
+        PixelFormat::Yuv422p10
     } else {
         PixelFormat::Yuv420p10
     };

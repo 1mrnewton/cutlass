@@ -77,7 +77,8 @@ pub struct AudioOutput {
 /// packed, with no stride gap and no display crop. Color conversion stays
 /// outside this crate. [`PixelFormat::Yuv420p`] is 4:2:0: a full-size Y plane,
 /// then U, then V, each `width / 2` by `height / 2`. [`PixelFormat::Yuv422p`]
-/// is 4:2:2: U and V are `width / 2` by `height`. [`PixelFormat::Yuv420p10`]
+/// is 4:2:2: U and V are `width / 2` by `height`. [`PixelFormat::Yuv422p10`]
+/// is that layout with a little-endian `u16` per sample. [`PixelFormat::Yuv420p10`]
 /// is that layout with a little-endian `u16` per sample. [`PixelFormat::Yuv444p`]
 /// is 4:4:4: three full-size planes. [`PixelFormat::Yuv444p10`] is that layout
 /// with a little-endian `u16` per sample. [`PixelFormat::Gray8`]
@@ -154,6 +155,7 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
         PixelFormat::Yuv420p => yuv420_bytes(width, height, 1),
         PixelFormat::Yuv420p10 => yuv420_bytes(width, height, 2),
         PixelFormat::Yuv422p => yuv422_bytes(width, height, 1),
+        PixelFormat::Yuv422p10 => yuv422_bytes(width, height, 2),
         PixelFormat::Yuv444p => width
             .checked_mul(height)
             .and_then(|pixels| pixels.checked_mul(3))
@@ -889,6 +891,10 @@ mod tests {
         assert_eq!(
             picture_byte_len(2, 2, PixelFormat::Yuv422p).expect("422"),
             8
+        );
+        assert_eq!(
+            picture_byte_len(2, 2, PixelFormat::Yuv422p10).expect("422-10"),
+            16
         );
         assert_eq!(
             picture_byte_len(3, 2, PixelFormat::Yuv422p).expect_err("odd"),

@@ -754,8 +754,10 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-jpeg",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-picture",
  "cutlass-png",
+ "cutlass-riff",
  "cutlass-still",
  "serde_json",
 ]

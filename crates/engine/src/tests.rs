@@ -752,3 +752,72 @@ impl Demux for Scripted {
         0
     }
 }
+
+fn open_wav(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let length = file
+        .metadata()
+        .map_err(|error| OpenError::Source {
+            message: error.to_string(),
+        })?
+        .len();
+    Ok(Box::new(cutlass_riff::WavDemux::open(file, length)?))
+}
+
+fn write_pcm_wav(path: &Path, rate: u32, bits: u16, samples: &[u8]) {
+    let data_bytes = u32::try_from(samples.len()).expect("wav size");
+    let channels = 1_u16;
+    let align = channels * (bits / 8);
+    let byte_rate = rate * u32::from(align);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&align.to_le_bytes());
+    bytes.extend_from_slice(&bits.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    bytes.extend_from_slice(samples);
+    std::fs::write(path, bytes).expect("wav");
+}
+
+#[test]
+fn a_pcm_wav_seeks_and_returns_full_scale_samples() {
+    let path = std::env::temp_dir().join(format!("cutlass-pcm-window-{}", std::process::id()));
+    let mut payload = Vec::new();
+    for sample in [0_i16, 32_767, -32_767] {
+        payload.extend_from_slice(&sample.to_le_bytes());
+    }
+    write_pcm_wav(&path, 48_000, 16, &payload);
+    let mut readers = ReaderFactory::new();
+    readers.register_container(cutlass_riff::probe, open_wav);
+    cutlass_pcm::register_decoders(readers.decoders_mut());
+    let mut media = readers.open(&path).expect("open");
+    let head = media.audio_from(Micros(0), 1).expect("head");
+    assert_eq!(head.rate, 48_000);
+    assert_eq!(head.as_f32(), Some(&[0.0][..]));
+    let later = media.audio_from(Micros(21), 2).expect("seek");
+    assert_eq!(later.as_f32(), Some(&[1.0, -1.0][..]));
+    std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
+fn an_eight_bit_wav_is_not_a_pcm_layout_this_decoder_opens() {
+    let path = std::env::temp_dir().join(format!("cutlass-pcm-eight-{}", std::process::id()));
+    write_pcm_wav(&path, 8_000, 8, &[0x80]);
+    let mut readers = ReaderFactory::new();
+    readers.register_container(cutlass_riff::probe, open_wav);
+    cutlass_pcm::register_decoders(readers.decoders_mut());
+    let Err(error) = readers.open(&path) else {
+        panic!("8-bit opened");
+    };
+    assert_eq!(error, EngineError::Layout);
+    std::fs::remove_file(&path).expect("remove");
+}

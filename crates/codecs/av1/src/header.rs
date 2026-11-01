@@ -1255,13 +1255,24 @@ fn uncompressed(
         }
         (coded, upscaled, height, render_width, render_height)
     } else {
-        if sequence.enable_order_hint && bits.read_bool()? {
-            return Err(CodecError::Unsupported {
-                what: "short reference signaling",
-            });
+        // Section 7.8. The two named slots are read. The other five names are
+        // derived from the order hints stored with the reference frames.
+        let short = sequence.enable_order_hint && bits.read_bool()?;
+        if short {
+            let last = bits.read(3)? as u8;
+            let gold = bits.read(3)? as u8;
+            ref_frames = set_frame_refs(
+                sequence.order_hint_bits,
+                order_hint,
+                order_hints,
+                last,
+                gold,
+            );
         }
         for slot in &mut ref_frames {
-            *slot = bits.read(3)? as u8;
+            if !short {
+                *slot = bits.read(3)? as u8;
+            }
             if sequence.frame_id_present {
                 let n = u32::from(sequence.delta_frame_id_len) + 2;
                 let _ = bits.read(n)?;
@@ -2447,6 +2458,92 @@ fn skip_pair(first: usize, second: usize) -> [i8; 2] {
     [low, high]
 }
 
+/// Section 7.8. `last` and `gold` are the signaled slots for `LAST_FRAME` and
+/// `GOLDEN_FRAME`. A backward slot is one whose order hint is not earlier than
+/// this frame. Ties keep the highest slot index.
+fn set_frame_refs(hint_bits: u8, order_hint: u32, hints: &[u32; 8], last: u8, gold: u8) -> [u8; 7] {
+    let last = usize::from(last);
+    let gold = usize::from(gold);
+    let mut idx = [-1i32; 7];
+    idx[0] = i32::try_from(last).unwrap_or(0);
+    idx[3] = i32::try_from(gold).unwrap_or(0);
+    let mut used = [false; 8];
+    if let Some(slot) = used.get_mut(last) {
+        *slot = true;
+    }
+    if let Some(slot) = used.get_mut(gold) {
+        *slot = true;
+    }
+    let cur = 1i32 << (hint_bits.saturating_sub(1));
+    let mut shifted = [0i32; 8];
+    for (slot, hint) in hints.iter().enumerate() {
+        shifted[slot] = cur + relative_dist(*hint, order_hint, hint_bits);
+    }
+    let mut latest = shifted.get(last).copied().unwrap_or(0);
+    let mut earliest = shifted.get(gold).copied().unwrap_or(0);
+    let mut ref_slot = -1i32;
+    for (slot, hint) in shifted.iter().enumerate() {
+        if !used[slot] && *hint >= cur && (ref_slot < 0 || *hint >= latest) {
+            ref_slot = i32::try_from(slot).unwrap_or(-1);
+            latest = *hint;
+        }
+    }
+    if ref_slot >= 0 {
+        idx[6] = ref_slot;
+        if let Some(slot) = used.get_mut(usize::try_from(ref_slot).unwrap_or(0)) {
+            *slot = true;
+        }
+    }
+    for name in [4usize, 5] {
+        ref_slot = -1;
+        for (slot, hint) in shifted.iter().enumerate() {
+            if !used[slot] && *hint >= cur && (ref_slot < 0 || *hint < earliest) {
+                ref_slot = i32::try_from(slot).unwrap_or(-1);
+                earliest = *hint;
+            }
+        }
+        if ref_slot >= 0 {
+            idx[name] = ref_slot;
+            if let Some(slot) = used.get_mut(usize::try_from(ref_slot).unwrap_or(0)) {
+                *slot = true;
+            }
+        }
+    }
+    // LAST2, LAST3, then any backward name that is still unset.
+    for name in [1usize, 2, 4, 5, 6] {
+        if idx[name] >= 0 {
+            continue;
+        }
+        ref_slot = -1;
+        for (slot, hint) in shifted.iter().enumerate() {
+            if !used[slot] && *hint < cur && (ref_slot < 0 || *hint >= latest) {
+                ref_slot = i32::try_from(slot).unwrap_or(-1);
+                latest = *hint;
+            }
+        }
+        if ref_slot >= 0 {
+            idx[name] = ref_slot;
+            if let Some(slot) = used.get_mut(usize::try_from(ref_slot).unwrap_or(0)) {
+                *slot = true;
+            }
+        }
+    }
+    ref_slot = -1;
+    earliest = 0;
+    for (slot, hint) in shifted.iter().enumerate() {
+        if ref_slot < 0 || *hint < earliest {
+            ref_slot = i32::try_from(slot).unwrap_or(-1);
+            earliest = *hint;
+        }
+    }
+    let mut refs = [0u8; 7];
+    for (name, choice) in idx.iter().enumerate() {
+        let slot = if *choice < 0 { ref_slot } else { *choice };
+        refs[name] = u8::try_from(slot).unwrap_or(0);
+    }
+    refs
+}
+
 pub(crate) fn relative_dist(a: u32, b: u32, bits: u8) -> i32 {
     if bits == 0 {
         return 0;
@@ -2724,6 +2821,17 @@ impl<'a> BitReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::parse_unit;
+
+    #[test]
+    fn short_signaling_fills_the_unnamed_references_from_order_hints() {
+        // No backward reference. The closest past slots fill LAST2 and LAST3.
+        // Equal hints keep the highest slot.
+        let past = super::set_frame_refs(7, 5, &[0, 1, 2, 3, 4, 0, 0, 0], 3, 4);
+        assert_eq!(past, [3, 2, 1, 4, 7, 6, 5]);
+        // Slots 4 and 5 are later than this frame. ALTREF is the latest, BWDREF the closest.
+        let future = super::set_frame_refs(7, 8, &[0, 1, 2, 3, 10, 11, 6, 7], 7, 6);
+        assert_eq!(future, [7, 3, 2, 6, 4, 1, 5]);
+    }
 
     #[test]
     fn the_constrained_keyframe_header_matches_the_known_fields() {

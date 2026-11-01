@@ -14,7 +14,7 @@
 //! or self-guided filtering, and film grain on the shown picture. A 12-bit
 //! profile 2 picture is little-endian samples for 4:2:0, 4:2:2, and 4:4:4.
 //! Film grain at 12-bit is refused, and so is 12-bit monochrome. A frame with `base_q_idx` 0 uses a
-//! 4×4 Walsh-Hadamard transform. A lossless segment inside a lossy frame uses that transform. A palette block and an intra block copy are
+//! 4×4 Walsh-Hadamard transform. A lossless segment inside a lossy frame uses that transform. An inter frame may signal LAST and GOLDEN and derive the other five reference slots from the stored order hints. A palette block and an intra block copy are
 //! reconstructed, and an inter frame may be forced to integer motion vectors.
 //! Two references may be
 //! averaged, weighted by order-hint distance, or blended with a wedge or a

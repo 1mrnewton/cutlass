@@ -3816,6 +3816,68 @@ mod tests {
     }
 
     #[test]
+    fn a_short_reference_picture_matches_dav1d() {
+        // aomenc 64×64, six frames, constant quality 10. CDEF, restoration, and
+        // super resolution are off. The last frame's header is rewritten so it
+        // signals only LAST and GOLDEN. The other five names are filled from
+        // the order hints stored in the eight slots. Blocks in that frame
+        // predict from LAST2, which is slot 2. Digests are
+        // `ffmpeg -c:v libdav1d -threads 1 -pix_fmt yuv420p`.
+        let file = include_bytes!("../fixtures/short-refs.ivf");
+        let frames = ivf_payloads(file);
+        assert_eq!(frames.len(), 6);
+        let mut sequence = None;
+        let mut hints = [0u32; 8];
+        let mut sizes = [None; 8];
+        let mut last = None;
+        for payload in &frames {
+            let (seq, frame) = crate::header::parse_with_motion(
+                payload,
+                sequence.as_ref(),
+                &[None; 8],
+                &hints,
+                &sizes,
+                &[crate::header::Inherited::defaults(); 8],
+            )
+            .expect("parse");
+            let size = Some((
+                frame.upscaled_width,
+                frame.height,
+                frame.render_width,
+                frame.render_height,
+            ));
+            for slot in 0..8 {
+                if frame.refresh_flags & (1u8 << slot) != 0 {
+                    hints[slot] = frame.order_hint;
+                    sizes[slot] = size;
+                }
+            }
+            last = Some(frame);
+            sequence = Some(seq);
+        }
+        let frame = last.expect("frame");
+        assert!(!frame.intra);
+        assert_eq!(frame.order_hint, 5);
+        assert_eq!(frame.ref_frames, [3, 2, 1, 4, 7, 6, 5]);
+        let expected = [
+            (64 * 64 * 3 / 2, 0xe485_041a_9516_0325),
+            (64 * 64 * 3 / 2, 0x99f9_f1e8_464b_d462),
+            (64 * 64 * 3 / 2, 0x63e8_8322_e74e_6325),
+            (64 * 64 * 3 / 2, 0x256a_1da7_2db1_44af),
+            (64 * 64 * 3 / 2, 0xd421_caac_351f_1c9c),
+            (64 * 64 * 3 / 2, 0x63e8_8322_e74e_6325),
+        ];
+        let params = CodecParams::video(CodecId::Av1, 64, 64);
+        let mut decoder = Av1Decoder::open(&params).expect("open");
+        for (index, payload) in frames.iter().enumerate() {
+            let packed = push_frame(&mut decoder, payload, index as i64);
+            assert_eq!(packed.len(), expected[index].0, "frame {index}");
+            assert_eq!(frame_digest(&packed), expected[index].1, "frame {index}");
+        }
+        assert!(decoder.drain().expect("drain").is_empty());
+    }
+
+    #[test]
     fn a_lossless_segment_picture_matches_dav1d() {
         // aomenc --lossless=1, 64×64, two frames. CDEF, restoration, and super
         // resolution are off. The inter frame header is rewritten so base_q_idx

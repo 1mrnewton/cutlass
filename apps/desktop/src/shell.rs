@@ -160,6 +160,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
             }
+            Self::Edit(EditError::FrameRate) => {
+                formatter.write_str("the frame rate is not a project rate")
+            }
             Self::Edit(error) => write!(formatter, "the edit was refused ({error:?})"),
             Self::Probe(message) | Self::Unavailable(message) | Self::Eval(message) => {
                 formatter.write_str(message)
@@ -1774,6 +1777,47 @@ impl Shell {
         self.apply(Request::SetCanvasBackground {
             color: color.to_owned(),
         })
+    }
+
+    /// The label for the project frame rate. An unreadable rate stays at 30.
+    pub fn frame_rate_label(&self) -> String {
+        let rate = self
+            .draft()
+            .and_then(Draft::frame_rate)
+            .unwrap_or(FrameRate::FPS_30);
+        rate_label(rate)
+    }
+
+    /// Drop frame is a timecode label for 29.97 and 59.94.
+    pub fn drop_frame_available(&self) -> bool {
+        self.draft()
+            .and_then(Draft::frame_rate)
+            .is_some_and(drop_rate)
+    }
+
+    /// Whether timecode labels use the drop-frame separator.
+    pub fn drop_frame_enabled(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| draft.is_drop_frame_timecode)
+    }
+
+    /// Step to the next project rate. 29.97 and 59.94 turn drop frame on.
+    /// Every other rate turns it off. One undo restores the rate and the label.
+    pub fn cycle_frame_rate(&mut self) -> Result<(), ShellError> {
+        let current = self.session_draft()?.frame_rate();
+        let next = next_rate(current);
+        let drop_frame = drop_rate(next);
+        self.apply(Request::SetFrameRate {
+            fps: stored_fps(next),
+            drop_frame,
+        })
+    }
+
+    /// Turn the drop-frame timecode label on or off. The frame rate stays.
+    /// One undo restores the label.
+    pub fn toggle_drop_frame(&mut self) -> Result<(), ShellError> {
+        let on = self.session_draft()?.is_drop_frame_timecode;
+        self.apply(Request::SetDropFrame { on: !on })
     }
 
     /// Turn follow on or off. Stored pairs stay either way. This is not an undo step.
@@ -4506,6 +4550,48 @@ fn file_name(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
+const PROJECT_RATES: [FrameRate; 9] = [
+    FrameRate::FPS_23_976,
+    FrameRate::FPS_24,
+    FrameRate::FPS_25,
+    FrameRate::FPS_29_97,
+    FrameRate::FPS_30,
+    FrameRate::FPS_50,
+    FrameRate::FPS_59_94,
+    FrameRate::FPS_60,
+    FrameRate::FPS_120,
+];
+
+fn next_rate(current: Option<FrameRate>) -> FrameRate {
+    let index = current
+        .and_then(|rate| PROJECT_RATES.iter().position(|item| *item == rate))
+        .map(|index| index.saturating_add(1))
+        .unwrap_or(0);
+    PROJECT_RATES[index % PROJECT_RATES.len()]
+}
+
+fn drop_rate(rate: FrameRate) -> bool {
+    matches!(
+        (rate.numerator, rate.denominator),
+        (30_000, 1001) | (60_000, 1001)
+    )
+}
+
+fn stored_fps(rate: FrameRate) -> f64 {
+    f64::from(rate.numerator) / f64::from(rate.denominator)
+}
+
+fn rate_label(rate: FrameRate) -> String {
+    let name = match (rate.numerator, rate.denominator) {
+        (24_000, 1001) => "23.976",
+        (30_000, 1001) => "29.97",
+        (60_000, 1001) => "59.94",
+        (numerator, 1) => return format!("{numerator} fps"),
+        _ => "Frame rate",
+    };
+    format!("{name} fps")
+}
+
 fn format_timecode(label: TimecodeLabel) -> String {
     let separator = if label.drop_frame { ';' } else { ':' };
     format!(
@@ -6884,6 +6970,61 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().line_spacing, 1.0);
+    }
+
+    #[test]
+    fn the_frame_rate_steps_the_playhead_and_drop_frame_labels_the_clock() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.cycle_frame_rate().unwrap_err().to_string(),
+            "no project is open"
+        );
+
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert_eq!(desktop.frame_rate_label(), "30 fps");
+        desktop.seek(Micros(0));
+        desktop.step_frame(1).unwrap();
+        assert_eq!(desktop.playhead(), Micros(33_334));
+        desktop.seek(Micros(0));
+        desktop.cycle_frame_rate().unwrap();
+        assert_eq!(desktop.frame_rate_label(), "50 fps");
+        assert!(!desktop.drop_frame_available());
+        desktop.step_frame(1).unwrap();
+        assert_eq!(desktop.playhead(), Micros(20_000));
+        assert_eq!(desktop.draft().unwrap().canvas_config.width, 2);
+
+        desktop.cycle_frame_rate().unwrap();
+        assert_eq!(desktop.frame_rate_label(), "59.94 fps");
+        assert!(desktop.drop_frame_available());
+        assert!(desktop.drop_frame_enabled());
+        assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00;59");
+        desktop.toggle_drop_frame().unwrap();
+        assert_eq!(desktop.frame_rate_label(), "59.94 fps");
+        assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00:00");
+        desktop.undo().unwrap();
+        assert!(desktop.drop_frame_enabled());
+        desktop.undo().unwrap();
+        assert_eq!(desktop.frame_rate_label(), "50 fps");
+        assert!(!desktop.drop_frame_enabled());
+
+        let lane = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(lane, TrackAttribute::LOCK)
+            .unwrap();
+        desktop.cycle_frame_rate().unwrap();
+        assert_eq!(desktop.frame_rate_label(), "59.94 fps");
     }
 
     #[test]

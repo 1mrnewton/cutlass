@@ -1073,12 +1073,11 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "No project".to_owned());
     fact(ui, "Saved", &saved, width);
-    let Some((ratio, canvas_width, canvas_height, fps, background)) = shell.draft().map(|draft| {
+    let Some((ratio, canvas_width, canvas_height, background)) = shell.draft().map(|draft| {
         (
             ratio_label(&draft.canvas_config.ratio),
             draft.canvas_config.width,
             draft.canvas_config.height,
-            draft.fps,
             draft.canvas_config.background.clone().unwrap_or_default(),
         )
     }) else {
@@ -1100,7 +1099,27 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
         &format!("{canvas_width}×{canvas_height}"),
         width,
     );
-    fact(ui, "Frame rate", &format!("{fps:.2}fps"), width);
+    let rate_label = shell.frame_rate_label();
+    let drop_shown = shell.drop_frame_available();
+    let drop_label = if shell.drop_frame_enabled() {
+        "Drop frame"
+    } else {
+        "Non-drop"
+    };
+    let rate = widgets::toolbar_button(ui, &rate_label).on_hover_text("Frames per second");
+    if rate.clicked()
+        && let Err(error) = shell.cycle_frame_rate()
+    {
+        shell.set_notice(error.to_string());
+    }
+    if drop_shown {
+        let drop = widgets::toolbar_button(ui, drop_label).on_hover_text("Timecode labels");
+        if drop.clicked()
+            && let Err(error) = shell.toggle_drop_frame()
+        {
+            shell.set_notice(error.to_string());
+        }
+    }
     if let Some(color) = color_field(
         ui,
         "Background",

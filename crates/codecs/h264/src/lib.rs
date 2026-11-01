@@ -56,6 +56,12 @@
 //! eight pixels makes that half 220.
 //! A 32×16 coded texture picture adds a zero difference to each of those
 //! vectors, so the left half stays 40 and 220 and the right half is 220.
+//! A 32×32 texture picture reads a 16×16 depth picture. Depth 64 is only at
+//! sample (7, 7). The multipliers are 1 and the shifts are 1, so the top-left
+//! macroblock shifts four pixels: four columns stay 100, eight are 180, and
+//! four are 100. The other three macroblocks stay eight columns of 100 and
+//! eight of 180. Chroma stays 90. The depth picture is chroma 40. A depth
+//! width that is not half the texture is an error.
 //! A depth P slice copies a later texture header. That source is intra, so the
 //! slice uses the picture's one reference. Motion of eight pixels makes that
 //! picture luma 220 and chroma 50. The texture picture between them is luma 10

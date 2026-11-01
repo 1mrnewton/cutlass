@@ -109,6 +109,21 @@ pub struct Sps {
     pub disparity_scale: Vec<i32>,
     /// `DisparityOffset`, same layout as `disparity_scale`.
     pub disparity_offset: Vec<i32>,
+    /// `reduced_resolution_flag`. Depth pictures are half the texture size.
+    pub reduced_depth: bool,
+    /// Depth picture width in macroblocks. Equal to the texture width when
+    /// `reduced_depth` is clear.
+    pub depth_mb_width: usize,
+    /// Depth picture height in macroblocks.
+    pub depth_mb_height: usize,
+    /// `depth_hor_mult_minus1 + 1`. 2 when reduced resolution is absent.
+    pub depth_hor_mult: u32,
+    /// `depth_ver_mult_minus1 + 1`.
+    pub depth_ver_mult: u32,
+    /// `depth_hor_rsh`. 0 when reduced resolution is absent.
+    pub depth_hor_rsh: u32,
+    /// `depth_ver_rsh`.
+    pub depth_ver_rsh: u32,
     /// Annex H interview reference views, one entry per `views` index.
     /// View 0 is empty. An Annex A or SVC sequence has no entries.
     pub interview: Vec<Interview>,
@@ -554,6 +569,13 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
     let mut view_synthesis = false;
     let mut disparity_scale = Vec::new();
     let mut disparity_offset = Vec::new();
+    let mut reduced_depth = false;
+    let mut depth_mb_width = usize::try_from(width_mbs).unwrap_or(0);
+    let mut depth_mb_height = usize::try_from(height_mbs).unwrap_or(0);
+    let mut depth_hor_mult = 2u32;
+    let mut depth_ver_mult = 2u32;
+    let mut depth_hor_rsh = 0u32;
+    let mut depth_ver_rsh = 0u32;
     let mut texture_views = Vec::new();
     let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
@@ -585,6 +607,8 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
             &mvcd.views,
             &mvcd.depth_views,
             &mvcd.texture_views,
+            (width_mbs, height_mbs),
+            frame_mbs_only,
         )?;
         acquisition = axis.acquisition;
         depth_near = axis.near;
@@ -593,6 +617,15 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         view_synthesis = axis.view_synthesis;
         disparity_scale = axis.disparity_scale;
         disparity_offset = axis.disparity_offset;
+        if axis.reduced {
+            reduced_depth = true;
+            depth_mb_width = axis.depth_mb_width;
+            depth_mb_height = axis.depth_mb_height;
+            depth_hor_mult = axis.hor_mult;
+            depth_ver_mult = axis.ver_mult;
+            depth_hor_rsh = axis.hor_rsh;
+            depth_ver_rsh = axis.ver_rsh;
+        }
         avc_3d = true;
         texture_views = mvcd.texture_views;
         let views = mvcd.views;
@@ -684,6 +717,13 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         view_synthesis,
         disparity_scale,
         disparity_offset,
+        reduced_depth,
+        depth_mb_width,
+        depth_mb_height,
+        depth_hor_mult,
+        depth_ver_mult,
+        depth_hor_rsh,
+        depth_ver_rsh,
         interview,
     };
     if !sps.within_level() {
@@ -912,16 +952,73 @@ struct DepthAxis {
     view_synthesis: bool,
     disparity_scale: Vec<i32>,
     disparity_offset: Vec<i32>,
+    reduced: bool,
+    depth_mb_width: usize,
+    depth_mb_height: usize,
+    hor_mult: u32,
+    ver_mult: u32,
+    hor_rsh: u32,
+    ver_rsh: u32,
 }
 
-/// `seq_parameter_set_3davc_extension`. Header prediction and view synthesis are
-/// stored. Acquisition 1 and 2 store integer depth ranges and the disparity pair.
-/// Reduced resolution, cropping, a grid, ALC, and RLE stay refused.
+struct ReducedDepth {
+    mb_width: usize,
+    mb_height: usize,
+    hor_mult: u32,
+    ver_mult: u32,
+    hor_rsh: u32,
+    ver_rsh: u32,
+}
+
+/// `reduced_resolution_flag` 1. The depth picture is half the texture picture
+/// on both axes. The multipliers and shifts feed J.8.2.1.1.
+fn reduced_depth(bits: &mut Bits<'_>, coded: (u32, u32)) -> Result<ReducedDepth, CodecError> {
+    let mb_width = depth_mbs(bits)?;
+    let mb_height = depth_mbs(bits)?;
+    let hor_mult = depth_factor(bits, 1023)?.saturating_add(1);
+    let ver_mult = depth_factor(bits, 1023)?.saturating_add(1);
+    let hor_rsh = depth_factor(bits, 31)?;
+    let ver_rsh = depth_factor(bits, 31)?;
+    let (texture_w, texture_h) = coded;
+    if mb_width.saturating_mul(2) != usize::try_from(texture_w).unwrap_or(usize::MAX)
+        || mb_height.saturating_mul(2) != usize::try_from(texture_h).unwrap_or(usize::MAX)
+    {
+        return Err(bits.malformed("3d"));
+    }
+    Ok(ReducedDepth {
+        mb_width,
+        mb_height,
+        hor_mult,
+        ver_mult,
+        hor_rsh,
+        ver_rsh,
+    })
+}
+
+fn depth_mbs(bits: &mut Bits<'_>) -> Result<usize, CodecError> {
+    let minus = bits.ue()?;
+    let count = minus.checked_add(1).ok_or_else(|| bits.malformed("3d"))?;
+    usize::try_from(count).map_err(|_| bits.malformed("3d"))
+}
+
+fn depth_factor(bits: &mut Bits<'_>, limit: u32) -> Result<u32, CodecError> {
+    let value = bits.ue()?;
+    if value > limit {
+        return Err(bits.malformed("3d"));
+    }
+    Ok(value)
+}
+
+/// `seq_parameter_set_3davc_extension`. Header prediction, view synthesis, and a
+/// half-resolution depth picture are stored. Acquisition 1 and 2 store integer
+/// depth ranges and the disparity pair. Cropping, a grid, ALC, and RLE stay refused.
 fn three_d_extension(
     bits: &mut Bits<'_>,
     views: &[u16],
     depth_views: &[bool],
     texture_views: &[bool],
+    coded: (u32, u32),
+    frame_only: bool,
 ) -> Result<DepthAxis, CodecError> {
     let depth_ids: Vec<u16> = views
         .iter()
@@ -936,6 +1033,13 @@ fn three_d_extension(
         view_synthesis: false,
         disparity_scale: Vec::new(),
         disparity_offset: Vec::new(),
+        reduced: false,
+        depth_mb_width: 0,
+        depth_mb_height: 0,
+        hor_mult: 2,
+        ver_mult: 2,
+        hor_rsh: 0,
+        ver_rsh: 0,
     };
     if !depth_ids.is_empty() {
         let acquisition = bits.ue()?;
@@ -957,7 +1061,20 @@ fn three_d_extension(
             axis.disparity_scale = scale;
             axis.disparity_offset = offset;
         }
-        if bits.bit()? || bits.bit()? || bits.ue()? != 0 {
+        if bits.bit()? {
+            if !frame_only {
+                return Err(CodecError::Unsupported { what: "3d" });
+            }
+            let depth = reduced_depth(bits, coded)?;
+            axis.reduced = true;
+            axis.depth_mb_width = depth.mb_width;
+            axis.depth_mb_height = depth.mb_height;
+            axis.hor_mult = depth.hor_mult;
+            axis.ver_mult = depth.ver_mult;
+            axis.hor_rsh = depth.hor_rsh;
+            axis.ver_rsh = depth.ver_rsh;
+        }
+        if bits.bit()? || bits.ue()? != 0 {
             return Err(CodecError::Unsupported { what: "3d" });
         }
         axis.header_prediction = bits.bit()?;

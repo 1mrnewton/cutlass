@@ -3318,22 +3318,42 @@ fn new_frame<S: Sample>(
     packet: &Packet,
     idr: bool,
 ) -> Result<Frame<S>, CodecError> {
-    let (vis_w, mut vis_h) = sps.visible()?;
-    let w = sps.width as usize;
+    let (mut vis_w, mut vis_h) = sps.visible()?;
     let field_pic = header.field;
-    let h = if field_pic {
+    let reduced = header.depth && sps.reduced_depth;
+    if reduced && field_pic {
+        return Err(CodecError::Unsupported { what: "3d" });
+    }
+    let w = if reduced {
+        sps.depth_mb_width.saturating_mul(16)
+    } else {
+        sps.width as usize
+    };
+    let h = if reduced {
+        sps.depth_mb_height.saturating_mul(16)
+    } else if field_pic {
         (sps.height as usize) / 2
     } else {
         sps.height as usize
     };
-    let mb_w = sps.mb_width;
-    let mb_h = if field_pic {
+    let mb_w = if reduced {
+        sps.depth_mb_width
+    } else {
+        sps.mb_width
+    };
+    let mb_h = if reduced {
+        sps.depth_mb_height
+    } else if field_pic {
         sps.mb_height / 2
     } else {
         sps.mb_height
     };
     if field_pic {
         vis_h /= 2;
+    }
+    if reduced {
+        vis_w = u32::try_from(w).unwrap_or(u32::MAX);
+        vis_h = u32::try_from(h).unwrap_or(u32::MAX);
     }
     let chroma = match sps.chroma {
         3 => w.saturating_mul(h),
@@ -3366,8 +3386,14 @@ fn new_frame<S: Sample>(
         pts: packet.pts,
         duration: packet.duration,
         timescale: packet.timescale,
-        crop_x: sps.crop_left.saturating_mul(unit_x),
-        crop_y: if field_pic {
+        crop_x: if reduced {
+            0
+        } else {
+            sps.crop_left.saturating_mul(unit_x)
+        },
+        crop_y: if reduced {
+            0
+        } else if field_pic {
             sps.crop_top.saturating_mul(unit_y) / 2
         } else {
             sps.crop_top.saturating_mul(unit_y)
@@ -4215,6 +4241,13 @@ mod tests {
             view_synthesis: false,
             disparity_scale: Vec::new(),
             disparity_offset: Vec::new(),
+            reduced_depth: false,
+            depth_mb_width: 1,
+            depth_mb_height: 1,
+            depth_hor_mult: 2,
+            depth_ver_mult: 2,
+            depth_hor_rsh: 0,
+            depth_ver_rsh: 0,
             interview: Vec::new(),
         }
     }

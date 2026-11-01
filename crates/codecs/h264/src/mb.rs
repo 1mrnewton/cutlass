@@ -6896,14 +6896,16 @@ fn synthesis_motion<S: Sample>(
             what: "3d",
         });
     };
+    let depth_w = slice.sps.depth_mb_width.saturating_mul(16);
+    let depth_h = slice.sps.depth_mb_height.saturating_mul(16);
     let Some(depth) = dpb.iter().find(|frame| {
         frame.depth
             && frame.referenced
             && !frame.nonexisting
             && frame.view_id == base_id
             && frame.poc == pic.poc
-            && frame.w == pic.w
-            && frame.h == pic.h
+            && frame.w == depth_w
+            && frame.h == depth_h
     }) else {
         return Err(CodecError::Malformed {
             at_bit: 0,
@@ -6925,35 +6927,64 @@ fn synthesis_motion<S: Sample>(
     };
     let scale = disparity_term(&slice.disparity_scale, src, reference, views);
     let offset = disparity_term(&slice.disparity_offset, src, reference, views);
-    let max_depth = max_depth(depth, origin, part);
+    let max_depth = max_depth(
+        depth,
+        origin,
+        part,
+        (slice.sps.depth_hor_mult, slice.sps.depth_hor_rsh),
+        (slice.sps.depth_ver_mult, slice.sps.depth_ver_rsh),
+    );
     let mapped = i32::from(slice.ndr[usize::try_from(max_depth).unwrap_or(0).min(255)]);
     Ok([disparity_value(mapped, scale, offset), 0])
 }
 
-/// J.8.2.1.1 corners. Reduced resolution is refused, so the inferred multipliers are 2
-/// and the shifts are 0. `origin` is the macroblock's luma sample.
-fn max_depth<S: Sample>(depth: &Frame<S>, origin: (usize, usize), part: &Part) -> i32 {
+/// J.8.2.1.1 corners. `origin` is the macroblock's luma sample. Each axis is
+/// `(texture * mult) >> shift`, then clipped to the depth picture. Absent
+/// reduced resolution uses mult 2 and shift 0.
+fn max_depth<S: Sample>(
+    depth: &Frame<S>,
+    origin: (usize, usize),
+    part: &Part,
+    hor: (u32, u32),
+    ver: (u32, u32),
+) -> i32 {
     let right = depth.w.saturating_sub(1);
     let bottom = depth.h.saturating_sub(1);
     let x = origin.0.saturating_add(part.x);
     let y = origin.1.saturating_add(part.y);
-    let x0 = x.saturating_mul(2).min(right);
-    let y0 = y.saturating_mul(2).min(bottom);
-    let x1 = x
-        .saturating_add(part.w)
-        .saturating_sub(1)
-        .saturating_mul(2)
-        .min(right);
-    let y1 = y
-        .saturating_add(part.h)
-        .saturating_sub(1)
-        .saturating_mul(2)
-        .min(bottom);
+    let (hor_mult, hor_rsh) = hor;
+    let (ver_mult, ver_rsh) = ver;
+    let x0 = map_axis(x, hor_mult, hor_rsh, right);
+    let y0 = map_axis(y, ver_mult, ver_rsh, bottom);
+    let x1 = map_axis(
+        x.saturating_add(part.w).saturating_sub(1),
+        hor_mult,
+        hor_rsh,
+        right,
+    );
+    let y1 = map_axis(
+        y.saturating_add(part.h).saturating_sub(1),
+        ver_mult,
+        ver_rsh,
+        bottom,
+    );
     let mut max = depth_sample(depth, x0, y0);
     for (x, y) in [(x1, y0), (x0, y1), (x1, y1)] {
         max = max.max(depth_sample(depth, x, y));
     }
     max
+}
+
+/// J-38. `(texture * mult) >> shift`, clipped to the depth picture.
+fn map_axis(texture: usize, mult: u32, shift: u32, last: usize) -> usize {
+    let mult = usize::try_from(mult).unwrap_or(usize::MAX);
+    let scaled = texture.saturating_mul(mult);
+    let shifted = if shift >= usize::BITS {
+        0
+    } else {
+        scaled >> shift
+    };
+    shifted.min(last)
 }
 
 fn depth_sample<S: Sample>(frame: &Frame<S>, x: usize, y: usize) -> i32 {

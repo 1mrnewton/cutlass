@@ -1518,6 +1518,70 @@ fn a_wide_view_synthesis_picture_samples_each_macroblock() {
 }
 
 #[test]
+fn a_half_resolution_depth_picture_selects_its_own_sample() {
+    let parsed = parse_subset_sps(&reduced_view_sps(0)).expect("reduced");
+    assert!(parsed.reduced_depth);
+    assert_eq!(parsed.mb_width, 2);
+    assert_eq!(parsed.mb_height, 2);
+    assert_eq!(parsed.depth_mb_width, 1);
+    assert_eq!(parsed.depth_mb_height, 1);
+    assert_eq!(parsed.depth_hor_mult, 1);
+    assert_eq!(parsed.depth_ver_mult, 1);
+    assert_eq!(parsed.depth_hor_rsh, 1);
+    assert_eq!(parsed.depth_ver_rsh, 1);
+    let err = parse_subset_sps(&reduced_view_sps(1)).expect_err("half");
+    assert!(
+        matches!(err, CodecError::Malformed { what: "3d", .. }),
+        "{err:?}"
+    );
+    let base = square_base();
+    let depth = reduced_depth();
+    let view = reduced_texture();
+    let mut decoder = open();
+    let mut pictures = Vec::new();
+    for annex in [&base, &depth, &view] {
+        pictures.extend(push_pictures(&mut decoder, annex));
+    }
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 3, "picture count");
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| square_split(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| reduced_corner(picture))
+            .count(),
+        1
+    );
+    assert_eq!(
+        pictures
+            .iter()
+            .filter(|picture| reduced_shift(picture))
+            .count(),
+        1
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let raw = ffmpeg_raw(&ffmpeg, &base);
+        let frame = 32 * 32 + 16 * 16 * 2;
+        assert_eq!(raw.len(), frame, "ffmpeg picture count");
+        let decoded = pictures
+            .iter()
+            .find(|picture| square_split(picture))
+            .expect("base");
+        assert_eq!(raw, planes_of(decoded));
+        assert!(
+            ffmpeg_bytes(&ffmpeg, &view).is_empty(),
+            "ffmpeg decoded a 3d view"
+        );
+    }
+}
+
+#[test]
 fn a_skipped_b_view_synthesis_macroblock_uses_four_8x8_disparities() {
     let base = dmvp_base_idr();
     let depth = vsp_block_depth();
@@ -2807,6 +2871,212 @@ fn wide_depth_slice() -> Vec<u8> {
     pcm_block(&mut w, &right, 40);
     w.trailing();
     w.bytes
+}
+
+fn reduced_view_sps(depth_minus1: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(139, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.bit(false);
+    w.bit(false);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(1);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.bits(30, 8);
+    w.ue(0);
+    w.bits(0, 3);
+    w.ue(0);
+    w.ue(0);
+    w.bit(true);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.ue(2);
+    w.ue(0);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    write_depth_value(&mut w, 31);
+    w.bit(true);
+    write_depth_value(&mut w, 32);
+    w.ue(0);
+    w.ue(0);
+    w.ue(3968);
+    w.ue(0);
+    w.bit(true);
+    w.ue(depth_minus1);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(1);
+    w.ue(1);
+    w.bit(false);
+    w.ue(0);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn square_ref_sps() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(66, 8);
+    w.bits(0, 8);
+    w.bits(30, 8);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(0);
+    w.ue(4);
+    w.bit(false);
+    w.ue(1);
+    w.ue(1);
+    w.bit(true);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn square_base() -> Vec<u8> {
+    let mut w = Writer::new();
+    i_header(&mut w);
+    for _ in 0..4 {
+        split_pcm(&mut w, 90);
+    }
+    w.trailing();
+    let mut out = annex_b_nal(3, 7, &square_ref_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &w.bytes));
+    out
+}
+
+fn reduced_depth() -> Vec<u8> {
+    let mut luma = vec![0u8; 256];
+    luma[7 * 16 + 7] = 64;
+    let mut out = annex_b_nal(3, 15, &reduced_view_sps(0));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_extension(
+        3,
+        21,
+        &[0x80, 0x60],
+        &vsp_depth_slice(&luma),
+    ));
+    out
+}
+
+fn reduced_texture() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 0, 0, true, true);
+    w.bit(false);
+    w.bit(true);
+    for _ in 0..4 {
+        w.ue(0);
+        w.ue(0);
+        w.bit(true);
+        w.bit(true);
+        w.ue(0);
+    }
+    w.trailing();
+    annex_b_extension(2, 21, &[0x80, 0xA0], &w.bytes)
+}
+
+fn square_split(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    y.len() == 32 * 32
+        && (0..32).all(|row| {
+            let start = row * 32;
+            let left = &y[start..start + 16];
+            let right = &y[start + 16..start + 32];
+            left[..8].iter().all(|sample| *sample == 100)
+                && left[8..].iter().all(|sample| *sample == 180)
+                && right[..8].iter().all(|sample| *sample == 100)
+                && right[8..].iter().all(|sample| *sample == 180)
+        })
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
+}
+
+fn reduced_corner(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let at = 7 * 16 + 7;
+    y.len() == 256
+        && y[at] == 64
+        && y.iter()
+            .enumerate()
+            .all(|(index, sample)| index == at || *sample == 0)
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 40)
+}
+
+fn reduced_shift(picture: &VideoOutput) -> bool {
+    let y = picture.picture.y();
+    let shifted = y.len() == 32 * 32
+        && (0..2).all(|my| {
+            (0..2).all(|mx| {
+                (0..16).all(|row| {
+                    let start = (my * 16 + row) * 32 + mx * 16;
+                    let samples = &y[start..start + 16];
+                    if mx == 0 && my == 0 {
+                        samples[..4].iter().all(|sample| *sample == 100)
+                            && samples[4..12].iter().all(|sample| *sample == 180)
+                            && samples[12..].iter().all(|sample| *sample == 100)
+                    } else {
+                        samples[..8].iter().all(|sample| *sample == 100)
+                            && samples[8..].iter().all(|sample| *sample == 180)
+                    }
+                })
+            })
+        });
+    shifted
+        && picture
+            .picture
+            .u()
+            .iter()
+            .chain(picture.picture.v())
+            .all(|sample| *sample == 90)
 }
 
 fn wide_vsp_texture() -> Vec<u8> {

@@ -517,6 +517,222 @@ fn tiled_picture_matches_ffmpeg_software() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The literal filter values are smooth, regular, sharp, and bilinear.
+/// A fixed filter is two bits, so rewriting it leaves the rest of the frame aligned.
+#[test]
+fn interpolation_filters_match_ffmpeg_software() {
+    let Some(source) = local_video() else {
+        eprintln!("skipped: ../local-files has no filter source");
+        return;
+    };
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("skipped: ffmpeg was not found");
+        return;
+    };
+    let dir = temp_dir("interp");
+    let ivf = dir.join("in.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &ivf,
+        &[
+            "-frames:v",
+            "4",
+            "-vf",
+            "scale=320:240",
+            "-lag-in-frames",
+            "0",
+            "-auto-alt-ref",
+            "0",
+            "-g",
+            "4",
+            "-threads",
+            "1",
+        ],
+    );
+    let stream = read_ivf(&ivf);
+    assert!(stream.frames.len() > 1, "filters need an inter frame");
+    let switchable = stream
+        .frames
+        .iter()
+        .filter(|frame| locate_interp(frame).is_some_and(|site| site.switchable))
+        .count();
+    assert!(switchable > 0, "the source frames are not switchable");
+    let (ours, _) = decode_shown(&stream, PixelFormat::Yuv420p);
+    let oracle = ffmpeg_yuv(&ffmpeg, &ivf, "yuv420p");
+    assert_eq!(ours.len(), oracle.len(), "switchable shown bytes differ");
+    let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+    assert_eq!(mismatch, None, "switchable first mismatch at {mismatch:?}");
+    eprintln!(
+        "interp switchable {} frames {} bytes",
+        stream.frames.len(),
+        ours.len()
+    );
+    let fixed_ivf = dir.join("fixed.ivf");
+    encode_profile0(
+        &ffmpeg,
+        &source,
+        &fixed_ivf,
+        &[
+            "-frames:v",
+            "4",
+            "-vf",
+            "scale=320:240",
+            "-lag-in-frames",
+            "0",
+            "-auto-alt-ref",
+            "0",
+            "-g",
+            "4",
+            "-cpu-used",
+            "0",
+            "-threads",
+            "1",
+        ],
+    );
+    let stream = read_ivf(&fixed_ivf);
+    let fixed = stream
+        .frames
+        .iter()
+        .filter(|frame| fixed_interp_bit(frame).is_some())
+        .count();
+    assert!(
+        fixed > 0,
+        "cpu-used 0 did not emit a fixed interpolation filter"
+    );
+    let mut packed = Vec::new();
+    for (literal, name) in [
+        (0u32, "smooth"),
+        (1, "regular"),
+        (2, "sharp"),
+        (3, "bilinear"),
+    ] {
+        let frames = stream
+            .frames
+            .iter()
+            .map(|frame| force_interp(frame, literal))
+            .collect::<Vec<_>>();
+        let rewritten = dir.join(format!("{name}.ivf"));
+        write_same_ivf(&fixed_ivf, &rewritten, &frames);
+        let shown = read_ivf(&rewritten);
+        let (ours, _) = decode_shown(&shown, PixelFormat::Yuv420p);
+        let oracle = ffmpeg_yuv(&ffmpeg, &rewritten, "yuv420p");
+        assert_eq!(ours.len(), oracle.len(), "{name} shown bytes differ");
+        let mismatch = ours.iter().zip(oracle.iter()).position(|(a, b)| a != b);
+        assert_eq!(mismatch, None, "{name} first mismatch at {mismatch:?}");
+        eprintln!(
+            "interp {name} {} frames {} bytes",
+            shown.frames.len(),
+            ours.len()
+        );
+        packed.push(ours);
+    }
+    assert!(
+        packed.windows(2).any(|pair| pair[0] != pair[1]),
+        "interpolation filters did not change a sample"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn force_interp(frame: &[u8], literal: u32) -> Vec<u8> {
+    let Some(at) = fixed_interp_bit(frame) else {
+        return frame.to_vec();
+    };
+    let mut out = frame.to_vec();
+    set_msb_bit(&mut out, at + 1, (literal >> 1) & 1 == 1);
+    set_msb_bit(&mut out, at + 2, literal & 1 == 1);
+    let read = (u32::from(bit_at(&out, at + 1)) << 1) | u32::from(bit_at(&out, at + 2));
+    assert_eq!(read, literal, "filter literal");
+    out
+}
+
+fn fixed_interp_bit(frame: &[u8]) -> Option<usize> {
+    let site = locate_interp(frame)?;
+    if site.switchable { None } else { Some(site.at) }
+}
+
+struct InterpSite {
+    at: usize,
+    switchable: bool,
+}
+
+fn locate_interp(frame: &[u8]) -> Option<InterpSite> {
+    let mut bits = crate::bits::BitReader::new(frame);
+    if bits.read(2).ok()? != 2 {
+        return None;
+    }
+    let mut profile = bits.read(1).ok()?;
+    profile |= bits.read(1).ok()? << 1;
+    if profile > 2 {
+        bits.read(1).ok()?;
+    }
+    let show_existing = bits.read(1).ok()? == 1;
+    let key_frame = bits.read(1).ok()? == 0;
+    if show_existing || key_frame {
+        return None;
+    }
+    let show_frame = bits.read(1).ok()? == 1;
+    let error_resilient = bits.read(1).ok()? == 1;
+    if !show_frame && bits.read(1).ok()? == 1 {
+        return None;
+    }
+    if !error_resilient {
+        bits.read(2).ok()?;
+    }
+    bits.read(8).ok()?;
+    for _ in 0..3 {
+        bits.read(3).ok()?;
+        bits.read(1).ok()?;
+    }
+    let mut found = false;
+    for _ in 0..3 {
+        if bits.read(1).ok()? == 1 {
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        bits.read(16).ok()?;
+        bits.read(16).ok()?;
+    }
+    if bits.read(1).ok()? == 1 {
+        bits.read(16).ok()?;
+        bits.read(16).ok()?;
+    }
+    bits.read(1).ok()?;
+    let at = bits.position();
+    let switchable = bits.read(1).ok()? == 1;
+    Some(InterpSite { at, switchable })
+}
+
+fn bit_at(data: &[u8], index: usize) -> bool {
+    let shift = 7 - (index % 8);
+    data[index / 8] & (1 << shift) != 0
+}
+
+fn set_msb_bit(data: &mut [u8], index: usize, one: bool) {
+    let shift = 7 - (index % 8);
+    if one {
+        data[index / 8] |= 1 << shift;
+    } else {
+        data[index / 8] &= !(1 << shift);
+    }
+}
+
+fn write_same_ivf(src: &Path, dst: &Path, frames: &[Vec<u8>]) {
+    let data = std::fs::read(src).expect("ivf");
+    let header = u16::from_le_bytes([data[6], data[7]]) as usize;
+    let mut out = data[..header].to_vec();
+    out[24..28].copy_from_slice(&u32::try_from(frames.len()).unwrap_or(0).to_le_bytes());
+    for (index, frame) in frames.iter().enumerate() {
+        let size = u32::try_from(frame.len()).unwrap_or(0);
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&(u64::try_from(index).unwrap_or(0)).to_le_bytes());
+        out.extend_from_slice(frame);
+    }
+    std::fs::write(dst, out).expect("ivf");
+}
+
 fn decode_shown(stream: &Ivf, pixel: PixelFormat) -> (Vec<u8>, u32) {
     let params = CodecParams::with_format(CodecId::Vp9, stream.width, stream.height, pixel);
     let mut decoder = Vp9Decoder::open(&params).expect("open");

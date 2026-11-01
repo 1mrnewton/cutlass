@@ -501,6 +501,10 @@ impl Shell {
     }
 
     pub fn play(&mut self) {
+        if self.cut_duration().0 <= 0 {
+            self.playing = false;
+            return;
+        }
         self.playing = true;
         self.queue_preview(PLAY_FRAMES);
     }
@@ -520,8 +524,14 @@ impl Shell {
             return;
         }
         let end = self.cut_duration().0;
+        if end <= 0 {
+            self.playing = false;
+            self.playhead = Micros(0);
+            self.output.queue(&[]);
+            return;
+        }
         let mut next = self.playhead.0.saturating_add(elapsed);
-        if end > 0 && next >= end {
+        if next >= end {
             if self.settings.playback.loop_playback {
                 next %= end;
             } else {
@@ -1721,6 +1731,22 @@ mod tests {
         desktop.seek(Micros(30));
         assert!(desktop.playing());
         assert_eq!(desktop.revision(), revision);
+    }
+
+    #[test]
+    fn play_on_an_empty_cut_stays_at_the_start() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.play();
+        assert!(!desktop.playing());
+        assert_eq!(desktop.playhead(), Micros(0));
+        desktop.playing = true;
+        desktop.playhead = Micros(2_000_000);
+        desktop.advance(1_000_000);
+        assert!(!desktop.playing());
+        assert_eq!(desktop.playhead(), Micros(0));
     }
 
     #[test]

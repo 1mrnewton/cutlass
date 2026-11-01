@@ -997,11 +997,6 @@ fn scaled_layer_motion<S: Sample>(
         });
     }
     let crop = &slice.sps.svc_scale;
-    if crop.left < 0 || crop.top < 0 || crop.right < 0 || crop.bottom < 0 {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
     let left = sample_offset(crop.left)?;
     let top = sample_offset(crop.top)?;
     let right = sample_offset(crop.right)?;
@@ -1219,11 +1214,6 @@ pub(crate) fn resample_residual<S: Sample>(
         });
     }
     let crop = &slice.sps.svc_scale;
-    if crop.left < 0 || crop.top < 0 || crop.right < 0 || crop.bottom < 0 {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
     let left = sample_offset(crop.left)?;
     let top = sample_offset(crop.top)?;
     let right = sample_offset(crop.right)?;
@@ -1473,31 +1463,7 @@ fn upsample_residual(up: ResidualUp<'_>) -> Result<Vec<i32>, CodecError> {
         mb_w,
         chroma,
     } = up;
-    if base_w <= 0
-        || base_h <= 0
-        || out_w <= 0
-        || out_h <= 0
-        || scaled_w <= 0
-        || scaled_h <= 0
-        || left < 0
-        || top < 0
-    {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
-    let right = out_w
-        .checked_sub(left)
-        .and_then(|width| width.checked_sub(scaled_w));
-    let bottom = out_h
-        .checked_sub(top)
-        .and_then(|height| height.checked_sub(scaled_h));
-    let (Some(right), Some(bottom)) = (right, bottom) else {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    };
-    if right < 0 || bottom < 0 {
+    if base_w <= 0 || base_h <= 0 || out_w <= 0 || out_h <= 0 || scaled_w <= 0 || scaled_h <= 0 {
         return Err(CodecError::Unsupported {
             what: "inter-layer prediction",
         });
@@ -8446,11 +8412,6 @@ pub(crate) fn resample_intra<S: Sample>(
         });
     }
     let scale = &sps.svc_scale;
-    if scale.left < 0 || scale.top < 0 || scale.right < 0 || scale.bottom < 0 {
-        return Err(CodecError::Unsupported {
-            what: "inter-layer prediction",
-        });
-    }
     let out_w = sps.width as usize;
     let out_h = sps.height as usize;
     if out_w == 0 || out_h == 0 || !out_w.is_multiple_of(16) || !out_h.is_multiple_of(16) {

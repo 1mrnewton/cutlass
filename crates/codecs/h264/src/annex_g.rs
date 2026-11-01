@@ -681,6 +681,47 @@ fn residual_resampling_respects_the_crop() {
     }
 }
 
+#[test]
+fn a_negative_offset_shifts_the_scaled_window() {
+    let mut decoder = open();
+    let mut pictures = push_pictures(&mut decoder, &shifted_idr());
+    pictures.extend(push_pictures(&mut decoder, &shifted_residual_p()));
+    pictures.extend(decoder.drain().expect("drain"));
+    assert_eq!(pictures.len(), 2);
+    let reference = &pictures[0];
+    assert_eq!(reference.picture.width(), 32);
+    assert!(
+        shifted_reference(reference),
+        "row {:?} chroma {:?}",
+        &reference.picture.y()[..32],
+        &reference.picture.u()[..16]
+    );
+    let picture = &pictures[1];
+    assert!(
+        shifted_residual(picture),
+        "row {:?} row8 {:?} chroma {:?}",
+        &picture.picture.y()[..32],
+        &picture.picture.y()[8 * 32..9 * 32],
+        &picture.picture.u()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = shifted_idr();
+        annex.extend(shifted_residual_p());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let base = decode(&resample_base());
+        let mut second = planes_of(&base);
+        for row in 0..4 {
+            for col in 0..4 {
+                second[row * 16 + col] = 43;
+            }
+        }
+        let mut want = planes_of(&base);
+        want.extend(second);
+        assert_eq!(raw, want);
+        assert_ne!(planes_of(picture), &raw[raw.len() / 2..]);
+    }
+}
+
 fn push_pictures(decoder: &mut H264Decoder, annex: &[u8]) -> Vec<VideoOutput> {
     decoder
         .push(&Packet::video(annex.to_vec(), 0, 1, 30, true))
@@ -2691,6 +2732,123 @@ fn cropped_reference(picture: &VideoOutput) -> bool {
         })
     };
     luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
+}
+
+fn shifted_idr() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &high_sps());
+    out.extend(annex_b_nal(3, 15, &shifted_subset()));
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &resample_pcm()));
+    out.extend(annex_b_extension(
+        3,
+        20,
+        &ilp_header(),
+        &motion_scale_intra(),
+    ));
+    out
+}
+
+fn shifted_subset() -> Vec<u8> {
+    let mut w = Writer::new();
+    w.bits(86, 8);
+    high_body_size(&mut w, 1, 1);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.bit(true);
+    w.bits(1, 2);
+    w.se(8);
+    w.se(0);
+    w.se(-8);
+    w.se(0);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.trailing();
+    w.bytes
+}
+
+fn shifted_residual_p() -> Vec<u8> {
+    let mut out = annex_b_nal(0, 1, &residual_scale_base());
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x80, 0x10, 0x07],
+        &shifted_enhancement(),
+    ));
+    out
+}
+
+fn shifted_enhancement() -> Vec<u8> {
+    let mut w = Writer::new();
+    motion_p_header(&mut w);
+    w.ue(0);
+    w.ue(1);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.bit(false);
+    w.bit(false);
+    w.bit(false);
+    w.bit(true);
+    w.ue(1);
+    w.bit(true);
+    w.ue(0);
+    w.ue(1);
+    w.bit(true);
+    w.ue(0);
+    w.trailing();
+    w.bytes
+}
+
+fn shifted_reference(picture: &VideoOutput) -> bool {
+    let luma = upsampled_luma();
+    let chroma = upsampled_chroma();
+    let y = picture.picture.y();
+    let luma_ok = (0..32).all(|row| {
+        y[row * 32..row * 32 + 16]
+            .iter()
+            .all(|sample| *sample == 128)
+            && y[row * 32 + 16..row * 32 + 32] == luma[..16]
+    });
+    let chroma_ok = |plane: &[u8]| {
+        (0..16).all(|row| {
+            plane[row * 16..row * 16 + 8]
+                .iter()
+                .all(|sample| *sample == 128)
+                && plane[row * 16 + 8..row * 16 + 16] == chroma[..8]
+        })
+    };
+    luma_ok && chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
+}
+
+fn shifted_residual(picture: &VideoOutput) -> bool {
+    let luma = upsampled_luma();
+    let y = picture.picture.y();
+    let luma_ok = (0..32).all(|row| {
+        (0..32).all(|col| {
+            let mut want = if col < 16 { 128 } else { luma[col - 16] };
+            if row < 8 && (16..24).contains(&col) {
+                want = 43;
+            }
+            y[row * 32 + col] == want
+        })
+    });
+    shifted_reference_chroma(picture) && luma_ok
+}
+
+fn shifted_reference_chroma(picture: &VideoOutput) -> bool {
+    let chroma = upsampled_chroma();
+    let chroma_ok = |plane: &[u8]| {
+        (0..16).all(|row| {
+            plane[row * 16..row * 16 + 8]
+                .iter()
+                .all(|sample| *sample == 128)
+                && plane[row * 16 + 8..row * 16 + 16] == chroma[..8]
+        })
+    };
+    chroma_ok(picture.picture.u()) && chroma_ok(picture.picture.v())
 }
 
 fn crop_residual_p() -> Vec<u8> {

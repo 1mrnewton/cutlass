@@ -334,6 +334,34 @@ fn inter_layer_prediction_averages_both_lists() {
 }
 
 #[test]
+fn inter_view_prediction_uses_the_base_view() {
+    let parsed = parse_subset_sps(&mvc_views(118, false, true)).expect("mvc");
+    assert_eq!(parsed.views, vec![0, 1]);
+    assert_eq!(parsed.interview[1].anchor_l0, vec![0]);
+    assert!(parsed.interview[1].anchor_l1.is_empty());
+    let mut decoder = open();
+    let base = decode_with(&mut decoder, &interview_base());
+    assert!(split_luma(&base, 100, 180));
+    let newer = decode_with(&mut decoder, &future_reference());
+    assert!(painted(&newer, 40, 90));
+    let view = decode_with(&mut decoder, &interview_view());
+    assert!(
+        base_residual_picture(&view),
+        "row {:?}",
+        &view.picture.y()[..16]
+    );
+    if let Some(ffmpeg) = ffmpeg_bin() {
+        let mut annex = interview_base();
+        annex.extend(future_reference());
+        let raw = ffmpeg_raw(&ffmpeg, &annex);
+        let frame = 16 * 16 + 8 * 8 * 2;
+        assert_eq!(raw.len(), frame * 2, "ffmpeg picture count");
+        assert_eq!(&raw[..frame], &planes_of(&base));
+        assert_ne!(&raw[..frame], &planes_of(&view));
+    }
+}
+
+#[test]
 fn a_non_base_mvc_view_is_an_intra_picture() {
     for profile in [118u8, 128] {
         let parsed = parse_subset_sps(&mvc_subset(profile, false)).expect("mvc");
@@ -572,6 +600,43 @@ fn mvc_header(view: u16) -> [u8; 3] {
     [0x00, b1, b2]
 }
 
+fn interview_base() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 7, &two_ref_sps());
+    out.extend(annex_b_nal(3, 8, &pps()));
+    out.extend(annex_b_nal(3, 5, &residual_pcm()));
+    out
+}
+
+fn interview_view() -> Vec<u8> {
+    let mut out = annex_b_nal(3, 15, &mvc_views(118, false, true));
+    out.extend(annex_b_extension(
+        0,
+        20,
+        &[0x40, 0x00, 0x45],
+        &interview_slice(),
+    ));
+    out
+}
+
+fn interview_slice() -> Vec<u8> {
+    let mut w = Writer::new();
+    ref_p_header(&mut w, 2, 0, false, false);
+    w.ue(0);
+    w.ue(0);
+    w.se(0);
+    w.se(0);
+    w.ue(2);
+    w.se(0);
+    w.bits(1, 2);
+    w.bit(false);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.bit(true);
+    w.trailing();
+    w.bytes
+}
+
 fn mvc_annex(header: &[u8; 3]) -> Vec<u8> {
     let mut out = annex_b_nal(3, 15, &mvc_subset(118, false));
     out.extend(annex_b_nal(3, 8, &pps()));
@@ -643,6 +708,10 @@ fn mvcd_subset(profile: u8, vui: bool) -> Vec<u8> {
 }
 
 fn mvc_subset(profile: u8, vui: bool) -> Vec<u8> {
+    mvc_views(profile, vui, false)
+}
+
+fn mvc_views(profile: u8, vui: bool, anchor_base: bool) -> Vec<u8> {
     let mut w = Writer::new();
     w.bits(u32::from(profile), 8);
     w.bits(0, 8);
@@ -668,7 +737,12 @@ fn mvc_subset(profile: u8, vui: bool) -> Vec<u8> {
     w.ue(1);
     w.ue(0);
     w.ue(1);
-    w.ue(0);
+    if anchor_base {
+        w.ue(1);
+        w.ue(0);
+    } else {
+        w.ue(0);
+    }
     w.ue(0);
     w.ue(0);
     w.ue(0);

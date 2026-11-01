@@ -64,7 +64,10 @@ pub(crate) fn reference_lists<S: Sample>(
     poc: i32,
     max_fn: u32,
 ) -> Result<(Vec<usize>, Vec<usize>), CodecError> {
-    let short = |frame: &&Frame<S>| frame.referenced && !frame.long_term && !frame.nonexisting;
+    let view = header.view_id;
+    let short = |frame: &&Frame<S>| {
+        frame.referenced && !frame.long_term && !frame.nonexisting && frame.view_id == view
+    };
     let mut shorts: Vec<usize> = dpb
         .iter()
         .enumerate()
@@ -74,7 +77,9 @@ pub(crate) fn reference_lists<S: Sample>(
     let mut longs: Vec<usize> = dpb
         .iter()
         .enumerate()
-        .filter(|(_, frame)| frame.referenced && frame.long_term && !frame.nonexisting)
+        .filter(|(_, frame)| {
+            frame.referenced && frame.long_term && !frame.nonexisting && frame.view_id == view
+        })
         .map(|(index, _)| index)
         .collect();
     longs.sort_by_key(|&index| dpb[index].long_idx);
@@ -87,6 +92,7 @@ pub(crate) fn reference_lists<S: Sample>(
         });
         let mut list = shorts;
         list.extend(longs);
+        append_interview(&mut list, dpb, poc, &header.interview_l0);
         let list = reorder(
             list,
             header.num_ref_l0,
@@ -120,6 +126,8 @@ pub(crate) fn reference_lists<S: Sample>(
     if list0 == list1 && list1.len() > 1 {
         list1.swap(0, 1);
     }
+    append_interview(&mut list0, dpb, poc, &header.interview_l0);
+    append_interview(&mut list1, dpb, poc, &header.interview_l1);
     let list0 = reorder(
         list0,
         header.num_ref_l0,
@@ -137,6 +145,23 @@ pub(crate) fn reference_lists<S: Sample>(
         max_fn,
     )?;
     Ok((list0, list1))
+}
+
+fn append_interview<S: Sample>(list: &mut Vec<usize>, dpb: &[Frame<S>], poc: i32, views: &[u16]) {
+    for view in views {
+        let Some(index) = dpb.iter().position(|frame| {
+            frame.referenced
+                && !frame.nonexisting
+                && frame.inter_view
+                && frame.view_id == *view
+                && frame.poc == poc
+        }) else {
+            continue;
+        };
+        if !list.contains(&index) {
+            list.push(index);
+        }
+    }
 }
 
 fn pic_num<S: Sample>(frame: &Frame<S>, current: u32, max_fn: u32) -> i32 {
@@ -3795,6 +3820,8 @@ mod intra8 {
             adaptive: false,
             mmco: Vec::new(),
             max_fn: 16,
+            view_id: 0,
+            inter_view: true,
             shown: super::super::Shown::plain(0, 0),
         }
     }

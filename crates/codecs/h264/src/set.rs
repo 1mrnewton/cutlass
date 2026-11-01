@@ -87,6 +87,18 @@ pub struct Sps {
     pub views: Vec<u16>,
     /// Annex I `depth_view_present_flag`, one entry per `views` index.
     pub depth_views: Vec<bool>,
+    /// Annex H interview reference views, one entry per `views` index.
+    /// View 0 is empty. An Annex A or SVC sequence has no entries.
+    pub interview: Vec<Interview>,
+}
+
+/// Interview reference views for one view. Annex H.
+#[derive(Clone, Debug, Default)]
+pub struct Interview {
+    pub anchor_l0: Vec<u16>,
+    pub anchor_l1: Vec<u16>,
+    pub non_anchor_l0: Vec<u16>,
+    pub non_anchor_l1: Vec<u16>,
 }
 
 /// `num_slice_groups_minus1` and the map parameters that follow it.
@@ -493,22 +505,22 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         adaptive_tcoeff: false,
         restriction: true,
     };
-    let (svc, views, depth_views) = if subset && scalable {
+    let (svc, views, depth_views, interview) = if subset && scalable {
         let syntax = svc_extension(&mut bits, if separate { 0 } else { chroma_format })?;
         if bits.bit()? {
             return Err(CodecError::Unsupported { what: "svc vui" });
         }
-        (syntax, Vec::new(), Vec::new())
+        (syntax, Vec::new(), Vec::new(), Vec::new())
     } else if subset && multiview {
         if !bits.bit()? {
             return Err(bits.malformed("mvc"));
         }
-        let views = mvc_extension(&mut bits)?;
+        let (views, interview) = mvc_extension(&mut bits)?;
         if bits.bit()? {
             return Err(CodecError::Unsupported { what: "mvc vui" });
         }
         let depth_views = vec![false; views.len()];
-        (plain, views, depth_views)
+        (plain, views, depth_views, interview)
     } else if subset {
         if !bits.bit()? {
             return Err(bits.malformed("mvcd"));
@@ -517,9 +529,9 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         if bits.bit()? || bits.bit()? {
             return Err(CodecError::Unsupported { what: "mvcd vui" });
         }
-        (plain, views, depth_views)
+        (plain, views, depth_views, Vec::new())
     } else {
-        (plain, Vec::new(), Vec::new())
+        (plain, Vec::new(), Vec::new(), Vec::new())
     };
     if subset && bits.bit()? {
         while bits.more_rbsp() {
@@ -576,6 +588,7 @@ fn parse_sequence(rbsp: &[u8], subset: bool) -> Result<Sps, CodecError> {
         adaptive_tcoeff: svc.adaptive_tcoeff,
         views,
         depth_views,
+        interview,
     };
     if !sps.within_level() {
         return Err(CodecError::Limit {
@@ -641,9 +654,9 @@ fn mvc_limit(bits: &mut Bits<'_>, max: u32) -> Result<u32, CodecError> {
     Ok(value)
 }
 
-/// `seq_parameter_set_mvc_extension`. The view list is kept. Interview
-/// reference ids are consumed and not used: an intra view does not need them.
-fn mvc_extension(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
+/// `seq_parameter_set_mvc_extension`. The view list and its interview
+/// reference views are kept.
+fn mvc_extension(bits: &mut Bits<'_>) -> Result<(Vec<u16>, Vec<Interview>), CodecError> {
     let views_minus1 = mvc_limit(bits, 1023)?;
     let mut views = Vec::new();
     for _ in 0..=views_minus1 {
@@ -653,13 +666,24 @@ fn mvc_extension(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
         };
         views.push(id);
     }
+    let mut interview = vec![Interview::default()];
     for _ in 1..=views_minus1 {
-        consume_refs(bits)?;
-        consume_refs(bits)?;
+        interview.push(Interview {
+            anchor_l0: read_view_refs(bits)?,
+            anchor_l1: read_view_refs(bits)?,
+            non_anchor_l0: Vec::new(),
+            non_anchor_l1: Vec::new(),
+        });
     }
-    for _ in 1..=views_minus1 {
-        consume_refs(bits)?;
-        consume_refs(bits)?;
+    for index in 1..=views_minus1 {
+        let Some(refs) = interview.get_mut(index as usize) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "mvc",
+            });
+        };
+        refs.non_anchor_l0 = read_view_refs(bits)?;
+        refs.non_anchor_l1 = read_view_refs(bits)?;
     }
     let levels = mvc_limit(bits, 63)?;
     for _ in 0..=levels {
@@ -674,15 +698,20 @@ fn mvc_extension(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
             let _ = mvc_limit(bits, 1023)?;
         }
     }
-    Ok(views)
+    Ok((views, interview))
 }
 
-fn consume_refs(bits: &mut Bits<'_>) -> Result<(), CodecError> {
+fn read_view_refs(bits: &mut Bits<'_>) -> Result<Vec<u16>, CodecError> {
     let count = mvc_limit(bits, 15)?;
+    let mut refs = Vec::new();
     for _ in 0..count {
-        let _ = mvc_limit(bits, 1023)?;
+        let id = mvc_limit(bits, 1023)?;
+        let Ok(id) = u16::try_from(id) else {
+            return Err(CodecError::Limit { what: "mvc" });
+        };
+        refs.push(id);
     }
-    Ok(())
+    Ok(refs)
 }
 
 /// `seq_parameter_set_mvcd_extension`. Depth-view ids are kept. Interview
@@ -707,15 +736,15 @@ fn mvcd_extension(bits: &mut Bits<'_>) -> Result<(Vec<u16>, Vec<bool>), CodecErr
     for index in 1..=views_minus1 {
         let depth = depth_views.get(index as usize).copied().unwrap_or(false);
         if depth {
-            consume_refs(bits)?;
-            consume_refs(bits)?;
+            let _ = read_view_refs(bits)?;
+            let _ = read_view_refs(bits)?;
         }
     }
     for index in 1..=views_minus1 {
         let depth = depth_views.get(index as usize).copied().unwrap_or(false);
         if depth {
-            consume_refs(bits)?;
-            consume_refs(bits)?;
+            let _ = read_view_refs(bits)?;
+            let _ = read_view_refs(bits)?;
         }
     }
     let levels = mvc_limit(bits, 63)?;

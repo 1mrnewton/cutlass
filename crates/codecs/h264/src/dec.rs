@@ -176,6 +176,10 @@ pub(crate) struct Frame<S: Sample = u8> {
     adaptive: bool,
     mmco: Vec<Mark>,
     max_fn: u32,
+    /// Annex H `view_id`. An Annex A picture is the base view, 0.
+    view_id: u16,
+    /// This picture may be an interview reference. The base view is.
+    inter_view: bool,
     /// Display time and film grain. Reconstruction keeps `pts` and the planes.
     shown: Shown,
 }
@@ -1358,6 +1362,8 @@ fn absent_frame<S: Sample>(sps: &Sps, frame_num: u32, poc: i32) -> Frame<S> {
         adaptive: false,
         mmco: Vec::new(),
         max_fn: 1u32 << sps.log2_max_frame_num,
+        view_id: 0,
+        inter_view: false,
         shown: Shown::plain(0, 0),
     }
 }
@@ -2044,6 +2050,14 @@ struct Header {
     base_mode: bool,
     /// The reference layer's list-0 residual is added after prediction.
     residual_pred: bool,
+    /// Annex H `view_id`. Zero for an Annex A picture.
+    view_id: u16,
+    /// This picture may be an interview reference.
+    inter_view: bool,
+    /// Interview reference views for list 0, already chosen for anchor or not.
+    interview_l0: Vec<u16>,
+    /// Interview reference views for list 1.
+    interview_l1: Vec<u16>,
 }
 
 struct Mod {
@@ -2360,11 +2374,13 @@ fn read_header(
         let width = crate::fmo::cycle_bits(units, pps.groups.rate)?;
         group_cycle = bits.u(width)?;
     }
+    let mut view_id = 0u16;
+    let mut inter_view = matches!(class, SliceClass::Avc);
+    let mut interview_l0 = Vec::new();
+    let mut interview_l1 = Vec::new();
     if let Some(mvc) = mvc {
-        if !intra_slice(kind) {
-            return Err(CodecError::Unsupported {
-                what: if depth { "3d" } else { "mvc" },
-            });
+        if depth && !intra_slice(kind) {
+            return Err(CodecError::Unsupported { what: "3d" });
         }
         let Some(index) = sps.views.iter().position(|view| *view == mvc.view_id) else {
             return Err(bits.malformed("view id"));
@@ -2376,6 +2392,20 @@ fn read_header(
             }
         } else if index == 0 {
             return Err(bits.malformed("view id"));
+        }
+        view_id = mvc.view_id;
+        inter_view = mvc.inter_view;
+        if !depth && let Some(refs) = sps.interview.get(index) {
+            interview_l0 = if mvc.anchor {
+                refs.anchor_l0.clone()
+            } else {
+                refs.non_anchor_l0.clone()
+            };
+            interview_l1 = if mvc.anchor {
+                refs.anchor_l1.clone()
+            } else {
+                refs.non_anchor_l1.clone()
+            };
         }
     }
     let (base_mode, residual_pred) = match svc {
@@ -2430,6 +2460,10 @@ fn read_header(
         output: svc.is_none_or(|svc| svc.output),
         base_mode,
         residual_pred,
+        view_id,
+        inter_view,
+        interview_l0,
+        interview_l1,
     })
 }
 
@@ -2743,6 +2777,8 @@ fn new_frame<S: Sample>(
         adaptive: header.adaptive,
         mmco: header.mmco.clone(),
         max_fn: 1u32 << sps.log2_max_frame_num,
+        view_id: header.view_id,
+        inter_view: header.inter_view,
         shown: Shown::from_sps(packet.pts, packet.duration, sps),
     })
 }
@@ -3224,6 +3260,10 @@ mod tests {
             output: true,
             base_mode: false,
             residual_pred: false,
+            view_id: 0,
+            inter_view: true,
+            interview_l0: Vec::new(),
+            interview_l1: Vec::new(),
         }
     }
 
@@ -3269,6 +3309,8 @@ mod tests {
             adaptive: true,
             mmco: Vec::new(),
             max_fn: 16,
+            view_id: 0,
+            inter_view: true,
             shown: super::Shown::plain(0, 1),
         }
     }
@@ -3324,6 +3366,7 @@ mod tests {
             adaptive_tcoeff: false,
             views: Vec::new(),
             depth_views: Vec::new(),
+            interview: Vec::new(),
         }
     }
 

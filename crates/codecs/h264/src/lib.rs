@@ -9,8 +9,9 @@
 //! Base mode and that residual can both apply, and the enhancement can add a coded residual of its own.
 //! List 0 can use a reference index other than 0, and a reference macroblock can use list 1 or both lists.
 //! An MVC non-base view that is intra is reconstructed.
+//! A non-base view can predict from the base view at the same order count.
 //! An Annex I depth view that is intra is reconstructed.
-//! Resampling, inter-view prediction, and a 3D-AVC extension header are refused.
+//! Resampling and a 3D-AVC extension header are refused.
 //!
 //! The decoder follows Recommendation ITU-T H.264 (08/2021) clauses 7, 8, and 9.
 //! The encoder chooses prediction and rate control; the bitstream it emits is

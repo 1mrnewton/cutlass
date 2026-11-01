@@ -33,6 +33,10 @@ pub struct MvcHeader {
     /// `IdrPicFlag`, the inverse of `non_idr_flag`.
     pub idr: bool,
     pub view_id: u16,
+    /// `anchor_pic_flag`. Selects the anchor interview list.
+    pub anchor: bool,
+    /// `inter_view_flag`. This view can be an interview reference.
+    pub inter_view: bool,
 }
 
 /// `nal_unit_header_svc_extension`. Annex G. Fields the reconstruction reads.
@@ -159,6 +163,8 @@ fn mvc_header(bytes: &[u8]) -> Result<MvcHeader, CodecError> {
     Ok(MvcHeader {
         idr: b0 & 0x40 == 0,
         view_id: (u16::from(b1) << 2) | u16::from(b2 >> 6),
+        anchor: b2 & 0x04 != 0,
+        inter_view: b2 & 0x02 != 0,
     })
 }
 

@@ -157,6 +157,17 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
                     what: "picture bytes",
                 })
         }
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => {
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                return Err(CodecError::InvalidApi { what: "4:2:0 size" });
+            }
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or(CodecError::Limit {
+                    what: "picture bytes",
+                })
+        }
         PixelFormat::Yuv422p | PixelFormat::Yuv440p | PixelFormat::Yuv444p | PixelFormat::Gbrp => {
             let (chroma_w, chroma_h) =
                 pixel

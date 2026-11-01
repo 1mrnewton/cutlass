@@ -115,6 +115,7 @@ impl VideoEncoder for Vp9Encoder {
             ss_y: 1,
             color_space: 0,
             color_range: 0,
+            bit_depth: 8,
         };
         let reference = Reference::from_picture(&picture)?;
         self.reference = Some(reference);
@@ -721,12 +722,14 @@ mod tests {
         let mut decoder = Vp9Decoder::open(&params).expect("decoder");
         let empty = decoder.push(&Packet::video(Vec::new(), 0, 1, 30, true));
         assert!(matches!(empty, Err(CodecError::InvalidApi { .. })));
-        for marker in [0x90, 0xb0] {
-            let err = decoder
-                .push(&Packet::video(vec![marker], 0, 1, 30, true))
-                .expect_err("profile");
-            assert!(err.to_string().contains("profile"), "{marker:#x} {err}");
-        }
+        let err = decoder
+            .push(&Packet::video(vec![0xb0], 0, 1, 30, true))
+            .expect_err("profile");
+        assert!(err.to_string().contains("profile"), "{err}");
+        let err = decoder
+            .push(&Packet::video(vec![0x90], 0, 1, 30, true))
+            .expect_err("truncated profile 2");
+        assert!(!err.to_string().contains("vp9 profile"), "{err}");
         let err = match Decoder::new().decode(&oversized_edge()) {
             Err(err) => err,
             Ok(_) => panic!("oversized edge was accepted"),

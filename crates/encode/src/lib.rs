@@ -236,6 +236,16 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
                 .checked_mul(3)
                 .ok_or(CodecError::Limit { what: "frame size" })
         }
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => {
+            if width % 2 != 0 || height % 2 != 0 {
+                return Err(CodecError::InvalidApi {
+                    what: "chroma size",
+                });
+            }
+            pixels
+                .checked_mul(3)
+                .ok_or(CodecError::Limit { what: "frame size" })
+        }
         PixelFormat::Yuv422p | PixelFormat::Yuv440p | PixelFormat::Yuv444p | PixelFormat::Gbrp => {
             let (chroma_w, chroma_h) =
                 pixel

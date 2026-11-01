@@ -1,4 +1,4 @@
-//! Profile 0 reconstruction.
+//! Reconstruction for profiles 0, 1, and 2.
 //!
 //! Partition walk, mode decode, and coefficient reconstruction follow
 //! libvpx `decode_partition` and `decode_block`. Inter prediction scales a
@@ -40,6 +40,7 @@ use crate::geom::{
 use crate::header::{Header, Parsed};
 use crate::intra;
 use crate::lpf;
+use crate::pel::Pix;
 use crate::prob::{self, Counts, FrameContext};
 use crate::tables::{
     KF_UV_MODE_PROB, KF_Y_MODE_PROB, NEIGHBORS_COL_4X4, NEIGHBORS_COL_8X8, NEIGHBORS_COL_16X16,
@@ -48,7 +49,7 @@ use crate::tables::{
     SCAN_COL_16X16, SCAN_DEFAULT_4X4, SCAN_DEFAULT_8X8, SCAN_DEFAULT_16X16, SCAN_DEFAULT_32X32,
     SCAN_ROW_4X4, SCAN_ROW_8X8, SCAN_ROW_16X16,
 };
-use crate::txfm::{iht_add, iwht4x4_add};
+use crate::txfm::{iht_add_pix, iwht4x4_add_pix};
 
 pub struct Picture {
     pub y: Vec<u8>,
@@ -60,6 +61,7 @@ pub struct Picture {
     pub ss_y: u32,
     pub color_space: u8,
     pub color_range: u8,
+    pub bit_depth: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -150,7 +152,7 @@ struct Residual {
 }
 
 struct Inv<'a> {
-    coef: &'a [i32],
+    coef: &'a [i64],
     stride: usize,
     n: usize,
     kind: u8,
@@ -178,7 +180,7 @@ impl Default for Mi {
     }
 }
 
-struct Scratch<'a> {
+struct Scratch<'a, P: Pix = u8> {
     header: &'a Header,
     fc: &'a FrameContext,
     counts: Counts,
@@ -189,9 +191,9 @@ struct Scratch<'a> {
     mi_cols: usize,
     mi_rows: usize,
     tile_col: usize,
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
+    y: Vec<P>,
+    u: Vec<P>,
+    v: Vec<P>,
     y_stride: usize,
     uv_stride: usize,
     /// Aligned plane size, libvpx `y_width` / `y_height`. The stride is wider
@@ -213,19 +215,19 @@ struct Scratch<'a> {
     left_y: [u8; 16],
     left_u: [u8; 16],
     left_v: [u8; 16],
-    coef: Vec<i32>,
+    coef: Vec<i64>,
     levels: lpf::Levels,
     masks: Vec<lpf::Mask>,
     sb_cols: usize,
-    slots: &'a RefSlots<'a>,
+    slots: &'a RefSlots<'a, P>,
     tile_col_end: usize,
     prev: Option<&'a Motion>,
     last_seg: &'a [u8],
 }
 
-pub fn reconstruct<'a>(
+pub fn reconstruct<'a, P: Pix>(
     parsed: &'a Parsed<'_>,
-    slots: &'a RefSlots<'a>,
+    slots: &'a RefSlots<'a, P>,
     prev: Option<&'a Motion>,
     last_seg: &'a [u8],
 ) -> Result<Recon, CodecError> {
@@ -258,11 +260,11 @@ pub fn reconstruct<'a>(
     })
 }
 
-impl<'a> Scratch<'a> {
+impl<'a, P: Pix> Scratch<'a, P> {
     fn new(
         header: &'a Header,
         fc: &'a FrameContext,
-        slots: &'a RefSlots<'a>,
+        slots: &'a RefSlots<'a, P>,
         prev: Option<&'a Motion>,
         last_seg: &'a [u8],
     ) -> Result<Self, CodecError> {
@@ -302,9 +304,9 @@ impl<'a> Scratch<'a> {
             mi_cols,
             mi_rows,
             tile_col: 0,
-            y: vec![0u8; y_stride.saturating_mul(y_rows)],
-            u: vec![0u8; uv_stride.saturating_mul(uv_rows)],
-            v: vec![0u8; uv_stride.saturating_mul(uv_rows)],
+            y: vec![P::default(); y_stride.saturating_mul(y_rows)],
+            u: vec![P::default(); uv_stride.saturating_mul(uv_rows)],
+            v: vec![P::default(); uv_stride.saturating_mul(uv_rows)],
             y_stride,
             uv_stride,
             plane_w: coded_w,
@@ -323,7 +325,7 @@ impl<'a> Scratch<'a> {
             left_y: [0; 16],
             left_u: [0; 16],
             left_v: [0; 16],
-            coef: vec![0i32; 32 * 32],
+            coef: vec![0i64; 32 * 32],
             levels: lpf::levels(header),
             masks: vec![
                 lpf::Mask::default();
@@ -1096,7 +1098,7 @@ impl<'a> Scratch<'a> {
         }
     }
 
-    fn plane_mut(&mut self, plane: usize) -> (usize, usize, usize, &mut [u8]) {
+    fn plane_mut(&mut self, plane: usize) -> (usize, usize, usize, &mut [P]) {
         // Intra edges use the aligned plane, libvpx `y_width` / `uv_width`,
         // not the stride. The stride includes the frame border.
         match plane {
@@ -1161,6 +1163,7 @@ impl<'a> Scratch<'a> {
             scan,
             neighbors,
             &mut self.coef,
+            self.header.bit_depth,
         )?;
         if eob > 0 {
             let inv = Inv {
@@ -1423,15 +1426,16 @@ impl<'a> Scratch<'a> {
 
     fn picture(&self) -> Result<Picture, CodecError> {
         Ok(Picture {
-            y: crop_plane(&self.y, self.y_stride, self.crop_w, self.crop_h)?,
-            u: crop_plane(&self.u, self.uv_stride, self.uv_w, self.uv_h)?,
-            v: crop_plane(&self.v, self.uv_stride, self.uv_w, self.uv_h)?,
+            y: pack_plane(&self.y, self.y_stride, self.crop_w, self.crop_h)?,
+            u: pack_plane(&self.u, self.uv_stride, self.uv_w, self.uv_h)?,
+            v: pack_plane(&self.v, self.uv_stride, self.uv_w, self.uv_h)?,
             width: self.header.width,
             height: self.header.height,
             ss_x: self.header.ss_x,
             ss_y: self.header.ss_y,
             color_space: self.header.color_space,
             color_range: self.header.color_range,
+            bit_depth: self.header.bit_depth,
         })
     }
 }
@@ -1461,7 +1465,7 @@ fn block_mode(mi: &Mi, plane: usize, row: usize, col: usize) -> u8 {
     }
 }
 
-fn plane_above<'a>(frame: &'a Scratch<'a>, plane: usize) -> &'a [u8] {
+fn plane_above<'a, P: Pix>(frame: &'a Scratch<'a, P>, plane: usize) -> &'a [u8] {
     match plane {
         0 => &frame.above_y,
         1 => &frame.above_u,
@@ -1469,7 +1473,7 @@ fn plane_above<'a>(frame: &'a Scratch<'a>, plane: usize) -> &'a [u8] {
     }
 }
 
-fn plane_left<'a>(frame: &'a Scratch<'a>, plane: usize) -> &'a [u8] {
+fn plane_left<'a, P: Pix>(frame: &'a Scratch<'a, P>, plane: usize) -> &'a [u8] {
     match plane {
         0 => &frame.left_y,
         1 => &frame.left_u,
@@ -1526,16 +1530,16 @@ fn limit_blocks(n4: usize, edge: i32, ss: u32) -> usize {
     }
 }
 
-fn add_inverse(dest: &mut [u8], inv: &Inv<'_>) -> Result<(), CodecError> {
+fn add_inverse<P: Pix>(dest: &mut [P], inv: &Inv<'_>) -> Result<(), CodecError> {
     let start = inv.y * inv.stride + inv.x;
     let need = (inv.n - 1) * inv.stride + inv.n;
     let Some(slot) = dest.get_mut(start..).filter(|tail| tail.len() >= need) else {
         return Err(bad("inverse plane"));
     };
     if inv.lossless {
-        iwht4x4_add(inv.coef, slot, inv.stride);
+        iwht4x4_add_pix(inv.coef, slot, inv.stride);
     } else {
-        iht_add(inv.coef, slot, inv.stride, inv.n, inv.kind);
+        iht_add_pix(inv.coef, slot, inv.stride, inv.n, inv.kind);
     }
     Ok(())
 }
@@ -1571,18 +1575,17 @@ fn take_tile<'a>(data: &mut &'a [u8], last: bool) -> Result<&'a [u8], CodecError
     Ok(tile)
 }
 
-fn crop_plane(
-    src: &[u8],
+fn pack_plane<P: Pix>(
+    src: &[P],
     stride: usize,
     width: usize,
     height: usize,
 ) -> Result<Vec<u8>, CodecError> {
-    let mut out = vec![0u8; width.saturating_mul(height)];
+    let mut out = Vec::new();
     for row in 0..height {
         let from = row * stride;
-        let to = row * width;
         let src_row = src.get(from..from + width).ok_or(bad("crop"))?;
-        out[to..to + width].copy_from_slice(src_row);
+        crate::pel::pack_row(src_row, &mut out);
     }
     Ok(out)
 }
@@ -1621,7 +1624,7 @@ mod tests {
     #[test]
     fn lossless_red_keyframe_matches_ffmpeg() {
         let parsed = parse(&Persist::new(), &RED_16).expect("header");
-        let pic = reconstruct(&parsed, &RefSlots::none(), None, &[])
+        let pic = reconstruct(&parsed, &RefSlots::<u8>::none(), None, &[])
             .expect("recon")
             .picture;
         assert_eq!((pic.width, pic.height), (16, 16));
@@ -1663,7 +1666,7 @@ mod tests {
         ];
         for (name, payload, raw, w, h) in cases {
             let parsed = parse(&Persist::new(), payload).expect("header");
-            let pic = reconstruct(&parsed, &RefSlots::none(), None, &[])
+            let pic = reconstruct(&parsed, &RefSlots::<u8>::none(), None, &[])
                 .unwrap_or_else(|err| panic!("{name} recon {err}"))
                 .picture;
             assert_eq!((pic.width, pic.height), (w, h), "{name}");

@@ -1,7 +1,7 @@
-//! VP9 profile 0 decoder and encoder.
+//! VP9 decoder and profile 0 encoder.
 //!
-//! The support record is `STATUS.md` next to this crate. Profiles 1, 2, and 3
-//! are rejected. Playback and a WebM container are outside this crate.
+//! The decoder accepts profiles 0, 1, and 2. Profile 3 is rejected. The
+//! encoder emits profile 0. Playback and a WebM container are outside this crate.
 
 #![forbid(unsafe_code)]
 
@@ -14,6 +14,7 @@ mod geom;
 mod header;
 mod intra;
 mod lpf;
+mod pel;
 mod prob;
 mod recon;
 mod tables;
@@ -30,7 +31,7 @@ use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};
 use cutlass_encode::VideoEncodeFactory;
 use cutlass_encode::video::VideoEncoder;
 
-/// Registers the profile-0 decoder on a video decode factory.
+/// Registers the VP9 decoder on a video decode factory.
 pub fn register_decoders(factory: &mut VideoDecodeFactory) {
     factory.register(CodecId::Vp9, open_decoder);
 }

@@ -13,13 +13,14 @@ use cutlass_encode::PixelFormat;
 
 use crate::geom::{self, SWITCHABLE, TX_MODE_SELECT};
 use crate::header::{Header, Parsed, Persist, parse};
+use crate::pel::{Pix, Wide};
 use crate::prob::{self, Counts, FrameContext};
 use crate::recon::{Motion, Picture, RefSlots, Reference, reconstruct};
 
 #[derive(Clone)]
 pub struct Decoder {
     persist: Persist,
-    refs: [Option<Arc<Reference>>; 8],
+    refs: [Option<Held>; 8],
     prev: Option<Arc<Motion>>,
     last_seg: Vec<u8>,
     /// Frames whose segmentation map was coded relative to the previous map.
@@ -62,23 +63,10 @@ impl Decoder {
             self.persist.last_height = parsed.header.height;
             return Ok(Some(picture));
         }
-        let prev = self.prev.clone();
-        let last_seg = seg_source(&self.last_seg, &parsed.header);
-        let built = {
-            let slots = self.slots();
-            reconstruct(&parsed, &slots, prev.as_deref(), &last_seg)?
-        };
-        self.commit(
-            &parsed,
-            &built.picture,
-            &built.counts,
-            built.motion,
-            built.segmap,
-        );
-        if parsed.header.show_frame {
-            Ok(Some(built.picture))
-        } else {
-            Ok(None)
+        match parsed.header.bit_depth {
+            10 => self.reconstruct_depth::<Wide<10>>(&parsed),
+            12 => self.reconstruct_depth::<Wide<12>>(&parsed),
+            _ => self.reconstruct_depth::<u8>(&parsed),
         }
     }
 
@@ -93,15 +81,39 @@ impl Decoder {
         }
     }
 
-    fn slots(&self) -> RefSlots<'_> {
+    fn reconstruct_depth<P: Store>(
+        &mut self,
+        parsed: &Parsed<'_>,
+    ) -> Result<Option<Picture>, CodecError> {
+        let prev = self.prev.clone();
+        let last_seg = seg_source(&self.last_seg, &parsed.header);
+        let built = {
+            let slots = self.slots::<P>();
+            reconstruct(parsed, &slots, prev.as_deref(), &last_seg)?
+        };
+        self.commit(
+            parsed,
+            &built.picture,
+            &built.counts,
+            built.motion,
+            built.segmap,
+        );
+        if parsed.header.show_frame {
+            Ok(Some(built.picture))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn slots<P: Store>(&self) -> RefSlots<'_, P> {
         RefSlots {
-            frames: std::array::from_fn(|index| self.refs[index].as_deref()),
+            frames: std::array::from_fn(|index| self.refs[index].as_ref().and_then(P::view)),
         }
     }
 
     fn shown(&self, header: &Header) -> Result<Picture, CodecError> {
         let slot = usize::from(header.frame_to_show);
-        let reference =
+        let held =
             self.refs
                 .get(slot)
                 .and_then(|slot| slot.as_ref())
@@ -109,17 +121,11 @@ impl Decoder {
                     at_bit: 0,
                     what: "shown reference",
                 })?;
-        Ok(Picture {
-            y: reference.y.samples.clone(),
-            u: reference.u.samples.clone(),
-            v: reference.v.samples.clone(),
-            width: reference.width,
-            height: reference.height,
-            ss_x: reference.ss_x,
-            ss_y: reference.ss_y,
-            color_space: reference.color_space,
-            color_range: reference.color_range,
-        })
+        match held {
+            Held::Eight(reference) => Ok(picture_from(reference)),
+            Held::Ten(reference) => Ok(picture_from(reference)),
+            Held::Twelve(reference) => Ok(picture_from(reference)),
+        }
     }
 
     fn commit(
@@ -156,7 +162,11 @@ impl Decoder {
             self.persist.contexts[index] = fc;
         }
         self.prev = Some(Arc::new(motion));
-        self.store_refs(header, picture);
+        match header.bit_depth {
+            10 => self.store_refs::<Wide<10>>(header, picture),
+            12 => self.store_refs::<Wide<12>>(header, picture),
+            _ => self.store_refs::<u8>(header, picture),
+        }
         self.store_seg(header, segmap);
     }
 
@@ -169,11 +179,11 @@ impl Decoder {
         }
     }
 
-    fn store_refs(&mut self, header: &Header, picture: &Picture) {
+    fn store_refs<P: Store>(&mut self, header: &Header, picture: &Picture) {
         if header.refresh_flags == 0 {
             return;
         }
-        let Ok(reference) = Reference::from_picture(picture) else {
+        let Ok(reference) = Reference::<P>::from_picture(picture) else {
             return;
         };
         let shared = Arc::new(reference);
@@ -182,12 +192,84 @@ impl Decoder {
             if header.refresh_flags & bit == 0 {
                 continue;
             }
-            self.refs[slot] = Some(Arc::clone(&shared));
+            self.refs[slot] = Some(P::keep(Arc::clone(&shared)));
             self.persist.ref_ok[slot] = true;
             self.persist.ref_w[slot] = header.width;
             self.persist.ref_h[slot] = header.height;
         }
     }
+}
+
+#[derive(Clone)]
+enum Held {
+    Eight(Arc<Reference<u8>>),
+    Ten(Arc<Reference<Wide<10>>>),
+    Twelve(Arc<Reference<Wide<12>>>),
+}
+
+trait Store: Pix {
+    fn view(held: &Held) -> Option<&Reference<Self>>;
+    fn keep(reference: Arc<Reference<Self>>) -> Held;
+}
+
+impl Store for u8 {
+    fn view(held: &Held) -> Option<&Reference<Self>> {
+        match held {
+            Held::Eight(reference) => Some(reference),
+            _ => None,
+        }
+    }
+
+    fn keep(reference: Arc<Reference<Self>>) -> Held {
+        Held::Eight(reference)
+    }
+}
+
+impl Store for Wide<10> {
+    fn view(held: &Held) -> Option<&Reference<Self>> {
+        match held {
+            Held::Ten(reference) => Some(reference),
+            _ => None,
+        }
+    }
+
+    fn keep(reference: Arc<Reference<Self>>) -> Held {
+        Held::Ten(reference)
+    }
+}
+
+impl Store for Wide<12> {
+    fn view(held: &Held) -> Option<&Reference<Self>> {
+        match held {
+            Held::Twelve(reference) => Some(reference),
+            _ => None,
+        }
+    }
+
+    fn keep(reference: Arc<Reference<Self>>) -> Held {
+        Held::Twelve(reference)
+    }
+}
+
+fn picture_from<P: Pix>(reference: &Reference<P>) -> Picture {
+    Picture {
+        y: packed(&reference.y.samples),
+        u: packed(&reference.u.samples),
+        v: packed(&reference.v.samples),
+        width: reference.width,
+        height: reference.height,
+        ss_x: reference.ss_x,
+        ss_y: reference.ss_y,
+        color_space: reference.color_space,
+        color_range: reference.color_range,
+        bit_depth: reference.bit_depth,
+    }
+}
+
+fn packed<P: Pix>(samples: &[P]) -> Vec<u8> {
+    let mut out = Vec::new();
+    crate::pel::pack_row(samples, &mut out);
+    out
 }
 
 fn seg_source(last: &[u8], header: &Header) -> Vec<u8> {
@@ -249,6 +331,8 @@ impl Vp9Decoder {
         if !matches!(
             params.pixel,
             PixelFormat::Yuv420p
+                | PixelFormat::Yuv420p10
+                | PixelFormat::Yuv420p12
                 | PixelFormat::Yuv422p
                 | PixelFormat::Yuv440p
                 | PixelFormat::Yuv444p
@@ -319,25 +403,40 @@ impl Vp9Decoder {
 }
 
 fn picture_frame(picture: &Picture) -> Result<VideoFrame, CodecError> {
-    let format = match (picture.ss_x, picture.ss_y, picture.color_space) {
-        (1, 1, _) => PixelFormat::Yuv420p,
-        (1, 0, _) => PixelFormat::Yuv422p,
-        (0, 1, _) => PixelFormat::Yuv440p,
-        (0, 0, 7) => PixelFormat::Gbrp,
-        (0, 0, _) => PixelFormat::Yuv444p,
+    let format = match (
+        picture.bit_depth,
+        picture.ss_x,
+        picture.ss_y,
+        picture.color_space,
+    ) {
+        (10, 1, 1, _) => PixelFormat::Yuv420p10,
+        (12, 1, 1, _) => PixelFormat::Yuv420p12,
+        (8, 1, 1, _) => PixelFormat::Yuv420p,
+        (8, 1, 0, _) => PixelFormat::Yuv422p,
+        (8, 0, 1, _) => PixelFormat::Yuv440p,
+        (8, 0, 0, 7) => PixelFormat::Gbrp,
+        (8, 0, 0, _) => PixelFormat::Yuv444p,
         _ => {
             return Err(CodecError::Unsupported { what: "vp9 chroma" });
         }
     };
     let chroma_w = picture.width.div_ceil(1u32 << picture.ss_x.min(1));
     let chroma_h = picture.height.div_ceil(1u32 << picture.ss_y.min(1));
+    let sample_bytes = if picture.bit_depth > 8 { 2 } else { 1 };
+    let plane = |width, height, samples: Vec<u8>| {
+        if sample_bytes == 1 {
+            Plane::tight(width, height, samples)
+        } else {
+            Plane::bytes(width, height, sample_bytes, samples)
+        }
+    };
     VideoFrame::planar(
         format,
         picture.width,
         picture.height,
-        Plane::tight(picture.width, picture.height, picture.y.clone())?,
-        Plane::tight(chroma_w, chroma_h, picture.u.clone())?,
-        Plane::tight(chroma_w, chroma_h, picture.v.clone())?,
+        plane(picture.width, picture.height, picture.y.clone())?,
+        plane(chroma_w, chroma_h, picture.u.clone())?,
+        plane(chroma_w, chroma_h, picture.v.clone())?,
     )
 }
 

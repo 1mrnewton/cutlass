@@ -4,48 +4,53 @@
 //! The arithmetic matches the libvpx scalar kernels, including the
 //! 16-bit truncation on the DCT working arrays.
 
-const COSPI_1: i32 = 16364;
-const COSPI_2: i32 = 16305;
-const COSPI_3: i32 = 16207;
-const COSPI_4: i32 = 16069;
-const COSPI_5: i32 = 15893;
-const COSPI_6: i32 = 15679;
-const COSPI_7: i32 = 15426;
-const COSPI_8: i32 = 15137;
-const COSPI_9: i32 = 14811;
-const COSPI_10: i32 = 14449;
-const COSPI_11: i32 = 14053;
-const COSPI_12: i32 = 13623;
-const COSPI_13: i32 = 13160;
-const COSPI_14: i32 = 12665;
-const COSPI_15: i32 = 12140;
-const COSPI_16: i32 = 11585;
-const COSPI_17: i32 = 11003;
-const COSPI_18: i32 = 10394;
-const COSPI_19: i32 = 9760;
-const COSPI_20: i32 = 9102;
-const COSPI_21: i32 = 8423;
-const COSPI_22: i32 = 7723;
-const COSPI_23: i32 = 7005;
-const COSPI_24: i32 = 6270;
-const COSPI_25: i32 = 5520;
-const COSPI_26: i32 = 4756;
-const COSPI_27: i32 = 3981;
-const COSPI_28: i32 = 3196;
-const COSPI_29: i32 = 2404;
-const COSPI_30: i32 = 1606;
-const COSPI_31: i32 = 804;
-const SINPI_1: i32 = 5283;
-const SINPI_2: i32 = 9929;
-const SINPI_3: i32 = 13377;
-const SINPI_4: i32 = 15212;
+const COSPI_1: i64 = 16364;
+const COSPI_2: i64 = 16305;
+const COSPI_3: i64 = 16207;
+const COSPI_4: i64 = 16069;
+const COSPI_5: i64 = 15893;
+const COSPI_6: i64 = 15679;
+const COSPI_7: i64 = 15426;
+const COSPI_8: i64 = 15137;
+const COSPI_9: i64 = 14811;
+const COSPI_10: i64 = 14449;
+const COSPI_11: i64 = 14053;
+const COSPI_12: i64 = 13623;
+const COSPI_13: i64 = 13160;
+const COSPI_14: i64 = 12665;
+const COSPI_15: i64 = 12140;
+const COSPI_16: i64 = 11585;
+const COSPI_17: i64 = 11003;
+const COSPI_18: i64 = 10394;
+const COSPI_19: i64 = 9760;
+const COSPI_20: i64 = 9102;
+const COSPI_21: i64 = 8423;
+const COSPI_22: i64 = 7723;
+const COSPI_23: i64 = 7005;
+const COSPI_24: i64 = 6270;
+const COSPI_25: i64 = 5520;
+const COSPI_26: i64 = 4756;
+const COSPI_27: i64 = 3981;
+const COSPI_28: i64 = 3196;
+const COSPI_29: i64 = 2404;
+const COSPI_30: i64 = 1606;
+const COSPI_31: i64 = 804;
+const SINPI_1: i64 = 5283;
+const SINPI_2: i64 = 9929;
+const SINPI_3: i64 = 13377;
+const SINPI_4: i64 = 15212;
 
 fn narrow(v: i32) -> i32 {
     i32::from(v as i16)
 }
 
-fn round_shift(v: i32) -> i32 {
+fn round_shift(v: i64) -> i64 {
     v.wrapping_add(8192) >> 14
+}
+
+/// 16-bit store on the 8-bit kernels. Wider bit depths keep the full value.
+fn sat<const HIGH: bool>(v: i64) -> i64 {
+    if HIGH { v } else { i64::from(v as i16) }
 }
 
 pub(crate) fn round_pow2(v: i32, n: u32) -> i32 {
@@ -65,19 +70,19 @@ fn clip_u8(v: i32) -> u8 {
     }
 }
 
-fn iadst4(input: &[i32], output: &mut [i32]) {
-    let mut s0: i32;
-    let mut s1: i32;
-    let mut s2: i32;
-    let mut s3: i32;
-    let mut s4: i32;
-    let mut s5: i32;
-    let mut s6: i32;
-    let mut s7: i32;
-    let mut x0: i32 = input[0];
-    let mut x1: i32 = input[1];
-    let mut x2: i32 = input[2];
-    let mut x3: i32 = input[3];
+fn iadst4<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut s0: i64;
+    let mut s1: i64;
+    let mut s2: i64;
+    let mut s3: i64;
+    let mut s4: i64;
+    let mut s5: i64;
+    let mut s6: i64;
+    let mut s7: i64;
+    let mut x0: i64 = input[0];
+    let mut x1: i64 = input[1];
+    let mut x2: i64 = input[2];
+    let mut x3: i64 = input[3];
     s0 = SINPI_1.wrapping_mul(x0);
     s1 = SINPI_2.wrapping_mul(x0);
     s2 = SINPI_3.wrapping_mul(x1);
@@ -96,45 +101,45 @@ fn iadst4(input: &[i32], output: &mut [i32]) {
     output[3] = (round_shift(s0.wrapping_add(s1).wrapping_sub(s3)));
 }
 
-fn idct4(input: &[i32], output: &mut [i32]) {
-    let mut step = [0i32; 4];
-    let mut temp1: i32;
-    let mut temp2: i32;
-    temp1 = (narrow(input[0]).wrapping_add(narrow(input[2]))).wrapping_mul(COSPI_16);
-    temp2 = (narrow(input[0]).wrapping_sub(narrow(input[2]))).wrapping_mul(COSPI_16);
-    step[0] = i32::from((round_shift(temp1)) as i16);
-    step[1] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[1])
+fn idct4<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut step = [0i64; 4];
+    let mut temp1: i64;
+    let mut temp2: i64;
+    temp1 = (sat::<HIGH>(input[0]).wrapping_add(sat::<HIGH>(input[2]))).wrapping_mul(COSPI_16);
+    temp2 = (sat::<HIGH>(input[0]).wrapping_sub(sat::<HIGH>(input[2]))).wrapping_mul(COSPI_16);
+    step[0] = sat::<HIGH>(round_shift(temp1));
+    step[1] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[1])
         .wrapping_mul(COSPI_24)
-        .wrapping_sub(narrow(input[3]).wrapping_mul(COSPI_8));
-    temp2 = narrow(input[1])
+        .wrapping_sub(sat::<HIGH>(input[3]).wrapping_mul(COSPI_8));
+    temp2 = sat::<HIGH>(input[1])
         .wrapping_mul(COSPI_8)
-        .wrapping_add(narrow(input[3]).wrapping_mul(COSPI_24));
-    step[2] = i32::from((round_shift(temp1)) as i16);
-    step[3] = i32::from((round_shift(temp2)) as i16);
+        .wrapping_add(sat::<HIGH>(input[3]).wrapping_mul(COSPI_24));
+    step[2] = sat::<HIGH>(round_shift(temp1));
+    step[3] = sat::<HIGH>(round_shift(temp2));
     output[0] = (step[0].wrapping_add(step[3]));
     output[1] = (step[1].wrapping_add(step[2]));
     output[2] = (step[1].wrapping_sub(step[2]));
     output[3] = (step[0].wrapping_sub(step[3]));
 }
 
-fn iadst8(input: &[i32], output: &mut [i32]) {
-    let mut s0: i32;
-    let mut s1: i32;
-    let mut s2: i32;
-    let mut s3: i32;
-    let mut s4: i32;
-    let mut s5: i32;
-    let mut s6: i32;
-    let mut s7: i32;
-    let mut x0: i32 = input[7];
-    let mut x1: i32 = input[0];
-    let mut x2: i32 = input[5];
-    let mut x3: i32 = input[2];
-    let mut x4: i32 = input[3];
-    let mut x5: i32 = input[4];
-    let mut x6: i32 = input[1];
-    let mut x7: i32 = input[6];
+fn iadst8<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut s0: i64;
+    let mut s1: i64;
+    let mut s2: i64;
+    let mut s3: i64;
+    let mut s4: i64;
+    let mut s5: i64;
+    let mut s6: i64;
+    let mut s7: i64;
+    let mut x0: i64 = input[7];
+    let mut x1: i64 = input[0];
+    let mut x2: i64 = input[5];
+    let mut x3: i64 = input[2];
+    let mut x4: i64 = input[3];
+    let mut x5: i64 = input[4];
+    let mut x6: i64 = input[1];
+    let mut x7: i64 = input[6];
     s0 = (COSPI_2
         .wrapping_mul(x0)
         .wrapping_add(COSPI_30.wrapping_mul(x1)));
@@ -210,57 +215,57 @@ fn iadst8(input: &[i32], output: &mut [i32]) {
     output[7] = ((x1).wrapping_neg());
 }
 
-fn idct8(input: &[i32], output: &mut [i32]) {
-    let mut step1 = [0i32; 8];
-    let mut step2 = [0i32; 8];
-    let mut temp1: i32;
-    let mut temp2: i32;
-    step1[0] = i32::from((narrow(input[0])) as i16);
-    step1[2] = i32::from((narrow(input[4])) as i16);
-    step1[1] = i32::from((narrow(input[2])) as i16);
-    step1[3] = i32::from((narrow(input[6])) as i16);
-    temp1 = narrow(input[1])
+fn idct8<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut step1 = [0i64; 8];
+    let mut step2 = [0i64; 8];
+    let mut temp1: i64;
+    let mut temp2: i64;
+    step1[0] = sat::<HIGH>(sat::<HIGH>(input[0]));
+    step1[2] = sat::<HIGH>(sat::<HIGH>(input[4]));
+    step1[1] = sat::<HIGH>(sat::<HIGH>(input[2]));
+    step1[3] = sat::<HIGH>(sat::<HIGH>(input[6]));
+    temp1 = sat::<HIGH>(input[1])
         .wrapping_mul(COSPI_28)
-        .wrapping_sub(narrow(input[7]).wrapping_mul(COSPI_4));
-    temp2 = narrow(input[1])
+        .wrapping_sub(sat::<HIGH>(input[7]).wrapping_mul(COSPI_4));
+    temp2 = sat::<HIGH>(input[1])
         .wrapping_mul(COSPI_4)
-        .wrapping_add(narrow(input[7]).wrapping_mul(COSPI_28));
-    step1[4] = i32::from((round_shift(temp1)) as i16);
-    step1[7] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[5])
+        .wrapping_add(sat::<HIGH>(input[7]).wrapping_mul(COSPI_28));
+    step1[4] = sat::<HIGH>(round_shift(temp1));
+    step1[7] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[5])
         .wrapping_mul(COSPI_12)
-        .wrapping_sub(narrow(input[3]).wrapping_mul(COSPI_20));
-    temp2 = narrow(input[5])
+        .wrapping_sub(sat::<HIGH>(input[3]).wrapping_mul(COSPI_20));
+    temp2 = sat::<HIGH>(input[5])
         .wrapping_mul(COSPI_20)
-        .wrapping_add(narrow(input[3]).wrapping_mul(COSPI_12));
-    step1[5] = i32::from((round_shift(temp1)) as i16);
-    step1[6] = i32::from((round_shift(temp2)) as i16);
+        .wrapping_add(sat::<HIGH>(input[3]).wrapping_mul(COSPI_12));
+    step1[5] = sat::<HIGH>(round_shift(temp1));
+    step1[6] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step1[0].wrapping_add(step1[2])).wrapping_mul(COSPI_16);
     temp2 = (step1[0].wrapping_sub(step1[2])).wrapping_mul(COSPI_16);
-    step2[0] = i32::from((round_shift(temp1)) as i16);
-    step2[1] = i32::from((round_shift(temp2)) as i16);
+    step2[0] = sat::<HIGH>(round_shift(temp1));
+    step2[1] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[1]
         .wrapping_mul(COSPI_24)
         .wrapping_sub(step1[3].wrapping_mul(COSPI_8));
     temp2 = step1[1]
         .wrapping_mul(COSPI_8)
         .wrapping_add(step1[3].wrapping_mul(COSPI_24));
-    step2[2] = i32::from((round_shift(temp1)) as i16);
-    step2[3] = i32::from((round_shift(temp2)) as i16);
-    step2[4] = i32::from((step1[4].wrapping_add(step1[5])) as i16);
-    step2[5] = i32::from((step1[4].wrapping_sub(step1[5])) as i16);
-    step2[6] = i32::from(((step1[6]).wrapping_neg().wrapping_add(step1[7])) as i16);
-    step2[7] = i32::from((step1[6].wrapping_add(step1[7])) as i16);
-    step1[0] = i32::from((step2[0].wrapping_add(step2[3])) as i16);
-    step1[1] = i32::from((step2[1].wrapping_add(step2[2])) as i16);
-    step1[2] = i32::from((step2[1].wrapping_sub(step2[2])) as i16);
-    step1[3] = i32::from((step2[0].wrapping_sub(step2[3])) as i16);
-    step1[4] = i32::from((step2[4]) as i16);
+    step2[2] = sat::<HIGH>(round_shift(temp1));
+    step2[3] = sat::<HIGH>(round_shift(temp2));
+    step2[4] = sat::<HIGH>(step1[4].wrapping_add(step1[5]));
+    step2[5] = sat::<HIGH>(step1[4].wrapping_sub(step1[5]));
+    step2[6] = sat::<HIGH>((step1[6]).wrapping_neg().wrapping_add(step1[7]));
+    step2[7] = sat::<HIGH>(step1[6].wrapping_add(step1[7]));
+    step1[0] = sat::<HIGH>(step2[0].wrapping_add(step2[3]));
+    step1[1] = sat::<HIGH>(step2[1].wrapping_add(step2[2]));
+    step1[2] = sat::<HIGH>(step2[1].wrapping_sub(step2[2]));
+    step1[3] = sat::<HIGH>(step2[0].wrapping_sub(step2[3]));
+    step1[4] = sat::<HIGH>(step2[4]);
     temp1 = (step2[6].wrapping_sub(step2[5])).wrapping_mul(COSPI_16);
     temp2 = (step2[5].wrapping_add(step2[6])).wrapping_mul(COSPI_16);
-    step1[5] = i32::from((round_shift(temp1)) as i16);
-    step1[6] = i32::from((round_shift(temp2)) as i16);
-    step1[7] = i32::from((step2[7]) as i16);
+    step1[5] = sat::<HIGH>(round_shift(temp1));
+    step1[6] = sat::<HIGH>(round_shift(temp2));
+    step1[7] = sat::<HIGH>(step2[7]);
     output[0] = (step1[0].wrapping_add(step1[7]));
     output[1] = (step1[1].wrapping_add(step1[6]));
     output[2] = (step1[2].wrapping_add(step1[5]));
@@ -271,39 +276,39 @@ fn idct8(input: &[i32], output: &mut [i32]) {
     output[7] = (step1[0].wrapping_sub(step1[7]));
 }
 
-fn iadst16(input: &[i32], output: &mut [i32]) {
-    let mut s0: i32;
-    let mut s1: i32;
-    let mut s2: i32;
-    let mut s3: i32;
-    let mut s4: i32;
-    let mut s5: i32;
-    let mut s6: i32;
-    let mut s7: i32;
-    let mut s8: i32;
-    let mut s9: i32;
-    let mut s10: i32;
-    let mut s11: i32;
-    let mut s12: i32;
-    let mut s13: i32;
-    let mut s14: i32;
-    let mut s15: i32;
-    let mut x0: i32 = input[15];
-    let mut x1: i32 = input[0];
-    let mut x2: i32 = input[13];
-    let mut x3: i32 = input[2];
-    let mut x4: i32 = input[11];
-    let mut x5: i32 = input[4];
-    let mut x6: i32 = input[9];
-    let mut x7: i32 = input[6];
-    let mut x8: i32 = input[7];
-    let mut x9: i32 = input[8];
-    let mut x10: i32 = input[5];
-    let mut x11: i32 = input[10];
-    let mut x12: i32 = input[3];
-    let mut x13: i32 = input[12];
-    let mut x14: i32 = input[1];
-    let mut x15: i32 = input[14];
+fn iadst16<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut s0: i64;
+    let mut s1: i64;
+    let mut s2: i64;
+    let mut s3: i64;
+    let mut s4: i64;
+    let mut s5: i64;
+    let mut s6: i64;
+    let mut s7: i64;
+    let mut s8: i64;
+    let mut s9: i64;
+    let mut s10: i64;
+    let mut s11: i64;
+    let mut s12: i64;
+    let mut s13: i64;
+    let mut s14: i64;
+    let mut s15: i64;
+    let mut x0: i64 = input[15];
+    let mut x1: i64 = input[0];
+    let mut x2: i64 = input[13];
+    let mut x3: i64 = input[2];
+    let mut x4: i64 = input[11];
+    let mut x5: i64 = input[4];
+    let mut x6: i64 = input[9];
+    let mut x7: i64 = input[6];
+    let mut x8: i64 = input[7];
+    let mut x9: i64 = input[8];
+    let mut x10: i64 = input[5];
+    let mut x11: i64 = input[10];
+    let mut x12: i64 = input[3];
+    let mut x13: i64 = input[12];
+    let mut x14: i64 = input[1];
+    let mut x15: i64 = input[14];
     s0 = x0
         .wrapping_mul(COSPI_1)
         .wrapping_add(x1.wrapping_mul(COSPI_31));
@@ -502,113 +507,113 @@ fn iadst16(input: &[i32], output: &mut [i32]) {
     output[15] = ((x1).wrapping_neg());
 }
 
-fn idct16(input: &[i32], output: &mut [i32]) {
-    let mut step1 = [0i32; 16];
-    let mut step2 = [0i32; 16];
-    let mut temp1: i32;
-    let mut temp2: i32;
-    step1[0] = i32::from((narrow(input[0])) as i16);
-    step1[1] = i32::from((narrow(input[8])) as i16);
-    step1[2] = i32::from((narrow(input[4])) as i16);
-    step1[3] = i32::from((narrow(input[12])) as i16);
-    step1[4] = i32::from((narrow(input[2])) as i16);
-    step1[5] = i32::from((narrow(input[10])) as i16);
-    step1[6] = i32::from((narrow(input[6])) as i16);
-    step1[7] = i32::from((narrow(input[14])) as i16);
-    step1[8] = i32::from((narrow(input[1])) as i16);
-    step1[9] = i32::from((narrow(input[9])) as i16);
-    step1[10] = i32::from((narrow(input[5])) as i16);
-    step1[11] = i32::from((narrow(input[13])) as i16);
-    step1[12] = i32::from((narrow(input[3])) as i16);
-    step1[13] = i32::from((narrow(input[11])) as i16);
-    step1[14] = i32::from((narrow(input[7])) as i16);
-    step1[15] = i32::from((narrow(input[15])) as i16);
-    step2[0] = i32::from((step1[0]) as i16);
-    step2[1] = i32::from((step1[1]) as i16);
-    step2[2] = i32::from((step1[2]) as i16);
-    step2[3] = i32::from((step1[3]) as i16);
-    step2[4] = i32::from((step1[4]) as i16);
-    step2[5] = i32::from((step1[5]) as i16);
-    step2[6] = i32::from((step1[6]) as i16);
-    step2[7] = i32::from((step1[7]) as i16);
+fn idct16<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut step1 = [0i64; 16];
+    let mut step2 = [0i64; 16];
+    let mut temp1: i64;
+    let mut temp2: i64;
+    step1[0] = sat::<HIGH>(sat::<HIGH>(input[0]));
+    step1[1] = sat::<HIGH>(sat::<HIGH>(input[8]));
+    step1[2] = sat::<HIGH>(sat::<HIGH>(input[4]));
+    step1[3] = sat::<HIGH>(sat::<HIGH>(input[12]));
+    step1[4] = sat::<HIGH>(sat::<HIGH>(input[2]));
+    step1[5] = sat::<HIGH>(sat::<HIGH>(input[10]));
+    step1[6] = sat::<HIGH>(sat::<HIGH>(input[6]));
+    step1[7] = sat::<HIGH>(sat::<HIGH>(input[14]));
+    step1[8] = sat::<HIGH>(sat::<HIGH>(input[1]));
+    step1[9] = sat::<HIGH>(sat::<HIGH>(input[9]));
+    step1[10] = sat::<HIGH>(sat::<HIGH>(input[5]));
+    step1[11] = sat::<HIGH>(sat::<HIGH>(input[13]));
+    step1[12] = sat::<HIGH>(sat::<HIGH>(input[3]));
+    step1[13] = sat::<HIGH>(sat::<HIGH>(input[11]));
+    step1[14] = sat::<HIGH>(sat::<HIGH>(input[7]));
+    step1[15] = sat::<HIGH>(sat::<HIGH>(input[15]));
+    step2[0] = sat::<HIGH>(step1[0]);
+    step2[1] = sat::<HIGH>(step1[1]);
+    step2[2] = sat::<HIGH>(step1[2]);
+    step2[3] = sat::<HIGH>(step1[3]);
+    step2[4] = sat::<HIGH>(step1[4]);
+    step2[5] = sat::<HIGH>(step1[5]);
+    step2[6] = sat::<HIGH>(step1[6]);
+    step2[7] = sat::<HIGH>(step1[7]);
     temp1 = step1[8]
         .wrapping_mul(COSPI_30)
         .wrapping_sub(step1[15].wrapping_mul(COSPI_2));
     temp2 = step1[8]
         .wrapping_mul(COSPI_2)
         .wrapping_add(step1[15].wrapping_mul(COSPI_30));
-    step2[8] = i32::from((round_shift(temp1)) as i16);
-    step2[15] = i32::from((round_shift(temp2)) as i16);
+    step2[8] = sat::<HIGH>(round_shift(temp1));
+    step2[15] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[9]
         .wrapping_mul(COSPI_14)
         .wrapping_sub(step1[14].wrapping_mul(COSPI_18));
     temp2 = step1[9]
         .wrapping_mul(COSPI_18)
         .wrapping_add(step1[14].wrapping_mul(COSPI_14));
-    step2[9] = i32::from((round_shift(temp1)) as i16);
-    step2[14] = i32::from((round_shift(temp2)) as i16);
+    step2[9] = sat::<HIGH>(round_shift(temp1));
+    step2[14] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[10]
         .wrapping_mul(COSPI_22)
         .wrapping_sub(step1[13].wrapping_mul(COSPI_10));
     temp2 = step1[10]
         .wrapping_mul(COSPI_10)
         .wrapping_add(step1[13].wrapping_mul(COSPI_22));
-    step2[10] = i32::from((round_shift(temp1)) as i16);
-    step2[13] = i32::from((round_shift(temp2)) as i16);
+    step2[10] = sat::<HIGH>(round_shift(temp1));
+    step2[13] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[11]
         .wrapping_mul(COSPI_6)
         .wrapping_sub(step1[12].wrapping_mul(COSPI_26));
     temp2 = step1[11]
         .wrapping_mul(COSPI_26)
         .wrapping_add(step1[12].wrapping_mul(COSPI_6));
-    step2[11] = i32::from((round_shift(temp1)) as i16);
-    step2[12] = i32::from((round_shift(temp2)) as i16);
-    step1[0] = i32::from((step2[0]) as i16);
-    step1[1] = i32::from((step2[1]) as i16);
-    step1[2] = i32::from((step2[2]) as i16);
-    step1[3] = i32::from((step2[3]) as i16);
+    step2[11] = sat::<HIGH>(round_shift(temp1));
+    step2[12] = sat::<HIGH>(round_shift(temp2));
+    step1[0] = sat::<HIGH>(step2[0]);
+    step1[1] = sat::<HIGH>(step2[1]);
+    step1[2] = sat::<HIGH>(step2[2]);
+    step1[3] = sat::<HIGH>(step2[3]);
     temp1 = step2[4]
         .wrapping_mul(COSPI_28)
         .wrapping_sub(step2[7].wrapping_mul(COSPI_4));
     temp2 = step2[4]
         .wrapping_mul(COSPI_4)
         .wrapping_add(step2[7].wrapping_mul(COSPI_28));
-    step1[4] = i32::from((round_shift(temp1)) as i16);
-    step1[7] = i32::from((round_shift(temp2)) as i16);
+    step1[4] = sat::<HIGH>(round_shift(temp1));
+    step1[7] = sat::<HIGH>(round_shift(temp2));
     temp1 = step2[5]
         .wrapping_mul(COSPI_12)
         .wrapping_sub(step2[6].wrapping_mul(COSPI_20));
     temp2 = step2[5]
         .wrapping_mul(COSPI_20)
         .wrapping_add(step2[6].wrapping_mul(COSPI_12));
-    step1[5] = i32::from((round_shift(temp1)) as i16);
-    step1[6] = i32::from((round_shift(temp2)) as i16);
-    step1[8] = i32::from((step2[8].wrapping_add(step2[9])) as i16);
-    step1[9] = i32::from((step2[8].wrapping_sub(step2[9])) as i16);
-    step1[10] = i32::from(((step2[10]).wrapping_neg().wrapping_add(step2[11])) as i16);
-    step1[11] = i32::from((step2[10].wrapping_add(step2[11])) as i16);
-    step1[12] = i32::from((step2[12].wrapping_add(step2[13])) as i16);
-    step1[13] = i32::from((step2[12].wrapping_sub(step2[13])) as i16);
-    step1[14] = i32::from(((step2[14]).wrapping_neg().wrapping_add(step2[15])) as i16);
-    step1[15] = i32::from((step2[14].wrapping_add(step2[15])) as i16);
+    step1[5] = sat::<HIGH>(round_shift(temp1));
+    step1[6] = sat::<HIGH>(round_shift(temp2));
+    step1[8] = sat::<HIGH>(step2[8].wrapping_add(step2[9]));
+    step1[9] = sat::<HIGH>(step2[8].wrapping_sub(step2[9]));
+    step1[10] = sat::<HIGH>((step2[10]).wrapping_neg().wrapping_add(step2[11]));
+    step1[11] = sat::<HIGH>(step2[10].wrapping_add(step2[11]));
+    step1[12] = sat::<HIGH>(step2[12].wrapping_add(step2[13]));
+    step1[13] = sat::<HIGH>(step2[12].wrapping_sub(step2[13]));
+    step1[14] = sat::<HIGH>((step2[14]).wrapping_neg().wrapping_add(step2[15]));
+    step1[15] = sat::<HIGH>(step2[14].wrapping_add(step2[15]));
     temp1 = (step1[0].wrapping_add(step1[1])).wrapping_mul(COSPI_16);
     temp2 = (step1[0].wrapping_sub(step1[1])).wrapping_mul(COSPI_16);
-    step2[0] = i32::from((round_shift(temp1)) as i16);
-    step2[1] = i32::from((round_shift(temp2)) as i16);
+    step2[0] = sat::<HIGH>(round_shift(temp1));
+    step2[1] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[2]
         .wrapping_mul(COSPI_24)
         .wrapping_sub(step1[3].wrapping_mul(COSPI_8));
     temp2 = step1[2]
         .wrapping_mul(COSPI_8)
         .wrapping_add(step1[3].wrapping_mul(COSPI_24));
-    step2[2] = i32::from((round_shift(temp1)) as i16);
-    step2[3] = i32::from((round_shift(temp2)) as i16);
-    step2[4] = i32::from((step1[4].wrapping_add(step1[5])) as i16);
-    step2[5] = i32::from((step1[4].wrapping_sub(step1[5])) as i16);
-    step2[6] = i32::from(((step1[6]).wrapping_neg().wrapping_add(step1[7])) as i16);
-    step2[7] = i32::from((step1[6].wrapping_add(step1[7])) as i16);
-    step2[8] = i32::from((step1[8]) as i16);
-    step2[15] = i32::from((step1[15]) as i16);
+    step2[2] = sat::<HIGH>(round_shift(temp1));
+    step2[3] = sat::<HIGH>(round_shift(temp2));
+    step2[4] = sat::<HIGH>(step1[4].wrapping_add(step1[5]));
+    step2[5] = sat::<HIGH>(step1[4].wrapping_sub(step1[5]));
+    step2[6] = sat::<HIGH>((step1[6]).wrapping_neg().wrapping_add(step1[7]));
+    step2[7] = sat::<HIGH>(step1[6].wrapping_add(step1[7]));
+    step2[8] = sat::<HIGH>(step1[8]);
+    step2[15] = sat::<HIGH>(step1[15]);
     temp1 = (step1[9])
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
@@ -616,8 +621,8 @@ fn idct16(input: &[i32], output: &mut [i32]) {
     temp2 = step1[9]
         .wrapping_mul(COSPI_24)
         .wrapping_add(step1[14].wrapping_mul(COSPI_8));
-    step2[9] = i32::from((round_shift(temp1)) as i16);
-    step2[14] = i32::from((round_shift(temp2)) as i16);
+    step2[9] = sat::<HIGH>(round_shift(temp1));
+    step2[14] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step1[10])
         .wrapping_neg()
         .wrapping_mul(COSPI_24)
@@ -626,48 +631,48 @@ fn idct16(input: &[i32], output: &mut [i32]) {
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
         .wrapping_add(step1[13].wrapping_mul(COSPI_24));
-    step2[10] = i32::from((round_shift(temp1)) as i16);
-    step2[13] = i32::from((round_shift(temp2)) as i16);
-    step2[11] = i32::from((step1[11]) as i16);
-    step2[12] = i32::from((step1[12]) as i16);
-    step1[0] = i32::from((step2[0].wrapping_add(step2[3])) as i16);
-    step1[1] = i32::from((step2[1].wrapping_add(step2[2])) as i16);
-    step1[2] = i32::from((step2[1].wrapping_sub(step2[2])) as i16);
-    step1[3] = i32::from((step2[0].wrapping_sub(step2[3])) as i16);
-    step1[4] = i32::from((step2[4]) as i16);
+    step2[10] = sat::<HIGH>(round_shift(temp1));
+    step2[13] = sat::<HIGH>(round_shift(temp2));
+    step2[11] = sat::<HIGH>(step1[11]);
+    step2[12] = sat::<HIGH>(step1[12]);
+    step1[0] = sat::<HIGH>(step2[0].wrapping_add(step2[3]));
+    step1[1] = sat::<HIGH>(step2[1].wrapping_add(step2[2]));
+    step1[2] = sat::<HIGH>(step2[1].wrapping_sub(step2[2]));
+    step1[3] = sat::<HIGH>(step2[0].wrapping_sub(step2[3]));
+    step1[4] = sat::<HIGH>(step2[4]);
     temp1 = (step2[6].wrapping_sub(step2[5])).wrapping_mul(COSPI_16);
     temp2 = (step2[5].wrapping_add(step2[6])).wrapping_mul(COSPI_16);
-    step1[5] = i32::from((round_shift(temp1)) as i16);
-    step1[6] = i32::from((round_shift(temp2)) as i16);
-    step1[7] = i32::from((step2[7]) as i16);
-    step1[8] = i32::from((step2[8].wrapping_add(step2[11])) as i16);
-    step1[9] = i32::from((step2[9].wrapping_add(step2[10])) as i16);
-    step1[10] = i32::from((step2[9].wrapping_sub(step2[10])) as i16);
-    step1[11] = i32::from((step2[8].wrapping_sub(step2[11])) as i16);
-    step1[12] = i32::from(((step2[12]).wrapping_neg().wrapping_add(step2[15])) as i16);
-    step1[13] = i32::from(((step2[13]).wrapping_neg().wrapping_add(step2[14])) as i16);
-    step1[14] = i32::from((step2[13].wrapping_add(step2[14])) as i16);
-    step1[15] = i32::from((step2[12].wrapping_add(step2[15])) as i16);
-    step2[0] = i32::from((step1[0].wrapping_add(step1[7])) as i16);
-    step2[1] = i32::from((step1[1].wrapping_add(step1[6])) as i16);
-    step2[2] = i32::from((step1[2].wrapping_add(step1[5])) as i16);
-    step2[3] = i32::from((step1[3].wrapping_add(step1[4])) as i16);
-    step2[4] = i32::from((step1[3].wrapping_sub(step1[4])) as i16);
-    step2[5] = i32::from((step1[2].wrapping_sub(step1[5])) as i16);
-    step2[6] = i32::from((step1[1].wrapping_sub(step1[6])) as i16);
-    step2[7] = i32::from((step1[0].wrapping_sub(step1[7])) as i16);
-    step2[8] = i32::from((step1[8]) as i16);
-    step2[9] = i32::from((step1[9]) as i16);
+    step1[5] = sat::<HIGH>(round_shift(temp1));
+    step1[6] = sat::<HIGH>(round_shift(temp2));
+    step1[7] = sat::<HIGH>(step2[7]);
+    step1[8] = sat::<HIGH>(step2[8].wrapping_add(step2[11]));
+    step1[9] = sat::<HIGH>(step2[9].wrapping_add(step2[10]));
+    step1[10] = sat::<HIGH>(step2[9].wrapping_sub(step2[10]));
+    step1[11] = sat::<HIGH>(step2[8].wrapping_sub(step2[11]));
+    step1[12] = sat::<HIGH>((step2[12]).wrapping_neg().wrapping_add(step2[15]));
+    step1[13] = sat::<HIGH>((step2[13]).wrapping_neg().wrapping_add(step2[14]));
+    step1[14] = sat::<HIGH>(step2[13].wrapping_add(step2[14]));
+    step1[15] = sat::<HIGH>(step2[12].wrapping_add(step2[15]));
+    step2[0] = sat::<HIGH>(step1[0].wrapping_add(step1[7]));
+    step2[1] = sat::<HIGH>(step1[1].wrapping_add(step1[6]));
+    step2[2] = sat::<HIGH>(step1[2].wrapping_add(step1[5]));
+    step2[3] = sat::<HIGH>(step1[3].wrapping_add(step1[4]));
+    step2[4] = sat::<HIGH>(step1[3].wrapping_sub(step1[4]));
+    step2[5] = sat::<HIGH>(step1[2].wrapping_sub(step1[5]));
+    step2[6] = sat::<HIGH>(step1[1].wrapping_sub(step1[6]));
+    step2[7] = sat::<HIGH>(step1[0].wrapping_sub(step1[7]));
+    step2[8] = sat::<HIGH>(step1[8]);
+    step2[9] = sat::<HIGH>(step1[9]);
     temp1 = ((step1[10]).wrapping_neg().wrapping_add(step1[13])).wrapping_mul(COSPI_16);
     temp2 = (step1[10].wrapping_add(step1[13])).wrapping_mul(COSPI_16);
-    step2[10] = i32::from((round_shift(temp1)) as i16);
-    step2[13] = i32::from((round_shift(temp2)) as i16);
+    step2[10] = sat::<HIGH>(round_shift(temp1));
+    step2[13] = sat::<HIGH>(round_shift(temp2));
     temp1 = ((step1[11]).wrapping_neg().wrapping_add(step1[12])).wrapping_mul(COSPI_16);
     temp2 = (step1[11].wrapping_add(step1[12])).wrapping_mul(COSPI_16);
-    step2[11] = i32::from((round_shift(temp1)) as i16);
-    step2[12] = i32::from((round_shift(temp2)) as i16);
-    step2[14] = i32::from((step1[14]) as i16);
-    step2[15] = i32::from((step1[15]) as i16);
+    step2[11] = sat::<HIGH>(round_shift(temp1));
+    step2[12] = sat::<HIGH>(round_shift(temp2));
+    step2[14] = sat::<HIGH>(step1[14]);
+    step2[15] = sat::<HIGH>(step1[15]);
     output[0] = (step2[0].wrapping_add(step2[15]));
     output[1] = (step2[1].wrapping_add(step2[14]));
     output[2] = (step2[2].wrapping_add(step2[13]));
@@ -686,177 +691,177 @@ fn idct16(input: &[i32], output: &mut [i32]) {
     output[15] = (step2[0].wrapping_sub(step2[15]));
 }
 
-fn idct32(input: &[i32], output: &mut [i32]) {
-    let mut step1 = [0i32; 32];
-    let mut step2 = [0i32; 32];
-    let mut temp1: i32;
-    let mut temp2: i32;
-    step1[0] = i32::from((narrow(input[0])) as i16);
-    step1[1] = i32::from((narrow(input[16])) as i16);
-    step1[2] = i32::from((narrow(input[8])) as i16);
-    step1[3] = i32::from((narrow(input[24])) as i16);
-    step1[4] = i32::from((narrow(input[4])) as i16);
-    step1[5] = i32::from((narrow(input[20])) as i16);
-    step1[6] = i32::from((narrow(input[12])) as i16);
-    step1[7] = i32::from((narrow(input[28])) as i16);
-    step1[8] = i32::from((narrow(input[2])) as i16);
-    step1[9] = i32::from((narrow(input[18])) as i16);
-    step1[10] = i32::from((narrow(input[10])) as i16);
-    step1[11] = i32::from((narrow(input[26])) as i16);
-    step1[12] = i32::from((narrow(input[6])) as i16);
-    step1[13] = i32::from((narrow(input[22])) as i16);
-    step1[14] = i32::from((narrow(input[14])) as i16);
-    step1[15] = i32::from((narrow(input[30])) as i16);
-    temp1 = narrow(input[1])
+fn idct32<const HIGH: bool>(input: &[i64], output: &mut [i64]) {
+    let mut step1 = [0i64; 32];
+    let mut step2 = [0i64; 32];
+    let mut temp1: i64;
+    let mut temp2: i64;
+    step1[0] = sat::<HIGH>(sat::<HIGH>(input[0]));
+    step1[1] = sat::<HIGH>(sat::<HIGH>(input[16]));
+    step1[2] = sat::<HIGH>(sat::<HIGH>(input[8]));
+    step1[3] = sat::<HIGH>(sat::<HIGH>(input[24]));
+    step1[4] = sat::<HIGH>(sat::<HIGH>(input[4]));
+    step1[5] = sat::<HIGH>(sat::<HIGH>(input[20]));
+    step1[6] = sat::<HIGH>(sat::<HIGH>(input[12]));
+    step1[7] = sat::<HIGH>(sat::<HIGH>(input[28]));
+    step1[8] = sat::<HIGH>(sat::<HIGH>(input[2]));
+    step1[9] = sat::<HIGH>(sat::<HIGH>(input[18]));
+    step1[10] = sat::<HIGH>(sat::<HIGH>(input[10]));
+    step1[11] = sat::<HIGH>(sat::<HIGH>(input[26]));
+    step1[12] = sat::<HIGH>(sat::<HIGH>(input[6]));
+    step1[13] = sat::<HIGH>(sat::<HIGH>(input[22]));
+    step1[14] = sat::<HIGH>(sat::<HIGH>(input[14]));
+    step1[15] = sat::<HIGH>(sat::<HIGH>(input[30]));
+    temp1 = sat::<HIGH>(input[1])
         .wrapping_mul(COSPI_31)
-        .wrapping_sub(narrow(input[31]).wrapping_mul(COSPI_1));
-    temp2 = narrow(input[1])
+        .wrapping_sub(sat::<HIGH>(input[31]).wrapping_mul(COSPI_1));
+    temp2 = sat::<HIGH>(input[1])
         .wrapping_mul(COSPI_1)
-        .wrapping_add(narrow(input[31]).wrapping_mul(COSPI_31));
-    step1[16] = i32::from((round_shift(temp1)) as i16);
-    step1[31] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[17])
+        .wrapping_add(sat::<HIGH>(input[31]).wrapping_mul(COSPI_31));
+    step1[16] = sat::<HIGH>(round_shift(temp1));
+    step1[31] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[17])
         .wrapping_mul(COSPI_15)
-        .wrapping_sub(narrow(input[15]).wrapping_mul(COSPI_17));
-    temp2 = narrow(input[17])
+        .wrapping_sub(sat::<HIGH>(input[15]).wrapping_mul(COSPI_17));
+    temp2 = sat::<HIGH>(input[17])
         .wrapping_mul(COSPI_17)
-        .wrapping_add(narrow(input[15]).wrapping_mul(COSPI_15));
-    step1[17] = i32::from((round_shift(temp1)) as i16);
-    step1[30] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[9])
+        .wrapping_add(sat::<HIGH>(input[15]).wrapping_mul(COSPI_15));
+    step1[17] = sat::<HIGH>(round_shift(temp1));
+    step1[30] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[9])
         .wrapping_mul(COSPI_23)
-        .wrapping_sub(narrow(input[23]).wrapping_mul(COSPI_9));
-    temp2 = narrow(input[9])
+        .wrapping_sub(sat::<HIGH>(input[23]).wrapping_mul(COSPI_9));
+    temp2 = sat::<HIGH>(input[9])
         .wrapping_mul(COSPI_9)
-        .wrapping_add(narrow(input[23]).wrapping_mul(COSPI_23));
-    step1[18] = i32::from((round_shift(temp1)) as i16);
-    step1[29] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[25])
+        .wrapping_add(sat::<HIGH>(input[23]).wrapping_mul(COSPI_23));
+    step1[18] = sat::<HIGH>(round_shift(temp1));
+    step1[29] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[25])
         .wrapping_mul(COSPI_7)
-        .wrapping_sub(narrow(input[7]).wrapping_mul(COSPI_25));
-    temp2 = narrow(input[25])
+        .wrapping_sub(sat::<HIGH>(input[7]).wrapping_mul(COSPI_25));
+    temp2 = sat::<HIGH>(input[25])
         .wrapping_mul(COSPI_25)
-        .wrapping_add(narrow(input[7]).wrapping_mul(COSPI_7));
-    step1[19] = i32::from((round_shift(temp1)) as i16);
-    step1[28] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[5])
+        .wrapping_add(sat::<HIGH>(input[7]).wrapping_mul(COSPI_7));
+    step1[19] = sat::<HIGH>(round_shift(temp1));
+    step1[28] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[5])
         .wrapping_mul(COSPI_27)
-        .wrapping_sub(narrow(input[27]).wrapping_mul(COSPI_5));
-    temp2 = narrow(input[5])
+        .wrapping_sub(sat::<HIGH>(input[27]).wrapping_mul(COSPI_5));
+    temp2 = sat::<HIGH>(input[5])
         .wrapping_mul(COSPI_5)
-        .wrapping_add(narrow(input[27]).wrapping_mul(COSPI_27));
-    step1[20] = i32::from((round_shift(temp1)) as i16);
-    step1[27] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[21])
+        .wrapping_add(sat::<HIGH>(input[27]).wrapping_mul(COSPI_27));
+    step1[20] = sat::<HIGH>(round_shift(temp1));
+    step1[27] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[21])
         .wrapping_mul(COSPI_11)
-        .wrapping_sub(narrow(input[11]).wrapping_mul(COSPI_21));
-    temp2 = narrow(input[21])
+        .wrapping_sub(sat::<HIGH>(input[11]).wrapping_mul(COSPI_21));
+    temp2 = sat::<HIGH>(input[21])
         .wrapping_mul(COSPI_21)
-        .wrapping_add(narrow(input[11]).wrapping_mul(COSPI_11));
-    step1[21] = i32::from((round_shift(temp1)) as i16);
-    step1[26] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[13])
+        .wrapping_add(sat::<HIGH>(input[11]).wrapping_mul(COSPI_11));
+    step1[21] = sat::<HIGH>(round_shift(temp1));
+    step1[26] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[13])
         .wrapping_mul(COSPI_19)
-        .wrapping_sub(narrow(input[19]).wrapping_mul(COSPI_13));
-    temp2 = narrow(input[13])
+        .wrapping_sub(sat::<HIGH>(input[19]).wrapping_mul(COSPI_13));
+    temp2 = sat::<HIGH>(input[13])
         .wrapping_mul(COSPI_13)
-        .wrapping_add(narrow(input[19]).wrapping_mul(COSPI_19));
-    step1[22] = i32::from((round_shift(temp1)) as i16);
-    step1[25] = i32::from((round_shift(temp2)) as i16);
-    temp1 = narrow(input[29])
+        .wrapping_add(sat::<HIGH>(input[19]).wrapping_mul(COSPI_19));
+    step1[22] = sat::<HIGH>(round_shift(temp1));
+    step1[25] = sat::<HIGH>(round_shift(temp2));
+    temp1 = sat::<HIGH>(input[29])
         .wrapping_mul(COSPI_3)
-        .wrapping_sub(narrow(input[3]).wrapping_mul(COSPI_29));
-    temp2 = narrow(input[29])
+        .wrapping_sub(sat::<HIGH>(input[3]).wrapping_mul(COSPI_29));
+    temp2 = sat::<HIGH>(input[29])
         .wrapping_mul(COSPI_29)
-        .wrapping_add(narrow(input[3]).wrapping_mul(COSPI_3));
-    step1[23] = i32::from((round_shift(temp1)) as i16);
-    step1[24] = i32::from((round_shift(temp2)) as i16);
-    step2[0] = i32::from((step1[0]) as i16);
-    step2[1] = i32::from((step1[1]) as i16);
-    step2[2] = i32::from((step1[2]) as i16);
-    step2[3] = i32::from((step1[3]) as i16);
-    step2[4] = i32::from((step1[4]) as i16);
-    step2[5] = i32::from((step1[5]) as i16);
-    step2[6] = i32::from((step1[6]) as i16);
-    step2[7] = i32::from((step1[7]) as i16);
+        .wrapping_add(sat::<HIGH>(input[3]).wrapping_mul(COSPI_3));
+    step1[23] = sat::<HIGH>(round_shift(temp1));
+    step1[24] = sat::<HIGH>(round_shift(temp2));
+    step2[0] = sat::<HIGH>(step1[0]);
+    step2[1] = sat::<HIGH>(step1[1]);
+    step2[2] = sat::<HIGH>(step1[2]);
+    step2[3] = sat::<HIGH>(step1[3]);
+    step2[4] = sat::<HIGH>(step1[4]);
+    step2[5] = sat::<HIGH>(step1[5]);
+    step2[6] = sat::<HIGH>(step1[6]);
+    step2[7] = sat::<HIGH>(step1[7]);
     temp1 = step1[8]
         .wrapping_mul(COSPI_30)
         .wrapping_sub(step1[15].wrapping_mul(COSPI_2));
     temp2 = step1[8]
         .wrapping_mul(COSPI_2)
         .wrapping_add(step1[15].wrapping_mul(COSPI_30));
-    step2[8] = i32::from((round_shift(temp1)) as i16);
-    step2[15] = i32::from((round_shift(temp2)) as i16);
+    step2[8] = sat::<HIGH>(round_shift(temp1));
+    step2[15] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[9]
         .wrapping_mul(COSPI_14)
         .wrapping_sub(step1[14].wrapping_mul(COSPI_18));
     temp2 = step1[9]
         .wrapping_mul(COSPI_18)
         .wrapping_add(step1[14].wrapping_mul(COSPI_14));
-    step2[9] = i32::from((round_shift(temp1)) as i16);
-    step2[14] = i32::from((round_shift(temp2)) as i16);
+    step2[9] = sat::<HIGH>(round_shift(temp1));
+    step2[14] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[10]
         .wrapping_mul(COSPI_22)
         .wrapping_sub(step1[13].wrapping_mul(COSPI_10));
     temp2 = step1[10]
         .wrapping_mul(COSPI_10)
         .wrapping_add(step1[13].wrapping_mul(COSPI_22));
-    step2[10] = i32::from((round_shift(temp1)) as i16);
-    step2[13] = i32::from((round_shift(temp2)) as i16);
+    step2[10] = sat::<HIGH>(round_shift(temp1));
+    step2[13] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[11]
         .wrapping_mul(COSPI_6)
         .wrapping_sub(step1[12].wrapping_mul(COSPI_26));
     temp2 = step1[11]
         .wrapping_mul(COSPI_26)
         .wrapping_add(step1[12].wrapping_mul(COSPI_6));
-    step2[11] = i32::from((round_shift(temp1)) as i16);
-    step2[12] = i32::from((round_shift(temp2)) as i16);
-    step2[16] = i32::from((step1[16].wrapping_add(step1[17])) as i16);
-    step2[17] = i32::from((step1[16].wrapping_sub(step1[17])) as i16);
-    step2[18] = i32::from(((step1[18]).wrapping_neg().wrapping_add(step1[19])) as i16);
-    step2[19] = i32::from((step1[18].wrapping_add(step1[19])) as i16);
-    step2[20] = i32::from((step1[20].wrapping_add(step1[21])) as i16);
-    step2[21] = i32::from((step1[20].wrapping_sub(step1[21])) as i16);
-    step2[22] = i32::from(((step1[22]).wrapping_neg().wrapping_add(step1[23])) as i16);
-    step2[23] = i32::from((step1[22].wrapping_add(step1[23])) as i16);
-    step2[24] = i32::from((step1[24].wrapping_add(step1[25])) as i16);
-    step2[25] = i32::from((step1[24].wrapping_sub(step1[25])) as i16);
-    step2[26] = i32::from(((step1[26]).wrapping_neg().wrapping_add(step1[27])) as i16);
-    step2[27] = i32::from((step1[26].wrapping_add(step1[27])) as i16);
-    step2[28] = i32::from((step1[28].wrapping_add(step1[29])) as i16);
-    step2[29] = i32::from((step1[28].wrapping_sub(step1[29])) as i16);
-    step2[30] = i32::from(((step1[30]).wrapping_neg().wrapping_add(step1[31])) as i16);
-    step2[31] = i32::from((step1[30].wrapping_add(step1[31])) as i16);
-    step1[0] = i32::from((step2[0]) as i16);
-    step1[1] = i32::from((step2[1]) as i16);
-    step1[2] = i32::from((step2[2]) as i16);
-    step1[3] = i32::from((step2[3]) as i16);
+    step2[11] = sat::<HIGH>(round_shift(temp1));
+    step2[12] = sat::<HIGH>(round_shift(temp2));
+    step2[16] = sat::<HIGH>(step1[16].wrapping_add(step1[17]));
+    step2[17] = sat::<HIGH>(step1[16].wrapping_sub(step1[17]));
+    step2[18] = sat::<HIGH>((step1[18]).wrapping_neg().wrapping_add(step1[19]));
+    step2[19] = sat::<HIGH>(step1[18].wrapping_add(step1[19]));
+    step2[20] = sat::<HIGH>(step1[20].wrapping_add(step1[21]));
+    step2[21] = sat::<HIGH>(step1[20].wrapping_sub(step1[21]));
+    step2[22] = sat::<HIGH>((step1[22]).wrapping_neg().wrapping_add(step1[23]));
+    step2[23] = sat::<HIGH>(step1[22].wrapping_add(step1[23]));
+    step2[24] = sat::<HIGH>(step1[24].wrapping_add(step1[25]));
+    step2[25] = sat::<HIGH>(step1[24].wrapping_sub(step1[25]));
+    step2[26] = sat::<HIGH>((step1[26]).wrapping_neg().wrapping_add(step1[27]));
+    step2[27] = sat::<HIGH>(step1[26].wrapping_add(step1[27]));
+    step2[28] = sat::<HIGH>(step1[28].wrapping_add(step1[29]));
+    step2[29] = sat::<HIGH>(step1[28].wrapping_sub(step1[29]));
+    step2[30] = sat::<HIGH>((step1[30]).wrapping_neg().wrapping_add(step1[31]));
+    step2[31] = sat::<HIGH>(step1[30].wrapping_add(step1[31]));
+    step1[0] = sat::<HIGH>(step2[0]);
+    step1[1] = sat::<HIGH>(step2[1]);
+    step1[2] = sat::<HIGH>(step2[2]);
+    step1[3] = sat::<HIGH>(step2[3]);
     temp1 = step2[4]
         .wrapping_mul(COSPI_28)
         .wrapping_sub(step2[7].wrapping_mul(COSPI_4));
     temp2 = step2[4]
         .wrapping_mul(COSPI_4)
         .wrapping_add(step2[7].wrapping_mul(COSPI_28));
-    step1[4] = i32::from((round_shift(temp1)) as i16);
-    step1[7] = i32::from((round_shift(temp2)) as i16);
+    step1[4] = sat::<HIGH>(round_shift(temp1));
+    step1[7] = sat::<HIGH>(round_shift(temp2));
     temp1 = step2[5]
         .wrapping_mul(COSPI_12)
         .wrapping_sub(step2[6].wrapping_mul(COSPI_20));
     temp2 = step2[5]
         .wrapping_mul(COSPI_20)
         .wrapping_add(step2[6].wrapping_mul(COSPI_12));
-    step1[5] = i32::from((round_shift(temp1)) as i16);
-    step1[6] = i32::from((round_shift(temp2)) as i16);
-    step1[8] = i32::from((step2[8].wrapping_add(step2[9])) as i16);
-    step1[9] = i32::from((step2[8].wrapping_sub(step2[9])) as i16);
-    step1[10] = i32::from(((step2[10]).wrapping_neg().wrapping_add(step2[11])) as i16);
-    step1[11] = i32::from((step2[10].wrapping_add(step2[11])) as i16);
-    step1[12] = i32::from((step2[12].wrapping_add(step2[13])) as i16);
-    step1[13] = i32::from((step2[12].wrapping_sub(step2[13])) as i16);
-    step1[14] = i32::from(((step2[14]).wrapping_neg().wrapping_add(step2[15])) as i16);
-    step1[15] = i32::from((step2[14].wrapping_add(step2[15])) as i16);
-    step1[16] = i32::from((step2[16]) as i16);
-    step1[31] = i32::from((step2[31]) as i16);
+    step1[5] = sat::<HIGH>(round_shift(temp1));
+    step1[6] = sat::<HIGH>(round_shift(temp2));
+    step1[8] = sat::<HIGH>(step2[8].wrapping_add(step2[9]));
+    step1[9] = sat::<HIGH>(step2[8].wrapping_sub(step2[9]));
+    step1[10] = sat::<HIGH>((step2[10]).wrapping_neg().wrapping_add(step2[11]));
+    step1[11] = sat::<HIGH>(step2[10].wrapping_add(step2[11]));
+    step1[12] = sat::<HIGH>(step2[12].wrapping_add(step2[13]));
+    step1[13] = sat::<HIGH>(step2[12].wrapping_sub(step2[13]));
+    step1[14] = sat::<HIGH>((step2[14]).wrapping_neg().wrapping_add(step2[15]));
+    step1[15] = sat::<HIGH>(step2[14].wrapping_add(step2[15]));
+    step1[16] = sat::<HIGH>(step2[16]);
+    step1[31] = sat::<HIGH>(step2[31]);
     temp1 = (step2[17])
         .wrapping_neg()
         .wrapping_mul(COSPI_4)
@@ -864,8 +869,8 @@ fn idct32(input: &[i32], output: &mut [i32]) {
     temp2 = step2[17]
         .wrapping_mul(COSPI_28)
         .wrapping_add(step2[30].wrapping_mul(COSPI_4));
-    step1[17] = i32::from((round_shift(temp1)) as i16);
-    step1[30] = i32::from((round_shift(temp2)) as i16);
+    step1[17] = sat::<HIGH>(round_shift(temp1));
+    step1[30] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step2[18])
         .wrapping_neg()
         .wrapping_mul(COSPI_28)
@@ -874,10 +879,10 @@ fn idct32(input: &[i32], output: &mut [i32]) {
         .wrapping_neg()
         .wrapping_mul(COSPI_4)
         .wrapping_add(step2[29].wrapping_mul(COSPI_28));
-    step1[18] = i32::from((round_shift(temp1)) as i16);
-    step1[29] = i32::from((round_shift(temp2)) as i16);
-    step1[19] = i32::from((step2[19]) as i16);
-    step1[20] = i32::from((step2[20]) as i16);
+    step1[18] = sat::<HIGH>(round_shift(temp1));
+    step1[29] = sat::<HIGH>(round_shift(temp2));
+    step1[19] = sat::<HIGH>(step2[19]);
+    step1[20] = sat::<HIGH>(step2[20]);
     temp1 = (step2[21])
         .wrapping_neg()
         .wrapping_mul(COSPI_20)
@@ -885,8 +890,8 @@ fn idct32(input: &[i32], output: &mut [i32]) {
     temp2 = step2[21]
         .wrapping_mul(COSPI_12)
         .wrapping_add(step2[26].wrapping_mul(COSPI_20));
-    step1[21] = i32::from((round_shift(temp1)) as i16);
-    step1[26] = i32::from((round_shift(temp2)) as i16);
+    step1[21] = sat::<HIGH>(round_shift(temp1));
+    step1[26] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step2[22])
         .wrapping_neg()
         .wrapping_mul(COSPI_12)
@@ -895,30 +900,30 @@ fn idct32(input: &[i32], output: &mut [i32]) {
         .wrapping_neg()
         .wrapping_mul(COSPI_20)
         .wrapping_add(step2[25].wrapping_mul(COSPI_12));
-    step1[22] = i32::from((round_shift(temp1)) as i16);
-    step1[25] = i32::from((round_shift(temp2)) as i16);
-    step1[23] = i32::from((step2[23]) as i16);
-    step1[24] = i32::from((step2[24]) as i16);
-    step1[27] = i32::from((step2[27]) as i16);
-    step1[28] = i32::from((step2[28]) as i16);
+    step1[22] = sat::<HIGH>(round_shift(temp1));
+    step1[25] = sat::<HIGH>(round_shift(temp2));
+    step1[23] = sat::<HIGH>(step2[23]);
+    step1[24] = sat::<HIGH>(step2[24]);
+    step1[27] = sat::<HIGH>(step2[27]);
+    step1[28] = sat::<HIGH>(step2[28]);
     temp1 = (step1[0].wrapping_add(step1[1])).wrapping_mul(COSPI_16);
     temp2 = (step1[0].wrapping_sub(step1[1])).wrapping_mul(COSPI_16);
-    step2[0] = i32::from((round_shift(temp1)) as i16);
-    step2[1] = i32::from((round_shift(temp2)) as i16);
+    step2[0] = sat::<HIGH>(round_shift(temp1));
+    step2[1] = sat::<HIGH>(round_shift(temp2));
     temp1 = step1[2]
         .wrapping_mul(COSPI_24)
         .wrapping_sub(step1[3].wrapping_mul(COSPI_8));
     temp2 = step1[2]
         .wrapping_mul(COSPI_8)
         .wrapping_add(step1[3].wrapping_mul(COSPI_24));
-    step2[2] = i32::from((round_shift(temp1)) as i16);
-    step2[3] = i32::from((round_shift(temp2)) as i16);
-    step2[4] = i32::from((step1[4].wrapping_add(step1[5])) as i16);
-    step2[5] = i32::from((step1[4].wrapping_sub(step1[5])) as i16);
-    step2[6] = i32::from(((step1[6]).wrapping_neg().wrapping_add(step1[7])) as i16);
-    step2[7] = i32::from((step1[6].wrapping_add(step1[7])) as i16);
-    step2[8] = i32::from((step1[8]) as i16);
-    step2[15] = i32::from((step1[15]) as i16);
+    step2[2] = sat::<HIGH>(round_shift(temp1));
+    step2[3] = sat::<HIGH>(round_shift(temp2));
+    step2[4] = sat::<HIGH>(step1[4].wrapping_add(step1[5]));
+    step2[5] = sat::<HIGH>(step1[4].wrapping_sub(step1[5]));
+    step2[6] = sat::<HIGH>((step1[6]).wrapping_neg().wrapping_add(step1[7]));
+    step2[7] = sat::<HIGH>(step1[6].wrapping_add(step1[7]));
+    step2[8] = sat::<HIGH>(step1[8]);
+    step2[15] = sat::<HIGH>(step1[15]);
     temp1 = (step1[9])
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
@@ -926,8 +931,8 @@ fn idct32(input: &[i32], output: &mut [i32]) {
     temp2 = step1[9]
         .wrapping_mul(COSPI_24)
         .wrapping_add(step1[14].wrapping_mul(COSPI_8));
-    step2[9] = i32::from((round_shift(temp1)) as i16);
-    step2[14] = i32::from((round_shift(temp2)) as i16);
+    step2[9] = sat::<HIGH>(round_shift(temp1));
+    step2[14] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step1[10])
         .wrapping_neg()
         .wrapping_mul(COSPI_24)
@@ -936,46 +941,46 @@ fn idct32(input: &[i32], output: &mut [i32]) {
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
         .wrapping_add(step1[13].wrapping_mul(COSPI_24));
-    step2[10] = i32::from((round_shift(temp1)) as i16);
-    step2[13] = i32::from((round_shift(temp2)) as i16);
-    step2[11] = i32::from((step1[11]) as i16);
-    step2[12] = i32::from((step1[12]) as i16);
-    step2[16] = i32::from((step1[16].wrapping_add(step1[19])) as i16);
-    step2[17] = i32::from((step1[17].wrapping_add(step1[18])) as i16);
-    step2[18] = i32::from((step1[17].wrapping_sub(step1[18])) as i16);
-    step2[19] = i32::from((step1[16].wrapping_sub(step1[19])) as i16);
-    step2[20] = i32::from(((step1[20]).wrapping_neg().wrapping_add(step1[23])) as i16);
-    step2[21] = i32::from(((step1[21]).wrapping_neg().wrapping_add(step1[22])) as i16);
-    step2[22] = i32::from((step1[21].wrapping_add(step1[22])) as i16);
-    step2[23] = i32::from((step1[20].wrapping_add(step1[23])) as i16);
-    step2[24] = i32::from((step1[24].wrapping_add(step1[27])) as i16);
-    step2[25] = i32::from((step1[25].wrapping_add(step1[26])) as i16);
-    step2[26] = i32::from((step1[25].wrapping_sub(step1[26])) as i16);
-    step2[27] = i32::from((step1[24].wrapping_sub(step1[27])) as i16);
-    step2[28] = i32::from(((step1[28]).wrapping_neg().wrapping_add(step1[31])) as i16);
-    step2[29] = i32::from(((step1[29]).wrapping_neg().wrapping_add(step1[30])) as i16);
-    step2[30] = i32::from((step1[29].wrapping_add(step1[30])) as i16);
-    step2[31] = i32::from((step1[28].wrapping_add(step1[31])) as i16);
-    step1[0] = i32::from((step2[0].wrapping_add(step2[3])) as i16);
-    step1[1] = i32::from((step2[1].wrapping_add(step2[2])) as i16);
-    step1[2] = i32::from((step2[1].wrapping_sub(step2[2])) as i16);
-    step1[3] = i32::from((step2[0].wrapping_sub(step2[3])) as i16);
-    step1[4] = i32::from((step2[4]) as i16);
+    step2[10] = sat::<HIGH>(round_shift(temp1));
+    step2[13] = sat::<HIGH>(round_shift(temp2));
+    step2[11] = sat::<HIGH>(step1[11]);
+    step2[12] = sat::<HIGH>(step1[12]);
+    step2[16] = sat::<HIGH>(step1[16].wrapping_add(step1[19]));
+    step2[17] = sat::<HIGH>(step1[17].wrapping_add(step1[18]));
+    step2[18] = sat::<HIGH>(step1[17].wrapping_sub(step1[18]));
+    step2[19] = sat::<HIGH>(step1[16].wrapping_sub(step1[19]));
+    step2[20] = sat::<HIGH>((step1[20]).wrapping_neg().wrapping_add(step1[23]));
+    step2[21] = sat::<HIGH>((step1[21]).wrapping_neg().wrapping_add(step1[22]));
+    step2[22] = sat::<HIGH>(step1[21].wrapping_add(step1[22]));
+    step2[23] = sat::<HIGH>(step1[20].wrapping_add(step1[23]));
+    step2[24] = sat::<HIGH>(step1[24].wrapping_add(step1[27]));
+    step2[25] = sat::<HIGH>(step1[25].wrapping_add(step1[26]));
+    step2[26] = sat::<HIGH>(step1[25].wrapping_sub(step1[26]));
+    step2[27] = sat::<HIGH>(step1[24].wrapping_sub(step1[27]));
+    step2[28] = sat::<HIGH>((step1[28]).wrapping_neg().wrapping_add(step1[31]));
+    step2[29] = sat::<HIGH>((step1[29]).wrapping_neg().wrapping_add(step1[30]));
+    step2[30] = sat::<HIGH>(step1[29].wrapping_add(step1[30]));
+    step2[31] = sat::<HIGH>(step1[28].wrapping_add(step1[31]));
+    step1[0] = sat::<HIGH>(step2[0].wrapping_add(step2[3]));
+    step1[1] = sat::<HIGH>(step2[1].wrapping_add(step2[2]));
+    step1[2] = sat::<HIGH>(step2[1].wrapping_sub(step2[2]));
+    step1[3] = sat::<HIGH>(step2[0].wrapping_sub(step2[3]));
+    step1[4] = sat::<HIGH>(step2[4]);
     temp1 = (step2[6].wrapping_sub(step2[5])).wrapping_mul(COSPI_16);
     temp2 = (step2[5].wrapping_add(step2[6])).wrapping_mul(COSPI_16);
-    step1[5] = i32::from((round_shift(temp1)) as i16);
-    step1[6] = i32::from((round_shift(temp2)) as i16);
-    step1[7] = i32::from((step2[7]) as i16);
-    step1[8] = i32::from((step2[8].wrapping_add(step2[11])) as i16);
-    step1[9] = i32::from((step2[9].wrapping_add(step2[10])) as i16);
-    step1[10] = i32::from((step2[9].wrapping_sub(step2[10])) as i16);
-    step1[11] = i32::from((step2[8].wrapping_sub(step2[11])) as i16);
-    step1[12] = i32::from(((step2[12]).wrapping_neg().wrapping_add(step2[15])) as i16);
-    step1[13] = i32::from(((step2[13]).wrapping_neg().wrapping_add(step2[14])) as i16);
-    step1[14] = i32::from((step2[13].wrapping_add(step2[14])) as i16);
-    step1[15] = i32::from((step2[12].wrapping_add(step2[15])) as i16);
-    step1[16] = i32::from((step2[16]) as i16);
-    step1[17] = i32::from((step2[17]) as i16);
+    step1[5] = sat::<HIGH>(round_shift(temp1));
+    step1[6] = sat::<HIGH>(round_shift(temp2));
+    step1[7] = sat::<HIGH>(step2[7]);
+    step1[8] = sat::<HIGH>(step2[8].wrapping_add(step2[11]));
+    step1[9] = sat::<HIGH>(step2[9].wrapping_add(step2[10]));
+    step1[10] = sat::<HIGH>(step2[9].wrapping_sub(step2[10]));
+    step1[11] = sat::<HIGH>(step2[8].wrapping_sub(step2[11]));
+    step1[12] = sat::<HIGH>((step2[12]).wrapping_neg().wrapping_add(step2[15]));
+    step1[13] = sat::<HIGH>((step2[13]).wrapping_neg().wrapping_add(step2[14]));
+    step1[14] = sat::<HIGH>(step2[13].wrapping_add(step2[14]));
+    step1[15] = sat::<HIGH>(step2[12].wrapping_add(step2[15]));
+    step1[16] = sat::<HIGH>(step2[16]);
+    step1[17] = sat::<HIGH>(step2[17]);
     temp1 = (step2[18])
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
@@ -983,8 +988,8 @@ fn idct32(input: &[i32], output: &mut [i32]) {
     temp2 = step2[18]
         .wrapping_mul(COSPI_24)
         .wrapping_add(step2[29].wrapping_mul(COSPI_8));
-    step1[18] = i32::from((round_shift(temp1)) as i16);
-    step1[29] = i32::from((round_shift(temp2)) as i16);
+    step1[18] = sat::<HIGH>(round_shift(temp1));
+    step1[29] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step2[19])
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
@@ -992,8 +997,8 @@ fn idct32(input: &[i32], output: &mut [i32]) {
     temp2 = step2[19]
         .wrapping_mul(COSPI_24)
         .wrapping_add(step2[28].wrapping_mul(COSPI_8));
-    step1[19] = i32::from((round_shift(temp1)) as i16);
-    step1[28] = i32::from((round_shift(temp2)) as i16);
+    step1[19] = sat::<HIGH>(round_shift(temp1));
+    step1[28] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step2[20])
         .wrapping_neg()
         .wrapping_mul(COSPI_24)
@@ -1002,8 +1007,8 @@ fn idct32(input: &[i32], output: &mut [i32]) {
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
         .wrapping_add(step2[27].wrapping_mul(COSPI_24));
-    step1[20] = i32::from((round_shift(temp1)) as i16);
-    step1[27] = i32::from((round_shift(temp2)) as i16);
+    step1[20] = sat::<HIGH>(round_shift(temp1));
+    step1[27] = sat::<HIGH>(round_shift(temp2));
     temp1 = (step2[21])
         .wrapping_neg()
         .wrapping_mul(COSPI_24)
@@ -1012,90 +1017,90 @@ fn idct32(input: &[i32], output: &mut [i32]) {
         .wrapping_neg()
         .wrapping_mul(COSPI_8)
         .wrapping_add(step2[26].wrapping_mul(COSPI_24));
-    step1[21] = i32::from((round_shift(temp1)) as i16);
-    step1[26] = i32::from((round_shift(temp2)) as i16);
-    step1[22] = i32::from((step2[22]) as i16);
-    step1[23] = i32::from((step2[23]) as i16);
-    step1[24] = i32::from((step2[24]) as i16);
-    step1[25] = i32::from((step2[25]) as i16);
-    step1[30] = i32::from((step2[30]) as i16);
-    step1[31] = i32::from((step2[31]) as i16);
-    step2[0] = i32::from((step1[0].wrapping_add(step1[7])) as i16);
-    step2[1] = i32::from((step1[1].wrapping_add(step1[6])) as i16);
-    step2[2] = i32::from((step1[2].wrapping_add(step1[5])) as i16);
-    step2[3] = i32::from((step1[3].wrapping_add(step1[4])) as i16);
-    step2[4] = i32::from((step1[3].wrapping_sub(step1[4])) as i16);
-    step2[5] = i32::from((step1[2].wrapping_sub(step1[5])) as i16);
-    step2[6] = i32::from((step1[1].wrapping_sub(step1[6])) as i16);
-    step2[7] = i32::from((step1[0].wrapping_sub(step1[7])) as i16);
-    step2[8] = i32::from((step1[8]) as i16);
-    step2[9] = i32::from((step1[9]) as i16);
+    step1[21] = sat::<HIGH>(round_shift(temp1));
+    step1[26] = sat::<HIGH>(round_shift(temp2));
+    step1[22] = sat::<HIGH>(step2[22]);
+    step1[23] = sat::<HIGH>(step2[23]);
+    step1[24] = sat::<HIGH>(step2[24]);
+    step1[25] = sat::<HIGH>(step2[25]);
+    step1[30] = sat::<HIGH>(step2[30]);
+    step1[31] = sat::<HIGH>(step2[31]);
+    step2[0] = sat::<HIGH>(step1[0].wrapping_add(step1[7]));
+    step2[1] = sat::<HIGH>(step1[1].wrapping_add(step1[6]));
+    step2[2] = sat::<HIGH>(step1[2].wrapping_add(step1[5]));
+    step2[3] = sat::<HIGH>(step1[3].wrapping_add(step1[4]));
+    step2[4] = sat::<HIGH>(step1[3].wrapping_sub(step1[4]));
+    step2[5] = sat::<HIGH>(step1[2].wrapping_sub(step1[5]));
+    step2[6] = sat::<HIGH>(step1[1].wrapping_sub(step1[6]));
+    step2[7] = sat::<HIGH>(step1[0].wrapping_sub(step1[7]));
+    step2[8] = sat::<HIGH>(step1[8]);
+    step2[9] = sat::<HIGH>(step1[9]);
     temp1 = ((step1[10]).wrapping_neg().wrapping_add(step1[13])).wrapping_mul(COSPI_16);
     temp2 = (step1[10].wrapping_add(step1[13])).wrapping_mul(COSPI_16);
-    step2[10] = i32::from((round_shift(temp1)) as i16);
-    step2[13] = i32::from((round_shift(temp2)) as i16);
+    step2[10] = sat::<HIGH>(round_shift(temp1));
+    step2[13] = sat::<HIGH>(round_shift(temp2));
     temp1 = ((step1[11]).wrapping_neg().wrapping_add(step1[12])).wrapping_mul(COSPI_16);
     temp2 = (step1[11].wrapping_add(step1[12])).wrapping_mul(COSPI_16);
-    step2[11] = i32::from((round_shift(temp1)) as i16);
-    step2[12] = i32::from((round_shift(temp2)) as i16);
-    step2[14] = i32::from((step1[14]) as i16);
-    step2[15] = i32::from((step1[15]) as i16);
-    step2[16] = i32::from((step1[16].wrapping_add(step1[23])) as i16);
-    step2[17] = i32::from((step1[17].wrapping_add(step1[22])) as i16);
-    step2[18] = i32::from((step1[18].wrapping_add(step1[21])) as i16);
-    step2[19] = i32::from((step1[19].wrapping_add(step1[20])) as i16);
-    step2[20] = i32::from((step1[19].wrapping_sub(step1[20])) as i16);
-    step2[21] = i32::from((step1[18].wrapping_sub(step1[21])) as i16);
-    step2[22] = i32::from((step1[17].wrapping_sub(step1[22])) as i16);
-    step2[23] = i32::from((step1[16].wrapping_sub(step1[23])) as i16);
-    step2[24] = i32::from(((step1[24]).wrapping_neg().wrapping_add(step1[31])) as i16);
-    step2[25] = i32::from(((step1[25]).wrapping_neg().wrapping_add(step1[30])) as i16);
-    step2[26] = i32::from(((step1[26]).wrapping_neg().wrapping_add(step1[29])) as i16);
-    step2[27] = i32::from(((step1[27]).wrapping_neg().wrapping_add(step1[28])) as i16);
-    step2[28] = i32::from((step1[27].wrapping_add(step1[28])) as i16);
-    step2[29] = i32::from((step1[26].wrapping_add(step1[29])) as i16);
-    step2[30] = i32::from((step1[25].wrapping_add(step1[30])) as i16);
-    step2[31] = i32::from((step1[24].wrapping_add(step1[31])) as i16);
-    step1[0] = i32::from((step2[0].wrapping_add(step2[15])) as i16);
-    step1[1] = i32::from((step2[1].wrapping_add(step2[14])) as i16);
-    step1[2] = i32::from((step2[2].wrapping_add(step2[13])) as i16);
-    step1[3] = i32::from((step2[3].wrapping_add(step2[12])) as i16);
-    step1[4] = i32::from((step2[4].wrapping_add(step2[11])) as i16);
-    step1[5] = i32::from((step2[5].wrapping_add(step2[10])) as i16);
-    step1[6] = i32::from((step2[6].wrapping_add(step2[9])) as i16);
-    step1[7] = i32::from((step2[7].wrapping_add(step2[8])) as i16);
-    step1[8] = i32::from((step2[7].wrapping_sub(step2[8])) as i16);
-    step1[9] = i32::from((step2[6].wrapping_sub(step2[9])) as i16);
-    step1[10] = i32::from((step2[5].wrapping_sub(step2[10])) as i16);
-    step1[11] = i32::from((step2[4].wrapping_sub(step2[11])) as i16);
-    step1[12] = i32::from((step2[3].wrapping_sub(step2[12])) as i16);
-    step1[13] = i32::from((step2[2].wrapping_sub(step2[13])) as i16);
-    step1[14] = i32::from((step2[1].wrapping_sub(step2[14])) as i16);
-    step1[15] = i32::from((step2[0].wrapping_sub(step2[15])) as i16);
-    step1[16] = i32::from((step2[16]) as i16);
-    step1[17] = i32::from((step2[17]) as i16);
-    step1[18] = i32::from((step2[18]) as i16);
-    step1[19] = i32::from((step2[19]) as i16);
+    step2[11] = sat::<HIGH>(round_shift(temp1));
+    step2[12] = sat::<HIGH>(round_shift(temp2));
+    step2[14] = sat::<HIGH>(step1[14]);
+    step2[15] = sat::<HIGH>(step1[15]);
+    step2[16] = sat::<HIGH>(step1[16].wrapping_add(step1[23]));
+    step2[17] = sat::<HIGH>(step1[17].wrapping_add(step1[22]));
+    step2[18] = sat::<HIGH>(step1[18].wrapping_add(step1[21]));
+    step2[19] = sat::<HIGH>(step1[19].wrapping_add(step1[20]));
+    step2[20] = sat::<HIGH>(step1[19].wrapping_sub(step1[20]));
+    step2[21] = sat::<HIGH>(step1[18].wrapping_sub(step1[21]));
+    step2[22] = sat::<HIGH>(step1[17].wrapping_sub(step1[22]));
+    step2[23] = sat::<HIGH>(step1[16].wrapping_sub(step1[23]));
+    step2[24] = sat::<HIGH>((step1[24]).wrapping_neg().wrapping_add(step1[31]));
+    step2[25] = sat::<HIGH>((step1[25]).wrapping_neg().wrapping_add(step1[30]));
+    step2[26] = sat::<HIGH>((step1[26]).wrapping_neg().wrapping_add(step1[29]));
+    step2[27] = sat::<HIGH>((step1[27]).wrapping_neg().wrapping_add(step1[28]));
+    step2[28] = sat::<HIGH>(step1[27].wrapping_add(step1[28]));
+    step2[29] = sat::<HIGH>(step1[26].wrapping_add(step1[29]));
+    step2[30] = sat::<HIGH>(step1[25].wrapping_add(step1[30]));
+    step2[31] = sat::<HIGH>(step1[24].wrapping_add(step1[31]));
+    step1[0] = sat::<HIGH>(step2[0].wrapping_add(step2[15]));
+    step1[1] = sat::<HIGH>(step2[1].wrapping_add(step2[14]));
+    step1[2] = sat::<HIGH>(step2[2].wrapping_add(step2[13]));
+    step1[3] = sat::<HIGH>(step2[3].wrapping_add(step2[12]));
+    step1[4] = sat::<HIGH>(step2[4].wrapping_add(step2[11]));
+    step1[5] = sat::<HIGH>(step2[5].wrapping_add(step2[10]));
+    step1[6] = sat::<HIGH>(step2[6].wrapping_add(step2[9]));
+    step1[7] = sat::<HIGH>(step2[7].wrapping_add(step2[8]));
+    step1[8] = sat::<HIGH>(step2[7].wrapping_sub(step2[8]));
+    step1[9] = sat::<HIGH>(step2[6].wrapping_sub(step2[9]));
+    step1[10] = sat::<HIGH>(step2[5].wrapping_sub(step2[10]));
+    step1[11] = sat::<HIGH>(step2[4].wrapping_sub(step2[11]));
+    step1[12] = sat::<HIGH>(step2[3].wrapping_sub(step2[12]));
+    step1[13] = sat::<HIGH>(step2[2].wrapping_sub(step2[13]));
+    step1[14] = sat::<HIGH>(step2[1].wrapping_sub(step2[14]));
+    step1[15] = sat::<HIGH>(step2[0].wrapping_sub(step2[15]));
+    step1[16] = sat::<HIGH>(step2[16]);
+    step1[17] = sat::<HIGH>(step2[17]);
+    step1[18] = sat::<HIGH>(step2[18]);
+    step1[19] = sat::<HIGH>(step2[19]);
     temp1 = ((step2[20]).wrapping_neg().wrapping_add(step2[27])).wrapping_mul(COSPI_16);
     temp2 = (step2[20].wrapping_add(step2[27])).wrapping_mul(COSPI_16);
-    step1[20] = i32::from((round_shift(temp1)) as i16);
-    step1[27] = i32::from((round_shift(temp2)) as i16);
+    step1[20] = sat::<HIGH>(round_shift(temp1));
+    step1[27] = sat::<HIGH>(round_shift(temp2));
     temp1 = ((step2[21]).wrapping_neg().wrapping_add(step2[26])).wrapping_mul(COSPI_16);
     temp2 = (step2[21].wrapping_add(step2[26])).wrapping_mul(COSPI_16);
-    step1[21] = i32::from((round_shift(temp1)) as i16);
-    step1[26] = i32::from((round_shift(temp2)) as i16);
+    step1[21] = sat::<HIGH>(round_shift(temp1));
+    step1[26] = sat::<HIGH>(round_shift(temp2));
     temp1 = ((step2[22]).wrapping_neg().wrapping_add(step2[25])).wrapping_mul(COSPI_16);
     temp2 = (step2[22].wrapping_add(step2[25])).wrapping_mul(COSPI_16);
-    step1[22] = i32::from((round_shift(temp1)) as i16);
-    step1[25] = i32::from((round_shift(temp2)) as i16);
+    step1[22] = sat::<HIGH>(round_shift(temp1));
+    step1[25] = sat::<HIGH>(round_shift(temp2));
     temp1 = ((step2[23]).wrapping_neg().wrapping_add(step2[24])).wrapping_mul(COSPI_16);
     temp2 = (step2[23].wrapping_add(step2[24])).wrapping_mul(COSPI_16);
-    step1[23] = i32::from((round_shift(temp1)) as i16);
-    step1[24] = i32::from((round_shift(temp2)) as i16);
-    step1[28] = i32::from((step2[28]) as i16);
-    step1[29] = i32::from((step2[29]) as i16);
-    step1[30] = i32::from((step2[30]) as i16);
-    step1[31] = i32::from((step2[31]) as i16);
+    step1[23] = sat::<HIGH>(round_shift(temp1));
+    step1[24] = sat::<HIGH>(round_shift(temp2));
+    step1[28] = sat::<HIGH>(step2[28]);
+    step1[29] = sat::<HIGH>(step2[29]);
+    step1[30] = sat::<HIGH>(step2[30]);
+    step1[31] = sat::<HIGH>(step2[31]);
     output[0] = (step1[0].wrapping_add(step1[31]));
     output[1] = (step1[1].wrapping_add(step1[30]));
     output[2] = (step1[2].wrapping_add(step1[29]));
@@ -1148,38 +1153,103 @@ fn wht4(input: &[i32], output: &mut [i32], shift: u32) {
 
 /// Inverse 4x4 Walsh-Hadamard added into `dest`.
 pub(crate) fn iwht4x4_add(coef: &[i32], dest: &mut [u8], stride: usize) {
-    let mut rows = [0i32; 16];
-    let mut tmp = [0i32; 4];
+    let wide: Vec<i64> = coef.iter().copied().map(i64::from).collect();
+    iwht4x4_add_pix(&wide, dest, stride);
+}
+
+pub(crate) fn iwht4x4_add_pix<P: crate::pel::Pix>(coef: &[i64], dest: &mut [P], stride: usize) {
+    let mut rows = [0i64; 16];
+    let mut tmp = [0i64; 4];
     for r in 0..4 {
-        wht4(&coef[r * 4..r * 4 + 4], &mut tmp, 2);
-        rows[r * 4..r * 4 + 4].copy_from_slice(&tmp);
+        let start = r * 4;
+        let Some(row) = coef.get(start..start + 4) else {
+            return;
+        };
+        wht4_wide(row, &mut tmp, 2);
+        rows[start..start + 4].copy_from_slice(&tmp);
     }
     for c in 0..4 {
         let col = [rows[c], rows[4 + c], rows[8 + c], rows[12 + c]];
-        wht4(&col, &mut tmp, 0);
+        wht4_wide(&col, &mut tmp, 0);
         for (r, sample) in tmp.iter().enumerate() {
             let i = r * stride + c;
-            let sum = i32::from(dest[i]).wrapping_add(*sample);
-            dest[i] = clip_u8(sum);
+            let Some(slot) = dest.get_mut(i) else {
+                return;
+            };
+            *slot = P::put_i64(i64::from(slot.get()).wrapping_add(*sample));
         }
     }
 }
 
-fn transform_1d(n: usize, adst: bool, input: &[i32], output: &mut [i32]) {
+fn wht4_wide(input: &[i64], output: &mut [i64], shift: u32) {
+    let a0 = input.first().copied().unwrap_or(0) >> shift;
+    let c0 = input.get(1).copied().unwrap_or(0) >> shift;
+    let d0 = input.get(2).copied().unwrap_or(0) >> shift;
+    let b0 = input.get(3).copied().unwrap_or(0) >> shift;
+    let a1 = a0.wrapping_add(c0);
+    let d1 = d0.wrapping_sub(b0);
+    let e = a1.wrapping_sub(d1) >> 1;
+    let b1 = e.wrapping_sub(b0);
+    let c1 = e.wrapping_sub(c0);
+    output[0] = a1.wrapping_sub(b1);
+    output[1] = b1;
+    output[2] = c1;
+    output[3] = d1.wrapping_add(c1);
+}
+
+fn transform_1d<const HIGH: bool>(n: usize, adst: bool, input: &[i64], output: &mut [i64]) {
     match (n, adst) {
-        (4, false) => idct4(input, output),
-        (4, true) => iadst4(input, output),
-        (8, false) => idct8(input, output),
-        (8, true) => iadst8(input, output),
-        (16, false) => idct16(input, output),
-        (16, true) => iadst16(input, output),
-        _ => idct32(input, output),
+        (4, false) => idct4::<HIGH>(input, output),
+        (4, true) => iadst4::<HIGH>(input, output),
+        (8, false) => idct8::<HIGH>(input, output),
+        (8, true) => iadst8::<HIGH>(input, output),
+        (16, false) => idct16::<HIGH>(input, output),
+        (16, true) => iadst16::<HIGH>(input, output),
+        _ => idct32::<HIGH>(input, output),
     }
+}
+
+fn round_pow2_wide(v: i64, n: u32) -> i64 {
+    if n == 0 {
+        return v;
+    }
+    v.wrapping_add(1i64 << (n - 1)) >> n
 }
 
 /// Row then column inverse transform, added into `dest` with the
 /// libvpx column shift (4, 5, 6, 6).
 pub(crate) fn iht_add(coef: &[i32], dest: &mut [u8], stride: usize, n: usize, tx_type: u8) {
+    let mut wide = [0i64; 32 * 32];
+    let count = n.saturating_mul(n).min(wide.len());
+    for (slot, value) in wide.iter_mut().zip(coef.iter()).take(count) {
+        *slot = i64::from(*value);
+    }
+    iht_add_pix(&wide[..count], dest, stride, n, tx_type);
+}
+
+/// Inverse transform added into samples of `P`. Eight-bit keeps the 16-bit
+/// truncation. Ten-bit and twelve-bit keep the wider intermediate.
+pub(crate) fn iht_add_pix<P: crate::pel::Pix>(
+    coef: &[i64],
+    dest: &mut [P],
+    stride: usize,
+    n: usize,
+    tx_type: u8,
+) {
+    if P::HIGH {
+        iht_add_depth::<true, P>(coef, dest, stride, n, tx_type);
+    } else {
+        iht_add_depth::<false, P>(coef, dest, stride, n, tx_type);
+    }
+}
+
+fn iht_add_depth<const HIGH: bool, P: crate::pel::Pix>(
+    coef: &[i64],
+    dest: &mut [P],
+    stride: usize,
+    n: usize,
+    tx_type: u8,
+) {
     let row_adst = tx_type == 2 || tx_type == 3;
     let col_adst = tx_type == 1 || tx_type == 3;
     let shift = if n == 4 {
@@ -1189,22 +1259,30 @@ pub(crate) fn iht_add(coef: &[i32], dest: &mut [u8], stride: usize, n: usize, tx
     } else {
         6
     };
-    let mut rows = vec![0i32; n * n];
-    let mut tmp_in = vec![0i32; n];
-    let mut tmp_out = vec![0i32; n];
+    let mut rows = vec![0i64; n * n];
+    let mut tmp_in = vec![0i64; n];
+    let mut tmp_out = vec![0i64; n];
     for r in 0..n {
-        transform_1d(n, row_adst, &coef[r * n..r * n + n], &mut tmp_out);
-        rows[r * n..r * n + n].copy_from_slice(&tmp_out);
+        let start = r * n;
+        let end = start + n;
+        let Some(row) = coef.get(start..end) else {
+            return;
+        };
+        transform_1d::<HIGH>(n, row_adst, row, &mut tmp_out);
+        rows[start..end].copy_from_slice(&tmp_out);
     }
     for c in 0..n {
         for r in 0..n {
             tmp_in[r] = rows[r * n + c];
         }
-        transform_1d(n, col_adst && n <= 16, &tmp_in, &mut tmp_out);
+        transform_1d::<HIGH>(n, col_adst && n <= 16, &tmp_in, &mut tmp_out);
         for (r, sample) in tmp_out.iter().enumerate() {
-            let add = round_pow2(*sample, shift);
+            let add = round_pow2_wide(*sample, shift);
             let i = r * stride + c;
-            dest[i] = clip_u8(i32::from(dest[i]).wrapping_add(add));
+            let Some(slot) = dest.get_mut(i) else {
+                return;
+            };
+            *slot = P::put_i64(i64::from(slot.get()).wrapping_add(add));
         }
     }
 }
@@ -1227,27 +1305,37 @@ mod oracle {
 
     use super::{iadst4, iadst8, iadst16, idct4, idct8, idct16, idct32};
 
-    fn check(f: fn(&[i32], &mut [i32]), input: &[i32], expect: &[i32]) {
-        let mut out = vec![0i32; expect.len()];
-        f(input, &mut out);
-        assert_eq!(out, expect);
+    fn check(f: fn(&[i64], &mut [i64]), input: &[i32], expect: &[i32]) {
+        let input: Vec<i64> = input.iter().copied().map(i64::from).collect();
+        let mut out = vec![0i64; expect.len()];
+        f(&input, &mut out);
+        let got: Vec<i32> = out.iter().map(|v| i32::try_from(*v).unwrap()).collect();
+        assert_eq!(got, expect);
     }
     #[test]
     fn idct4_case_0() {
-        check(idct4, &[-163, 282, -236, -39], &[-36, 196, -92, -528]);
+        check(
+            idct4::<false>,
+            &[-163, 282, -236, -39],
+            &[-36, 196, -92, -528],
+        );
     }
     #[test]
     fn idct4_case_1() {
-        check(idct4, &[-180, 207, 160, 183], &[247, -330, -150, -275]);
+        check(
+            idct4::<false>,
+            &[-180, 207, 160, 183],
+            &[247, -330, -150, -275],
+        );
     }
     #[test]
     fn idct4_case_2() {
-        check(idct4, &[88, -86, -204, 199], &[-85, -11, 423, -79]);
+        check(idct4::<false>, &[88, -86, -204, 199], &[-85, -11, 423, -79]);
     }
     #[test]
     fn idct8_case_3() {
         check(
-            idct8,
+            idct8::<false>,
             &[-271, 99, 143, -298, 156, -28, -66, -196],
             &[-178, 91, -240, 166, -542, -596, -463, 230],
         );
@@ -1255,7 +1343,7 @@ mod oracle {
     #[test]
     fn idct8_case_4() {
         check(
-            idct8,
+            idct8::<false>,
             &[25, -269, -278, -274, 254, -291, 90, -79],
             &[-693, -193, 24, 354, 484, 32, -511, 643],
         );
@@ -1263,7 +1351,7 @@ mod oracle {
     #[test]
     fn idct8_case_5() {
         check(
-            idct8,
+            idct8::<false>,
             &[132, -271, 240, -73, 148, 207, 266, -62],
             &[298, -545, 53, 95, -347, 233, 215, 746],
         );
@@ -1271,7 +1359,7 @@ mod oracle {
     #[test]
     fn idct16_case_6() {
         check(
-            idct16,
+            idct16::<false>,
             &[
                 53, -64, -76, 170, -4, -278, 126, 269, -198, -110, 3, -177, 40, 212, 132, 219,
             ],
@@ -1283,7 +1371,7 @@ mod oracle {
     #[test]
     fn idct16_case_7() {
         check(
-            idct16,
+            idct16::<false>,
             &[
                 -106, 10, -10, 211, 217, 102, -265, 191, -52, 113, 124, -123, 75, 261, 83, -212,
             ],
@@ -1296,7 +1384,7 @@ mod oracle {
     #[test]
     fn idct16_case_8() {
         check(
-            idct16,
+            idct16::<false>,
             &[
                 149, 220, -190, -133, 233, 102, 79, 201, -270, 180, -256, 15, 292, 103, -126, -128,
             ],
@@ -1308,7 +1396,7 @@ mod oracle {
     #[test]
     fn idct32_case_9() {
         check(
-            idct32,
+            idct32::<false>,
             &[
                 214, -68, -288, -96, 252, 261, -63, 114, 226, 52, 291, 61, 170, -25, 261, -295, 92,
                 224, -168, 231, 274, -90, 136, -243, 192, 73, 283, 267, -96, 216, 123, 196,
@@ -1323,7 +1411,7 @@ mod oracle {
     #[test]
     fn idct32_case_10() {
         check(
-            idct32,
+            idct32::<false>,
             &[
                 65, 124, 54, -299, 251, 253, 39, 169, -272, -65, -119, 263, 298, -115, -207, 264,
                 -39, -267, -228, -215, -283, 163, -286, -13, -45, -25, -188, -111, 52, -3, -229,
@@ -1339,7 +1427,7 @@ mod oracle {
     #[test]
     fn idct32_case_11() {
         check(
-            idct32,
+            idct32::<false>,
             &[
                 -137, -39, 240, -128, -21, 1, 165, 29, 208, 185, -184, -276, 19, 95, 51, 131, -108,
                 -36, -189, -41, 222, -86, 142, -279, -70, -282, 106, -151, -264, -136, 156, 218,
@@ -1353,20 +1441,32 @@ mod oracle {
     }
     #[test]
     fn iadst4_case_12() {
-        check(iadst4, &[136, 257, -75, 228], &[322, 105, 358, -203]);
+        check(
+            iadst4::<false>,
+            &[136, 257, -75, 228],
+            &[322, 105, 358, -203],
+        );
     }
     #[test]
     fn iadst4_case_13() {
-        check(iadst4, &[161, -72, 236, -269], &[49, 212, -281, 438]);
+        check(
+            iadst4::<false>,
+            &[161, -72, 236, -269],
+            &[49, 212, -281, 438],
+        );
     }
     #[test]
     fn iadst4_case_14() {
-        check(iadst4, &[104, 289, 28, 136], &[378, 164, 173, -166]);
+        check(
+            iadst4::<false>,
+            &[104, 289, 28, 136],
+            &[378, 164, 173, -166],
+        );
     }
     #[test]
     fn iadst8_case_15() {
         check(
-            iadst8,
+            iadst8::<false>,
             &[-240, 5, -172, -83, -252, 13, -228, -222],
             &[-778, -73, -180, 86, -205, -216, 58, -542],
         );
@@ -1374,7 +1474,7 @@ mod oracle {
     #[test]
     fn iadst8_case_16() {
         check(
-            iadst8,
+            iadst8::<false>,
             &[17, 5, -138, 126, 278, -42, -167, -292],
             &[-254, 503, -619, 10, 386, 161, -183, -30],
         );
@@ -1382,7 +1482,7 @@ mod oracle {
     #[test]
     fn iadst8_case_17() {
         check(
-            iadst8,
+            iadst8::<false>,
             &[274, -262, -78, 283, 171, -125, 221, -262],
             &[66, 253, -540, -146, -19, 972, 33, 493],
         );
@@ -1390,7 +1490,7 @@ mod oracle {
     #[test]
     fn iadst16_case_18() {
         check(
-            iadst16,
+            iadst16::<false>,
             &[
                 87, -95, 55, -199, -90, 287, 143, -102, 204, -194, 99, 3, 216, 211, -283, 33,
             ],
@@ -1403,7 +1503,7 @@ mod oracle {
     #[test]
     fn iadst16_case_19() {
         check(
-            iadst16,
+            iadst16::<false>,
             &[
                 111, -12, -282, -140, -95, 35, 276, -162, 47, 139, -82, -28, -202, 88, 260, 52,
             ],
@@ -1415,7 +1515,7 @@ mod oracle {
     #[test]
     fn iadst16_case_20() {
         check(
-            iadst16,
+            iadst16::<false>,
             &[
                 247, 196, 245, -60, -234, -259, -214, -164, -127, -130, 251, -82, -26, 40, 218, -39,
             ],

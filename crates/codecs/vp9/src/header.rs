@@ -14,7 +14,9 @@ use crate::geom::{
     SINGLE_REFERENCE, SWITCHABLE,
 };
 use crate::prob::{self, FrameContext};
-use crate::tables::{AC_QLOOKUP, DC_QLOOKUP};
+use crate::tables::{
+    AC_QLOOKUP, AC_QLOOKUP_10, AC_QLOOKUP_12, DC_QLOOKUP, DC_QLOOKUP_10, DC_QLOOKUP_12,
+};
 
 const MAX_PROB: u8 = 255;
 const REF_SLOTS: usize = 8;
@@ -166,7 +168,7 @@ pub fn parse<'a>(state: &Persist, data: &'a [u8]) -> Result<Parsed<'a>, CodecErr
     if profile > 3 {
         return Err(bad(&bits, "vp9 profile"));
     }
-    if profile != 0 && profile != 1 {
+    if profile == 3 {
         return Err(CodecError::Unsupported {
             what: "vp9 profile",
         });
@@ -755,12 +757,21 @@ fn load_context(contexts: &[FrameContext; 4], index: u8) -> Result<FrameContext,
 
 fn fill_dequant(header: &mut Header) {
     let base = i32::from(header.base_qindex);
+    let (dc, ac) = q_tables(header.bit_depth);
     for seg_id in 0..8 {
         let q = seg_qindex(&header.seg, seg_id, base);
-        header.y_dq[seg_id][0] = lookup(&DC_QLOOKUP, q, i32::from(header.y_dc_delta));
-        header.y_dq[seg_id][1] = lookup(&AC_QLOOKUP, q, 0);
-        header.uv_dq[seg_id][0] = lookup(&DC_QLOOKUP, q, i32::from(header.uv_dc_delta));
-        header.uv_dq[seg_id][1] = lookup(&AC_QLOOKUP, q, i32::from(header.uv_ac_delta));
+        header.y_dq[seg_id][0] = lookup(dc, q, i32::from(header.y_dc_delta));
+        header.y_dq[seg_id][1] = lookup(ac, q, 0);
+        header.uv_dq[seg_id][0] = lookup(dc, q, i32::from(header.uv_dc_delta));
+        header.uv_dq[seg_id][1] = lookup(ac, q, i32::from(header.uv_ac_delta));
+    }
+}
+
+fn q_tables(bit_depth: u8) -> (&'static [i16; 256], &'static [i16; 256]) {
+    match bit_depth {
+        10 => (&DC_QLOOKUP_10, &AC_QLOOKUP_10),
+        12 => (&DC_QLOOKUP_12, &AC_QLOOKUP_12),
+        _ => (&DC_QLOOKUP, &AC_QLOOKUP),
     }
 }
 
@@ -806,11 +817,20 @@ fn read_sync(bits: &mut BitReader<'_>) -> Result<(), CodecError> {
 }
 
 fn read_color(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
-    header.bit_depth = 8;
+    if header.profile >= 2 {
+        header.bit_depth = if bits.read(1)? == 1 { 12 } else { 10 };
+    } else {
+        header.bit_depth = 8;
+    }
     header.color_space = u8::try_from(bits.read(3)?).unwrap_or(0);
     if header.color_space == 7 {
         if header.profile & 1 == 0 {
-            return Err(bad(bits, "profile 0 rgb"));
+            let what = if header.profile == 0 {
+                "profile 0 rgb"
+            } else {
+                "profile rgb"
+            };
+            return Err(bad(bits, what));
         }
         header.color_range = 1;
         header.ss_x = 0;
@@ -1092,8 +1112,8 @@ mod tests {
     }
 
     #[test]
-    fn profile_two_is_unsupported() {
-        let err = must_fail(&[0x90]);
+    fn profile_three_is_unsupported() {
+        let err = must_fail(&[0xb0]);
         assert!(err.contains("profile"), "{err}");
     }
 

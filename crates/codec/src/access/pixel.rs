@@ -15,6 +15,10 @@ pub enum PixelFormat {
     Yuv444p,
     /// 8-bit 4:4:4 stored as G, B, R.
     Gbrp,
+    /// 10-bit 4:2:0, little-endian samples.
+    Yuv420p10,
+    /// 12-bit 4:2:0, little-endian samples.
+    Yuv420p12,
 }
 
 /// Color primaries named on a video stream.
@@ -80,7 +84,9 @@ impl PixelFormat {
     #[must_use]
     pub const fn chroma_wh(self, width: u32, height: u32) -> Option<(u32, u32)> {
         match self {
-            Self::Yuv420p => Some((width.div_ceil(2), height.div_ceil(2))),
+            Self::Yuv420p | Self::Yuv420p10 | Self::Yuv420p12 => {
+                Some((width.div_ceil(2), height.div_ceil(2)))
+            }
             Self::Yuv422p => Some((width.div_ceil(2), height)),
             Self::Yuv440p => Some((width, height.div_ceil(2))),
             Self::Yuv444p | Self::Gbrp => Some((width, height)),

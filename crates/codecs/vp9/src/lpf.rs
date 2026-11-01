@@ -11,6 +11,7 @@ use cutlass_decode::CodecError;
 
 use crate::geom::{self, TX_8X8, TX_16X16, uv_tx_420};
 use crate::header::Header;
+use crate::pel::Pix;
 
 const LEFT_TX: [u64; 4] = [
     0xffff_ffff_ffff_ffff,
@@ -148,10 +149,10 @@ pub struct Block {
     pub bh: usize,
 }
 
-pub struct Planes<'a> {
-    pub y: &'a mut [u8],
-    pub u: &'a mut [u8],
-    pub v: &'a mut [u8],
+pub struct Planes<'a, P: Pix = u8> {
+    pub y: &'a mut [P],
+    pub u: &'a mut [P],
+    pub v: &'a mut [P],
     pub y_stride: usize,
     pub uv_stride: usize,
 }
@@ -234,10 +235,10 @@ pub fn build(mask: &mut Mask, levels: &Levels, block: &Block, mi_row: usize, mi_
     }
 }
 
-pub fn filter_sb(
+pub fn filter_sb<P: Pix>(
     mask: &mut Mask,
     levels: &Levels,
-    planes: &mut Planes<'_>,
+    planes: &mut Planes<'_, P>,
     origin: Origin,
     chroma_420: bool,
 ) -> Result<(), CodecError> {
@@ -259,8 +260,8 @@ pub(crate) struct ChromaSample {
     pub level: u8,
 }
 
-pub(crate) fn filter_chroma_sample(
-    plane: &mut [u8],
+pub(crate) fn filter_chroma_sample<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     levels: &Levels,
     sample: ChromaSample,
@@ -430,10 +431,10 @@ fn clip_cols(mask: &mut Mask, columns: usize) {
     }
 }
 
-fn filter_luma(
+fn filter_luma<P: Pix>(
     mask: &Mask,
     levels: &Levels,
-    plane: &mut [u8],
+    plane: &mut [P],
     stride: usize,
     origin: &Origin,
 ) -> Result<(), CodecError> {
@@ -497,10 +498,10 @@ fn filter_luma(
     Ok(())
 }
 
-fn filter_chroma(
+fn filter_chroma<P: Pix>(
     mask: &Mask,
     levels: &Levels,
-    plane: &mut [u8],
+    plane: &mut [P],
     stride: usize,
     origin: &Origin,
 ) -> Result<(), CodecError> {
@@ -614,8 +615,8 @@ fn chroma_edge<'a>(mask: &Mask, levels: &'a Levels, row: usize, lfl: &'a [u8]) -
     }
 }
 
-fn vertical_pair(
-    plane: &mut [u8],
+fn vertical_pair<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x0: usize,
     y: usize,
@@ -645,8 +646,8 @@ fn vertical_pair(
     Ok(())
 }
 
-fn vertical_column(
-    plane: &mut [u8],
+fn vertical_column<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -674,8 +675,8 @@ fn vertical_column(
     Ok(())
 }
 
-fn vertical_edges(
-    plane: &mut [u8],
+fn vertical_edges<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x0: usize,
     y: usize,
@@ -702,8 +703,8 @@ fn vertical_edges(
     Ok(())
 }
 
-fn horizontal_edges(
-    plane: &mut [u8],
+fn horizontal_edges<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x0: usize,
     y: usize,
@@ -752,8 +753,8 @@ fn chroma_levels(lfl: &[u8; 64], row: usize) -> [u8; 4] {
     std::array::from_fn(|col| lfl.get(row * 16 + col * 2).copied().unwrap_or(0))
 }
 
-fn filter_one_vert(
-    plane: &mut [u8],
+fn filter_one_vert<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -777,7 +778,7 @@ fn filter_one_vert(
     };
     if filter_size >= TX_16X16 {
         let p = side(plane, at, 8);
-        let mut q = [0u8; 8];
+        let mut q = [P::default(); 8];
         q.copy_from_slice(&plane[at..at + 8]);
         let wide = filter16(thr, &p, &q);
         plane[at - 7..at].copy_from_slice(&wide[..7]);
@@ -809,8 +810,8 @@ fn filter_one_vert(
     Ok(())
 }
 
-fn filter_one_horiz(
-    plane: &mut [u8],
+fn filter_one_horiz<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -850,8 +851,8 @@ fn filter_one_horiz(
     Ok(())
 }
 
-fn vert4(
-    plane: &mut [u8],
+fn vert4<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -879,8 +880,8 @@ fn vert4(
     Ok(())
 }
 
-fn vert8(
-    plane: &mut [u8],
+fn vert8<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -905,8 +906,8 @@ fn vert8(
     Ok(())
 }
 
-fn vert16(
-    plane: &mut [u8],
+fn vert16<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -920,7 +921,7 @@ fn vert16(
             continue;
         };
         let p = side(plane, at, 8);
-        let mut q = [0u8; 8];
+        let mut q = [P::default(); 8];
         q.copy_from_slice(&plane[at..at + 8]);
         let wide = filter16(thr, &p, &q);
         plane[at - 7..at].copy_from_slice(&wide[..7]);
@@ -929,8 +930,8 @@ fn vert16(
     Ok(())
 }
 
-fn horiz4(
-    plane: &mut [u8],
+fn horiz4<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -953,8 +954,8 @@ fn horiz4(
     Ok(())
 }
 
-fn horiz8(
-    plane: &mut [u8],
+fn horiz8<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -972,8 +973,8 @@ fn horiz8(
     Ok(())
 }
 
-fn horiz16(
-    plane: &mut [u8],
+fn horiz16<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
@@ -992,7 +993,7 @@ fn horiz16(
     Ok(())
 }
 
-fn vert4_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+fn vert4_border<P: Pix>(plane: &mut [P], stride: usize, x: usize, y: usize, thr: &Thresh) {
     let xi = isize::try_from(x).unwrap_or(0);
     let yi = isize::try_from(y).unwrap_or(0);
     let p = side_px(plane, stride, xi, yi, 4);
@@ -1009,7 +1010,7 @@ fn vert4_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thres
     put_px(plane, stride, xi + 1, yi, q1);
 }
 
-fn vert8_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+fn vert8_border<P: Pix>(plane: &mut [P], stride: usize, x: usize, y: usize, thr: &Thresh) {
     let xi = isize::try_from(x).unwrap_or(0);
     let yi = isize::try_from(y).unwrap_or(0);
     let p = side_px(plane, stride, xi, yi, 4);
@@ -1021,7 +1022,7 @@ fn vert8_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thres
     }
 }
 
-fn vert16_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+fn vert16_border<P: Pix>(plane: &mut [P], stride: usize, x: usize, y: usize, thr: &Thresh) {
     let xi = isize::try_from(x).unwrap_or(0);
     let yi = isize::try_from(y).unwrap_or(0);
     let p = side_px(plane, stride, xi, yi, 8);
@@ -1033,7 +1034,7 @@ fn vert16_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thre
     }
 }
 
-fn horiz4_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+fn horiz4_border<P: Pix>(plane: &mut [P], stride: usize, x: usize, y: usize, thr: &Thresh) {
     let samples = column_px(plane, stride, x, y, 4, 4);
     let mask = filter_mask(thr, &samples[..4], &samples[4..]);
     let mut p1 = samples[2];
@@ -1044,20 +1045,20 @@ fn horiz4_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thre
     store_column_px(plane, stride, x, y, &[p1, p0, q0, q1], 2);
 }
 
-fn horiz8_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+fn horiz8_border<P: Pix>(plane: &mut [P], stride: usize, x: usize, y: usize, thr: &Thresh) {
     let samples = column_px(plane, stride, x, y, 4, 4);
     let wide = filter8(thr, &samples[..4], &samples[4..]);
     store_column_px(plane, stride, x, y, &wide, 3);
 }
 
-fn horiz16_border(plane: &mut [u8], stride: usize, x: usize, y: usize, thr: &Thresh) {
+fn horiz16_border<P: Pix>(plane: &mut [P], stride: usize, x: usize, y: usize, thr: &Thresh) {
     let samples = column_px(plane, stride, x, y, 8, 8);
     let wide = filter16(thr, &samples[..8], &samples[8..]);
     store_column_px(plane, stride, x, y, &wide, 7);
 }
 
-fn side_px(plane: &[u8], stride: usize, x: isize, y: isize, n: usize) -> [u8; 8] {
-    let mut out = [0u8; 8];
+fn side_px<P: Pix>(plane: &[P], stride: usize, x: isize, y: isize, n: usize) -> [P; 8] {
+    let mut out = [P::default(); 8];
     for (i, slot) in out.iter_mut().take(n).rev().enumerate() {
         let di = isize::try_from(i).unwrap_or(0);
         *slot = px(plane, stride, x - 1 - di, y);
@@ -1065,8 +1066,8 @@ fn side_px(plane: &[u8], stride: usize, x: isize, y: isize, n: usize) -> [u8; 8]
     out
 }
 
-fn ahead_px(plane: &[u8], stride: usize, x: isize, y: isize, n: usize) -> [u8; 8] {
-    let mut out = [0u8; 8];
+fn ahead_px<P: Pix>(plane: &[P], stride: usize, x: isize, y: isize, n: usize) -> [P; 8] {
+    let mut out = [P::default(); 8];
     for (i, slot) in out.iter_mut().enumerate().take(n) {
         let di = isize::try_from(i).unwrap_or(0);
         *slot = px(plane, stride, x + di, y);
@@ -1074,15 +1075,15 @@ fn ahead_px(plane: &[u8], stride: usize, x: isize, y: isize, n: usize) -> [u8; 8
     out
 }
 
-fn column_px(
-    plane: &[u8],
+fn column_px<P: Pix>(
+    plane: &[P],
     stride: usize,
     x: usize,
     y: usize,
     above: usize,
     below: usize,
-) -> [u8; 16] {
-    let mut out = [0u8; 16];
+) -> [P; 16] {
+    let mut out = [P::default(); 16];
     let xi = isize::try_from(x).unwrap_or(0);
     let yi = isize::try_from(y).unwrap_or(0);
     let above_i = isize::try_from(above).unwrap_or(0);
@@ -1093,12 +1094,12 @@ fn column_px(
     out
 }
 
-fn store_column_px(
-    plane: &mut [u8],
+fn store_column_px<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
-    samples: &[u8],
+    samples: &[P],
     radius: usize,
 ) {
     let xi = isize::try_from(x).unwrap_or(0);
@@ -1110,21 +1111,21 @@ fn store_column_px(
     }
 }
 
-fn px(plane: &[u8], stride: usize, x: isize, y: isize) -> u8 {
+fn px<P: Pix>(plane: &[P], stride: usize, x: isize, y: isize) -> P {
     if stride == 0 || x < 0 || y < 0 {
-        return 0;
+        return P::default();
     }
     let (Ok(x), Ok(y)) = (usize::try_from(x), usize::try_from(y)) else {
-        return 0;
+        return P::default();
     };
     let height = plane.len() / stride;
     if x >= stride || y >= height {
-        return 0;
+        return P::default();
     }
-    plane.get(y * stride + x).copied().unwrap_or(0)
+    plane.get(y * stride + x).copied().unwrap_or(P::default())
 }
 
-fn put_px(plane: &mut [u8], stride: usize, x: isize, y: isize, value: u8) {
+fn put_px<P: Pix>(plane: &mut [P], stride: usize, x: isize, y: isize, value: P) {
     if stride == 0 || x < 0 || y < 0 {
         return;
     }
@@ -1140,8 +1141,8 @@ fn put_px(plane: &mut [u8], stride: usize, x: isize, y: isize, value: u8) {
     }
 }
 
-fn index(
-    plane: &[u8],
+fn index<P: Pix>(
+    plane: &[P],
     stride: usize,
     x: usize,
     y: usize,
@@ -1155,27 +1156,27 @@ fn index(
     Ok(y * stride + x)
 }
 
-fn side(plane: &[u8], at: usize, n: usize) -> [u8; 8] {
-    let mut out = [0u8; 8];
+fn side<P: Pix>(plane: &[P], at: usize, n: usize) -> [P; 8] {
+    let mut out = [P::default(); 8];
     for i in 0..n {
         out[n - 1 - i] = plane[at - 1 - i];
     }
     out
 }
 
-fn column(
-    plane: &[u8],
+fn column<P: Pix>(
+    plane: &[P],
     stride: usize,
     x: usize,
     y: usize,
     above: usize,
     below: usize,
-) -> Result<[u8; 16], CodecError> {
+) -> Result<[P; 16], CodecError> {
     let height = plane.len() / stride.max(1);
     if stride == 0 || y < above || y + below > height || x >= stride {
         return Err(bad("loop filter edge"));
     }
-    let mut out = [0u8; 16];
+    let mut out = [P::default(); 16];
     for (i, slot) in out.iter_mut().enumerate().take(above + below) {
         let row = y - above + i;
         *slot = plane[row * stride + x];
@@ -1183,12 +1184,12 @@ fn column(
     Ok(out)
 }
 
-fn put_column(
-    plane: &mut [u8],
+fn put_column<P: Pix>(
+    plane: &mut [P],
     stride: usize,
     x: usize,
     y: usize,
-    samples: &[u8],
+    samples: &[P],
     radius: usize,
 ) -> Result<(), CodecError> {
     if y < radius || x >= stride {
@@ -1205,83 +1206,97 @@ fn put_column(
     Ok(())
 }
 
-fn filter_mask(thr: &Thresh, p: &[u8], q: &[u8]) -> i8 {
+fn scaled<P: Pix>(value: u8) -> i32 {
+    i32::from(value) << P::SHIFT
+}
+
+fn apart<P: Pix>(a: P, b: P) -> i32 {
+    (a.get() - b.get()).abs()
+}
+
+fn half_range<P: Pix>() -> i32 {
+    128 << P::SHIFT
+}
+
+fn clamp_signed<P: Pix>(value: i32) -> i32 {
+    let half = half_range::<P>();
+    value.clamp(-half, half - 1)
+}
+
+fn to_signed<P: Pix>(sample: P) -> i32 {
+    sample.get() - half_range::<P>()
+}
+
+fn from_signed<P: Pix>(value: i32) -> P {
+    P::put(clamp_signed::<P>(value) + half_range::<P>())
+}
+
+fn filter_mask<P: Pix>(thr: &Thresh, p: &[P], q: &[P]) -> i8 {
     // `p` is p3, p2, p1, p0. `q` is q0, q1, q2, q3.
+    let lim = scaled::<P>(thr.lim);
     let mut reject = false;
-    reject |= p[0].abs_diff(p[1]) > thr.lim;
-    reject |= p[1].abs_diff(p[2]) > thr.lim;
-    reject |= p[2].abs_diff(p[3]) > thr.lim;
-    reject |= q[0].abs_diff(q[1]) > thr.lim;
-    reject |= q[1].abs_diff(q[2]) > thr.lim;
-    reject |= q[2].abs_diff(q[3]) > thr.lim;
-    let gap = i32::from(p[3].abs_diff(q[0])) * 2 + i32::from(p[2].abs_diff(q[1]) / 2);
-    reject |= gap > i32::from(thr.blimit);
+    reject |= apart(p[0], p[1]) > lim;
+    reject |= apart(p[1], p[2]) > lim;
+    reject |= apart(p[2], p[3]) > lim;
+    reject |= apart(q[0], q[1]) > lim;
+    reject |= apart(q[1], q[2]) > lim;
+    reject |= apart(q[2], q[3]) > lim;
+    let gap = apart(p[3], q[0]) * 2 + apart(p[2], q[1]) / 2;
+    reject |= gap > scaled::<P>(thr.blimit);
     if reject { 0 } else { -1 }
 }
 
-fn flat4(thresh: u8, p: &[u8], q: &[u8]) -> i8 {
-    let p0 = p[3];
-    let q0 = q[0];
+fn flat4<P: Pix>(thresh: u8, p: &[P], q: &[P]) -> i8 {
+    let limit = scaled::<P>(thresh);
     let mut reject = false;
-    reject |= p[2].abs_diff(p0) > thresh;
-    reject |= q[1].abs_diff(q0) > thresh;
-    reject |= p[1].abs_diff(p0) > thresh;
-    reject |= q[2].abs_diff(q0) > thresh;
-    reject |= p[0].abs_diff(p0) > thresh;
-    reject |= q[3].abs_diff(q0) > thresh;
+    reject |= apart(p[2], p[3]) > limit;
+    reject |= apart(q[1], q[0]) > limit;
+    reject |= apart(p[1], p[3]) > limit;
+    reject |= apart(q[2], q[0]) > limit;
+    reject |= apart(p[0], p[3]) > limit;
+    reject |= apart(q[3], q[0]) > limit;
     if reject { 0 } else { -1 }
 }
 
 /// Outer taps of the 16-pixel flat test. `p` is p7..p0 and `q` is q0..q7.
-fn flat_outer(p: &[u8], q: &[u8]) -> i8 {
-    let p0 = p[7];
-    let q0 = q[0];
+fn flat_outer<P: Pix>(p: &[P], q: &[P]) -> i8 {
+    let limit = 1 << P::SHIFT;
     let mut reject = false;
-    reject |= p[0].abs_diff(p0) > 1;
-    reject |= p[1].abs_diff(p0) > 1;
-    reject |= p[2].abs_diff(p0) > 1;
-    reject |= p[3].abs_diff(p0) > 1;
-    reject |= q[4].abs_diff(q0) > 1;
-    reject |= q[5].abs_diff(q0) > 1;
-    reject |= q[6].abs_diff(q0) > 1;
-    reject |= q[7].abs_diff(q0) > 1;
+    reject |= apart(p[0], p[7]) > limit;
+    reject |= apart(p[1], p[7]) > limit;
+    reject |= apart(p[2], p[7]) > limit;
+    reject |= apart(p[3], p[7]) > limit;
+    reject |= apart(q[4], q[0]) > limit;
+    reject |= apart(q[5], q[0]) > limit;
+    reject |= apart(q[6], q[0]) > limit;
+    reject |= apart(q[7], q[0]) > limit;
     if reject { 0 } else { -1 }
 }
 
-fn filter4(mask: i8, hev_thr: u8, p1: &mut u8, p0: &mut u8, q0: &mut u8, q1: &mut u8) {
-    let ps1 = i32::from(signed(*p1));
-    let ps0 = i32::from(signed(*p0));
-    let qs0 = i32::from(signed(*q0));
-    let qs1 = i32::from(signed(*q1));
-    let hev = i32::from(hev_mask(hev_thr, *p1, *p0, *q0, *q1));
+fn filter4<P: Pix>(mask: i8, hev_thr: u8, p1: &mut P, p0: &mut P, q0: &mut P, q1: &mut P) {
+    let ps1 = to_signed(*p1);
+    let ps0 = to_signed(*p0);
+    let qs0 = to_signed(*q0);
+    let qs1 = to_signed(*q1);
+    let hev = i32::from(hev_mask::<P>(hev_thr, *p1, *p0, *q0, *q1));
     let mask = i32::from(mask);
-    let mut filter = i32::from(clamp_i8(ps1 - qs1)) & hev;
-    filter = i32::from(clamp_i8(filter + 3 * (qs0 - ps0))) & mask;
-    let filter1 = i32::from(clamp_i8(filter + 4) >> 3);
-    let filter2 = i32::from(clamp_i8(filter + 3) >> 3);
-    *q0 = unsigned(clamp_i8(qs0 - filter1));
-    *p0 = unsigned(clamp_i8(ps0 + filter2));
+    let mut filter = clamp_signed::<P>(ps1 - qs1) & hev;
+    filter = clamp_signed::<P>(filter + 3 * (qs0 - ps0)) & mask;
+    let filter1 = clamp_signed::<P>(filter + 4) >> 3;
+    let filter2 = clamp_signed::<P>(filter + 3) >> 3;
+    *q0 = from_signed(qs0 - filter1);
+    *p0 = from_signed(ps0 + filter2);
     let outer = round_pow2(filter1, 1) & !hev;
-    *q1 = unsigned(clamp_i8(qs1 - outer));
-    *p1 = unsigned(clamp_i8(ps1 + outer));
+    *q1 = from_signed(qs1 - outer);
+    *p1 = from_signed(ps1 + outer);
 }
 
-fn filter8(thr: &Thresh, p: &[u8], q: &[u8]) -> [u8; 6] {
+fn filter8<P: Pix>(thr: &Thresh, p: &[P], q: &[P]) -> [P; 6] {
     let mask = filter_mask(thr, p, q);
     let flat = flat4(1, p, q);
     if flat != 0 && mask != 0 {
-        let (p3, p2, p1, p0) = (
-            i32::from(p[0]),
-            i32::from(p[1]),
-            i32::from(p[2]),
-            i32::from(p[3]),
-        );
-        let (q0, q1, q2, q3) = (
-            i32::from(q[0]),
-            i32::from(q[1]),
-            i32::from(q[2]),
-            i32::from(q[3]),
-        );
+        let (p3, p2, p1, p0) = (p[0].get(), p[1].get(), p[2].get(), p[3].get());
+        let (q0, q1, q2, q3) = (q[0].get(), q[1].get(), q[2].get(), q[3].get());
         [
             rnd3(p3 + p3 + p3 + 2 * p2 + p1 + p0 + q0),
             rnd3(p3 + p3 + p2 + 2 * p1 + p0 + q0 + q1),
@@ -1302,7 +1317,7 @@ fn filter8(thr: &Thresh, p: &[u8], q: &[u8]) -> [u8; 6] {
     }
 }
 
-fn filter16(thr: &Thresh, p: &[u8], q: &[u8]) -> [u8; 14] {
+fn filter16<P: Pix>(thr: &Thresh, p: &[P], q: &[P]) -> [P; 14] {
     let inner_p = [p[4], p[5], p[6], p[7]];
     let inner_q = [q[0], q[1], q[2], q[3]];
     let mask = filter_mask(thr, &inner_p, &inner_q);
@@ -1319,9 +1334,9 @@ fn filter16(thr: &Thresh, p: &[u8], q: &[u8]) -> [u8; 14] {
     }
 }
 
-fn wide15(p: &[u8], q: &[u8]) -> [u8; 14] {
-    let p: [i32; 8] = std::array::from_fn(|i| i32::from(p[i]));
-    let q: [i32; 8] = std::array::from_fn(|i| i32::from(q[i]));
+fn wide15<P: Pix>(p: &[P], q: &[P]) -> [P; 14] {
+    let p: [i32; 8] = std::array::from_fn(|i| p[i].get());
+    let q: [i32; 8] = std::array::from_fn(|i| q[i].get());
     [
         rnd4(p[0] * 7 + p[1] * 2 + p[2] + p[3] + p[4] + p[5] + p[6] + p[7] + q[0]),
         rnd4(p[0] * 6 + p[1] + p[2] * 2 + p[3] + p[4] + p[5] + p[6] + p[7] + q[0] + q[1]),
@@ -1451,36 +1466,25 @@ fn wide15(p: &[u8], q: &[u8]) -> [u8; 14] {
     ]
 }
 
-fn hev_mask(thresh: u8, p1: u8, p0: u8, q0: u8, q1: u8) -> i8 {
-    if p1.abs_diff(p0) > thresh || q1.abs_diff(q0) > thresh {
+fn hev_mask<P: Pix>(thresh: u8, p1: P, p0: P, q0: P, q1: P) -> i8 {
+    let limit = scaled::<P>(thresh);
+    if apart(p1, p0) > limit || apart(q1, q0) > limit {
         -1
     } else {
         0
     }
 }
 
-fn signed(sample: u8) -> i8 {
-    i8::from_ne_bytes([(sample ^ 0x80)])
-}
-
-fn unsigned(sample: i8) -> u8 {
-    sample.cast_unsigned() ^ 0x80
-}
-
-fn clamp_i8(value: i32) -> i8 {
-    i8::try_from(value.clamp(-128, 127)).unwrap_or(0)
-}
-
 fn round_pow2(value: i32, n: u32) -> i32 {
     (value + (1 << (n - 1))) >> n
 }
 
-fn rnd3(value: i32) -> u8 {
-    u8::try_from(round_pow2(value, 3).clamp(0, 255)).unwrap_or(0)
+fn rnd3<P: Pix>(value: i32) -> P {
+    P::put(round_pow2(value, 3))
 }
 
-fn rnd4(value: i32) -> u8 {
-    u8::try_from(round_pow2(value, 4).clamp(0, 255)).unwrap_or(0)
+fn rnd4<P: Pix>(value: i32) -> P {
+    P::put(round_pow2(value, 4))
 }
 
 fn bad(what: &'static str) -> CodecError {

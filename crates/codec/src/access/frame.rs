@@ -43,6 +43,38 @@ impl Plane {
         })
     }
 
+    /// A tight plane whose samples are `sample_bytes` each, little-endian.
+    pub fn bytes(
+        width: u32,
+        height: u32,
+        sample_bytes: usize,
+        samples: Vec<u8>,
+    ) -> Result<Self, CodecError> {
+        let columns = usize::try_from(width).map_err(|_| CodecError::Limit {
+            what: "plane width",
+        })?;
+        let rows = usize::try_from(height).map_err(|_| CodecError::Limit {
+            what: "plane height",
+        })?;
+        let stride = columns.checked_mul(sample_bytes).ok_or(CodecError::Limit {
+            what: "plane samples",
+        })?;
+        let need = stride.checked_mul(rows).ok_or(CodecError::Limit {
+            what: "plane samples",
+        })?;
+        if samples.len() != need || sample_bytes == 0 {
+            return Err(CodecError::InvalidApi {
+                what: "plane sample count",
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            stride,
+            samples,
+        })
+    }
+
     /// A zero-filled tight plane.
     pub fn blank(width: u32, height: u32) -> Result<Self, CodecError> {
         let stride = usize::try_from(width).map_err(|_| CodecError::Limit {

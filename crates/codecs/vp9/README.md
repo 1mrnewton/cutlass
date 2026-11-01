@@ -12,17 +12,17 @@ The bitstream and the reconstruction follow the VP9 Bitstream & Decoding Process
 
 The crate exports `Vp9Decoder`, `Vp9Encoder`, `Decoder`, `register_decoders`, and `register_encoders`.
 
-`Vp9Decoder::open` takes a `CodecParams` whose codec is `CodecId::Vp9` and whose pixel format is `PixelFormat::Yuv420p`. The decoder implements `VideoDecoder`. `push` consumes one `Packet` and returns `VideoOutput` values. Each output carries a `VideoFrame` plus `pts`, `duration`, and `timescale`. `drain` is empty. `reset` drops reference pictures. `cancel_flag` is the flag `push` checks between frames.
+`Vp9Decoder::open` takes a `CodecParams` whose codec is `CodecId::Vp9`. The decoder implements `VideoDecoder`. `push` consumes one `Packet` and returns `VideoOutput` values. Each output carries a `VideoFrame` plus `pts`, `duration`, and `timescale`. `drain` is empty. `reset` drops reference pictures. `cancel_flag` is the flag `push` checks between frames.
 
 `Vp9Encoder::open` takes the same kind of `CodecParams`. A `bitrate` of 0 keeps quantizer 32. A positive bitrate moves the quantizer. `Vp9Encoder::with_quantizer` fixes the quantizer, and 0 is lossless. The encoder implements `VideoEncoder`. `push` consumes one `VideoInput` (`VideoFrame`, `pts`, `duration`, `timescale`) and returns `Packet` values. `drain` is empty. `reset` drops the reference picture.
 
 `Decoder::new` and `Decoder::decode` take the bytes of one frame. A shown frame returns the reconstructed width, height, and `y`, `u`, and `v` planes. A frame that is not shown returns no picture. `reset` drops references and probabilities.
 
-`register_decoders` adds the profile-0 opener to a `VideoDecodeFactory`. `register_encoders` adds it to a `VideoEncodeFactory`.
+`register_decoders` adds the VP9 opener to a `VideoDecodeFactory`. `register_encoders` adds the profile 0 encoder to a `VideoEncodeFactory`.
 
 ## Support
 
-Profile 0 only: 8-bit 4:2:0. Profiles 1, 2, and 3 are refused. An open call also refuses a pixel format other than `PixelFormat::Yuv420p`. A coded edge outside 1..=4096 is `CodecError::Limit`. Profile 0 with the RGB color space is malformed. A reference scale this decoder cannot use is `CodecError::Unsupported`.
+The decoder accepts profile 0 (8-bit 4:2:0), profile 1 (8-bit 4:2:2, 4:4:0, 4:4:4, and sRGB), and profile 2 (10-bit and 12-bit 4:2:0). Profile 3 is refused. `open` accepts `Yuv420p`, `Yuv422p`, `Yuv440p`, `Yuv444p`, `Gbrp`, `Yuv420p10`, and `Yuv420p12`. A coded edge outside 1..=4096 is `CodecError::Limit`. Profile 0 or profile 2 with the RGB color space is malformed. sRGB is 4:4:4 and full range, and its reserved bit must be 0. A reference scale this decoder cannot use is `CodecError::Unsupported`. The encoder still emits profile 0 only.
 
 | Frame | Decoder | Encoder |
 | --- | --- | --- |
@@ -85,7 +85,7 @@ cargo run --release -p cutlass-vp9 --example roundtrip
 
 ## Gaps
 
-- Profiles 1, 2, and 3 are refused. Those are 8-bit 4:4:4, and 10-bit and 12-bit 4:2:0 and 4:4:4.
+- Profile 3 is refused. That is 10-bit and 12-bit 4:2:2, 4:4:0, 4:4:4, and sRGB.
 - The encoder does not emit show-existing frames, hidden frames, more than one tile, a loop filter, segmentation, compound prediction, or sub-pixel motion. Intra blocks are DC. Inter motion is an integer LAST vector. Transforms are no larger than 8×8. Quantizer 0 uses a 4×4 Walsh-Hadamard transform.
 - The encoder refuses a size that is not a multiple of 8. The decoder can reconstruct those sizes.
 - An edge above 4096 is refused.

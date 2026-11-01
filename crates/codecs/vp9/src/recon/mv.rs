@@ -13,6 +13,7 @@ use crate::geom::{
     self, ALTREF_FRAME, BLOCK_4X4, BLOCK_4X8, BLOCK_8X4, BLOCK_8X8, COMPOUND_REFERENCE,
     GOLDEN_FRAME, INTRA_FRAME, LAST_FRAME, NEAR, NEAREST, NEW, REFERENCE_SELECT, ZERO,
 };
+use crate::pel::Pix;
 use crate::prob::{self, Counts};
 
 const SENTINEL_FILTER: u8 = 3;
@@ -170,7 +171,7 @@ struct Paint {
     scale_y: i32,
 }
 
-impl<'a> Scratch<'a> {
+impl<'a, P: Pix> Scratch<'a, P> {
     pub(super) fn read_inter_frame(
         &mut self,
         reader: &mut BoolDecoder<'_>,
@@ -1007,7 +1008,7 @@ impl<'a> Scratch<'a> {
         if w == 0 || h == 0 {
             return Ok(());
         }
-        let mut pred = vec![0u8; w.saturating_mul(h)];
+        let mut pred = vec![P::default(); w.saturating_mul(h)];
         {
             let source = self.plane_ref(paint.frame, paint.plane)?;
             if let Some(scale) = paint.scale {
@@ -1060,7 +1061,7 @@ impl<'a> Scratch<'a> {
         }
     }
 
-    fn plane_ref(&self, frame: u8, plane: usize) -> Result<&RefPlane, CodecError> {
+    fn plane_ref(&self, frame: u8, plane: usize) -> Result<&RefPlane<P>, CodecError> {
         let reference = self.reference(frame)?;
         Ok(match plane {
             0 => &reference.y,
@@ -1069,7 +1070,7 @@ impl<'a> Scratch<'a> {
         })
     }
 
-    fn reference(&self, frame: u8) -> Result<&mc::Reference, CodecError> {
+    fn reference(&self, frame: u8) -> Result<&mc::Reference<P>, CodecError> {
         if !(1..=3).contains(&frame) {
             return Err(super::bad("reference frame"));
         }
@@ -1084,10 +1085,13 @@ impl<'a> Scratch<'a> {
         if reference.ss_x != self.header.ss_x || reference.ss_y != self.header.ss_y {
             return Err(super::bad("reference subsampling"));
         }
+        if reference.bit_depth != self.header.bit_depth {
+            return Err(super::bad("reference bit depth"));
+        }
         Ok(reference)
     }
 
-    fn blit(&mut self, paint: &Paint, w: usize, h: usize, pred: &[u8]) -> Result<(), CodecError> {
+    fn blit(&mut self, paint: &Paint, w: usize, h: usize, pred: &[P]) -> Result<(), CodecError> {
         let stride = if paint.plane == 0 {
             self.y_stride
         } else {
@@ -1106,8 +1110,8 @@ impl<'a> Scratch<'a> {
             let dst = dest.get_mut(at..at + w).ok_or(super::bad("prediction"))?;
             if paint.average {
                 for (out, sample) in dst.iter_mut().zip(src) {
-                    let mixed = (u16::from(*out) + u16::from(*sample) + 1) >> 1;
-                    *out = u8::try_from(mixed).unwrap_or(0);
+                    let mixed = (out.get() + sample.get() + 1) >> 1;
+                    *out = P::put(mixed);
                 }
             } else {
                 dst.copy_from_slice(src);

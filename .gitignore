@@ -1,7 +1,6 @@
 target/
 /dist
 /docs/*
-!/docs/roadmap.md
 /.cursor/
 local-assets/
 local-files/

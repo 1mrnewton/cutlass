@@ -112,6 +112,24 @@ mod tests {
         assert_eq!(samples, &[0x4000]);
     }
 
+    #[test]
+    fn a_fragmented_movie_without_sidx_or_mfra_decodes_the_picture_at_two_seconds() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !path.is_file() {
+            eprintln!("skipped: {} is missing", path.display());
+            return;
+        }
+        let mut media = installed_readers().open(&path).expect("open");
+        let at = cutlass_model::Micros(2_000_000);
+        let held = media
+            .decode_at(at, &cutlass_model::TimeRange::new(0, 10_000_000))
+            .expect("picture at 2 s");
+        assert!(held.start.0 <= at.0 && at.0 < held.end.0);
+        assert_eq!(held.frame.width(), 1920);
+        assert_eq!(held.frame.height(), 1080);
+    }
+
     fn aiff_s16(frame: &[u8]) -> Vec<u8> {
         let mut mux = cutlass_aiff::AiffMux::new(std::io::Cursor::new(Vec::new()));
         let params =

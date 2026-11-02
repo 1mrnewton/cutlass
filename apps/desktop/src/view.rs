@@ -1824,7 +1824,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
-    shell.ask_thumbnails();
+    shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
         lanes_left,

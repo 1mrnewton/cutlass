@@ -21,7 +21,7 @@ use cutlass_editor::{
     move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
-use cutlass_engine::{Thumb, ThumbKey, Thumbnails};
+use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{Heard, ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
     Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
@@ -506,6 +506,10 @@ pub struct Shell {
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
     film_asks: Vec<ThumbKey>,
+    /// Timeline waveforms, once the window starts them.
+    waveforms: Option<Waveforms>,
+    /// Files this frame's clips asked for peaks of.
+    wave_asks: Vec<PathBuf>,
     face: FaceTable,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
@@ -578,6 +582,8 @@ impl Shell {
             speech: RefCell::new(None),
             thumbnails: None,
             film_asks: Vec::new(),
+            waveforms: None,
+            wave_asks: Vec::new(),
             face: FaceTable::load(),
             gpu: None,
             preview_stale: false,
@@ -599,7 +605,7 @@ impl Shell {
     /// The filmstrip of clip `id`, drawn `clip_width` by `height` pixels:
     /// the tiles that meet `visible`, pixels from the clip's left edge, each
     /// with its picture once stored. A missing picture is asked for when the
-    /// frame ends, by [`Self::ask_thumbnails`]. A clip with no picture file
+    /// frame ends, by [`Self::send_timeline_asks`]. A clip with no picture file
     /// has no filmstrip.
     pub fn film(
         &mut self,
@@ -671,13 +677,80 @@ impl Shell {
         cells
     }
 
-    /// Send this frame's thumbnail asks, and pause the worker while playing.
-    pub fn ask_thumbnails(&mut self) {
+    /// Send this frame's thumbnail and waveform asks, and pause both
+    /// workers while playing.
+    pub fn send_timeline_asks(&mut self) {
         let asks = std::mem::take(&mut self.film_asks);
         if let Some(thumbnails) = self.thumbnails.as_ref() {
             thumbnails.set_paused(self.playing);
             thumbnails.want(asks);
         }
+        let asks = std::mem::take(&mut self.wave_asks);
+        if let Some(waveforms) = self.waveforms.as_ref() {
+            waveforms.set_paused(self.playing);
+            waveforms.want(asks);
+        }
+    }
+
+    /// Read timeline waveforms on their own thread. `ready` runs there after
+    /// each publish.
+    pub fn start_waveforms(&mut self, ready: impl Fn() + Send + 'static) {
+        self.waveforms = Some(Waveforms::start(self.readers.clone(), ready));
+    }
+
+    /// The waveform of audio clip `id`, `clip_width` pixels wide: one level,
+    /// 0 to 1, per pixel column of `visible`, pixels from the clip's left
+    /// edge, starting at the returned column. A file not read yet is asked
+    /// for when the frame ends, and is silent until its peaks arrive.
+    pub fn wave(
+        &mut self,
+        id: &SegmentId,
+        clip_width: f64,
+        visible: std::ops::Range<f64>,
+    ) -> Option<(u32, Vec<f32>)> {
+        let waveforms = self.waveforms.as_ref()?;
+        let draft = self.session.as_ref().map(Session::draft)?;
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| &segment.id == id)?;
+        let Some(MaterialRef::Audio(_)) = draft.materials.get(segment.material_id.as_str()) else {
+            return None;
+        };
+        let path = self.media_file(cutlass_engine::media_path(draft, segment))?;
+        let map = cutlass_engine::placement_of(draft, segment).ok()?;
+        let Some(peaks) = waveforms.get(&path) else {
+            self.wave_asks.push(path);
+            return None;
+        };
+        if !peaks.complete {
+            self.wave_asks.push(path);
+        }
+        let pixel_size = self.pixel_size;
+        let usable = |value: f64| value.is_finite() && value > 0.0;
+        if !usable(pixel_size) || !usable(clip_width) {
+            return None;
+        }
+        let first = visible.start.max(0.0).floor();
+        let last = visible.end.min(clip_width).ceil();
+        let start = segment.target.start.0;
+        let end = segment.target.end().0.saturating_sub(1).max(start);
+        let at = |x: f64| {
+            let time = Micros((start as f64 + x / pixel_size) as i64).min(Micros(end));
+            cutlass_engine::map_timeline(&map, time).ok()
+        };
+        let mut levels = Vec::new();
+        let mut x = first;
+        while x < last && levels.len() < 16_384 {
+            let level = match (at(x), at(x + 1.0)) {
+                (Some(from), Some(to)) => peaks.level(from, to),
+                _ => 0.0,
+            };
+            levels.push(level);
+            x += 1.0;
+        }
+        Some((first as u32, levels))
     }
 
     /// A stored media path as a file: inside the project when relative.
@@ -6075,7 +6148,7 @@ mod tests {
         let cells = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
         assert_eq!(cells.len(), 5);
         assert!(cells.iter().all(|cell| cell.thumb.is_none()));
-        desktop.ask_thumbnails();
+        desktop.send_timeline_asks();
         for _ in 0..cells.len() {
             receiver
                 .recv_timeout(std::time::Duration::from_secs(10))
@@ -6112,7 +6185,7 @@ mod tests {
         let id = SegmentId::new("movie");
         let wide = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
         assert_eq!(wide[0].tile.width, 48.0 * 16.0 / 9.0);
-        desktop.ask_thumbnails();
+        desktop.send_timeline_asks();
         receiver
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("a thumbnail");
@@ -6120,6 +6193,61 @@ mod tests {
         assert_eq!(tall[0].tile.width, 27.0);
         let thumb = tall[0].thumb.as_ref().expect("stored");
         assert_eq!((thumb.width, thumb.height), (54, 96));
+    }
+
+    #[test]
+    fn an_audio_clip_reads_its_waveform_from_the_worker() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.duration = Micros(20_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(20_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 20_000_000));
+        segment.source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        // 20 s across 400 px: one column every 50 ms.
+        desktop.pixel_size = 400.0 / 20_000_000.0;
+        let id = SegmentId::new("song");
+        assert_eq!(desktop.wave(&id, 400.0, 100.0..300.0), None);
+        desktop.send_timeline_asks();
+        let mut levels = None;
+        while receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok()
+        {
+            levels = desktop.wave(&id, 400.0, 100.0..300.0);
+            let read = desktop.waveforms.as_ref().unwrap().get(
+                &desktop
+                    .media_file(Some(&sound.display().to_string()))
+                    .unwrap(),
+            );
+            if read.is_some_and(|peaks| peaks.complete) {
+                break;
+            }
+        }
+        let (first, levels) = levels.expect("peaks");
+        assert_eq!(first, 100);
+        assert_eq!(levels.len(), 200);
+        assert!(levels.iter().all(|level| (0.0..=1.0).contains(level)));
+        let loud = levels.iter().filter(|level| **level > 0.05).count();
+        assert!(loud > 100, "{loud} of {} columns have sound", levels.len());
     }
 
     #[test]

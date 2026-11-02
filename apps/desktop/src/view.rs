@@ -296,9 +296,7 @@ fn projects_home(
                 }
             });
         });
-    if !shell.notice().is_empty() {
-        paint_notice(ui, bar.center().x, bar.bottom() + 12.0, shell.notice());
-    }
+    paint_notice(shell, ui, bar.center().x, bar.bottom() + 12.0);
 }
 
 fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
@@ -1475,14 +1473,12 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     shell.chrome.timeline = true;
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::TOOLBAR_HEIGHT));
     paint_toolbar(shell, ui, toolbar);
-    if !shell.notice().is_empty() {
-        paint_notice(
-            ui,
-            toolbar.center().x,
-            toolbar.bottom() + tokens::RULER_HEIGHT + 8.0,
-            shell.notice(),
-        );
-    }
+    paint_notice(
+        shell,
+        ui,
+        toolbar.center().x,
+        toolbar.bottom() + tokens::RULER_HEIGHT + 8.0,
+    );
     ui.painter().hline(
         toolbar.x_range(),
         toolbar.bottom(),
@@ -1708,23 +1704,49 @@ const TOOLS: &[Option<(&str, &str)>] = &[
     Some(("zoomIn", "Zoom in")),
 ];
 
-fn paint_notice(ui: &Ui, center_x: f32, top: f32, notice: &str) {
+/// The notice as a toast that fades in, holds, then fades out and goes.
+fn paint_notice(shell: &mut Shell, ui: &Ui, center_x: f32, top: f32) {
+    shell.expire_notice();
+    if shell.notice().is_empty() {
+        return;
+    }
+    let age = shell.notice_age();
+    let alpha = notice_alpha(age);
+    let left = crate::shell::NOTICE_SHOWN.saturating_sub(age);
+    if alpha < 1.0 {
+        ui.ctx().request_repaint();
+    } else {
+        ui.ctx()
+            .request_repaint_after(left.saturating_sub(crate::shell::NOTICE_FADE));
+    }
+    let ink = Color32::from_rgb(0x14, 0x14, 0x14).gamma_multiply(alpha);
     let galley = ui.ctx().fonts_mut(|fonts| {
-        fonts.layout_no_wrap(
-            notice.to_owned(),
-            FontId::proportional(12.0),
-            Color32::from_rgb(0x14, 0x14, 0x14),
-        )
+        fonts.layout_no_wrap(shell.notice().to_owned(), FontId::proportional(12.0), ink)
     });
     let size = galley.size() + Vec2::new(24.0, 12.0);
     let rect = Rect::from_min_size(Pos2::new(center_x - size.x / 2.0, top), size);
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(99), Color32::WHITE);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(99),
+        Color32::WHITE.gamma_multiply(alpha),
+    );
     ui.painter().galley(
         rect.left_center() + Vec2::new(12.0, -galley.size().y / 2.0),
         galley,
-        Color32::from_rgb(0x14, 0x14, 0x14),
+        ink,
     );
+}
+
+/// How opaque a notice is `age` after it was set: a quick fade in, a hold,
+/// and [`crate::shell::NOTICE_FADE`] out at the end.
+fn notice_alpha(age: std::time::Duration) -> f32 {
+    const FADE_IN: f32 = 0.04;
+    let age = age.as_secs_f32();
+    let shown = crate::shell::NOTICE_SHOWN.as_secs_f32();
+    let fade = crate::shell::NOTICE_FADE.as_secs_f32();
+    let rising = if age < FADE_IN { age / FADE_IN } else { 1.0 };
+    let falling = ((shown - age) / fade).clamp(0.0, 1.0);
+    rising.min(falling)
 }
 
 fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -3615,6 +3637,17 @@ mod tests {
         assert!(painted.contains("No clips"), "{painted}");
         assert!(!painted.contains("Import a file"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_notice_fades_in_holds_and_fades_out() {
+        let at = |ms| notice_alpha(std::time::Duration::from_millis(ms));
+        assert_eq!(at(0), 0.0);
+        assert_eq!(at(100), 1.0);
+        assert_eq!(at(1_900), 1.0);
+        assert!((at(2_080) - 0.5).abs() < 0.01, "{}", at(2_080));
+        assert_eq!(at(2_160), 0.0);
+        assert_eq!(at(5_000), 0.0);
     }
 
     #[test]

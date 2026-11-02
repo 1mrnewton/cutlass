@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
@@ -64,6 +64,12 @@ impl TransitionOffer {
         format!("transition:{}", self.id)
     }
 }
+
+/// How long a notice shows, its fade in and out included.
+pub const NOTICE_SHOWN: Duration = Duration::from_millis(2_160);
+
+/// How long a notice takes to fade out at the end of [`NOTICE_SHOWN`].
+pub const NOTICE_FADE: Duration = Duration::from_millis(160);
 
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
@@ -475,6 +481,8 @@ pub struct Shell {
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<PendingMove>,
     notice: String,
+    /// When the notice was set; it fades out [`NOTICE_SHOWN`] later.
+    notice_since: Instant,
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
@@ -543,6 +551,7 @@ impl Shell {
             pending_trim: None,
             pending_moves: Vec::new(),
             notice: String::new(),
+            notice_since: Instant::now(),
             next_id: 0,
             speech: RefCell::new(None),
             face: FaceTable::load(),
@@ -3932,10 +3941,23 @@ impl Shell {
 
     pub fn set_notice(&mut self, message: impl Into<String>) {
         self.notice = message.into();
+        self.notice_since = Instant::now();
     }
 
     pub fn unavailable(&mut self, control: &str) {
-        self.notice = format!("{control} is not available");
+        self.set_notice(format!("{control} is not available"));
+    }
+
+    /// How long the notice has shown.
+    pub fn notice_age(&self) -> Duration {
+        self.notice_since.elapsed()
+    }
+
+    /// Drop the notice once it has faded out.
+    pub fn expire_notice(&mut self) {
+        if self.notice_age() >= NOTICE_SHOWN {
+            self.notice.clear();
+        }
     }
 
     /// Writes a PNG of the frame at the playhead.

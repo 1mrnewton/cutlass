@@ -924,8 +924,6 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         rect.min + Vec2::new(16.0, 16.0),
         Pos2::new(rect.max.x - 16.0, transport.min.y - 8.0),
     );
-    ui.painter()
-        .rect_filled(frame, CornerRadius::ZERO, tokens::GAP);
     let shown = match shell.preview_texture() {
         Ok(Some((id, [width, height]))) => {
             let fitted = fit_texture(frame, Vec2::new(width as f32, height as f32));

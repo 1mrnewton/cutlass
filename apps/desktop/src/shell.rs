@@ -488,6 +488,8 @@ pub struct Shell {
     notice: String,
     /// When the notice was set; it fades out [`NOTICE_SHOWN`] later.
     notice_since: Instant,
+    /// The preview canvas shows black under the picture, or nothing.
+    preview_black: bool,
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
@@ -557,6 +559,7 @@ impl Shell {
             pending_moves: Vec::new(),
             notice: String::new(),
             notice_since: Instant::now(),
+            preview_black: true,
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
@@ -570,6 +573,15 @@ impl Shell {
     pub fn codecs_ready(&self) -> bool {
         let picture = CodecParams::video(CodecId::Png, 1, 1);
         self.decoders.open(&picture).is_ok() && self.encoders.open(&picture).is_ok()
+    }
+
+    /// Black under the preview canvas, or nothing so it shows clear.
+    pub fn preview_black(&self) -> bool {
+        self.preview_black
+    }
+
+    pub fn toggle_preview_background(&mut self) {
+        self.preview_black = !self.preview_black;
     }
 
     pub fn notice(&self) -> &str {
@@ -5919,6 +5931,16 @@ mod tests {
         assert!(matches!(error, ShellError::MissingFolder(_)), "{error}");
         assert_eq!(desktop.draft().unwrap().name, "Color");
         std::fs::rename(&moved, &temp.path).unwrap();
+    }
+
+    #[test]
+    fn the_preview_background_starts_black_and_toggles_clear() {
+        let mut desktop = shell();
+        assert!(desktop.preview_black());
+        desktop.toggle_preview_background();
+        assert!(!desktop.preview_black());
+        desktop.toggle_preview_background();
+        assert!(desktop.preview_black());
     }
 
     #[test]

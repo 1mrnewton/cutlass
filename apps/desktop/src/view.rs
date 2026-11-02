@@ -2721,6 +2721,34 @@ fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visib
     ui.ctx().data_mut(|data| data.insert_temp(store, textures));
 }
 
+/// The audio clip's waveform inside `clip_rect`: each visible pixel column
+/// as tall as its loudest sample, mirrored around the middle.
+fn paint_wave(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visible: Rect) {
+    let span =
+        f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
+    let Some((first, levels)) = shell.wave(id, f64::from(clip_rect.width()), span) else {
+        return;
+    };
+    let middle = clip_rect.center().y;
+    let reach = (clip_rect.height() / 2.0 - 4.0).max(1.0);
+    let color = Color32::from_white_alpha(150);
+    let mut mesh = egui::Mesh::default();
+    for (index, level) in levels.iter().enumerate() {
+        let half = (level * reach).max(0.5);
+        let left = clip_rect.left() + (first as usize + index) as f32;
+        mesh.add_colored_rect(
+            Rect::from_min_max(
+                Pos2::new(left, middle - half),
+                Pos2::new(left + 1.0, middle + half),
+            ),
+            color,
+        );
+    }
+    ui.painter()
+        .with_clip_rect(clip_rect.shrink(1.0).intersect(visible))
+        .add(mesh);
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -2755,6 +2783,7 @@ fn paint_clip(
     painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
     if !ghost {
         paint_film(shell, ui, &clip.id, clip_rect, visible);
+        paint_wave(shell, ui, &clip.id, clip_rect, visible);
     }
     if selected {
         painter.rect_stroke(

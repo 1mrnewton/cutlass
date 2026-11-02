@@ -20,10 +20,13 @@ struct Runtime {
 }
 
 struct Fragments {
+    first: u64,
     next: u64,
     trex: Vec<Trex>,
     sidx: Vec<SidxRef>,
     mfra: Option<Vec<Tfra>>,
+    /// Built by walking every `moof` when the file has neither `sidx` nor `mfra`.
+    walked: Option<Vec<Tfra>>,
     exhausted: bool,
 }
 
@@ -112,10 +115,12 @@ impl IsoBmff {
             }
             let fragments = if built.fragmented {
                 Some(Fragments {
+                    first: first_moof.unwrap_or(at),
                     next: first_moof.unwrap_or(at),
                     trex: built.trex,
                     sidx,
                     mfra: None,
+                    walked: None,
                     exhausted: first_moof.is_none(),
                 })
             } else {
@@ -693,22 +698,41 @@ impl IsoBmff {
         restore_fragment_cursor(&mut self.fragments, saved.next);
     }
 
-    /// The header duration is unknown. Walk each `moof` and keep the end of the
-    /// last sample. The fragment cursor stays where reading left it.
+    /// The header duration is unknown. Keep the end of each track's last sample.
+    /// The fragment cursor stays where reading left it.
     fn measure_fragments(&mut self, source: &mut dyn Source) -> Result<(), Error> {
-        let Some(mut at) = self.fragments.as_ref().map(|fragments| fragments.next) else {
-            return Ok(());
-        };
-        let trex = self
+        let ends = self.walk_fragments(source)?;
+        for stream in &mut self.streams {
+            if stream.params.duration_ticks != 0 {
+                continue;
+            }
+            let Some((_, end)) = ends.iter().find(|(id, _)| *id == stream.params.track_id) else {
+                continue;
+            };
+            if *end > 0 {
+                stream.params.duration_ticks = u64::try_from(*end).unwrap_or(u64::MAX);
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk each top-level `moof` once, reading box headers and skipping `mdat`.
+    /// Each fragment with a sync sample becomes a seek row at that sample's
+    /// earliest presentation time. Returns the end of each track's last sample.
+    fn walk_fragments(&mut self, source: &mut dyn Source) -> Result<Vec<(u32, i64)>, Error> {
+        let Some((mut at, trex)) = self
             .fragments
             .as_ref()
-            .map(|fragments| fragments.trex.clone())
-            .unwrap_or_default();
+            .map(|fragments| (fragments.first, fragments.trex.clone()))
+        else {
+            return Ok(Vec::new());
+        };
         let mut ends: Vec<(u32, i64)> = self
             .streams
             .iter()
             .map(|stream| (stream.params.track_id, 0))
             .collect();
+        let mut rows = Vec::new();
         let mut seen = 0u32;
         while at < self.file_len {
             seen = seen.saturating_add(1);
@@ -730,6 +754,19 @@ impl IsoBmff {
                 let groups =
                     fragment::parse_moof(&payload, header.start, &trex, &ends, &mut budget)?;
                 for group in groups {
+                    if let Some(time) = group
+                        .samples
+                        .iter()
+                        .filter(|sample| sample.keyframe)
+                        .map(|sample| sample.pts)
+                        .min()
+                    {
+                        rows.push(Tfra {
+                            track_id: group.track_id,
+                            time: u64::try_from(time).unwrap_or(0),
+                            moof_offset: header.start,
+                        });
+                    }
                     let Some(last) = group.samples.last() else {
                         continue;
                     };
@@ -743,18 +780,10 @@ impl IsoBmff {
             }
             at = header.end;
         }
-        for stream in &mut self.streams {
-            if stream.params.duration_ticks != 0 {
-                continue;
-            }
-            let Some((_, end)) = ends.iter().find(|(id, _)| *id == stream.params.track_id) else {
-                continue;
-            };
-            if *end > 0 {
-                stream.params.duration_ticks = u64::try_from(*end).unwrap_or(u64::MAX);
-            }
+        if let Some(fragments) = &mut self.fragments {
+            fragments.walked = Some(rows);
         }
-        Ok(())
+        Ok(ends)
     }
 
     fn load_fragment(&mut self, source: &mut dyn Source, append: bool) -> Result<bool, Error> {

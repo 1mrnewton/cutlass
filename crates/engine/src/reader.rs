@@ -5,6 +5,7 @@
 //! same id. Probe reads stream parameters and timestamps. It does not decode.
 //! [`Media::decode_at`] seeks a picture. [`Media::audio_from`] seeks a PCM window.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -116,6 +117,39 @@ struct Pipe {
     track: u32,
     timescale: Timescale,
     decoder: Box<dyn Decoder>,
+    /// Pictures the decoder returned that a pull has not handed out yet.
+    ready: VecDeque<Ready>,
+    /// The stream ended and the decoder was drained.
+    drained: bool,
+    /// The last picture packet's duration, for pictures a drain releases.
+    last_duration: i64,
+}
+
+impl Pipe {
+    fn new(track: u32, timescale: Timescale, decoder: Box<dyn Decoder>) -> Self {
+        Self {
+            track,
+            timescale,
+            decoder,
+            ready: VecDeque::new(),
+            drained: false,
+            last_duration: 0,
+        }
+    }
+
+    /// Drop references, held pictures, and the end of stream before a seek.
+    fn reset(&mut self) {
+        self.decoder.reset();
+        self.ready.clear();
+        self.drained = false;
+    }
+}
+
+/// One decoded picture and the stream ticks it starts at, when known.
+struct Ready {
+    frame: DecodedFrame,
+    pts: Option<i64>,
+    duration: i64,
 }
 
 /// Registered containers and the decoder factory.
@@ -216,7 +250,7 @@ impl Media {
                     codec: "picture".to_owned(),
                 });
             };
-            pipe.decoder.reset();
+            pipe.reset();
             (pipe.track, pipe.timescale)
         };
         self.seek_picture(source, track, timescale)?;
@@ -242,7 +276,7 @@ impl Media {
                     codec: "picture".to_owned(),
                 });
             };
-            pipe.decoder.reset();
+            pipe.reset();
             (pipe.track, pipe.timescale)
         };
         self.seek_picture(range.start, track, timescale)?;
@@ -302,23 +336,59 @@ impl Media {
         Ok(())
     }
 
+    /// The next picture in display order.
+    ///
+    /// A push can return several pictures. The ones after the first wait in
+    /// the pipe for the next pull. At the end of the stream the decoder is
+    /// drained once, so a picture still held for reorder is not lost. A
+    /// picture covers the span from its own timestamp, not from the packet
+    /// that released it.
     fn pull_picture(&mut self, cover: &TimeRange) -> Result<Option<HeldFrame>, EngineError> {
-        let (track, timescale) = {
-            let Some(pipe) = self.picture.as_ref() else {
+        let mut pictures = 0_u32;
+        let mut others = 0_u32;
+        loop {
+            let Some(pipe) = self.picture.as_mut() else {
                 return Err(EngineError::NoDecoder {
                     codec: "picture".to_owned(),
                 });
             };
-            (pipe.track, pipe.timescale)
-        };
-        let mut pictures = 0_u32;
-        let mut others = 0_u32;
-        loop {
+            let (track, timescale) = (pipe.track, pipe.timescale);
+            if let Some(ready) = pipe.ready.pop_front() {
+                let (start, end) = coverage(ready.pts, ready.duration, timescale, cover)?;
+                return Ok(Some(HeldFrame {
+                    start,
+                    end,
+                    frame: ready.frame,
+                }));
+            }
             if pictures == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
             }
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
-                return Ok(None);
+                let Some(pipe) = self.picture.as_mut() else {
+                    return Ok(None);
+                };
+                if pipe.drained {
+                    return Ok(None);
+                }
+                pipe.drained = true;
+                let outputs = match pipe.decoder.drain() {
+                    Ok(outputs) => outputs,
+                    Err(CodecError::Unsupported { .. }) => Vec::new(),
+                    Err(error) => return Err(EngineError::Codec(error)),
+                };
+                let duration = pipe.last_duration;
+                for (frame, pts) in outputs
+                    .into_iter()
+                    .filter_map(|output| coded_output(output, timescale))
+                {
+                    pipe.ready.push_back(Ready {
+                        frame,
+                        pts,
+                        duration,
+                    });
+                }
+                continue;
             };
             if packet.stream() != track {
                 if others == OTHER_STREAM_PACKETS {
@@ -334,11 +404,16 @@ impl Media {
                     codec: "picture".to_owned(),
                 });
             };
-            let Some(frame) = push_picture(pipe.decoder.as_mut(), &access)? else {
-                continue;
-            };
-            let (start, end) = coverage(&packet, timescale, cover)?;
-            return Ok(Some(HeldFrame { start, end, frame }));
+            let packet_pts = packet.timestamp().presentation_or_decode();
+            let duration = packet.timestamp().duration().unwrap_or(0);
+            pipe.last_duration = duration;
+            for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale)? {
+                pipe.ready.push_back(Ready {
+                    frame,
+                    pts: pts.or(packet_pts),
+                    duration,
+                });
+            }
         }
     }
 
@@ -358,7 +433,7 @@ impl Media {
             let Some(pipe) = self.audio.as_mut() else {
                 return Err(EngineError::NotMedia);
             };
-            pipe.decoder.reset();
+            pipe.reset();
             (pipe.track, pipe.timescale)
         };
         if timescale.is_clock() {
@@ -504,7 +579,8 @@ fn audible(output: AudioOutput) -> Result<PcmReady, EngineError> {
 }
 
 fn coverage(
-    packet: &cutlass_codec::Packet,
+    start_ticks: Option<i64>,
+    duration: i64,
     timescale: Timescale,
     cover: &TimeRange,
 ) -> Result<(Micros, Micros), EngineError> {
@@ -512,39 +588,49 @@ fn coverage(
         let end = cover.start.0.saturating_add(cover.duration.0);
         return Ok((cover.start, Micros(end)));
     }
-    let Some(start_ticks) = packet.timestamp().presentation_or_decode() else {
+    let Some(start_ticks) = start_ticks else {
         let end = cover.start.0.saturating_add(cover.duration.0);
         return Ok((cover.start, Micros(end)));
     };
     let start = ticks_to_micros(start_ticks, timescale)?;
-    let duration = packet.timestamp().duration().unwrap_or(0);
     let end_ticks = start_ticks.saturating_add(duration.max(1));
     let end = ticks_to_micros(end_ticks, timescale)?;
     Ok((start, end))
 }
 
+/// Every picture one packet released, with its own start in stream ticks.
+/// A still keeps only its first frame and takes the packet's time.
 fn push_picture(
     decoder: &mut dyn Decoder,
     packet: &AccessPacket,
-) -> Result<Option<DecodedFrame>, EngineError> {
+    timescale: Timescale,
+) -> Result<Vec<(DecodedFrame, Option<i64>)>, EngineError> {
     match decoder.decode_picture(packet) {
         Ok(frames) => Ok(frames
             .into_iter()
-            .next()
-            .map(|still| DecodedFrame::Still(Box::new(still.image)))),
+            .take(1)
+            .map(|still| (DecodedFrame::Still(Box::new(still.image)), None))
+            .collect()),
         Err(CodecError::Unsupported {
             what: "picture output",
         }) => {
             let outputs = decoder.push(packet)?;
-            Ok(outputs.into_iter().find_map(coded_output))
+            Ok(outputs
+                .into_iter()
+                .filter_map(|output| coded_output(output, timescale))
+                .collect())
         }
         Err(error) => Err(EngineError::Codec(error)),
     }
 }
 
-fn coded_output(output: Output) -> Option<DecodedFrame> {
+/// A picture and its start. The start is kept only in the stream's own ticks.
+fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, Option<i64>)> {
     match output {
-        Output::Picture(picture) => Some(frame_from_picture(picture)),
+        Output::Picture(picture) => {
+            let pts = (picture.timescale() == timescale.ticks_per_second()).then(|| picture.pts());
+            Some((frame_from_picture(picture), pts))
+        }
         Output::Audio(_) => None,
     }
 }
@@ -614,11 +700,7 @@ fn open_pipes(
             }
             Err(error) => return Err(EngineError::Codec(error)),
         };
-        let pipe = Pipe {
-            track: stream.id().get(),
-            timescale: stream.timescale(),
-            decoder,
-        };
+        let pipe = Pipe::new(stream.id().get(), stream.timescale(), decoder);
         if sized.is_some() && picture.is_none() {
             picture = Some(pipe);
         } else if rate.is_some() && audio.is_none() {

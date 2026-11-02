@@ -140,6 +140,10 @@ pub const TIME_VALID: u32 = 1;
 pub const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 /// Biplanar 4:2:0, video range: a Y plane, then interleaved Cb and Cr.
 pub const NV12: u32 = u32::from_be_bytes(*b"420v");
+/// `kVTDecodeFrame_EnableAsynchronousDecompression`.
+pub const DECODE_ASYNC: u32 = 1 << 0;
+/// `kVTDecodeFrame_EnableTemporalProcessing`: output waits for display order.
+pub const DECODE_TEMPORAL: u32 = 1 << 3;
 pub const ALPHA_PREMULTIPLIED_LAST: u32 = 1;
 pub const BYTE_ORDER_32_BIG: u32 = 4 << 12;
 
@@ -239,6 +243,8 @@ unsafe extern "C" {
     ) -> OSStatus;
 
     pub fn VTDecompressionSessionWaitForAsynchronousFrames(session: *mut c_void) -> OSStatus;
+
+    pub fn VTDecompressionSessionFinishDelayedFrames(session: *mut c_void) -> OSStatus;
 
     pub fn VTCompressionSessionCreate(
         allocator: *const c_void,

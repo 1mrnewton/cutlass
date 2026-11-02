@@ -547,6 +547,66 @@ fn sixty_four_silent_pictures_hit_the_decode_bound() {
     assert!(matches!(error, EngineError::DecodeLimit));
 }
 
+#[test]
+fn pictures_a_drain_releases_reach_the_scan_at_their_own_times() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_four);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Held(Vec::new()))));
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let frames = media
+        .pictures_across(&TimeRange::new(0, 1_000_000), 0, 10)
+        .expect("scan");
+    let starts: Vec<i64> = frames.iter().map(|held| held.start.0).collect();
+    let expected: Vec<i64> = (0..4)
+        .map(|ticks| ticks_to_micros(ticks, Timescale::new(30)).expect("time").0)
+        .collect();
+    assert_eq!(starts, expected);
+}
+
+fn open_four(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 4)))
+}
+
+/// Holds every picture until `drain`, like a decoder waiting on reorder.
+struct Held(Vec<(i64, u32)>);
+
+impl Decoder for Held {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        self.0.push((packet.pts, packet.timescale));
+        Ok(Vec::new())
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        let mut outputs = Vec::new();
+        for (pts, timescale) in self.0.drain(..) {
+            let picture = PictureOutput::cpu(
+                PictureInfo {
+                    width: 2,
+                    height: 2,
+                    pixel: PixelFormat::Yuv420p,
+                    primaries: ColorPrimaries::Bt709,
+                    transfer: Transfer::Bt709,
+                },
+                vec![16, 16, 16, 16, 128, 128],
+                pts,
+                timescale,
+            )?;
+            outputs.push(Output::Picture(picture));
+        }
+        Ok(outputs)
+    }
+
+    fn reset(&mut self) {
+        self.0.clear();
+    }
+}
+
 fn probe_script(header: &[u8]) -> ProbeResult {
     if header.is_empty() {
         return ProbeResult::NeedBytes { have: 0, need: 1 };

@@ -4,12 +4,19 @@
 //! [`to_cpu`] copies that buffer to tightly packed RGBA. VideoToolbox itself
 //! is asked for BGRA. A caller that asks for [`PixelFormat::Yuv420p`] gets
 //! CPU 4:2:0 instead: VideoToolbox writes video-range NV12 and the planes are
-//! copied out as packed Y, then U, then V. Pictures leave in decode order,
-//! each with its own timestamp. A session the hardware will not open is
+//! copied out as packed Y, then U, then V.
+//!
+//! Decode is asynchronous. A push submits its unit and returns the pictures
+//! that have finished, so the next unit is read while the hardware works.
+//! VideoToolbox finishes pictures in decode order. They are held for the
+//! stream's reorder depth and leave in display order, each with its own
+//! timestamp. A unit the
+//! hardware rejects later is an error on the push that collects it. `drain`
+//! waits for every picture still held. A session the hardware will not open is
 //! [`CodecError::Unsupported`], so the factory can try a software codec.
 //! VP8 has no framework format id.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +31,7 @@ use super::cf::{self, Cf};
 use super::sys::{self, CMSampleTimingInfo};
 use crate::limits::{self, even_picture};
 use crate::nal::{self, AvcConfig, Nal};
+use crate::reorder::{self, Reorder};
 use crate::status::{open_status, unit_status};
 
 const H264: u32 = u32::from_be_bytes(*b"avc1");
@@ -39,9 +47,21 @@ struct Decompress {
     raw: *mut std::ffi::c_void,
 }
 
+impl Decompress {
+    /// Release held pictures and wait until every callback has run.
+    fn flush(&self) -> sys::OSStatus {
+        unsafe {
+            let finished = sys::VTDecompressionSessionFinishDelayedFrames(self.raw);
+            let waited = sys::VTDecompressionSessionWaitForAsynchronousFrames(self.raw);
+            if finished != 0 { finished } else { waited }
+        }
+    }
+}
+
 impl Drop for Decompress {
     fn drop(&mut self) {
         if !self.raw.is_null() {
+            let _ = self.flush();
             unsafe {
                 sys::VTDecompressionSessionInvalidate(self.raw);
                 sys::CFRelease(self.raw);
@@ -63,11 +83,10 @@ struct FrameMeta {
     timescale: u32,
 }
 
-struct DecodeSlot {
-    picture: Option<Result<PictureOutput, CodecError>>,
-    pts: i64,
-    timescale: u32,
+/// What the output callback writes into. The session's refcon points here.
+struct Finished {
     planar: bool,
+    pictures: Mutex<VecDeque<Result<PictureOutput, CodecError>>>,
 }
 
 pub struct VideoDecoder {
@@ -75,10 +94,12 @@ pub struct VideoDecoder {
     width: u32,
     height: u32,
     extra: Vec<u8>,
-    /// The caller asked for packed CPU 4:2:0 instead of a platform buffer.
-    planar: bool,
     format: Option<Cf>,
+    /// Dropped before `finished`, so no callback outlives it.
     session: Option<Decompress>,
+    finished: Box<Finished>,
+    /// Finished pictures waiting for display order.
+    reorder: Reorder<PictureOutput>,
 }
 
 pub struct VideoEncoder {
@@ -102,9 +123,13 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
         width,
         height,
         extra: params.extra.clone(),
-        planar: params.pixel == PixelFormat::Yuv420p,
         format: None,
         session: None,
+        finished: Box::new(Finished {
+            planar: params.pixel == PixelFormat::Yuv420p,
+            pictures: Mutex::new(VecDeque::new()),
+        }),
+        reorder: Reorder::new(reorder::MAX_DEPTH),
     };
     if !params.extra.is_empty() || needs_sized_format(params.codec) {
         decoder.open_format(&params.extra)?;
@@ -179,30 +204,47 @@ impl Decoder for VideoDecoder {
             });
         };
         let access = access_unit(self.codec, &packet.data)?;
-        if access.is_empty() {
-            return Ok(Vec::new());
+        if !access.is_empty() {
+            decode_access(
+                session.raw,
+                format,
+                &access,
+                packet.pts,
+                if packet.timescale == 0 {
+                    30
+                } else {
+                    packet.timescale
+                },
+            )?;
         }
-        let picture = decode_access(
-            session.raw,
-            format,
-            &access,
-            packet.pts,
-            if packet.timescale == 0 {
-                30
-            } else {
-                packet.timescale
-            },
-            self.planar,
-        )?;
-        Ok(picture.into_iter().map(Output::Picture).collect())
+        self.collect()
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
-        Ok(Vec::new())
+        if let Some(session) = self.session.as_ref() {
+            unit_status(session.flush(), "videotoolbox")?;
+        }
+        let mut outputs = self.collect()?;
+        let mut held = Vec::new();
+        self.reorder.flush(&mut held);
+        outputs.extend(held.into_iter().map(Output::Picture));
+        Ok(outputs)
     }
 
     fn reset(&mut self) {
-        self.session = None;
+        if let Some(session) = self.session.as_ref() {
+            let _ = session.flush();
+            let finished: Vec<PictureOutput> = lock_pictures(&self.finished)
+                .drain(..)
+                .filter_map(Result::ok)
+                .collect();
+            for picture in finished.iter().chain(self.reorder.clear().iter()) {
+                if let PictureSamples::Platform { token } = picture.samples() {
+                    let _ = release_buffer(token);
+                }
+            }
+            return;
+        }
         self.format = None;
         if !self.extra.is_empty() || needs_sized_format(self.codec) {
             let extra = self.extra.clone();
@@ -221,17 +263,75 @@ impl VideoDecoder {
         } else {
             parameter_format(self.codec, extra)?
         };
-        let surface = if self.planar {
+        let surface = if self.finished.planar {
             Some(sys::NV12)
         } else if needs_sized_format(self.codec) {
             None
         } else {
             Some(sys::BGRA)
         };
-        let session = create_decompress(&format, surface)?;
+        let refcon: *const Finished = &raw const *self.finished;
+        let session = create_decompress(&format, surface, refcon.cast_mut().cast())?;
+        self.reorder = Reorder::new(reorder_depth(self.codec, extra));
         self.format = Some(format);
         self.session = Some(session);
         Ok(())
+    }
+}
+
+impl VideoDecoder {
+    /// Move finished pictures into the reorder buffer and return the ones it
+    /// releases, in display order. An error stops the move. The pictures
+    /// released before it are returned now and the error on the next call.
+    fn collect(&mut self) -> Result<Vec<Output>, CodecError> {
+        let mut released = Vec::new();
+        let mut queue = lock_pictures(&self.finished);
+        while let Some(next) = queue.pop_front() {
+            match next {
+                Ok(picture) => self.reorder.push(picture.pts(), picture, &mut released),
+                Err(err) if released.is_empty() => return Err(err),
+                Err(err) => {
+                    queue.push_front(Err(err));
+                    break;
+                }
+            }
+        }
+        Ok(released.into_iter().map(Output::Picture).collect())
+    }
+}
+
+/// How many pictures the stream may finish ahead of display order.
+///
+/// H.264 and HEVC read their sequence parameter set; one that does not parse
+/// holds [`reorder::MAX_DEPTH`]. MPEG-2 and MPEG-4 hold one anchor. Every
+/// other codec here finishes in display order.
+fn reorder_depth(codec: CodecId, extra: &[u8]) -> usize {
+    match codec {
+        CodecId::H264 => nal::avc_config(extra)
+            .ok()
+            .and_then(|config| config.sps.first().and_then(|sps| reorder::h264_depth(sps)))
+            .unwrap_or(reorder::MAX_DEPTH),
+        CodecId::Hevc => nal::read_hevc_sets(extra)
+            .ok()
+            .and_then(|config| {
+                config
+                    .nals
+                    .iter()
+                    .find(|set| nal::hevc_type(set) == Some(33))
+                    .and_then(|sps| reorder::hevc_depth(sps))
+            })
+            .unwrap_or(reorder::MAX_DEPTH),
+        CodecId::Mpeg2 | CodecId::Mpeg4 => 1,
+        _ => 0,
+    }
+}
+
+fn lock_pictures(
+    finished: &Finished,
+) -> std::sync::MutexGuard<'_, VecDeque<Result<PictureOutput, CodecError>>> {
+    match finished.pictures.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
     }
 }
 
@@ -598,14 +698,19 @@ fn sized_format(codec: CodecId, width: u32, height: u32) -> Result<Cf, CodecErro
 
 /// `surface` is the pixel format VideoToolbox writes. `None` keeps the
 /// decoder's own format.
-fn create_decompress(format: &Cf, surface: Option<u32>) -> Result<Decompress, CodecError> {
+/// `refcon` is the [`Finished`] the callback writes into.
+fn create_decompress(
+    format: &Cf,
+    surface: Option<u32>,
+    refcon: *mut std::ffi::c_void,
+) -> Result<Decompress, CodecError> {
     let attributes = match surface {
         Some(pixel) => Some(pixel_attributes(pixel)?),
         None => None,
     };
     let callback = sys::VTDecompressionOutputCallbackRecord {
         callback: decode_output,
-        refcon: ptr::null_mut(),
+        refcon,
     };
     let mut raw = ptr::null_mut();
     let status = unsafe {
@@ -633,14 +738,13 @@ fn decode_access(
     bytes: &[u8],
     pts: i64,
     timescale: u32,
-    planar: bool,
-) -> Result<Option<PictureOutput>, CodecError> {
+) -> Result<(), CodecError> {
     let block = block_from(bytes)?;
     let scale = i32::try_from(timescale).unwrap_or(30);
     let timing = CMSampleTimingInfo {
         duration: cf::time(1, scale),
         presentation: cf::time(pts, scale),
-        decode: cf::time(pts, scale),
+        decode: cf::time_invalid(),
     };
     let size = bytes.len();
     let mut sample = ptr::null_mut();
@@ -662,28 +766,16 @@ fn decode_access(
         at_bit: 0,
         what: "sample buffer",
     })?;
-    let mut slot = DecodeSlot {
-        picture: None,
-        pts,
-        timescale,
-        planar,
-    };
     let status = unsafe {
         sys::VTDecompressionSessionDecodeFrame(
             session,
             sample.as_ptr(),
-            0,
-            (&raw mut slot).cast(),
+            sys::DECODE_ASYNC | sys::DECODE_TEMPORAL,
+            ptr::null_mut(),
             ptr::null_mut(),
         )
     };
-    if status != 0 {
-        return unit_status(status, "videotoolbox").map(|()| None);
-    }
-    match slot.picture {
-        Some(result) => result.map(Some),
-        None => Ok(None),
-    }
+    unit_status(status, "videotoolbox")
 }
 
 fn block_from(bytes: &[u8]) -> Result<Cf, CodecError> {
@@ -708,33 +800,36 @@ fn block_from(bytes: &[u8]) -> Result<Cf, CodecError> {
     })
 }
 
+/// Runs on a VideoToolbox thread, once per unit, in display order.
+///
+/// A unit the decoder chose to drop has no image and no error. It adds nothing.
 unsafe extern "C" fn decode_output(
-    _refcon: *mut std::ffi::c_void,
-    source: *mut std::ffi::c_void,
+    refcon: *mut std::ffi::c_void,
+    _source: *mut std::ffi::c_void,
     status: sys::OSStatus,
     _flags: u32,
     image: *mut std::ffi::c_void,
-    _pts: sys::CMTime,
+    pts: sys::CMTime,
     _duration: sys::CMTime,
 ) {
-    unsafe {
-        if source.is_null() {
-            return;
-        }
-        let slot = &mut *source.cast::<DecodeSlot>();
-        if status != 0 || image.is_null() {
-            slot.picture = Some(Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "videotoolbox",
-            }));
-            return;
-        }
-        slot.picture = Some(if slot.planar {
-            planar_picture(image, slot.pts, slot.timescale)
-        } else {
-            gpu_picture(image, slot.pts, slot.timescale)
-        });
+    if refcon.is_null() || (status == 0 && image.is_null()) {
+        return;
     }
+    // SAFETY: the session's refcon is the decoder's boxed `Finished`, and the
+    // session is flushed and invalidated before that box is dropped.
+    let finished = unsafe { &*refcon.cast::<Finished>() };
+    let timescale = u32::try_from(pts.timescale).unwrap_or(30);
+    let picture = if status != 0 {
+        Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "videotoolbox",
+        })
+    } else if finished.planar {
+        planar_picture(image, pts.value, timescale)
+    } else {
+        gpu_picture(image, pts.value, timescale)
+    };
+    lock_pictures(finished).push_back(picture);
 }
 
 struct HeldBuffer {
@@ -1520,6 +1615,19 @@ mod tests {
         )
     }
 
+    /// Every output of `packets`, then the pictures `drain` releases.
+    fn decode_all(
+        decoder: &mut dyn Decoder,
+        packets: &[Packet],
+    ) -> Result<Vec<Output>, CodecError> {
+        let mut outputs = Vec::new();
+        for packet in packets {
+            outputs.extend(decoder.push(packet)?);
+        }
+        outputs.extend(decoder.drain()?);
+        Ok(outputs)
+    }
+
     fn channel_sum(bytes: &[u8], channel: usize) -> u64 {
         bytes
             .as_chunks::<4>()
@@ -1538,6 +1646,64 @@ mod tests {
         assert_eq!(&packet[..3], &[0, 0, 1]);
         assert_eq!(access_unit(CodecId::H264, &packet).unwrap(), packet);
         assert_eq!(in_band_config(CodecId::H264, &packet).unwrap(), None);
+    }
+
+    fn encoded(codec: CodecId, frames: i64) -> Option<(Vec<Packet>, Vec<u8>)> {
+        let mut encoder = open_encoder(&video_params(codec, 64, 48)).ok()?;
+        let mut packets = Vec::new();
+        for pts in 0..frames {
+            let shade = u8::try_from(pts * 20 % 200).unwrap_or(0);
+            packets.extend(
+                encoder
+                    .push_frame(&solid(64, 48, [shade, 40, 200, 255], pts))
+                    .ok()?,
+            );
+        }
+        packets.extend(encoder.drain().ok()?);
+        let config = packets.iter().find_map(|packet| {
+            packet.side.iter().find_map(|side| match side {
+                SideData::Config(bytes) if !bytes.is_empty() => Some(bytes.clone()),
+                _ => None,
+            })
+        })?;
+        Some((packets, config))
+    }
+
+    #[test]
+    fn pictures_leave_in_display_order_once_drained() {
+        for codec in [CodecId::H264, CodecId::Hevc] {
+            let Some((packets, config)) = encoded(codec, 12) else {
+                continue;
+            };
+            let mut params = CodecParams::with_format(codec, 64, 48, PixelFormat::Yuv420p);
+            params.extra = config;
+            let mut decoder = open_decoder(&params).expect("decode open");
+            let pts: Vec<i64> = decode_all(decoder.as_mut(), &packets)
+                .expect("decode")
+                .iter()
+                .filter_map(|output| match output {
+                    Output::Picture(picture) => Some(picture.pts()),
+                    Output::Audio(_) => None,
+                })
+                .collect();
+            assert_eq!(pts, (0..12).collect::<Vec<_>>(), "{codec:?}");
+            assert!(decoder.drain().expect("second drain").is_empty());
+        }
+    }
+
+    #[test]
+    fn reset_drops_pictures_still_in_flight() {
+        let (packets, config) = encoded(CodecId::H264, 6).expect("h264");
+        let mut params = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
+        params.extra = config;
+        let mut decoder = open_decoder(&params).expect("decode open");
+        for packet in &packets {
+            let _ = decoder.push(packet).expect("decode");
+        }
+        decoder.reset();
+        assert!(decoder.drain().expect("drain").is_empty());
+        let again = decode_all(decoder.as_mut(), &packets).expect("decode after reset");
+        assert_eq!(again.len(), 6);
     }
 
     #[test]
@@ -1561,13 +1727,11 @@ mod tests {
         decode_params.extra = config;
         let mut decoder = open_decoder(&decode_params).expect("decode open");
         let mut pictures = Vec::new();
-        for packet in &packets {
-            for output in decoder.push(packet).expect("decode") {
-                let Output::Picture(picture) = output else {
-                    panic!("picture");
-                };
-                pictures.push(picture);
-            }
+        for output in decode_all(decoder.as_mut(), &packets).expect("decode") {
+            let Output::Picture(picture) = output else {
+                panic!("picture");
+            };
+            pictures.push(picture);
         }
         let picture = pictures.first().expect("a picture");
         assert_eq!(picture.info().pixel, PixelFormat::Yuv420p);
@@ -1632,13 +1796,11 @@ mod tests {
         });
         assert!(bad.is_err(), "a broken access unit must fail");
         let mut pictures = Vec::new();
-        for packet in &packets {
-            for output in decoder.push(packet).expect("decode") {
-                let Output::Picture(picture) = output else {
-                    panic!("picture");
-                };
-                pictures.push(picture);
-            }
+        for output in decode_all(decoder.as_mut(), &packets).expect("decode") {
+            let Output::Picture(picture) = output else {
+                panic!("picture");
+            };
+            pictures.push(picture);
         }
         assert!(
             !pictures.is_empty(),
@@ -1693,19 +1855,17 @@ mod tests {
         decode_params.extra = config;
         let mut decoder = open_decoder(&decode_params).expect("decode open");
         let mut token = None;
-        for packet in &packets {
-            for output in decoder.push(packet).expect("decode") {
-                let Output::Picture(picture) = output else {
-                    panic!("picture");
+        for output in decode_all(decoder.as_mut(), &packets).expect("decode") {
+            let Output::Picture(picture) = output else {
+                panic!("picture");
+            };
+            if token.is_none() {
+                let PictureSamples::Platform { token: published } = picture.samples() else {
+                    panic!("platform");
                 };
-                if token.is_none() {
-                    let PictureSamples::Platform { token: published } = picture.samples() else {
-                        panic!("platform");
-                    };
-                    token = Some((published, picture.pts(), picture.timescale()));
-                } else if let PictureSamples::Platform { token } = picture.samples() {
-                    release_buffer(token).expect("release extra");
-                }
+                token = Some((published, picture.pts(), picture.timescale()));
+            } else if let PictureSamples::Platform { token } = picture.samples() {
+                release_buffer(token).expect("release extra");
             }
         }
         let (token, pts, timescale) = token.expect("retained frame");
@@ -1735,21 +1895,19 @@ mod tests {
         second_params.extra = second_config;
         let mut second = open_decoder(&second_params).expect("second decode");
         let mut red = 0u64;
-        for packet in &encoded {
-            for output in second.push(packet).expect("decode token") {
-                let Output::Picture(picture) = output else {
-                    continue;
-                };
-                let PictureSamples::Platform { token: decoded } = picture.samples() else {
-                    panic!("platform");
-                };
-                let copied = to_cpu(&picture).expect("cpu");
-                release_buffer(decoded).expect("release decoded");
-                let PictureSamples::Cpu(bytes) = copied.samples() else {
-                    panic!("cpu");
-                };
-                red += channel_sum(bytes, 0);
-            }
+        for output in decode_all(second.as_mut(), &encoded).expect("decode token") {
+            let Output::Picture(picture) = output else {
+                continue;
+            };
+            let PictureSamples::Platform { token: decoded } = picture.samples() else {
+                panic!("platform");
+            };
+            let copied = to_cpu(&picture).expect("cpu");
+            release_buffer(decoded).expect("release decoded");
+            let PictureSamples::Cpu(bytes) = copied.samples() else {
+                panic!("cpu");
+            };
+            red += channel_sum(bytes, 0);
         }
         release_buffer(token).expect("release source");
         assert!(red > 0, "retained frame encoded to black");
@@ -1802,31 +1960,29 @@ mod tests {
         let mut red = 0u64;
         let mut green = 0u64;
         let mut blue = 0u64;
-        for packet in &packets {
-            for output in decoder.push(packet)? {
-                let Output::Picture(picture) = output else {
-                    continue;
-                };
-                let PictureSamples::Platform { token } = picture.samples() else {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "platform",
-                    });
-                };
-                let copied = to_cpu(&picture);
-                let released = release_buffer(token);
-                let copied = copied?;
-                released?;
-                let PictureSamples::Cpu(bytes) = copied.samples() else {
-                    return Err(CodecError::Malformed {
-                        at_bit: 0,
-                        what: "cpu",
-                    });
-                };
-                red += channel_sum(bytes, 0);
-                green += channel_sum(bytes, 1);
-                blue += channel_sum(bytes, 2);
-            }
+        for output in decode_all(decoder.as_mut(), &packets)? {
+            let Output::Picture(picture) = output else {
+                continue;
+            };
+            let PictureSamples::Platform { token } = picture.samples() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "platform",
+                });
+            };
+            let copied = to_cpu(&picture);
+            let released = release_buffer(token);
+            let copied = copied?;
+            released?;
+            let PictureSamples::Cpu(bytes) = copied.samples() else {
+                return Err(CodecError::Malformed {
+                    at_bit: 0,
+                    what: "cpu",
+                });
+            };
+            red += channel_sum(bytes, 0);
+            green += channel_sum(bytes, 1);
+            blue += channel_sum(bytes, 2);
         }
         if red == 0 || red <= green.saturating_mul(4) || red <= blue.saturating_mul(4) {
             return Err(CodecError::Malformed {

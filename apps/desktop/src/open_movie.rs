@@ -551,7 +551,12 @@ fn evaluated_frame(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn movie_draft(path: &Path, width: u32, height: u32, under: bool) -> Result<Draft, String> {
+pub(crate) fn movie_draft(
+    path: &Path,
+    width: u32,
+    height: u32,
+    under: bool,
+) -> Result<Draft, String> {
     let mut draft = Draft::empty("draft");
     draft.canvas_config.width = i32::try_from(width).map_err(|_| "width")?;
     draft.canvas_config.height = i32::try_from(height).map_err(|_| "height")?;
@@ -699,4 +704,109 @@ fn split_yuv(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
         bytes[u_end..v_end].to_vec(),
     )
     .ok()
+}
+
+/// One parity case: a name and an edit to the movie draft.
+type Edit = fn(&mut Draft);
+
+#[test]
+fn the_gpu_compositor_matches_the_cpu_frame() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = root.join("IMG_8143.MP4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+        return;
+    }
+    let renderer = match cutlass_render::Renderer::headless() {
+        Ok(renderer) => renderer,
+        Err(error) => {
+            eprintln!("skipped: {error}");
+            return;
+        }
+    };
+    let cases: [(&str, (u32, u32), Edit); 7] = [
+        ("same size", (848, 608), |_| {}),
+        ("shrunk to fit", (424, 240), |_| {}),
+        ("centered", (1000, 700), |_| {}),
+        ("moved, turned, flipped, faded", (848, 608), |draft| {
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.45;
+            clip.rotation = 30.0;
+            clip.transform.x = 0.2;
+            clip.transform.y = -0.1;
+            clip.flip.horizontal = true;
+            clip.alpha = 0.7;
+        }),
+        ("a quarter turn", (848, 608), |draft| {
+            draft.tracks[0].segments[1].clip.rotation = 90.0;
+        }),
+        ("cropped", (848, 608), |draft| {
+            let crop = &mut draft.materials.videos[0].crop;
+            crop.upper_left_x = 0.1;
+            crop.upper_left_y = 0.2;
+            crop.upper_right_x = 0.8;
+            crop.upper_right_y = 0.2;
+            crop.lower_left_x = 0.1;
+            crop.lower_left_y = 0.9;
+            crop.lower_right_x = 0.8;
+            crop.lower_right_y = 0.9;
+        }),
+        ("background", (1000, 700), |draft| {
+            draft.canvas_config.background = Some("#336699".to_owned());
+        }),
+    ];
+    let readers = crate::readers::installed_readers();
+    for (name, (width, height), edit) in cases {
+        let mut draft = movie_draft(&path, width, height, true).unwrap();
+        edit(&mut draft);
+        let time = Micros(500_000);
+        let cpu = render(&readers, &draft, time).unwrap();
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let composed = cutlass_eval::layers_in(
+            &Snapshot::new(&draft),
+            time,
+            &mut device,
+            &readers,
+            &mut clips,
+            0,
+            None,
+        )
+        .unwrap();
+        let cutlass_eval::Composed::Layers(layers) = composed else {
+            panic!("{name}: composed on the CPU");
+        };
+        assert!(
+            layers
+                .layers
+                .iter()
+                .any(|layer| matches!(layer.source, cutlass_eval::GpuSource::Yuv { .. })),
+            "{name}: the movie did not reach the GPU"
+        );
+        let canvas = renderer.canvas(width, height).unwrap();
+        crate::gpu::draw(&renderer, &canvas, &layers).unwrap();
+        let gpu = renderer.read(&canvas).unwrap();
+        assert_eq!(gpu.len(), cpu.len(), "{name}");
+        let pixels = cpu.len() / 4;
+        let mut off = 0;
+        let mut worst = 0;
+        for (a, b) in gpu.chunks(4).zip(cpu.chunks(4)) {
+            let diff = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| x.abs_diff(*y))
+                .max()
+                .unwrap_or(0);
+            worst = worst.max(diff);
+            if diff > 2 {
+                off += 1;
+            }
+        }
+        eprintln!("{name}: {off} of {pixels} pixels differ by more than 2, worst {worst}");
+        assert!(
+            off * 1000 <= pixels,
+            "{name}: {off} of {pixels} pixels differ"
+        );
+    }
 }

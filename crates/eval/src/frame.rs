@@ -7,7 +7,9 @@ use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
 use cutlass_picture::{CpuBytes, Picture, Sample};
 
-use crate::effect::{StackLayer, present};
+use crate::canvas::canvas_rgba;
+use crate::effect::{StackLayer, needs_cpu, present};
+use crate::gpu::{Composed, FrameLayers, GpuLayer};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
@@ -160,6 +162,78 @@ pub fn frame_in<D: Device>(
     compose(snapshot, time, device, media, clips, revision, &[])
 }
 
+/// The frame as GPU layers, or composed pixels when it needs the CPU.
+///
+/// A frame with an effect mark or a clip filter is composed on the CPU, as
+/// [`frame_in`] composes it. Any other frame is the project background, then
+/// every layer in order: a clip the GPU path covers is its decoded picture
+/// and placement, a solid is one stretched pixel, and the rest are their
+/// CPU pictures.
+pub fn layers_in<D: Device>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    root: Option<&std::path::Path>,
+) -> Result<Composed, EvalError<D::Error>> {
+    clips.set_project(root);
+    with_layers(
+        snapshot,
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        &[],
+        |draft, device, extent, layers| {
+            let stack = stack_of(layers);
+            if needs_cpu(draft, time, &stack) {
+                return present(draft, snapshot.packages(), time, device, extent, &stack)
+                    .map(Composed::Frame);
+            }
+            Ok(Composed::Layers(gpu_layers(draft, time, extent, layers)))
+        },
+    )
+}
+
+fn gpu_layers(draft: &Draft, time: Micros, extent: Extent, layers: &[Ordered<'_>]) -> FrameLayers {
+    let mut out = Vec::new();
+    if let Some(pixel) = draft
+        .canvas_config
+        .background
+        .as_deref()
+        .and_then(canvas_rgba)
+        .and_then(|pixel| CpuBytes::new(1, 1, pixel.to_vec()).ok())
+    {
+        out.push(GpuLayer::fill(pixel));
+    }
+    for layer in layers {
+        let gpu = match &layer.paint {
+            Paint::Video(placed) => placed.gpu(time),
+            Paint::Solid(solid) => match solid.one_pixel(time) {
+                Sample::Ready(Picture::Cpu(pixel)) => Some(vec![GpuLayer::fill(pixel)]),
+                Sample::Ready(Picture::Platform(_)) | Sample::Miss => Some(Vec::new()),
+            },
+            Paint::Text(_) | Paint::Nest(_) | Paint::Mixed(_) => None,
+        };
+        match gpu {
+            Some(gpu) => out.extend(gpu),
+            None => {
+                if let Sample::Ready(Picture::Cpu(picture)) = layer.source().sample(time) {
+                    out.push(GpuLayer::canvas(picture));
+                }
+            }
+        }
+    }
+    FrameLayers {
+        width: extent.width,
+        height: extent.height,
+        layers: out,
+    }
+}
+
 pub(crate) fn compose<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -169,6 +243,33 @@ pub(crate) fn compose<D: Device>(
     revision: u64,
     ancestors: &[cutlass_model::DraftId],
 ) -> Result<Frame, EvalError<D::Error>> {
+    with_layers(
+        snapshot,
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        ancestors,
+        |draft, device, extent, layers| {
+            let stack = stack_of(layers);
+            present(draft, snapshot.packages(), time, device, extent, &stack)
+        },
+    )
+}
+
+/// Build every layer at `time` in order, then hand them to `finish`.
+#[allow(clippy::too_many_arguments)]
+fn with_layers<D: Device, T>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    ancestors: &[cutlass_model::DraftId],
+    finish: impl FnOnce(&Draft, &mut D, Extent, &[Ordered<'_>]) -> Result<T, EvalError<D::Error>>,
+) -> Result<T, EvalError<D::Error>> {
     let draft = snapshot.draft();
     let extent = canvas_extent(draft).ok_or(EvalError::Canvas)?;
     clips.prepare(draft, revision);
@@ -215,15 +316,7 @@ pub(crate) fn compose<D: Device>(
         extent.height,
         pass.time,
     );
-    let stack = stack_of(&layers);
-    present(
-        draft,
-        snapshot.packages(),
-        pass.time,
-        pass.device,
-        extent,
-        &stack,
-    )
+    finish(draft, pass.device, extent, &layers)
 }
 
 fn stack_of<'a>(layers: &'a [Ordered<'a>]) -> Vec<StackLayer<'a>> {

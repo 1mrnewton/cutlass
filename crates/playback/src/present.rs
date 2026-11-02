@@ -186,6 +186,32 @@ pub(crate) struct DrawnWith<'a> {
     pub(crate) fonts: &'a dyn Fonts,
 }
 
+impl FrameCache {
+    /// The frame at `time` as GPU layers, or composed pixels when it needs
+    /// the CPU. The open clips are shared with [`Self::frame`]. Nothing is
+    /// stored: the caller keeps what it drew.
+    pub fn layers<D: Device>(
+        &mut self,
+        session: &Session,
+        device: &mut D,
+        time: Micros,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        fonts: &dyn Fonts,
+    ) -> Result<cutlass_eval::Composed, PresentError<D::Error>> {
+        cutlass_eval::layers_in(
+            &Snapshot::with_fonts(session.draft(), fonts),
+            time,
+            device,
+            media,
+            &mut self.clips,
+            session.revision(),
+            root,
+        )
+        .map_err(PresentError::Picture)
+    }
+}
+
 impl Default for FrameCache {
     fn default() -> Self {
         Self::new()

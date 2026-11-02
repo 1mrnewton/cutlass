@@ -131,6 +131,31 @@ impl VideoSource {
         }
     }
 
+    /// The decoded picture at `time`, before color conversion, for a pass
+    /// that converts on the GPU. It is cached and decoded like
+    /// [`Self::picture_at`].
+    pub fn decoded_at(&self, time: Micros) -> Result<DecodedFrame, EngineError> {
+        let source = map::map_timeline(&self.map, time)?;
+        let cached = self.cache.borrow().get(source.0).cloned();
+        if let Some(frame) = cached {
+            return Ok(frame);
+        }
+        match self.clock.borrow().kind() {
+            ClockKind::Playback => Err(EngineError::NotReady),
+            ClockKind::Export => {
+                let held = match &self.ahead {
+                    Some(ahead) => ahead.picture(source)?,
+                    None => self.decode(source)?,
+                };
+                let frame = held.frame.clone();
+                self.cache
+                    .borrow_mut()
+                    .insert(held.start.0, held.end.0, held.frame);
+                Ok(frame)
+            }
+        }
+    }
+
     /// The filmstrip cell for `time`, if a fill already stored one.
     ///
     /// A miss is [`EngineError::NotReady`] and does not decode. A time outside

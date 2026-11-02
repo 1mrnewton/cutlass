@@ -26,10 +26,13 @@ pub fn run() -> eframe::Result {
             viewport,
             ..Default::default()
         },
-        Box::new(|_creation| {
+        Box::new(|creation| {
             let settings = crate::load_settings(&Shell::settings_path());
             let (decoders, encoders) = crate::register_codecs_with(&settings.hardware);
             let mut shell = Shell::new(decoders, encoders, settings);
+            if let Some(state) = creation.wgpu_render_state.as_ref() {
+                shell.attach_gpu(state);
+            }
             shell.open_preview_audio(cutlass_playback::AudioHost::current());
             Ok(Box::new(DesktopWindow {
                 shell,

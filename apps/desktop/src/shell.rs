@@ -432,6 +432,8 @@ pub struct Shell {
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
     face: FaceTable,
+    /// The preview canvas on eframe's GPU device, once the window has one.
+    gpu: Option<crate::gpu::Preview>,
     pub chrome: Chrome,
 }
 
@@ -493,6 +495,7 @@ impl Shell {
             next_id: 0,
             speech: RefCell::new(None),
             face: FaceTable::load(),
+            gpu: None,
             chrome: Chrome::default(),
         }
     }
@@ -974,6 +977,50 @@ impl Shell {
                 root: root.as_deref(),
             },
         );
+    }
+
+    /// Draw preview on `state`'s device from now on.
+    pub fn attach_gpu(&mut self, state: &eframe::egui_wgpu::RenderState) {
+        self.gpu = Some(crate::gpu::Preview::new(state));
+    }
+
+    /// The preview as a GPU texture and its size, or `None` before
+    /// [`Self::attach_gpu`]. A frame already on the canvas is not drawn again.
+    pub fn preview_texture(&mut self) -> Result<Option<(egui::TextureId, [u32; 2])>, ShellError> {
+        let time = self.sample_time().0;
+        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(None);
+        };
+        let key = crate::gpu::Drawn {
+            draft: session.draft().id.to_string(),
+            revision: session.revision(),
+            time,
+        };
+        if let Some(shown) = gpu.shown(&key) {
+            return Ok(Some(shown));
+        }
+        let mut device = SoftwareDevice::new();
+        let composed = self
+            .preview_cache
+            .borrow_mut()
+            .layers(
+                session,
+                &mut device,
+                Micros(time),
+                &self.readers,
+                self.path.as_deref(),
+                &self.face,
+            )
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let layers = match composed {
+            cutlass_eval::Composed::Layers(layers) => layers,
+            cutlass_eval::Composed::Frame(frame) => cutlass_eval::FrameLayers::pixels(frame)
+                .ok_or_else(|| ShellError::Eval("the frame has no pixels".to_owned()))?,
+        };
+        gpu.show(&layers, key)
+            .map(Some)
+            .map_err(|error| ShellError::Eval(error.to_string()))
     }
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
@@ -5244,6 +5291,69 @@ mod tests {
     fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
+    }
+
+    #[test]
+    fn preview_draws_a_real_movie_on_the_gpu_like_the_cpu() {
+        let movie =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/IMG_8143.MP4");
+        if !movie.is_file() {
+            eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let state = match pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("skipped: {error}");
+                return;
+            }
+        };
+        let temp = Temp::new();
+        let draft = crate::open_movie::movie_draft(&movie, 848, 608, true).unwrap();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        desktop.seek(Micros(400_000));
+
+        let (id, size) = desktop.preview_texture().unwrap().expect("gpu preview");
+        assert_eq!(size, [848, 608]);
+        assert!(state.renderer.read().texture(&id).is_some());
+        let again = desktop.preview_texture().unwrap().expect("gpu preview");
+        assert_eq!(again, (id, size));
+
+        let gpu = desktop
+            .gpu
+            .as_ref()
+            .and_then(crate::gpu::Preview::read)
+            .unwrap();
+        let cpu = desktop.preview_bytes().unwrap().rgba;
+        let off = gpu
+            .chunks(4)
+            .zip(cpu.chunks(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
+            .count();
+        assert!(off * 1000 <= gpu.len() / 4, "{off} pixels differ");
+
+        desktop.seek(Micros(433_334));
+        let (next, _) = desktop.preview_texture().unwrap().expect("gpu preview");
+        assert_eq!(next, id);
+        assert_ne!(
+            desktop
+                .gpu
+                .as_ref()
+                .and_then(crate::gpu::Preview::read)
+                .unwrap(),
+            gpu
+        );
     }
 
     struct Temp {

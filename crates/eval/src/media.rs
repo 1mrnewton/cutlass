@@ -22,9 +22,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use cutlass_codec::access::{ColorPrimaries, PixelFormat};
 use cutlass_engine::{
-    ClockKind, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture, open_segment_in,
+    ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
+    open_segment_in,
 };
+use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
     Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialCanvas, MaterialRef,
     Micros, Segment, SegmentId, TimeRange, TrackAttribute, UniformScale,
@@ -32,6 +35,7 @@ use cutlass_model::{
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
+use crate::gpu::{GpuLayer, GpuSource};
 
 /// Pictures each open clip decodes ahead of the time asked for.
 const READ_AHEAD: usize = 8;
@@ -714,6 +718,194 @@ impl PictureSource for Placed<'_> {
             Picture::Platform(_) => Sample::Miss,
         }
     }
+}
+
+impl Placed<'_> {
+    /// This clip as GPU layers: a color backdrop, if any, then the decoded
+    /// picture with the maps that place it.
+    ///
+    /// `None` when the GPU path does not reproduce the CPU path: a picture
+    /// that is not 4:2:0 or needs a gamut change, a crop quad that is not a
+    /// parallelogram, or a blur or image backdrop. The caller then uses the
+    /// CPU picture.
+    pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
+        let backdrop = match &self.backdrop {
+            Backdrop::None => None,
+            Backdrop::Color(pixel) => {
+                Some(GpuLayer::fill(CpuBytes::new(1, 1, pixel.to_vec()).ok()?))
+            }
+            Backdrop::Blur(_) | Backdrop::Image(_) => return None,
+        };
+        let DecodedFrame::Coded {
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p,
+            primaries: ColorPrimaries::Unspecified | ColorPrimaries::Bt709,
+            bytes,
+            ..
+        } = self.source.decoded_at(time).ok()?
+        else {
+            return None;
+        };
+        if width % 2 != 0 || height % 2 != 0 {
+            return None;
+        }
+        let display = self.source.display();
+        let oriented = match display {
+            DisplayQuarter::Zero | DisplayQuarter::Half => (width, height),
+            DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
+        };
+        let (to_oriented, picture) = gpu_crop(self.crop, self.crop_scale, oriented)?;
+        let placement = Placement {
+            to_picture: gpu_place(self.transform, picture, (self.width, self.height))?,
+            picture,
+            to_oriented,
+            oriented,
+            to_texture: gpu_turn(display, width, height),
+            opacity: f64::from(self.transform.opacity) / 255.0,
+        };
+        let mut layers: Vec<GpuLayer> = backdrop.into_iter().collect();
+        layers.push(GpuLayer {
+            source: GpuSource::Yuv {
+                width,
+                height,
+                bytes,
+            },
+            placement,
+        });
+        Some(layers)
+    }
+}
+
+/// Oriented-source pixel center to stored pixels, as [`turned_source`].
+fn gpu_turn(display: DisplayQuarter, width: u32, height: u32) -> Affine {
+    let (w, h) = (f64::from(width), f64::from(height));
+    Affine(match display {
+        DisplayQuarter::Zero => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        DisplayQuarter::Clockwise90 => [0.0, 1.0, 0.0, -1.0, 0.0, h],
+        DisplayQuarter::Half => [-1.0, 0.0, w, 0.0, -1.0, h],
+        DisplayQuarter::Clockwise270 => [0.0, -1.0, w, 1.0, 0.0, 0.0],
+    })
+}
+
+/// Picture pixel center to oriented-source pixels, and the picture size,
+/// as [`apply_crop`]. A crop that is not a parallelogram is not affine.
+fn gpu_crop(crop: Crop, crop_scale: f64, oriented: (u32, u32)) -> Option<(Affine, (u32, u32))> {
+    let uncropped = Some((Affine::IDENTITY, oriented));
+    if crop_absent(crop) {
+        return uncropped;
+    }
+    let quad = scale_quad(crop, crop_scale);
+    if !quad_finite(quad) {
+        return uncropped;
+    }
+    let (src_w, src_h) = oriented;
+    let Some(out_w) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.upper_right_x,
+        quad.upper_right_y,
+        src_w,
+        src_h,
+    )) else {
+        return uncropped;
+    };
+    let Some(out_h) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.lower_left_x,
+        quad.lower_left_y,
+        src_w,
+        src_h,
+    )) else {
+        return uncropped;
+    };
+    let across = (
+        quad.upper_right_x - quad.upper_left_x,
+        quad.upper_right_y - quad.upper_left_y,
+    );
+    let below = (
+        quad.lower_right_x - quad.lower_left_x,
+        quad.lower_right_y - quad.lower_left_y,
+    );
+    if (across.0 - below.0).abs() > 1e-9 || (across.1 - below.1).abs() > 1e-9 {
+        return None;
+    }
+    let down = (
+        quad.lower_left_x - quad.upper_left_x,
+        quad.lower_left_y - quad.upper_left_y,
+    );
+    let (w, h) = (f64::from(src_w), f64::from(src_h));
+    let (ow, oh) = (f64::from(out_w), f64::from(out_h));
+    Some((
+        Affine([
+            w * across.0 / ow,
+            w * down.0 / oh,
+            w * quad.upper_left_x,
+            h * across.1 / ow,
+            h * down.1 / oh,
+            h * quad.upper_left_y,
+        ]),
+        (out_w, out_h),
+    ))
+}
+
+/// Canvas pixel center to placed-picture pixels, as [`place_with`].
+fn gpu_place(
+    transform: PictureTransform,
+    picture: (u32, u32),
+    canvas: (u32, u32),
+) -> Option<Affine> {
+    let (pw, ph) = picture;
+    let (cw, ch) = canvas;
+    if transform.geometry_identity {
+        if pw == cw && ph == ch {
+            return Some(Affine::IDENTITY);
+        }
+        // Stamped at the floored center. A larger picture is shrunk first,
+        // sampling at each pixel's left edge.
+        let (dw, dh) = if pw <= cw && ph <= ch {
+            (pw, ph)
+        } else {
+            contain_size(pw, ph, cw, ch)?
+        };
+        let x0 = f64::from((cw - dw) / 2);
+        let y0 = f64::from((ch - dh) / 2);
+        let kx = f64::from(pw) / f64::from(dw);
+        let ky = f64::from(ph) / f64::from(dh);
+        // A small push keeps an exact whole result from flooring below it.
+        let push = if kx == 1.0 && ky == 1.0 { 0.0 } else { 1e-4 };
+        return Some(Affine([
+            kx,
+            0.0,
+            -kx * (x0 + 0.5) + push,
+            0.0,
+            ky,
+            -ky * (y0 + 0.5) + push,
+        ]));
+    }
+    let (fw, fh) = fitted_size(pw, ph, cw, ch)?;
+    let (fw, fh) = (f64::from(fw), f64::from(fh));
+    let (pw, ph) = (f64::from(pw), f64::from(ph));
+    let cx = f64::from(cw) / 2.0 + transform.dx;
+    let cy = f64::from(ch) / 2.0 - transform.dy;
+    let (sin, cos) = (transform.sin, transform.cos);
+    let (sx, sy) = (transform.scale_x, transform.scale_y);
+    // lx = (cos*(x-cx) + sin*(cy-y)) / sx ; ly = (-sin*(x-cx) + cos*(cy-y)) / sy
+    let lx = [cos / sx, -sin / sx, (-cos * cx + sin * cy) / sx];
+    let ly = [-sin / sy, -cos / sy, (sin * cx + cos * cy) / sy];
+    // su = lx * pw/fw + pw/2 ; sv = -ly * ph/fh + ph/2
+    let mut su = lx.map(|value| value * pw / fw);
+    su[2] += pw / 2.0;
+    let mut sv = ly.map(|value| -value * ph / fh);
+    sv[2] += ph / 2.0;
+    if transform.flip_h {
+        su = [-su[0], -su[1], pw - su[2]];
+    }
+    if transform.flip_v {
+        sv = [-sv[0], -sv[1], ph - sv[2]];
+    }
+    Some(Affine([su[0], su[1], su[2], sv[0], sv[1], sv[2]]))
 }
 
 impl PictureTransform {

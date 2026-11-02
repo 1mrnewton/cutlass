@@ -927,8 +927,28 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     );
     ui.painter()
         .rect_filled(frame, CornerRadius::same(12), tokens::GAP);
-    match shell.preview_bytes() {
-        Ok(picture) => {
+    let shown = match shell.preview_texture() {
+        Ok(Some((id, [width, height]))) => {
+            let fitted = fit_texture(frame, Vec2::new(width as f32, height as f32));
+            ui.painter().image(
+                id,
+                fitted,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            Ok(())
+        }
+        Ok(None) => Err(None),
+        Err(error) => Err(Some(error)),
+    };
+    let fallback = match shown {
+        Ok(()) => None,
+        Err(Some(error)) => Some(Err(error)),
+        Err(None) => Some(shell.preview_bytes()),
+    };
+    match fallback {
+        None => {}
+        Some(Ok(picture)) => {
             if let Some(image) = raster(&picture) {
                 let texture = if let Some(texture) = &mut view.preview {
                     texture.set(image, egui::TextureOptions::LINEAR);
@@ -949,17 +969,16 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                 );
             }
         }
-        Err(error) => {
-            if shell.draft().is_some() {
-                ui.painter().text(
-                    frame.center(),
-                    Align2::CENTER_CENTER,
-                    error.to_string(),
-                    FontId::proportional(tokens::TYPE_SIZE),
-                    tokens::MUTED,
-                );
-            }
+        Some(Err(error)) if shell.draft().is_some() => {
+            ui.painter().text(
+                frame.center(),
+                Align2::CENTER_CENTER,
+                error.to_string(),
+                FontId::proportional(tokens::TYPE_SIZE),
+                tokens::MUTED,
+            );
         }
+        Some(Err(_)) => {}
     }
     ui.painter().text(
         frame.left_top() + Vec2::new(12.0, 12.0),

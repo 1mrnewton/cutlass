@@ -20,6 +20,7 @@ mod audio;
 mod canvas;
 mod effect;
 mod frame;
+mod gpu;
 mod heard;
 mod media;
 mod nest;
@@ -33,7 +34,10 @@ pub use cutlass_engine::{
     ClipPcm, ClockKind, MixResult, ReaderFactory, SceneError, scene_cuts, timeline_for_source,
 };
 pub use cutlass_model::Micros;
-pub use frame::{EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, wait_export_frame};
+pub use frame::{
+    EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
+};
+pub use gpu::{Composed, FrameLayers, GpuLayer, GpuSource};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
 

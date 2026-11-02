@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 mod dialogs;
 mod face;
+mod gpu;
 pub mod icons;
 pub mod probe;
 mod readers;

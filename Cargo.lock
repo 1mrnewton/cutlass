@@ -568,6 +568,7 @@ dependencies = [
  "cutlass-playback",
  "cutlass-png",
  "cutlass-prores",
+ "cutlass-render",
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
@@ -582,6 +583,7 @@ dependencies = [
  "cutlass-webp",
  "eframe",
  "egui",
+ "pollster",
  "rfd",
  "serde_json",
 ]
@@ -773,6 +775,7 @@ dependencies = [
  "cutlass-effects",
  "cutlass-engine",
  "cutlass-generated",
+ "cutlass-gpu",
  "cutlass-model",
  "cutlass-pcm",
  "cutlass-picture",
@@ -1036,6 +1039,15 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+]
+
+[[package]]
+name = "cutlass-render"
+version = "0.1.0"
+dependencies = [
+ "cutlass-gpu",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]

@@ -1326,3 +1326,99 @@ fn box_of(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 fn u32_bytes(value: u32) -> Vec<u8> {
     value.to_be_bytes().to_vec()
 }
+
+/// Cut the trailing `mfra`, so only the `moof` boxes say where samples are.
+fn without_mfra(mut bytes: Vec<u8>) -> Vec<u8> {
+    let mut at = 0usize;
+    while at + 8 <= bytes.len() {
+        let size = u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        if &bytes[at + 4..at + 8] == b"mfra" {
+            bytes.truncate(at);
+            break;
+        }
+        at += usize::try_from(size).expect("size");
+    }
+    bytes
+}
+
+#[test]
+fn a_fragmented_file_without_sidx_or_mfra_seeks_through_its_moof_boxes() {
+    let options = MuxOptions {
+        fragmented: true,
+        samples_per_fragment: 2,
+        ..MuxOptions::default()
+    };
+    let names: Vec<String> = (0..9).map(|index| format!("S{index}")).collect();
+    let packets = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let dts = i64::try_from(index).unwrap() * 10;
+            packet(dts, dts, 10, name.as_bytes(), index % 3 == 0, 30)
+        })
+        .collect();
+    let bytes = without_mfra(write_movie(options, vec![(video(), packets)]));
+    for (target, landing, first) in [
+        (0, 0, b"S0"),
+        (25, 0, b"S0"),
+        (35, 30, b"S3"),
+        (59, 30, b"S3"),
+        (60, 60, b"S6"),
+        (85, 60, b"S6"),
+    ] {
+        let mut movie = open(&bytes);
+        let mut source = SliceSource::new(&bytes);
+        let at = movie.seek(&mut source, 1, target).expect("seek");
+        assert_eq!(at.dts, landing, "target {target}");
+        assert!(at.keyframe);
+        let read = movie.read_packet(&mut source).unwrap().unwrap();
+        assert_eq!(read.payload, first, "target {target}");
+    }
+    let mut movie = open(&bytes);
+    let mut source = SliceSource::new(&bytes);
+    movie.seek(&mut source, 1, 35).expect("seek");
+    let mut rest = Vec::new();
+    while let Some(packet) = movie.read_packet(&mut source).unwrap() {
+        rest.push(packet.payload);
+    }
+    assert_eq!(rest, [b"S3", b"S4", b"S5", b"S6", b"S7", b"S8"]);
+}
+
+#[test]
+fn a_local_fragmented_file_without_an_index_seeks_to_two_seconds() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../local-files/16929689_1920_1080_30fps.mp4");
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("skipped: {} is missing", path.display());
+        return;
+    };
+    let mut movie = open(&bytes);
+    let mut source = SliceSource::new(&bytes);
+    let (track, scale) = movie
+        .streams()
+        .iter()
+        .find(|stream| matches!(stream.params.kind, MediaKind::Video(_)))
+        .map(|stream| (stream.params.track_id, stream.params.timescale.get()))
+        .expect("video");
+    let target = i64::from(scale) * 2;
+    let at = movie.seek(&mut source, track, target).expect("seek");
+    assert!(at.keyframe);
+    assert!(at.dts <= target);
+    let mut covered = false;
+    let mut first = true;
+    while let Some(packet) = movie.read_packet(&mut source).unwrap() {
+        if packet.track_id != track {
+            continue;
+        }
+        if first {
+            assert!(packet.keyframe);
+            assert!(packet.pts <= target);
+            first = false;
+        }
+        if packet.pts <= target && target < packet.pts + i64::from(packet.duration) {
+            covered = true;
+            break;
+        }
+    }
+    assert!(covered);
+}

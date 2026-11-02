@@ -15,11 +15,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Pointer, TimelineScale,
-    TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category,
-    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
+    DropGesture, DropOutcome, FilmTile, GestureError, GestureOutcome, MoveGesture, Pointer,
+    TimelineScale, TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, film_tiles,
+    fit_pixel_size, hit_test, lane_category, lanes, last_accuracy_step, minimum_pixel_size,
+    move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
+use cutlass_engine::{Thumb, ThumbKey, Thumbnails};
 use cutlass_eval::{Heard, ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
     Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
@@ -73,6 +75,12 @@ pub const NOTICE_FADE: Duration = Duration::from_millis(160);
 
 /// The shortest time between two automatic writes of the project.
 pub const AUTOSAVE_GAP: Duration = Duration::from_millis(500);
+
+/// One filmstrip tile of a clip, and its picture once stored.
+pub struct FilmCell {
+    pub tile: FilmTile,
+    pub thumb: Option<std::sync::Arc<Thumb>>,
+}
 
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
@@ -493,6 +501,10 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// Timeline thumbnails, once the window starts them.
+    thumbnails: Option<Thumbnails>,
+    /// Thumbnails this frame's clips asked for, nearest the view first.
+    film_asks: Vec<ThumbKey>,
     face: FaceTable,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
@@ -563,6 +575,8 @@ impl Shell {
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
+            thumbnails: None,
+            film_asks: Vec::new(),
             face: FaceTable::load(),
             gpu: None,
             preview_stale: false,
@@ -573,6 +587,99 @@ impl Shell {
     pub fn codecs_ready(&self) -> bool {
         let picture = CodecParams::video(CodecId::Png, 1, 1);
         self.decoders.open(&picture).is_ok() && self.encoders.open(&picture).is_ok()
+    }
+
+    /// Decode timeline thumbnails on their own thread. `ready` runs there
+    /// after each one is stored.
+    pub fn start_thumbnails(&mut self, ready: impl Fn() + Send + 'static) {
+        self.thumbnails = Some(Thumbnails::start(self.readers.clone(), ready));
+    }
+
+    /// The filmstrip of clip `id`, drawn `clip_width` by `height` pixels:
+    /// the tiles that meet `visible`, pixels from the clip's left edge, each
+    /// with its picture once stored. A missing picture is asked for when the
+    /// frame ends, by [`Self::ask_thumbnails`]. A clip with no picture file
+    /// has no filmstrip.
+    pub fn film(
+        &mut self,
+        id: &SegmentId,
+        clip_width: f64,
+        height: f64,
+        visible: std::ops::Range<f64>,
+    ) -> Vec<FilmCell> {
+        let Some(thumbnails) = self.thumbnails.as_ref() else {
+            return Vec::new();
+        };
+        let Some(draft) = self.session.as_ref().map(Session::draft) else {
+            return Vec::new();
+        };
+        let Some(segment) = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| &segment.id == id)
+        else {
+            return Vec::new();
+        };
+        let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
+        else {
+            return Vec::new();
+        };
+        let Some(path) = self.media_file(cutlass_engine::media_path(draft, segment)) else {
+            return Vec::new();
+        };
+        let Ok(map) = cutlass_engine::placement_of(draft, segment) else {
+            return Vec::new();
+        };
+        let still = video.kind == MetaType::Photo.as_str();
+        let aspect = if video.width > 0 && video.height > 0 {
+            f64::from(video.width) / f64::from(video.height)
+        } else {
+            16.0 / 9.0
+        };
+        let rate = draft.frame_rate().unwrap_or(FrameRate::FPS_30);
+        let mut cells = Vec::new();
+        for tile in film_tiles(clip_width, height * aspect, visible, self.pixel_size) {
+            let time = Micros(segment.target.start.0.saturating_add(tile.offset.0));
+            let Ok(source) = cutlass_engine::map_timeline(&map, time) else {
+                continue;
+            };
+            let source = if still {
+                Micros(0)
+            } else {
+                rate.frame_index(source)
+                    .and_then(|frame| rate.frame_start(frame))
+                    .unwrap_or(source)
+            };
+            let key = ThumbKey {
+                path: path.clone(),
+                time: source,
+            };
+            let thumb = thumbnails.get(&key);
+            if thumb.is_none() {
+                self.film_asks.push(key);
+            }
+            cells.push(FilmCell { tile, thumb });
+        }
+        cells
+    }
+
+    /// Send this frame's thumbnail asks, and pause the worker while playing.
+    pub fn ask_thumbnails(&mut self) {
+        let asks = std::mem::take(&mut self.film_asks);
+        if let Some(thumbnails) = self.thumbnails.as_ref() {
+            thumbnails.set_paused(self.playing);
+            thumbnails.want(asks);
+        }
+    }
+
+    /// A stored media path as a file: inside the project when relative.
+    fn media_file(&self, stored: Option<&str>) -> Option<PathBuf> {
+        let stored = stored?;
+        if Path::new(stored).is_absolute() {
+            return Some(PathBuf::from(stored));
+        }
+        cutlass_engine::media_in_project(self.path.as_deref()?, stored)
     }
 
     /// Black under the preview canvas, or nothing so it shows clear.
@@ -5931,6 +6038,49 @@ mod tests {
         assert!(matches!(error, ShellError::MissingFolder(_)), "{error}");
         assert_eq!(desktop.draft().unwrap().name, "Color");
         std::fs::rename(&moved, &temp.path).unwrap();
+    }
+
+    #[test]
+    fn a_clip_filmstrip_fills_from_the_thumbnail_worker() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.duration = Micros(4_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = SegmentId::new("movie");
+        assert!(desktop.film(&id, 400.0, 48.0, 0.0..400.0).is_empty());
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        // 4 s across 400 px: 85 px tiles at 48 rows of 16:9, five of them.
+        desktop.pixel_size = 400.0 / 4_000_000.0;
+        let cells = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        assert_eq!(cells.len(), 5);
+        assert!(cells.iter().all(|cell| cell.thumb.is_none()));
+        desktop.ask_thumbnails();
+        for _ in 0..cells.len() {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("a thumbnail");
+        }
+        let cells = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        for cell in &cells {
+            let thumb = cell.thumb.as_ref().expect("stored");
+            assert_eq!((thumb.width, thumb.height), (171, 96));
+            assert!(thumb.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
+        }
+        assert_ne!(cells[0].thumb, cells[4].thumb);
     }
 
     #[test]

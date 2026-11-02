@@ -19,6 +19,7 @@ mod preload;
 mod reader;
 mod scene;
 mod source;
+mod thumbs;
 mod waveform;
 
 pub use ahead::BEHIND;
@@ -39,6 +40,7 @@ pub use reader::{
 };
 pub use scene::{SCENE_CELLS, SCENE_SCORE, SceneError, cut_times, scene_cuts};
 pub use source::{VideoSource, decoded_picture, media_in_project, open_segment, open_segment_in};
+pub use thumbs::{MAX_THUMBS, THUMB_HEIGHT, Thumb, ThumbKey, Thumbnails};
 pub use waveform::{MAX_BUCKETS, Peak, Waveform};
 
 #[cfg(test)]

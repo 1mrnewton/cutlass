@@ -3772,6 +3772,77 @@ mod tests {
     }
 
     #[test]
+    fn an_audio_clip_paints_its_waveform_once_the_peaks_arrive() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-wave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.duration = Micros(20_000_000);
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: cutlass_model::MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(20_000_000),
+            ..cutlass_model::MaterialAudio::default()
+        });
+        let mut segment = cutlass_model::Segment::new(
+            "song",
+            "song",
+            cutlass_model::TimeRange::new(0, 20_000_000),
+        );
+        segment.source_range = Some(cutlass_model::TimeRange::new(0, 20_000_000));
+        draft.tracks[0].segments.push(segment);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        shell.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let wave = Color32::from_white_alpha(150);
+        let columns = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Mesh(mesh)
+                        if mesh.vertices.first().is_some_and(|v| v.color == wave) =>
+                    {
+                        Some(mesh.vertices.len() / 4)
+                    }
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+        assert_eq!(columns(&mut shell, &mut view), 0);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("peaks");
+        while receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok()
+        {}
+        assert!(columns(&mut shell, &mut view) > 100);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn a_notice_fades_in_holds_and_fades_out() {
         let at = |ms| notice_alpha(std::time::Duration::from_millis(ms));
         assert_eq!(at(0), 0.0);

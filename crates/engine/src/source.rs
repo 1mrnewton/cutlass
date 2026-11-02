@@ -162,7 +162,10 @@ impl VideoSource {
             Some(ahead) if !self.patient.get() => match ahead.try_picture(source)? {
                 Some(held) => held,
                 None => {
-                    let shown = self.cache.borrow().nearest(source.0).cloned();
+                    let shown = ahead
+                        .nearest(source)
+                        .map(|held| held.frame)
+                        .or_else(|| self.cache.borrow().nearest(source.0).cloned());
                     if let Some(shown) = shown {
                         self.stale.set(true);
                         return Ok(shown);

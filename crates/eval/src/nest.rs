@@ -511,19 +511,22 @@ mod tests {
         draft.canvas_config.height = 4;
         let full = pixels(&draft, 0);
         assert_eq!(&full[0..4], &[255, 0, 0, 255]);
+        // The middle two columns, 2x4, fit the 4x4 canvas as 2x4 again.
         draft.materials.drafts[0].crop = Crop {
             upper_left_x: 0.25,
-            upper_left_y: 0.25,
+            upper_left_y: 0.0,
             upper_right_x: 0.75,
-            upper_right_y: 0.25,
+            upper_right_y: 0.0,
             lower_left_x: 0.25,
-            lower_left_y: 0.75,
+            lower_left_y: 1.0,
             lower_right_x: 0.75,
-            lower_right_y: 0.75,
+            lower_right_y: 1.0,
         };
         let cropped = pixels(&draft, 0);
         assert_eq!(&cropped[0..4], &[0, 0, 0, 0]);
-        assert_eq!(&cropped[20..24], &[255, 0, 0, 255]);
+        assert_eq!(&cropped[4..8], &[255, 0, 0, 255]);
+        assert_eq!(&cropped[8..12], &[255, 0, 0, 255]);
+        assert_eq!(&cropped[12..16], &[0, 0, 0, 0]);
     }
 
     #[test]

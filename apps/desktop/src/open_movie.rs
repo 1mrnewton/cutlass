@@ -413,12 +413,17 @@ fn evaluated_still(path: &Path) -> Result<(), String> {
     let draft = movie_draft(path, width, height, true)?;
     same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
 
+    // Twice the picture and two rows taller: the fit doubles each pixel and
+    // leaves one clear row above and below.
     let mut wide = movie_draft(path, width, height, false)?;
-    let canvas_w = width.checked_add(2).ok_or("canvas width")?;
-    let canvas_h = height.checked_add(2).ok_or("canvas height")?;
+    let canvas_w = width.checked_mul(2).ok_or("canvas width")?;
+    let canvas_h = height
+        .checked_mul(2)
+        .and_then(|rows| rows.checked_add(2))
+        .ok_or("canvas height")?;
     wide.canvas_config.width = i32::try_from(canvas_w).map_err(|_| "canvas width")?;
     wide.canvas_config.height = i32::try_from(canvas_h).map_err(|_| "canvas height")?;
-    centered(
+    doubled(
         &render(&readers, &wide, Micros(0))?,
         canvas_w,
         canvas_h,
@@ -520,12 +525,17 @@ fn evaluated_frame(path: &Path) -> Result<(), String> {
     let draft = movie_draft(path, width, height, true)?;
     same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
 
+    // Twice the picture and two rows taller: the fit doubles each pixel and
+    // leaves one clear row above and below.
     let mut wide = movie_draft(path, width, height, false)?;
-    let canvas_w = width.checked_add(2).ok_or("canvas width")?;
-    let canvas_h = height.checked_add(2).ok_or("canvas height")?;
+    let canvas_w = width.checked_mul(2).ok_or("canvas width")?;
+    let canvas_h = height
+        .checked_mul(2)
+        .and_then(|rows| rows.checked_add(2))
+        .ok_or("canvas height")?;
     wide.canvas_config.width = i32::try_from(canvas_w).map_err(|_| "canvas width")?;
     wide.canvas_config.height = i32::try_from(canvas_h).map_err(|_| "canvas height")?;
-    centered(
+    doubled(
         &render(&readers, &wide, Micros(0))?,
         canvas_w,
         canvas_h,
@@ -608,7 +618,9 @@ fn render(readers: &ReaderFactory, draft: &Draft, time: Micros) -> Result<Vec<u8
     Ok(picture.rgba)
 }
 
-fn centered(
+/// `canvas` holds `picture` scaled up twice, centered between one clear row
+/// at the top and one at the bottom.
+fn doubled(
     canvas: &[u8],
     canvas_w: u32,
     canvas_h: u32,
@@ -616,45 +628,30 @@ fn centered(
     pic_w: u32,
     pic_h: u32,
 ) -> Result<(), String> {
-    let x0 = canvas_w.saturating_sub(pic_w) / 2;
-    let y0 = canvas_h.saturating_sub(pic_h) / 2;
-    if x0 == 0 || y0 == 0 {
-        return Err("the picture covers the canvas edge".to_owned());
+    let (canvas_w, canvas_h) = (canvas_w as usize, canvas_h as usize);
+    let (pic_w, pic_h) = (pic_w as usize, pic_h as usize);
+    if canvas_w != pic_w * 2 || canvas_h != pic_h * 2 + 2 {
+        return Err(format!("canvas {canvas_w}x{canvas_h} for {pic_w}x{pic_h}"));
     }
-    let canvas_len = usize::try_from(canvas_w)
-        .ok()
-        .and_then(|width| width.checked_mul(usize::try_from(canvas_h).ok()?))
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or("canvas length")?;
-    if canvas.len() != canvas_len {
+    if canvas.len() != canvas_w * canvas_h * 4 || picture.len() != pic_w * pic_h * 4 {
         return Err(format!("canvas is {} bytes", canvas.len()));
     }
-    let corner = canvas.get(..4).ok_or("canvas")?;
-    if corner != [0, 0, 0, 0] {
-        return Err(format!("corner {corner:?}"));
+    let stride = canvas_w * 4;
+    let last = (canvas_h - 1) * stride;
+    if canvas[..stride]
+        .iter()
+        .chain(&canvas[last..])
+        .any(|byte| *byte != 0)
+    {
+        return Err(format!("corner {:?}", &canvas[..4]));
     }
-    let canvas_stride = usize::try_from(canvas_w)
-        .map_err(|_| "canvas width")?
-        .checked_mul(4)
-        .ok_or("canvas stride")?;
-    let picture_stride = usize::try_from(pic_w)
-        .map_err(|_| "picture width")?
-        .checked_mul(4)
-        .ok_or("picture stride")?;
-    for row in 0..usize::try_from(pic_h).map_err(|_| "picture height")? {
-        let dest = (usize::try_from(y0).map_err(|_| "origin")? + row)
-            .checked_mul(canvas_stride)
-            .and_then(|row| row.checked_add(usize::try_from(x0).ok()?.checked_mul(4)?))
-            .ok_or("canvas row")?;
-        let src = row.checked_mul(picture_stride).ok_or("picture row")?;
-        let got = canvas
-            .get(dest..dest + picture_stride)
-            .ok_or("canvas row")?;
-        let expected = picture
-            .get(src..src + picture_stride)
-            .ok_or("picture row")?;
-        if got != expected {
-            return Err(format!("centered row {row} differs"));
+    for y in 0..pic_h * 2 {
+        for x in 0..canvas_w {
+            let at = (y + 1) * stride + x * 4;
+            let from = ((y / 2) * pic_w + x / 2) * 4;
+            if canvas[at..at + 4] != picture[from..from + 4] {
+                return Err(format!("doubled pixel {x},{y} differs"));
+            }
         }
     }
     Ok(())

@@ -1,8 +1,9 @@
 //! Video pictures for one evaluated frame.
 //!
 //! A segment the factory cannot open is omitted. The other layers still draw.
-//! Identity keeps the decoded size when it fits, centered on the canvas. A
-//! larger picture is scaled down until it fits, then centered. The segment
+//! Identity fits the decoded picture inside the canvas, keeping its shape,
+//! and centers it, so a smaller picture is scaled up and a larger one down.
+//! Scale 1 is that fitted picture, as CapCut draws it. The segment
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
 //! A translation of 1 is half the canvas. A file display quarter turn is
@@ -1008,13 +1009,9 @@ pub(crate) fn gpu_place(
         if pw == cw && ph == ch {
             return Some(Affine::IDENTITY);
         }
-        // Stamped at the floored center. A larger picture is shrunk first,
-        // sampling at each pixel's left edge.
-        let (dw, dh) = if pw <= cw && ph <= ch {
-            (pw, ph)
-        } else {
-            contain_size(pw, ph, cw, ch)?
-        };
+        // Stamped at the floored center, fitted first, sampling at each
+        // pixel's left edge.
+        let (dw, dh) = contain_size(pw, ph, cw, ch)?;
         let x0 = f64::from((cw - dw) / 2);
         let y0 = f64::from((ch - dh) / 2);
         let kx = f64::from(pw) / f64::from(dw);
@@ -1030,7 +1027,7 @@ pub(crate) fn gpu_place(
             -ky * (y0 + 0.5) + push,
         ]));
     }
-    let (fw, fh) = fitted_size(pw, ph, cw, ch)?;
+    let (fw, fh) = contain_size(pw, ph, cw, ch)?;
     let (fw, fh) = (f64::from(fw), f64::from(fh));
     let (pw, ph) = (f64::from(pw), f64::from(ph));
     let cx = f64::from(cw) / 2.0 + transform.dx;
@@ -1361,16 +1358,16 @@ fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes) -> Sample {
     if src_w == canvas_w && src_h == canvas_h {
         return Sample::Ready(Picture::Cpu(picture));
     }
-    let (draw_w, draw_h, pixels) = if src_w <= canvas_w && src_h <= canvas_h {
-        (src_w, src_h, picture.rgba().to_vec())
+    let Some((draw_w, draw_h)) = contain_size(src_w, src_h, canvas_w, canvas_h) else {
+        return Sample::Miss;
+    };
+    let pixels = if (draw_w, draw_h) == (src_w, src_h) {
+        picture.rgba().to_vec()
     } else {
-        let Some((draw_w, draw_h)) = contain_size(src_w, src_h, canvas_w, canvas_h) else {
-            return Sample::Miss;
-        };
         let Some(pixels) = nearest(src_w, src_h, picture.rgba(), draw_w, draw_h) else {
             return Sample::Miss;
         };
-        (draw_w, draw_h, pixels)
+        pixels
     };
     let Some(canvas) = stamp(canvas_w, canvas_h, draw_w, draw_h, &pixels) else {
         return Sample::Miss;
@@ -1413,7 +1410,7 @@ fn sample_transformed(
 ) -> Sample {
     let src_w = picture.width();
     let src_h = picture.height();
-    let Some((fitted_w, fitted_h)) = fitted_size(src_w, src_h, canvas_w, canvas_h) else {
+    let Some((fitted_w, fitted_h)) = contain_size(src_w, src_h, canvas_w, canvas_h) else {
         return Sample::Miss;
     };
     let draw = Draw {
@@ -1461,17 +1458,6 @@ fn sample_transformed(
     match CpuBytes::new(canvas_w, canvas_h, canvas) {
         Ok(bytes) => Sample::Ready(Picture::Cpu(bytes)),
         Err(_) => Sample::Miss,
-    }
-}
-
-fn fitted_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32)> {
-    if src_w == 0 || src_h == 0 {
-        return None;
-    }
-    if src_w <= canvas_w && src_h <= canvas_h {
-        Some((src_w, src_h))
-    } else {
-        contain_size(src_w, src_h, canvas_w, canvas_h)
     }
 }
 
@@ -1695,15 +1681,22 @@ mod tests {
     }
 
     #[test]
-    fn a_smaller_picture_stays_native_and_centered() {
+    fn a_smaller_picture_is_scaled_up_to_fit() {
         let picture = solid(1, 1, [1, 2, 3, 4]);
         let Sample::Ready(Picture::Cpu(bytes)) = place(3, 3, picture) else {
             panic!("ready");
         };
+        assert!(bytes.rgba().chunks(4).all(|pixel| pixel == [1, 2, 3, 4]));
+
+        let wide = solid(2, 1, [5, 6, 7, 8]);
+        let Sample::Ready(Picture::Cpu(bytes)) = place(4, 4, wide) else {
+            panic!("ready");
+        };
         let rgba = bytes.rgba();
+        // 2x1 fits 4x2, centered on rows 1 and 2.
         assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
-        assert_eq!(&rgba[16..20], &[1, 2, 3, 4]);
-        assert_eq!(rgba.iter().filter(|byte| **byte != 0).count(), 4);
+        assert!(rgba[16..48].chunks(4).all(|pixel| pixel == [5, 6, 7, 8]));
+        assert_eq!(&rgba[48..52], &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -1899,13 +1892,12 @@ mod tests {
             rotation: 45.0,
             ..Clip::default()
         };
-        let rgba = paint(
-            3,
-            3,
-            solid(1, 1, [6, 0, 0, 255]),
-            clip,
-            UniformScale::default(),
-        );
+        // A third of the fitted picture keeps it one pixel wide.
+        let third = UniformScale {
+            value: 1.0 / 3.0,
+            ..UniformScale::default()
+        };
+        let rgba = paint(3, 3, solid(1, 1, [6, 0, 0, 255]), clip, third);
         assert_eq!(&rgba[16..20], &[6, 0, 0, 255]);
         assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
     }

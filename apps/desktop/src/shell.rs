@@ -6705,14 +6705,15 @@ mod tests {
         readers.decoders_mut().register(CodecId::Jpeg, open_flat);
         desktop.set_readers(readers);
 
+        // The clip and its decode thread each open the movie.
         let first = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 2);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
         assert_ne!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(4));
         assert!(first.rgba.iter().any(|byte| *byte != 0));
 
         desktop.seek(Micros(10));
         let later = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 2);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
         assert_eq!(later.rgba, first.rgba);
 
         let track = desktop.draft().unwrap().tracks[0].id.clone();
@@ -6721,14 +6722,14 @@ mod tests {
             .unwrap();
         desktop.seek(Micros(20));
         let muted = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
         assert_eq!(muted.rgba, first.rgba);
 
         desktop
             .toggle_attribute(track, TrackAttribute::HIDE)
             .unwrap();
         let hidden = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
         assert_eq!(hidden.rgba, vec![0; 16]);
     }
 

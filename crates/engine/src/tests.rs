@@ -548,6 +548,30 @@ fn sixty_four_silent_pictures_hit_the_decode_bound() {
 }
 
 #[test]
+fn decode_at_returns_the_picture_that_covers_the_time() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_eight);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let cover = TimeRange::new(0, 1_000_000);
+    for wanted in [3, 3, 5, 6, 1, 7, 0] {
+        let held = media
+            .decode_at(Micros(tick(wanted).0 + 10), &cover)
+            .expect("picture");
+        assert_eq!(held.start, tick(wanted), "tick {wanted}");
+    }
+    let past = media.decode_at(tick(20), &cover).expect("last picture");
+    assert_eq!(past.start, tick(7));
+}
+
+fn open_eight(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 8)))
+}
+
+#[test]
 fn pictures_a_drain_releases_reach_the_scan_at_their_own_times() {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_script, open_four);

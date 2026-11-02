@@ -19,6 +19,7 @@ use cutlass_gpu::Extent;
 use cutlass_model::{Draft, Micros, SegmentId};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, rgba_len};
 
+use crate::ahead::ReadAhead;
 use crate::cache::FrameWindow;
 use crate::clock::{ClockKind, MediaClock};
 use crate::error::EngineError;
@@ -38,9 +39,27 @@ pub struct VideoSource {
     preload: RefCell<Preload>,
     decodes: Cell<u32>,
     display: DisplayQuarter,
+    /// A decode thread an export-clock read waits on instead of decoding here.
+    ahead: Option<ReadAhead>,
 }
 
 impl VideoSource {
+    /// Decode this clip on its own thread, `frames` pictures ahead.
+    ///
+    /// The thread opens the file again through `factory`. An export-clock
+    /// read then waits on it instead of decoding on the caller's thread, and
+    /// moving forward finds the next picture already decoded. Playback-clock
+    /// reads, filmstrip cells, and waveforms are unchanged.
+    pub fn read_ahead(
+        &mut self,
+        factory: &ReaderFactory,
+        frames: usize,
+    ) -> Result<(), EngineError> {
+        let media = factory.open(&self.path)?;
+        self.ahead = Some(ReadAhead::start(media, self.map.source.clone(), frames)?);
+        Ok(())
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -99,7 +118,10 @@ impl VideoSource {
         match self.clock.borrow().kind() {
             ClockKind::Playback => Err(EngineError::NotReady),
             ClockKind::Export => {
-                let held = self.decode(source)?;
+                let held = match &self.ahead {
+                    Some(ahead) => ahead.picture(source)?,
+                    None => self.decode(source)?,
+                };
                 let frame = held.frame.clone();
                 self.cache
                     .borrow_mut()
@@ -231,6 +253,7 @@ pub fn open_segment_in(
         preload: RefCell::new(Preload::new()),
         decodes: Cell::new(0),
         display,
+        ahead: None,
     })
 }
 

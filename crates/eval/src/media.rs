@@ -33,6 +33,22 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
 
+/// Pictures each open clip decodes ahead of the time asked for.
+const READ_AHEAD: usize = 8;
+
+/// Open one clip and start its decode thread. A clip whose thread cannot
+/// start still decodes on the caller's thread.
+fn open_clip(
+    media: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+) -> Option<VideoSource> {
+    let mut source = open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?;
+    let _ = source.read_ahead(media, READ_AHEAD);
+    Some(source)
+}
+
 /// Open video files for one draft revision.
 pub struct OpenClips {
     draft: Option<DraftId>,
@@ -274,15 +290,8 @@ pub(crate) fn video_layers<'a>(
                 continue;
             }
             if !clips.sources.contains_key(&segment.id) {
-                let root = clips.root.clone();
-                let Ok(source) = open_segment_in(
-                    media,
-                    draft,
-                    &segment.id,
-                    ClockKind::Export,
-                    1,
-                    root.as_deref(),
-                ) else {
+                let Some(source) = open_clip(media, draft, &segment.id, clips.root.as_deref())
+                else {
                     continue;
                 };
                 clips.sources.insert(segment.id.clone(), source);
@@ -352,16 +361,7 @@ pub(crate) fn video_picture(
         return None;
     }
     if !clips.sources.contains_key(&segment.id) {
-        let root = clips.root.clone();
-        let source = open_segment_in(
-            media,
-            draft,
-            &segment.id,
-            ClockKind::Export,
-            1,
-            root.as_deref(),
-        )
-        .ok()?;
+        let source = open_clip(media, draft, &segment.id, clips.root.as_deref())?;
         clips.sources.insert(segment.id.clone(), source);
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);

@@ -568,10 +568,7 @@ dependencies = [
  "cutlass-playback",
  "cutlass-png",
  "cutlass-prores",
- "cutlass-renderer-android",
- "cutlass-renderer-metal",
  "cutlass-renderer-software",
- "cutlass-renderer-windows",
  "cutlass-riff",
  "cutlass-session",
  "cutlass-settings",
@@ -1042,28 +1039,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutlass-renderer-android"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
-]
-
-[[package]]
-name = "cutlass-renderer-metal"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
-]
-
-[[package]]
 name = "cutlass-renderer-software"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
-]
-
-[[package]]
-name = "cutlass-renderer-windows"
 version = "0.1.0"
 dependencies = [
  "cutlass-gpu",

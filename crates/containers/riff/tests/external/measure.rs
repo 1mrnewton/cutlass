@@ -70,7 +70,7 @@ fn time_file(bytes: &[u8], frames: i64, file_len: usize, label: &str) {
     }
 }
 
-fn time_open_seek<R: std::io::Read + std::io::Seek>(
+fn time_open_seek<R: std::io::Read + std::io::Seek + Send>(
     demux: &mut WavDemux<R>,
     samples: u64,
     file_len: usize,

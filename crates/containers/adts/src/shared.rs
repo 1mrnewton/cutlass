@@ -142,7 +142,7 @@ impl<D: ByteFeed, R: Read> FramedFile<D, R> {
     }
 }
 
-impl<D: ByteFeed, R: Read> cutlass_container::Demux for FramedFile<D, R> {
+impl<D: ByteFeed + Send, R: Read + Send> cutlass_container::Demux for FramedFile<D, R> {
     fn family(&self) -> ContainerId {
         self.family
     }
@@ -180,7 +180,7 @@ impl<D: ByteFeed, R: Read> cutlass_container::Demux for FramedFile<D, R> {
 
 macro_rules! shared_demux {
     ($name:ident) => {
-        impl<R: Read> cutlass_container::Demux for $name<R> {
+        impl<R: Read + Send> cutlass_container::Demux for $name<R> {
             fn family(&self) -> ContainerId {
                 cutlass_container::Demux::family(&self.0)
             }

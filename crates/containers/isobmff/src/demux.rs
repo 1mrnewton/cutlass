@@ -300,7 +300,7 @@ impl<R: Read + Seek> IsoBmffFile<R> {
     }
 }
 
-impl<R: Read + Seek> cutlass_container::Demux for IsoBmffFile<R> {
+impl<R: Read + Seek + Send> cutlass_container::Demux for IsoBmffFile<R> {
     fn family(&self) -> cutlass_codec::ContainerId {
         cutlass_codec::ContainerId::Isobmff
     }
@@ -941,6 +941,16 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     while cursor > 0 && samples.get(cursor).is_some_and(|sample| !sample.keyframe) {
         visited = visited.saturating_add(1);
         cursor -= 1;
+    }
+    // `ticks` is a presentation time. With reordered pictures a sync sample
+    // decodes before it displays, so the one found by decode time can still
+    // display after `ticks`. Step back to a sync sample that does not.
+    while cursor > 0 && samples.get(cursor).is_some_and(|sample| sample.pts > ticks) {
+        let Some(earlier) = samples[..cursor].iter().rposition(|sample| sample.keyframe) else {
+            break;
+        };
+        visited = visited.saturating_add(u32::try_from(cursor - earlier).unwrap_or(u32::MAX));
+        cursor = earlier;
     }
     let Some(sample) = samples.get(cursor) else {
         return Err(Error::Missing { what: "sample" });

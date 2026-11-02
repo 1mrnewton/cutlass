@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod ahead;
 mod cache;
 mod clock;
 mod error;
@@ -20,6 +21,7 @@ mod scene;
 mod source;
 mod waveform;
 
+pub use ahead::BEHIND;
 pub use cache::{FrameWindow, MAX_WINDOW};
 pub use clock::{ClockKind, MediaClock};
 pub use cutlass_container::DisplayQuarter;

@@ -390,6 +390,39 @@ fn brands_select_the_file_type() {
 }
 
 #[test]
+fn seek_lands_on_a_sync_sample_that_displays_at_or_before_the_time() {
+    // Decode order K0 P B B K4 P B B, where each keyframe displays 20 ticks
+    // after it decodes. Display time 35 decodes at 30, so a decode-time
+    // search lands on K4, which displays at 60.
+    let bytes = write_movie(
+        MuxOptions::default(),
+        vec![(
+            video(),
+            vec![
+                packet(0, 20, 10, b"K0", true, 30),
+                packet(10, 50, 10, b"P1", false, 30),
+                packet(20, 30, 10, b"B2", false, 30),
+                packet(30, 40, 10, b"B3", false, 30),
+                packet(40, 60, 10, b"K4", true, 30),
+                packet(50, 90, 10, b"P5", false, 30),
+                packet(60, 70, 10, b"B6", false, 30),
+                packet(70, 80, 10, b"B7", false, 30),
+            ],
+        )],
+    );
+    let mut movie = open(&bytes);
+    let mut source = SliceSource::new(&bytes);
+    let at = movie.seek(&mut source, 1, 45).unwrap();
+    assert_eq!(at.dts, 0);
+    assert_eq!(
+        movie.read_packet(&mut source).unwrap().unwrap().payload,
+        b"K0"
+    );
+    let at = movie.seek(&mut source, 1, 65).unwrap();
+    assert_eq!(at.dts, 40);
+}
+
+#[test]
 fn seek_lands_on_the_sync_sample_at_or_before_the_time() {
     let bytes = write_movie(
         MuxOptions::default(),

@@ -22,13 +22,20 @@ use cutlass_decode::{
 use cutlass_model::{Micros, TimeRange};
 
 use crate::error::EngineError;
-use crate::map::{micros_to_ticks, ticks_to_micros};
+use crate::map::{micros_to_ticks, micros_to_ticks_floor, ticks_to_micros};
 
 const HEADER_LIMIT: usize = 4096;
 /// Picture or audio packets one seek may decode before giving up.
 const DECODE_PACKETS: u32 = 64;
 /// Pictures one forward scene scan will decode. A longer file is read from its start.
 const MAX_SCAN_PICTURES: u32 = 4_000;
+/// How far past the last picture [`Media::decode_at`] keeps decoding forward
+/// instead of seeking. A longer jump seeks to the keyframe before the time.
+const FORWARD_REACH: i64 = 2_000_000;
+/// Pictures one [`Media::decode_at`] may fail to decode and pass over. After
+/// a seek to an open-GOP keyframe, the leading pictures reference frames
+/// before the seek and cannot be decoded.
+const SKIPPED_PICTURES: u32 = 16;
 /// Samples from another stream that may sit ahead of the wanted one.
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
@@ -208,6 +215,7 @@ impl ReaderFactory {
             picture,
             audio,
             info,
+            cursor: None,
         })
     }
 
@@ -230,6 +238,16 @@ pub struct Media {
     picture: Option<Pipe>,
     audio: Option<Pipe>,
     info: MediaInfo,
+    /// Where the last [`Media::decode_at`] left the picture stream.
+    cursor: Option<Cursor>,
+}
+
+/// The picture stream after a [`Media::decode_at`]. A time inside `last`
+/// returns it again. A later time continues from here without a seek.
+struct Cursor {
+    last: HeldFrame,
+    /// A picture decoded past `last`, handed out first next time.
+    ahead: Option<HeldFrame>,
 }
 
 impl Media {
@@ -239,22 +257,85 @@ impl Media {
     }
 
     /// The picture that covers `source`, seeking in the file timescale when the stream has a clock.
+    ///
+    /// A time at or past the last picture, and within [`FORWARD_REACH`] of it,
+    /// decodes forward from where the stream is. Any other time seeks to the
+    /// keyframe before it. Either way pictures are decoded until one covers
+    /// `source`. A time before the first picture is that first picture. A time
+    /// past the last one is the last one.
     pub fn decode_at(
         &mut self,
         source: Micros,
         cover: &TimeRange,
     ) -> Result<HeldFrame, EngineError> {
-        let (track, timescale) = {
-            let Some(pipe) = self.picture.as_mut() else {
-                return Err(EngineError::NoDecoder {
-                    codec: "picture".to_owned(),
-                });
-            };
-            pipe.reset();
-            (pipe.track, pipe.timescale)
+        if let Some(cursor) = &self.cursor
+            && cursor.last.start.0 <= source.0
+            && source.0 < cursor.last.end.0
+        {
+            return Ok(cursor.last.clone());
+        }
+        let cursor = self.cursor.take().filter(|cursor| {
+            cursor.last.end.0 <= source.0 && source.0 - cursor.last.end.0 <= FORWARD_REACH
+        });
+        // Resuming, the last picture still shows until the next one starts.
+        let (mut ahead, mut previous) = match cursor {
+            Some(cursor) => (cursor.ahead, Some(cursor.last)),
+            None => {
+                let (track, timescale) = {
+                    let Some(pipe) = self.picture.as_mut() else {
+                        return Err(EngineError::NoDecoder {
+                            codec: "picture".to_owned(),
+                        });
+                    };
+                    pipe.reset();
+                    (pipe.track, pipe.timescale)
+                };
+                self.seek_picture(source, track, timescale)?;
+                (None, None)
+            }
         };
-        self.seek_picture(source, track, timescale)?;
-        self.pull_picture(cover)?.ok_or(EngineError::NotReady)
+        let mut skipped = 0_u32;
+        for _ in 0..MAX_SCAN_PICTURES {
+            let next = match ahead.take() {
+                Some(held) => Some(held),
+                None => match self.pull_picture(cover) {
+                    Ok(next) => next,
+                    Err(EngineError::Codec(CodecError::Malformed { .. }))
+                        if skipped < SKIPPED_PICTURES =>
+                    {
+                        skipped = skipped.saturating_add(1);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                },
+            };
+            let Some(held) = next else {
+                let last = previous.ok_or(EngineError::NotReady)?;
+                return Ok(self.keep(last, None));
+            };
+            if held.start.0 > source.0 {
+                return Ok(match previous {
+                    Some(mut previous) => {
+                        // A gap before the next picture still shows this one.
+                        previous.end = Micros(previous.end.0.max(held.start.0));
+                        self.keep(previous, Some(held))
+                    }
+                    None => self.keep(held, None),
+                });
+            }
+            if source.0 < held.end.0 {
+                return Ok(self.keep(held, None));
+            }
+            previous = Some(held);
+        }
+        Err(EngineError::DecodeLimit)
+    }
+
+    /// Remember `last` for the next [`Media::decode_at`] and return it.
+    fn keep(&mut self, last: HeldFrame, ahead: Option<HeldFrame>) -> HeldFrame {
+        let returned = last.clone();
+        self.cursor = Some(Cursor { last, ahead });
+        returned
     }
 
     /// Pictures from `range`, at least `gap` microseconds apart, at most `limit`.
@@ -267,6 +348,7 @@ impl Media {
         gap: i64,
         limit: usize,
     ) -> Result<Vec<HeldFrame>, EngineError> {
+        self.cursor = None;
         if limit == 0 || range.duration.0 <= 0 {
             return Err(EngineError::Window);
         }
@@ -318,7 +400,7 @@ impl Media {
         timescale: Timescale,
     ) -> Result<(), EngineError> {
         if timescale.is_clock() {
-            let ticks = micros_to_ticks(source, timescale)?;
+            let ticks = micros_to_ticks_floor(source, timescale)?;
             self.demux
                 .seek(SeekTo {
                     track,
@@ -429,6 +511,7 @@ impl Media {
         if frames == 0 || frames > MAX_AUDIO_FRAMES {
             return Err(EngineError::Window);
         }
+        self.cursor = None;
         let (track, timescale) = {
             let Some(pipe) = self.audio.as_mut() else {
                 return Err(EngineError::NotMedia);
@@ -504,6 +587,7 @@ impl Media {
 
     /// The next decoded audio buffer, or [`None`] when the stream ends or there is no audio.
     pub fn pull_audio(&mut self) -> Result<Option<PcmReady>, EngineError> {
+        self.cursor = None;
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
         };

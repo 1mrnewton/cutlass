@@ -719,7 +719,7 @@ fn end_scans(scans: u32) -> SeekLanding {
     }
 }
 
-impl<R: Read + Seek> Demux for WavDemux<R> {
+impl<R: Read + Seek + Send> Demux for WavDemux<R> {
     fn family(&self) -> ContainerId {
         ContainerId::Riff
     }

@@ -1049,15 +1049,32 @@ fn malformed(bits: &BitReader<'_>, what: &'static str) -> CodecError {
     }
 }
 
+/// Largest sample a decoded frame may hold. Full scale is 1; a frame far
+/// past it came from a stream this decoder misread.
+const LOUDEST: f32 = 4.0;
+
 impl AacDecoder {
     /// One frame of PCM, stamped with the packet that carried it. A packet
     /// with no clock is stamped with the frame count since the last reset.
+    ///
+    /// A frame with a sample that is not finite or is past [`LOUDEST`] is
+    /// silence marked concealed, and the overlap is cleared so the next
+    /// frame does not inherit it. A misread stream is then quiet, not a
+    /// burst at full volume.
     fn output(
-        &self,
-        samples: Vec<f32>,
+        &mut self,
+        mut samples: Vec<f32>,
         index: u64,
         packet: Option<(i64, u32)>,
     ) -> Result<AudioOutput, CodecError> {
+        let concealed = samples
+            .iter()
+            .any(|sample| !sample.is_finite() || sample.abs() > LOUDEST);
+        if concealed {
+            samples.fill(0.0);
+            let frame = self.config.frame_length;
+            self.overlaps = vec![Overlap::new(frame); self.config.layout.len()];
+        }
         let pcm = Pcm::from_f32(self.config.sample_rate, self.config.layout.clone(), samples)
             .map_err(|_| CodecError::Limit { what: "pcm" })?;
         let frame = u64::try_from(self.config.frame_length).unwrap_or(0);
@@ -1071,7 +1088,7 @@ impl AacDecoder {
             timescale,
             skip_leading: 0,
             skip_trailing: 0,
-            concealed: false,
+            concealed,
         })
     }
 }
@@ -1123,6 +1140,28 @@ mod tests {
         ChannelLayout, CodecError, CodecId, CodecParams, DecodeFactory, Decoder, Output, Packet,
         SideData,
     };
+
+    #[test]
+    fn a_frame_far_past_full_scale_is_concealed_as_silence() {
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let frame = decoder.config().frame_length;
+        let quiet = decoder.output(vec![0.5; frame], 0, None).unwrap();
+        assert!(!quiet.concealed);
+        let mut loud = vec![0.25; frame];
+        loud[7] = 1_000.0;
+        let loud = decoder.output(loud, 1, None).unwrap();
+        assert!(loud.concealed);
+        assert!(
+            loud.pcm
+                .as_f32()
+                .unwrap()
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        let broken = decoder.output(vec![f32::NAN; frame], 2, None).unwrap();
+        assert!(broken.concealed);
+    }
 
     #[test]
     fn grouping_bits_follow_transmission_order() {

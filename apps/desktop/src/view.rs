@@ -979,13 +979,6 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         }
         Some(Err(_)) => {}
     }
-    ui.painter().text(
-        frame.left_top() + Vec2::new(12.0, 12.0),
-        Align2::LEFT_TOP,
-        shell.timecode(),
-        FontId::monospace(11.0),
-        tokens::TEXT,
-    );
     transport_bar(shell, ui, transport);
 }
 
@@ -3466,7 +3459,11 @@ mod tests {
         assert!(shell.chrome.transport);
         assert!(shell.chrome.export);
         let painted = painted_text(&output);
+        let lines = galleys(&output);
         output.textures_delta.clear();
+        // The timecode shows on the transport only, not over the preview.
+        assert!(!lines.iter().any(|line| line == "00:00:00:00"), "{lines:?}");
+        assert!(painted.contains("00:00:00:00  /  "), "{painted}");
         assert!(painted.contains("Details"), "{painted}");
         assert!(painted.contains("Main"), "{painted}");
         assert!(painted.contains("Untitled"), "{painted}");

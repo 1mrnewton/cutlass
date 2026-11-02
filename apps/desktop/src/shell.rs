@@ -780,6 +780,16 @@ impl Shell {
     }
 
     pub fn import_file(&mut self, path: &Path) -> Result<(), ShellError> {
+        match self.import_file_in(path) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                cutlass_logger::error!("import {}: {error}", path.display());
+                Err(error)
+            }
+        }
+    }
+
+    fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let (stored, copied) = place_in_project(&project, path)?;
@@ -5418,6 +5428,50 @@ mod tests {
         assert!(error.to_string().contains("still"), "{error}");
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(!temp.path.join("Resources").join("short.png").exists());
+    }
+
+    #[test]
+    fn an_import_failure_is_written_to_the_log() {
+        let log_dir =
+            std::env::temp_dir().join(format!("cutlass-import-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&log_dir);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        cutlass_logger::init(&log_dir).unwrap();
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let junk = temp.path.join("notes.txt");
+        std::fs::write(&junk, b"hello").unwrap();
+        let error = desktop.import_file(&junk).unwrap_err();
+        let log = std::fs::read_to_string(log_dir.join(cutlass_logger::FILE_NAME)).unwrap();
+        assert!(log.contains(&error.to_string()), "{log}");
+        assert!(log.contains("notes.txt"), "{log}");
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    #[test]
+    fn a_fragmented_movie_imports_when_the_header_duration_is_empty() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/GOOGLE IS BACK! (Gemini 3.8 Flash).mp4");
+        if !path.is_file() {
+            eprintln!("skipped: the fragmented sample is not in ../local-files");
+            return;
+        }
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&path).unwrap();
+        let video = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(video.width, 854);
+        assert_eq!(video.height, 480);
+        assert!(
+            (1_009_000_000..1_011_000_000).contains(&video.duration.0),
+            "{}",
+            video.duration.0
+        );
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
     }
 
     #[test]

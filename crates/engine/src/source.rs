@@ -131,6 +131,15 @@ impl VideoSource {
         }
     }
 
+    /// Start decoding the picture at `time` on the clip's thread without
+    /// waiting. A clip without a thread, or a time outside the clip, is left
+    /// alone.
+    pub fn prefetch(&self, time: Micros) {
+        if let (Some(ahead), Ok(source)) = (&self.ahead, map::map_timeline(&self.map, time)) {
+            ahead.prefetch(source);
+        }
+    }
+
     /// The decoded picture at `time`, before color conversion, for a pass
     /// that converts on the GPU. It is cached and decoded like
     /// [`Self::picture_at`].

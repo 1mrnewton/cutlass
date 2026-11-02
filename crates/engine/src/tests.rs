@@ -897,6 +897,45 @@ fn a_pcm_wav_seeks_and_returns_full_scale_samples() {
 }
 
 #[test]
+fn audio_windows_join_without_a_seam_and_a_seek_lands_on_the_sample() {
+    let path = std::env::temp_dir().join(format!("cutlass-pcm-ramp-{}", std::process::id()));
+    let ramp: Vec<i16> = (0..9_600_i32)
+        .map(|index| i16::try_from(index - 4_800).expect("sample"))
+        .collect();
+    let payload: Vec<u8> = ramp
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    write_pcm_wav(&path, 48_000, 16, &payload);
+    let mut readers = ReaderFactory::new();
+    readers.register_container(cutlass_riff::probe, open_wav);
+    cutlass_pcm::register_decoders(readers.decoders_mut());
+    let expected = |from: usize, count: usize| -> Vec<f32> {
+        ramp[from..from + count]
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_767.0)
+            .collect()
+    };
+
+    let mut media = readers.open(&path).expect("open");
+    let mut joined = Vec::new();
+    for window in 0..10_i64 {
+        let pcm = media
+            .audio_from(Micros(30_000 + window * 10_000), 480)
+            .expect("window");
+        joined.extend_from_slice(pcm.as_f32().expect("f32"));
+    }
+    assert_eq!(joined, expected(1_440, 4_800));
+
+    let mut fresh = readers.open(&path).expect("open");
+    let landed = fresh.audio_from(Micros(125_000), 96).expect("seek");
+    assert_eq!(landed.as_f32().expect("f32"), &expected(6_000, 96)[..]);
+    let back = fresh.audio_from(Micros(20_000), 48).expect("seek back");
+    assert_eq!(back.as_f32().expect("f32"), &expected(960, 48)[..]);
+    std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
 fn an_eight_bit_wav_is_not_a_pcm_layout_this_decoder_opens() {
     let path = std::env::temp_dir().join(format!("cutlass-pcm-eight-{}", std::process::id()));
     write_pcm_wav(&path, 8_000, 8, &[0x80]);

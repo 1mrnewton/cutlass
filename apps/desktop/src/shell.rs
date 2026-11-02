@@ -29,7 +29,8 @@ use cutlass_model::{
     track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
-    AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
+    AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PREVIEW_RATE, PreviewMix, preview_frames,
+    queue_mix, stream_mix,
 };
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
@@ -378,6 +379,54 @@ pub struct MovePreview {
     pub track_id: TrackId,
 }
 
+/// How far ahead playback opens clips and decodes their first pictures.
+const PREROLL: Micros = Micros(1_000_000);
+/// How far the picture may drift from the heard audio before it jumps to it.
+const AUDIO_SNAP: i64 = 60_000;
+/// The share of the drift corrected each tick. Small enough that the device's
+/// buffer-sized clock steps do not reach the picture.
+const AUDIO_PULL: i64 = 16;
+
+/// The playhead after one tick: moved by the frame's elapsed time, then
+/// pulled a little toward the heard audio, or onto it when far off.
+fn follow_audio(wall: i64, heard: i64) -> i64 {
+    let drift = heard.saturating_sub(wall);
+    if drift.abs() > AUDIO_SNAP {
+        heard
+    } else {
+        wall.saturating_add(drift / AUDIO_PULL)
+    }
+}
+
+/// Audio streamed ahead of the device by playback.
+const STREAM_LEAD: usize = 6_144;
+/// One streamed window: 20 ms at the preview rate, a whole number of
+/// microseconds, so consecutive windows meet exactly.
+const STREAM_WINDOW: u32 = PREVIEW_RATE / 50;
+
+/// The audio stream playback follows. The playhead is where its heard
+/// frames reach, so the picture follows the sound.
+#[derive(Clone, Copy, Debug)]
+struct AudioStream {
+    /// Timeline time of the first streamed frame.
+    start: Micros,
+    /// The device's played count when this stream started.
+    played: u64,
+    /// Frames mixed and streamed since `start`.
+    mixed: u64,
+}
+
+impl AudioStream {
+    fn time_at(self, frames: u64) -> Micros {
+        let micros = i128::from(frames) * 1_000_000 / i128::from(PREVIEW_RATE);
+        Micros(
+            self.start
+                .0
+                .saturating_add(i64::try_from(micros).unwrap_or(i64::MAX)),
+        )
+    }
+}
+
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
@@ -392,6 +441,8 @@ pub struct Shell {
     path: Option<PathBuf>,
     playhead: Micros,
     playing: bool,
+    /// Present while playing on a device with a stream clock.
+    stream: Option<AudioStream>,
     pixel_size: f64,
     /// Left edge of the lanes, in microseconds.
     view_origin: i64,
@@ -465,6 +516,7 @@ impl Shell {
             path: None,
             playhead: Micros(0),
             playing: false,
+            stream: None,
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
             lane_width: 800.0,
@@ -638,7 +690,7 @@ impl Shell {
         self.fit_on_layout = false;
         self.notice.clear();
         self.heard.clear();
-        self.output.queue(&[]);
+        self.silence();
         Ok(())
     }
 
@@ -747,7 +799,7 @@ impl Shell {
         self.fit_on_layout = self.cut_duration().0 > 0;
         self.notice.clear();
         self.heard.clear();
-        self.output.queue(&[]);
+        self.silence();
         Ok(())
     }
 
@@ -869,9 +921,12 @@ impl Shell {
         if self.playing && self.settings.playback.seek_during_playback == SeekDuringPlayback::Pause
         {
             self.playing = false;
+            self.silence();
         }
         self.playhead = Micros(time.0.max(0));
-        if self.playing || self.settings.playback.scrub_audio {
+        if self.playing {
+            self.start_stream();
+        } else if self.settings.playback.scrub_audio {
             self.queue_preview(PLAY_FRAMES);
         }
         self.reveal_playhead();
@@ -887,13 +942,100 @@ impl Shell {
             self.playhead = Micros(0);
         }
         self.playing = true;
-        self.queue_preview(PLAY_FRAMES);
+        self.start_stream();
+        self.preroll();
         self.reveal_playhead();
     }
 
     pub fn pause(&mut self) {
         self.playing = false;
+        self.silence();
+    }
+
+    /// Open the clips playback reaches within [`PREROLL`] and start decoding
+    /// them, so a cut does not open a file on the frame it lands.
+    fn preroll(&self) {
+        if !self.playing {
+            return;
+        }
+        if let Some(session) = self.session.as_ref() {
+            self.preview_cache.borrow_mut().preroll(
+                session,
+                &self.readers,
+                self.path.as_deref(),
+                self.playhead,
+                PREROLL,
+            );
+        }
+    }
+
+    /// Stop every sound: the stream and the scrub slice.
+    fn silence(&mut self) {
+        self.stream = None;
+        self.output.clear_stream();
         self.output.queue(&[]);
+    }
+
+    /// Stream audio from the playhead. A host with no stream clock queues
+    /// one slice per tick instead.
+    fn start_stream(&mut self) {
+        self.output.clear_stream();
+        let Some(clock) = self.output.clock() else {
+            self.stream = None;
+            self.queue_preview(PLAY_FRAMES);
+            return;
+        };
+        self.stream = Some(AudioStream {
+            start: self.playhead,
+            played: clock.played,
+            mixed: 0,
+        });
+        self.top_up_stream();
+    }
+
+    /// Mix whole windows until the stream is [`STREAM_LEAD`] ahead of the
+    /// device, or reaches the end of the cut.
+    fn top_up_stream(&mut self) {
+        let end = self.cut_duration().0;
+        let (Some(stream), Some(clock), Some(session)) = (
+            self.stream.as_mut(),
+            self.output.clock(),
+            self.session.as_ref(),
+        ) else {
+            return;
+        };
+        let mut buffered = clock.buffered;
+        while buffered < STREAM_LEAD {
+            let at = stream.time_at(stream.mixed);
+            if at.0 >= end {
+                break;
+            }
+            stream_mix(
+                &mut self.output,
+                PreviewMix {
+                    draft: session.draft(),
+                    revision: session.revision(),
+                    time: at,
+                    frames: STREAM_WINDOW,
+                    readers: &self.readers,
+                    heard: &mut self.heard,
+                    root: self.path.as_deref(),
+                },
+            );
+            stream.mixed = stream.mixed.saturating_add(u64::from(STREAM_WINDOW));
+            buffered = buffered.saturating_add(STREAM_WINDOW as usize);
+        }
+    }
+
+    /// Where the stream's heard frames reach, or `None` without a stream.
+    fn heard_time(&self) -> Option<Micros> {
+        let stream = self.stream?;
+        let clock = self.output.clock()?;
+        let heard = clock
+            .heard()
+            .saturating_sub(stream.played)
+            .min(stream.mixed);
+        Some(stream.time_at(heard))
     }
 
     pub fn toggle_play(&mut self) {
@@ -923,6 +1065,9 @@ impl Shell {
         self.preview_bytes()
     }
 
+    /// Move the playhead while playing, by `elapsed`. With a stream clock it
+    /// is also pulled toward the heard audio, so the picture stays with the
+    /// sound without taking on the device's uneven steps.
     pub fn advance(&mut self, elapsed: i64) {
         if !self.playing || elapsed <= 0 {
             return;
@@ -931,23 +1076,34 @@ impl Shell {
         if end <= 0 {
             self.playing = false;
             self.playhead = Micros(0);
-            self.output.queue(&[]);
+            self.silence();
             return;
         }
-        let mut next = self.playhead.0.saturating_add(elapsed);
+        let wall = self.playhead.0.saturating_add(elapsed);
+        let mut next = match self.heard_time() {
+            Some(heard) => follow_audio(wall, heard.0).max(self.playhead.0),
+            None => wall,
+        };
+        let mut wrapped = false;
         if next >= end {
             if self.settings.playback.loop_playback {
                 next %= end;
+                wrapped = true;
             } else {
                 next = end;
                 self.playing = false;
             }
         }
         self.playhead = Micros(next);
-        if self.playing {
-            self.queue_preview(preview_frames(elapsed));
+        self.preroll();
+        if !self.playing {
+            self.silence();
+        } else if wrapped && self.stream.is_some() {
+            self.start_stream();
+        } else if self.stream.is_some() {
+            self.top_up_stream();
         } else {
-            self.output.queue(&[]);
+            self.queue_preview(preview_frames(elapsed));
         }
         self.reveal_playhead();
     }
@@ -5291,6 +5447,23 @@ mod tests {
     fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
+    }
+
+    #[test]
+    fn the_playhead_moves_by_elapsed_time_and_leans_toward_the_audio() {
+        assert_eq!(super::follow_audio(1_000_000, 1_000_000), 1_000_000);
+        assert_eq!(super::follow_audio(1_000_000, 1_016_000), 1_001_000);
+        assert_eq!(super::follow_audio(1_000_000, 984_000), 999_000);
+        assert_eq!(super::follow_audio(1_000_000, 1_100_000), 1_100_000);
+        let stream = super::AudioStream {
+            start: Micros(2_000_000),
+            played: 0,
+            mixed: 0,
+        };
+        assert_eq!(
+            stream.time_at(u64::from(super::STREAM_WINDOW)),
+            Micros(2_020_000)
+        );
     }
 
     #[test]

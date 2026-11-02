@@ -25,6 +25,8 @@ pub struct AacDecoder {
     overlaps: Vec<Overlap>,
     frame_index: u64,
     live: bool,
+    /// The last packet's timestamp and timescale, for the frame a drain releases.
+    last: Option<(i64, u32)>,
 }
 
 impl AacDecoder {
@@ -38,6 +40,7 @@ impl AacDecoder {
             overlaps,
             frame_index: 0,
             live: false,
+            last: None,
         })
     }
 
@@ -109,6 +112,7 @@ impl AacDecoder {
         self.overlaps = vec![Overlap::new(frame); self.config.layout.len()];
         self.frame_index = 0;
         self.live = false;
+        self.last = None;
     }
 
     pub fn frame_index(&self) -> u64 {
@@ -1046,15 +1050,25 @@ fn malformed(bits: &BitReader<'_>, what: &'static str) -> CodecError {
 }
 
 impl AacDecoder {
-    fn output(&self, samples: Vec<f32>, index: u64) -> Result<AudioOutput, CodecError> {
+    /// One frame of PCM, stamped with the packet that carried it. A packet
+    /// with no clock is stamped with the frame count since the last reset.
+    fn output(
+        &self,
+        samples: Vec<f32>,
+        index: u64,
+        packet: Option<(i64, u32)>,
+    ) -> Result<AudioOutput, CodecError> {
         let pcm = Pcm::from_f32(self.config.sample_rate, self.config.layout.clone(), samples)
             .map_err(|_| CodecError::Limit { what: "pcm" })?;
         let frame = u64::try_from(self.config.frame_length).unwrap_or(0);
-        let pts = i64::try_from(index.saturating_mul(frame)).unwrap_or(i64::MAX);
+        let (pts, timescale) = packet.filter(|(_, timescale)| *timescale > 0).unwrap_or((
+            i64::try_from(index.saturating_mul(frame)).unwrap_or(i64::MAX),
+            self.config.sample_rate,
+        ));
         Ok(AudioOutput {
             pcm,
             pts,
-            timescale: self.config.sample_rate,
+            timescale,
             skip_leading: 0,
             skip_trailing: 0,
             concealed: false,
@@ -1070,7 +1084,9 @@ impl Decoder for AacDecoder {
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         let samples = self.push_packet(packet)?;
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![Output::Audio(self.output(samples, index)?)])
+        let stamp = Some((packet.pts, packet.timescale));
+        self.last = stamp;
+        Ok(vec![Output::Audio(self.output(samples, index, stamp)?)])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -1078,7 +1094,19 @@ impl Decoder for AacDecoder {
             return Ok(Vec::new());
         };
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![Output::Audio(self.output(samples, index)?)])
+        // The drained frame follows the last packet by one frame.
+        let frame = i64::try_from(self.config.frame_length).unwrap_or(0);
+        let stamp = self
+            .last
+            .filter(|(_, timescale)| *timescale > 0)
+            .map(|(pts, timescale)| {
+                let step = frame
+                    .saturating_mul(i64::from(timescale))
+                    .checked_div(i64::from(self.config.sample_rate.max(1)))
+                    .unwrap_or(0);
+                (pts.saturating_add(step), timescale)
+            });
+        Ok(vec![Output::Audio(self.output(samples, index, stamp)?)])
     }
 
     fn reset(&mut self) {

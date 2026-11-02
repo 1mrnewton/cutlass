@@ -20,10 +20,10 @@ mod playhead;
 mod present;
 mod preview;
 
-pub use apple::{AudioGap, AudioHost, AudioOutput, CopyOutcome};
+pub use apple::{AudioGap, AudioHost, AudioOutput, CopyOutcome, RATE as PREVIEW_RATE, StreamClock};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
 pub use present::{FrameCache, PresentError, Presentation};
-pub use preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix};
+pub use preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix, stream_mix};
 
 #[cfg(test)]
 pub(crate) fn color_session(duration_us: i64, segment_us: i64) -> cutlass_session::Session {

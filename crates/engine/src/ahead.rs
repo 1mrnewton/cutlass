@@ -77,6 +77,19 @@ impl ReadAhead {
         })
     }
 
+    /// Ask for the picture that covers `source` without waiting for it, so
+    /// it is decoded by the time [`Self::picture`] asks.
+    pub(crate) fn prefetch(&self, source: Micros) {
+        let mut state = lock(&self.shared.state);
+        if state.want == Some(source) || find(&state, source).is_some() {
+            return;
+        }
+        state.want = Some(source);
+        state.answer = None;
+        state.failed = None;
+        self.shared.wake.notify_all();
+    }
+
     /// The picture that covers `source`, waiting for the worker when it is
     /// not decoded yet.
     pub(crate) fn picture(&self, source: Micros) -> Result<HeldFrame, EngineError> {

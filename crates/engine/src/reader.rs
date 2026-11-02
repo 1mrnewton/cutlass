@@ -32,6 +32,9 @@ const MAX_SCAN_PICTURES: u32 = 4_000;
 /// How far past the last picture [`Media::decode_at`] keeps decoding forward
 /// instead of seeking. A longer jump seeks to the keyframe before the time.
 const FORWARD_REACH: i64 = 2_000_000;
+/// How far before the asked time an audio seek lands, so the decoder is
+/// primed by the time the asked sample comes out.
+const AUDIO_PREROLL: i64 = 100_000;
 /// Pictures one [`Media::decode_at`] may fail to decode and pass over. After
 /// a seek to an open-GOP keyframe, the leading pictures reference frames
 /// before the seek and cannot be decoded.
@@ -130,6 +133,8 @@ struct Pipe {
     drained: bool,
     /// The last picture packet's duration, for pictures a drain releases.
     last_duration: i64,
+    /// Audio buffers a packet returned after the first, not handed out yet.
+    heard: VecDeque<AudioOutput>,
 }
 
 impl Pipe {
@@ -141,6 +146,7 @@ impl Pipe {
             ready: VecDeque::new(),
             drained: false,
             last_duration: 0,
+            heard: VecDeque::new(),
         }
     }
 
@@ -148,6 +154,7 @@ impl Pipe {
     fn reset(&mut self) {
         self.decoder.reset();
         self.ready.clear();
+        self.heard.clear();
         self.drained = false;
     }
 }
@@ -216,6 +223,7 @@ impl ReaderFactory {
             audio,
             info,
             cursor: None,
+            run: None,
         })
     }
 
@@ -240,6 +248,35 @@ pub struct Media {
     info: MediaInfo,
     /// Where the last [`Media::decode_at`] left the picture stream.
     cursor: Option<Cursor>,
+    /// Decoded audio past the last [`Media::audio_from`], for the next one.
+    run: Option<AudioRun>,
+}
+
+/// Decoded audio the next [`Media::audio_from`] continues from.
+struct AudioRun {
+    /// Sample index, at `rate`, of the first held frame.
+    next: i64,
+    rate: u32,
+    layout: ChannelLayout,
+    /// Interleaved frames from `next` on.
+    samples: Vec<f32>,
+}
+
+impl AudioRun {
+    fn frames(&self) -> usize {
+        self.samples.len() / self.layout.len().max(1)
+    }
+
+    /// Drop up to `frames` leading frames.
+    fn skip(&mut self, frames: i64) {
+        let frames = usize::try_from(frames.max(0))
+            .unwrap_or(usize::MAX)
+            .min(self.frames());
+        self.samples.drain(..frames * self.layout.len());
+        self.next = self
+            .next
+            .saturating_add(i64::try_from(frames).unwrap_or(i64::MAX));
+    }
 }
 
 /// The picture stream after a [`Media::decode_at`]. A time inside `last`
@@ -399,6 +436,7 @@ impl Media {
         track: u32,
         timescale: Timescale,
     ) -> Result<(), EngineError> {
+        self.run = None;
         if timescale.is_clock() {
             let ticks = micros_to_ticks_floor(source, timescale)?;
             self.demux
@@ -503,6 +541,11 @@ impl Media {
     ///
     /// The mix resamples and stretches this buffer. Integer PCM is full-scale
     /// `f32` before it returns. A file with no audio stream is [`EngineError::NotMedia`].
+    ///
+    /// A call that starts where the last one ended continues the decoded
+    /// stream: no seek, no decoder reset, so consecutive windows join without
+    /// a seam. Any other time seeks [`AUDIO_PREROLL`] early and trims to the
+    /// asked sample. Audio before the stream's first sample is silence.
     pub fn audio_from(
         &mut self,
         source: Micros,
@@ -512,6 +555,125 @@ impl Media {
             return Err(EngineError::Window);
         }
         self.cursor = None;
+        let (track, timescale) = {
+            let Some(pipe) = self.audio.as_ref() else {
+                return Err(EngineError::NotMedia);
+            };
+            (pipe.track, pipe.timescale)
+        };
+        let rate = self
+            .info
+            .streams
+            .iter()
+            .find(|stream| stream.track == track)
+            .and_then(|stream| stream.sample_rate)
+            .filter(|rate| *rate > 0);
+        let Some(rate) = rate.filter(|_| timescale.is_clock()) else {
+            return self.audio_from_start(source, frames);
+        };
+        let mut rate = self.run.as_ref().map_or(rate, |run| run.rate);
+        let mut want = sample_at(source, rate);
+        let continues = self
+            .run
+            .as_ref()
+            .is_some_and(|run| (run.next - want).abs() <= 1);
+        if continues {
+            want = self.run.as_ref().map_or(want, |run| run.next);
+        } else {
+            self.run = None;
+            if let Some(pipe) = self.audio.as_mut() {
+                pipe.reset();
+            }
+            let early = Micros(source.0.saturating_sub(AUDIO_PREROLL).max(0));
+            let ticks = micros_to_ticks_floor(early, timescale)?;
+            self.demux
+                .seek(SeekTo {
+                    track,
+                    time: ticks,
+                    end: None,
+                })
+                .map_err(from_read)?;
+        }
+        let needed = i64::from(frames);
+        let mut empty = 0_u32;
+        loop {
+            if let Some(run) = self.run.as_mut() {
+                if run.next < want {
+                    run.skip(want - run.next);
+                }
+                let end = run.next + i64::try_from(run.frames()).unwrap_or(i64::MAX);
+                if run.next <= want && end >= want + needed {
+                    break;
+                }
+            }
+            let Some(output) = self.next_audio()? else {
+                break;
+            };
+            let start = output
+                .pts
+                .checked_mul(i64::from(output.pcm.rate))
+                .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
+                .unwrap_or(0)
+                .saturating_add(i64::from(output.skip_leading));
+            let pcm = audible(output)?.pcm;
+            if pcm.rate == 0 {
+                return Err(EngineError::NoClock);
+            }
+            let floats = unit_samples(&pcm)?;
+            if floats.is_empty() {
+                empty = empty.saturating_add(1);
+                if empty == 8 {
+                    break;
+                }
+                continue;
+            }
+            match self.run.as_mut() {
+                Some(run) => {
+                    if run.rate != pcm.rate || run.layout != pcm.layout {
+                        return Err(EngineError::Layout);
+                    }
+                    run.samples.extend_from_slice(&floats);
+                }
+                None => {
+                    if pcm.rate != rate {
+                        // The decoder runs at another rate than the stream
+                        // names, as HE-AAC does.
+                        rate = pcm.rate;
+                        want = sample_at(source, rate);
+                    }
+                    self.run = Some(AudioRun {
+                        next: start,
+                        rate,
+                        layout: pcm.layout.clone(),
+                        samples: floats,
+                    });
+                }
+            }
+        }
+        let Some(run) = self.run.as_mut() else {
+            return Err(EngineError::NotReady);
+        };
+        let channels = run.layout.len();
+        let mut out = Vec::with_capacity(usize::try_from(frames).unwrap_or(0) * channels);
+        let silent = (run.next - want).clamp(0, needed);
+        out.resize(usize::try_from(silent).unwrap_or(0) * channels, 0.0);
+        let take = usize::try_from(needed - silent)
+            .unwrap_or(0)
+            .min(run.frames());
+        out.extend(run.samples.drain(..take * channels));
+        run.next = run.next.saturating_add(i64::try_from(take).unwrap_or(0));
+        cutlass_codec::access::Pcm::from_f32(run.rate, run.layout.clone(), out)
+            .map_err(|_| EngineError::Layout)
+    }
+
+    /// [`Self::audio_from`] for a stream with no clock or no stated rate:
+    /// seek and read from the landed packet.
+    fn audio_from_start(
+        &mut self,
+        source: Micros,
+        frames: u32,
+    ) -> Result<cutlass_codec::access::Pcm, EngineError> {
+        self.run = None;
         let (track, timescale) = {
             let Some(pipe) = self.audio.as_mut() else {
                 return Err(EngineError::NotMedia);
@@ -588,9 +750,19 @@ impl Media {
     /// The next decoded audio buffer, or [`None`] when the stream ends or there is no audio.
     pub fn pull_audio(&mut self) -> Result<Option<PcmReady>, EngineError> {
         self.cursor = None;
+        self.run = None;
+        self.next_audio()?.map(audible).transpose()
+    }
+
+    /// The next decoded audio buffer with its timestamp. A packet that
+    /// returns several keeps the rest for the next call.
+    fn next_audio(&mut self) -> Result<Option<AudioOutput>, EngineError> {
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
         };
+        if let Some(output) = self.audio.as_mut().and_then(|pipe| pipe.heard.pop_front()) {
+            return Ok(Some(output));
+        }
         let mut taken = 0_u32;
         let mut others = 0_u32;
         loop {
@@ -613,10 +785,13 @@ impl Media {
                 return Ok(None);
             };
             let outputs = pipe.decoder.push(&access)?;
-            for output in outputs {
-                if let Output::Audio(audio) = output {
-                    return Ok(Some(audible(audio)?));
-                }
+            pipe.heard
+                .extend(outputs.into_iter().filter_map(|output| match output {
+                    Output::Audio(audio) => Some(audio),
+                    Output::Picture(_) => None,
+                }));
+            if let Some(output) = pipe.heard.pop_front() {
+                return Ok(Some(output));
             }
         }
     }
@@ -867,6 +1042,13 @@ fn pcm_format(coding: u8) -> Result<SampleFormat, EngineError> {
         2..=5 => Ok(SampleFormat::F32),
         _ => Err(EngineError::Layout),
     }
+}
+
+/// The sample index at `rate` nearest `time`.
+fn sample_at(time: Micros, rate: u32) -> i64 {
+    let product = i128::from(time.0) * i128::from(rate);
+    let rounded = (product + 500_000).div_euclid(1_000_000);
+    i64::try_from(rounded).unwrap_or(i64::MAX)
 }
 
 fn unit_samples(pcm: &cutlass_codec::access::Pcm) -> Result<Vec<f32>, EngineError> {

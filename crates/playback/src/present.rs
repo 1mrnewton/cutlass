@@ -187,6 +187,21 @@ pub(crate) struct DrawnWith<'a> {
 }
 
 impl FrameCache {
+    /// Open clips that start within `horizon` after `time` and start
+    /// decoding their first pictures.
+    pub fn preroll(
+        &mut self,
+        session: &Session,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        time: Micros,
+        horizon: Micros,
+    ) {
+        self.clips.set_project(root);
+        self.clips
+            .preroll(media, session.draft(), session.revision(), time, horizon);
+    }
+
     /// The frame at `time` as GPU layers, or composed pixels when it needs
     /// the CPU. The open clips are shared with [`Self::frame`]. Nothing is
     /// stored: the caller keeps what it drew.

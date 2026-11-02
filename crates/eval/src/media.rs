@@ -107,6 +107,50 @@ impl OpenClips {
         self.root = root.map(Path::to_path_buf);
     }
 
+    /// Open the video clips that start after `time` and within `horizon`,
+    /// and start decoding each one's first picture, so playback reaching a
+    /// cut finds it ready instead of opening and seeking on that frame.
+    pub fn preroll(
+        &mut self,
+        media: &ReaderFactory,
+        draft: &Draft,
+        revision: u64,
+        time: Micros,
+        horizon: Micros,
+    ) {
+        self.prepare(draft, revision);
+        let until = time.0.saturating_add(horizon.0);
+        for track in &draft.tracks {
+            if track.attribute.contains(TrackAttribute::HIDE) {
+                continue;
+            }
+            for segment in &track.segments {
+                let start = segment.target.start.0;
+                if !segment.visible
+                    || segment.source_range.is_none()
+                    || start <= time.0
+                    || start > until
+                    || !matches!(
+                        draft.materials.get(segment.material_id.as_str()),
+                        Some(MaterialRef::Video(_))
+                    )
+                {
+                    continue;
+                }
+                if !self.sources.contains_key(&segment.id) {
+                    let Some(source) = open_clip(media, draft, &segment.id, self.root.as_deref())
+                    else {
+                        continue;
+                    };
+                    self.sources.insert(segment.id.clone(), source);
+                }
+                if let Some(source) = self.sources.get(&segment.id) {
+                    source.prefetch(segment.target.start);
+                }
+            }
+        }
+    }
+
     pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
         if self.bound && self.draft.as_ref() == Some(&draft.id) && self.revision == revision {
             return;

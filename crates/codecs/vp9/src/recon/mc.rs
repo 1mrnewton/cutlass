@@ -9,6 +9,7 @@
 
 use cutlass_decode::CodecError;
 
+use crate::pel::Pix;
 use crate::tables::SUBPEL_FILTERS;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,47 +32,69 @@ pub struct Motion {
     pub cells: Vec<MotionCell>,
 }
 
-pub struct RefPlane {
-    pub samples: Vec<u8>,
+pub struct RefPlane<P: Pix = u8> {
+    pub samples: Vec<P>,
     pub stride: usize,
     pub width: usize,
     pub height: usize,
 }
 
-pub struct Reference {
-    pub y: RefPlane,
-    pub u: RefPlane,
-    pub v: RefPlane,
+pub struct Reference<P: Pix = u8> {
+    pub y: RefPlane<P>,
+    pub u: RefPlane<P>,
+    pub v: RefPlane<P>,
     pub width: u32,
     pub height: u32,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub color_space: u8,
+    pub color_range: u8,
+    pub bit_depth: u8,
+    pub render_width: u32,
+    pub render_height: u32,
 }
 
-pub struct RefSlots<'a> {
-    pub frames: [Option<&'a Reference>; 8],
+pub struct RefSlots<'a, P: Pix = u8> {
+    pub frames: [Option<&'a Reference<P>>; 8],
 }
 
-impl<'a> RefSlots<'a> {
+impl<'a, P: Pix> RefSlots<'a, P> {
     pub fn none() -> Self {
         Self { frames: [None; 8] }
     }
 }
 
-impl Reference {
+impl<P: Pix> Reference<P> {
     pub fn from_picture(pic: &super::Picture) -> Result<Self, CodecError> {
+        if pic.bit_depth != P::DEPTH {
+            return Err(bad("reference bit depth"));
+        }
         let width = usize::try_from(pic.width).unwrap_or(0);
         let height = usize::try_from(pic.height).unwrap_or(0);
+        let chroma_w = width.div_ceil(1usize << pic.ss_x.min(1));
+        let chroma_h = height.div_ceil(1usize << pic.ss_y.min(1));
+        let y = unpack(&pic.y, width.saturating_mul(height))?;
+        let u = unpack(&pic.u, chroma_w.saturating_mul(chroma_h))?;
+        let v = unpack(&pic.v, chroma_w.saturating_mul(chroma_h))?;
         Ok(Self {
-            y: RefPlane::tight(&pic.y, width, height)?,
-            u: RefPlane::tight(&pic.u, width.div_ceil(2), height.div_ceil(2))?,
-            v: RefPlane::tight(&pic.v, width.div_ceil(2), height.div_ceil(2))?,
+            y: RefPlane::tight(&y, width, height)?,
+            u: RefPlane::tight(&u, chroma_w, chroma_h)?,
+            v: RefPlane::tight(&v, chroma_w, chroma_h)?,
             width: pic.width,
             height: pic.height,
+            ss_x: pic.ss_x,
+            ss_y: pic.ss_y,
+            color_space: pic.color_space,
+            color_range: pic.color_range,
+            bit_depth: pic.bit_depth,
+            render_width: pic.render_width,
+            render_height: pic.render_height,
         })
     }
 }
 
-impl RefPlane {
-    fn tight(samples: &[u8], width: usize, height: usize) -> Result<Self, CodecError> {
+impl<P: Pix> RefPlane<P> {
+    fn tight(samples: &[P], width: usize, height: usize) -> Result<Self, CodecError> {
         let need = width.checked_mul(height).ok_or(bad("reference plane"))?;
         if samples.len() != need || width == 0 || height == 0 {
             return Err(bad("reference plane"));
@@ -85,8 +108,8 @@ impl RefPlane {
     }
 }
 
-pub struct Job<'a> {
-    pub pred: &'a mut [u8],
+pub struct Job<'a, P: Pix = u8> {
+    pub pred: &'a mut [P],
     pub pred_stride: usize,
     pub w: usize,
     pub h: usize,
@@ -95,7 +118,7 @@ pub struct Job<'a> {
     pub mv_row: i32,
     pub mv_col: i32,
     pub filter: usize,
-    pub reference: &'a RefPlane,
+    pub reference: &'a RefPlane<P>,
 }
 
 /// Fixed-point reference scale, libvpx `scale_factors` for 8-bit 4:2:0.
@@ -146,8 +169,8 @@ impl Scale {
     }
 }
 
-pub struct ScaledJob<'a> {
-    pub pred: &'a mut [u8],
+pub struct ScaledJob<'a, P: Pix = u8> {
+    pub pred: &'a mut [P],
     pub pred_stride: usize,
     pub w: usize,
     pub h: usize,
@@ -158,7 +181,7 @@ pub struct ScaledJob<'a> {
     pub x_step: i32,
     pub y_step: i32,
     pub filter: usize,
-    pub reference: &'a RefPlane,
+    pub reference: &'a RefPlane<P>,
 }
 
 /// Block origin in the reference after `vp9_scale_mv`.
@@ -178,7 +201,7 @@ pub fn scaled_point(
     Ok((x0, y0, col & 15, row & 15))
 }
 
-pub fn render_scaled(mut job: ScaledJob<'_>) -> Result<(), CodecError> {
+pub fn render_scaled<P: Pix>(mut job: ScaledJob<'_, P>) -> Result<(), CodecError> {
     if job.filter >= SUBPEL_FILTERS.len()
         || job.w == 0
         || job.h == 0
@@ -200,7 +223,7 @@ pub fn render_scaled(mut job: ScaledJob<'_>) -> Result<(), CodecError> {
     }
 }
 
-pub fn render(mut job: Job<'_>) -> Result<(), CodecError> {
+pub fn render<P: Pix>(mut job: Job<'_, P>) -> Result<(), CodecError> {
     if job.filter >= SUBPEL_FILTERS.len() || job.w == 0 || job.h == 0 {
         return Err(bad("motion sample"));
     }
@@ -219,7 +242,7 @@ pub fn render(mut job: Job<'_>) -> Result<(), CodecError> {
     }
 }
 
-fn copy_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
+fn copy_scaled<P: Pix>(job: &mut ScaledJob<'_, P>) -> Result<(), CodecError> {
     for row in 0..job.h {
         let y = job.y0 + i32::try_from(row).unwrap_or(0);
         for col in 0..job.w {
@@ -231,7 +254,7 @@ fn copy_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn horiz_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
+fn horiz_scaled<P: Pix>(job: &mut ScaledJob<'_, P>) -> Result<(), CodecError> {
     for row in 0..job.h {
         let y = job.y0 + i32::try_from(row).unwrap_or(0);
         let mut x_q4 = job.sub_x;
@@ -244,7 +267,7 @@ fn horiz_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn vert_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
+fn vert_scaled<P: Pix>(job: &mut ScaledJob<'_, P>) -> Result<(), CodecError> {
     for row in 0..job.h {
         let y_q4 = job.sub_y + i32::try_from(row).unwrap_or(0) * job.y_step;
         let phase = phase_of(y_q4)?;
@@ -259,7 +282,7 @@ fn vert_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn both_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
+fn both_scaled<P: Pix>(job: &mut ScaledJob<'_, P>) -> Result<(), CodecError> {
     let height = i32::try_from(job.h).unwrap_or(0);
     let rows_i = ((height - 1) * job.y_step + job.sub_y) >> 4;
     let rows = usize::try_from(rows_i + 8).unwrap_or(0);
@@ -268,7 +291,7 @@ fn both_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
     if rows < 8 {
         return Err(bad("motion sample"));
     }
-    let mut temp = vec![0u8; cells];
+    let mut temp = vec![P::default(); cells];
     for row in 0..rows {
         let y = job.y0 - 3 + i32::try_from(row).unwrap_or(0);
         let mut x_q4 = job.sub_x;
@@ -285,11 +308,10 @@ fn both_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
         for col in 0..width {
             let mut sum = 0i32;
             for (tap, coef) in kernel.iter().enumerate() {
-                let sample = i32::from(
-                    *temp
-                        .get((base + tap) * width + col)
-                        .ok_or(bad("motion sample"))?,
-                );
+                let sample = temp
+                    .get((base + tap) * width + col)
+                    .ok_or(bad("motion sample"))?
+                    .get();
                 sum += i32::from(*coef) * sample;
             }
             put_scaled(job, col, row, round7(sum))?;
@@ -298,7 +320,7 @@ fn both_scaled(job: &mut ScaledJob<'_>) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn horiz_tap(job: &ScaledJob<'_>, x_q4: i32, y: i32) -> Result<u8, CodecError> {
+fn horiz_tap<P: Pix>(job: &ScaledJob<'_, P>, x_q4: i32, y: i32) -> Result<P, CodecError> {
     let phase = phase_of(x_q4)?;
     let kernel = &SUBPEL_FILTERS[job.filter][phase];
     let x = job.x0 + (x_q4 >> 4);
@@ -309,11 +331,11 @@ fn phase_of(q4: i32) -> Result<usize, CodecError> {
     usize::try_from(q4 & 15).map_err(|_| bad("motion sample"))
 }
 
-fn put_scaled(
-    job: &mut ScaledJob<'_>,
+fn put_scaled<P: Pix>(
+    job: &mut ScaledJob<'_, P>,
     col: usize,
     row: usize,
-    value: u8,
+    value: P,
 ) -> Result<(), CodecError> {
     let at = row * job.pred_stride + col;
     let slot = job.pred.get_mut(at).ok_or(bad("motion sample"))?;
@@ -357,7 +379,7 @@ fn split_q4(delta: i32) -> (i32, usize) {
     (delta >> 4, usize::try_from(delta & 15).unwrap_or(0))
 }
 
-fn copy(job: &mut Job<'_>, x0: i32, y0: i32) -> Result<(), CodecError> {
+fn copy<P: Pix>(job: &mut Job<'_, P>, x0: i32, y0: i32) -> Result<(), CodecError> {
     for row in 0..job.h {
         let y = y0 + i32::try_from(row).unwrap_or(0);
         for col in 0..job.w {
@@ -369,7 +391,7 @@ fn copy(job: &mut Job<'_>, x0: i32, y0: i32) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn horiz(job: &mut Job<'_>, x0: i32, y0: i32, sub: usize) -> Result<(), CodecError> {
+fn horiz<P: Pix>(job: &mut Job<'_, P>, x0: i32, y0: i32, sub: usize) -> Result<(), CodecError> {
     let kernel = SUBPEL_FILTERS[job.filter][sub];
     for row in 0..job.h {
         let y = y0 + i32::try_from(row).unwrap_or(0);
@@ -382,7 +404,7 @@ fn horiz(job: &mut Job<'_>, x0: i32, y0: i32, sub: usize) -> Result<(), CodecErr
     Ok(())
 }
 
-fn vert(job: &mut Job<'_>, x0: i32, y0: i32, sub: usize) -> Result<(), CodecError> {
+fn vert<P: Pix>(job: &mut Job<'_, P>, x0: i32, y0: i32, sub: usize) -> Result<(), CodecError> {
     let kernel = SUBPEL_FILTERS[job.filter][sub];
     for row in 0..job.h {
         let y = y0 + i32::try_from(row).unwrap_or(0);
@@ -395,9 +417,15 @@ fn vert(job: &mut Job<'_>, x0: i32, y0: i32, sub: usize) -> Result<(), CodecErro
     Ok(())
 }
 
-fn both(job: &mut Job<'_>, x0: i32, y0: i32, sx: usize, sy: usize) -> Result<(), CodecError> {
+fn both<P: Pix>(
+    job: &mut Job<'_, P>,
+    x0: i32,
+    y0: i32,
+    sx: usize,
+    sy: usize,
+) -> Result<(), CodecError> {
     let rows = (((job.h - 1) * 16 + sy) >> 4) + 8;
-    let mut temp = vec![0u8; job.w.saturating_mul(rows)];
+    let mut temp = vec![P::default(); job.w.saturating_mul(rows)];
     let kernel_x = SUBPEL_FILTERS[job.filter][sx];
     for row in 0..rows {
         let y = y0 - 3 + i32::try_from(row).unwrap_or(0);
@@ -413,11 +441,10 @@ fn both(job: &mut Job<'_>, x0: i32, y0: i32, sx: usize, sy: usize) -> Result<(),
         for col in 0..job.w {
             let mut sum = 0i32;
             for (tap, coef) in kernel_y.iter().enumerate() {
-                let sample = i32::from(
-                    *temp
-                        .get((base + tap) * job.w + col)
-                        .ok_or(bad("motion sample"))?,
-                );
+                let sample = temp
+                    .get((base + tap) * job.w + col)
+                    .ok_or(bad("motion sample"))?
+                    .get();
                 sum += i32::from(*coef) * sample;
             }
             put(job, col, row, round7(sum))?;
@@ -426,25 +453,35 @@ fn both(job: &mut Job<'_>, x0: i32, y0: i32, sx: usize, sy: usize) -> Result<(),
     Ok(())
 }
 
-fn filter_at(plane: &RefPlane, x: i32, y: i32, kernel: &[i16; 8]) -> Result<u8, CodecError> {
+fn filter_at<P: Pix>(
+    plane: &RefPlane<P>,
+    x: i32,
+    y: i32,
+    kernel: &[i16; 8],
+) -> Result<P, CodecError> {
     let mut sum = 0i32;
     for (tap, coef) in kernel.iter().enumerate() {
-        let sample = i32::from(sample(plane, x - 3 + i32::try_from(tap).unwrap_or(0), y)?);
+        let sample = sample(plane, x - 3 + i32::try_from(tap).unwrap_or(0), y)?.get();
         sum += i32::from(*coef) * sample;
     }
     Ok(round7(sum))
 }
 
-fn filter_column(plane: &RefPlane, x: i32, y: i32, kernel: &[i16; 8]) -> Result<u8, CodecError> {
+fn filter_column<P: Pix>(
+    plane: &RefPlane<P>,
+    x: i32,
+    y: i32,
+    kernel: &[i16; 8],
+) -> Result<P, CodecError> {
     let mut sum = 0i32;
     for (tap, coef) in kernel.iter().enumerate() {
-        let sample = i32::from(sample(plane, x, y - 3 + i32::try_from(tap).unwrap_or(0))?);
+        let sample = sample(plane, x, y - 3 + i32::try_from(tap).unwrap_or(0))?.get();
         sum += i32::from(*coef) * sample;
     }
     Ok(round7(sum))
 }
 
-fn sample(plane: &RefPlane, x: i32, y: i32) -> Result<u8, CodecError> {
+fn sample<P: Pix>(plane: &RefPlane<P>, x: i32, y: i32) -> Result<P, CodecError> {
     if plane.width == 0 || plane.height == 0 {
         return Err(bad("reference plane"));
     }
@@ -459,16 +496,19 @@ fn sample(plane: &RefPlane, x: i32, y: i32) -> Result<u8, CodecError> {
         .ok_or(bad("reference plane"))
 }
 
-fn put(job: &mut Job<'_>, col: usize, row: usize, value: u8) -> Result<(), CodecError> {
+fn put<P: Pix>(job: &mut Job<'_, P>, col: usize, row: usize, value: P) -> Result<(), CodecError> {
     let at = row * job.pred_stride + col;
     let slot = job.pred.get_mut(at).ok_or(bad("motion sample"))?;
     *slot = value;
     Ok(())
 }
 
-fn round7(sum: i32) -> u8 {
-    let rounded = (sum + 64) >> 7;
-    u8::try_from(rounded.clamp(0, 255)).unwrap_or(0)
+fn round7<P: Pix>(sum: i32) -> P {
+    P::put((sum + 64) >> 7)
+}
+
+fn unpack<P: Pix>(bytes: &[u8], count: usize) -> Result<Vec<P>, CodecError> {
+    crate::pel::unpack_plane(bytes, count).map_err(|()| bad("reference plane"))
 }
 
 fn bad(what: &'static str) -> CodecError {

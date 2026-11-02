@@ -268,7 +268,7 @@ mod tests {
         let bytes = writer.finish().expect("tokens");
         let mut reader = BoolDecoder::new(&bytes).expect("decoder");
         let mut counts = Counts::new();
-        let mut coef = vec![0i32; tokens.len()];
+        let mut coef = vec![0i64; tokens.len()];
         decode_coefs(
             &mut reader,
             &fc,
@@ -282,9 +282,11 @@ mod tests {
             scan,
             neighbors,
             &mut coef,
+            8,
         )
         .expect("coefs");
         reader.finish().expect("padding");
+        let coef: Vec<i32> = coef.iter().map(|v| i32::try_from(*v).unwrap()).collect();
         assert_eq!(coef, tokens);
     }
 }

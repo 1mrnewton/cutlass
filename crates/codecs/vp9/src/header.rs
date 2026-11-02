@@ -14,7 +14,9 @@ use crate::geom::{
     SINGLE_REFERENCE, SWITCHABLE,
 };
 use crate::prob::{self, FrameContext};
-use crate::tables::{AC_QLOOKUP, DC_QLOOKUP};
+use crate::tables::{
+    AC_QLOOKUP, AC_QLOOKUP_10, AC_QLOOKUP_12, DC_QLOOKUP, DC_QLOOKUP_10, DC_QLOOKUP_12,
+};
 
 const MAX_PROB: u8 = 255;
 const REF_SLOTS: usize = 8;
@@ -53,6 +55,11 @@ pub struct Persist {
     pub ref_deltas: [i8; 4],
     pub mode_deltas: [i8; 2],
     pub sign_bias: [u8; 4],
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub bit_depth: u8,
+    pub color_space: u8,
+    pub color_range: u8,
 }
 
 impl Persist {
@@ -74,6 +81,11 @@ impl Persist {
             ref_deltas: [0; 4],
             mode_deltas: [0; 2],
             sign_bias: [0; 4],
+            ss_x: 1,
+            ss_y: 1,
+            bit_depth: 8,
+            color_space: 1,
+            color_range: 0,
         }
     }
 }
@@ -97,6 +109,9 @@ pub struct Header {
     pub refresh_flags: u8,
     pub color_space: u8,
     pub color_range: u8,
+    pub ss_x: u32,
+    pub ss_y: u32,
+    pub bit_depth: u8,
     pub width: u32,
     pub height: u32,
     pub render_width: u32,
@@ -150,10 +165,8 @@ pub fn parse<'a>(state: &Persist, data: &'a [u8]) -> Result<Parsed<'a>, CodecErr
         return Err(bad(&bits, "frame marker"));
     }
     let profile = read_profile(&mut bits)?;
-    if profile != 0 {
-        return Err(CodecError::Unsupported {
-            what: "vp9 profile",
-        });
+    if profile > 3 {
+        return Err(bad(&bits, "vp9 profile"));
     }
     if bits.read(1)? == 1 {
         return show_existing(state, &mut bits, data);
@@ -182,6 +195,13 @@ pub fn parse<'a>(state: &Persist, data: &'a [u8]) -> Result<Parsed<'a>, CodecErr
         )?;
     }
     header.need_resync = need_resync;
+    if !key_frame && !header.intra_only {
+        header.ss_x = state.ss_x;
+        header.ss_y = state.ss_y;
+        header.bit_depth = state.bit_depth;
+        header.color_space = state.color_space;
+        header.color_range = state.color_range;
+    }
 
     read_context_flags(&mut bits, &mut header)?;
     if header.intra() || error_resilient {
@@ -327,8 +347,15 @@ fn read_inter_setup(
 
 fn read_intra_only(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
     read_sync(bits)?;
-    header.color_space = 1;
-    header.color_range = 0;
+    if header.profile > 0 {
+        read_color(bits, header)?;
+    } else {
+        header.color_space = 1;
+        header.color_range = 0;
+        header.ss_x = 1;
+        header.ss_y = 1;
+        header.bit_depth = 8;
+    }
     header.refresh_flags = u8::try_from(bits.read(8)?).unwrap_or(0);
     read_frame_size(bits, header)
 }
@@ -725,12 +752,21 @@ fn load_context(contexts: &[FrameContext; 4], index: u8) -> Result<FrameContext,
 
 fn fill_dequant(header: &mut Header) {
     let base = i32::from(header.base_qindex);
+    let (dc, ac) = q_tables(header.bit_depth);
     for seg_id in 0..8 {
         let q = seg_qindex(&header.seg, seg_id, base);
-        header.y_dq[seg_id][0] = lookup(&DC_QLOOKUP, q, i32::from(header.y_dc_delta));
-        header.y_dq[seg_id][1] = lookup(&AC_QLOOKUP, q, 0);
-        header.uv_dq[seg_id][0] = lookup(&DC_QLOOKUP, q, i32::from(header.uv_dc_delta));
-        header.uv_dq[seg_id][1] = lookup(&AC_QLOOKUP, q, i32::from(header.uv_ac_delta));
+        header.y_dq[seg_id][0] = lookup(dc, q, i32::from(header.y_dc_delta));
+        header.y_dq[seg_id][1] = lookup(ac, q, 0);
+        header.uv_dq[seg_id][0] = lookup(dc, q, i32::from(header.uv_dc_delta));
+        header.uv_dq[seg_id][1] = lookup(ac, q, i32::from(header.uv_ac_delta));
+    }
+}
+
+fn q_tables(bit_depth: u8) -> (&'static [i16; 256], &'static [i16; 256]) {
+    match bit_depth {
+        10 => (&DC_QLOOKUP_10, &AC_QLOOKUP_10),
+        12 => (&DC_QLOOKUP_12, &AC_QLOOKUP_12),
+        _ => (&DC_QLOOKUP, &AC_QLOOKUP),
     }
 }
 
@@ -776,19 +812,50 @@ fn read_sync(bits: &mut BitReader<'_>) -> Result<(), CodecError> {
 }
 
 fn read_color(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
+    if header.profile >= 2 {
+        header.bit_depth = if bits.read(1)? == 1 { 12 } else { 10 };
+    } else {
+        header.bit_depth = 8;
+    }
     header.color_space = u8::try_from(bits.read(3)?).unwrap_or(0);
     if header.color_space == 7 {
-        return Err(bad(bits, "profile 0 rgb"));
+        if header.profile & 1 == 0 {
+            let what = if header.profile == 0 {
+                "profile 0 rgb"
+            } else {
+                "profile rgb"
+            };
+            return Err(bad(bits, what));
+        }
+        header.color_range = 1;
+        header.ss_x = 0;
+        header.ss_y = 0;
+        if bits.read(1)? == 1 {
+            return Err(bad(bits, "reserved bit"));
+        }
+        return Ok(());
     }
     header.color_range = u8::try_from(bits.read(1)?).unwrap_or(0);
+    if header.profile & 1 == 1 {
+        header.ss_x = bits.read(1)?;
+        header.ss_y = bits.read(1)?;
+        if header.ss_x == 1 && header.ss_y == 1 {
+            return Err(bad(bits, "profile chroma"));
+        }
+        if bits.read(1)? == 1 {
+            return Err(bad(bits, "reserved bit"));
+        }
+    } else {
+        header.ss_x = 1;
+        header.ss_y = 1;
+    }
     Ok(())
 }
 
 fn read_frame_size(bits: &mut BitReader<'_>, header: &mut Header) -> Result<(), CodecError> {
     let width = bits.read(16)?.saturating_add(1);
     let height = bits.read(16)?.saturating_add(1);
-    check_edge(width)?;
-    check_edge(height)?;
+    check_picture(width, height)?;
     header.width = width;
     header.height = height;
     header.show_width = width;
@@ -823,8 +890,7 @@ fn read_size_with_refs(bits: &mut BitReader<'_>, header: &mut Header) -> Result<
         header.width = width;
         header.height = height;
     }
-    check_edge(header.width)?;
-    check_edge(header.height)?;
+    check_picture(header.width, header.height)?;
     let mut valid = false;
     for size in header.ref_size {
         valid |= valid_ref_size(size.0, size.1, header.width, header.height);
@@ -862,8 +928,18 @@ fn valid_ref_size(ref_w: u32, ref_h: u32, width: u32, height: u32) -> bool {
         && height <= ref_h.saturating_mul(16)
 }
 
+fn check_picture(width: u32, height: u32) -> Result<(), CodecError> {
+    if geom::level_picture(width, height) {
+        Ok(())
+    } else {
+        Err(CodecError::Limit {
+            what: "vp9 frame edge",
+        })
+    }
+}
+
 fn check_edge(edge: u32) -> Result<(), CodecError> {
-    if edge == 0 || edge > geom::MAX_EDGE {
+    if edge == 0 || edge > geom::LEVEL_MAX_EDGE {
         Err(CodecError::Limit {
             what: "vp9 frame edge",
         })
@@ -931,6 +1007,9 @@ fn empty_header(profile: u8, key_frame: bool, show_frame: bool, error_resilient:
         refresh_flags: 0,
         color_space: 0,
         color_range: 0,
+        ss_x: 1,
+        ss_y: 1,
+        bit_depth: 8,
         width: 0,
         height: 0,
         render_width: 0,
@@ -1036,9 +1115,17 @@ mod tests {
     }
 
     #[test]
-    fn profile_one_is_unsupported() {
-        let err = must_fail(&[0xa0]);
-        assert!(err.contains("profile"), "{err}");
+    fn profile_three_header_continues_past_the_profile_bits() {
+        let err = must_fail(&[0xb0]);
+        assert!(!err.contains("vp9 profile"), "{err}");
+    }
+
+    #[test]
+    fn profile_one_reserved_bit_is_malformed() {
+        // Marker, profile 1, key frame, shown, sync, sRGB, reserved bit 1.
+        let bytes = [0xa2, 0x49, 0x83, 0x42, 0b1111_0000];
+        let err = must_fail(&bytes);
+        assert!(err.contains("reserved"), "{err}");
     }
 
     #[test]

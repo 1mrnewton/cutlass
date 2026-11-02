@@ -29,12 +29,13 @@ struct CoefReader<'a, 'b> {
     reference: usize,
     scan: &'a [u16],
     neighbors: &'a [u16],
-    coef: &'a mut [i32],
+    coef: &'a mut [i64],
     bands: &'a [u8],
     cache: Vec<u8>,
     dq_dc: i32,
     dq_ac: i32,
     shift: u32,
+    bit_depth: u8,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -50,7 +51,8 @@ pub fn decode_coefs(
     ctx: usize,
     scan: &[u16],
     neighbors: &[u16],
-    coef: &mut [i32],
+    coef: &mut [i64],
+    bit_depth: u8,
 ) -> Result<usize, CodecError> {
     let bands: &[u8] = if tx == 0 { &BAND_4X4 } else { &BAND_8X8_PLUS };
     let mut walk = CoefReader {
@@ -69,6 +71,7 @@ pub fn decode_coefs(
         dq_dc: i32::from(dq[0]),
         dq_ac: i32::from(dq[1]),
         shift: u32::from(tx == 3),
+        bit_depth,
     };
     walk.walk(ctx)
 }
@@ -127,11 +130,11 @@ impl CoefReader<'_, '_> {
         }
     }
 
-    fn magnitude(&mut self, band: usize, ctx: usize, dqv: i32) -> Result<(i32, u8), CodecError> {
+    fn magnitude(&mut self, band: usize, ctx: usize, dqv: i32) -> Result<(i64, u8), CodecError> {
         let pivot = self.prob(band, ctx, 2);
         if self.bit(pivot)? == 0 {
             self.tally(band, ctx, ONE_TOKEN);
-            let mag = dqv >> self.shift;
+            let mag = i64::from(dqv) >> self.shift;
             return Ok((self.signed(mag)?, 1));
         }
         self.tally(band, ctx, TWO_TOKEN);
@@ -142,17 +145,17 @@ impl CoefReader<'_, '_> {
         self.category(extra, dqv)
     }
 
-    fn small(&mut self, extra: [u8; 8], dqv: i32) -> Result<(i32, u8), CodecError> {
+    fn small(&mut self, extra: [u8; 8], dqv: i32) -> Result<(i64, u8), CodecError> {
         if self.bit(extra[1])? == 0 {
-            let mag = (2 * dqv) >> self.shift;
+            let mag = i64::from(2 * dqv) >> self.shift;
             return Ok((self.signed(mag)?, 2));
         }
         let ones = i32::try_from(self.bit(extra[2])?).unwrap_or(0);
-        let mag = ((3 + ones) * dqv) >> self.shift;
+        let mag = i64::from((3 + ones) * dqv) >> self.shift;
         Ok((self.signed(mag)?, 3))
     }
 
-    fn category(&mut self, extra: [u8; 8], dqv: i32) -> Result<(i32, u8), CodecError> {
+    fn category(&mut self, extra: [u8; 8], dqv: i32) -> Result<(i64, u8), CodecError> {
         let (base, bits, probs, energy) = if self.bit(extra[3])? == 0 {
             if self.bit(extra[4])? == 0 {
                 (5, 1u32, &CAT1_PROB[..], 4)
@@ -168,10 +171,17 @@ impl CoefReader<'_, '_> {
         } else if self.bit(extra[7])? == 0 {
             (35, 5, &CAT5_PROB[..], 5)
         } else {
-            (67, 14, &CAT6_PROB[..], 5)
+            let mut base = 67i32;
+            let extra = u32::from(self.bit_depth.saturating_sub(8));
+            for e in 0..extra {
+                let high = i32::try_from(self.bit(255)?).unwrap_or(0);
+                let shift = 5 + i32::from(self.bit_depth) - i32::try_from(e).unwrap_or(0);
+                base += high << shift;
+            }
+            (base, 14, &CAT6_PROB[..], 5)
         };
         let extra_bits = self.cat_bits(probs, bits)?;
-        let mag = ((base + extra_bits) * dqv) >> self.shift;
+        let mag = ((i64::from(base) + i64::from(extra_bits)) * i64::from(dqv)) >> self.shift;
         Ok((self.signed(mag)?, energy))
     }
 
@@ -184,7 +194,7 @@ impl CoefReader<'_, '_> {
         Ok(value)
     }
 
-    fn signed(&mut self, mag: i32) -> Result<i32, CodecError> {
+    fn signed(&mut self, mag: i64) -> Result<i64, CodecError> {
         if self.bit(128)? == 1 {
             Ok(-mag)
         } else {
@@ -192,7 +202,7 @@ impl CoefReader<'_, '_> {
         }
     }
 
-    fn store(&mut self, c: usize, value: i32, energy: u8) -> Result<(), CodecError> {
+    fn store(&mut self, c: usize, value: i64, energy: u8) -> Result<(), CodecError> {
         let at = usize::from(self.scan[c]);
         let slot = self.coef.get_mut(at).ok_or(CodecError::Malformed {
             at_bit: 0,

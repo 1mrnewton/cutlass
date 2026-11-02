@@ -70,6 +70,7 @@ impl Matrix {
         match value {
             MatrixCoefficients::Unspecified | MatrixCoefficients::Bt709 => Ok(Self::Bt709),
             MatrixCoefficients::Bt601 => Ok(Self::Bt601),
+            MatrixCoefficients::Bt2020 => Ok(Self::Bt2020),
             MatrixCoefficients::Rgb => Err(Error::Matrix),
         }
     }

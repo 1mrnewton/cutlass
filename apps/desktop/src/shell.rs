@@ -633,8 +633,14 @@ impl Shell {
             return Vec::new();
         };
         let still = video.kind == MetaType::Photo.as_str();
-        let aspect = if video.width > 0 && video.height > 0 {
-            f64::from(video.width) / f64::from(video.height)
+        // The file's upright shape once the worker has opened it; the stored
+        // material size until then.
+        let (shape_w, shape_h) = thumbnails.shape(&path).unwrap_or((
+            u32::try_from(video.width).unwrap_or(0),
+            u32::try_from(video.height).unwrap_or(0),
+        ));
+        let aspect = if shape_w > 0 && shape_h > 0 {
+            f64::from(shape_w) / f64::from(shape_h)
         } else {
             16.0 / 9.0
         };
@@ -6082,6 +6088,38 @@ mod tests {
             assert!(thumb.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
         }
         assert_ne!(cells[0].thumb, cells[4].thumb);
+    }
+
+    #[test]
+    fn a_portrait_clip_gets_tall_narrow_tiles() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("7150172-hd_720_1280_50fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        // Stored as 16:9, as a bad probe might; the file's own shape wins.
+        let draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 1_000_000.0;
+        let id = SegmentId::new("movie");
+        let wide = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        assert_eq!(wide[0].tile.width, 48.0 * 16.0 / 9.0);
+        desktop.ask_thumbnails();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a thumbnail");
+        let tall = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        assert_eq!(tall[0].tile.width, 27.0);
+        let thumb = tall[0].thumb.as_ref().expect("stored");
+        assert_eq!((thumb.width, thumb.height), (54, 96));
     }
 
     #[test]

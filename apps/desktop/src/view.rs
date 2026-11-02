@@ -1020,6 +1020,7 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         Pos2::new(rect.right() - 28.0, rect.center().y),
         Vec2::splat(32.0),
     );
+    background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
     let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
     if still_response.clicked() {
         shell.unavailable("still");
@@ -1030,6 +1031,49 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+}
+
+/// The button that shows the preview canvas over black or clear. Its mark
+/// is a filled square for black and a two-by-two checker for clear.
+fn background_toggle(shell: &mut Shell, ui: &Ui, button: Rect) {
+    let response = ui.interact(button, ui.scope_id().with("background"), Sense::click());
+    if response.clicked() {
+        shell.toggle_preview_background();
+    }
+    ui.painter()
+        .circle_filled(button.center(), 16.0, tokens::ICON_BUTTON);
+    let mark = Rect::from_center_size(button.center(), Vec2::splat(12.0));
+    if shell.preview_black() {
+        ui.painter()
+            .rect_filled(mark, CornerRadius::same(2), Color32::BLACK);
+        ui.painter().rect_stroke(
+            mark,
+            CornerRadius::same(2),
+            egui::Stroke::new(1.0, tokens::MUTED),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        let half = mark.width() / 2.0;
+        for (column, row) in [(0.0, 0.0), (1.0, 1.0)] {
+            let cell = Rect::from_min_size(
+                mark.min + Vec2::new(column * half, row * half),
+                Vec2::splat(half),
+            );
+            ui.painter()
+                .rect_filled(cell, CornerRadius::ZERO, tokens::MUTED);
+        }
+        ui.painter().rect_stroke(
+            mark,
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, tokens::MUTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_text(if shell.preview_black() {
+        "Show the canvas clear"
+    } else {
+        "Show the canvas on black"
+    });
 }
 
 fn duration_label(shell: &Shell) -> String {
@@ -3482,13 +3526,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
-    /// Rects filled black, the canvas background among them.
+    /// Rects filled black larger than a button's mark: the canvas background.
     fn black_rects(output: &egui::FullOutput) -> Vec<Rect> {
         output
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Rect(rect) if rect.fill == Color32::BLACK => Some(rect.rect),
+                egui::Shape::Rect(rect)
+                    if rect.fill == Color32::BLACK && rect.rect.width() > 32.0 =>
+                {
+                    Some(rect.rect)
+                }
                 _ => None,
             })
             .collect()
@@ -3522,23 +3570,55 @@ mod tests {
         shell.open_folder(&temp).unwrap();
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let frame = |shell: &mut Shell, view: &mut ViewState| {
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    screen_rect: screen,
+                    events,
                     ..Default::default()
                 },
                 |ui| show(shell, ui, view, None),
             );
             output.textures_delta.clear();
-            black_rects(&output)
+            // The round transport buttons, left to right: the toggle, the still.
+            let mut buttons: Vec<Pos2> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Circle(circle)
+                        if circle.radius == 16.0 && circle.fill == tokens::ICON_BUTTON =>
+                    {
+                        Some(circle.center)
+                    }
+                    _ => None,
+                })
+                .collect();
+            buttons.sort_by(|a, b| a.x.total_cmp(&b.x));
+            (black_rects(&output), buttons)
         };
-        let black = frame(&mut shell, &mut view);
+        let (black, buttons) = frame(&mut shell, &mut view, Vec::new());
         assert_eq!(black.len(), 1, "{black:?}");
         let ratio = black[0].width() / black[0].height();
         assert!((ratio - 16.0 / 9.0).abs() < 0.01, "{:?}", black[0]);
-        shell.toggle_preview_background();
-        assert!(frame(&mut shell, &mut view).is_empty());
+        assert_eq!(buttons.len(), 2, "{buttons:?}");
+        let toggle = buttons[0];
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: toggle,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(toggle), press(true)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(false)]);
+        assert!(!shell.preview_black());
+        // The click lands after that frame's canvas was painted; the next is clear.
+        let (black, _) = frame(&mut shell, &mut view, Vec::new());
+        assert!(black.is_empty(), "{black:?}");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

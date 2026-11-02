@@ -157,7 +157,12 @@ pub(crate) fn cover(picture: &CpuBytes, canvas_w: u32, canvas_h: u32) -> Option<
     CpuBytes::new(canvas_w, canvas_h, rgba).ok()
 }
 
-fn cover_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32)> {
+pub(crate) fn cover_size(
+    src_w: u32,
+    src_h: u32,
+    canvas_w: u32,
+    canvas_h: u32,
+) -> Option<(u32, u32)> {
     let by_width = u64::from(canvas_w).checked_mul(u64::from(src_h))?;
     let by_height = u64::from(canvas_h).checked_mul(u64::from(src_w))?;
     if by_width <= by_height {

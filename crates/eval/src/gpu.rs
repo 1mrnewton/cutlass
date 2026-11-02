@@ -28,6 +28,16 @@ pub enum GpuSource {
 pub struct GpuLayer {
     pub source: GpuSource,
     pub placement: Placement,
+    /// A blurred copy of the source drawn over the whole canvas first.
+    pub backdrop: Option<GpuBackdrop>,
+}
+
+/// A segment canvas of kind `canvas_blur`: the source scaled to cover the
+/// canvas through `cover`, box-blurred by `radius` pixels, not faded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GpuBackdrop {
+    pub cover: Placement,
+    pub radius: u32,
 }
 
 impl GpuLayer {
@@ -37,6 +47,7 @@ impl GpuLayer {
         Self {
             source: GpuSource::Rgba(picture),
             placement,
+            backdrop: None,
         }
     }
 
@@ -48,6 +59,7 @@ impl GpuLayer {
                 to_picture: Affine([0.0, 0.0, 0.5, 0.0, 0.0, 0.5]),
                 ..Placement::canvas(1, 1)
             },
+            backdrop: None,
         }
     }
 }

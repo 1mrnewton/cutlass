@@ -35,7 +35,7 @@ use cutlass_model::{
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
-use crate::gpu::{GpuLayer, GpuSource};
+use crate::gpu::{GpuBackdrop, GpuLayer, GpuSource};
 
 /// Pictures each open clip decodes ahead of the time asked for.
 const READ_AHEAD: usize = 8;
@@ -823,12 +823,14 @@ impl Placed<'_> {
     /// parallelogram, or a blur or image backdrop. The caller then uses the
     /// CPU picture.
     pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
-        let backdrop = match &self.backdrop {
-            Backdrop::None => None,
-            Backdrop::Color(pixel) => {
-                Some(GpuLayer::fill(CpuBytes::new(1, 1, pixel.to_vec()).ok()?))
-            }
-            Backdrop::Blur(_) | Backdrop::Image(_) => return None,
+        let (backdrop, blur) = match &self.backdrop {
+            Backdrop::None => (None, None),
+            Backdrop::Color(pixel) => (
+                Some(GpuLayer::fill(CpuBytes::new(1, 1, pixel.to_vec()).ok()?)),
+                None,
+            ),
+            Backdrop::Blur(radius) => (None, Some(*radius)),
+            Backdrop::Image(_) => return None,
         };
         let DecodedFrame::Coded {
             width,
@@ -859,6 +861,17 @@ impl Placed<'_> {
             opacity: f64::from(self.transform.opacity) / 255.0,
         };
         let mut layers: Vec<GpuLayer> = backdrop.into_iter().collect();
+        let backdrop = match blur {
+            Some(radius) => Some(GpuBackdrop {
+                cover: Placement {
+                    to_picture: gpu_cover(picture, (self.width, self.height))?,
+                    opacity: 1.0,
+                    ..placement
+                },
+                radius,
+            }),
+            None => None,
+        };
         layers.push(GpuLayer {
             source: GpuSource::Yuv {
                 width,
@@ -866,6 +879,7 @@ impl Placed<'_> {
                 bytes,
             },
             placement,
+            backdrop,
         });
         Some(layers)
     }
@@ -880,6 +894,30 @@ fn gpu_turn(display: DisplayQuarter, width: u32, height: u32) -> Affine {
         DisplayQuarter::Half => [-1.0, 0.0, w, 0.0, -1.0, h],
         DisplayQuarter::Clockwise270 => [0.0, -1.0, w, 1.0, 0.0, 0.0],
     })
+}
+
+/// Canvas pixel center to picture pixels for a copy that covers the canvas,
+/// as [`crate::canvas::cover`]: scaled with left-edge sampling until both
+/// edges reach the canvas, then centered.
+fn gpu_cover(picture: (u32, u32), canvas: (u32, u32)) -> Option<Affine> {
+    if picture == canvas {
+        return Some(Affine::IDENTITY);
+    }
+    let (dw, dh) = crate::canvas::cover_size(picture.0, picture.1, canvas.0, canvas.1)?;
+    let x0 = f64::from(dw.checked_sub(canvas.0)? / 2);
+    let y0 = f64::from(dh.checked_sub(canvas.1)? / 2);
+    let kx = f64::from(picture.0) / f64::from(dw);
+    let ky = f64::from(picture.1) / f64::from(dh);
+    // A small push keeps an exact whole result from flooring below it.
+    let push = 1e-4;
+    Some(Affine([
+        kx,
+        0.0,
+        kx * (x0 - 0.5) + push,
+        0.0,
+        ky,
+        ky * (y0 - 0.5) + push,
+    ]))
 }
 
 /// Picture pixel center to oriented-source pixels, and the picture size,

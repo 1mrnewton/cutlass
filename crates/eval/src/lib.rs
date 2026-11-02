@@ -37,7 +37,7 @@ pub use cutlass_model::Micros;
 pub use frame::{
     EvalError, Fonts, NoFonts, Snapshot, frame, frame_in, layers_in, wait_export_frame,
 };
-pub use gpu::{Composed, FrameLayers, GpuLayer, GpuSource};
+pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
 

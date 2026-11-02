@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+mod blur;
 mod layer;
 mod target;
 
@@ -64,6 +65,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     layers: layer::Pipelines,
+    blurs: blur::Blurs,
 }
 
 impl Renderer {
@@ -71,10 +73,12 @@ impl Renderer {
     #[must_use]
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let layers = layer::Pipelines::new(&device);
+        let blurs = blur::Blurs::new(&device);
         Self {
             device,
             queue,
             layers,
+            blurs,
         }
     }
 
@@ -116,10 +120,37 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cutlass-render frame"),
             });
-        let bound = layers
-            .iter()
-            .map(|layer| self.layers.bind(&self.device, &self.queue, layer))
-            .collect::<Result<Vec<_>, _>>()?;
+        let (device, queue) = (&self.device, &self.queue);
+        let mut bound = Vec::with_capacity(layers.len());
+        for layer in layers {
+            match layer {
+                Layer::Rgba(rgba, placement) => {
+                    let uploaded = layer::Pipelines::upload_rgba(device, queue, rgba)?;
+                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                }
+                Layer::Yuv(planes, placement) => {
+                    let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
+                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                }
+                Layer::YuvOverBlur {
+                    planes,
+                    placement,
+                    cover,
+                    radius,
+                } => {
+                    let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
+                    let backdrop =
+                        self.blurred(&mut encoder, &uploaded, *cover, *radius, canvas.size());
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &backdrop,
+                        Placement::canvas(canvas.size().0, canvas.size().1),
+                    ));
+                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                }
+            }
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cutlass-render layers"),
@@ -143,6 +174,48 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         Ok(())
+    }
+
+    /// Draw `uploaded` through `cover` into a canvas-sized texture and blur
+    /// it, ahead of the frame's own pass.
+    fn blurred(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        uploaded: &layer::Uploaded,
+        cover: Placement,
+        radius: u32,
+        size: (u32, u32),
+    ) -> layer::Uploaded {
+        let (device, queue) = (&self.device, &self.queue);
+        let first = blur::scratch(device, size);
+        let second = blur::scratch(device, size);
+        let covered = self.layers.bind(device, queue, uploaded, cover);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cutlass-render cover"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &first,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.layers.draw(&mut pass, &covered);
+        }
+        self.blurs
+            .run(device, queue, encoder, &first, &second, size, radius);
+        layer::Uploaded {
+            views: [first.clone(), first.clone(), first],
+            size,
+            yuv: false,
+        }
     }
 
     /// The canvas as premultiplied RGBA bytes, row by row with no padding.

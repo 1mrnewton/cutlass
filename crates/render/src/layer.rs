@@ -74,6 +74,23 @@ impl<'a> Planes<'a> {
 pub enum Layer<'a> {
     Rgba(Rgba<'a>, Placement),
     Yuv(Planes<'a>, Placement),
+    /// A 4:2:0 picture over a blurred copy of itself that covers the canvas.
+    /// `cover` maps canvas pixels to the picture for the copy; `radius` is the
+    /// box blur's half width in canvas pixels. The copy is not faded.
+    YuvOverBlur {
+        planes: Planes<'a>,
+        placement: Placement,
+        cover: Placement,
+        radius: u32,
+    },
+}
+
+/// A layer's textures once uploaded: three views (the same one three times
+/// for RGBA), the source size, and whether it is 4:2:0.
+pub(crate) struct Uploaded {
+    pub(crate) views: [wgpu::TextureView; 3],
+    pub(crate) size: (u32, u32),
+    pub(crate) yuv: bool,
 }
 
 const SHADER: &str = r"
@@ -243,50 +260,62 @@ impl Pipelines {
     }
 
     /// Upload one layer's pixels and parameters.
+    /// Upload an RGBA picture.
+    pub(crate) fn upload_rgba(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rgba: &Rgba<'_>,
+    ) -> Result<Uploaded, RenderError> {
+        let view = upload(
+            device,
+            queue,
+            rgba.width,
+            rgba.height,
+            rgba.bytes,
+            wgpu::TextureFormat::Rgba8Unorm,
+            4,
+        )?;
+        Ok(Uploaded {
+            views: [view.clone(), view.clone(), view],
+            size: (rgba.width, rgba.height),
+            yuv: false,
+        })
+    }
+
+    /// Upload the three planes of a 4:2:0 picture.
+    pub(crate) fn upload_planes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        planes: &Planes<'_>,
+    ) -> Result<Uploaded, RenderError> {
+        let plane = |plane: &Plane<'_>| {
+            upload(
+                device,
+                queue,
+                plane.width,
+                plane.height,
+                plane.bytes,
+                wgpu::TextureFormat::R8Unorm,
+                1,
+            )
+        };
+        Ok(Uploaded {
+            views: [plane(&planes.y)?, plane(&planes.u)?, plane(&planes.v)?],
+            size: (planes.y.width, planes.y.height),
+            yuv: true,
+        })
+    }
+
+    /// Bind uploaded textures with a placement.
     pub(crate) fn bind(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        layer: &Layer<'_>,
-    ) -> Result<Bound, RenderError> {
-        let (views, size, placement, kind) = match layer {
-            Layer::Rgba(rgba, placement) => {
-                let view = upload(
-                    device,
-                    queue,
-                    rgba.width,
-                    rgba.height,
-                    rgba.bytes,
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    4,
-                )?;
-                (
-                    [view.clone(), view.clone(), view],
-                    (rgba.width, rgba.height),
-                    *placement,
-                    0.0,
-                )
-            }
-            Layer::Yuv(planes, placement) => {
-                let plane = |plane: &Plane<'_>| {
-                    upload(
-                        device,
-                        queue,
-                        plane.width,
-                        plane.height,
-                        plane.bytes,
-                        wgpu::TextureFormat::R8Unorm,
-                        1,
-                    )
-                };
-                (
-                    [plane(&planes.y)?, plane(&planes.u)?, plane(&planes.v)?],
-                    (planes.y.width, planes.y.height),
-                    *placement,
-                    1.0,
-                )
-            }
-        };
+        uploaded: &Uploaded,
+        placement: Placement,
+    ) -> Bound {
+        let size = uploaded.size;
+        let kind = if uploaded.yuv { 1.0 } else { 0.0 };
         let row = |affine: Affine, index: usize| {
             let a = affine.0;
             [
@@ -327,7 +356,7 @@ impl Pipelines {
             mapped_at_creation: false,
         });
         queue.write_buffer(&buffer, 0, &bytes);
-        let [t0, t1, t2] = views;
+        let [t0, t1, t2] = &uploaded.views;
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cutlass-render layer"),
             layout: &self.layout,
@@ -338,19 +367,19 @@ impl Pipelines {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&t0),
+                    resource: wgpu::BindingResource::TextureView(t0),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&t1),
+                    resource: wgpu::BindingResource::TextureView(t1),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&t2),
+                    resource: wgpu::BindingResource::TextureView(t2),
                 },
             ],
         });
-        Ok(Bound { group })
+        Bound { group }
     }
 
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, layer: &Bound) {

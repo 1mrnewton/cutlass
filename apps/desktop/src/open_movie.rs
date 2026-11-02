@@ -14,8 +14,8 @@ use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_engine::DecodedFrame;
 use cutlass_eval::{OpenClips, ReaderFactory, Snapshot, frame};
 use cutlass_model::{
-    Draft, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros, Segment, TimeRange,
-    TrackAttribute,
+    Draft, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros, Segment,
+    TimeRange, TrackAttribute,
 };
 use cutlass_renderer_software::SoftwareDevice;
 
@@ -724,7 +724,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             return;
         }
     };
-    let cases: [(&str, (u32, u32), Edit); 7] = [
+    let cases: [(&str, (u32, u32), Edit); 8] = [
         ("same size", (848, 608), |_| {}),
         ("shrunk to fit", (424, 240), |_| {}),
         ("centered", (1000, 700), |_| {}),
@@ -754,6 +754,21 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         }),
         ("background", (1000, 700), |draft| {
             draft.canvas_config.background = Some("#336699".to_owned());
+        }),
+        ("blur backdrop", (1000, 700), |draft| {
+            let canvas = MaterialCanvas {
+                id: "canvas".into(),
+                kind: "canvas_blur".to_owned(),
+                blur: 0.05,
+                ..MaterialCanvas::default()
+            };
+            draft.tracks[0].segments[1]
+                .extra_material_refs
+                .push(canvas.id.clone());
+            draft.materials.canvases.push(canvas);
+            draft.tracks[0].segments[1].clip.scale.x = 0.7;
+            draft.tracks[0].segments[1].clip.scale.y = 0.7;
+            draft.tracks[0].segments[1].clip.alpha = 0.8;
         }),
     ];
     let readers = crate::readers::installed_readers();

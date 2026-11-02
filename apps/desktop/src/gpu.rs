@@ -23,7 +23,18 @@ pub(crate) fn draw(
                 width,
                 height,
                 bytes,
-            } => Layer::Yuv(Planes::packed(*width, *height, bytes)?, layer.placement),
+            } => {
+                let planes = Planes::packed(*width, *height, bytes)?;
+                match layer.backdrop {
+                    Some(backdrop) => Layer::YuvOverBlur {
+                        planes,
+                        placement: layer.placement,
+                        cover: backdrop.cover,
+                        radius: backdrop.radius,
+                    },
+                    None => Layer::Yuv(planes, layer.placement),
+                }
+            }
             GpuSource::Rgba(picture) => Layer::Rgba(
                 Rgba {
                     width: picture.width(),

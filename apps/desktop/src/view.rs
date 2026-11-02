@@ -3682,6 +3682,67 @@ mod tests {
     }
 
     #[test]
+    fn a_video_clip_paints_its_filmstrip_once_the_thumbnails_land() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-film-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = cutlass_model::TimeRange::new(0, 6_000_000);
+        draft.tracks[0].segments[0].source_range =
+            Some(cutlass_model::TimeRange::new(0, 6_000_000));
+        draft.duration = Micros(6_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        shell.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let tiles = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            // Textured meshes in the lanes, below the preview.
+            output
+                .shapes
+                .iter()
+                .filter(|clipped| match &clipped.shape {
+                    egui::Shape::Mesh(mesh) => {
+                        mesh.texture_id != egui::TextureId::default()
+                            && mesh.calc_bounds().center().y > 450.0
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        // The first frame asks for the tiles; none are stored yet.
+        assert_eq!(tiles(&mut shell, &mut view), 0);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a thumbnail");
+        while receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok()
+        {}
+        assert!(tiles(&mut shell, &mut view) >= 3);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn a_notice_fades_in_holds_and_fades_out() {
         let at = |ms| notice_alpha(std::time::Duration::from_millis(ms));
         assert_eq!(at(0), 0.0);

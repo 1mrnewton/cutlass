@@ -265,6 +265,29 @@ impl Folder {
         })
     }
 
+    /// Record the linkage switch for this draft. Other keys in the file stay.
+    pub fn set_linkage_enabled(&mut self, enabled: bool) {
+        let timeline_id = self.draft.id.as_str().to_owned();
+        let root = self
+            .biz_config
+            .get_or_insert_with(|| Value::Object(Map::new()));
+        let Some(root) = root.as_object_mut() else {
+            return;
+        };
+        let timelines = root
+            .entry("timeline_settings")
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(timelines) = timelines.as_object_mut() else {
+            return;
+        };
+        let timeline = timelines
+            .entry(timeline_id)
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(timeline) = timeline.as_object_mut() {
+            timeline.insert("linkage_enabled".to_owned(), Value::Bool(enabled));
+        }
+    }
+
     /// Write the folder. The top draft file is a byte copy of the main timeline.
     pub fn save(&self, path: &Path) -> Result<(), StoreError> {
         validate(self)?;
@@ -1186,6 +1209,20 @@ mod tests {
         let error = folder.save(&root).unwrap_err();
         assert!(matches!(error, StoreError::PathEscapes { .. }));
         assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn set_linkage_enabled_keeps_the_other_keys() {
+        let mut folder = Folder::new(Draft::empty("D"));
+        folder.biz_config = Some(serde_json::json!({
+            "timeline_settings": { "D": { "follow": { "audio": false } } },
+            "kept": 1
+        }));
+        folder.set_linkage_enabled(false);
+        let biz = folder.biz_config.unwrap();
+        assert_eq!(biz["kept"], 1);
+        assert_eq!(biz["timeline_settings"]["D"]["follow"]["audio"], false);
+        assert_eq!(biz["timeline_settings"]["D"]["linkage_enabled"], false);
     }
 
     #[test]

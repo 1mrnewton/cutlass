@@ -15,6 +15,7 @@ mod player;
 mod project;
 
 pub use cache::ResourceCache;
+pub use cutlass_logger::InitError as LogError;
 pub use error::FfiError;
 pub use host::Commands;
 pub use player::PhonePlayer;
@@ -24,6 +25,19 @@ use std::path::{Path, PathBuf};
 
 use cutlass_session::{Draft, LinkageSettings, Micros, Request, Session};
 use cutlass_store::RepairNote;
+
+/// Open the process log in `directory`.
+///
+/// A phone shell calls this once at start. The public build writes the file
+/// and does not write stderr.
+pub fn start_log(directory: &Path) -> Result<PathBuf, LogError> {
+    cutlass_logger::init(directory)
+}
+
+/// Open the process log in the per-user log directory.
+pub fn start_default_log() -> Result<PathBuf, LogError> {
+    cutlass_logger::init_default()
+}
 
 /// The open project, its session, the playhead, and the resource cache.
 ///
@@ -200,7 +214,7 @@ mod tests {
     use cutlass_storage::StorageError;
 
     use super::PhoneHost;
-    use crate::FfiError;
+    use crate::{FfiError, start_log};
 
     struct Temp {
         path: PathBuf,
@@ -221,6 +235,16 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn start_log_writes_the_file() {
+        let temp = Temp::new();
+        let log = start_log(&temp.path).unwrap();
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(text.contains("log file"), "{text}");
+        assert!(text.contains("INFO"), "{text}");
+        assert_eq!(log, temp.path.join("cutlass.log"));
     }
 
     struct Roots<'a> {

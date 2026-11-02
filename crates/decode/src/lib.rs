@@ -232,22 +232,62 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
             .ok_or(CodecError::Limit {
                 what: "picture bytes",
             }),
-        PixelFormat::Yuv420p => yuv420_bytes(width, height, 1),
-        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => yuv420_bytes(width, height, 2),
-        PixelFormat::Yuv422p => yuv422_bytes(width, height, 1),
-        PixelFormat::Yuv422p10 | PixelFormat::Yuv422p12 => yuv422_bytes(width, height, 2),
-        PixelFormat::Yuv444p => width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(3))
-            .ok_or(CodecError::Limit {
+        PixelFormat::Yuv420p => {
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                return Err(CodecError::InvalidApi { what: "4:2:0 size" });
+            }
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .and_then(|bytes| bytes.checked_div(2))
+                .ok_or(CodecError::Limit {
+                    what: "picture bytes",
+                })
+        }
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => {
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                return Err(CodecError::InvalidApi { what: "4:2:0 size" });
+            }
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or(CodecError::Limit {
+                    what: "picture bytes",
+                })
+        }
+        PixelFormat::Yuv422p10
+        | PixelFormat::Yuv422p12
+        | PixelFormat::Yuv440p10
+        | PixelFormat::Yuv440p12
+        | PixelFormat::Yuv444p10
+        | PixelFormat::Yuv444p12
+        | PixelFormat::Gbrp10
+        | PixelFormat::Gbrp12 => wide_planar(width, height, pixel),
+        PixelFormat::Yuv422p | PixelFormat::Yuv440p | PixelFormat::Yuv444p | PixelFormat::Gbrp => {
+            let (chroma_w, chroma_h) =
+                pixel
+                    .chroma_wh(width as u32, height as u32)
+                    .ok_or(CodecError::InvalidApi {
+                        what: "picture format",
+                    })?;
+            let luma = width.checked_mul(height).ok_or(CodecError::Limit {
                 what: "picture bytes",
-            }),
-        PixelFormat::Yuv444p10 | PixelFormat::Yuv444p12 => width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(6))
-            .ok_or(CodecError::Limit {
+            })?;
+            let chroma = usize::try_from(chroma_w)
+                .ok()
+                .and_then(|w| {
+                    usize::try_from(chroma_h)
+                        .ok()
+                        .and_then(|h| w.checked_mul(h))
+                })
+                .and_then(|samples| samples.checked_mul(2))
+                .ok_or(CodecError::Limit {
+                    what: "picture bytes",
+                })?;
+            luma.checked_add(chroma).ok_or(CodecError::Limit {
                 what: "picture bytes",
-            }),
+            })
+        }
         PixelFormat::Gray8 => width.checked_mul(height).ok_or(CodecError::Limit {
             what: "picture bytes",
         }),
@@ -260,31 +300,33 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
     }
 }
 
-fn yuv422_bytes(width: usize, height: usize, sample_bytes: usize) -> Result<usize, CodecError> {
-    if !width.is_multiple_of(2) {
-        return Err(CodecError::InvalidApi { what: "4:2:2 size" });
-    }
-    width
+fn wide_planar(width: usize, height: usize, pixel: PixelFormat) -> Result<usize, CodecError> {
+    let (chroma_w, chroma_h) =
+        pixel
+            .chroma_wh(width as u32, height as u32)
+            .ok_or(CodecError::InvalidApi {
+                what: "picture format",
+            })?;
+    let luma = width
         .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(2))
-        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+        .and_then(|samples| samples.checked_mul(2))
         .ok_or(CodecError::Limit {
             what: "picture bytes",
+        })?;
+    let chroma = usize::try_from(chroma_w)
+        .ok()
+        .and_then(|w| {
+            usize::try_from(chroma_h)
+                .ok()
+                .and_then(|h| w.checked_mul(h))
         })
-}
-
-fn yuv420_bytes(width: usize, height: usize, sample_bytes: usize) -> Result<usize, CodecError> {
-    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-        return Err(CodecError::InvalidApi { what: "4:2:0 size" });
-    }
-    width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(3))
-        .and_then(|bytes| bytes.checked_div(2))
-        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+        .and_then(|samples| samples.checked_mul(4))
         .ok_or(CodecError::Limit {
             what: "picture bytes",
-        })
+        })?;
+    luma.checked_add(chroma).ok_or(CodecError::Limit {
+        what: "picture bytes",
+    })
 }
 
 impl PictureOutput {
@@ -977,8 +1019,8 @@ mod tests {
             16
         );
         assert_eq!(
-            picture_byte_len(3, 2, PixelFormat::Yuv422p).expect_err("odd"),
-            CodecError::InvalidApi { what: "4:2:2 size" }
+            picture_byte_len(3, 2, PixelFormat::Yuv422p).expect("odd 4:2:2"),
+            14
         );
         assert_eq!(
             picture_byte_len(2, 2, PixelFormat::Yuv444p10).expect("444-10"),

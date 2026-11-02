@@ -2,7 +2,7 @@
 
 Checkout: `491f9300f2ae781150d00720b0e323bc61bcca97` on `h264-sw-enc-dec`. Native safe Rust in `cutlass-h264`. No `unsafe`. No bundled C, FFmpeg, or other H.264 library.
 
-This record is partial. Progressive 8-bit 4:2:0 decode and High CABAC encode are implemented. The release speed, memory, and fuzz runs below were executed on this machine. Playback and export are outside this record. The desktop shell does not register this crate.
+This record is partial. Progressive 8-bit 4:2:0 decode and High CABAC encode are implemented. The release speed, memory, and fuzz runs below were executed on this machine. Playback and export are outside this record. The desktop registers this decoder after the platform decoder. The encoder is registered on the video factory; export still opens the platform encoder for RGBA.
 
 ## Specifications
 
@@ -63,7 +63,7 @@ Encode quality, from the default tests on this machine: `testsrc2` 320×240, 60 
 | 1280×720 High decode | At least 30 fps, under 64 MiB extra | n/a | `high_720p_decode_meets_the_release_gates` | Passed. About 73 fps, 29,008 KiB |
 | Throughput vs ffmpeg, one thread | Same High stream | Same pictures, libx264 ultrafast | `against_ffmpeg` | Decode 3.0× behind ffmpeg. Encode 105.6× behind libx264 ultrafast. Not a quality match |
 | ITU conformance bitstreams | Not run | Not run | Streams not obtained | Not available |
-| Desktop registration | Not wired | Not wired | `apps/desktop` prints and returns | Not done |
+| Desktop registration | Wired after the platform opener | Registered on the video factory | `a_real_movie_returns_a_software_picture_and_audio` | Decode is on the engine path. Export still uses the platform encoder for RGBA |
 | Linux and Windows | Not run | Not run | This file was written on macOS | Not run |
 
 ## Checks run with these edits
@@ -77,7 +77,7 @@ Encode quality, from the default tests on this machine: `testsrc2` 320×240, 60 
 ## Still required before calling this complete
 
 - Official ITU conformance bitstreams, or this gap stays as not available.
-- Register the software decoder and encoder when the platform has none for this codec.
+- The software encoder is not the export path. Export opens an RGBA encoder, and this encoder is registered on the video factory only.
 - Linux and Windows runs.
 - The workspace fmt, lint, test, and deny commands above.
 - Encoder gaps that are not release gates: B slices do not search below 16×16 and do not emit skip or direct. Intra blocks stay DC 4×4. Weighted prediction, 4×4 sub-macroblocks, and more than one slice per picture stay unemitted, as `SCOPE.md` records.

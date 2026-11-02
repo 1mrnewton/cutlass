@@ -1,5 +1,7 @@
 use cutlass_model::{
     Draft, MaterialRef, MaterialTransition, Micros, Segment, SegmentId, TimeRange,
+    beat_timeline_time, clip_mark_time, referenced_time_marks, segment_beats, segment_time_mark,
+    time_mark_items, user_beats,
 };
 
 /// What a drag lined up with. The time is on the timeline, in microseconds.
@@ -11,6 +13,8 @@ pub enum SnapKind {
     Marker,
     Beat,
     TransitionMiddle,
+    /// A vertical guide left on the timeline.
+    Guide,
     /// The start of the timeline, or its stored duration.
     TimelineEnd,
 }
@@ -35,6 +39,19 @@ pub fn snap(
     threshold: Micros,
     ignore: Option<&SegmentId>,
 ) -> Option<SnapTarget> {
+    snap_guides(draft, time, playhead, threshold, ignore, &[])
+}
+
+/// [`snap`] plus vertical guide times. A guide is a target like a marker.
+#[must_use]
+pub fn snap_guides(
+    draft: &Draft,
+    time: Micros,
+    playhead: Micros,
+    threshold: Micros,
+    ignore: Option<&SegmentId>,
+    guides: &[Micros],
+) -> Option<SnapTarget> {
     let limit = u64::try_from(threshold.0).ok()?;
     let mut best: Option<Best> = None;
     consider(&mut best, playhead, SnapKind::Playhead, time.0, limit);
@@ -47,6 +64,9 @@ pub fn snap(
         }
     }
     collect_markers(draft, &mut best, time.0, limit);
+    for guide in guides {
+        consider(&mut best, *guide, SnapKind::Guide, time.0, limit);
+    }
     consider(&mut best, Micros(0), SnapKind::TimelineEnd, time.0, limit);
     consider(
         &mut best,
@@ -119,7 +139,8 @@ impl SnapKind {
             Self::Marker => 3,
             Self::Beat => 4,
             Self::TransitionMiddle => 5,
-            Self::TimelineEnd => 6,
+            Self::Guide => 6,
+            Self::TimelineEnd => 7,
         }
     }
 }
@@ -137,6 +158,7 @@ fn collect_segment(
         note(Micros(end), SnapKind::SegmentEdge);
         collect_keyframes(segment, &mut note);
         collect_beats(draft, segment, &mut note);
+        collect_clip_marks(draft, segment, &mut note);
         collect_transition(draft, segment, Micros(end), &mut note);
     }
 }
@@ -156,21 +178,13 @@ fn collect_keyframes(segment: &Segment, note: &mut impl FnMut(Micros, SnapKind))
 }
 
 fn collect_beats(draft: &Draft, segment: &Segment, note: &mut impl FnMut(Micros, SnapKind)) {
-    for id in &segment.extra_material_refs {
-        let Some(MaterialRef::Other(raw)) = draft.materials.get(id.as_str()) else {
-            continue;
-        };
-        if raw.kind != "beats" {
-            continue;
+    let Some(raw) = segment_beats(&draft.materials, segment) else {
+        return;
+    };
+    for beat in user_beats(raw) {
+        if let Some(time) = beat_timeline_time(segment, beat) {
+            note(time, SnapKind::Beat);
         }
-        let Some(beats) = raw.fields.get("user_beats") else {
-            continue;
-        };
-        each_integer(beats, &mut |beat| {
-            if let Some(time) = beat_on_timeline(segment, beat) {
-                note(time, SnapKind::Beat);
-            }
-        });
     }
 }
 
@@ -190,10 +204,27 @@ fn collect_transition(
     }
 }
 
+fn collect_clip_marks(draft: &Draft, segment: &Segment, note: &mut impl FnMut(Micros, SnapKind)) {
+    let Some(raw) = segment_time_mark(&draft.materials, segment) else {
+        return;
+    };
+    for item in time_mark_items(raw) {
+        if let Some(time) = clip_mark_time(segment, &item) {
+            note(time, SnapKind::Marker);
+        }
+    }
+}
+
 fn collect_markers(draft: &Draft, best: &mut Option<Best>, query: i64, limit: u64) {
     let mut note = |time: Micros| consider(best, time, SnapKind::Marker, query, limit);
+    let owned = referenced_time_marks(&draft.materials, &draft.tracks);
     for material in &draft.materials.time_marks {
-        mark_items(material.fields.get("mark_items"), &mut note);
+        if owned.iter().any(|id| id == &material.id) {
+            continue;
+        }
+        for item in time_mark_items(material) {
+            note(item.start);
+        }
     }
     let Some(root) = draft.rest.get("time_marks") else {
         return;
@@ -233,54 +264,6 @@ fn one_mark(item: &serde_json::Value, note: &mut impl FnMut(Micros)) {
     note(Micros(start));
 }
 
-fn each_integer(value: &serde_json::Value, note: &mut impl FnMut(i64)) {
-    if let Some(beat) = value.as_i64() {
-        note(beat);
-        return;
-    }
-    let Some(items) = value.as_array() else {
-        return;
-    };
-    for item in items {
-        if let Some(beat) = item.as_i64() {
-            note(beat);
-        }
-    }
-}
-
-/// A beat is a source time. It lands on the timeline at the segment start
-/// plus that offset through the source range. Speed other than 1 divides
-/// the source offset, toward zero.
-fn beat_on_timeline(segment: &Segment, beat: i64) -> Option<Micros> {
-    let (source_start, source_end) = if let Some(source) = &segment.source_range {
-        let end = positive_end(source)?;
-        (source.start.0, end)
-    } else {
-        (0, segment.target.duration.0)
-    };
-    if beat < source_start || beat >= source_end {
-        return None;
-    }
-    let delta = beat.checked_sub(source_start)?;
-    let delta_target = if segment.speed == 1.0 {
-        delta
-    } else {
-        speed_offset(delta, segment.speed)?
-    };
-    segment.target.start.0.checked_add(delta_target).map(Micros)
-}
-
-fn speed_offset(delta: i64, speed: f64) -> Option<i64> {
-    if delta < 0 || !speed.is_finite() || speed <= 0.0 {
-        return None;
-    }
-    let mapped = (delta as f64) / speed;
-    if !mapped.is_finite() || mapped < 0.0 || mapped >= (1_u64 << 63) as f64 {
-        return None;
-    }
-    Some(mapped.trunc() as i64)
-}
-
 fn positive_end(range: &TimeRange) -> Option<i64> {
     if range.duration.0 <= 0 {
         return None;
@@ -292,7 +275,7 @@ fn positive_end(range: &TimeRange) -> Option<i64> {
 mod tests {
     use cutlass_model::{
         CommonKeyframe, CommonKeyframeGroup, Draft, MaterialId, MaterialTransition, RawMaterial,
-        Segment, TimeRange, TrackId,
+        Segment, SegmentId, TimeRange, TrackId,
     };
 
     use super::*;
@@ -454,6 +437,34 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_marker_snaps_from_the_clip_start() {
+        use cutlass_model::{TimeMarkItem, new_time_mark};
+
+        let mark = new_time_mark(
+            MaterialId::new("marks"),
+            TimeMarkItem::point(Micros(250_000), "#ffffff"),
+        );
+        let mut clip = segment("clip", 1_000_000, 1_000_000);
+        clip.extra_material_refs.push(mark.id.clone());
+        let mut draft = main_with(clip);
+        draft.materials.time_marks.push(mark);
+        let hit = snap(&draft, Micros(1_250_000), Micros(0), Micros(0), None).unwrap();
+        assert_eq!(hit.time, Micros(1_250_000));
+        assert_eq!(hit.kind, SnapKind::Marker);
+        assert!(snap(&draft, Micros(250_000), Micros(0), Micros(0), None).is_none());
+        assert!(
+            snap(
+                &draft,
+                Micros(1_250_000),
+                Micros(0),
+                Micros(0),
+                Some(&SegmentId::new("clip")),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn a_beat_at_double_speed_uses_half_the_source_offset() {
         let mut clip = segment("clip", 1_000_000, 500_000);
         clip.speed = 2.0;
@@ -477,6 +488,28 @@ mod tests {
         let target = snap(&draft, Micros(4_900_000), Micros(0), Micros(200_000), None).unwrap();
         assert_eq!(target.time, Micros(5_000_000));
         assert_eq!(target.kind, SnapKind::TimelineEnd);
+        let guide = snap_guides(
+            &draft,
+            Micros(1_500_000),
+            Micros(0),
+            Micros(2_000),
+            None,
+            &[Micros(1_501_000)],
+        )
+        .unwrap();
+        assert_eq!(guide.kind, SnapKind::Guide);
+        assert_eq!(guide.time, Micros(1_501_000));
+        assert!(
+            snap_guides(
+                &draft,
+                Micros(1_500_000),
+                Micros(0),
+                Micros(2_000),
+                None,
+                &[Micros(1_600_000)],
+            )
+            .is_none()
+        );
     }
 
     #[test]

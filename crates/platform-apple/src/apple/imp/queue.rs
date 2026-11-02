@@ -1,7 +1,7 @@
 //! The preview output queue.
 //!
-//! The render callback copies one pipeline sample into the queue buffer.
-//! It does not decode, mix, or wait for a picture.
+//! The render callback walks the stored slice. Past the end it writes
+//! silence, so the device keeps running. It does not decode or mix.
 
 use std::ffi::c_void;
 use std::ptr;
@@ -31,8 +31,13 @@ pub enum QueueError {
     Hostile,
 }
 
+struct Held {
+    bytes: Vec<u8>,
+    cursor: usize,
+}
+
 struct Shared {
-    sample: Mutex<Vec<u8>>,
+    held: Mutex<Held>,
     frame_bytes: usize,
 }
 
@@ -54,7 +59,10 @@ impl OutputQueue {
             .filter(|bytes| *bytes > 0 && *bytes <= MAX_FRAME_BYTES)
             .ok_or(QueueError::Format)?;
         let shared = Arc::new(Shared {
-            sample: Mutex::new(Vec::new()),
+            held: Mutex::new(Held {
+                bytes: Vec::new(),
+                cursor: 0,
+            }),
             frame_bytes,
         });
         let format = AudioStreamBasicDescription {
@@ -92,7 +100,10 @@ impl OutputQueue {
         Ok(output)
     }
 
-    /// Replace the sample the callback copies. An empty slice is silence.
+    /// Replace the slice the callback walks. An empty slice is silence.
+    ///
+    /// The cursor returns to the start, so the next callback plays this slice
+    /// from its first frame.
     pub fn set_sample(&self, sample: &[u8]) -> Result<(), QueueError> {
         if sample.len() > MAX_SLICE_BYTES {
             return Err(QueueError::Hostile);
@@ -101,8 +112,10 @@ impl OutputQueue {
         if !sample.is_empty() && (sample.len() < frame || !sample.len().is_multiple_of(frame)) {
             return Err(QueueError::Truncated);
         }
-        let mut guard = lock(&self.shared.sample);
-        *guard = sample.to_vec();
+        let mut guard = lock(&self.shared.held);
+        guard.bytes.clear();
+        guard.bytes.extend_from_slice(sample);
+        guard.cursor = 0;
         Ok(())
     }
 
@@ -155,11 +168,35 @@ impl Drop for OutputQueue {
     }
 }
 
-fn lock(sample: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
-    match sample.lock() {
+fn lock(held: &Mutex<Held>) -> std::sync::MutexGuard<'_, Held> {
+    match held.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
+}
+
+/// Copy the next frames from `cursor`. Past the end of `bytes` the rest of
+/// `out` is silence and the cursor stays at the end.
+pub(crate) fn pull_frames(bytes: &[u8], cursor: &mut usize, frame: usize, out: &mut [u8]) -> usize {
+    if frame == 0 || out.len() < frame {
+        return 0;
+    }
+    let room = out.len() - (out.len() % frame);
+    let mut filled = 0;
+    while filled + frame <= room {
+        let start = *cursor;
+        let Some(end) = start.checked_add(frame) else {
+            break;
+        };
+        if end <= bytes.len() {
+            out[filled..filled + frame].copy_from_slice(&bytes[start..end]);
+            *cursor = end;
+        } else {
+            out[filled..filled + frame].fill(0);
+        }
+        filled += frame;
+    }
+    filled
 }
 
 fn copy_one_sample(
@@ -199,17 +236,18 @@ unsafe extern "C" fn render(
     }
     let shared = unsafe { &*(user.cast::<Shared>()) };
     let frame = shared.frame_bytes;
-    let mut one = [0_u8; MAX_FRAME_BYTES];
+    let mut block = [0_u8; 4_096];
     let copied = {
-        let guard = lock(&shared.sample);
-        copy_one_sample(&guard, frame, &mut one).unwrap_or(0)
+        let mut guard = lock(&shared.held);
+        let Held { bytes, cursor } = &mut *guard;
+        pull_frames(bytes, cursor, frame, &mut block)
     };
     unsafe {
         let header = &mut *buffer;
         let capacity = usize::try_from(header.audio_data_bytes_capacity).unwrap_or(0);
-        let bytes = copied.min(capacity).min(one.len());
+        let bytes = copied.min(capacity).min(block.len());
         if !header.audio_data.is_null() && bytes > 0 {
-            ptr::copy_nonoverlapping(one.as_ptr(), header.audio_data.cast(), bytes);
+            ptr::copy_nonoverlapping(block.as_ptr(), header.audio_data.cast(), bytes);
         }
         header.audio_data_byte_size = u32::try_from(bytes).unwrap_or(0);
         let _ = sys::AudioQueueEnqueueBuffer(queue, buffer, 0, ptr::null());
@@ -241,6 +279,23 @@ mod tests {
             copy_one_sample(&[], 0, &mut buffer),
             Err(QueueError::Hostile)
         );
+    }
+
+    #[test]
+    fn the_callback_walks_the_slice_and_then_plays_silence() {
+        let bytes = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let mut cursor = 0;
+        let mut out = [0_u8; 24];
+        let filled = pull_frames(&bytes, &mut cursor, 8, &mut out);
+        assert_eq!(filled, 24);
+        assert_eq!(&out[..16], &bytes);
+        assert_eq!(&out[16..], &[0_u8; 8]);
+        assert_eq!(cursor, 16);
+        let filled = pull_frames(&bytes, &mut cursor, 8, &mut out);
+        assert_eq!(filled, 24);
+        assert_eq!(out, [0_u8; 24]);
+        assert_eq!(cursor, 16);
+        assert_eq!(pull_frames(&bytes, &mut cursor, 0, &mut out), 0);
     }
 
     #[test]

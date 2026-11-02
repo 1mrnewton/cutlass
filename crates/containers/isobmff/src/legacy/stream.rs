@@ -1,3 +1,5 @@
+use cutlass_container::DisplayQuarter;
+
 use super::StreamParams;
 
 /// One edit from an edit list.
@@ -17,4 +19,6 @@ pub struct Edit {
 pub struct Stream {
     pub params: StreamParams,
     pub edits: Vec<Edit>,
+    /// Clockwise quarter turn. [`DisplayQuarter::Zero`] when the matrix is not one.
+    pub display: DisplayQuarter,
 }

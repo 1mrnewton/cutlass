@@ -383,57 +383,12 @@ fn dc4(above: &[u8; 8], left: &[u8; 4], above_ok: bool, left_ok: bool) -> i32 {
     }
 }
 
-pub fn pred16(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok: bool) -> [u8; 256] {
-    let mut out = [128u8; 256];
-    match mode {
-        0 if above_ok => {
-            for y in 0..16 {
-                out[y * 16..y * 16 + 16].copy_from_slice(&above[..16]);
-            }
-        }
-        1 if left_ok => {
-            for y in 0..16 {
-                out[y * 16..y * 16 + 16].fill(left[y]);
-            }
-        }
-        2 => {
-            let value = if above_ok && left_ok {
-                let sum = above[..16].iter().map(|v| i32::from(*v)).sum::<i32>()
-                    + left[..16].iter().map(|v| i32::from(*v)).sum::<i32>();
-                ((sum + 16) >> 5) as u8
-            } else if left_ok {
-                let sum = left[..16].iter().map(|v| i32::from(*v)).sum::<i32>();
-                ((sum + 8) >> 4) as u8
-            } else if above_ok {
-                let sum = above[..16].iter().map(|v| i32::from(*v)).sum::<i32>();
-                ((sum + 8) >> 4) as u8
-            } else {
-                128
-            };
-            out.fill(value);
-        }
-        3 if above_ok && left_ok => plane16(&mut out, above, left),
-        _ => {}
-    }
-    out
-}
-
-fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8]) {
-    let mut h = 0i32;
-    let mut v = 0i32;
-    for i in 1..=8 {
-        let above_r = i32::from(
-            *above
-                .get((8 + i) as usize)
-                .unwrap_or(&above[above.len() - 1]),
-        );
-        let above_l = i32::from(*above.get((8 - i) as usize).unwrap_or(&above[0]));
-        let left_b = i32::from(*left.get((8 + i) as usize).unwrap_or(&left[left.len() - 1]));
-        let left_t = i32::from(*left.get((8 - i) as usize).unwrap_or(&left[0]));
-        h += i * (above_r - above_l);
-        v += i * (left_b - left_t);
-    }
-    let a = 16 * (i32::from(above[15]) + i32::from(left[15]));
+/// Clause 8.3.3.4. `above[x]` is p[x, -1] for x = 0..15 and `left[y]` is p[-1, y].
+/// `corner` is p[-1, -1]. The gradient weight is i * (p[7+i] - p[7-i]).
+fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8], corner: u8) {
+    let h = plane_gradient(above, corner, 8);
+    let v = plane_gradient(left, corner, 8);
+    let a = 16 * (sample_at(above, 15) + sample_at(left, 15));
     let b = (5 * h + 32) >> 6;
     let c = (5 * v + 32) >> 6;
     for y in 0..16 {
@@ -443,7 +398,82 @@ fn plane16(out: &mut [u8; 256], above: &[u8], left: &[u8]) {
     }
 }
 
-pub fn pred_chroma(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok: bool) -> [u8; 64] {
+/// Clause 8.3.4.4 for chroma and clause 8.3.3.4 for Intra_16x16.
+/// `samples[i]` is p[i] along that edge. The last term uses p[-1], the corner.
+fn plane_gradient(samples: &[u8], corner: u8, n: usize) -> i32 {
+    let mut sum = 0i32;
+    for i in 1..=n {
+        let right = sample_at(samples, n - 1 + i);
+        let left = if i == n {
+            i32::from(corner)
+        } else {
+            sample_at(samples, n - 1 - i)
+        };
+        let Ok(weight) = i32::try_from(i) else {
+            continue;
+        };
+        sum += weight * (right - left);
+    }
+    sum
+}
+
+fn sample_at(samples: &[u8], index: usize) -> i32 {
+    i32::from(samples.get(index).copied().unwrap_or(128))
+}
+
+pub fn pred16(
+    mode: u8,
+    above: &[u8],
+    left: &[u8],
+    corner: u8,
+    above_ok: bool,
+    left_ok: bool,
+) -> [u8; 256] {
+    let mut out = [128u8; 256];
+    match mode {
+        0 if above_ok => {
+            for y in 0..16 {
+                let Some(row) = above.get(..16) else {
+                    return out;
+                };
+                out[y * 16..y * 16 + 16].copy_from_slice(row);
+            }
+        }
+        1 if left_ok => {
+            for y in 0..16 {
+                out[y * 16..y * 16 + 16].fill(left.get(y).copied().unwrap_or(128));
+            }
+        }
+        2 => {
+            let value = if above_ok && left_ok {
+                let sum = above.iter().take(16).map(|v| i32::from(*v)).sum::<i32>()
+                    + left.iter().take(16).map(|v| i32::from(*v)).sum::<i32>();
+                ((sum + 16) >> 5) as u8
+            } else if left_ok {
+                let sum = left.iter().take(16).map(|v| i32::from(*v)).sum::<i32>();
+                ((sum + 8) >> 4) as u8
+            } else if above_ok {
+                let sum = above.iter().take(16).map(|v| i32::from(*v)).sum::<i32>();
+                ((sum + 8) >> 4) as u8
+            } else {
+                128
+            };
+            out.fill(value);
+        }
+        3 if above_ok && left_ok => plane16(&mut out, above, left, corner),
+        _ => {}
+    }
+    out
+}
+
+pub fn pred_chroma(
+    mode: u8,
+    above: &[u8],
+    left: &[u8],
+    corner: u8,
+    above_ok: bool,
+    left_ok: bool,
+) -> [u8; 64] {
     let mut out = [128u8; 64];
     match mode {
         1 if left_ok => {
@@ -457,22 +487,10 @@ pub fn pred_chroma(mode: u8, above: &[u8], left: &[u8], above_ok: bool, left_ok:
             }
         }
         3 if above_ok && left_ok => {
-            let mut h = 0i32;
-            let mut v = 0i32;
-            for i in 1..=4 {
-                let above_r = i32::from(
-                    *above
-                        .get((4 + i) as usize)
-                        .unwrap_or(&above[above.len() - 1]),
-                );
-                let above_l = i32::from(*above.get((4 - i) as usize).unwrap_or(&above[0]));
-                let left_b =
-                    i32::from(*left.get((4 + i) as usize).unwrap_or(&left[left.len() - 1]));
-                let left_t = i32::from(*left.get((4 - i) as usize).unwrap_or(&left[0]));
-                h += i * (above_r - above_l);
-                v += i * (left_b - left_t);
-            }
-            let a = 16 * (i32::from(above[7]) + i32::from(left[7]));
+            // Clause 8.3.4.4. Weight i multiplies p[3+i] - p[3-i], and p[-1] is the corner.
+            let h = plane_gradient(above, corner, 4);
+            let v = plane_gradient(left, corner, 4);
+            let a = 16 * (sample_at(above, 7) + sample_at(left, 7));
             let b = (17 * h + 16) >> 5;
             let c = (17 * v + 16) >> 5;
             for y in 0..8 {
@@ -1244,7 +1262,25 @@ fn filter_span<const VERTICAL: bool>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockMc, Pel, chroma_mc, put_chroma_block, put_luma_block, qpel};
+    use super::{
+        BlockMc, Pel, chroma_mc, pred_chroma, pred16, put_chroma_block, put_luma_block, qpel,
+    };
+
+    #[test]
+    fn plane_uses_the_corner_in_the_outer_term() {
+        let above: Vec<u8> = (1..=16).collect();
+        let left = above.clone();
+        let luma = pred16(3, &above, &left, 0, true, true);
+        assert_eq!(luma[0], 2);
+        assert_eq!(luma[7 * 16 + 7], 16);
+
+        let chroma_above = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let chroma_left = [8u8, 16, 24, 32, 40, 48, 56, 64];
+        let chroma = pred_chroma(3, &chroma_above, &chroma_left, 0, true, true);
+        assert_eq!(chroma[0], 18);
+        assert_eq!(chroma[3 * 8 + 3], 72);
+        assert_eq!(chroma[7 * 8 + 7], 144);
+    }
 
     #[test]
     fn block_motion_matches_the_sample_filter() {

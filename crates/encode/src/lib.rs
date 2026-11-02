@@ -225,16 +225,55 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
         PixelFormat::Rgba8 => pixels
             .checked_mul(4)
             .ok_or(CodecError::Limit { what: "frame size" }),
-        PixelFormat::Yuv420p => yuv420_len(width, height, pixels, 1),
-        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => yuv420_len(width, height, pixels, 2),
-        PixelFormat::Yuv422p => yuv422_len(width, pixels, 1),
-        PixelFormat::Yuv422p10 | PixelFormat::Yuv422p12 => yuv422_len(width, pixels, 2),
-        PixelFormat::Yuv444p => pixels
-            .checked_mul(3)
-            .ok_or(CodecError::Limit { what: "frame size" }),
-        PixelFormat::Yuv444p10 | PixelFormat::Yuv444p12 => pixels
-            .checked_mul(6)
-            .ok_or(CodecError::Limit { what: "frame size" }),
+        PixelFormat::Yuv420p => {
+            if width % 2 != 0 || height % 2 != 0 {
+                return Err(CodecError::InvalidApi {
+                    what: "chroma size",
+                });
+            }
+            let samples = pixels / 2;
+            samples
+                .checked_mul(3)
+                .ok_or(CodecError::Limit { what: "frame size" })
+        }
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => {
+            if width % 2 != 0 || height % 2 != 0 {
+                return Err(CodecError::InvalidApi {
+                    what: "chroma size",
+                });
+            }
+            pixels
+                .checked_mul(3)
+                .ok_or(CodecError::Limit { what: "frame size" })
+        }
+        PixelFormat::Yuv422p10
+        | PixelFormat::Yuv422p12
+        | PixelFormat::Yuv440p10
+        | PixelFormat::Yuv440p12
+        | PixelFormat::Yuv444p10
+        | PixelFormat::Yuv444p12
+        | PixelFormat::Gbrp10
+        | PixelFormat::Gbrp12 => wide_planar(width, height, pixel),
+        PixelFormat::Yuv422p | PixelFormat::Yuv440p | PixelFormat::Yuv444p | PixelFormat::Gbrp => {
+            let (chroma_w, chroma_h) =
+                pixel
+                    .chroma_wh(width as u32, height as u32)
+                    .ok_or(CodecError::InvalidApi {
+                        what: "pixel format",
+                    })?;
+            let chroma = usize::try_from(chroma_w)
+                .ok()
+                .and_then(|w| {
+                    usize::try_from(chroma_h)
+                        .ok()
+                        .and_then(|h| w.checked_mul(h))
+                })
+                .and_then(|samples| samples.checked_mul(2))
+                .ok_or(CodecError::Limit { what: "frame size" })?;
+            pixels
+                .checked_add(chroma)
+                .ok_or(CodecError::Limit { what: "frame size" })
+        }
         PixelFormat::Gray8 => Ok(pixels),
         PixelFormat::Gray10 => pixels
             .checked_mul(2)
@@ -242,31 +281,27 @@ fn picture_len(width: u32, height: u32, pixel: PixelFormat) -> Result<usize, Cod
     }
 }
 
-fn yuv422_len(width: usize, pixels: usize, sample_bytes: usize) -> Result<usize, CodecError> {
-    if !width.is_multiple_of(2) {
-        return Err(CodecError::InvalidApi { what: "4:2:2 size" });
-    }
-    pixels
-        .checked_mul(2)
-        .and_then(|bytes| bytes.checked_mul(sample_bytes))
-        .ok_or(CodecError::Limit { what: "frame size" })
-}
-
-fn yuv420_len(
-    width: usize,
-    height: usize,
-    pixels: usize,
-    sample_bytes: usize,
-) -> Result<usize, CodecError> {
-    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-        return Err(CodecError::InvalidApi {
-            what: "chroma size",
-        });
-    }
-    let samples = pixels / 2;
-    samples
-        .checked_mul(3)
-        .and_then(|bytes| bytes.checked_mul(sample_bytes))
+fn wide_planar(width: usize, height: usize, pixel: PixelFormat) -> Result<usize, CodecError> {
+    let (chroma_w, chroma_h) =
+        pixel
+            .chroma_wh(width as u32, height as u32)
+            .ok_or(CodecError::InvalidApi {
+                what: "pixel format",
+            })?;
+    let luma = width
+        .checked_mul(height)
+        .and_then(|samples| samples.checked_mul(2))
+        .ok_or(CodecError::Limit { what: "frame size" })?;
+    let chroma = usize::try_from(chroma_w)
+        .ok()
+        .and_then(|w| {
+            usize::try_from(chroma_h)
+                .ok()
+                .and_then(|h| w.checked_mul(h))
+        })
+        .and_then(|samples| samples.checked_mul(4))
+        .ok_or(CodecError::Limit { what: "frame size" })?;
+    luma.checked_add(chroma)
         .ok_or(CodecError::Limit { what: "frame size" })
 }
 

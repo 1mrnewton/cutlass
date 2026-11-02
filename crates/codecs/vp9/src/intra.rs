@@ -8,8 +8,10 @@
 
 #![allow(dead_code)]
 
-pub struct Edge<'a> {
-    pub samples: &'a [u8],
+use crate::pel::Pix;
+
+pub struct Edge<'a, P: Pix> {
+    pub samples: &'a [P],
     pub stride: usize,
     pub crop_w: usize,
     pub crop_h: usize,
@@ -33,7 +35,7 @@ pub struct Site {
     pub have_right: bool,
 }
 
-pub fn predict(mode: u8, samples: &mut [u8], site: Site) {
+pub fn predict<P: Pix>(mode: u8, samples: &mut [P], site: Site) {
     let Site {
         tx,
         stride,
@@ -46,8 +48,8 @@ pub fn predict(mode: u8, samples: &mut [u8], site: Site) {
         have_right,
     } = site;
     let size = 4usize << tx;
-    let mut above = vec![127u8; size * 2 + 1];
-    let mut left = vec![129u8; size];
+    let mut above = vec![P::above(); size * 2 + 1];
+    let mut left = vec![P::left(); size];
     let (corner, used_left, used_above) = {
         let edge = Edge {
             samples,
@@ -64,7 +66,7 @@ pub fn predict(mode: u8, samples: &mut [u8], site: Site) {
         (above[0], edge.have_left, edge.have_above)
     };
     let above_row = &above[1..];
-    let mut pred = vec![0u8; size * size];
+    let mut pred = vec![P::default(); size * size];
     match mode {
         1 => vertical(&mut pred, size, above_row),
         2 => horizontal(&mut pred, size, &left),
@@ -86,7 +88,7 @@ pub fn predict(mode: u8, samples: &mut [u8], site: Site) {
     }
 }
 
-fn fill_edges(edge: &Edge<'_>, size: usize, above: &mut [u8], left: &mut [u8]) {
+fn fill_edges<P: Pix>(edge: &Edge<'_, P>, size: usize, above: &mut [P], left: &mut [P]) {
     if edge.have_left {
         for (i, slot) in left.iter_mut().enumerate().take(size) {
             *slot = sample(edge, edge.x as isize - 1, edge.y as isize + i as isize);
@@ -107,17 +109,17 @@ fn fill_edges(edge: &Edge<'_>, size: usize, above: &mut [u8], left: &mut [u8]) {
         above[0] = if edge.have_left {
             sample(edge, edge.x as isize - 1, edge.y as isize - 1)
         } else {
-            129
+            P::left()
         };
     } else {
         for slot in &mut above[1..] {
-            *slot = 127;
+            *slot = P::above();
         }
-        above[0] = 127;
+        above[0] = P::above();
     }
 }
 
-fn sample(edge: &Edge<'_>, x: isize, y: isize) -> u8 {
+fn sample<P: Pix>(edge: &Edge<'_, P>, x: isize, y: isize) -> P {
     let max_x = edge.crop_w.saturating_sub(1) as isize;
     let max_y = edge.crop_h.saturating_sub(1) as isize;
     let x = usize::try_from(x.clamp(0, max_x)).unwrap_or(0);
@@ -125,16 +127,16 @@ fn sample(edge: &Edge<'_>, x: isize, y: isize) -> u8 {
     edge.samples
         .get(y * edge.stride + x)
         .copied()
-        .unwrap_or(128)
+        .unwrap_or(P::mid())
 }
 
-fn vertical(pred: &mut [u8], size: usize, above: &[u8]) {
+fn vertical<P: Pix>(pred: &mut [P], size: usize, above: &[P]) {
     for row in 0..size {
         pred[row * size..row * size + size].copy_from_slice(&above[..size]);
     }
 }
 
-fn horizontal(pred: &mut [u8], size: usize, left: &[u8]) {
+fn horizontal<P: Pix>(pred: &mut [P], size: usize, left: &[P]) {
     for row in 0..size {
         for col in 0..size {
             pred[row * size + col] = left[row];
@@ -142,7 +144,14 @@ fn horizontal(pred: &mut [u8], size: usize, left: &[u8]) {
     }
 }
 
-fn dc(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], have_left: bool, have_above: bool) {
+fn dc<P: Pix>(
+    pred: &mut [P],
+    size: usize,
+    above: &[P],
+    left: &[P],
+    have_left: bool,
+    have_above: bool,
+) {
     let log2 = size.trailing_zeros();
     let avg = if have_left && have_above {
         let sum = side_sum(left, size) + side_sum(above, size);
@@ -154,21 +163,20 @@ fn dc(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], have_left: bool, 
         let sum = side_sum(above, size);
         (sum + (1 << (log2 - 1))) >> log2
     } else {
-        128
+        usize::try_from(P::mid().get()).unwrap_or(0)
     };
-    let avg = u8::try_from(avg).unwrap_or(128);
-    pred.fill(avg);
+    pred.fill(P::put(i32::try_from(avg).unwrap_or(P::mid().get())));
 }
 
-fn side_sum(samples: &[u8], size: usize) -> usize {
+fn side_sum<P: Pix>(samples: &[P], size: usize) -> usize {
     samples
         .iter()
         .take(size)
-        .map(|sample| usize::from(*sample))
+        .map(|sample| usize::try_from(sample.get()).unwrap_or(0))
         .sum()
 }
 
-fn d45(pred: &mut [u8], size: usize, above: &[u8]) {
+fn d45<P: Pix>(pred: &mut [P], size: usize, above: &[P]) {
     for row in 0..size {
         for col in 0..size {
             pred[row * size + col] = if row + col + 2 < size * 2 {
@@ -180,7 +188,7 @@ fn d45(pred: &mut [u8], size: usize, above: &[u8]) {
     }
 }
 
-fn d63(pred: &mut [u8], size: usize, above: &[u8]) {
+fn d63<P: Pix>(pred: &mut [P], size: usize, above: &[P]) {
     for row in 0..size {
         for col in 0..size {
             let base = row / 2 + col;
@@ -193,7 +201,7 @@ fn d63(pred: &mut [u8], size: usize, above: &[u8]) {
     }
 }
 
-fn d207(pred: &mut [u8], size: usize, left: &[u8]) {
+fn d207<P: Pix>(pred: &mut [P], size: usize, left: &[P]) {
     for col in 0..size {
         pred[(size - 1) * size + col] = left[size - 1];
     }
@@ -216,7 +224,7 @@ fn d207(pred: &mut [u8], size: usize, left: &[u8]) {
     }
 }
 
-fn d117(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
+fn d117<P: Pix>(pred: &mut [P], size: usize, above: &[P], left: &[P], corner: P) {
     for col in 0..size {
         let previous = if col == 0 { corner } else { above[col - 1] };
         pred[col] = round1(previous, above[col]);
@@ -237,7 +245,7 @@ fn d117(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
     }
 }
 
-fn d135(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
+fn d135<P: Pix>(pred: &mut [P], size: usize, above: &[P], left: &[P], corner: P) {
     pred[0] = round2(left[0], corner, above[0]);
     for col in 1..size {
         let back = if col == 1 { corner } else { above[col - 2] };
@@ -254,7 +262,7 @@ fn d135(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
     }
 }
 
-fn d153(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
+fn d153<P: Pix>(pred: &mut [P], size: usize, above: &[P], left: &[P], corner: P) {
     pred[0] = round1(left[0], corner);
     for row in 1..size {
         pred[row * size] = round1(left[row - 1], left[row]);
@@ -277,24 +285,19 @@ fn d153(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
     }
 }
 
-fn tm(pred: &mut [u8], size: usize, above: &[u8], left: &[u8], corner: u8) {
+fn tm<P: Pix>(pred: &mut [P], size: usize, above: &[P], left: &[P], corner: P) {
     for row in 0..size {
         for col in 0..size {
-            let value = i32::from(above[col]) + i32::from(left[row]) - i32::from(corner);
-            pred[row * size + col] = clip(value);
+            let value = above[col].get() + left[row].get() - corner.get();
+            pred[row * size + col] = P::put(value);
         }
     }
 }
 
-fn round1(a: u8, b: u8) -> u8 {
-    u8::try_from((usize::from(a) + usize::from(b) + 1) >> 1).unwrap_or(0)
+fn round1<P: Pix>(a: P, b: P) -> P {
+    P::put((a.get() + b.get() + 1) >> 1)
 }
 
-fn round2(a: u8, b: u8, c: u8) -> u8 {
-    let sum = usize::from(a) + usize::from(b) * 2 + usize::from(c) + 2;
-    u8::try_from(sum >> 2).unwrap_or(0)
-}
-
-fn clip(value: i32) -> u8 {
-    u8::try_from(value.clamp(0, 255)).unwrap_or(0)
+fn round2<P: Pix>(a: P, b: P, c: P) -> P {
+    P::put((a.get() + b.get() * 2 + c.get() + 2) >> 2)
 }

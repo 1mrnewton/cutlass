@@ -707,6 +707,64 @@ fn compact_sizes_and_wide_offsets_read_the_same_samples() {
 }
 
 #[test]
+fn a_display_matrix_is_a_clockwise_quarter_turn_or_none() {
+    let one = 1 << 16;
+    let full = 1 << 30;
+    let identity = identity_matrix();
+    let spec = HandBuilt {
+        wide_offsets: false,
+        compact_sizes: false,
+        sync: SyncTable::Absent,
+        negative_cts: false,
+        version0_cts: false,
+        edit: false,
+        external: false,
+        outside: false,
+    };
+    let cases = [
+        (
+            [0, one, 0, -one, 0, 0, 0, 0, full],
+            cutlass_container::DisplayQuarter::Clockwise90,
+        ),
+        (
+            [-one, 0, 0, 0, -one, 0, 0, 0, full],
+            cutlass_container::DisplayQuarter::Half,
+        ),
+        (
+            [0, -one, 0, one, 0, 0, 0, 0, full],
+            cutlass_container::DisplayQuarter::Clockwise270,
+        ),
+        (identity, cutlass_container::DisplayQuarter::Zero),
+        (
+            [-one, 0, 0, 0, one, 0, 0, 0, full],
+            cutlass_container::DisplayQuarter::Zero,
+        ),
+    ];
+    for (track, expect) in cases {
+        let bytes = hand_built_matrices(spec, identity, track);
+        assert_eq!(open(&bytes).streams()[0].display, expect);
+        let file = IsoBmffFile::open(Cursor::new(bytes)).expect("open");
+        assert_eq!(
+            cutlass_container::Demux::streams(&file)[0].display(),
+            expect
+        );
+    }
+    let wiped = hand_built_matrices(spec, [0; 9], [0, one, 0, -one, 0, 0, 0, 0, full]);
+    assert_eq!(
+        open(&wiped).streams()[0].display,
+        cutlass_container::DisplayQuarter::Zero
+    );
+    let written = write_movie(
+        MuxOptions::default(),
+        vec![(video(), vec![packet(0, 0, 1, &[1], true, 30)])],
+    );
+    assert_eq!(
+        open(&written).streams()[0].display,
+        cutlass_container::DisplayQuarter::Zero
+    );
+}
+
+#[test]
 fn an_empty_sync_table_can_be_read_and_cannot_be_seeked() {
     let bytes = hand_built(HandBuilt {
         wide_offsets: false,
@@ -889,6 +947,10 @@ enum SyncTable {
 }
 
 fn hand_built(spec: HandBuilt) -> Vec<u8> {
+    hand_built_matrices(spec, [0; 9], [0; 9])
+}
+
+fn hand_built_matrices(spec: HandBuilt, movie: [i32; 9], track: [i32; 9]) -> Vec<u8> {
     let payload = b"abcWXYZ";
     let ftyp = box_of(b"ftyp", b"isom\0\0\0\0isom");
     let mdat = box_of(b"mdat", payload);
@@ -899,7 +961,7 @@ fn hand_built(spec: HandBuilt) -> Vec<u8> {
         data_at
     };
     let mut trak = Vec::new();
-    trak.extend(tkhd());
+    trak.extend(tkhd_matrix(&track));
     if spec.edit {
         let mut elst = u32_bytes(1);
         elst.extend(u32_bytes(2000));
@@ -988,7 +1050,7 @@ fn hand_built(spec: HandBuilt) -> Vec<u8> {
     mdia.extend(minf);
     trak.extend(box_of(b"mdia", &mdia));
     let moov = {
-        let mut body = mvhd(1000);
+        let mut body = mvhd_matrix(1000, &movie);
         body.extend(box_of(b"trak", &trak));
         box_of(b"moov", &body)
     };
@@ -1075,29 +1137,50 @@ fn iloc_box(offset: u32, length: u32) -> Vec<u8> {
 }
 
 fn tkhd() -> Vec<u8> {
+    tkhd_matrix(&[0; 9])
+}
+
+fn tkhd_matrix(matrix: &[i32; 9]) -> Vec<u8> {
     let mut body = vec![0, 0, 0, 3];
     body.extend_from_slice(&[0; 8]);
     body.extend(u32_bytes(1));
     body.extend_from_slice(&[0; 4]);
     body.extend(u32_bytes(2000));
     body.extend_from_slice(&[0; 16]);
-    body.extend_from_slice(&[0; 36]);
+    body.extend(matrix_bytes(matrix));
     body.extend(u32_bytes(2u32 << 16));
     body.extend(u32_bytes(1u32 << 16));
     box_of(b"tkhd", &body)
 }
 
 fn mvhd(timescale: u32) -> Vec<u8> {
+    mvhd_matrix(timescale, &[0; 9])
+}
+
+fn mvhd_matrix(timescale: u32, matrix: &[i32; 9]) -> Vec<u8> {
     let mut body = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     body.extend(timescale.to_be_bytes());
     body.extend(u32_bytes(2000));
     body.extend(u32_bytes(0x0001_0000));
     body.extend(0x0100u16.to_be_bytes());
     body.extend_from_slice(&[0; 10]);
-    body.extend_from_slice(&[0; 36]);
+    body.extend(matrix_bytes(matrix));
     body.extend_from_slice(&[0; 24]);
     body.extend(u32_bytes(2));
     box_of(b"mvhd", &body)
+}
+
+fn matrix_bytes(matrix: &[i32; 9]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(36);
+    for value in matrix {
+        out.extend(value.to_be_bytes());
+    }
+    out
+}
+
+fn identity_matrix() -> [i32; 9] {
+    let one = 1 << 16;
+    [one, 0, 0, 0, one, 0, 0, 0, 1 << 30]
 }
 
 fn stsd_visual() -> Vec<u8> {

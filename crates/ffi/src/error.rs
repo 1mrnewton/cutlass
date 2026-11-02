@@ -104,7 +104,32 @@ fn edit_cause(error: EditError) -> String {
         EditError::DuplicateMaterial => "the material id is already in a pool".to_owned(),
         EditError::TransitionWindow => "the split falls inside a transition window".to_owned(),
         EditError::AlreadyLinked => "the segment is already linked".to_owned(),
-        EditError::TrackKind => "the track type is not the type the import named".to_owned(),
+        EditError::TrackKind => "the track could not be added".to_owned(),
+        EditError::DuplicateMark => "a marker is already there".to_owned(),
+        EditError::DuplicateBeat => "a beat is already there".to_owned(),
+        EditError::NotAudio => "a beat belongs on audio".to_owned(),
+        EditError::NotVideo => "an extract belongs on video".to_owned(),
+        EditError::NoSound => "the clip has no sound".to_owned(),
+        EditError::AlreadyExtracted => "the sound is already on its own clip".to_owned(),
+        EditError::Angle => "the rotation is not a finite number of degrees".to_owned(),
+        EditError::Position => "the position is not a finite number".to_owned(),
+        EditError::Scale => "the scale must be greater than zero".to_owned(),
+        EditError::Fade => "a fade cannot be negative".to_owned(),
+        EditError::Opacity => "the opacity must be from zero to one".to_owned(),
+        EditError::NotText => "a text style belongs on text".to_owned(),
+        EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
+        EditError::TextColor => "the text color is not a hex color".to_owned(),
+        EditError::TextAlign => "text alignment is not left, center, or right".to_owned(),
+        EditError::LetterSpacing => "letter spacing must be from -1 to 4".to_owned(),
+        EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
+        EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
+        EditError::TextFont => "the face is not a file name".to_owned(),
+        EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
+        EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
+        EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),
+        EditError::Letterbox => "a letterbox belongs on a picture".to_owned(),
+        EditError::FrameRate => "the frame rate is not a project rate".to_owned(),
+        EditError::ColorSpace => "the color space is not a project color space".to_owned(),
     }
 }
 
@@ -132,12 +157,97 @@ mod tests {
     }
 
     #[test]
-    fn a_track_kind_mismatch_names_the_import() {
-        let error = FfiError::from(EditError::TrackKind);
+    fn extract_audio_names_why_it_was_refused() {
         assert_eq!(
-            error.to_string(),
-            "the track type is not the type the import named"
+            FfiError::from(EditError::NotVideo).to_string(),
+            "an extract belongs on video"
         );
+        assert_eq!(
+            FfiError::from(EditError::NoSound).to_string(),
+            "the clip has no sound"
+        );
+        assert_eq!(
+            FfiError::from(EditError::AlreadyExtracted).to_string(),
+            "the sound is already on its own clip"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Position).to_string(),
+            "the position is not a finite number"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Scale).to_string(),
+            "the scale must be greater than zero"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Fade).to_string(),
+            "a fade cannot be negative"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Opacity).to_string(),
+            "the opacity must be from zero to one"
+        );
+        assert_eq!(
+            FfiError::from(EditError::NotText).to_string(),
+            "a text style belongs on text"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextSize).to_string(),
+            "the text size must be greater than zero and at most 512"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextColor).to_string(),
+            "the text color is not a hex color"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextAlign).to_string(),
+            "text alignment is not left, center, or right"
+        );
+        assert_eq!(
+            FfiError::from(EditError::LetterSpacing).to_string(),
+            "letter spacing must be from -1 to 4"
+        );
+        assert_eq!(
+            FfiError::from(EditError::LineSpacing).to_string(),
+            "line spacing must be greater than -1 and at most 4"
+        );
+        assert_eq!(
+            FfiError::from(EditError::LineWidth).to_string(),
+            "the line width must be from zero through 8192"
+        );
+        assert_eq!(
+            FfiError::from(EditError::TextFont).to_string(),
+            "the face is not a file name"
+        );
+        assert_eq!(
+            FfiError::from(EditError::CanvasColor).to_string(),
+            "the canvas color is not a hex color"
+        );
+        assert_eq!(
+            FfiError::from(EditError::CanvasSize).to_string(),
+            "the canvas side must be from 1 to 7680"
+        );
+        assert_eq!(
+            FfiError::from(EditError::CanvasRatio).to_string(),
+            "the canvas ratio is not a project ratio"
+        );
+        assert_eq!(
+            FfiError::from(EditError::Letterbox).to_string(),
+            "a letterbox belongs on a picture"
+        );
+        assert_eq!(
+            FfiError::from(EditError::FrameRate).to_string(),
+            "the frame rate is not a project rate"
+        );
+        assert_eq!(
+            FfiError::from(EditError::ColorSpace).to_string(),
+            "the color space is not a project color space"
+        );
+    }
+
+    #[test]
+    fn a_track_that_cannot_be_added_names_the_cause() {
+        let error = FfiError::from(EditError::TrackKind);
+        assert_eq!(error.to_string(), "the track could not be added");
     }
 
     #[test]

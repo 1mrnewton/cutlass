@@ -110,6 +110,19 @@ impl DecodedFrame {
     }
 }
 
+/// What a steered decode does after each picture. See
+/// [`Media::decode_steered`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Steer {
+    /// Keep going to the target.
+    Go,
+    /// Go to this time instead. A time before the picture just decoded
+    /// cannot be reached going forward, so it stops the decode.
+    Retarget(Micros),
+    /// Stop here.
+    Stop,
+}
+
 /// One picture and the source span it covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldFrame {
@@ -307,6 +320,20 @@ impl Media {
         source: Micros,
         cover: &TimeRange,
     ) -> Result<HeldFrame, EngineError> {
+        self.decode_steered(source, cover, &mut |_| Steer::Go)
+    }
+
+    /// [`Self::decode_at`], asking `steer` after each picture decoded on the
+    /// way. It can move the target to a later time, which the decode then
+    /// stops at, or stop the decode. A stopped decode is
+    /// [`EngineError::Interrupted`], and the stream stays where it got to, so
+    /// a later time continues from there without a seek.
+    pub fn decode_steered(
+        &mut self,
+        mut source: Micros,
+        cover: &TimeRange,
+        steer: &mut dyn FnMut(&HeldFrame) -> Steer,
+    ) -> Result<HeldFrame, EngineError> {
         if let Some(cursor) = &self.cursor
             && cursor.last.start.0 <= source.0
             && source.0 < cursor.last.end.0
@@ -352,6 +379,14 @@ impl Media {
                 let last = previous.ok_or(EngineError::NotReady)?;
                 return Ok(self.keep(last, None));
             };
+            match steer(&held) {
+                Steer::Go => {}
+                Steer::Retarget(later) if later.0 >= held.start.0 => source = later,
+                Steer::Retarget(_) | Steer::Stop => {
+                    self.keep(held, None);
+                    return Err(EngineError::Interrupted);
+                }
+            }
             if held.start.0 > source.0 {
                 return Ok(match previous {
                     Some(mut previous) => {

@@ -28,7 +28,7 @@ use cutlass_still::{StillDemux, StillProbe, still_limits};
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
-use crate::reader::{MAX_AUDIO_FRAMES, ReaderFactory};
+use crate::reader::{MAX_AUDIO_FRAMES, ReaderFactory, Steer};
 use crate::source::{open_segment, peaks_from};
 use crate::{MAX_BUCKETS, MAX_EDGE};
 
@@ -565,6 +565,50 @@ fn decode_at_returns_the_picture_that_covers_the_time() {
     }
     let past = media.decode_at(tick(20), &cover).expect("last picture");
     assert_eq!(past.start, tick(7));
+}
+
+#[test]
+fn a_steered_decode_moves_to_a_later_time_or_stops_where_it_got_to() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_eight);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let cover = TimeRange::new(0, 1_000_000);
+
+    let moved = media
+        .decode_steered(Micros(tick(2).0 + 10), &cover, &mut |held| {
+            if held.start == tick(1) {
+                Steer::Retarget(Micros(tick(5).0 + 10))
+            } else {
+                Steer::Go
+            }
+        })
+        .expect("retargeted");
+    assert_eq!(moved.start, tick(5));
+
+    let mut seen = Vec::new();
+    let stopped = media.decode_steered(Micros(tick(1).0 + 10), &cover, &mut |held| {
+        seen.push(held.start);
+        if held.start == tick(1) {
+            Steer::Retarget(tick(0))
+        } else {
+            Steer::Go
+        }
+    });
+    assert_eq!(stopped, Err(EngineError::Interrupted));
+    let next = media
+        .decode_steered(Micros(tick(3).0 + 10), &cover, &mut |held| {
+            seen.push(held.start);
+            Steer::Go
+        })
+        .expect("continued");
+    assert_eq!(next.start, tick(3));
+    // After stopping at tick 1 the stream went on from there, without a seek
+    // back to tick 0.
+    assert_eq!(seen, [tick(0), tick(1), tick(2), tick(3)]);
 }
 
 fn open_eight(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {

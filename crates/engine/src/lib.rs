@@ -35,7 +35,7 @@ pub use mix::{
     AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, mix_inputs, render, volume_at,
 };
 pub use reader::{
-    DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, StreamReport,
+    DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, Steer, StreamReport,
 };
 pub use scene::{SCENE_CELLS, SCENE_SCORE, SceneError, cut_times, scene_cuts};
 pub use source::{VideoSource, decoded_picture, media_in_project, open_segment, open_segment_in};

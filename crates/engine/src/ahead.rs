@@ -12,17 +12,20 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cutlass_model::{Micros, TimeRange};
 
 use crate::error::EngineError;
-use crate::reader::{HeldFrame, Media};
+use crate::reader::{HeldFrame, Media, Steer};
 
 /// Pictures kept before the asked time, for a short step back.
 pub const BEHIND: usize = 2;
 /// The longest a caller waits for one picture.
 const WAIT: Duration = Duration::from_secs(2);
+/// How often a long decode stores a picture on its way, so a caller that
+/// does not wait sees it move.
+const PUBLISH: Duration = Duration::from_millis(50);
 
 /// One clip's decode thread and the pictures it has ready.
 pub(crate) struct ReadAhead {
@@ -102,6 +105,16 @@ impl ReadAhead {
             self.shared.wake.notify_all();
         }
         Ok(None)
+    }
+
+    /// The stored picture nearest `source`, covering it or not, for a caller
+    /// that shows something while the asked picture decodes.
+    pub(crate) fn nearest(&self, source: Micros) -> Option<HeldFrame> {
+        lock(&self.shared.state)
+            .frames
+            .iter()
+            .min_by_key(|held| held.start.0.abs_diff(source.0))
+            .cloned()
     }
 
     /// Ask for the picture that covers `source` without waiting for it, so
@@ -228,13 +241,18 @@ fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
             continue;
         };
         drop(state);
-        let (time, answering) = match job {
+        let (mut time, answering) = match job {
             Job::Answer(time) => (time, true),
             Job::Ahead(time) => (time, false),
         };
-        let decoded = media.decode_at(time, cover);
+        let decoded = if answering {
+            answer(shared, &mut media, cover, ahead, &mut time)
+        } else {
+            media.decode_at(time, cover)
+        };
         state = lock(&shared.state);
         match decoded {
+            Err(EngineError::Interrupted) => {}
             Ok(held) => {
                 if answering {
                     state.answer = Some((time, held.start));
@@ -259,6 +277,42 @@ fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
         }
         shared.wake.notify_all();
     }
+}
+
+/// Decode toward `target`, following the newest asked time while it is still
+/// ahead, so dragging the playhead never waits on a time it has left.
+///
+/// A time behind the decode stops it; the next job seeks for it. On a long
+/// decode a picture is stored every [`PUBLISH`], so the caller can show
+/// progress toward the asked time instead of holding one picture.
+fn answer(
+    shared: &Shared,
+    media: &mut Media,
+    cover: &TimeRange,
+    ahead: usize,
+    target: &mut Micros,
+) -> Result<HeldFrame, EngineError> {
+    let mut published = Instant::now();
+    let start = *target;
+    media.decode_steered(start, cover, &mut |held| {
+        let mut state = lock(&shared.state);
+        if state.stop {
+            return Steer::Stop;
+        }
+        if published.elapsed() >= PUBLISH {
+            published = Instant::now();
+            store(&mut state, held.clone(), ahead);
+            shared.wake.notify_all();
+        }
+        match state.want {
+            Some(want) if want == *target => Steer::Go,
+            Some(want) => {
+                *target = want;
+                Steer::Retarget(want)
+            }
+            None => Steer::Go,
+        }
+    })
 }
 
 /// Insert `held` in display order and drop pictures outside the window

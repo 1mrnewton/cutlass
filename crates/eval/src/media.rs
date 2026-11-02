@@ -6,28 +6,43 @@
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
 //! A translation of 1 is half the canvas. A file display quarter turn is
-//! clockwise and is applied before that fit. Alpha, rotation, position, and
-//! scale keyframes are straight lines measured from the segment start.
+//! clockwise and is applied before that fit. The video material's crop quad
+//! is in that oriented picture, from the top left, with Y down. An all-zero
+//! quad is the whole picture. `crop_ratio` is not read. `crop_scale` above 1
+//! shrinks the quad around its center. Alpha, rotation, position, and scale
+//! keyframes are measured from the segment start. A line, an empty curve,
+//! `none`, and an unknown curve stay straight and ignore their handles. Any
+//! other curve is a cubic through the earlier key's right handle and the
+//! later key's left handle. A graph id is not sampled. A segment canvas is
+//! drawn behind that fitted picture.
 //!
 //! [`OpenClips`] keeps a file open for one draft revision. A later time seeks
 //! that file. A failed open is not kept, so the next time tries again.
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use cutlass_engine::{ClockKind, DisplayQuarter, ReaderFactory, VideoSource, open_segment};
+use cutlass_engine::{
+    ClockKind, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture, open_segment_in,
+};
 use cutlass_model::{
-    Clip, CommonKeyframeGroup, Draft, DraftId, MaterialRef, Micros, Segment, SegmentId,
-    TrackAttribute, UniformScale,
+    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialCanvas, MaterialRef,
+    Micros, Segment, SegmentId, TimeRange, TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
+
+use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
 
 /// Open video files for one draft revision.
 pub struct OpenClips {
     draft: Option<DraftId>,
     revision: u64,
     bound: bool,
+    /// Project folder for a relative media path. An absolute path ignores it.
+    root: Option<std::path::PathBuf>,
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
+    images: HashMap<String, CpuBytes>,
 }
 
 impl OpenClips {
@@ -37,8 +52,10 @@ impl OpenClips {
             draft: None,
             revision: 0,
             bound: false,
+            root: None,
             sources: HashMap::new(),
             nests: HashMap::new(),
+            images: HashMap::new(),
         }
     }
 
@@ -46,6 +63,7 @@ impl OpenClips {
     pub fn clear(&mut self) {
         self.sources.clear();
         self.nests.clear();
+        self.images.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
@@ -56,7 +74,17 @@ impl OpenClips {
     /// Each compound keeps its own child files. A second segment that stores
     /// its own copy of a nest does not share them.
     pub(crate) fn child(&mut self, id: &SegmentId) -> &mut Self {
-        self.nests.entry(id.clone()).or_default()
+        let root = self.root.clone();
+        let child = self.nests.entry(id.clone()).or_default();
+        if child.root.is_none() {
+            child.root = root;
+        }
+        child
+    }
+
+    /// The folder a relative media path is joined to. `None` opens a relative path from the process directory.
+    pub fn set_project(&mut self, root: Option<&Path>) {
+        self.root = root.map(Path::to_path_buf);
     }
 
     pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
@@ -65,6 +93,7 @@ impl OpenClips {
         }
         self.sources.clear();
         self.nests.clear();
+        self.images.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;
@@ -109,6 +138,9 @@ pub(crate) struct Placed<'a> {
     width: u32,
     height: u32,
     transform: PictureTransform,
+    crop: Crop,
+    crop_scale: f64,
+    backdrop: Backdrop,
 }
 
 pub(crate) fn picture_transform(
@@ -226,12 +258,12 @@ pub(crate) fn video_layers<'a>(
             if !covers(segment.target.start.0, segment.target.duration.0, time.0) {
                 continue;
             }
-            if !matches!(
-                draft.materials.get(segment.material_id.as_str()),
-                Some(MaterialRef::Video(_))
-            ) {
+            let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str())
+            else {
                 continue;
-            }
+            };
+            let crop = video.crop;
+            let crop_scale = video.crop_scale;
             let Some((clip, uniform)) = segment_clip(segment, time) else {
                 continue;
             };
@@ -242,23 +274,36 @@ pub(crate) fn video_layers<'a>(
                 continue;
             }
             if !clips.sources.contains_key(&segment.id) {
-                let Ok(source) = open_segment(media, draft, &segment.id, ClockKind::Export, 1)
-                else {
+                let root = clips.root.clone();
+                let Ok(source) = open_segment_in(
+                    media,
+                    draft,
+                    &segment.id,
+                    ClockKind::Export,
+                    1,
+                    root.as_deref(),
+                ) else {
                     continue;
                 };
                 clips.sources.insert(segment.id.clone(), source);
             }
+            let backdrop = backdrop_for(draft, segment, media, clips, width, height);
             chosen.push((
                 segment.render_index,
                 track_index,
                 segment_index,
                 segment.id.clone(),
                 transform,
+                crop,
+                crop_scale,
+                backdrop,
             ));
         }
     }
     let mut layers = Vec::with_capacity(chosen.len());
-    for (render_index, track_index, segment_index, id, transform) in chosen {
+    for (render_index, track_index, segment_index, id, transform, crop, crop_scale, backdrop) in
+        chosen
+    {
         let Some(source) = clips.sources.get(&id) else {
             continue;
         };
@@ -271,18 +316,144 @@ pub(crate) fn video_layers<'a>(
                 width,
                 height,
                 transform,
+                crop,
+                crop_scale,
+                backdrop,
             },
         });
     }
     layers
 }
 
-/// The clip at `time`, with line keyframes measured from the segment start.
+/// The placed picture of one video segment at `time`.
+///
+/// `time` must fall inside the target. A failed open is not kept. The draft
+/// is not changed.
+pub(crate) fn video_picture(
+    draft: &Draft,
+    segment: &Segment,
+    media: &ReaderFactory,
+    width: u32,
+    height: u32,
+    time: Micros,
+    clips: &mut OpenClips,
+) -> Option<CpuBytes> {
+    if !segment.visible || segment.source_range.is_none() {
+        return None;
+    }
+    let Some(MaterialRef::Video(video)) = draft.materials.get(segment.material_id.as_str()) else {
+        return None;
+    };
+    let crop = video.crop;
+    let crop_scale = video.crop_scale;
+    let (clip, uniform) = segment_clip(segment, time)?;
+    let transform = picture_transform(&clip, &uniform, width, height)?;
+    if transform.omitted() {
+        return None;
+    }
+    if !clips.sources.contains_key(&segment.id) {
+        let root = clips.root.clone();
+        let source = open_segment_in(
+            media,
+            draft,
+            &segment.id,
+            ClockKind::Export,
+            1,
+            root.as_deref(),
+        )
+        .ok()?;
+        clips.sources.insert(segment.id.clone(), source);
+    }
+    let backdrop = backdrop_for(draft, segment, media, clips, width, height);
+    let source = clips.sources.get(&segment.id)?;
+    let placed = Placed {
+        source,
+        width,
+        height,
+        transform,
+        crop,
+        crop_scale,
+        backdrop,
+    };
+    match placed.sample(time) {
+        Sample::Ready(Picture::Cpu(bytes)) => Some(bytes),
+        Sample::Ready(Picture::Platform(_)) | Sample::Miss => None,
+    }
+}
+
+pub(crate) fn backdrop_for(
+    draft: &Draft,
+    segment: &Segment,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    width: u32,
+    height: u32,
+) -> Backdrop {
+    let Some(canvas) = segment_canvas(draft, segment) else {
+        return Backdrop::None;
+    };
+    if canvas.kind == "canvas_image" {
+        let image = canvas_image(canvas, media, clips, width, height);
+        return image_backdrop(canvas, image);
+    }
+    segment_backdrop(canvas, width, height)
+}
+
+fn segment_canvas<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a MaterialCanvas> {
+    segment
+        .extra_material_refs
+        .iter()
+        .find_map(|id| match draft.materials.get(id.as_str()) {
+            Some(MaterialRef::Canvas(canvas)) => Some(canvas),
+            _ => None,
+        })
+}
+
+fn canvas_image(
+    canvas: &MaterialCanvas,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    width: u32,
+    height: u32,
+) -> Option<CpuBytes> {
+    let path = if canvas.image.is_empty() {
+        canvas.album_image.as_str()
+    } else {
+        canvas.image.as_str()
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let decoded = if let Some(cached) = clips.images.get(path) {
+        cached.clone()
+    } else {
+        let decoded = decode_canvas_image(media, path)?;
+        clips.images.insert(path.to_owned(), decoded.clone());
+        decoded
+    };
+    cover(&decoded, width, height)
+}
+
+fn decode_canvas_image(media: &ReaderFactory, path: &str) -> Option<CpuBytes> {
+    let mut opened = media.open(Path::new(path)).ok()?;
+    let display = opened.info().display;
+    let held = opened.decode_at(Micros(0), &TimeRange::new(0, 1)).ok()?;
+    let Picture::Cpu(bytes) = decoded_picture(&held.frame).ok()? else {
+        return None;
+    };
+    orient(bytes, display)
+}
+
+/// The clip at `time`, with keyframes measured from the segment start.
 ///
 /// A key before the first sample holds that sample. A key after the last
-/// holds the last. The same offset keeps the later key. A curve type other
-/// than a straight line is still sampled as a straight line. A non-finite
-/// sample refuses the clip. `KFTypeScale` drives both axes through uniform
+/// holds the last. The same offset keeps the later key. A line, an empty
+/// curve, `none`, and an unknown curve are a straight line, and their handles
+/// are ignored. Any other curve is a cubic. The earlier key's right handle
+/// and the later key's left handle are offsets from those samples. The sample
+/// solves that cubic in time, and stops when the time error is under a
+/// thousandth of the span. A handle that is not finite refuses the clip. A
+/// graph id is not sampled. `KFTypeScale` drives both axes through uniform
 /// scale when that switch is on, and through `clip.scale` when it is off.
 /// `KFTypeScaleX` and `KFTypeScaleY` replace one axis only while uniform
 /// scale is off.
@@ -322,6 +493,18 @@ pub(crate) fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, Uni
     Some((clip, uniform))
 }
 
+#[derive(Clone)]
+struct KeySample {
+    time: i64,
+    value: f64,
+    order: usize,
+    bends: bool,
+    left_x: f64,
+    left_y: f64,
+    right_x: f64,
+    right_y: f64,
+}
+
 fn line_at(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Option<Option<f64>> {
     let mut keys = Vec::new();
     for group in groups {
@@ -335,48 +518,175 @@ fn line_at(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Optio
             if !value.is_finite() {
                 return None;
             }
-            keys.push((key.time_offset.0, value, keys.len()));
+            let bends = bends(&key.curve_type);
+            if bends
+                && !(key.left_control.x.is_finite()
+                    && key.left_control.y.is_finite()
+                    && key.right_control.x.is_finite()
+                    && key.right_control.y.is_finite())
+            {
+                return None;
+            }
+            let (left_x, left_y, right_x, right_y) = if bends {
+                (
+                    key.left_control.x,
+                    key.left_control.y,
+                    key.right_control.x,
+                    key.right_control.y,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+            keys.push(KeySample {
+                time: key.time_offset.0,
+                value,
+                order: keys.len(),
+                bends,
+                left_x,
+                left_y,
+                right_x,
+                right_y,
+            });
         }
     }
-    Some(straight_line(&mut keys, offset))
+    Some(sample_keys(&mut keys, offset))
 }
 
-fn straight_line(keys: &mut [(i64, f64, usize)], at: i64) -> Option<f64> {
+fn bends(curve_type: &str) -> bool {
+    match KeyframeCurve::parse(curve_type) {
+        Some(
+            KeyframeCurve::CurveOut
+            | KeyframeCurve::CurveIn
+            | KeyframeCurve::CurveInOut
+            | KeyframeCurve::FreeCurveIn
+            | KeyframeCurve::FreeCurveOut
+            | KeyframeCurve::FreeCurveInOut,
+        ) => true,
+        Some(KeyframeCurve::Line | KeyframeCurve::None) | None => false,
+    }
+}
+
+fn sample_keys(keys: &mut [KeySample], at: i64) -> Option<f64> {
     if keys.is_empty() {
         return None;
     }
-    keys.sort_by(|left, right| left.0.cmp(&right.0).then(left.2.cmp(&right.2)));
-    let mut collapsed: Vec<(i64, f64)> = Vec::new();
-    for (time, value, _) in keys.iter().copied() {
+    keys.sort_by(|left, right| {
+        left.time
+            .cmp(&right.time)
+            .then(left.order.cmp(&right.order))
+    });
+    let mut collapsed: Vec<KeySample> = Vec::new();
+    for key in keys.iter().cloned() {
         if let Some(last) = collapsed.last_mut()
-            && last.0 == time
+            && last.time == key.time
         {
-            last.1 = value;
+            *last = key;
             continue;
         }
-        collapsed.push((time, value));
+        collapsed.push(key);
     }
-    let (first_time, first) = collapsed.first().copied()?;
-    if at <= first_time {
-        return Some(first);
+    let first = collapsed.first()?;
+    if at <= first.time {
+        return Some(first.value);
     }
-    let (last_time, last) = collapsed.last().copied()?;
-    if at >= last_time {
-        return Some(last);
+    let last = collapsed.last()?;
+    if at >= last.time {
+        return Some(last.value);
     }
     for pair in collapsed.windows(2) {
-        let (left_time, left) = pair[0];
-        let (right_time, right) = pair[1];
-        if at >= left_time && at <= right_time {
-            let span = (right_time - left_time) as f64;
-            if span == 0.0 {
-                return Some(right);
-            }
-            let t = (at - left_time) as f64 / span;
-            return Some(left + (right - left) * t);
+        if at >= pair[0].time && at <= pair[1].time {
+            return Some(blend(&pair[0], &pair[1], at));
         }
     }
-    Some(last)
+    Some(last.value)
+}
+
+fn blend(left: &KeySample, right: &KeySample, at: i64) -> f64 {
+    let span = (right.time - left.time) as f64;
+    if span == 0.0 {
+        return right.value;
+    }
+    let along = (at - left.time) as f64 / span;
+    let linear = left.value + (right.value - left.value) * along;
+    if !left.bends && !right.bends {
+        return linear;
+    }
+    let t = parameter(left.right_x / span, 1.0 + right.left_x / span, along);
+    let curved = bezier(
+        left.value,
+        left.value + left.right_y,
+        right.value + right.left_y,
+        right.value,
+        t,
+    );
+    if curved.is_finite() { curved } else { linear }
+}
+
+/// Cubic parameter whose horizontal bezier equals `along`.
+///
+/// Eight Newton steps from `along`, then bisection. A step whose time error
+/// is under a thousandth of the span is kept. A query on either sample
+/// returns that end.
+fn parameter(cx1: f64, cx2: f64, along: f64) -> f64 {
+    if along < 1e-6 {
+        return 0.0;
+    }
+    if along > 1.0 || (1.0 - along) < 1e-6 {
+        return 1.0;
+    }
+    let mut t = along;
+    for _ in 0..8 {
+        let x = horizontal(cx1, cx2, t);
+        if (x - along).abs() < 1e-3 {
+            return t;
+        }
+        let slope = horizontal_slope(cx1, cx2, t);
+        if slope.abs() < 1e-6 {
+            break;
+        }
+        t = (t - (x - along) / slope).clamp(0.0, 1.0);
+    }
+    let mut low = 0.0;
+    let mut high = 1.0;
+    for _ in 0..64 {
+        if low >= high || (high - low) <= 1e-6 {
+            return t.min(1.0);
+        }
+        let mid = low + (high - low) * 0.5;
+        let x = horizontal(cx1, cx2, mid);
+        if x < along {
+            low = mid;
+        } else {
+            high = mid;
+        }
+        if (x - along).abs() < 1e-3 {
+            return mid;
+        }
+    }
+    t.min(1.0)
+}
+
+fn horizontal(cx1: f64, cx2: f64, t: f64) -> f64 {
+    let (cubic, square, linear) = horizontal_terms(cx1, cx2);
+    ((cubic * t + square) * t + linear) * t
+}
+
+fn horizontal_slope(cx1: f64, cx2: f64, t: f64) -> f64 {
+    let (cubic, square, linear) = horizontal_terms(cx1, cx2);
+    (3.0 * cubic * t + 2.0 * square) * t + linear
+}
+
+fn horizontal_terms(cx1: f64, cx2: f64) -> (f64, f64, f64) {
+    (
+        3.0 * cx1 - 3.0 * cx2 + 1.0,
+        3.0 * cx2 - 6.0 * cx1,
+        3.0 * cx1,
+    )
+}
+
+fn bezier(y0: f64, y1: f64, y2: f64, y3: f64, t: f64) -> f64 {
+    let rest = 1.0 - t;
+    rest * rest * rest * y0 + 3.0 * rest * rest * t * y1 + 3.0 * rest * t * t * y2 + t * t * t * y3
 }
 
 fn covers(start: i64, duration: i64, time: i64) -> bool {
@@ -392,12 +702,14 @@ impl PictureSource for Placed<'_> {
             return Sample::Miss;
         };
         match picture {
-            Picture::Cpu(bytes) => place_with(
-                self.width,
-                self.height,
+            Picture::Cpu(bytes) => finish_picture(
+                (self.width, self.height),
                 bytes,
                 self.transform,
                 self.source.display(),
+                self.crop,
+                self.crop_scale,
+                &self.backdrop,
             ),
             Picture::Platform(_) => Sample::Miss,
         }
@@ -409,6 +721,220 @@ impl PictureTransform {
     pub(crate) fn omitted(self) -> bool {
         self.opacity == 0 || self.scale_x == 0.0 || self.scale_y == 0.0
     }
+}
+
+fn finish_picture(
+    canvas: (u32, u32),
+    picture: CpuBytes,
+    transform: PictureTransform,
+    display: DisplayQuarter,
+    crop: Crop,
+    crop_scale: f64,
+    backdrop: &Backdrop,
+) -> Sample {
+    let (canvas_w, canvas_h) = canvas;
+    let Some(picture) = orient(picture, display) else {
+        return Sample::Miss;
+    };
+    let picture = apply_crop(picture, crop, crop_scale);
+    let sharp = matches!(backdrop, Backdrop::Blur(_)).then(|| picture.clone());
+    let Sample::Ready(Picture::Cpu(placed)) =
+        place_with(canvas_w, canvas_h, picture, transform, DisplayQuarter::Zero)
+    else {
+        return Sample::Miss;
+    };
+    Sample::Ready(Picture::Cpu(over_backdrop(
+        placed,
+        sharp.as_ref(),
+        backdrop,
+    )))
+}
+
+/// Sample `crop` from the oriented picture.
+///
+/// Coordinates are fractions of the picture. Y grows downward. An all-zero
+/// quad, a non-finite corner, or an edge that does not cover a pixel returns
+/// `picture`. `crop_scale` above 1 moves each corner toward the quad center.
+/// A scale that is not finite or not positive stays 1. A sample that falls
+/// outside the picture is clear.
+pub(crate) fn apply_crop(picture: CpuBytes, crop: Crop, crop_scale: f64) -> CpuBytes {
+    if crop_absent(crop) {
+        return picture;
+    }
+    let quad = scale_quad(crop, crop_scale);
+    if !quad_finite(quad) {
+        return picture;
+    }
+    let src_w = picture.width();
+    let src_h = picture.height();
+    let Some(out_w) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.upper_right_x,
+        quad.upper_right_y,
+        src_w,
+        src_h,
+    )) else {
+        return picture;
+    };
+    let Some(out_h) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.lower_left_x,
+        quad.lower_left_y,
+        src_w,
+        src_h,
+    )) else {
+        return picture;
+    };
+    let Some(len) = rgba_len(out_w, out_h) else {
+        return picture;
+    };
+    let mut dst = vec![0_u8; len];
+    let built = {
+        let src = picture.rgba();
+        let mut wrote = true;
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let u = (f64::from(x) + 0.5) / f64::from(out_w);
+                let v = (f64::from(y) + 0.5) / f64::from(out_h);
+                let nx = bilinear(
+                    u,
+                    v,
+                    quad.upper_left_x,
+                    quad.upper_right_x,
+                    quad.lower_left_x,
+                    quad.lower_right_x,
+                );
+                let ny = bilinear(
+                    u,
+                    v,
+                    quad.upper_left_y,
+                    quad.upper_right_y,
+                    quad.lower_left_y,
+                    quad.lower_right_y,
+                );
+                let pixel = sample_norm(src, src_w, src_h, nx, ny);
+                let Some(slot) = dst_slot(&mut dst, out_w, x, y) else {
+                    wrote = false;
+                    break;
+                };
+                slot.copy_from_slice(&pixel);
+            }
+            if !wrote {
+                break;
+            }
+        }
+        wrote
+    };
+    if !built {
+        return picture;
+    }
+    CpuBytes::new(out_w, out_h, dst).unwrap_or(picture)
+}
+
+fn crop_absent(crop: Crop) -> bool {
+    is_zero(crop.upper_left_x)
+        && is_zero(crop.upper_left_y)
+        && is_zero(crop.upper_right_x)
+        && is_zero(crop.upper_right_y)
+        && is_zero(crop.lower_left_x)
+        && is_zero(crop.lower_left_y)
+        && is_zero(crop.lower_right_x)
+        && is_zero(crop.lower_right_y)
+}
+
+fn is_zero(value: f64) -> bool {
+    value.to_bits() == 0.0_f64.to_bits() || value.to_bits() == (-0.0_f64).to_bits()
+}
+
+fn scale_quad(crop: Crop, scale: f64) -> Crop {
+    if !scale.is_finite() || scale <= 0.0 || scale.to_bits() == 1.0_f64.to_bits() {
+        return crop;
+    }
+    let center_x =
+        (crop.upper_left_x + crop.upper_right_x + crop.lower_left_x + crop.lower_right_x) / 4.0;
+    let center_y =
+        (crop.upper_left_y + crop.upper_right_y + crop.lower_left_y + crop.lower_right_y) / 4.0;
+    Crop {
+        upper_left_x: toward(crop.upper_left_x, center_x, scale),
+        upper_left_y: toward(crop.upper_left_y, center_y, scale),
+        upper_right_x: toward(crop.upper_right_x, center_x, scale),
+        upper_right_y: toward(crop.upper_right_y, center_y, scale),
+        lower_left_x: toward(crop.lower_left_x, center_x, scale),
+        lower_left_y: toward(crop.lower_left_y, center_y, scale),
+        lower_right_x: toward(crop.lower_right_x, center_x, scale),
+        lower_right_y: toward(crop.lower_right_y, center_y, scale),
+    }
+}
+
+fn toward(value: f64, center: f64, scale: f64) -> f64 {
+    center + (value - center) / scale
+}
+
+fn quad_finite(crop: Crop) -> bool {
+    [
+        crop.upper_left_x,
+        crop.upper_left_y,
+        crop.upper_right_x,
+        crop.upper_right_y,
+        crop.lower_left_x,
+        crop.lower_left_y,
+        crop.lower_right_x,
+        crop.lower_right_y,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+}
+
+fn edge_len(x0: f64, y0: f64, x1: f64, y1: f64, width: u32, height: u32) -> f64 {
+    let dx = (x1 - x0) * f64::from(width);
+    let dy = (y1 - y0) * f64::from(height);
+    dx.mul_add(dx, dy * dy).sqrt()
+}
+
+fn round_edge(value: f64) -> Option<u32> {
+    if !value.is_finite() || value < 1.0 {
+        return None;
+    }
+    let rounded = value.round();
+    if !(1.0..4_294_967_296.0).contains(&rounded) {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(rounded as u32)
+}
+
+fn bilinear(
+    u: f64,
+    v: f64,
+    upper_left: f64,
+    upper_right: f64,
+    lower_left: f64,
+    lower_right: f64,
+) -> f64 {
+    let upper = upper_left + (upper_right - upper_left) * u;
+    let lower = lower_left + (lower_right - lower_left) * u;
+    upper + (lower - upper) * v
+}
+
+fn sample_norm(src: &[u8], width: u32, height: u32, nx: f64, ny: f64) -> [u8; 4] {
+    let Some(x) = floor_index(nx * f64::from(width), width) else {
+        return [0, 0, 0, 0];
+    };
+    let Some(y) = floor_index(ny * f64::from(height), height) else {
+        return [0, 0, 0, 0];
+    };
+    src_pixel(src, width, x, y).unwrap_or([0, 0, 0, 0])
+}
+
+fn dst_slot(dst: &mut [u8], width: u32, x: u32, y: u32) -> Option<&mut [u8]> {
+    let stride = usize::try_from(width).ok()?.checked_mul(4)?;
+    let index = usize::try_from(y)
+        .ok()?
+        .checked_mul(stride)?
+        .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
+    dst.get_mut(index..index + 4)
 }
 
 pub(crate) fn place_with(
@@ -802,7 +1328,9 @@ fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) 
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{CommonKeyframe, CommonKeyframeGroup, Flip, Point, Segment, TimeRange};
+    use cutlass_model::{
+        CommonKeyframe, CommonKeyframeGroup, Crop, Flip, Point, Segment, TimeRange,
+    };
 
     use super::*;
 
@@ -1163,6 +1691,72 @@ mod tests {
     }
 
     #[test]
+    fn curve_keyframes_follow_the_handles() {
+        let mut raised = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        raised.keyframe_list[0].curve_type = "CurveOut".to_owned();
+        raised.keyframe_list[0].right_control.y = 1.0;
+        let segment = keyed(0, vec![raised.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.875).abs() < 1e-12);
+        raised.keyframe_list[0].right_control.y = 2.0;
+        let segment = keyed(0, vec![raised.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 1.25).abs() < 1e-12);
+        raised.keyframe_list[0].right_control.y = 1.0;
+        let segment = keyed(0, vec![raised.clone()]);
+        let (held, _) = segment_clip(&segment, Micros(0)).expect("clip");
+        assert_eq!(held.alpha, 0.0);
+        let (end, _) = segment_clip(&segment, Micros(5_000)).expect("clip");
+        assert_eq!(end.alpha, 1.0);
+
+        raised.keyframe_list[0].curve_type = "FreeCurveInOut".to_owned();
+        raised.keyframe_list[0].graph_id = "missing".to_owned();
+        let segment = keyed(0, vec![raised]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.875).abs() < 1e-12);
+
+        let mut straight = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        straight.keyframe_list[0].right_control.y = 1.0;
+        straight.keyframe_list[0].curve_type = "Ease".to_owned();
+        let segment = keyed(0, vec![straight.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-12);
+        straight.keyframe_list[0].curve_type = "none".to_owned();
+        straight.keyframe_list[0].right_control.y = f64::NAN;
+        let segment = keyed(0, vec![straight]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-12);
+
+        let mut eased = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        eased.keyframe_list[0].curve_type = "CurveInOut".to_owned();
+        eased.keyframe_list[0].right_control.x = 400.0;
+        eased.keyframe_list[1].curve_type = "CurveInOut".to_owned();
+        eased.keyframe_list[1].left_control.x = -400.0;
+        let segment = keyed(0, vec![eased]);
+        let (quarter, _) = segment_clip(&segment, Micros(250)).expect("clip");
+        assert!((quarter.alpha - 0.13518434228493398).abs() < 1e-12);
+        let (three, _) = segment_clip(&segment, Micros(750)).expect("clip");
+        assert!((three.alpha - 0.864_815_657_715_066).abs() < 1e-12);
+
+        let mut replaced = line("KFTypeAlpha", &[(0, 0.0), (0, 0.0), (1_000, 1.0)]);
+        replaced.keyframe_list[0].curve_type = "CurveOut".to_owned();
+        replaced.keyframe_list[0].right_control.y = 1.0;
+        let segment = keyed(0, vec![replaced.clone()]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.5).abs() < 1e-12);
+        replaced.keyframe_list[1].curve_type = "CurveOut".to_owned();
+        replaced.keyframe_list[1].right_control.y = 1.0;
+        let segment = keyed(0, vec![replaced]);
+        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        assert!((mid.alpha - 0.875).abs() < 1e-12);
+
+        let mut broken = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
+        broken.keyframe_list[0].curve_type = "CurveIn".to_owned();
+        broken.keyframe_list[0].right_control.x = f64::INFINITY;
+        assert!(segment_clip(&keyed(0, vec![broken]), Micros(500)).is_none());
+    }
+
+    #[test]
     fn scale_keyframes_follow_the_uniform_switch() {
         let segment = keyed(
             0,
@@ -1205,5 +1799,143 @@ mod tests {
             ..Clip::default()
         };
         assert!(picture_transform(&clip, &UniformScale::default(), 2, 2).is_none());
+    }
+
+    fn quad(corners: [f64; 8]) -> Crop {
+        Crop {
+            upper_left_x: corners[0],
+            upper_left_y: corners[1],
+            upper_right_x: corners[2],
+            upper_right_y: corners[3],
+            lower_left_x: corners[4],
+            lower_left_y: corners[5],
+            lower_right_x: corners[6],
+            lower_right_y: corners[7],
+        }
+    }
+
+    fn full_quad() -> Crop {
+        quad([0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+    }
+
+    fn colored(width: u32, height: u32, pixels: &[[u8; 4]]) -> CpuBytes {
+        let mut rgba = Vec::new();
+        for pixel in pixels {
+            rgba.extend(pixel);
+        }
+        CpuBytes::new(width, height, rgba).unwrap()
+    }
+
+    fn cropped(picture: CpuBytes, crop: Crop, scale: f64) -> Vec<u8> {
+        apply_crop(picture, crop, scale).rgba().to_vec()
+    }
+
+    #[test]
+    fn an_absent_quad_and_a_full_quad_keep_the_picture() {
+        let picture = colored(
+            2,
+            2,
+            &[
+                [1, 0, 0, 255],
+                [2, 0, 0, 255],
+                [3, 0, 0, 255],
+                [4, 0, 0, 255],
+            ],
+        );
+        let pixels = picture.rgba().to_vec();
+        assert_eq!(cropped(picture.clone(), Crop::default(), 1.0), pixels);
+        assert_eq!(cropped(picture.clone(), full_quad(), 1.0), pixels);
+        assert_eq!(cropped(picture.clone(), full_quad(), 0.0), pixels);
+        let mut broken = full_quad();
+        broken.upper_left_x = f64::NAN;
+        assert_eq!(cropped(picture, broken, 1.0), pixels);
+    }
+
+    #[test]
+    fn a_half_quad_keeps_that_side_and_a_reversed_edge_swaps_it() {
+        let strip = colored(
+            4,
+            1,
+            &[
+                [1, 0, 0, 255],
+                [2, 0, 0, 255],
+                [3, 0, 0, 255],
+                [4, 0, 0, 255],
+            ],
+        );
+        let left = quad([0.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0]);
+        let right = quad([0.5, 0.0, 1.0, 0.0, 0.5, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            cropped(strip.clone(), left, 1.0),
+            vec![1, 0, 0, 255, 2, 0, 0, 255]
+        );
+        assert_eq!(
+            cropped(strip.clone(), right, f64::NAN),
+            vec![3, 0, 0, 255, 4, 0, 0, 255]
+        );
+        assert_eq!(cropped(strip.clone(), full_quad(), 2.0), strip.rgba());
+        let block = colored(
+            4,
+            2,
+            &[
+                [1, 0, 0, 255],
+                [2, 0, 0, 255],
+                [3, 0, 0, 255],
+                [4, 0, 0, 255],
+                [5, 0, 0, 255],
+                [6, 0, 0, 255],
+                [7, 0, 0, 255],
+                [8, 0, 0, 255],
+            ],
+        );
+        assert_eq!(
+            cropped(block, full_quad(), 2.0),
+            vec![6, 0, 0, 255, 7, 0, 0, 255]
+        );
+
+        let pair = colored(2, 1, &[[9, 0, 0, 255], [8, 0, 0, 255]]);
+        let reversed = quad([1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            cropped(pair, reversed, 1.0),
+            vec![8, 0, 0, 255, 9, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn the_quarter_turn_precedes_the_crop() {
+        let picture = colored(
+            2,
+            2,
+            &[
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255, 255, 0, 255],
+            ],
+        );
+        let transform =
+            picture_transform(&Clip::default(), &UniformScale::default(), 1, 2).expect("transform");
+        let left = quad([0.0, 0.0, 0.5, 0.0, 0.0, 1.0, 0.5, 1.0]);
+        let Sample::Ready(Picture::Cpu(bytes)) = finish_picture(
+            (1, 2),
+            picture,
+            transform,
+            DisplayQuarter::Clockwise90,
+            left,
+            1.0,
+            &Backdrop::None,
+        ) else {
+            panic!("ready");
+        };
+        assert_eq!(bytes.width(), 1);
+        assert_eq!(bytes.height(), 2);
+        assert_eq!(bytes.rgba(), &[0, 0, 255, 255, 255, 255, 0, 255]);
+    }
+
+    #[test]
+    fn a_quad_outside_the_picture_is_clear() {
+        let picture = colored(2, 1, &[[9, 0, 0, 255], [8, 0, 0, 255]]);
+        let outside = quad([1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 2.0, 1.0]);
+        assert_eq!(cropped(picture, outside, 1.0), vec![0, 0, 0, 0, 0, 0, 0, 0]);
     }
 }

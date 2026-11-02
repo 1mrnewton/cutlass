@@ -25,22 +25,24 @@ pub fn move_segment(
 
     let mut moved = segment;
     moved.target.start = start;
-    if overlaps_except(&draft.tracks[to_index], &moved, segment_id)? {
+    let packed = super::magnet::packs(draft.config.maintrack_adsorb, &draft.tracks[to_index]);
+    if !packed && overlaps_except(&draft.tracks[to_index], &moved, segment_id)? {
         return Err(EditError::Overlap);
     }
 
     draft.tracks[from_index].segments.remove(segment_index);
-    let dest = if from_index == to_index {
-        &mut draft.tracks[from_index]
-    } else {
-        &mut draft.tracks[to_index]
-    };
-    let index = dest
-        .segments
+    let dest_index = draft
+        .tracks
         .iter()
-        .position(|existing| existing.target.start > moved.target.start)
-        .unwrap_or(dest.segments.len());
-    dest.segments.insert(index, moved);
+        .position(|track| &track.id == track_id)
+        .ok_or(EditError::MissingTrack)?;
+    let packed = super::magnet::packs(draft.config.maintrack_adsorb, &draft.tracks[dest_index]);
+    let index = super::magnet::insert_at(
+        &draft.tracks[dest_index].segments,
+        moved.target.start.0,
+        packed,
+    );
+    draft.tracks[dest_index].segments.insert(index, moved);
     Ok(())
 }
 

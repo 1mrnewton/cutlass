@@ -3,12 +3,15 @@
 //! The factory tries registrations in order. The shell registers the platform
 //! decoder for this operating system first, then the Rust decoder for the
 //! same id. Probe reads stream parameters and timestamps. It does not decode.
+//! [`Media::decode_at`] seeks a picture. [`Media::audio_from`] seeks a PCM window.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use cutlass_codec::access::{ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, Transfer};
+use cutlass_codec::access::{
+    ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, Transfer,
+};
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
@@ -23,9 +26,15 @@ use crate::map::{micros_to_ticks, ticks_to_micros};
 const HEADER_LIMIT: usize = 4096;
 /// Picture or audio packets one seek may decode before giving up.
 const DECODE_PACKETS: u32 = 64;
+/// Pictures one forward scene scan will decode. A longer file is read from its start.
+const MAX_SCAN_PICTURES: u32 = 4_000;
 /// Samples from another stream that may sit ahead of the wanted one.
 /// A movie can store an audio chunk before the next picture.
 const OTHER_STREAM_PACKETS: u32 = 4_096;
+/// PCM frames one [`Media::audio_from`] call will decode.
+pub(crate) const MAX_AUDIO_FRAMES: u32 = 480_000;
+/// Full-scale positive [`i16`]. The mix uses the same divisor.
+const I16_FULL: f32 = 32_767.0;
 
 /// One stream, still in the file's own parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +155,15 @@ impl ReaderFactory {
         Ok(info)
     }
 
+    /// Whether `path` has an audio stream. This reads the header and does not decode.
+    pub fn carries_sound(&self, path: &Path) -> Result<bool, EngineError> {
+        let info = self.probe(path)?;
+        Ok(info
+            .streams
+            .iter()
+            .any(|stream| stream.sample_rate.is_some_and(|rate| rate > 0)))
+    }
+
     /// Opens the container and a decoder for each picture or audio stream.
     pub fn open(&self, path: &Path) -> Result<Media, EngineError> {
         let info = self.probe(path)?;
@@ -201,6 +219,70 @@ impl Media {
             pipe.decoder.reset();
             (pipe.track, pipe.timescale)
         };
+        self.seek_picture(source, track, timescale)?;
+        self.pull_picture(cover)?.ok_or(EngineError::NotReady)
+    }
+
+    /// Pictures from `range`, at least `gap` microseconds apart, at most `limit`.
+    ///
+    /// One seek starts the read. Later pictures stay in file order. The stream
+    /// ending is an empty or short list, not an error.
+    pub fn pictures_across(
+        &mut self,
+        range: &TimeRange,
+        gap: i64,
+        limit: usize,
+    ) -> Result<Vec<HeldFrame>, EngineError> {
+        if limit == 0 || range.duration.0 <= 0 {
+            return Err(EngineError::Window);
+        }
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_mut() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            pipe.decoder.reset();
+            (pipe.track, pipe.timescale)
+        };
+        self.seek_picture(range.start, track, timescale)?;
+        let end = range.start.0.saturating_add(range.duration.0);
+        let mut kept = Vec::new();
+        let mut last = None;
+        let mut decoded = 0_u32;
+        while kept.len() < limit {
+            if decoded == MAX_SCAN_PICTURES {
+                break;
+            }
+            decoded = decoded.saturating_add(1);
+            let held = match self.pull_picture(range) {
+                Ok(Some(held)) => held,
+                Ok(None) => break,
+                Err(_) if !kept.is_empty() => break,
+                Err(error) => return Err(error),
+            };
+            if held.start.0 >= end {
+                break;
+            }
+            if held.end.0 <= range.start.0 {
+                continue;
+            }
+            if last.is_some_and(|previous: i64| held.start.0 < previous.saturating_add(gap.max(0)))
+            {
+                continue;
+            }
+            last = Some(held.start.0);
+            kept.push(held);
+        }
+        Ok(kept)
+    }
+
+    fn seek_picture(
+        &mut self,
+        source: Micros,
+        track: u32,
+        timescale: Timescale,
+    ) -> Result<(), EngineError> {
         if timescale.is_clock() {
             let ticks = micros_to_ticks(source, timescale)?;
             self.demux
@@ -217,6 +299,18 @@ impl Media {
                 end: None,
             });
         }
+        Ok(())
+    }
+
+    fn pull_picture(&mut self, cover: &TimeRange) -> Result<Option<HeldFrame>, EngineError> {
+        let (track, timescale) = {
+            let Some(pipe) = self.picture.as_ref() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            (pipe.track, pipe.timescale)
+        };
         let mut pictures = 0_u32;
         let mut others = 0_u32;
         loop {
@@ -224,7 +318,7 @@ impl Media {
                 return Err(EngineError::DecodeLimit);
             }
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
-                return Err(EngineError::NotReady);
+                return Ok(None);
             };
             if packet.stream() != track {
                 if others == OTHER_STREAM_PACKETS {
@@ -244,8 +338,93 @@ impl Media {
                 continue;
             };
             let (start, end) = coverage(&packet, timescale, cover)?;
-            return Ok(HeldFrame { start, end, frame });
+            return Ok(Some(HeldFrame { start, end, frame }));
         }
+    }
+
+    /// PCM covering `source`, at the file rate, for at most `frames` sample frames.
+    ///
+    /// The mix resamples and stretches this buffer. Integer PCM is full-scale
+    /// `f32` before it returns. A file with no audio stream is [`EngineError::NotMedia`].
+    pub fn audio_from(
+        &mut self,
+        source: Micros,
+        frames: u32,
+    ) -> Result<cutlass_codec::access::Pcm, EngineError> {
+        if frames == 0 || frames > MAX_AUDIO_FRAMES {
+            return Err(EngineError::Window);
+        }
+        let (track, timescale) = {
+            let Some(pipe) = self.audio.as_mut() else {
+                return Err(EngineError::NotMedia);
+            };
+            pipe.decoder.reset();
+            (pipe.track, pipe.timescale)
+        };
+        if timescale.is_clock() {
+            let ticks = micros_to_ticks(source, timescale)?;
+            self.demux
+                .seek(SeekTo {
+                    track,
+                    time: ticks,
+                    end: None,
+                })
+                .map_err(from_read)?;
+        } else {
+            let _ = self.demux.seek(SeekTo {
+                track,
+                time: 0,
+                end: None,
+            });
+        }
+        let mut samples = Vec::new();
+        let mut rate = 0_u32;
+        let mut layout = None;
+        let mut got = 0_u32;
+        let mut empty = 0_u32;
+        while got < frames {
+            let Some(ready) = self.pull_audio()? else {
+                break;
+            };
+            let pcm = ready.pcm;
+            if pcm.rate == 0 {
+                return Err(EngineError::NoClock);
+            }
+            if rate == 0 {
+                rate = pcm.rate;
+                layout = Some(pcm.layout.clone());
+            } else if rate != pcm.rate || layout.as_ref() != Some(&pcm.layout) {
+                return Err(EngineError::Layout);
+            }
+            let floats = unit_samples(&pcm)?;
+            let channels = pcm.layout.len();
+            if channels == 0 {
+                return Err(EngineError::Layout);
+            }
+            let available = floats.len() / channels;
+            if available == 0 {
+                empty = empty.saturating_add(1);
+                if empty == 8 {
+                    break;
+                }
+                continue;
+            }
+            let need = usize::try_from(frames - got).unwrap_or(usize::MAX);
+            let take_frames = available.min(need);
+            let take = take_frames.saturating_mul(channels);
+            samples.extend_from_slice(&floats[..take]);
+            got = got.saturating_add(u32::try_from(take_frames).unwrap_or(0));
+            if take_frames < available {
+                break;
+            }
+        }
+        let Some(layout) = layout else {
+            return Err(EngineError::NotReady);
+        };
+        if rate == 0 {
+            return Err(EngineError::NoClock);
+        }
+        cutlass_codec::access::Pcm::from_f32(rate, layout, samples).map_err(|_| EngineError::Layout)
     }
 
     /// The next decoded audio buffer, or [`None`] when the stream ends or there is no audio.
@@ -475,8 +654,66 @@ fn params_for(
         _ => return Err(EngineError::Layout),
     };
     let mut params = CodecParams::audio(id, rate, layout);
-    params.extra = extra.to_vec();
+    let (extra, format) = codec_extra(id, extra)?;
+    params.extra = extra;
+    if let Some(format) = format {
+        params.sample_format = Some(format);
+    }
     Ok(params)
+}
+
+/// The PCM decoder reads three layout bytes and a sample format that matches
+/// them. A WAV description is sixteen bytes: tag, width, a reserved field,
+/// block align, channel mask, integer or float, then flags. Other codecs
+/// keep the container bytes and the caller's sample format.
+fn codec_extra(id: CodecId, extra: &[u8]) -> Result<(Vec<u8>, Option<SampleFormat>), EngineError> {
+    if id != CodecId::Pcm {
+        return Ok((extra.to_vec(), None));
+    }
+    if extra.is_empty() {
+        return Ok((Vec::new(), Some(SampleFormat::F32)));
+    }
+    if extra.len() == 3 {
+        return Ok((extra.to_vec(), Some(pcm_format(extra[0])?)));
+    }
+    if extra.len() < 16 {
+        return Err(EngineError::Layout);
+    }
+    let tag = u16::from_le_bytes([extra[0], extra[1]]);
+    let bits = u16::from_le_bytes([extra[2], extra[3]]);
+    let kind = u16::from_le_bytes([extra[12], extra[13]]);
+    // Coding byte: 1 s16, 2 s24, 3 s32, 4 f32, 5 f64. Then little-endian
+    // interleaved. The container already refused a big-endian WAV.
+    let coding = match (tag, bits, kind) {
+        (0x0001, 16, 0) => 1_u8,
+        (0x0001, 24, 0) => 2,
+        (0x0001, 32, 0) => 3,
+        (0x0003, 32, 1) => 4,
+        (0x0003, 64, 1) => 5,
+        _ => return Err(EngineError::Layout),
+    };
+    Ok((vec![coding, 0, 0], Some(pcm_format(coding)?)))
+}
+
+fn pcm_format(coding: u8) -> Result<SampleFormat, EngineError> {
+    match coding {
+        1 => Ok(SampleFormat::I16),
+        2..=5 => Ok(SampleFormat::F32),
+        _ => Err(EngineError::Layout),
+    }
+}
+
+fn unit_samples(pcm: &cutlass_codec::access::Pcm) -> Result<Vec<f32>, EngineError> {
+    if let Some(samples) = pcm.as_f32() {
+        return Ok(samples.to_vec());
+    }
+    let Some(samples) = pcm.as_i16() else {
+        return Err(EngineError::Layout);
+    };
+    Ok(samples
+        .iter()
+        .map(|sample| f32::from(*sample) / I16_FULL)
+        .collect())
 }
 
 fn unknown_tag(codec: &StreamCodec) -> String {

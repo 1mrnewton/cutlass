@@ -5,9 +5,11 @@ use crate::id::MaterialId;
 
 mod adjust;
 mod audio;
+mod beat;
 mod color;
 mod draft;
 mod effect;
+mod mark;
 mod shape;
 mod speed;
 mod text;
@@ -17,10 +19,18 @@ mod words;
 
 pub use adjust::{MaterialHsl, MaterialPictureAdjust};
 pub use audio::{MaterialAudio, MaterialAudioFade};
+pub use beat::{
+    VisibleBeat, beat_timeline_time, new_beats, segment_beats, set_user_beats, source_time_at,
+    track_holds_beats, user_beats, visible_beats,
+};
 pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{
     MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideoEffect, StickerAnimation,
+};
+pub use mark::{
+    TimeMarkItem, VisibleMark, clip_mark_time, new_time_mark, referenced_time_marks,
+    segment_time_mark, set_time_mark_items, time_mark_items, visible_marks,
 };
 pub use shape::MaterialShape;
 pub use speed::{

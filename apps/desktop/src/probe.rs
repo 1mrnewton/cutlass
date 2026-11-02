@@ -58,6 +58,9 @@ pub fn probe(path: &Path) -> Result<Probed, ProbeError> {
     if let Some(probed) = wave(path, &header)? {
         return Ok(probed);
     }
+    if let Some(probed) = aiff(path, &header)? {
+        return Ok(probed);
+    }
     if let Some(probed) = movie(path, &header)? {
         return Ok(probed);
     }
@@ -138,6 +141,24 @@ fn wave(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
     };
     let rate = demux.format().sample_rate();
     let duration = samples_to_micros(samples, rate)?;
+    Ok(Some(Probed::Audio { duration }))
+}
+
+fn aiff(path: &Path, header: &[u8]) -> Result<Option<Probed>, ProbeError> {
+    if !matches!(
+        cutlass_aiff::probe(header),
+        cutlass_container::ProbeResult::Accept { .. }
+    ) {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| io_error(path, error))?
+        .len();
+    let demux = cutlass_aiff::AiffDemux::open(file, length)
+        .map_err(|error| ProbeError::new(format!("aiff refused the file: {error}")))?;
+    let duration = samples_to_micros(demux.duration_samples(), demux.sample_rate())?;
     Ok(Some(Probed::Audio { duration }))
 }
 
@@ -257,9 +278,6 @@ fn unavailable(header: &[u8]) -> Option<&'static str> {
     if header.starts_with(b"caff") {
         return Some("caf is not available");
     }
-    if header.starts_with(b"FORM") && header.get(8..12) == Some(b"AIFF") {
-        return Some("aiff is not available");
-    }
     if header.starts_with(b"RIFF") && header.get(8..12) == Some(b"AVI ") {
         return Some("avi is not available");
     }
@@ -324,6 +342,47 @@ mod tests {
             }
             Probed::Audio { .. } => panic!("png opened as audio"),
         }
+    }
+
+    #[test]
+    fn an_aiff_file_is_audio_on_the_sample_clock() {
+        let path = std::env::temp_dir().join(format!("cutlass-probe-aiff-{}", std::process::id()));
+        let bytes = aiff_s16(&[0x40, 0x00]);
+        std::fs::write(&path, &bytes).expect("write");
+        let probed = probe(&path).expect("aiff");
+        std::fs::remove_file(&path).expect("remove");
+        assert_eq!(probed, Probed::Audio { duration: 125 });
+    }
+
+    fn aiff_s16(frame: &[u8]) -> Vec<u8> {
+        use cutlass_codec::{CodecId, Packet, StreamCodec, StreamParams, Timescale, Timestamp};
+        use cutlass_container::{Mux, NewStream, TrackDuration, TrackId};
+        let mut mux = cutlass_aiff::AiffMux::new(std::io::Cursor::new(Vec::new()));
+        let params =
+            StreamParams::try_audio(StreamCodec::Known(CodecId::Pcm), 8_000, 1, vec![1, 1, 0])
+                .expect("params");
+        mux.add_stream(NewStream {
+            params,
+            timescale: Timescale::new(8_000),
+            language: None,
+        })
+        .expect("stream");
+        let packet = Packet::try_new(
+            0,
+            frame.to_vec(),
+            Timestamp::try_new(Some(0), Some(0), Some(1)).expect("time"),
+            Timescale::new(8_000),
+            true,
+        )
+        .expect("packet");
+        mux.write_packet(&packet).expect("write");
+        mux.finish(&[TrackDuration {
+            track: TrackId::new(0),
+            timescale: Timescale::new(8_000),
+            ticks: 1,
+        }])
+        .expect("finish");
+        mux.into_inner().into_inner()
     }
 
     #[test]

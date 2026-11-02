@@ -8,8 +8,10 @@
 //! Rec.709, HLG, and PQ are transfer functions. HLG here is the BT.2100 OETF
 //! and its inverse. The HLG system-gamma OOTF is not applied. A segment HDR
 //! mode and the draft color-space integer are both inputs, and neither is
-//! rewritten into the other. A platform buffer stays a platform buffer when
-//! the preview and the encoder both accept it. This crate does not download it.
+//! rewritten into the other. A still is a separate path: a power curve of
+//! `45455/100000` with BT.709 primaries. A readable RGB profile replaces
+//! that curve. A platform buffer stays a platform buffer when the preview
+//! and the encoder both accept it. This crate does not download it.
 //!
 //! The crate depends on `cutlass-codec` only. It does not sample a GPU texture.
 
@@ -17,6 +19,7 @@
 
 mod convert;
 mod lut;
+mod still;
 mod transfer;
 
 use std::fmt;
@@ -26,6 +29,7 @@ use cutlass_codec::access::{
 };
 
 pub use lut::{Cube, Lut, ThreeDl};
+pub use still::{StillMap, StillTags};
 pub use transfer::Curve;
 
 /// Longest edge this crate will convert. Matches the software framebuffer.
@@ -250,6 +254,8 @@ pub enum Error {
     Intensity,
     /// Peak nits are negative or non-finite.
     Nits,
+    /// A still gamma of zero cannot be applied.
+    Gamma,
     /// The platform buffer is missing a consumer, and this crate will not download it.
     Platform,
     /// The LUT text is not a complete cube or 3dl.
@@ -290,6 +296,7 @@ impl fmt::Display for Error {
             Self::Segment(_) => "segment hdr mode is outside 0 through 11",
             Self::Intensity => "segment hdr intensity is not in 0 through 1",
             Self::Nits => "segment hdr nits are not usable",
+            Self::Gamma => "still gamma is zero",
             Self::Platform => "platform buffer was not converted on the cpu",
             Self::Lut(LutIssue::Truncated) => "lut is truncated",
             Self::Lut(LutIssue::Header) => "lut header is missing",

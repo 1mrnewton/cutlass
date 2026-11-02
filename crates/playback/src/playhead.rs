@@ -6,13 +6,14 @@
 
 use std::fmt;
 
-use cutlass_eval::{OpenClips, ReaderFactory};
+use cutlass_eval::{Heard, OpenClips, ReaderFactory};
 use cutlass_gpu::Device;
 use cutlass_model::Micros;
 use cutlass_session::Session;
 
 use crate::apple::{self, AudioOutput, CopyOutcome};
 use crate::present::{self, Cache, PresentError, Presentation};
+use crate::preview::{self, PLAY_FRAMES, PreviewMix};
 
 /// CPU pixels for one presented frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +74,7 @@ pub struct Player {
     output: AudioOutput,
     readers: ReaderFactory,
     clips: OpenClips,
+    heard: Heard,
 }
 
 impl Default for Player {
@@ -95,6 +97,7 @@ impl Player {
             output: AudioOutput::software(),
             readers: ReaderFactory::new(),
             clips: OpenClips::new(),
+            heard: Heard::new(),
         }
     }
 
@@ -103,6 +106,7 @@ impl Player {
         self.readers = readers;
         self.cache = Cache::new();
         self.clips.clear();
+        self.heard.clear();
     }
 
     #[must_use]
@@ -167,8 +171,12 @@ impl Player {
             device,
             time,
             &self.readers,
+            present::DrawnWith {
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+            },
         )?;
-        self.output.set_slice(&[]);
+        self.queue_window(session, time);
         let presentation = present::accept(self.audio_time, time, readback);
         if let Presentation::Shown(ref frame) = presentation {
             self.shown = Some(frame.clone());
@@ -183,6 +191,9 @@ impl Player {
             return Err(PlayheadError::Duration);
         }
         self.playing = self.time.0 < duration.0;
+        if self.playing {
+            self.queue_window(session, self.time);
+        }
         Ok(())
     }
 
@@ -207,6 +218,7 @@ impl Player {
         if next >= duration.0 {
             self.time = duration;
             self.playing = false;
+            self.output.queue(&[]);
             return Ok(Tick::Stopped);
         }
         let frame = self.evaluate_at(session, device, Micros(next), false)?;
@@ -270,13 +282,37 @@ impl Player {
             device,
             time,
             &self.readers,
+            present::DrawnWith {
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+            },
         )?;
-        self.output.set_slice(&[]);
+        self.queue_window(session, time);
         if commit_time {
             self.time = time;
             self.shown = Some(readback.clone());
         }
         Ok(readback)
+    }
+
+    fn queue_window(&mut self, session: &Session, time: Micros) {
+        if !self.playing {
+            self.output.queue(&[]);
+            return;
+        }
+        let frames = PLAY_FRAMES;
+        preview::queue_mix(
+            &mut self.output,
+            PreviewMix {
+                draft: session.draft(),
+                revision: session.revision(),
+                time,
+                frames,
+                readers: &self.readers,
+                heard: &mut self.heard,
+                root: None,
+            },
+        );
     }
 }
 

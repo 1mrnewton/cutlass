@@ -10,17 +10,20 @@
 //! silence is not a missing build, and it is not a failed open. Pictures
 //! still present. A missing device is [`AudioGap`], not a panic.
 //!
-//! WASAPI and AAudio are not in this pass.
+//! Apple plays through Core Audio. Windows plays through WASAPI. Android
+//! plays through AAudio.
 
 #![forbid(unsafe_code)]
 
 mod apple;
 mod playhead;
 mod present;
+mod preview;
 
 pub use apple::{AudioGap, AudioHost, AudioOutput, CopyOutcome};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
 pub use present::{FrameCache, PresentError, Presentation};
+pub use preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix};
 
 #[cfg(test)]
 pub(crate) fn color_session(duration_us: i64, segment_us: i64) -> cutlass_session::Session {

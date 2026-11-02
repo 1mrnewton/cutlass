@@ -1,0 +1,21 @@
+[package]
+name = "cutlass-logger"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "File log for every build, and stderr unless this is a public release."
+autobins = false
+
+[features]
+# A public release passes this. `cargo run --release` does not, so it still logs.
+public-release = []
+
+[[bin]]
+name = "emit"
+path = "src/bin/emit.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true

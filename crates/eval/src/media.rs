@@ -245,6 +245,8 @@ pub(crate) struct PictureTransform {
     dy: f64,
     opacity: u8,
     geometry_identity: bool,
+    /// Keep the picture's own size instead of fitting it to the canvas.
+    native: bool,
 }
 
 pub(crate) struct Placed<'a> {
@@ -310,6 +312,7 @@ pub(crate) fn picture_transform(
         dy,
         opacity,
         geometry_identity,
+        native: false,
     })
 }
 
@@ -919,16 +922,7 @@ fn gpu_cover(picture: (u32, u32), canvas: (u32, u32)) -> Option<Affine> {
     let y0 = f64::from(dh.checked_sub(canvas.1)? / 2);
     let kx = f64::from(picture.0) / f64::from(dw);
     let ky = f64::from(picture.1) / f64::from(dh);
-    // A small push keeps an exact whole result from flooring below it.
-    let push = 1e-4;
-    Some(Affine([
-        kx,
-        0.0,
-        kx * (x0 - 0.5) + push,
-        0.0,
-        ky,
-        ky * (y0 - 0.5) + push,
-    ]))
+    Some(Affine([kx, 0.0, kx * x0, 0.0, ky, ky * y0]))
 }
 
 /// Picture pixel center to oriented-source pixels, and the picture size,
@@ -1009,25 +1003,16 @@ pub(crate) fn gpu_place(
         if pw == cw && ph == ch {
             return Some(Affine::IDENTITY);
         }
-        // Stamped at the floored center, fitted first, sampling at each
-        // pixel's left edge.
-        let (dw, dh) = contain_size(pw, ph, cw, ch)?;
+        // Stamped at the floored center, each canvas pixel center on the
+        // matching point of the picture.
+        let (dw, dh) = transform.drawn_size(picture, canvas)?;
         let x0 = f64::from((cw - dw) / 2);
         let y0 = f64::from((ch - dh) / 2);
         let kx = f64::from(pw) / f64::from(dw);
         let ky = f64::from(ph) / f64::from(dh);
-        // A small push keeps an exact whole result from flooring below it.
-        let push = if kx == 1.0 && ky == 1.0 { 0.0 } else { 1e-4 };
-        return Some(Affine([
-            kx,
-            0.0,
-            -kx * (x0 + 0.5) + push,
-            0.0,
-            ky,
-            -ky * (y0 + 0.5) + push,
-        ]));
+        return Some(Affine([kx, 0.0, -kx * x0, 0.0, ky, -ky * y0]));
     }
-    let (fw, fh) = contain_size(pw, ph, cw, ch)?;
+    let (fw, fh) = transform.drawn_size(picture, canvas)?;
     let (fw, fh) = (f64::from(fw), f64::from(fh));
     let (pw, ph) = (f64::from(pw), f64::from(ph));
     let cx = f64::from(cw) / 2.0 + transform.dx;
@@ -1052,6 +1037,24 @@ pub(crate) fn gpu_place(
 }
 
 impl PictureTransform {
+    /// Keep the picture's own size at scale 1: a title, whose raster is cut
+    /// tight around its glyphs. A picture larger than the canvas still
+    /// shrinks to fit.
+    pub(crate) const fn native(mut self) -> Self {
+        self.native = true;
+        self
+    }
+
+    /// The size the picture is drawn at scale 1. Media fits inside the
+    /// canvas, keeping its shape.
+    fn drawn_size(self, picture: (u32, u32), canvas: (u32, u32)) -> Option<(u32, u32)> {
+        let (pw, ph) = picture;
+        if self.native && pw > 0 && ph > 0 && pw <= canvas.0 && ph <= canvas.1 {
+            return Some(picture);
+        }
+        contain_size(pw, ph, canvas.0, canvas.1)
+    }
+
     /// The clip's opacity, 0 to 255.
     pub(crate) const fn opacity(self) -> u8 {
         self.opacity
@@ -1291,7 +1294,7 @@ pub(crate) fn place_with(
         return Sample::Miss;
     };
     if transform.geometry_identity {
-        let sample = place(canvas_w, canvas_h, picture);
+        let sample = place(canvas_w, canvas_h, picture, transform);
         return if transform.opacity == 255 {
             sample
         } else {
@@ -1352,22 +1355,17 @@ fn pixel_at(width: u32, x: u32, y: u32) -> Option<usize> {
         .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)
 }
 
-fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes) -> Sample {
+fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes, transform: PictureTransform) -> Sample {
     let src_w = picture.width();
     let src_h = picture.height();
     if src_w == canvas_w && src_h == canvas_h {
         return Sample::Ready(Picture::Cpu(picture));
     }
-    let Some((draw_w, draw_h)) = contain_size(src_w, src_h, canvas_w, canvas_h) else {
+    let Some((draw_w, draw_h)) = transform.drawn_size((src_w, src_h), (canvas_w, canvas_h)) else {
         return Sample::Miss;
     };
-    let pixels = if (draw_w, draw_h) == (src_w, src_h) {
-        picture.rgba().to_vec()
-    } else {
-        let Some(pixels) = nearest(src_w, src_h, picture.rgba(), draw_w, draw_h) else {
-            return Sample::Miss;
-        };
-        pixels
+    let Some(pixels) = crate::sample::scale(src_w, src_h, picture.rgba(), draw_w, draw_h) else {
+        return Sample::Miss;
     };
     let Some(canvas) = stamp(canvas_w, canvas_h, draw_w, draw_h, &pixels) else {
         return Sample::Miss;
@@ -1410,7 +1408,8 @@ fn sample_transformed(
 ) -> Sample {
     let src_w = picture.width();
     let src_h = picture.height();
-    let Some((fitted_w, fitted_h)) = contain_size(src_w, src_h, canvas_w, canvas_h) else {
+    let Some((fitted_w, fitted_h)) = transform.drawn_size((src_w, src_h), (canvas_w, canvas_h))
+    else {
         return Sample::Miss;
     };
     let draw = Draw {
@@ -1436,10 +1435,10 @@ fn sample_transformed(
     let mut wrote = false;
     for y in y0..y1 {
         for x in x0..x1 {
-            let Some((sx, sy)) = source_pixel(x, y, &draw) else {
+            let Some((u, v)) = source_point(x, y, &draw) else {
                 continue;
             };
-            let Some(pixel) = src_pixel(src, src_w, sx, sy) else {
+            let Some(pixel) = crate::sample::bilinear(src, src_w, src_h, u, v) else {
                 continue;
             };
             let Some(dest) = canvas_slot(&mut canvas, canvas_w, x, y) else {
@@ -1528,7 +1527,9 @@ fn axis_bound(value: f64, limit: u32) -> Option<u32> {
     u32::try_from(value as u64).ok()
 }
 
-fn source_pixel(x: u32, y: u32, draw: &Draw) -> Option<(u32, u32)> {
+/// The continuous point of the picture under canvas pixel `(x, y)`, or none
+/// outside the drawn box.
+fn source_point(x: u32, y: u32, draw: &Draw) -> Option<(f64, f64)> {
     let rel_x = f64::from(x) + 0.5 - draw.center_x;
     let rel_y = f64::from(y) + 0.5 - draw.center_y;
     let up_y = -rel_y;
@@ -1542,17 +1543,16 @@ fn source_pixel(x: u32, y: u32, draw: &Draw) -> Option<(u32, u32)> {
     if local_x < -half_w || local_x >= half_w || local_y <= -half_h || local_y > half_h {
         return None;
     }
-    let su = (local_x + half_w) / draw.fitted_w * f64::from(draw.src_w);
-    let sv = (half_h - local_y) / draw.fitted_h * f64::from(draw.src_h);
-    let mut sx = floor_index(su, draw.src_w)?;
-    let mut sy = floor_index(sv, draw.src_h)?;
+    let (src_w, src_h) = (f64::from(draw.src_w), f64::from(draw.src_h));
+    let mut u = (local_x + half_w) / draw.fitted_w * src_w;
+    let mut v = (half_h - local_y) / draw.fitted_h * src_h;
     if draw.transform.flip_h {
-        sx = draw.src_w.saturating_sub(sx).saturating_sub(1);
+        u = src_w - u;
     }
     if draw.transform.flip_v {
-        sy = draw.src_h.saturating_sub(sy).saturating_sub(1);
+        v = src_h - v;
     }
-    Some((sx, sy))
+    Some((u, v))
 }
 
 fn floor_index(value: f64, limit: u32) -> Option<u32> {
@@ -1602,35 +1602,6 @@ fn contain_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<
     }
 }
 
-fn nearest(src_w: u32, src_h: u32, src: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
-    if src.len() != rgba_len(src_w, src_h)? || dst_w == 0 || dst_h == 0 {
-        return None;
-    }
-    let dst_len = rgba_len(dst_w, dst_h)?;
-    let mut out = vec![0_u8; dst_len];
-    let src_stride = usize::try_from(src_w).ok()?.checked_mul(4)?;
-    let dst_stride = usize::try_from(dst_w).ok()?.checked_mul(4)?;
-    let src_h_us = usize::try_from(src_h).ok()?;
-    let src_w_us = usize::try_from(src_w).ok()?;
-    for y in 0..dst_h {
-        let sy = (u64::from(y) * u64::from(src_h) / u64::from(dst_h))
-            .min(u64::from(src_h.saturating_sub(1)));
-        let sy = usize::try_from(sy).ok()?;
-        let src_row = sy.min(src_h_us.saturating_sub(1)).checked_mul(src_stride)?;
-        let dst_row = usize::try_from(y).ok()?.checked_mul(dst_stride)?;
-        for x in 0..dst_w {
-            let sx = (u64::from(x) * u64::from(src_w) / u64::from(dst_w))
-                .min(u64::from(src_w.saturating_sub(1)));
-            let sx = usize::try_from(sx).ok()?.min(src_w_us.saturating_sub(1));
-            let from = src_row.checked_add(sx.checked_mul(4)?)?;
-            let to = dst_row.checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
-            let pixel = src.get(from..from + 4)?;
-            out.get_mut(to..to + 4)?.copy_from_slice(pixel);
-        }
-    }
-    Some(out)
-}
-
 fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) -> Option<Vec<u8>> {
     if draw_w > canvas_w || draw_h > canvas_h || pixels.len() != rgba_len(draw_w, draw_h)? {
         return None;
@@ -1674,7 +1645,7 @@ mod tests {
     #[test]
     fn a_matching_canvas_keeps_the_decoded_bytes() {
         let picture = solid(2, 1, [9, 8, 7, 6]);
-        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 1, picture) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 1, picture, identity(2, 1)) else {
             panic!("ready");
         };
         assert_eq!(bytes.rgba(), &[9, 8, 7, 6, 9, 8, 7, 6]);
@@ -1683,13 +1654,13 @@ mod tests {
     #[test]
     fn a_smaller_picture_is_scaled_up_to_fit() {
         let picture = solid(1, 1, [1, 2, 3, 4]);
-        let Sample::Ready(Picture::Cpu(bytes)) = place(3, 3, picture) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(3, 3, picture, identity(3, 3)) else {
             panic!("ready");
         };
         assert!(bytes.rgba().chunks(4).all(|pixel| pixel == [1, 2, 3, 4]));
 
         let wide = solid(2, 1, [5, 6, 7, 8]);
-        let Sample::Ready(Picture::Cpu(bytes)) = place(4, 4, wide) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(4, 4, wide, identity(4, 4)) else {
             panic!("ready");
         };
         let rgba = bytes.rgba();
@@ -1706,11 +1677,12 @@ mod tests {
             rgba.extend([pixel, 0, 0, 255]);
         }
         let picture = CpuBytes::new(4, 2, rgba).unwrap();
-        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 2, picture) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 2, picture, identity(2, 2)) else {
             panic!("ready");
         };
         let rgba = bytes.rgba();
-        assert_eq!(&rgba[0..8], &[1, 0, 0, 255, 3, 0, 0, 255]);
+        // Each output pixel averages a 2x2 block: 3.5 and 5.5, rounded.
+        assert_eq!(&rgba[0..8], &[4, 0, 0, 255, 6, 0, 0, 255]);
         assert_eq!(&rgba[8..16], &[0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -1721,6 +1693,10 @@ mod tests {
         height: u32,
     ) -> PictureTransform {
         picture_transform(&clip, &uniform, width, height).expect("transform")
+    }
+
+    fn identity(width: u32, height: u32) -> PictureTransform {
+        transform_of(Clip::default(), UniformScale::default(), width, height)
     }
 
     fn paint(

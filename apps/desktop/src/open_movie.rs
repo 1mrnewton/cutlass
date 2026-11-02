@@ -413,7 +413,7 @@ fn evaluated_still(path: &Path) -> Result<(), String> {
     let draft = movie_draft(path, width, height, true)?;
     same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
 
-    // Twice the picture and two rows taller: the fit doubles each pixel and
+    // Twice the picture and two rows taller: the fit doubles the picture and
     // leaves one clear row above and below.
     let mut wide = movie_draft(path, width, height, false)?;
     let canvas_w = width.checked_mul(2).ok_or("canvas width")?;
@@ -525,7 +525,7 @@ fn evaluated_frame(path: &Path) -> Result<(), String> {
     let draft = movie_draft(path, width, height, true)?;
     same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
 
-    // Twice the picture and two rows taller: the fit doubles each pixel and
+    // Twice the picture and two rows taller: the fit doubles the picture and
     // leaves one clear row above and below.
     let mut wide = movie_draft(path, width, height, false)?;
     let canvas_w = width.checked_mul(2).ok_or("canvas width")?;
@@ -619,7 +619,9 @@ fn render(readers: &ReaderFactory, draft: &Draft, time: Micros) -> Result<Vec<u8
 }
 
 /// `canvas` holds `picture` scaled up twice, centered between one clear row
-/// at the top and one at the bottom.
+/// at the top and one at the bottom. Each output pixel center sits a quarter
+/// pixel from a source center, so it is three quarters of that pixel and a
+/// quarter of the next one out, the edge pixel repeated.
 fn doubled(
     canvas: &[u8],
     canvas_w: u32,
@@ -645,12 +647,34 @@ fn doubled(
     {
         return Err(format!("corner {:?}", &canvas[..4]));
     }
+    // The source pixel an output pixel leans on, and its quarter neighbor.
+    let taps = |out: usize, len: usize| {
+        let own = out / 2;
+        let other = if out.is_multiple_of(2) {
+            own.saturating_sub(1)
+        } else {
+            (own + 1).min(len - 1)
+        };
+        (own, other)
+    };
     for y in 0..pic_h * 2 {
+        let (row, row_other) = taps(y, pic_h);
         for x in 0..canvas_w {
-            let at = (y + 1) * stride + x * 4;
-            let from = ((y / 2) * pic_w + x / 2) * 4;
-            if canvas[at..at + 4] != picture[from..from + 4] {
-                return Err(format!("doubled pixel {x},{y} differs"));
+            let (column, column_other) = taps(x, pic_w);
+            let at = |cx: usize, cy: usize, channel: usize| {
+                f64::from(picture[(cy * pic_w + cx) * 4 + channel])
+            };
+            for channel in 0..4 {
+                let near = 0.75 * at(column, row, channel) + 0.25 * at(column_other, row, channel);
+                let far = 0.75 * at(column, row_other, channel)
+                    + 0.25 * at(column_other, row_other, channel);
+                let expected = (0.75 * near + 0.25 * far).round();
+                let got = f64::from(canvas[(y + 1) * stride + x * 4 + channel]);
+                if (got - expected).abs() > 1.0 {
+                    return Err(format!(
+                        "doubled pixel {x},{y} channel {channel}: {got} vs {expected}"
+                    ));
+                }
             }
         }
     }

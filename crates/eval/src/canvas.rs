@@ -139,7 +139,7 @@ pub(crate) fn cover(picture: &CpuBytes, canvas_w: u32, canvas_h: u32) -> Option<
         return Some(picture.clone());
     }
     let (draw_w, draw_h) = cover_size(src_w, src_h, canvas_w, canvas_h)?;
-    let scaled = nearest(src_w, src_h, picture.rgba(), draw_w, draw_h)?;
+    let scaled = crate::sample::scale(src_w, src_h, picture.rgba(), draw_w, draw_h)?;
     let x0 = draw_w.checked_sub(canvas_w)? / 2;
     let y0 = draw_h.checked_sub(canvas_h)? / 2;
     let mut rgba = vec![0_u8; rgba_len(canvas_w, canvas_h)?];
@@ -178,32 +178,6 @@ pub(crate) fn cover_size(
         let draw_h = u32::try_from(draw_h).ok()?.max(canvas_h);
         Some((canvas_w, draw_h))
     }
-}
-
-fn nearest(src_w: u32, src_h: u32, src: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
-    if src.len() != rgba_len(src_w, src_h)? || dst_w == 0 || dst_h == 0 {
-        return None;
-    }
-    let mut out = vec![0_u8; rgba_len(dst_w, dst_h)?];
-    let src_stride = usize::try_from(src_w).ok()?.checked_mul(4)?;
-    let dst_stride = usize::try_from(dst_w).ok()?.checked_mul(4)?;
-    for y in 0..dst_h {
-        let sy = (u64::from(y) * u64::from(src_h) / u64::from(dst_h))
-            .min(u64::from(src_h.saturating_sub(1)));
-        let sy = usize::try_from(sy).ok()?;
-        let src_row = sy.checked_mul(src_stride)?;
-        let dst_row = usize::try_from(y).ok()?.checked_mul(dst_stride)?;
-        for x in 0..dst_w {
-            let sx = (u64::from(x) * u64::from(src_w) / u64::from(dst_w))
-                .min(u64::from(src_w.saturating_sub(1)));
-            let sx = usize::try_from(sx).ok()?;
-            let from = src_row.checked_add(sx.checked_mul(4)?)?;
-            let to = dst_row.checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
-            out.get_mut(to..to + 4)?
-                .copy_from_slice(src.get(from..from + 4)?);
-        }
-    }
-    Some(out)
 }
 
 /// Separable box blur. Samples past an edge repeat that edge.
@@ -392,11 +366,12 @@ mod tests {
     #[test]
     fn a_cover_keeps_the_center_and_a_blur_of_one_pixel_averages_the_edge() {
         let sharp = pixel(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]);
+        // Scaled to 4x2 between the pixel centers, then the middle two columns.
         let covered = cover(&sharp, 2, 2).expect("cover");
         assert_eq!(
             covered.rgba(),
             &[
-                255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 0, 255, 255
+                191, 0, 64, 255, 64, 0, 191, 255, 191, 0, 64, 255, 64, 0, 191, 255
             ]
         );
         let placed = pixel(
@@ -408,7 +383,7 @@ mod tests {
         assert_eq!(
             blurred.rgba(),
             &[
-                255, 0, 0, 255, 0, 0, 255, 255, 170, 0, 85, 255, 85, 0, 170, 255
+                255, 0, 0, 255, 0, 0, 255, 255, 148, 0, 106, 255, 106, 0, 148, 255
             ]
         );
     }

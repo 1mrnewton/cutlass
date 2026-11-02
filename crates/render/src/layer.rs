@@ -142,40 +142,63 @@ fn outside(p: vec2<f32>, size: vec2<f32>) -> bool {
     return p.x < 0.0 || p.y < 0.0 || p.x >= size.x || p.y >= size.y;
 }
 
-@fragment
-fn fs(in: Out) -> @location(0) vec4<f32> {
-    // `position.xy` is the canvas pixel center.
-    let picture = map(params.picture_x, params.picture_y, in.position.xy);
-    if (outside(picture, params.sizes.xy)) {
-        discard;
-    }
-    let oriented = map(params.oriented_x, params.oriented_y, floor(picture) + 0.5);
+// Picture pixel `index`, through the crop and the file turn to the
+// texture. A pixel the crop leaves outside the source is clear.
+fn picture_pixel(index: vec2<f32>) -> vec4<f32> {
+    let oriented = map(params.oriented_x, params.oriented_y, index + 0.5);
     if (outside(oriented, params.sizes.zw)) {
-        discard;
+        return vec4<f32>(0.0);
     }
     let stored = map(params.texture_x, params.texture_y, floor(oriented) + 0.5);
     let size = params.source.xy;
     let texel = vec2<i32>(clamp(floor(stored), vec2<f32>(0.0), size - 1.0));
-    var color: vec4<f32>;
     if (params.source.w < 0.5) {
-        color = textureLoad(tex0, texel, 0);
-    } else {
-        let chroma = texel / 2;
-        // Limited-range BT.709, as the CPU conversion.
-        let y = (textureLoad(tex0, texel, 0).r * 255.0 - 16.0) / 219.0;
-        let cb = (textureLoad(tex1, chroma, 0).r * 255.0 - 128.0) / 224.0;
-        let cr = (textureLoad(tex2, chroma, 0).r * 255.0 - 128.0) / 224.0;
-        let kr = 0.2126;
-        let kb = 0.0722;
-        let kg = 1.0 - kr - kb;
-        let rgb = vec3<f32>(
-            y + 2.0 * (1.0 - kr) * cr,
-            y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr,
-            y + 2.0 * (1.0 - kb) * cb,
-        );
-        color = vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+        return textureLoad(tex0, texel, 0);
     }
-    return color * params.source.z;
+    let chroma = texel / 2;
+    // Limited-range BT.709, as the CPU conversion.
+    let y = (textureLoad(tex0, texel, 0).r * 255.0 - 16.0) / 219.0;
+    let cb = (textureLoad(tex1, chroma, 0).r * 255.0 - 128.0) / 224.0;
+    let cr = (textureLoad(tex2, chroma, 0).r * 255.0 - 128.0) / 224.0;
+    let kr = 0.2126;
+    let kb = 0.0722;
+    let kg = 1.0 - kr - kb;
+    let rgb = vec3<f32>(
+        y + 2.0 * (1.0 - kr) * cr,
+        y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr,
+        y + 2.0 * (1.0 - kb) * cb,
+    );
+    // Each channel is stored as a byte, as the CPU picture holds it.
+    return vec4<f32>(round(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0, 1.0);
+}
+
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+    // `position.xy` is the canvas pixel center, and `picture` the matching
+    // point of the placed picture, where pixel i spans i to i + 1.
+    let picture = map(params.picture_x, params.picture_y, in.position.xy);
+    if (outside(picture, params.sizes.xy)) {
+        discard;
+    }
+    // Bilinear between the four nearest pixel centers, the edge pixel
+    // repeated past the edge.
+    let at = picture - 0.5;
+    let base = floor(at);
+    let weight = at - base;
+    let last = params.sizes.xy - 1.0;
+    let near = clamp(base, vec2<f32>(0.0), last);
+    let far = clamp(base + 1.0, vec2<f32>(0.0), last);
+    let top = mix(
+        picture_pixel(near),
+        picture_pixel(vec2<f32>(far.x, near.y)),
+        weight.x,
+    );
+    let bottom = mix(
+        picture_pixel(vec2<f32>(near.x, far.y)),
+        picture_pixel(far),
+        weight.x,
+    );
+    return mix(top, bottom, weight.y) * params.source.z;
 }
 ";
 

@@ -110,7 +110,9 @@ pub(crate) fn text_layers(
             let Some((clip, uniform)) = segment_clip(segment, time) else {
                 continue;
             };
-            let Some(transform) = picture_transform(&clip, &uniform, width, height) else {
+            let Some(transform) = picture_transform(&clip, &uniform, width, height)
+                .map(crate::media::PictureTransform::native)
+            else {
                 continue;
             };
             if transform.omitted() {
@@ -355,6 +357,33 @@ mod tests {
         assert!(shown.chunks(4).any(|pixel| pixel == [0, 0, 0, 0]));
         assert!(!ink(&pixels(&draft, 1_000_000)));
         assert_eq!(draft, before);
+    }
+
+    /// Rows and columns that hold any drawn pixel.
+    fn inked_span(rgba: &[u8], width: usize) -> (usize, usize) {
+        let lit: Vec<usize> = rgba
+            .chunks(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] > 0)
+            .map(|(index, _)| index)
+            .collect();
+        let columns = lit.iter().map(|index| index % width);
+        let rows = lit.iter().map(|index| index / width);
+        let span = |values: Vec<usize>| {
+            values.iter().max().unwrap_or(&0) - values.iter().min().unwrap_or(&0) + 1
+        };
+        (span(columns.collect()), span(rows.collect()))
+    }
+
+    #[test]
+    fn a_title_keeps_its_own_size_instead_of_fitting_the_canvas() {
+        let small = text_segment("A", false);
+        let mut large = small.clone();
+        large.canvas_config.width = 512;
+        large.canvas_config.height = 512;
+        let (width, height) = inked_span(&pixels(&small, 0), 256);
+        assert!(width < 128 && height < 128, "{width}x{height}");
+        assert_eq!(inked_span(&pixels(&large, 0), 512), (width, height));
     }
 
     #[test]

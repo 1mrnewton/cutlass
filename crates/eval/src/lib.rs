@@ -24,6 +24,7 @@ mod gpu;
 mod heard;
 mod media;
 mod nest;
+mod sample;
 mod sources;
 mod text;
 mod transition;

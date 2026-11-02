@@ -79,6 +79,7 @@ pub const AUTOSAVE_GAP: Duration = Duration::from_millis(500);
 /// One filmstrip tile of a clip, and its picture once stored.
 pub struct FilmCell {
     pub tile: FilmTile,
+    pub key: ThumbKey,
     pub thumb: Option<std::sync::Arc<Thumb>>,
 }
 
@@ -657,9 +658,9 @@ impl Shell {
             };
             let thumb = thumbnails.get(&key);
             if thumb.is_none() {
-                self.film_asks.push(key);
+                self.film_asks.push(key.clone());
             }
-            cells.push(FilmCell { tile, thumb });
+            cells.push(FilmCell { tile, key, thumb });
         }
         cells
     }

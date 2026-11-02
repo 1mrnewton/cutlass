@@ -1824,6 +1824,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
+    shell.ask_thumbnails();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
         lanes_left,
@@ -2665,6 +2666,61 @@ fn paint_transitions(
     }
 }
 
+/// Thumbnail textures by the picture they show, kept in egui's memory.
+#[derive(Clone, Default)]
+struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::TextureHandle>);
+
+/// Textures kept before the oldest are let go.
+const FILM_TEXTURES: usize = 1500;
+
+/// The clip's filmstrip inside `clip_rect`, over the tiles that meet
+/// `visible`. A tile without its picture yet keeps the clip color.
+fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visible: Rect) {
+    let span =
+        f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
+    let cells = shell.film(
+        id,
+        f64::from(clip_rect.width()),
+        f64::from(clip_rect.height()),
+        span,
+    );
+    if cells.is_empty() {
+        return;
+    }
+    let store = egui::Id::NULL.with("film textures");
+    let mut textures = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<FilmTextures>(store))
+        .unwrap_or_default();
+    if textures.0.len() > FILM_TEXTURES {
+        textures.0.clear();
+    }
+    let painter = ui
+        .painter()
+        .with_clip_rect(clip_rect.shrink(1.0).intersect(visible));
+    for cell in cells {
+        let Some(thumb) = cell.thumb else {
+            continue;
+        };
+        let texture = textures.0.entry(cell.key).or_insert_with(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [thumb.width as usize, thumb.height as usize],
+                &thumb.rgba,
+            );
+            ui.ctx()
+                .load_texture("film", image, egui::TextureOptions::LINEAR)
+        });
+        let full = clip_rect.height() * thumb.width as f32 / thumb.height as f32;
+        let tile = Rect::from_min_size(
+            Pos2::new(clip_rect.left() + cell.tile.left as f32, clip_rect.top()),
+            Vec2::new(cell.tile.width as f32, clip_rect.height()),
+        );
+        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new((tile.width() / full).min(1.0), 1.0));
+        painter.image(texture.id(), tile, uv, Color32::from_gray(210));
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(store, textures));
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -2697,6 +2753,9 @@ fn paint_clip(
         lane_color(&lane.kind)
     };
     painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
+    if !ghost {
+        paint_film(shell, ui, &clip.id, clip_rect, visible);
+    }
     if selected {
         painter.rect_stroke(
             clip_rect,

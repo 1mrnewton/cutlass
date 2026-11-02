@@ -19,6 +19,7 @@ use cutlass_picture::{Picture, rgba_len};
 use crate::error::EngineError;
 use crate::reader::{DecodedFrame, Media, ReaderFactory};
 use crate::source::decoded_picture;
+use cutlass_container::DisplayQuarter;
 
 /// Rows in a stored thumbnail. A shorter picture keeps its own height.
 pub const THUMB_HEIGHT: u32 = 96;
@@ -61,6 +62,8 @@ struct State {
     order: VecDeque<ThumbKey>,
     wanted: VecDeque<ThumbKey>,
     failed: HashSet<ThumbKey>,
+    /// Each opened file's picture size, upright.
+    shapes: HashMap<PathBuf, (u32, u32)>,
     paused: bool,
     closed: bool,
 }
@@ -116,6 +119,12 @@ impl Thumbnails {
         self.shared.wake.notify_all();
     }
 
+    /// The upright picture size of `path`, once the worker has opened it.
+    #[must_use]
+    pub fn shape(&self, path: &std::path::Path) -> Option<(u32, u32)> {
+        self.shared.lock().shapes.get(path).copied()
+    }
+
     /// Asks still waiting for the worker.
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -155,6 +164,14 @@ fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
         };
         let made = thumb_for(factory, &mut open, &key);
         let mut state = shared.lock();
+        if let Some((path, media)) = open.front() {
+            let info = media.info();
+            if let (Some(width), Some(height)) = (info.width, info.height) {
+                state
+                    .shapes
+                    .insert(path.clone(), upright(width, height, info.display));
+            }
+        }
         match made {
             Ok(thumb) => {
                 state.stored.insert(key.clone(), Arc::new(thumb));
@@ -200,8 +217,17 @@ fn thumb_for(
         .info()
         .duration
         .map_or(i64::MAX / 2, |end| end.0.max(1));
+    let display = media.info().display;
     let held = media.decode_at(key.time, &TimeRange::new(0, length))?;
-    shrink(&held.frame)
+    shrink(&held.frame, display)
+}
+
+/// `width` by `height` after a display quarter turn.
+fn upright(width: u32, height: u32, display: DisplayQuarter) -> (u32, u32) {
+    match display {
+        DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
+        DisplayQuarter::Zero | DisplayQuarter::Half => (width, height),
+    }
 }
 
 /// The rows a picture `height` tall is shrunk to, and the width that keeps
@@ -215,9 +241,14 @@ fn thumb_size(width: u32, height: u32) -> Option<(u32, u32)> {
     Some((u32::try_from(columns.max(1)).ok()?, rows))
 }
 
-/// `frame` shrunk to a thumbnail. A planar 4:2:0 picture is averaged in YUV
-/// and only the small result is converted.
-fn shrink(frame: &DecodedFrame) -> Result<Thumb, EngineError> {
+/// `frame` shrunk to a thumbnail and turned upright. The thumbnail height
+/// is counted upright. A planar 4:2:0 picture is averaged in YUV and only
+/// the small result is converted.
+fn shrink(frame: &DecodedFrame, display: DisplayQuarter) -> Result<Thumb, EngineError> {
+    let (coded_w, coded_h) = (frame.width(), frame.height());
+    let (up_w, up_h) = upright(coded_w, coded_h, display);
+    let (out_w, out_h) = thumb_size(up_w, up_h).ok_or(EngineError::Window)?;
+    let size = upright(out_w, out_h, display);
     if let DecodedFrame::Coded {
         width,
         height,
@@ -225,15 +256,14 @@ fn shrink(frame: &DecodedFrame) -> Result<Thumb, EngineError> {
         bytes,
         ..
     } = frame
-        && let Some(thumb) = shrink_yuv(*width, *height, bytes)
+        && let Some(thumb) = shrink_yuv(*width, *height, bytes, size)
     {
-        return Ok(thumb);
+        return Ok(turn(thumb, display));
     }
     let Picture::Cpu(picture) = decoded_picture(frame)? else {
         return Err(EngineError::NotReady);
     };
-    let (width, height) =
-        thumb_size(picture.width(), picture.height()).ok_or(EngineError::Window)?;
+    let (width, height) = size;
     let mut rgba = Vec::with_capacity(rgba_len(width, height).ok_or(EngineError::Window)?);
     for y in 0..height {
         for x in 0..width {
@@ -249,14 +279,44 @@ fn shrink(frame: &DecodedFrame) -> Result<Thumb, EngineError> {
             }
         }
     }
-    Ok(Thumb {
+    Ok(turn(
+        Thumb {
+            width,
+            height,
+            rgba,
+        },
+        display,
+    ))
+}
+
+/// `thumb` turned clockwise by `display`.
+fn turn(thumb: Thumb, display: DisplayQuarter) -> Thumb {
+    if display == DisplayQuarter::Zero {
+        return thumb;
+    }
+    let (src_w, src_h) = (thumb.width as usize, thumb.height as usize);
+    let (width, height) = upright(thumb.width, thumb.height, display);
+    let mut rgba = Vec::with_capacity(thumb.rgba.len());
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let (sx, sy) = match display {
+                DisplayQuarter::Zero => (x, y),
+                DisplayQuarter::Clockwise90 => (y, src_h - 1 - x),
+                DisplayQuarter::Half => (src_w - 1 - x, src_h - 1 - y),
+                DisplayQuarter::Clockwise270 => (src_w - 1 - y, x),
+            };
+            let at = (sy * src_w + sx) * 4;
+            rgba.extend_from_slice(&thumb.rgba[at..at + 4]);
+        }
+    }
+    Thumb {
         width,
         height,
         rgba,
-    })
+    }
 }
 
-fn shrink_yuv(width: u32, height: u32, bytes: &[u8]) -> Option<Thumb> {
+fn shrink_yuv(width: u32, height: u32, bytes: &[u8], (out_w, out_h): (u32, u32)) -> Option<Thumb> {
     let luma = usize::try_from(width).ok()? * usize::try_from(height).ok()?;
     let (chroma_w, chroma_h) = (width / 2, height / 2);
     let chroma = usize::try_from(chroma_w).ok()? * usize::try_from(chroma_h).ok()?;
@@ -265,7 +325,6 @@ fn shrink_yuv(width: u32, height: u32, bytes: &[u8]) -> Option<Thumb> {
     }
     let (y_plane, rest) = bytes.split_at(luma);
     let (u_plane, v_plane) = rest.split_at(chroma);
-    let (out_w, out_h) = thumb_size(width, height)?;
     let mut rgba = Vec::with_capacity(rgba_len(out_w, out_h)?);
     for y in 0..out_h {
         for x in 0..out_w {
@@ -351,11 +410,30 @@ mod tests {
         let (width, height) = (4, 2);
         let mut bytes = vec![235, 235, 16, 16, 235, 235, 16, 16];
         bytes.extend([128, 128, 128, 128]);
-        let thumb = shrink_yuv(width, height, &bytes).expect("thumb");
+        let thumb = shrink_yuv(width, height, &bytes, (4, 2)).expect("thumb");
         assert_eq!((thumb.width, thumb.height), (4, 2));
         assert_eq!(&thumb.rgba[..4], &[255, 255, 255, 255]);
         assert_eq!(&thumb.rgba[8..12], &[0, 0, 0, 255]);
-        assert!(shrink_yuv(width, height, &bytes[..10]).is_none());
+        assert!(shrink_yuv(width, height, &bytes[..10], (4, 2)).is_none());
+    }
+
+    #[test]
+    fn a_quarter_turn_stands_the_thumb_up() {
+        // 2x1: red then blue. Turned clockwise, red is on top.
+        let flat = Thumb {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        };
+        let up = turn(flat.clone(), DisplayQuarter::Clockwise90);
+        assert_eq!((up.width, up.height), (1, 2));
+        assert_eq!(up.rgba, [255, 0, 0, 255, 0, 0, 255, 255]);
+        let down = turn(flat.clone(), DisplayQuarter::Clockwise270);
+        assert_eq!(down.rgba, [0, 0, 255, 255, 255, 0, 0, 255]);
+        assert_eq!(turn(flat.clone(), DisplayQuarter::Zero), flat);
+        // A sideways 1280x720 file stands 96 rows tall.
+        let (up_w, up_h) = upright(1280, 720, DisplayQuarter::Clockwise90);
+        assert_eq!(thumb_size(up_w, up_h), Some((54, 96)));
     }
 
     #[test]

@@ -2336,7 +2336,7 @@ fn predict_chroma(recon: &[u8], stride: u32, mx: u32, my: u32) -> [u8; 64] {
             left[row] = recon[((y0 + row as u32) * stride + x0 - 1) as usize];
         }
     }
-    crate::recon::pred_chroma(0, &above, &left, my > 0, mx > 0)
+    crate::recon::pred_chroma(0, &above, &left, 128, my > 0, mx > 0)
 }
 
 fn hadamard2(dc: [i32; 4]) -> [i32; 4] {

@@ -425,6 +425,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Move { .. } => "move",
         Request::Trim { .. } => "trim",
         Request::SetWords { .. } => "set_words",
+        Request::AddCaption { .. } => "add_caption",
+        Request::ExtractAudio { .. } => "extract_audio",
         Request::SetTrackAttribute { .. } => "set_track_attribute",
         Request::SetConstantSpeed { .. } => "set_constant_speed",
         Request::SetCurveSpeed { .. } => "set_curve_speed",
@@ -434,11 +436,38 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::Remove { .. } => "remove",
         Request::SetReverse { .. } => "set_reverse",
         Request::SetFreeze { .. } => "set_freeze",
+        Request::SetMirror { .. } => "set_mirror",
+        Request::SetVerticalFlip { .. } => "set_vertical_flip",
+        Request::SetRotation { .. } => "set_rotation",
+        Request::SetPosition { .. } => "set_position",
+        Request::SetScale { .. } => "set_scale",
+        Request::SetOpacity { .. } => "set_opacity",
         Request::SetVolume { .. } => "set_volume",
         Request::SetFade { .. } => "set_fade",
         Request::SetCrop { .. } => "set_crop",
         Request::SetTextContent { .. } => "set_text_content",
+        Request::SetTextSize { .. } => "set_text_size",
+        Request::SetTextColor { .. } => "set_text_color",
+        Request::SetTextAlign { .. } => "set_text_align",
+        Request::SetLetterSpacing { .. } => "set_letter_spacing",
+        Request::SetLineSpacing { .. } => "set_line_spacing",
+        Request::SetLineWidth { .. } => "set_line_width",
+        Request::SetTextFont { .. } => "set_text_font",
         Request::SetKeyframes { .. } => "set_keyframes",
+        Request::Import { .. } => "import",
+        Request::InsertTrack { .. } => "insert_track",
+        Request::AddTimeMark { .. } => "add_time_mark",
+        Request::RemoveTimeMark { .. } => "remove_time_mark",
+        Request::AddBeat { .. } => "add_beat",
+        Request::RemoveBeat { .. } => "remove_beat",
+        Request::SetMagnet { .. } => "set_magnet",
+        Request::SetCanvasBackground { .. } => "set_canvas_background",
+        Request::SetCanvasSize { .. } => "set_canvas_size",
+        Request::SetLetterbox { .. } => "set_letterbox",
+        Request::SetFrameRate { .. } => "set_frame_rate",
+        Request::SetDropFrame { .. } => "set_drop_frame",
+        Request::SetColorSpace { .. } => "set_color_space",
+        Request::SetProjectName { .. } => "set_project_name",
     }
 }
 
@@ -642,8 +671,11 @@ fn map_redo(error: EditError) -> DraftError {
 
 #[cfg(test)]
 mod tests {
-    use cutlass_model::{Draft, MaterialId, Micros, Segment, SegmentId, TimeRange, Track, TrackId};
-    use cutlass_session::{EditError, Request, Session};
+    use cutlass_model::{
+        Draft, MaterialId, MaterialVideo, Micros, Segment, SegmentId, TimeRange, Track, TrackId,
+        TrackType,
+    };
+    use cutlass_session::{EditError, ImportedMedium, Request, Session};
 
     use super::{
         ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, QueryView,
@@ -662,6 +694,23 @@ mod tests {
             track_id: track_id.clone(),
             segment: Box::new(Segment::new(id, "media", TimeRange::new(start, duration))),
         }
+    }
+
+    #[test]
+    fn import_is_named() {
+        let request = Request::Import {
+            medium: ImportedMedium::Video(Box::new(MaterialVideo::new("clip"))),
+        };
+        assert_eq!(request_name(&request), "import");
+    }
+
+    #[test]
+    fn insert_track_is_named() {
+        let request = Request::InsertTrack {
+            track_id: TrackId::new("lane"),
+            kind: TrackType::Audio,
+        };
+        assert_eq!(request_name(&request), "insert_track");
     }
 
     fn apply_input(

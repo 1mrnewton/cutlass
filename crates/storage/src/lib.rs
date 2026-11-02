@@ -17,10 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use cutlass_download::{
-    Checksum, DownloadError, Downloader, Job, JobId, Priority, Progress, hash_file,
-};
+use cutlass_download::hash_file;
 
+pub use cutlass_download::{Checksum, DownloadError, Downloader, Job, JobId, Priority, Progress};
 pub use index::{Place, Record, ResourceId};
 pub use quota::{Quota, Shortfall};
 

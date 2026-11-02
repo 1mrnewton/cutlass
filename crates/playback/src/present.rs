@@ -6,8 +6,9 @@
 //! drops the cache.
 
 use std::collections::VecDeque;
+use std::path::Path;
 
-use cutlass_eval::Snapshot;
+use cutlass_eval::{Fonts, OpenClips, ReaderFactory, Snapshot};
 use cutlass_gpu::Device;
 use cutlass_model::{DraftId, Micros};
 use cutlass_session::Session;
@@ -133,11 +134,72 @@ impl Cache {
     }
 }
 
+/// Composited pictures and the open movies behind them.
+///
+/// The picture key is the draft id, the revision, the timeline time, and the
+/// canvas size. Four pictures is enough for a short scrub. A new time seeks
+/// a movie that is already open. A new draft or revision drops both.
+pub struct FrameCache {
+    inner: Cache,
+    clips: OpenClips,
+}
+
+impl FrameCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Cache::new(),
+            clips: OpenClips::new(),
+        }
+    }
+
+    /// Drops every stored picture and every open file.
+    pub fn clear(&mut self) {
+        self.inner = Cache::new();
+        self.clips.clear();
+    }
+
+    /// The picture at `time`. A stored key is returned without evaluating again.
+    pub fn frame<D: Device>(
+        &mut self,
+        session: &Session,
+        device: &mut D,
+        time: Micros,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        fonts: &dyn Fonts,
+    ) -> Result<Readback, PresentError<D::Error>> {
+        evaluate(
+            &mut self.inner,
+            &mut self.clips,
+            session,
+            device,
+            time,
+            media,
+            DrawnWith { root, fonts },
+        )
+    }
+}
+
+pub(crate) struct DrawnWith<'a> {
+    pub(crate) root: Option<&'a Path>,
+    pub(crate) fonts: &'a dyn Fonts,
+}
+
+impl Default for FrameCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) fn evaluate<D: Device>(
     cache: &mut Cache,
+    clips: &mut OpenClips,
     session: &Session,
     device: &mut D,
     time: Micros,
+    media: &ReaderFactory,
+    drawn: DrawnWith<'_>,
 ) -> Result<Readback, PresentError<D::Error>> {
     let draft = session.draft();
     let revision = session.revision();
@@ -146,8 +208,16 @@ pub(crate) fn evaluate<D: Device>(
     if let Some(hit) = cache.lookup(&draft.id, revision, time, width, height) {
         return Ok(hit);
     }
-    let frame =
-        cutlass_eval::frame(&Snapshot::new(draft), time, device).map_err(PresentError::Picture)?;
+    let frame = cutlass_eval::frame_in(
+        &Snapshot::with_fonts(draft, drawn.fonts),
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        drawn.root,
+    )
+    .map_err(PresentError::Picture)?;
     let readback = Readback {
         width: frame.extent.width,
         height: frame.extent.height,

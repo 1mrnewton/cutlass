@@ -6,11 +6,15 @@ publish.workspace = true
 license.workspace = true
 description = "The calls the phone shells make."
 
+[features]
+public-release = ["cutlass-logger/public-release"]
+
 [dependencies]
 cutlass-session = { path = "../session", version = "0.1.0" }
 cutlass-store = { path = "../store", version = "0.1.0" }
 cutlass-storage = { path = "../storage", version = "0.1.0" }
 cutlass-playback = { path = "../playback", version = "0.1.0" }
+cutlass-logger = { path = "../logger", version = "0.1.0" }
 
 [lints]
 workspace = true

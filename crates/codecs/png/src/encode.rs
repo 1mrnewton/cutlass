@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cutlass_encode::{
-    AudioInput, CodecError, CodecId, CodecParams, Encoder, FrameInput, Packet, PictureInput,
+    AudioInput, BitDepth, CodecError, CodecId, CodecParams, ColorType, Encoder, FrameInput, Packet,
+    PictureInput, PixelFormat, StillImage,
 };
 
 use crate::write::encode_png;
@@ -46,8 +47,37 @@ impl Encoder for PngEncoder {
         })
     }
 
-    fn push_frame(&mut self, _input: &FrameInput) -> Result<Vec<Packet>, CodecError> {
-        Err(CodecError::Unsupported { what: "frame" })
+    fn push_frame(&mut self, input: &FrameInput) -> Result<Vec<Packet>, CodecError> {
+        let FrameInput::Cpu(frame) = input else {
+            return Err(CodecError::Unsupported {
+                what: "platform picture",
+            });
+        };
+        if frame.pixel() != PixelFormat::Rgba8 {
+            return Err(CodecError::Unsupported {
+                what: "pixel format",
+            });
+        }
+        let samples = frame.bytes().iter().copied().map(u16::from).collect();
+        let image = StillImage::from_samples(
+            frame.width(),
+            frame.height(),
+            ColorType::Rgba,
+            BitDepth::Eight,
+            samples,
+        )
+        .checked()
+        .map_err(|_| CodecError::InvalidApi {
+            what: "still image",
+        })?;
+        let data = encode_png(&image, self.interlace, &self.cancel)?;
+        Ok(vec![Packet::video(
+            data,
+            frame.time().pts(),
+            frame.time().duration(),
+            frame.time().timescale(),
+            true,
+        )])
     }
 
     fn push_picture(&mut self, input: &PictureInput) -> Result<Vec<Packet>, CodecError> {

@@ -8,7 +8,7 @@ use cutlass_font::Font;
 use cutlass_model::{MaterialId, MaterialText};
 
 use crate::TextError;
-use crate::atlas::{ATLAS_EM, Atlas, GlyphImage};
+use crate::atlas::{Atlas, GlyphImage};
 use crate::layout::{Layout, PlacedGlyph, layout};
 
 /// A glyph quad in pixel space. The picture origin is the top left.
@@ -69,6 +69,32 @@ fn cache(font: &Font<'_>, layout: &Layout) -> Result<Atlas, TextError> {
     Ok(atlas)
 }
 
+pub(crate) fn glyph_quad(
+    placed: &PlacedGlyph,
+    baseline: f32,
+    font_size: f32,
+    scale: f32,
+    image: &GlyphImage,
+) -> Result<(f32, f32, f32, f32), TextError> {
+    let (x, y, width, height) = if image.width == 0 || image.height == 0 {
+        (placed.x, baseline, 0.0, 0.0)
+    } else {
+        if !(image.pixels_per_em.is_finite() && image.pixels_per_em > 0.0) {
+            return Err(TextError::Limit);
+        }
+        let texel = font_size / image.pixels_per_em;
+        let width = pixel(image.width) * texel;
+        let height = pixel(image.height) * texel;
+        let x = placed.x + image.left * scale;
+        let y = baseline - image.top * scale;
+        (x, y, width, height)
+    };
+    if ![x, y, width, height].iter().all(|value| value.is_finite()) {
+        return Err(TextError::Limit);
+    }
+    Ok((x, y, width, height))
+}
+
 fn record(
     placed: &PlacedGlyph,
     baseline: f32,
@@ -76,19 +102,8 @@ fn record(
     image: &GlyphImage,
     line: u32,
 ) -> Result<GlyphRecord, TextError> {
-    let (x, y, width, height) = if image.width == 0 || image.height == 0 {
-        (placed.x, baseline, 0.0, 0.0)
-    } else {
-        let texel = layout.font_size / ATLAS_EM;
-        let width = pixel(image.width) * texel;
-        let height = pixel(image.height) * texel;
-        let x = placed.x + image.left * layout.scale;
-        let y = baseline - image.top * layout.scale;
-        (x, y, width, height)
-    };
-    if ![x, y, width, height].iter().all(|value| value.is_finite()) {
-        return Err(TextError::Limit);
-    }
+    let (x, y, width, height) =
+        glyph_quad(placed, baseline, layout.font_size, layout.scale, image)?;
     Ok(GlyphRecord {
         glyph_id: placed.glyph_id,
         missing: placed.missing,
@@ -118,6 +133,7 @@ mod tests {
     use cutlass_model::MaterialText;
 
     const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
+    const COLOR: &[u8] = include_bytes!("../../font/fixtures/color-strike.otf");
 
     fn material(content: &str) -> MaterialText {
         let mut text = MaterialText::new("text-material");
@@ -139,6 +155,16 @@ mod tests {
         assert_eq!(mesh.glyphs[1].glyph_id, 3);
         assert!(mesh.glyphs[0].width > 0.0);
         assert!(mesh.glyphs[1].height > 0.0);
+        let font = read(TTF).expect("ttf");
+        let laid = layout(&font, &text).expect("layout");
+        let mut atlas = Atlas::new();
+        let image = atlas.glyph(&font, 2).expect("glyph");
+        let outlined = super::pixel(image.width) * laid.font_size / image.pixels_per_em;
+        assert_eq!(mesh.glyphs[0].width.to_bits(), outlined.to_bits());
+
+        let strike = build_text(COLOR, &material("A")).expect("strike");
+        assert_eq!(strike.glyphs[0].width.to_bits(), 8.0_f32.to_bits());
+        assert_eq!(strike.glyphs[0].height.to_bits(), 8.0_f32.to_bits());
         assert_eq!(mesh.glyphs[0].line, 0);
         assert_eq!(mesh.glyphs[1].line, 0);
 

@@ -17,7 +17,9 @@ pub fn trim(
     let mut next = current.clone();
     let speed = super::speed::timeline_speed(draft, &current);
     apply_edge(&mut next, edge, time, speed)?;
-    if overlaps_except(&draft.tracks[track_index], &next, segment_id)? {
+    if !super::magnet::packs(draft.config.maintrack_adsorb, &draft.tracks[track_index])
+        && overlaps_except(&draft.tracks[track_index], &next, segment_id)?
+    {
         return Err(EditError::Overlap);
     }
     draft.tracks[track_index].segments[segment_index] = next;

@@ -1,16 +1,19 @@
 //! Reads a TrueType or OpenType font, including one face of a collection.
 //!
-//! The file yields a glyph id, an advance width, an outline, and horizontal
-//! kerning pairs from a `kern` table. Glyph 0 is the missing glyph. A face
-//! with `CFF2` and no `CFF ` table has no outlines this reader can draw.
-//! Shaping, atlases, and meshes are not part of this crate.
+//! The file yields a glyph id, an advance width, an outline, horizontal
+//! kerning pairs, and a bitmap strike when the file has one. Glyph 0 is the
+//! missing glyph. A face with `CFF2` and no `CFF ` table has no outlines this
+//! reader can draw. Shaping, atlases, and meshes are not part of this crate.
 
 #![forbid(unsafe_code)]
 
 mod collection;
 mod kern;
 mod otf;
+mod strike;
 mod ttf;
+
+pub use strike::{BitmapGlyph, BitmapPixels};
 
 use std::cmp::Ordering;
 use std::error::Error;
@@ -127,6 +130,7 @@ pub struct Font<'a> {
     cmap: Cmap<'a>,
     kern: kern::Kerning,
     outlines: Outlines<'a>,
+    strikes: strike::Strikes<'a>,
 }
 
 /// Read one TrueType or OpenType face.
@@ -242,6 +246,20 @@ impl Font<'_> {
         }
     }
 
+    /// `true` when the face has a `CBLC`/`CBDT`, `EBLC`/`EBDT`, or `sbix` strike.
+    #[must_use]
+    pub fn has_bitmap_strike(&self) -> bool {
+        self.strikes.is_some()
+    }
+
+    /// Bitmap for one glyph, when this face has a strike and this glyph has pixels.
+    ///
+    /// `Ok(None)` means the face has no strike, or this glyph has no bitmap in it.
+    /// A color strike is premultiplied RGBA. A gray or mono strike is coverage.
+    pub fn bitmap(&self, glyph_id: u16) -> Result<Option<BitmapGlyph>, FontError> {
+        self.strikes.glyph(glyph_id, self.num_glyphs)
+    }
+
     /// Horizontal kerning for a glyph pair, in font design units.
     ///
     /// The value is added to the advance of `left` before `right` is placed.
@@ -279,6 +297,7 @@ impl Font<'_> {
             }
             FontKind::OpenType => Outlines::OpenType(otf::source(&directory)?),
         };
+        let strikes = strike::Strikes::parse(&directory)?;
         Ok(Font {
             kind: directory.kind,
             units_per_em: head.units_per_em,
@@ -287,6 +306,7 @@ impl Font<'_> {
             cmap,
             kern,
             outlines,
+            strikes,
         })
     }
 }

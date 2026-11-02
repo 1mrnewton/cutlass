@@ -4,6 +4,8 @@
 //! bit depth, and alpha domain declared by the datastream. Color conversion
 //! is left to the color crate. `CodecParams.extra` of `[1]` asks the encoder
 //! for Adam7. An empty extra, or `[0]`, writes a non-interlaced image.
+//! `push_frame` accepts one tightly packed RGBA picture and stamps the
+//! packet with that frame's clock. A platform buffer is refused.
 //!
 //! The support record is `STATUS.md` next to this crate.
 

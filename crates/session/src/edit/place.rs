@@ -16,26 +16,26 @@ pub fn place(draft: &mut Draft, track_id: &TrackId, segment: Segment) -> Result<
     }) {
         return Err(EditError::DuplicateSegment);
     }
+    let adsorb = draft.config.maintrack_adsorb;
     let track = draft
         .tracks
         .iter_mut()
         .find(|track| &track.id == track_id)
         .ok_or(EditError::MissingTrack)?;
     ensure_unlocked(track.attribute)?;
-    for existing in &track.segments {
-        if segment
-            .target
-            .overlaps(&existing.target)
-            .map_err(EditError::Range)?
-        {
-            return Err(EditError::Overlap);
+    let packed = super::magnet::packs(adsorb, track);
+    if !packed {
+        for existing in &track.segments {
+            if segment
+                .target
+                .overlaps(&existing.target)
+                .map_err(EditError::Range)?
+            {
+                return Err(EditError::Overlap);
+            }
         }
     }
-    let index = track
-        .segments
-        .iter()
-        .position(|existing| existing.target.start > segment.target.start)
-        .unwrap_or(track.segments.len());
+    let index = super::magnet::insert_at(&track.segments, segment.target.start.0, packed);
     track.segments.insert(index, segment);
     Ok(())
 }

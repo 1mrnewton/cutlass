@@ -72,7 +72,9 @@ pub use seek::{
     IndexEntry, Landing, ScanEntry, SeekLanding, SeekTo, ensure_index_sorted, reserve_index,
     seek_by_scan, seek_with_index, suppress_stale,
 };
-pub use stream::{Edit, EditError, Gap, GapError, Language, LanguageError, Stream, TrackId, Trim};
+pub use stream::{
+    DisplayQuarter, Edit, EditError, Gap, GapError, Language, LanguageError, Stream, TrackId, Trim,
+};
 pub use time::{CompareError, compare_ticks};
 
 #[cfg(test)]

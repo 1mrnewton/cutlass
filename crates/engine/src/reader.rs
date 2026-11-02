@@ -118,6 +118,7 @@ pub struct HeldFrame {
     pub frame: DecodedFrame,
 }
 
+#[derive(Clone)]
 struct Family {
     probe: fn(&[u8]) -> ProbeResult,
     open: fn(&Path) -> Result<Box<dyn Demux>, OpenError>,
@@ -167,6 +168,7 @@ struct Ready {
 }
 
 /// Registered containers and the decoder factory.
+#[derive(Clone)]
 pub struct ReaderFactory {
     families: Vec<Family>,
     decoders: DecodeFactory,

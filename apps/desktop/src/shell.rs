@@ -29,8 +29,8 @@ use cutlass_model::{
     track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
-    AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PREVIEW_RATE, PreviewMix, preview_frames,
-    queue_mix, stream_mix,
+    AudioHost, AudioOutput, FrameCache, MixJob, Mixer, PLAY_FRAMES, PREVIEW_RATE, PreviewMix,
+    preview_frames, queue_mix,
 };
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
@@ -398,22 +398,16 @@ fn follow_audio(wall: i64, heard: i64) -> i64 {
     }
 }
 
-/// Audio streamed ahead of the device by playback.
-const STREAM_LEAD: usize = 6_144;
-/// One streamed window: 20 ms at the preview rate, a whole number of
-/// microseconds, so consecutive windows meet exactly.
-const STREAM_WINDOW: u32 = PREVIEW_RATE / 50;
-
 /// The audio stream playback follows. The playhead is where its heard
-/// frames reach, so the picture follows the sound.
+/// frames reach, so the picture follows the sound. The mixer thread fills it.
 #[derive(Clone, Copy, Debug)]
 struct AudioStream {
     /// Timeline time of the first streamed frame.
     start: Micros,
     /// The device's played count when this stream started.
     played: u64,
-    /// Frames mixed and streamed since `start`.
-    mixed: u64,
+    /// The device has played this stream's first frame.
+    heard: bool,
 }
 
 impl AudioStream {
@@ -443,6 +437,8 @@ pub struct Shell {
     playing: bool,
     /// Present while playing on a device with a stream clock.
     stream: Option<AudioStream>,
+    /// Mixes the stream on its own thread. Started on the first play.
+    mixer: Option<Mixer>,
     pixel_size: f64,
     /// Left edge of the lanes, in microseconds.
     view_origin: i64,
@@ -519,6 +515,7 @@ impl Shell {
             playhead: Micros(0),
             playing: false,
             stream: None,
+            mixer: None,
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
             lane_width: 800.0,
@@ -757,6 +754,8 @@ impl Shell {
 
     /// Replace the software buffer with the output for `host`.
     pub fn open_preview_audio(&mut self, host: AudioHost) {
+        self.stream = None;
+        self.mixer = None;
         self.output = AudioOutput::open(host);
     }
 
@@ -975,70 +974,86 @@ impl Shell {
     /// Stop every sound: the stream and the scrub slice.
     fn silence(&mut self) {
         self.stream = None;
+        if let Some(mixer) = &self.mixer {
+            mixer.stop();
+        }
         self.output.clear_stream();
         self.output.queue(&[]);
     }
 
-    /// Stream audio from the playhead. A host with no stream clock queues
-    /// one slice per tick instead.
+    /// Stream audio from the playhead on the mixer thread. A host with no
+    /// stream clock queues one slice per tick instead.
     fn start_stream(&mut self) {
         self.output.clear_stream();
-        let Some(clock) = self.output.clock() else {
+        let (Some(clock), Some(session)) = (self.output.clock(), self.session.as_ref()) else {
             self.stream = None;
             self.queue_preview(PLAY_FRAMES);
             return;
         };
+        if self.mixer.is_none() {
+            self.mixer = Mixer::start(&self.output, self.readers.clone());
+        }
+        let Some(mixer) = &self.mixer else {
+            self.stream = None;
+            self.queue_preview(PLAY_FRAMES);
+            return;
+        };
+        mixer.play(MixJob {
+            draft: session.draft().clone(),
+            revision: session.revision(),
+            root: self.path.clone(),
+            start: self.playhead,
+            end: self.cut_duration(),
+        });
         self.stream = Some(AudioStream {
             start: self.playhead,
             played: clock.played,
-            mixed: 0,
+            heard: false,
         });
-        self.top_up_stream();
     }
 
-    /// Mix whole windows until the stream is [`STREAM_LEAD`] ahead of the
-    /// device, or reaches the end of the cut.
-    fn top_up_stream(&mut self) {
-        let end = self.cut_duration().0;
-        let (Some(stream), Some(clock), Some(session)) = (
-            self.stream.as_mut(),
-            self.output.clock(),
-            self.session.as_ref(),
-        ) else {
+    /// Restart the stream from the playhead when the draft changed while
+    /// playing, so the mixer hears the edit.
+    fn follow_edits(&mut self) {
+        let (Some(mixer), Some(session)) = (&self.mixer, self.session.as_ref()) else {
             return;
         };
-        let mut buffered = clock.buffered;
-        while buffered < STREAM_LEAD {
-            let at = stream.time_at(stream.mixed);
-            if at.0 >= end {
-                break;
-            }
-            stream_mix(
-                &mut self.output,
-                PreviewMix {
-                    draft: session.draft(),
-                    revision: session.revision(),
-                    time: at,
-                    frames: STREAM_WINDOW,
-                    readers: &self.readers,
-                    heard: &mut self.heard,
-                    root: self.path.as_deref(),
-                },
-            );
-            stream.mixed = stream.mixed.saturating_add(u64::from(STREAM_WINDOW));
-            buffered = buffered.saturating_add(STREAM_WINDOW as usize);
+        if mixer.revision() != Some(session.revision()) {
+            self.start_stream();
         }
     }
 
     /// Where the stream's heard frames reach, or `None` without a stream.
+    #[cfg(test)]
     fn heard_time(&self) -> Option<Micros> {
         let stream = self.stream?;
+        Some(stream.time_at(self.heard_frames()?))
+    }
+
+    /// Frames of the stream the device has played.
+    fn heard_frames(&self) -> Option<u64> {
+        let stream = self.stream?;
         let clock = self.output.clock()?;
-        let heard = clock
-            .heard()
-            .saturating_sub(stream.played)
-            .min(stream.mixed);
-        Some(stream.time_at(heard))
+        let mixed = self.mixer.as_ref()?.mixed();
+        Some(clock.heard().saturating_sub(stream.played).min(mixed))
+    }
+
+    /// The playhead after `elapsed` while streaming. Before the device plays
+    /// the stream's first frame the picture holds, so it starts with the
+    /// sound. On that first frame it lands on the heard time, and after that
+    /// it moves by `elapsed` and leans toward the audio.
+    fn streamed_playhead(&mut self, wall: i64) -> Option<i64> {
+        let heard_frames = self.heard_frames()?;
+        let stream = self.stream.as_mut()?;
+        let heard = stream.time_at(heard_frames).0;
+        if heard_frames == 0 {
+            return Some(stream.start.0);
+        }
+        if !stream.heard {
+            stream.heard = true;
+            return Some(heard);
+        }
+        Some(follow_audio(wall, heard))
     }
 
     pub fn toggle_play(&mut self) {
@@ -1083,8 +1098,8 @@ impl Shell {
             return;
         }
         let wall = self.playhead.0.saturating_add(elapsed);
-        let mut next = match self.heard_time() {
-            Some(heard) => follow_audio(wall, heard.0).max(self.playhead.0),
+        let mut next = match self.streamed_playhead(wall) {
+            Some(streamed) => streamed.max(self.playhead.0),
             None => wall,
         };
         let mut wrapped = false;
@@ -1104,7 +1119,7 @@ impl Shell {
         } else if wrapped && self.stream.is_some() {
             self.start_stream();
         } else if self.stream.is_some() {
-            self.top_up_stream();
+            self.follow_edits();
         } else {
             self.queue_preview(preview_frames(elapsed));
         }
@@ -1113,6 +1128,7 @@ impl Shell {
 
     #[cfg(test)]
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
+        self.mixer = None;
         self.readers = readers;
         self.preview_cache.borrow_mut().clear();
         self.heard.clear();
@@ -5475,10 +5491,10 @@ mod tests {
         let stream = super::AudioStream {
             start: Micros(2_000_000),
             played: 0,
-            mixed: 0,
+            heard: true,
         };
         assert_eq!(
-            stream.time_at(u64::from(super::STREAM_WINDOW)),
+            stream.time_at(u64::from(cutlass_playback::MIX_WINDOW)),
             Micros(2_020_000)
         );
     }
@@ -5538,6 +5554,79 @@ mod tests {
             .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
             .count();
         assert!(off * 1000 <= gpu.len() / 4, "{off} pixels differ");
+    }
+
+    #[test]
+    fn playback_waits_for_the_sound_then_follows_it_and_hears_an_edit() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie with sound is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 8_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 8_000_000));
+        draft.materials.videos[0].duration = Micros(8_000_000);
+        draft.duration = Micros(8_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.open_preview_audio(AudioHost::current());
+        if desktop.output.clock().is_none() {
+            eprintln!("skipped: no audio device");
+            return;
+        }
+        desktop.seek(Micros(1_000_000));
+        desktop.play();
+        assert!(desktop.mixer.is_some());
+        // Each tick passes the time that really went by, as the window does.
+        let mut last = std::time::Instant::now();
+        let mut step = |desktop: &mut Shell| {
+            std::thread::sleep(std::time::Duration::from_micros(16_667));
+            let now = std::time::Instant::now();
+            let elapsed = i64::try_from(now.duration_since(last).as_micros()).unwrap();
+            last = now;
+            desktop.advance(elapsed);
+        };
+        let mut ticks = 0;
+        loop {
+            assert!(ticks < 120, "the stream never started");
+            step(&mut desktop);
+            ticks += 1;
+            if desktop.heard_frames() != Some(0) {
+                break;
+            }
+            // Nothing heard after this tick, so nothing was heard during it.
+            assert_eq!(desktop.playhead, Micros(1_000_000), "the picture held");
+        }
+        for _ in 0..30 {
+            step(&mut desktop);
+        }
+        let heard = desktop.heard_time().unwrap();
+        assert!(desktop.playhead.0 > 1_300_000, "playback moved");
+        assert!(
+            (desktop.playhead.0 - heard.0).abs() < 10_000,
+            "picture {} audio {}",
+            desktop.playhead.0,
+            heard.0
+        );
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::MUTE)
+            .unwrap();
+        step(&mut desktop);
+        let revision = desktop.session.as_ref().unwrap().revision();
+        assert_eq!(
+            desktop
+                .mixer
+                .as_ref()
+                .and_then(cutlass_playback::Mixer::revision),
+            Some(revision)
+        );
+        desktop.pause();
+        assert!(desktop.stream.is_none());
     }
 
     #[test]

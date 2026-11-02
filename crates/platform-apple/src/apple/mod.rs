@@ -12,6 +12,7 @@ pub use off::{
 mod imp;
 #[cfg(target_vendor = "apple")]
 pub use imp::{
-    OutputQueue, QueueError, decode_file, encode_file, register_decoders, register_decoders_with,
-    register_encoders, register_encoders_with, release_buffer, to_cpu, with_pixel_buffer,
+    OutputQueue, QueueError, StreamSink, decode_file, encode_file, register_decoders,
+    register_decoders_with, register_encoders, register_encoders_with, release_buffer, to_cpu,
+    with_pixel_buffer,
 };

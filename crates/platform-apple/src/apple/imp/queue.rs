@@ -82,6 +82,50 @@ struct Shared {
     frame_bytes: usize,
 }
 
+impl Shared {
+    fn append(&self, sample: &[u8]) -> Result<(), QueueError> {
+        if !sample.is_empty() && !sample.len().is_multiple_of(self.frame_bytes) {
+            return Err(QueueError::Truncated);
+        }
+        lock(&self.held).append(sample)
+    }
+
+    fn buffered_frames(&self) -> usize {
+        let guard = lock(&self.held);
+        guard.bytes.len().saturating_sub(guard.cursor) / self.frame_bytes
+    }
+
+    fn clear(&self) {
+        let mut guard = lock(&self.held);
+        guard.bytes.clear();
+        guard.cursor = 0;
+    }
+}
+
+/// Appends to a queue's stream from another thread, such as a mixer.
+#[derive(Clone)]
+pub struct StreamSink {
+    shared: Arc<Shared>,
+}
+
+impl StreamSink {
+    /// Play `sample` after the samples already held. See [`OutputQueue::append`].
+    pub fn append(&self, sample: &[u8]) -> Result<(), QueueError> {
+        self.shared.append(sample)
+    }
+
+    /// Frames held that the device has not taken yet.
+    #[must_use]
+    pub fn buffered_frames(&self) -> usize {
+        self.shared.buffered_frames()
+    }
+
+    /// Drop every held frame.
+    pub fn clear(&self) {
+        self.shared.clear();
+    }
+}
+
 /// A Core Audio output queue. The callback copies one stored sample.
 pub struct OutputQueue {
     queue: AudioQueueRef,
@@ -167,18 +211,13 @@ impl OutputQueue {
     /// Frames the device has taken are dropped first. A stream that would
     /// hold more than a second is refused and left as it was.
     pub fn append(&self, sample: &[u8]) -> Result<(), QueueError> {
-        let frame = self.shared.frame_bytes;
-        if !sample.is_empty() && !sample.len().is_multiple_of(frame) {
-            return Err(QueueError::Truncated);
-        }
-        lock(&self.shared.held).append(sample)
+        self.shared.append(sample)
     }
 
     /// Frames held that the device has not taken yet.
     #[must_use]
     pub fn buffered_frames(&self) -> usize {
-        let guard = lock(&self.shared.held);
-        guard.bytes.len().saturating_sub(guard.cursor) / self.shared.frame_bytes
+        self.shared.buffered_frames()
     }
 
     /// Frames handed to the device since the queue opened, and when that
@@ -205,9 +244,15 @@ impl OutputQueue {
 
     /// Drop every held frame. The played count stays.
     pub fn clear(&self) {
-        let mut guard = lock(&self.shared.held);
-        guard.bytes.clear();
-        guard.cursor = 0;
+        self.shared.clear();
+    }
+
+    /// A handle another thread can append through while this queue plays.
+    #[must_use]
+    pub fn sink(&self) -> StreamSink {
+        StreamSink {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Copy one sample the way the callback does.

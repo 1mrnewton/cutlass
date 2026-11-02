@@ -49,21 +49,13 @@ pub fn queue_mix(output: &mut AudioOutput, mix: PreviewMix<'_>) {
     output.queue(&mixed_bytes(mix, frames));
 }
 
-/// Mix `mix.frames` at `mix.time` and play it after what is already
-/// streamed. A failed mix streams silence of the same length, so the
-/// stream's clock keeps moving.
-pub fn stream_mix(output: &mut AudioOutput, mix: PreviewMix<'_>) {
-    if output.gap().is_some() {
-        return;
-    }
-    let frames = mix.frames.min(max_frames());
-    if frames == 0 {
-        return;
-    }
+/// `frames` of mixed stereo at `mix.time`. A failed mix is silence of the
+/// same length.
+pub(crate) fn window_bytes(mix: PreviewMix<'_>, frames: u32) -> Vec<u8> {
     let mut bytes = mixed_bytes(mix, frames);
     let want = usize::try_from(frames).unwrap_or(0) * FRAME_BYTES;
     bytes.resize(want, 0);
-    output.stream(&bytes);
+    bytes
 }
 
 fn max_frames() -> u32 {

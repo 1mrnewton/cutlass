@@ -201,15 +201,15 @@ impl SampleBuffer {
         Ok(())
     }
 
-    /// Append to the live stream. A host with no stream replaces its slice.
-    fn stream(&mut self, sample: &[u8]) {
+    fn sink(&self) -> Option<AudioSink> {
         #[cfg(target_vendor = "apple")]
         if let Some(queue) = &self.live {
-            let _ = queue.append(sample);
-            return;
+            return Some(AudioSink {
+                inner: queue.sink(),
+            });
         }
-        self.queued.extend_from_slice(sample);
-        let _ = self.store_live(sample);
+        let _ = self;
+        None
     }
 
     fn clock(&self) -> Option<StreamClock> {
@@ -236,6 +236,45 @@ impl SampleBuffer {
             return;
         }
         let _ = self.store_live(&[]);
+    }
+}
+
+/// Appends to a live stream from another thread, such as the mixer.
+#[derive(Clone)]
+pub struct AudioSink {
+    #[cfg(target_vendor = "apple")]
+    inner: cutlass_platform_apple::StreamSink,
+}
+
+impl AudioSink {
+    /// Play `sample` after what is already streamed.
+    pub fn append(&self, sample: &[u8]) {
+        #[cfg(target_vendor = "apple")]
+        {
+            let _ = self.inner.append(sample);
+        }
+        let _ = (self, sample);
+    }
+
+    /// Frames streamed that the device has not taken.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        #[cfg(target_vendor = "apple")]
+        {
+            self.inner.buffered_frames()
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = self;
+            0
+        }
+    }
+
+    /// Drop everything streamed and not yet played.
+    pub fn clear(&self) {
+        #[cfg(target_vendor = "apple")]
+        self.inner.clear();
+        let _ = self;
     }
 }
 
@@ -321,11 +360,13 @@ impl AudioOutput {
         }
     }
 
-    /// Play `sample` after what is already streamed. On a host with no
-    /// stream, such as Windows and Android today, it replaces the slice.
-    pub fn stream(&mut self, sample: &[u8]) {
-        if let OutputKind::Buffer(queue) = &mut self.kind {
-            queue.stream(sample);
+    /// A handle another thread can stream through, or `None` on a host with
+    /// no device stream.
+    #[must_use]
+    pub fn sink(&self) -> Option<AudioSink> {
+        match &self.kind {
+            OutputKind::Buffer(queue) => queue.sink(),
+            OutputKind::Silent(_) => None,
         }
     }
 

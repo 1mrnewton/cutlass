@@ -71,6 +71,9 @@ pub const NOTICE_SHOWN: Duration = Duration::from_millis(2_160);
 /// How long a notice takes to fade out at the end of [`NOTICE_SHOWN`].
 pub const NOTICE_FADE: Duration = Duration::from_millis(160);
 
+/// The shortest time between two automatic writes of the project.
+pub const AUTOSAVE_GAP: Duration = Duration::from_millis(500);
+
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
 
@@ -438,6 +441,8 @@ pub struct Shell {
     session: Option<Session>,
     folder: Option<Folder>,
     hold: Option<Hold>,
+    /// The session revision the project folder holds, and when it was written.
+    saved: Option<(u64, Instant)>,
     path: Option<PathBuf>,
     playhead: Micros,
     playing: bool,
@@ -552,6 +557,7 @@ impl Shell {
             pending_moves: Vec::new(),
             notice: String::new(),
             notice_since: Instant::now(),
+            saved: None,
             next_id: 0,
             speech: RefCell::new(None),
             face: FaceTable::load(),
@@ -682,6 +688,7 @@ impl Shell {
         self.session = None;
         self.folder = None;
         self.hold = None;
+        self.saved = None;
         self.path = None;
         self.playhead = Micros(0);
         self.playing = false;
@@ -774,6 +781,9 @@ impl Shell {
     }
 
     pub fn open_folder(&mut self, path: &Path) -> Result<(), ShellError> {
+        if self.unsaved() {
+            self.save()?;
+        }
         let opened = cutlass_store::open(path).map_err(ShellError::Store)?;
         let hold = cutlass_store::hold(path).map_err(ShellError::Store)?;
         let rate = opened
@@ -790,6 +800,7 @@ impl Shell {
         );
         let mut session = Session::open(opened.folder.draft.clone());
         session.set_linkage(linkage);
+        self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
         self.folder = Some(opened.folder);
         self.hold = Some(hold);
@@ -855,7 +866,38 @@ impl Shell {
         }
         folder.set_linkage_enabled(enabled);
         folder.save(&path).map_err(ShellError::Store)?;
+        let revision = self.session.as_ref().map_or(0, Session::revision);
+        self.saved = Some((revision, Instant::now()));
         Ok(())
+    }
+
+    /// Write the project when an edit has landed since the last write, at
+    /// most once per [`AUTOSAVE_GAP`]. Returns how long until a held-back
+    /// write is due, so the window can wake for it.
+    pub fn autosave(&mut self) -> Option<Duration> {
+        if !self.unsaved() {
+            return None;
+        }
+        let (_, at) = self.saved?;
+        let revision = self.session.as_ref()?.revision();
+        let wait = AUTOSAVE_GAP.saturating_sub(at.elapsed());
+        if !wait.is_zero() {
+            return Some(wait);
+        }
+        if let Err(error) = self.save() {
+            cutlass_logger::error!("autosave: {error}");
+            self.saved = Some((revision, Instant::now()));
+            self.set_notice(format!("Could not save: {error}"));
+        }
+        None
+    }
+
+    /// An edit has landed since the folder was last written.
+    pub fn unsaved(&self) -> bool {
+        match (self.session.as_ref(), self.saved) {
+            (Some(session), Some((saved, _))) => session.revision() != saved,
+            _ => false,
+        }
     }
 
     pub fn import_file(&mut self, path: &Path) -> Result<(), ShellError> {
@@ -5858,6 +5900,33 @@ mod tests {
         assert!(matches!(error, ShellError::MissingFolder(_)), "{error}");
         assert_eq!(desktop.draft().unwrap().name, "Color");
         std::fs::rename(&moved, &temp.path).unwrap();
+    }
+
+    #[test]
+    fn an_import_is_written_to_the_folder_without_closing_the_project() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert_eq!(desktop.autosave(), None);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let wait = desktop.autosave().expect("the write waits for the gap");
+        std::thread::sleep(wait);
+        assert_eq!(desktop.autosave(), None);
+        drop(desktop);
+
+        let mut reopened = shell();
+        reopened.open_folder(&temp.path).unwrap();
+        let videos = &reopened.draft().unwrap().materials.videos;
+        assert_eq!(videos.len(), 1);
+        assert!(
+            videos[0].path.ends_with("pattern.png"),
+            "{}",
+            videos[0].path
+        );
+        assert_eq!(reopened.autosave(), None);
     }
 
     #[test]

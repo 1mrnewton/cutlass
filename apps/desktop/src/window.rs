@@ -71,5 +71,16 @@ impl eframe::App for DesktopWindow {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
         show(&mut self.shell, ui, &mut self.view, Some(frame));
+        if let Some(wait) = self.shell.autosave() {
+            ui.ctx().request_repaint_after(wait);
+        }
+    }
+
+    fn on_exit(&mut self) {
+        if self.shell.unsaved()
+            && let Err(error) = self.shell.save()
+        {
+            cutlass_logger::error!("save on quit: {error}");
+        }
     }
 }

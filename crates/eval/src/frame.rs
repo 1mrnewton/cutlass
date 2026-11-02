@@ -237,7 +237,8 @@ fn gpu_layers(draft: &Draft, time: Micros, extent: Extent, layers: &[Ordered<'_>
                 Sample::Ready(Picture::Platform(_)) | Sample::Miss => Some(Vec::new()),
             },
             Paint::Nest(nested) => nested.gpu(),
-            Paint::Text(_) | Paint::Mixed(_) => None,
+            Paint::Text(text) => text.gpu(),
+            Paint::Mixed(_) => None,
         };
         match gpu {
             Some(gpu) => out.extend(gpu),
@@ -320,7 +321,14 @@ fn with_layers<D: Device, T>(
     )?;
     let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
-        text_layers(draft, pass.fonts, extent.width, extent.height, pass.time),
+        text_layers(
+            draft,
+            pass.fonts,
+            extent.width,
+            extent.height,
+            pass.time,
+            pass.clips.texts(),
+        ),
         video_layers(
             draft,
             pass.media,

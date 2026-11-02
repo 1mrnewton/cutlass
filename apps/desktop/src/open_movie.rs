@@ -733,7 +733,8 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             return;
         }
     };
-    let cases: [(&str, (u32, u32), Edit); 9] = [
+    let fonts = crate::face::FaceTable::load();
+    let cases: [(&str, (u32, u32), Edit); 10] = [
         ("same size", (848, 608), |_| {}),
         ("shrunk to fit", (424, 240), |_| {}),
         ("centered", (1000, 700), |_| {}),
@@ -816,17 +817,40 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             parent.tracks[0].segments.push(segment);
             *draft = parent;
         }),
+        ("title over video", (848, 608), |draft| {
+            let mut text = cutlass_model::MaterialText::new("words");
+            text.content = "Smooth playback".to_owned();
+            text.font_size = 72.0;
+            text.font_path = crate::face::FaceTable::load().name().to_owned();
+            text.text_color = "#FFFFFF".to_owned();
+            draft.materials.texts.push(text);
+            let mut title = Segment::new("title", "words", TimeRange::new(0, 1_000_000));
+            title.render_index = 2;
+            title.clip.transform.y = -0.5;
+            title.clip.rotation = 8.0;
+            title.clip.alpha = 0.9;
+            draft.tracks[0].segments.push(title);
+        }),
     ];
     let readers = crate::readers::installed_readers();
     for (name, (width, height), edit) in cases {
         let mut draft = movie_draft(&path, width, height, true).unwrap();
         edit(&mut draft);
         let time = Micros(500_000);
-        let cpu = render(&readers, &draft, time).unwrap();
         let mut device = SoftwareDevice::new();
+        let cpu = frame(
+            &Snapshot::with_fonts(&draft, &fonts),
+            time,
+            &mut device,
+            &readers,
+            &mut OpenClips::new(),
+            0,
+        )
+        .unwrap()
+        .rgba;
         let mut clips = OpenClips::new();
         let composed = cutlass_eval::layers_in(
-            &Snapshot::new(&draft),
+            &Snapshot::with_fonts(&draft, &fonts),
             time,
             &mut device,
             &readers,
@@ -842,6 +866,15 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             decodes_on_gpu(&layers),
             "{name}: the movie did not reach the GPU"
         );
+        if name == "title over video" && !fonts.name().is_empty() {
+            assert!(
+                layers.layers.iter().any(|layer| matches!(
+                    &layer.source,
+                    cutlass_eval::GpuSource::Rgba(raster) if raster.width() > 1
+                )),
+                "the title was not drawn"
+            );
+        }
         let canvas = renderer.canvas(width, height).unwrap();
         crate::gpu::draw(&renderer, &canvas, &layers).unwrap();
         let gpu = renderer.read(&canvas).unwrap();

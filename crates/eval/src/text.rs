@@ -11,12 +11,18 @@
 
 use cutlass_captions::{CaptionQuery, PageLimits, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
-use cutlass_model::{Draft, MaterialRef, MaterialText, Micros, TrackAttribute, WordColumns};
+use std::collections::HashMap;
+
+use cutlass_gpu::{Affine, Placement};
+use cutlass_model::{
+    Draft, MaterialRef, MaterialText, Micros, SegmentId, TrackAttribute, WordColumns,
+};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
 
 use crate::Fonts;
-use crate::media::{picture_transform, place_with, segment_clip};
+use crate::gpu::{GpuLayer, GpuSource};
+use crate::media::{gpu_place, picture_transform, place_with, segment_clip};
 
 pub(crate) struct TextLayer {
     pub(crate) render_index: i32,
@@ -26,44 +32,57 @@ pub(crate) struct TextLayer {
 }
 
 pub(crate) struct PlacedText {
-    ink: Ink,
+    /// The text drawn tight around its glyphs, before placement.
+    raster: CpuBytes,
     width: u32,
     height: u32,
     transform: crate::media::PictureTransform,
 }
 
-enum Ink {
-    Run(TextSource),
-    Caption(CpuBytes),
-}
-
 impl PictureSource for PlacedText {
-    fn sample(&self, time: Micros) -> Sample {
-        let bytes = match &self.ink {
-            Ink::Run(source) => {
-                let Sample::Ready(Picture::Cpu(bytes)) = source.sample(time) else {
-                    return Sample::Miss;
-                };
-                bytes
-            }
-            Ink::Caption(bytes) => bytes.clone(),
-        };
+    fn sample(&self, _time: Micros) -> Sample {
         place_with(
             self.width,
             self.height,
-            bytes,
+            self.raster.clone(),
             self.transform,
             DisplayQuarter::Zero,
         )
     }
 }
 
+impl PlacedText {
+    /// The raster as a GPU layer, placed as [`PictureSource::sample`] places
+    /// it, so the canvas-sized picture is never built.
+    pub(crate) fn gpu(&self) -> Option<Vec<GpuLayer>> {
+        let size = (self.raster.width(), self.raster.height());
+        let placement = Placement {
+            to_picture: gpu_place(self.transform, size, (self.width, self.height))?,
+            picture: size,
+            to_oriented: Affine::IDENTITY,
+            oriented: size,
+            to_texture: Affine::IDENTITY,
+            opacity: f64::from(self.transform.opacity()) / 255.0,
+        };
+        Some(vec![GpuLayer {
+            source: GpuSource::Rgba(self.raster.clone()),
+            placement,
+            backdrop: None,
+        }])
+    }
+}
+
+/// Text segments covering `time`, placed. A title's raster is kept in
+/// `rasters` for its segment, so a later frame of the same revision does not
+/// lay it out and draw it again. Captions change with time and are drawn
+/// each frame.
 pub(crate) fn text_layers(
     draft: &Draft,
     fonts: &dyn Fonts,
     width: u32,
     height: u32,
     time: Micros,
+    rasters: &mut HashMap<SegmentId, CpuBytes>,
 ) -> Vec<TextLayer> {
     let mut layers = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
@@ -97,24 +116,30 @@ pub(crate) fn text_layers(
             if transform.omitted() {
                 continue;
             }
-            let ink = if words_present(material) {
+            let raster = if words_present(material) {
                 let Some(bytes) = caption_picture(face, material, segment.target.start, time)
                 else {
                     continue;
                 };
-                Ink::Caption(bytes)
+                bytes
+            } else if let Some(kept) = rasters.get(&segment.id) {
+                kept.clone()
             } else {
                 let Ok(source) = TextSource::open(face, None, material, segment) else {
                     continue;
                 };
-                Ink::Run(source)
+                let Sample::Ready(Picture::Cpu(bytes)) = source.sample(time) else {
+                    continue;
+                };
+                rasters.insert(segment.id.clone(), bytes.clone());
+                bytes
             };
             layers.push(TextLayer {
                 render_index: segment.render_index,
                 track_index,
                 segment_index,
                 placed: PlacedText {
-                    ink,
+                    raster,
                     width,
                     height,
                     transform,

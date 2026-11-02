@@ -65,6 +65,8 @@ pub struct OpenClips {
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
+    /// Title rasters by segment. A title does not change within a revision.
+    texts: HashMap<SegmentId, CpuBytes>,
     /// Off, a clip whose picture is not decoded yet shows its last one.
     patient: bool,
 }
@@ -80,6 +82,7 @@ impl OpenClips {
             sources: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
+            texts: HashMap::new(),
             patient: true,
         }
     }
@@ -114,9 +117,15 @@ impl OpenClips {
         self.sources.clear();
         self.nests.clear();
         self.images.clear();
+        self.texts.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
+    }
+
+    /// Title rasters kept for this revision.
+    pub(crate) fn texts(&mut self) -> &mut HashMap<SegmentId, CpuBytes> {
+        &mut self.texts
     }
 
     /// Open files for the compound segment `id`.
@@ -197,6 +206,7 @@ impl OpenClips {
         self.sources.clear();
         self.nests.clear();
         self.images.clear();
+        self.texts.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;

@@ -86,5 +86,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace --all-targets
+      - name: Public release logger
+        run: |
+          cargo clippy -p cutlass-logger --all-targets --features public-release -- -D warnings
+          cargo test -p cutlass-logger --features public-release
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2

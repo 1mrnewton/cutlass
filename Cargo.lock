@@ -882,6 +882,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-logger"
+version = "0.1.0"
+
+[[package]]
 name = "cutlass-matroska"
 version = "0.1.0"
 dependencies = [

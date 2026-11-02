@@ -77,6 +77,33 @@ impl ReadAhead {
         })
     }
 
+    /// The picture that covers `source` if it is decoded, without waiting.
+    /// A miss asks the worker for it. A time the worker could not decode is
+    /// its error.
+    pub(crate) fn try_picture(&self, source: Micros) -> Result<Option<HeldFrame>, EngineError> {
+        let mut state = lock(&self.shared.state);
+        if let Some(held) = find(&state, source) {
+            let held = held.clone();
+            if state.want != Some(source) {
+                state.want = Some(source);
+                self.shared.wake.notify_all();
+            }
+            return Ok(Some(held));
+        }
+        if let Some((at, error)) = &state.failed
+            && *at == source
+        {
+            return Err(error.clone());
+        }
+        if state.want != Some(source) {
+            state.want = Some(source);
+            state.answer = None;
+            state.failed = None;
+            self.shared.wake.notify_all();
+        }
+        Ok(None)
+    }
+
     /// Ask for the picture that covers `source` without waiting for it, so
     /// it is decoded by the time [`Self::picture`] asks.
     pub(crate) fn prefetch(&self, source: Micros) {

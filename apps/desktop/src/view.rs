@@ -216,7 +216,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             export_dialog(shell, ui, view, parent);
         }
         shortcuts(shell, ui);
-        if shell.playing() {
+        if shell.playing() || shell.preview_pending() {
             ui.ctx().request_repaint();
         }
     }

@@ -187,6 +187,19 @@ pub(crate) struct DrawnWith<'a> {
 }
 
 impl FrameCache {
+    /// Wait for every clip's picture, or show a clip's last picture while
+    /// the one asked for decodes. Preview does not wait, so a jump never
+    /// stops the window.
+    pub fn set_patient(&mut self, patient: bool) {
+        self.clips.set_patient(patient);
+    }
+
+    /// Whether the last frame showed an earlier picture than asked for. The
+    /// caller draws again until this is false.
+    pub fn take_stale(&mut self) -> bool {
+        self.clips.take_stale()
+    }
+
     /// Open clips that start within `horizon` after `time` and start
     /// decoding their first pictures.
     pub fn preroll(

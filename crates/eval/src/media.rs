@@ -47,9 +47,11 @@ fn open_clip(
     draft: &Draft,
     id: &SegmentId,
     root: Option<&Path>,
+    patient: bool,
 ) -> Option<VideoSource> {
     let mut source = open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?;
     let _ = source.read_ahead(media, READ_AHEAD);
+    source.set_patient(patient);
     Some(source)
 }
 
@@ -63,6 +65,8 @@ pub struct OpenClips {
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
+    /// Off, a clip whose picture is not decoded yet shows its last one.
+    patient: bool,
 }
 
 impl OpenClips {
@@ -76,7 +80,33 @@ impl OpenClips {
             sources: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
+            patient: true,
         }
+    }
+
+    /// Wait for every clip's picture, as export must, or show a clip's last
+    /// picture while the one asked for decodes, as preview does.
+    pub fn set_patient(&mut self, patient: bool) {
+        self.patient = patient;
+        for source in self.sources.values() {
+            source.set_patient(patient);
+        }
+        for nest in self.nests.values_mut() {
+            nest.set_patient(patient);
+        }
+    }
+
+    /// Whether any clip showed an earlier picture than the one asked for
+    /// since the last call. A caller redraws until this is false.
+    pub fn take_stale(&mut self) -> bool {
+        let mut stale = false;
+        for source in self.sources.values() {
+            stale |= source.take_stale();
+        }
+        for nest in self.nests.values_mut() {
+            stale |= nest.take_stale();
+        }
+        stale
     }
 
     /// Drops every open file.
@@ -95,9 +125,13 @@ impl OpenClips {
     /// its own copy of a nest does not share them.
     pub(crate) fn child(&mut self, id: &SegmentId) -> &mut Self {
         let root = self.root.clone();
+        let patient = self.patient;
         let child = self.nests.entry(id.clone()).or_default();
         if child.root.is_none() {
             child.root = root;
+        }
+        if child.patient != patient {
+            child.set_patient(patient);
         }
         child
     }
@@ -138,8 +172,13 @@ impl OpenClips {
                     continue;
                 }
                 if !self.sources.contains_key(&segment.id) {
-                    let Some(source) = open_clip(media, draft, &segment.id, self.root.as_deref())
-                    else {
+                    let Some(source) = open_clip(
+                        media,
+                        draft,
+                        &segment.id,
+                        self.root.as_deref(),
+                        self.patient,
+                    ) else {
                         continue;
                     };
                     self.sources.insert(segment.id.clone(), source);
@@ -338,8 +377,13 @@ pub(crate) fn video_layers<'a>(
                 continue;
             }
             if !clips.sources.contains_key(&segment.id) {
-                let Some(source) = open_clip(media, draft, &segment.id, clips.root.as_deref())
-                else {
+                let Some(source) = open_clip(
+                    media,
+                    draft,
+                    &segment.id,
+                    clips.root.as_deref(),
+                    clips.patient,
+                ) else {
                     continue;
                 };
                 clips.sources.insert(segment.id.clone(), source);
@@ -409,7 +453,13 @@ pub(crate) fn video_picture(
         return None;
     }
     if !clips.sources.contains_key(&segment.id) {
-        let source = open_clip(media, draft, &segment.id, clips.root.as_deref())?;
+        let source = open_clip(
+            media,
+            draft,
+            &segment.id,
+            clips.root.as_deref(),
+            clips.patient,
+        )?;
         clips.sources.insert(segment.id.clone(), source);
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);

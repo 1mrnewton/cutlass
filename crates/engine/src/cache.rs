@@ -51,6 +51,15 @@ impl<T> FrameWindow<T> {
             .map(|frame| &frame.value)
     }
 
+    /// The stored picture whose start is nearest `time`, covering it or not.
+    #[must_use]
+    pub fn nearest(&self, time: i64) -> Option<&T> {
+        self.frames
+            .iter()
+            .min_by_key(|frame| frame.start.abs_diff(time))
+            .map(|frame| &frame.value)
+    }
+
     /// Stores `value` and drops the picture farthest from `start` when the window is full.
     pub fn insert(&mut self, start: i64, end: i64, value: T) {
         let end = if end <= start {
@@ -81,6 +90,17 @@ impl<T> FrameWindow<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_nearest_picture_is_returned_whether_or_not_it_covers_the_time() {
+        let mut window = FrameWindow::new(2).unwrap();
+        assert_eq!(window.nearest(5), None);
+        window.insert(0, 10, "first");
+        window.insert(40, 50, "second");
+        assert_eq!(window.nearest(28), Some(&"second"));
+        assert_eq!(window.nearest(12), Some(&"first"));
+        assert_eq!(window.get(28), None);
+    }
 
     #[test]
     fn the_window_drops_the_farthest_picture_and_a_miss_is_immediate() {

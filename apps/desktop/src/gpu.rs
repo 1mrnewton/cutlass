@@ -73,6 +73,12 @@ impl Preview {
         Some((*id, [width, height]))
     }
 
+    /// Draw the next frame even when its key matches, because what is on
+    /// the canvas is not the picture that key asks for yet.
+    pub(crate) fn forget(&mut self) {
+        self.drawn = None;
+    }
+
     /// The canvas as premultiplied RGBA, for tests.
     #[cfg(test)]
     pub(crate) fn read(&self) -> Option<Vec<u8>> {

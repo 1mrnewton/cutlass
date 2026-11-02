@@ -485,6 +485,8 @@ pub struct Shell {
     face: FaceTable,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
+    /// The canvas shows a clip's earlier picture while the asked one decodes.
+    preview_stale: bool,
     pub chrome: Chrome,
 }
 
@@ -548,6 +550,7 @@ impl Shell {
             speech: RefCell::new(None),
             face: FaceTable::load(),
             gpu: None,
+            preview_stale: false,
             chrome: Chrome::default(),
         }
     }
@@ -1157,9 +1160,9 @@ impl Shell {
             return Ok(Some(shown));
         }
         let mut device = SoftwareDevice::new();
-        let composed = self
-            .preview_cache
-            .borrow_mut()
+        let mut cache = self.preview_cache.borrow_mut();
+        cache.set_patient(false);
+        let composed = cache
             .layers(
                 session,
                 &mut device,
@@ -1169,14 +1172,28 @@ impl Shell {
                 &self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let stale = cache.take_stale();
+        drop(cache);
         let layers = match composed {
             cutlass_eval::Composed::Layers(layers) => layers,
             cutlass_eval::Composed::Frame(frame) => cutlass_eval::FrameLayers::pixels(frame)
                 .ok_or_else(|| ShellError::Eval("the frame has no pixels".to_owned()))?,
         };
-        gpu.show(&layers, key)
-            .map(Some)
-            .map_err(|error| ShellError::Eval(error.to_string()))
+        let shown = gpu
+            .show(&layers, key)
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        if stale {
+            gpu.forget();
+        }
+        self.preview_stale = stale;
+        Ok(Some(shown))
+    }
+
+    /// The preview shows a clip's earlier picture while the one asked for
+    /// decodes. The window draws again until this is false.
+    #[must_use]
+    pub fn preview_pending(&self) -> bool {
+        self.preview_stale
     }
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
@@ -1184,9 +1201,9 @@ impl Shell {
         let time = self.sample_time();
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
-        let picture = self
-            .preview_cache
-            .borrow_mut()
+        let mut cache = self.preview_cache.borrow_mut();
+        cache.set_patient(true);
+        let picture = cache
             .frame(
                 session,
                 &mut device,
@@ -5464,6 +5481,63 @@ mod tests {
             stream.time_at(u64::from(super::STREAM_WINDOW)),
             Micros(2_020_000)
         );
+    }
+
+    #[test]
+    fn a_far_jump_shows_the_last_picture_until_the_asked_one_decodes() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/12471039-uhd_3840_2160_24fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the 4K movie is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 3840, 2160, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 9_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 9_000_000));
+        draft.materials.videos[0].duration = Micros(9_000_000);
+        draft.duration = Micros(9_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        desktop.preview_texture().unwrap().expect("first frame");
+        assert!(!desktop.preview_pending(), "the first frame waits");
+
+        desktop.seek(Micros(8_200_000));
+        desktop.preview_texture().unwrap().expect("held frame");
+        assert!(desktop.preview_pending(), "a far jump shows the held frame");
+        let mut paints = 0;
+        while desktop.preview_pending() {
+            assert!(paints < 2_000, "the asked frame never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            desktop.preview_texture().unwrap().expect("frame");
+            paints += 1;
+        }
+        let gpu = desktop
+            .gpu
+            .as_ref()
+            .and_then(crate::gpu::Preview::read)
+            .unwrap();
+        let cpu = desktop.preview_bytes().unwrap().rgba;
+        let off = gpu
+            .chunks(4)
+            .zip(cpu.chunks(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
+            .count();
+        assert!(off * 1000 <= gpu.len() / 4, "{off} pixels differ");
     }
 
     #[test]

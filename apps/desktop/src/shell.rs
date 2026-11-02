@@ -454,8 +454,8 @@ pub struct Shell {
     /// Left edge of the lanes, in microseconds.
     view_origin: i64,
     lane_width: f64,
-    /// Fit the cut on the next lane layout. An empty cut stays at the opening scale.
-    fit_on_layout: bool,
+    /// The cut has been fit to the lanes since the project opened.
+    fitted: bool,
     library_width: f32,
     inspector_width: f32,
     timeline_height: f32,
@@ -532,7 +532,7 @@ impl Shell {
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
             lane_width: 800.0,
-            fit_on_layout: false,
+            fitted: false,
             library_width: tokens::LIBRARY_WIDTH,
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
@@ -703,7 +703,7 @@ impl Shell {
         self.beating = false;
         self.selected_beat = None;
         self.cancel_clip_drag();
-        self.fit_on_layout = false;
+        self.fitted = false;
         self.notice.clear();
         self.heard.clear();
         self.silence();
@@ -745,12 +745,18 @@ impl Shell {
         }
     }
 
-    /// Remember the lane width, and fit a saved cut the first time it is shown.
+    /// Remember the lane width. Until a cut has been fit once, an empty
+    /// timeline shows [`EMPTY_SPAN`] across a third of the lanes, and the
+    /// first clip, or a saved cut, is fit to three quarters.
     pub fn prepare_lane(&mut self, width: f32) {
         self.set_lane_width(width);
-        if self.fit_on_layout {
-            self.fit_on_layout = false;
-            let _ = self.zoom_fit();
+        if self.fitted || self.session.is_none() {
+            return;
+        }
+        if self.cut_duration().0 > 0 {
+            self.fitted = self.zoom_fit().is_ok();
+        } else if let Some(size) = empty_pixel_size(self.lane_width, self.zoom_bounds().rate) {
+            self.pixel_size = size;
         }
     }
 
@@ -818,7 +824,7 @@ impl Shell {
         self.selected_beat = None;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
-        self.fit_on_layout = self.cut_duration().0 > 0;
+        self.fitted = false;
         self.notice.clear();
         self.heard.clear();
         self.silence();
@@ -4461,6 +4467,19 @@ fn opening_pixel_size(rate: FrameRate) -> f64 {
     last_accuracy_step(rate).unwrap_or(0.006)
 }
 
+/// How much time an empty timeline shows across a third of the lanes.
+pub const EMPTY_SPAN: Micros = Micros(10_000_000);
+
+/// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
+/// finest ruler step.
+fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
+    let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
+    if !size.is_finite() || size <= 0.0 {
+        return None;
+    }
+    Some(size.min(last_accuracy_step(rate)?))
+}
+
 fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
     if settings
         .shortcuts
@@ -6022,6 +6041,32 @@ mod tests {
             video.duration.0
         );
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+    }
+
+    #[test]
+    fn an_empty_timeline_opens_at_a_third_and_the_first_clip_fits() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.prepare_lane(900.0);
+        assert_eq!(desktop.pixel_size(), 300.0 / 10_000_000.0);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        desktop.prepare_lane(900.0);
+        let cut = desktop.cut_duration().0 as f64;
+        let fitted = desktop.pixel_size();
+        assert!((fitted * cut - 675.0).abs() < 1.0e-6, "{}", fitted * cut);
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        desktop.prepare_lane(900.0);
+        assert_eq!(desktop.pixel_size(), fitted);
     }
 
     #[test]

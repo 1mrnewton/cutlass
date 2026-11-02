@@ -8,6 +8,7 @@ use egui::{
     Ui, Vec2,
 };
 
+use cutlass_editor::ruler_ticks;
 use cutlass_model::{FrameRate, Micros, SegmentId};
 use cutlass_session::TrimEdge;
 
@@ -2277,6 +2278,8 @@ fn lane_x(lanes_left: f32, pixel_size: f64, origin: i64, time: i64) -> f32 {
     lanes_left + delta as f32
 }
 
+/// The ruler's ticks and labels across the lanes. Past the end of the cut,
+/// the ticks keep going.
 fn paint_ticks(
     ui: &Ui,
     ruler: Rect,
@@ -2289,150 +2292,38 @@ fn paint_ticks(
     if !pixel_size.is_finite() || pixel_size <= 0.0 {
         return;
     }
-    let grid = TickGrid {
-        ui,
-        ruler,
-        lanes_left,
-        pixel_size,
-        origin,
-        width: f64::from(ruler.right() - lanes_left),
-    };
-    if let Some(stride) = frame_stride(pixel_size, rate) {
-        paint_frame_ticks(&grid, rate, drop_frame, stride);
+    let width = f64::from(ruler.right() - lanes_left).max(0.0);
+    let span = (width / pixel_size).ceil();
+    if !span.is_finite() || span > i64::MAX as f64 {
         return;
     }
-    let step = second_step(pixel_size);
-    let origin = grid.origin as f64;
-    let mut time = if origin <= 0.0 {
-        0.0
-    } else {
-        (origin / step).floor() * step
-    };
-    if time < 0.0 {
-        time = 0.0;
-    }
-    while (time - origin) * pixel_size <= grid.width {
-        paint_major(&grid, time, second_label(time));
-        paint_minor(&grid, time, time + step / 2.0);
-        time += step;
-        if step <= 0.0 {
-            break;
-        }
-    }
-}
-
-struct TickGrid<'a> {
-    ui: &'a Ui,
-    ruler: Rect,
-    lanes_left: f32,
-    pixel_size: f64,
-    origin: i64,
-    width: f64,
-}
-
-/// One, two, or five frames, when that gap is wide enough to read. Otherwise the
-/// ruler stays on whole seconds.
-fn frame_stride(pixel_size: f64, rate: FrameRate) -> Option<i64> {
-    let frame = rate.frame_start(1)?;
-    let width = frame.0 as f64 * pixel_size;
-    if frame.0 <= 0 || !width.is_finite() || width <= 0.0 {
-        return None;
-    }
-    [1, 2, 5]
-        .into_iter()
-        .find(|stride| *stride as f64 * width >= 72.0)
-}
-
-fn paint_frame_ticks(grid: &TickGrid<'_>, rate: FrameRate, drop_frame: bool, stride: i64) {
-    let mut index = rate.frame_index(Micros(grid.origin.max(0))).unwrap_or(0);
-    if stride > 1 {
-        index -= index.rem_euclid(stride);
-    }
-    let origin = grid.origin as f64;
-    for _ in 0..10_000 {
-        let Some(start) = rate.frame_start(index) else {
-            return;
+    let from = Micros(origin.max(0));
+    let to = Micros(origin.saturating_add(span as i64));
+    let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+        Pos2::new(lanes_left, ruler.top()),
+        ruler.max,
+    ));
+    for tick in ruler_ticks(rate, drop_frame, pixel_size, from, to) {
+        let x = lane_x(lanes_left, pixel_size, origin, tick.time.0);
+        let height = if tick.major {
+            tokens::MAJOR_TICK
+        } else {
+            tokens::MAJOR_TICK / 2.0
         };
-        let time = start.0 as f64;
-        if (time - origin) * grid.pixel_size > grid.width {
-            return;
-        }
-        paint_major(grid, time, ruler_label(time, 1.0, rate, drop_frame));
-        let next = index.saturating_add(stride);
-        let Some(next_start) = rate.frame_start(next) else {
-            return;
-        };
-        if next <= index {
-            return;
-        }
-        let minor = (time + next_start.0 as f64) / 2.0;
-        paint_minor(grid, time, minor);
-        index = next;
-    }
-}
-
-fn second_step(pixel_size: f64) -> f64 {
-    const STEPS: [f64; 9] = [
-        1_000_000.0,
-        2_000_000.0,
-        5_000_000.0,
-        10_000_000.0,
-        30_000_000.0,
-        60_000_000.0,
-        300_000_000.0,
-        600_000_000.0,
-        1_800_000_000.0,
-    ];
-    STEPS
-        .into_iter()
-        .find(|step| step * pixel_size >= 72.0)
-        .unwrap_or(STEPS[STEPS.len() - 1])
-}
-
-fn paint_major(grid: &TickGrid<'_>, time: f64, label: String) {
-    let x = lane_x(
-        grid.lanes_left,
-        grid.pixel_size,
-        grid.origin,
-        time.round() as i64,
-    );
-    if x < grid.lanes_left - 1.0 || x > grid.ruler.right() + 1.0 {
-        return;
-    }
-    grid.ui.painter().vline(
-        x,
-        (grid.ruler.bottom() - 12.0)..=grid.ruler.bottom(),
-        egui::Stroke::new(1.0, tokens::MUTED),
-    );
-    grid.ui.painter().text(
-        Pos2::new(x + 4.0, grid.ruler.bottom() - 14.0),
-        Align2::LEFT_BOTTOM,
-        label,
-        FontId::proportional(10.0),
-        tokens::FAINT,
-    );
-}
-
-fn paint_minor(grid: &TickGrid<'_>, major: f64, minor: f64) {
-    let x = lane_x(
-        grid.lanes_left,
-        grid.pixel_size,
-        grid.origin,
-        major.round() as i64,
-    );
-    let minor_x = lane_x(
-        grid.lanes_left,
-        grid.pixel_size,
-        grid.origin,
-        minor.round() as i64,
-    );
-    let origin = grid.origin as f64;
-    if (minor - origin) * grid.pixel_size <= grid.width && minor_x - x >= 8.0 {
-        grid.ui.painter().vline(
-            minor_x,
-            (grid.ruler.bottom() - 6.0)..=grid.ruler.bottom(),
-            egui::Stroke::new(1.0, tokens::MUTED),
+        painter.vline(
+            x,
+            (ruler.bottom() - height)..=ruler.bottom(),
+            egui::Stroke::new(1.0, tokens::RULER_TICK),
         );
+        if let Some(label) = tick.label {
+            painter.text(
+                Pos2::new(x + 4.0, ruler.bottom() - tokens::MAJOR_TICK - 2.0),
+                Align2::LEFT_BOTTOM,
+                label,
+                FontId::monospace(11.0),
+                tokens::MUTED,
+            );
+        }
     }
 }
 
@@ -2443,55 +2334,6 @@ fn ruler_rate(shell: &Shell) -> (FrameRate, bool) {
             draft.is_drop_frame_timecode,
         ),
         None => (FrameRate::FPS_30, false),
-    }
-}
-
-/// A step shorter than one second names the frame. A longer step stays on the second.
-fn ruler_label(micros: f64, step: f64, rate: FrameRate, drop_frame: bool) -> String {
-    if step < 1_000_000.0
-        && let Some(label) = sub_second_label(micros, rate, drop_frame)
-    {
-        return label;
-    }
-    second_label(micros)
-}
-
-fn sub_second_label(micros: f64, rate: FrameRate, drop_frame: bool) -> Option<String> {
-    if !micros.is_finite() || micros < 0.0 {
-        return None;
-    }
-    let rounded = micros.round();
-    if rounded > i64::MAX as f64 {
-        return None;
-    }
-    let label = rate.label(Micros(rounded as i64), drop_frame)?;
-    let separator = if label.drop_frame { ';' } else { ':' };
-    if label.hours > 0 {
-        Some(format!(
-            "{:02}:{:02}:{:02}{separator}{:02}",
-            label.hours, label.minutes, label.seconds, label.frames
-        ))
-    } else {
-        Some(format!(
-            "{:02}:{:02}{separator}{:02}",
-            label.minutes, label.seconds, label.frames
-        ))
-    }
-}
-
-fn second_label(micros: f64) -> String {
-    let total = (micros / 1_000_000.0).floor();
-    if !total.is_finite() || total < 0.0 {
-        return String::new();
-    }
-    let total = total as i64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
     }
 }
 
@@ -3633,7 +3475,8 @@ mod tests {
             "{painted}"
         );
         assert!(painted.contains("Projects"), "{painted}");
-        assert!(painted.contains("00:00:01"), "{painted}");
+        assert!(painted.contains("00:10"), "{painted}");
+        assert!(painted.contains("00:20"), "{painted}");
         assert!(painted.contains("No clips"), "{painted}");
         assert!(!painted.contains("Import a file"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
@@ -3672,32 +3515,6 @@ mod tests {
         assert!(painted.contains("no project is open"), "{painted}");
         output.textures_delta.clear();
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_sub_second_tick_names_the_frame() {
-        let step = 1_000_000.0 / 30.0;
-        let rate = FrameRate::FPS_30;
-        let frame = rate.frame_start(1).expect("frame").0 as f64;
-        assert_eq!(ruler_label(0.0, step, rate, false), "00:00:00");
-        assert_eq!(ruler_label(frame, step, rate, false), "00:00:01");
-        assert_eq!(ruler_label(1_000_000.0, step, rate, false), "00:01:00");
-        assert_eq!(
-            ruler_label(3_600_000_000.0, step, rate, false),
-            "01:00:00:00"
-        );
-        assert_eq!(frame_stride(0.006, rate), Some(1));
-        assert_eq!(frame_stride(72.0 / 1_000_000.0, rate), None);
-        assert_eq!(ruler_label(1_000_000.0, 1_000_000.0, rate, false), "00:01");
-        assert_eq!(
-            ruler_label(3_661_000_000.0, 1_000_000.0, rate, false),
-            "01:01:01"
-        );
-        assert_eq!(ruler_label(-1.0, step, rate, false), "");
-        assert_eq!(
-            ruler_label(0.0, step, FrameRate::FPS_29_97, true),
-            "00:00;00"
-        );
     }
 
     #[test]
@@ -3773,7 +3590,7 @@ mod tests {
         assert!((80.0..tokens::LIBRARY_WIDTH).contains(&card.x), "{card:?}");
         assert!((40.0..500.0).contains(&card.y), "{card:?}");
         let notice = text_pos(&output, "Imported pattern.png").expect("notice");
-        let tick = text_pos(&output, "00:00:00").expect("frame tick");
+        let tick = text_pos(&output, "00:00").expect("first tick");
         assert!(
             notice.y > tick.y,
             "notice {notice:?} overlaps tick {tick:?}"

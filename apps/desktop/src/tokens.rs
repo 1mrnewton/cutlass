@@ -20,6 +20,8 @@ pub const TEXT: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
 pub const MUTED: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
 /// Tertiary text.
 pub const FAINT: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
+/// A ruler tick.
+pub const RULER_TICK: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
 /// The playhead.
 pub const PLAYHEAD: Color32 = Color32::WHITE;
 /// An icon button, and a toolbar button that is on.
@@ -56,6 +58,8 @@ pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;
 pub const TOOLBAR_HEIGHT: f32 = 36.0;
 pub const RULER_HEIGHT: f32 = 44.0;
+/// A major ruler tick. A minor tick is half as tall.
+pub const MAJOR_TICK: f32 = 12.0;
 pub const RAIL_WIDTH: f32 = 76.0;
 pub const COVER_WIDTH: f32 = 72.0;
 pub const TRACK_HEAD: f32 = 130.0;

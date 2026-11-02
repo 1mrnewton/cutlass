@@ -592,14 +592,32 @@ impl IsoBmff {
                 || fragments.mfra.as_ref().is_some_and(|rows| !rows.is_empty())
         });
         if has_index {
-            Err(Error::SeekLimited {
+            return Err(Error::SeekLimited {
                 reason: "fragment index does not cover that time",
-            })
-        } else {
-            Err(Error::SeekLimited {
-                reason: "fragmented file has no sidx or mfra",
-            })
+            });
         }
+        if self
+            .fragments
+            .as_ref()
+            .is_some_and(|fragments| fragments.walked.is_none())
+        {
+            self.walk_fragments(source)?;
+        }
+        self.fragments
+            .as_ref()
+            .and_then(|fragments| {
+                fragments.walked.as_ref().and_then(|rows| {
+                    covering_offset(
+                        rows.iter().filter(|row| row.track_id == track_id),
+                        time,
+                        |row| row.time,
+                        |row| row.moof_offset,
+                    )
+                })
+            })
+            .ok_or(Error::SeekLimited {
+                reason: "fragmented file has no sync sample for that track",
+            })
     }
 
     fn ensure_mfra(&mut self, source: &mut dyn Source) -> Result<(), Error> {

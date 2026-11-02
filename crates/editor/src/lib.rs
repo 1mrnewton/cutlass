@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod filmstrip;
 mod gesture;
 mod hit;
 mod lane;
@@ -12,6 +13,7 @@ mod ruler;
 mod snap;
 mod zoom;
 
+pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,

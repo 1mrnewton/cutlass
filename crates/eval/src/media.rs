@@ -922,7 +922,11 @@ fn gpu_cover(picture: (u32, u32), canvas: (u32, u32)) -> Option<Affine> {
 
 /// Picture pixel center to oriented-source pixels, and the picture size,
 /// as [`apply_crop`]. A crop that is not a parallelogram is not affine.
-fn gpu_crop(crop: Crop, crop_scale: f64, oriented: (u32, u32)) -> Option<(Affine, (u32, u32))> {
+pub(crate) fn gpu_crop(
+    crop: Crop,
+    crop_scale: f64,
+    oriented: (u32, u32),
+) -> Option<(Affine, (u32, u32))> {
     let uncropped = Some((Affine::IDENTITY, oriented));
     if crop_absent(crop) {
         return uncropped;
@@ -983,7 +987,7 @@ fn gpu_crop(crop: Crop, crop_scale: f64, oriented: (u32, u32)) -> Option<(Affine
 }
 
 /// Canvas pixel center to placed-picture pixels, as [`place_with`].
-fn gpu_place(
+pub(crate) fn gpu_place(
     transform: PictureTransform,
     picture: (u32, u32),
     canvas: (u32, u32),
@@ -1041,6 +1045,11 @@ fn gpu_place(
 }
 
 impl PictureTransform {
+    /// The clip's opacity, 0 to 255.
+    pub(crate) const fn opacity(self) -> u8 {
+        self.opacity
+    }
+
     /// Nothing to draw: the picture is fully transparent or scaled to nothing.
     pub(crate) fn omitted(self) -> bool {
         self.opacity == 0 || self.scale_x == 0.0 || self.scale_y == 0.0

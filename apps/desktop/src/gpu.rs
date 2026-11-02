@@ -16,6 +16,11 @@ pub(crate) fn draw(
     canvas: &Canvas,
     frame: &FrameLayers,
 ) -> Result<(), RenderError> {
+    renderer.draw(canvas, &layers_of(frame)?)
+}
+
+/// The render layers for `frame`, a compound's child frame included.
+fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
     let mut layers = Vec::with_capacity(frame.layers.len());
     for layer in &frame.layers {
         layers.push(match &layer.source {
@@ -43,9 +48,14 @@ pub(crate) fn draw(
                 },
                 layer.placement,
             ),
+            GpuSource::Nested(child) => Layer::Nested {
+                layers: layers_of(child)?,
+                size: (child.width, child.height),
+                placement: layer.placement,
+            },
         });
     }
-    renderer.draw(canvas, &layers)
+    Ok(layers)
 }
 
 /// What the preview canvas last showed.

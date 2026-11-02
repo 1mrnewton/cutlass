@@ -120,6 +120,20 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cutlass-render frame"),
             });
+        self.draw_into(&mut encoder, canvas.view(), canvas.size(), layers)?;
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// Clear `target` and draw `layers` into it. A nested layer is drawn
+    /// into its own texture first, on the same encoder.
+    fn draw_into(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        size: (u32, u32),
+        layers: &[Layer<'_>],
+    ) -> Result<(), RenderError> {
         let (device, queue) = (&self.device, &self.queue);
         let mut bound = Vec::with_capacity(layers.len());
         for layer in layers {
@@ -139,40 +153,57 @@ impl Renderer {
                     radius,
                 } => {
                     let uploaded = layer::Pipelines::upload_planes(device, queue, planes)?;
-                    let backdrop =
-                        self.blurred(&mut encoder, &uploaded, *cover, *radius, canvas.size());
+                    let backdrop = self.blurred(encoder, &uploaded, *cover, *radius, size);
                     bound.push(self.layers.bind(
                         device,
                         queue,
                         &backdrop,
-                        Placement::canvas(canvas.size().0, canvas.size().1),
+                        Placement::canvas(size.0, size.1),
                     ));
+                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
+                }
+                Layer::Nested {
+                    layers,
+                    size: inner,
+                    placement,
+                } => {
+                    let limit = device.limits().max_texture_dimension_2d;
+                    if inner.0 == 0 || inner.1 == 0 || inner.0 > limit || inner.1 > limit {
+                        return Err(RenderError::Size {
+                            width: inner.0,
+                            height: inner.1,
+                        });
+                    }
+                    let view = blur::scratch(device, *inner);
+                    self.draw_into(encoder, &view, *inner, layers)?;
+                    let uploaded = layer::Uploaded {
+                        views: [view.clone(), view.clone(), view],
+                        size: *inner,
+                        yuv: false,
+                    };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
             }
         }
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cutlass-render layers"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: canvas.view(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            for layer in &bound {
-                self.layers.draw(&mut pass, layer);
-            }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("cutlass-render layers"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        for layer in &bound {
+            self.layers.draw(&mut pass, layer);
         }
-        self.queue.submit([encoder.finish()]);
         Ok(())
     }
 

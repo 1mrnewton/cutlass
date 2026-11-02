@@ -179,23 +179,43 @@ pub fn layers_in<D: Device>(
     root: Option<&std::path::Path>,
 ) -> Result<Composed, EvalError<D::Error>> {
     clips.set_project(root);
-    with_layers(
+    compose_layers(snapshot, time, device, media, clips, revision, &[])
+}
+
+/// [`layers_in`] for a draft under `ancestors`, as a compound's child is.
+/// A frame that needs the CPU is composed again on the CPU path.
+pub(crate) fn compose_layers<D: Device>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    ancestors: &[cutlass_model::DraftId],
+) -> Result<Composed, EvalError<D::Error>> {
+    let layers = with_layers(
         snapshot,
         time,
         device,
         media,
         clips,
         revision,
-        &[],
-        |draft, device, extent, layers| {
+        ancestors,
+        true,
+        |draft, _device, extent, layers| {
             let stack = stack_of(layers);
             if needs_cpu(draft, time, &stack) {
-                return present(draft, snapshot.packages(), time, device, extent, &stack)
-                    .map(Composed::Frame);
+                return Ok(None);
             }
-            Ok(Composed::Layers(gpu_layers(draft, time, extent, layers)))
+            Ok(Some(gpu_layers(draft, time, extent, layers)))
         },
-    )
+    )?;
+    match layers {
+        Some(layers) => Ok(Composed::Layers(layers)),
+        None => {
+            compose(snapshot, time, device, media, clips, revision, ancestors).map(Composed::Frame)
+        }
+    }
 }
 
 fn gpu_layers(draft: &Draft, time: Micros, extent: Extent, layers: &[Ordered<'_>]) -> FrameLayers {
@@ -216,7 +236,8 @@ fn gpu_layers(draft: &Draft, time: Micros, extent: Extent, layers: &[Ordered<'_>
                 Sample::Ready(Picture::Cpu(pixel)) => Some(vec![GpuLayer::fill(pixel)]),
                 Sample::Ready(Picture::Platform(_)) | Sample::Miss => Some(Vec::new()),
             },
-            Paint::Text(_) | Paint::Nest(_) | Paint::Mixed(_) => None,
+            Paint::Nest(nested) => nested.gpu(),
+            Paint::Text(_) | Paint::Mixed(_) => None,
         };
         match gpu {
             Some(gpu) => out.extend(gpu),
@@ -251,6 +272,7 @@ pub(crate) fn compose<D: Device>(
         clips,
         revision,
         ancestors,
+        false,
         |draft, device, extent, layers| {
             let stack = stack_of(layers);
             present(draft, snapshot.packages(), time, device, extent, &stack)
@@ -268,6 +290,7 @@ fn with_layers<D: Device, T>(
     clips: &mut OpenClips,
     revision: u64,
     ancestors: &[cutlass_model::DraftId],
+    gpu: bool,
     finish: impl FnOnce(&Draft, &mut D, Extent, &[Ordered<'_>]) -> Result<T, EvalError<D::Error>>,
 ) -> Result<T, EvalError<D::Error>> {
     let draft = snapshot.draft();
@@ -284,6 +307,7 @@ fn with_layers<D: Device, T>(
         clips,
         revision,
         ancestors,
+        gpu,
     };
     let nests = nest_layers(draft, &mut pass)?;
     let prepared = crate::transition::prepare(

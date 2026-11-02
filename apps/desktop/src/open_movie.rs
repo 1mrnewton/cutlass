@@ -14,8 +14,8 @@ use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_engine::DecodedFrame;
 use cutlass_eval::{OpenClips, ReaderFactory, Snapshot, frame};
 use cutlass_model::{
-    Draft, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros, Segment,
-    TimeRange, TrackAttribute,
+    Crop, Draft, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros,
+    Segment, TimeRange, TrackAttribute,
 };
 use cutlass_renderer_software::SoftwareDevice;
 
@@ -709,6 +709,15 @@ fn split_yuv(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
 /// One parity case: a name and an edit to the movie draft.
 type Edit = fn(&mut Draft);
 
+/// A layer, or a compound's child layer, is a decoded picture the GPU converts.
+fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
+    frame.layers.iter().any(|layer| match &layer.source {
+        cutlass_eval::GpuSource::Yuv { .. } => true,
+        cutlass_eval::GpuSource::Nested(child) => decodes_on_gpu(child),
+        cutlass_eval::GpuSource::Rgba(_) => false,
+    })
+}
+
 #[test]
 fn the_gpu_compositor_matches_the_cpu_frame() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
@@ -724,7 +733,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             return;
         }
     };
-    let cases: [(&str, (u32, u32), Edit); 8] = [
+    let cases: [(&str, (u32, u32), Edit); 9] = [
         ("same size", (848, 608), |_| {}),
         ("shrunk to fit", (424, 240), |_| {}),
         ("centered", (1000, 700), |_| {}),
@@ -770,6 +779,43 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             draft.tracks[0].segments[1].clip.scale.y = 0.7;
             draft.tracks[0].segments[1].clip.alpha = 0.8;
         }),
+        ("nested compound", (848, 608), |draft| {
+            // The movie draft becomes a compound's child, moved, turned,
+            // faded and cropped on a parent that has a solid under it.
+            let mut child = draft.clone();
+            child.id = "child".into();
+            let mut parent = Draft::empty("parent");
+            parent.canvas_config = draft.canvas_config.clone();
+            parent.materials.material_colors = draft.materials.material_colors.clone();
+            parent.tracks[0]
+                .segments
+                .push(draft.tracks[0].segments[0].clone());
+            let crop = Crop {
+                upper_left_x: 0.05,
+                upper_left_y: 0.1,
+                upper_right_x: 0.9,
+                upper_right_y: 0.1,
+                lower_left_x: 0.05,
+                lower_left_y: 0.95,
+                lower_right_x: 0.9,
+                lower_right_y: 0.95,
+            };
+            parent.materials.drafts.push(MaterialDraft {
+                id: "nest".into(),
+                draft: Some(Box::new(child)),
+                crop,
+                ..MaterialDraft::default()
+            });
+            let mut segment = Segment::new("compound", "nest", TimeRange::new(0, 1_000_000));
+            segment.source_range = Some(TimeRange::new(0, 1_000_000));
+            segment.render_index = 1;
+            segment.clip.scale.x = 0.75;
+            segment.clip.scale.y = 0.75;
+            segment.clip.rotation = 15.0;
+            segment.clip.alpha = 0.85;
+            parent.tracks[0].segments.push(segment);
+            *draft = parent;
+        }),
     ];
     let readers = crate::readers::installed_readers();
     for (name, (width, height), edit) in cases {
@@ -793,10 +839,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             panic!("{name}: composed on the CPU");
         };
         assert!(
-            layers
-                .layers
-                .iter()
-                .any(|layer| matches!(layer.source, cutlass_eval::GpuSource::Yuv { .. })),
+            decodes_on_gpu(&layers),
             "{name}: the movie did not reach the GPU"
         );
         let canvas = renderer.canvas(width, height).unwrap();

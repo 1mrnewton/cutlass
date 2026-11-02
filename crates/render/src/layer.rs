@@ -70,7 +70,7 @@ impl<'a> Planes<'a> {
 }
 
 /// What one layer draws.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Layer<'a> {
     Rgba(Rgba<'a>, Placement),
     Yuv(Planes<'a>, Placement),
@@ -82,6 +82,13 @@ pub enum Layer<'a> {
         placement: Placement,
         cover: Placement,
         radius: u32,
+    },
+    /// Layers drawn onto their own `size` canvas first, then that canvas
+    /// placed like a picture, as a compound clip is.
+    Nested {
+        layers: Vec<Layer<'a>>,
+        size: (u32, u32),
+        placement: Placement,
     },
 }
 

@@ -11,7 +11,7 @@ use cutlass_gpu::{Affine, Placement};
 use cutlass_picture::CpuBytes;
 
 /// The pixels one layer draws.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum GpuSource {
     /// Packed Y, then U, then V, limited-range BT.709.
     Yuv {
@@ -21,6 +21,8 @@ pub enum GpuSource {
     },
     /// Premultiplied RGBA.
     Rgba(CpuBytes),
+    /// A compound clip's child frame, drawn onto its own canvas first.
+    Nested(Box<FrameLayers>),
 }
 
 /// One layer and where it lands.

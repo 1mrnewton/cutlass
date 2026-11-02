@@ -927,12 +927,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     let shown = match shell.preview_texture() {
         Ok(Some((id, [width, height]))) => {
             let fitted = fit_texture(frame, Vec2::new(width as f32, height as f32));
-            ui.painter().image(
-                id,
-                fitted,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            paint_canvas(ui, id, fitted, shell.preview_black());
             Ok(())
         }
         Ok(None) => Err(None),
@@ -958,12 +953,7 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                     ))
                 };
                 let fitted = fit_texture(frame, texture.size_vec2());
-                ui.painter().image(
-                    texture.id(),
-                    fitted,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                paint_canvas(ui, texture.id(), fitted, shell.preview_black());
             }
         }
         Some(Err(error)) if shell.draft().is_some() => {
@@ -978,6 +968,21 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Some(Err(_)) => {}
     }
     transport_bar(shell, ui, transport);
+}
+
+/// The preview canvas at `rect`, over black when `black` is on. Only the
+/// canvas gets that background; the area around it stays unfilled.
+fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
+    if black {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    }
+    ui.painter().image(
+        texture,
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
@@ -3474,6 +3479,66 @@ mod tests {
         assert!(painted.contains("00:20"), "{painted}");
         assert!(painted.contains("No clips"), "{painted}");
         assert!(!painted.contains("Import a file"), "{painted}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Rects filled black, the canvas background among them.
+    fn black_rects(output: &egui::FullOutput) -> Vec<Rect> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == Color32::BLACK => Some(rect.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_preview_canvas_turns_black_and_the_toggle_clears_it() {
+        let temp = std::env::temp_dir().join(format!("cutlass-black-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 9;
+        draft.duration = Micros(1_000_000);
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "solid".into(),
+                is_color_clip: true,
+                solid_color: "0xFFFF0000".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "solid",
+            "solid",
+            cutlass_model::TimeRange::new(0, 1_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            black_rects(&output)
+        };
+        let black = frame(&mut shell, &mut view);
+        assert_eq!(black.len(), 1, "{black:?}");
+        let ratio = black[0].width() / black[0].height();
+        assert!((ratio - 16.0 / 9.0).abs() < 0.01, "{:?}", black[0]);
+        shell.toggle_preview_background();
+        assert!(frame(&mut shell, &mut view).is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

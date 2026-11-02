@@ -36,6 +36,8 @@ pub fn run() -> eframe::Result {
             shell.open_preview_audio(cutlass_playback::AudioHost::current());
             let ctx = creation.egui_ctx.clone();
             shell.start_thumbnails(move || ctx.request_repaint());
+            let ctx = creation.egui_ctx.clone();
+            shell.start_waveforms(move || ctx.request_repaint());
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),

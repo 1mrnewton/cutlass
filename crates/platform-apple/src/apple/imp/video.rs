@@ -2,7 +2,10 @@
 //!
 //! A decoded frame stays a retained pixel buffer, named by a platform token.
 //! [`to_cpu`] copies that buffer to tightly packed RGBA. VideoToolbox itself
-//! is asked for BGRA. A session the hardware will not open is
+//! is asked for BGRA. A caller that asks for [`PixelFormat::Yuv420p`] gets
+//! CPU 4:2:0 instead: VideoToolbox writes video-range NV12 and the planes are
+//! copied out as packed Y, then U, then V. Pictures leave in decode order,
+//! each with its own timestamp. A session the hardware will not open is
 //! [`CodecError::Unsupported`], so the factory can try a software codec.
 //! VP8 has no framework format id.
 
@@ -64,6 +67,7 @@ struct DecodeSlot {
     picture: Option<Result<PictureOutput, CodecError>>,
     pts: i64,
     timescale: u32,
+    planar: bool,
 }
 
 pub struct VideoDecoder {
@@ -71,6 +75,8 @@ pub struct VideoDecoder {
     width: u32,
     height: u32,
     extra: Vec<u8>,
+    /// The caller asked for packed CPU 4:2:0 instead of a platform buffer.
+    planar: bool,
     format: Option<Cf>,
     session: Option<Decompress>,
 }
@@ -91,16 +97,12 @@ unsafe impl Send for VideoEncoder {}
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
     let _ = codec_type(params.codec)?;
     let (width, height) = video_size(params.width, params.height)?;
-    if params.pixel == PixelFormat::Yuv420p {
-        return Err(CodecError::Unsupported {
-            what: "yuv picture",
-        });
-    }
     let mut decoder = VideoDecoder {
         codec: params.codec,
         width,
         height,
         extra: params.extra.clone(),
+        planar: params.pixel == PixelFormat::Yuv420p,
         format: None,
         session: None,
     };
@@ -190,6 +192,7 @@ impl Decoder for VideoDecoder {
             } else {
                 packet.timescale
             },
+            self.planar,
         )?;
         Ok(picture.into_iter().map(Output::Picture).collect())
     }
@@ -218,7 +221,14 @@ impl VideoDecoder {
         } else {
             parameter_format(self.codec, extra)?
         };
-        let session = create_decompress(&format, !needs_sized_format(self.codec))?;
+        let surface = if self.planar {
+            Some(sys::NV12)
+        } else if needs_sized_format(self.codec) {
+            None
+        } else {
+            Some(sys::BGRA)
+        };
+        let session = create_decompress(&format, surface)?;
         self.format = Some(format);
         self.session = Some(session);
         Ok(())
@@ -415,6 +425,9 @@ fn config_of(packet: &Packet) -> Option<&[u8]> {
 }
 
 fn in_band_config(codec: CodecId, data: &[u8]) -> Result<Option<Vec<u8>>, CodecError> {
+    if length_framed(data) {
+        return Ok(None);
+    }
     let nals = match nal::annex_b(data) {
         Ok(nals) => nals,
         Err(_) => return Ok(None),
@@ -461,8 +474,17 @@ fn in_band_config(codec: CodecId, data: &[u8]) -> Result<Option<Vec<u8>>, CodecE
     }
 }
 
+/// Four-byte NAL lengths that cover every byte of `data`.
+///
+/// A container packet is length framed. Its prefix can read as a start
+/// code: a NAL of 256 to 511 bytes begins `00 00 01`. So length framing is
+/// tried before Annex B.
+fn length_framed(data: &[u8]) -> bool {
+    nal::split_lengths(data, 4).is_ok()
+}
+
 fn access_unit(codec: CodecId, data: &[u8]) -> Result<Vec<u8>, CodecError> {
-    if !matches!(codec, CodecId::H264 | CodecId::Hevc) {
+    if !matches!(codec, CodecId::H264 | CodecId::Hevc) || length_framed(data) {
         return Ok(data.to_vec());
     }
     if let Ok(nals) = nal::annex_b(data) {
@@ -574,8 +596,13 @@ fn sized_format(codec: CodecId, width: u32, height: u32) -> Result<Cf, CodecErro
     })
 }
 
-fn create_decompress(format: &Cf, bgra: bool) -> Result<Decompress, CodecError> {
-    let attributes = if bgra { Some(bgra_attributes()?) } else { None };
+/// `surface` is the pixel format VideoToolbox writes. `None` keeps the
+/// decoder's own format.
+fn create_decompress(format: &Cf, surface: Option<u32>) -> Result<Decompress, CodecError> {
+    let attributes = match surface {
+        Some(pixel) => Some(pixel_attributes(pixel)?),
+        None => None,
+    };
     let callback = sys::VTDecompressionOutputCallbackRecord {
         callback: decode_output,
         refcon: ptr::null_mut(),
@@ -606,6 +633,7 @@ fn decode_access(
     bytes: &[u8],
     pts: i64,
     timescale: u32,
+    planar: bool,
 ) -> Result<Option<PictureOutput>, CodecError> {
     let block = block_from(bytes)?;
     let scale = i32::try_from(timescale).unwrap_or(30);
@@ -638,6 +666,7 @@ fn decode_access(
         picture: None,
         pts,
         timescale,
+        planar,
     };
     let status = unsafe {
         sys::VTDecompressionSessionDecodeFrame(
@@ -700,7 +729,11 @@ unsafe extern "C" fn decode_output(
             }));
             return;
         }
-        slot.picture = Some(gpu_picture(image, slot.pts, slot.timescale));
+        slot.picture = Some(if slot.planar {
+            planar_picture(image, slot.pts, slot.timescale)
+        } else {
+            gpu_picture(image, slot.pts, slot.timescale)
+        });
     }
 }
 
@@ -931,6 +964,159 @@ fn copy_rgba(
     )
 }
 
+fn planar_picture(
+    image: *mut std::ffi::c_void,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let locked = unsafe { sys::CVPixelBufferLockBaseAddress(image, 1) };
+    if locked != 0 {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "pixel buffer",
+        });
+    }
+    let result = copy_planar(image, pts, timescale);
+    unsafe {
+        let _ = sys::CVPixelBufferUnlockBaseAddress(image, 1);
+    }
+    result
+}
+
+/// One locked plane: its first byte, its row stride, and its rows.
+fn plane(
+    image: *mut std::ffi::c_void,
+    index: usize,
+    row: usize,
+    rows: usize,
+) -> Result<&'static [u8], CodecError> {
+    let base = unsafe { sys::CVPixelBufferGetBaseAddressOfPlane(image, index) };
+    let stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, index) };
+    let height = unsafe { sys::CVPixelBufferGetHeightOfPlane(image, index) };
+    if base.is_null() || stride < row || height < rows {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "pixel plane",
+        });
+    }
+    let len = stride.checked_mul(rows).ok_or(CodecError::Limit {
+        what: "picture bytes",
+    })?;
+    // SAFETY: the buffer is locked for the caller's copy, and `rows` rows of
+    // `stride` bytes lie inside the plane.
+    Ok(unsafe { std::slice::from_raw_parts(base.cast::<u8>(), len) })
+}
+
+/// Copy a video-range NV12 buffer to packed Y, then U, then V.
+///
+/// An odd edge drops its last column or row, since 4:2:0 needs even edges.
+fn copy_planar(
+    image: *mut std::ffi::c_void,
+    pts: i64,
+    timescale: u32,
+) -> Result<PictureOutput, CodecError> {
+    let format = unsafe { sys::CVPixelBufferGetPixelFormatType(image) };
+    if format != sys::NV12 || unsafe { sys::CVPixelBufferGetPlaneCount(image) } != 2 {
+        return Err(CodecError::Unsupported {
+            what: "pixel format",
+        });
+    }
+    let width = unsafe { sys::CVPixelBufferGetWidth(image) } & !1;
+    let height = unsafe { sys::CVPixelBufferGetHeight(image) } & !1;
+    let edge = |value: usize| {
+        u32::try_from(value).map_err(|_| CodecError::Limit {
+            what: "picture edge",
+        })
+    };
+    let (picture_width, picture_height) = (edge(width)?, edge(height)?);
+    limits::picture_ok(picture_width, picture_height)?;
+    let (chroma_width, chroma_height) = (width / 2, height / 2);
+    if unsafe { sys::CVPixelBufferGetWidthOfPlane(image, 1) } < chroma_width {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "pixel plane",
+        });
+    }
+    let luma = plane(image, 0, width, height)?;
+    let chroma = plane(image, 1, chroma_width * 2, chroma_height)?;
+    let luma_stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, 0) };
+    let chroma_stride = unsafe { sys::CVPixelBufferGetBytesPerRowOfPlane(image, 1) };
+    let chroma_len = chroma_width * chroma_height;
+    let mut bytes = vec![0u8; width * height + chroma_len * 2];
+    let (y, rest) = bytes.split_at_mut(width * height);
+    let (u, v) = rest.split_at_mut(chroma_len);
+    for (row, out) in y.chunks_exact_mut(width).enumerate() {
+        let start = row * luma_stride;
+        out.copy_from_slice(&luma[start..start + width]);
+    }
+    for row in 0..chroma_height {
+        let start = row * chroma_stride;
+        let pairs = &chroma[start..start + chroma_width * 2];
+        let out = row * chroma_width;
+        for (x, pair) in pairs.as_chunks::<2>().0.iter().enumerate() {
+            u[out + x] = pair[0];
+            v[out + x] = pair[1];
+        }
+    }
+    let (primaries, transfer) = buffer_color(image);
+    PictureOutput::cpu(
+        PictureInfo {
+            width: picture_width,
+            height: picture_height,
+            pixel: PixelFormat::Yuv420p,
+            primaries,
+            transfer,
+        },
+        bytes,
+        pts,
+        timescale,
+    )
+}
+
+/// The primaries and transfer VideoToolbox attached to `image`.
+///
+/// A missing or unnamed tag is unspecified. CoreVideo has no SMPTE 170M
+/// transfer, so a BT.601 stream reads back as the identical BT.709 curve.
+fn buffer_color(image: *mut std::ffi::c_void) -> (ColorPrimaries, Transfer) {
+    let primaries = unsafe {
+        match attachment(image, sys::kCVImageBufferColorPrimariesKey) {
+            Some(tag) if same(&tag, sys::kCVImageBufferColorPrimaries_ITU_R_709_2) => {
+                ColorPrimaries::Bt709
+            }
+            Some(tag)
+                if same(&tag, sys::kCVImageBufferColorPrimaries_SMPTE_C)
+                    || same(&tag, sys::kCVImageBufferColorPrimaries_EBU_3213) =>
+            {
+                ColorPrimaries::Bt601
+            }
+            Some(tag) if same(&tag, sys::kCVImageBufferColorPrimaries_ITU_R_2020) => {
+                ColorPrimaries::Bt2020
+            }
+            _ => ColorPrimaries::Unspecified,
+        }
+    };
+    let transfer = unsafe {
+        match attachment(image, sys::kCVImageBufferTransferFunctionKey) {
+            Some(tag) if same(&tag, sys::kCVImageBufferTransferFunction_ITU_R_709_2) => {
+                Transfer::Bt709
+            }
+            Some(tag) if same(&tag, sys::kCVImageBufferTransferFunction_ITU_R_2020) => {
+                Transfer::Bt2020
+            }
+            _ => Transfer::Unspecified,
+        }
+    };
+    (primaries, transfer)
+}
+
+fn attachment(image: *mut std::ffi::c_void, key: *const std::ffi::c_void) -> Option<Cf> {
+    Cf::from_owned(unsafe { sys::CVBufferCopyAttachment(image, key, ptr::null_mut()) })
+}
+
+fn same(tag: &Cf, name: *const std::ffi::c_void) -> bool {
+    !name.is_null() && unsafe { sys::CFEqual(tag.as_ptr(), name) } != 0
+}
+
 fn create_compress(
     codec: CodecId,
     width: u32,
@@ -1026,7 +1212,12 @@ fn force_keyframe() -> Result<Cf, CodecError> {
 }
 
 fn bgra_attributes() -> Result<Cf, CodecError> {
-    let format = cf::number_i32(i32::try_from(sys::BGRA).unwrap_or(0))?;
+    pixel_attributes(sys::BGRA)
+}
+
+/// IOSurface-backed buffers in `pixel`.
+fn pixel_attributes(pixel: u32) -> Result<Cf, CodecError> {
+    let format = cf::number_i32(i32::try_from(pixel).unwrap_or(0))?;
     let surface = cf::dictionary(&[], &[])?;
     let keys = unsafe {
         [
@@ -1336,6 +1527,63 @@ mod tests {
             .iter()
             .map(|pixel| u64::from(pixel[channel]))
             .sum()
+    }
+
+    #[test]
+    fn a_length_prefix_that_reads_as_a_start_code_stays_length_framed() {
+        let mut nal = vec![0x41];
+        nal.resize(300, 0x9a);
+        let mut packet = u32::try_from(nal.len()).unwrap().to_be_bytes().to_vec();
+        packet.extend(&nal);
+        assert_eq!(&packet[..3], &[0, 0, 1]);
+        assert_eq!(access_unit(CodecId::H264, &packet).unwrap(), packet);
+        assert_eq!(in_band_config(CodecId::H264, &packet).unwrap(), None);
+    }
+
+    #[test]
+    fn h264_decodes_to_cpu_yuv_when_asked() {
+        let mut encoder = open_encoder(&video_params(CodecId::H264, 64, 48)).expect("encode open");
+        let mut packets = encoder
+            .push_frame(&solid(64, 48, [220, 10, 10, 255], 0))
+            .expect("encode");
+        packets.extend(encoder.drain().expect("drain"));
+        let config = packets
+            .iter()
+            .find_map(|packet| {
+                packet.side.iter().find_map(|side| match side {
+                    SideData::Config(bytes) if !bytes.is_empty() => Some(bytes.clone()),
+                    _ => None,
+                })
+            })
+            .expect("avcC");
+        let mut decode_params =
+            CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
+        decode_params.extra = config;
+        let mut decoder = open_decoder(&decode_params).expect("decode open");
+        let mut pictures = Vec::new();
+        for packet in &packets {
+            for output in decoder.push(packet).expect("decode") {
+                let Output::Picture(picture) = output else {
+                    panic!("picture");
+                };
+                pictures.push(picture);
+            }
+        }
+        let picture = pictures.first().expect("a picture");
+        assert_eq!(picture.info().pixel, PixelFormat::Yuv420p);
+        assert_eq!((picture.info().width, picture.info().height), (64, 48));
+        let PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        assert_eq!(bytes.len(), 64 * 48 * 3 / 2);
+        let mean = |plane: &[u8]| {
+            plane.iter().map(|&value| u64::from(value)).sum::<u64>() / plane.len() as u64
+        };
+        let (y, rest) = bytes.split_at(64 * 48);
+        let (u, v) = rest.split_at(32 * 24);
+        let (y, u, v) = (mean(y), mean(u), mean(v));
+        assert!((40..=90).contains(&y), "red luma {y}");
+        assert!(u < 128 && v > 180, "red chroma u {u} v {v}");
     }
 
     #[test]

@@ -450,7 +450,9 @@ impl Shell {
         Self {
             decoders,
             encoders,
-            readers: crate::readers::installed_readers(),
+            readers: crate::readers::readers_with(
+                crate::register_codecs_with(&settings.hardware).0,
+            ),
             output: AudioOutput::open(AudioHost::Software),
             heard: Heard::new(),
             preview_cache: RefCell::new(FrameCache::new()),
@@ -537,6 +539,17 @@ impl Shell {
         application_support()
             .map(|base| base.join("Cutlass").join("Projects"))
             .unwrap_or_else(|| std::env::temp_dir().join("cutlass-projects"))
+    }
+
+    /// The user's settings file.
+    ///
+    /// On macOS this is `~/Library/Application Support/Cutlass/settings.json`.
+    #[must_use]
+    pub fn settings_path() -> PathBuf {
+        application_support()
+            .map(|base| base.join("Cutlass"))
+            .unwrap_or_else(|| std::env::temp_dir().join("cutlass"))
+            .join("settings.json")
     }
 
     /// Projects under `root`, newest first. A folder without a draft is skipped.

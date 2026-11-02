@@ -12,7 +12,9 @@ mod nal;
 mod orient;
 mod status;
 
-pub use apple::{register_decoders, register_encoders};
+pub use apple::{
+    register_decoders, register_decoders_with, register_encoders, register_encoders_with,
+};
 
 #[cfg(target_vendor = "apple")]
 pub use apple::{

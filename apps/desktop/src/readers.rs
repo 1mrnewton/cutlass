@@ -5,13 +5,19 @@ use std::path::Path;
 
 use cutlass_codec::ContainerId;
 use cutlass_container::{Demux, Input, OpenError, ProbeResult};
+use cutlass_decode::DecodeFactory;
 use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF, and stills.
+#[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
-    let (decoders, _) = crate::register_codecs();
+    readers_with(crate::register_codecs().0)
+}
+
+/// ISOBMFF, WAV, AIFF, and stills, decoded with `decoders`.
+pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
     readers.register_container(cutlass_riff::probe, open_wav);

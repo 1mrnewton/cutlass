@@ -27,8 +27,9 @@ pub fn run() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|_creation| {
-            let (decoders, encoders) = crate::register_codecs();
-            let mut shell = Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+            let settings = crate::load_settings(&Shell::settings_path());
+            let (decoders, encoders) = crate::register_codecs_with(&settings.hardware);
+            let mut shell = Shell::new(decoders, encoders, settings);
             shell.open_preview_audio(cutlass_playback::AudioHost::current());
             Ok(Box::new(DesktopWindow {
                 shell,

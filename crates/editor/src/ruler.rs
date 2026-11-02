@@ -39,8 +39,6 @@ struct RateSteps {
     clock_minors: i64,
     /// Frame steps, coarse to fine, with their thresholds.
     frames: &'static [(i64, f64)],
-    /// Frame numbers drop frame skips each minute but every tenth.
-    drop: i64,
 }
 
 const RATES: [RateSteps; 8] = [
@@ -56,7 +54,6 @@ const RATES: [RateSteps; 8] = [
             (3, 0.002),
             (2, 0.0048),
         ],
-        drop: 0,
     },
     RateSteps {
         fps: 24.0,
@@ -69,14 +66,12 @@ const RATES: [RateSteps; 8] = [
             (3, 0.002),
             (2, 0.0048),
         ],
-        drop: 0,
     },
     RateSteps {
         fps: 25.0,
         nominal: 25,
         clock_minors: 5,
         frames: &[(5, 0.005)],
-        drop: 0,
     },
     RateSteps {
         fps: 30_000.0 / 1001.0,
@@ -90,7 +85,6 @@ const RATES: [RateSteps; 8] = [
             (3, 0.0013),
             (2, 0.006),
         ],
-        drop: 2,
     },
     RateSteps {
         fps: 30.0,
@@ -103,14 +97,12 @@ const RATES: [RateSteps; 8] = [
             (3, 0.0013),
             (2, 0.006),
         ],
-        drop: 0,
     },
     RateSteps {
         fps: 50.0,
         nominal: 50,
         clock_minors: 10,
         frames: &[(25, 0.0006), (10, 0.0009), (5, 0.005), (2, 0.01)],
-        drop: 0,
     },
     RateSteps {
         fps: 60_000.0 / 1001.0,
@@ -128,7 +120,6 @@ const RATES: [RateSteps; 8] = [
             (3, 0.009),
             (2, 0.012),
         ],
-        drop: 4,
     },
     RateSteps {
         fps: 60.0,
@@ -143,7 +134,6 @@ const RATES: [RateSteps; 8] = [
             (3, 0.009),
             (2, 0.012),
         ],
-        drop: 0,
     },
 ];
 
@@ -273,7 +263,7 @@ pub fn ruler_ticks(
     let table = steps_for(rate);
     let step = ruler_step(rate, pixel_size);
     let minor = step.minor_frames();
-    let drop = if drop_frame { table.drop } else { 0 };
+    let drop = drop_frame && rate.dropped_per_minute() > 0;
     let first = rate.frame_index(Micros(from.0.max(0))).unwrap_or(0);
     let mut frame = first - first.rem_euclid(minor);
     while ticks.len() < MAX_TICKS {
@@ -285,8 +275,10 @@ pub fn ruler_ticks(
         }
         let major = frame % step.frames == 0;
         let label = major.then(|| {
-            if drop > 0 {
-                drop_frame_label(frame, table.nominal, drop)
+            if drop {
+                rate.label(time, true)
+                    .map(|label| label.format())
+                    .unwrap_or_default()
             } else if !step.frame || frame % table.nominal == 0 {
                 clock_label(frame, table.nominal)
             } else {
@@ -308,26 +300,6 @@ fn clock_label(frame: i64, nominal: i64) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
-}
-
-/// SMPTE drop frame: `drop` frame numbers are skipped at the start of each
-/// minute, except every tenth.
-fn drop_frame_label(frame: i64, nominal: i64, drop: i64) -> String {
-    let per_minute = nominal * 60 - drop;
-    let per_ten = nominal * 600 - drop * 9;
-    let (tens, within) = (frame / per_ten, frame % per_ten);
-    let mut counted = frame + drop * 9 * tens;
-    if within > drop {
-        counted += drop * ((within - drop) / per_minute);
-    }
-    let whole = counted / nominal;
-    format!(
-        "{:02}:{:02}:{:02};{:02}",
-        whole / 3600,
-        whole / 60 % 60,
-        whole % 60,
-        counted % nominal
-    )
 }
 
 #[cfg(test)]
@@ -423,12 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_frame_skips_two_numbers_a_minute_but_every_tenth() {
-        assert_eq!(drop_frame_label(1799, 30, 2), "00:00:59;29");
-        assert_eq!(drop_frame_label(1800, 30, 2), "00:01:00;02");
-        assert_eq!(drop_frame_label(17_982, 30, 2), "00:10:00;00");
-        assert_eq!(drop_frame_label(3596, 60, 4), "00:00:59;56");
-        assert_eq!(drop_frame_label(3600, 60, 4), "00:01:00;04");
+    fn drop_frame_labels_each_major_tick_with_its_timecode() {
         let ticks = ruler_ticks(
             FrameRate::FPS_29_97,
             true,

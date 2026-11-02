@@ -8064,7 +8064,7 @@ mod tests {
         assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00;59");
         desktop.toggle_drop_frame().unwrap();
         assert_eq!(desktop.frame_rate_label(), "59.94 fps");
-        assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00:00");
+        assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00:59");
         desktop.undo().unwrap();
         assert!(desktop.drop_frame_enabled());
         desktop.undo().unwrap();

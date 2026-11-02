@@ -6,7 +6,7 @@ use crate::fragment::{self, SidxRef, Tfra};
 use crate::heif;
 use crate::index::Sample;
 use crate::legacy::{Demux, Error, Packet, SeekAt, Source, Stream, Timescale};
-use crate::limits::{MAX_METADATA_BYTES, MAX_SAMPLES};
+use crate::limits::{MAX_ATOMS, MAX_METADATA_BYTES, MAX_SAMPLES};
 use crate::movie::{self, BuiltTrack, Trex};
 use crate::parse::{self, file_header};
 use std::io::{Read, Seek, SeekFrom};
@@ -121,14 +121,25 @@ impl IsoBmff {
             } else {
                 None
             };
-            return Ok(from_tracks(
+            let mut opened = from_tracks(
                 Timescale(built.timescale),
                 brands,
                 built.tracks,
                 media,
                 fragments,
                 file_len,
-            ));
+            );
+            // A finished fragment movie often leaves `mvhd` and `mdhd` at zero.
+            // The sample time lives in the fragments.
+            if opened.fragments.is_some()
+                && opened
+                    .streams
+                    .iter()
+                    .any(|stream| stream.params.duration_ticks == 0)
+            {
+                opened.measure_fragments(source)?;
+            }
+            return Ok(opened);
         }
 
         if let Some((origin, payload)) = meta {
@@ -549,22 +560,24 @@ impl IsoBmff {
     ) -> Result<u64, Error> {
         let time = u64::try_from(ticks.max(0)).unwrap_or(0);
         if let Some(hit) = self.fragments.as_ref().and_then(|fragments| {
-            fragments
-                .sidx
-                .iter()
-                .filter(|row| row.track_id == track_id && row.time <= time)
-                .max_by_key(|row| row.time)
-                .map(|row| row.offset)
+            covering_offset(
+                fragments.sidx.iter().filter(|row| row.track_id == track_id),
+                time,
+                |row| row.time,
+                |row| row.offset,
+            )
         }) {
             return Ok(hit);
         }
         self.ensure_mfra(source)?;
         if let Some(hit) = self.fragments.as_ref().and_then(|fragments| {
             fragments.mfra.as_ref().and_then(|rows| {
-                rows.iter()
-                    .filter(|row| row.track_id == track_id && row.time <= time)
-                    .max_by_key(|row| row.time)
-                    .map(|row| row.moof_offset)
+                covering_offset(
+                    rows.iter().filter(|row| row.track_id == track_id),
+                    time,
+                    |row| row.time,
+                    |row| row.moof_offset,
+                )
             })
         }) {
             return Ok(hit);
@@ -680,6 +693,70 @@ impl IsoBmff {
         restore_fragment_cursor(&mut self.fragments, saved.next);
     }
 
+    /// The header duration is unknown. Walk each `moof` and keep the end of the
+    /// last sample. The fragment cursor stays where reading left it.
+    fn measure_fragments(&mut self, source: &mut dyn Source) -> Result<(), Error> {
+        let Some(mut at) = self.fragments.as_ref().map(|fragments| fragments.next) else {
+            return Ok(());
+        };
+        let trex = self
+            .fragments
+            .as_ref()
+            .map(|fragments| fragments.trex.clone())
+            .unwrap_or_default();
+        let mut ends: Vec<(u32, i64)> = self
+            .streams
+            .iter()
+            .map(|stream| (stream.params.track_id, 0))
+            .collect();
+        let mut seen = 0u32;
+        while at < self.file_len {
+            seen = seen.saturating_add(1);
+            if seen > MAX_ATOMS {
+                return Err(Error::Limit {
+                    what: "boxes",
+                    value: u64::from(seen),
+                });
+            }
+            let Some(header) = file_header(source, at, self.file_len)? else {
+                break;
+            };
+            if header.kind == *b"mfra" {
+                break;
+            }
+            if header.kind == *b"moof" {
+                let payload = parse::load_payload(source, &header, MAX_METADATA_BYTES)?;
+                let mut budget = 0u32;
+                let groups =
+                    fragment::parse_moof(&payload, header.start, &trex, &ends, &mut budget)?;
+                for group in groups {
+                    let Some(last) = group.samples.last() else {
+                        continue;
+                    };
+                    let end = last.dts.saturating_add(i64::from(last.duration));
+                    if let Some(slot) = ends.iter_mut().find(|(id, _)| *id == group.track_id)
+                        && end > slot.1
+                    {
+                        slot.1 = end;
+                    }
+                }
+            }
+            at = header.end;
+        }
+        for stream in &mut self.streams {
+            if stream.params.duration_ticks != 0 {
+                continue;
+            }
+            let Some((_, end)) = ends.iter().find(|(id, _)| *id == stream.params.track_id) else {
+                continue;
+            };
+            if *end > 0 {
+                stream.params.duration_ticks = u64::try_from(*end).unwrap_or(u64::MAX);
+            }
+        }
+        Ok(())
+    }
+
     fn load_fragment(&mut self, source: &mut dyn Source, append: bool) -> Result<bool, Error> {
         let Some(mut at) = self.fragments.as_ref().map(|fragments| fragments.next) else {
             return Ok(false);
@@ -789,6 +866,30 @@ struct Landing {
     keyframe: bool,
     preroll: u32,
     visited: u32,
+}
+
+/// The latest index row at or before `time`. A time before every row still
+/// uses the first row, so the start of a file whose first sample is not at
+/// zero can be opened.
+fn covering_offset<T>(
+    rows: impl Iterator<Item = T>,
+    time: u64,
+    row_time: impl Fn(&T) -> u64,
+    row_offset: impl Fn(&T) -> u64,
+) -> Option<u64> {
+    let mut earliest: Option<(u64, u64)> = None;
+    let mut covered: Option<(u64, u64)> = None;
+    for row in rows {
+        let at = row_time(&row);
+        let offset = row_offset(&row);
+        if earliest.is_none_or(|(earliest_time, _)| at < earliest_time) {
+            earliest = Some((at, offset));
+        }
+        if at <= time && covered.is_none_or(|(covered_time, _)| at >= covered_time) {
+            covered = Some((at, offset));
+        }
+    }
+    covered.or(earliest).map(|(_, offset)| offset)
 }
 
 fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
@@ -903,4 +1004,26 @@ fn scale_ticks(ticks: i64, from: u32, to: u32) -> i64 {
     let scaled = u128::from(ticks.unsigned_abs()) * u128::from(to) / u128::from(from);
     let value = i64::try_from(scaled).unwrap_or(i64::MAX);
     if negative { -value } else { value }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::covering_offset;
+
+    #[test]
+    fn a_time_before_the_first_index_row_uses_that_row() {
+        let rows = [(1u32, 1_001u64, 10u64), (1, 5_000, 20), (2, 0, 30)];
+        let video = |time| {
+            covering_offset(
+                rows.iter().copied().filter(|row| row.0 == 1),
+                time,
+                |row| row.1,
+                |row| row.2,
+            )
+        };
+        assert_eq!(video(0), Some(10));
+        assert_eq!(video(4_000), Some(10));
+        assert_eq!(video(5_000), Some(20));
+        assert_eq!(video(9_000), Some(20));
+    }
 }

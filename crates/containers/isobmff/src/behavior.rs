@@ -446,6 +446,92 @@ fn a_failed_seek_leaves_the_next_packet() {
 }
 
 #[test]
+fn a_local_fragmented_recording_keeps_the_sample_duration() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../../local-files/GOOGLE IS BACK! (Gemini 3.8 Flash).mp4");
+    if !path.is_file() {
+        eprintln!("skipped: the fragmented sample is not in ../local-files");
+        return;
+    }
+    let mut source = crate::FileSource::open(&path).expect("open");
+    let mut movie = IsoBmff::open(&mut source).expect("movie");
+    let video = movie
+        .streams()
+        .iter()
+        .find(|stream| matches!(stream.params.kind, MediaKind::Video(_)))
+        .expect("video");
+    let audio = movie
+        .streams()
+        .iter()
+        .find(|stream| matches!(stream.params.kind, MediaKind::Audio(_)))
+        .expect("audio");
+    assert_eq!(video.params.duration_ticks, 30_303_273);
+    assert_eq!(audio.params.duration_ticks, 44_549_568);
+    let track = video.params.track_id;
+    let at = movie.seek(&mut source, track, 0).expect("seek");
+    assert!(at.keyframe);
+    let packet = movie
+        .read_packet(&mut source)
+        .expect("read")
+        .expect("packet");
+    assert!(!packet.payload.is_empty());
+    let mid = movie
+        .seek(&mut source, track, 15_000_000)
+        .expect("seek mid");
+    assert!(mid.dts <= 15_000_000);
+    assert!(movie.read_packet(&mut source).expect("read").is_some());
+}
+
+#[test]
+fn a_fragmented_file_uses_sample_time_when_the_header_duration_is_empty() {
+    let options = MuxOptions {
+        fragmented: true,
+        samples_per_fragment: 1,
+        ..MuxOptions::default()
+    };
+    let bytes = write_movie(
+        options,
+        vec![
+            (
+                video(),
+                vec![
+                    packet(0, 0, 10, b"V0", true, 30),
+                    packet(10, 10, 10, b"V1", true, 30),
+                ],
+            ),
+            (
+                audio(),
+                vec![
+                    packet(0, 0, 1_024, b"A0", true, 48_000),
+                    packet(1_024, 1_024, 1_024, b"A1", true, 48_000),
+                ],
+            ),
+        ],
+    );
+    let movie = open(&bytes);
+    let video_duration = movie
+        .streams()
+        .iter()
+        .find(|stream| matches!(stream.params.kind, MediaKind::Video(_)))
+        .map(|stream| stream.params.duration_ticks);
+    let audio_duration = movie
+        .streams()
+        .iter()
+        .find(|stream| matches!(stream.params.kind, MediaKind::Audio(_)))
+        .map(|stream| stream.params.duration_ticks);
+    assert_eq!(video_duration, Some(20));
+    assert_eq!(audio_duration, Some(2_048));
+    let mut source = SliceSource::new(&bytes);
+    let mut movie = open(&bytes);
+    let at = movie.seek(&mut source, 1, 15).unwrap();
+    assert_eq!(at.dts, 10);
+    assert_eq!(
+        movie.read_packet(&mut source).unwrap().unwrap().payload,
+        b"V1"
+    );
+}
+
+#[test]
 fn fragmented_seek_crosses_to_the_sync_sample() {
     let options = MuxOptions {
         fragmented: true,

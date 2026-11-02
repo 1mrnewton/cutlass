@@ -90,5 +90,7 @@ jobs:
         run: |
           cargo clippy -p cutlass-logger --all-targets --features public-release -- -D warnings
           cargo test -p cutlass-logger --features public-release
+          cargo check -p cutlass-ffi --features public-release
+          cargo check -p cutlass --features public-release
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2

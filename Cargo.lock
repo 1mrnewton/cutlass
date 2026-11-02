@@ -551,6 +551,7 @@ dependencies = [
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-logger",
  "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-model",
@@ -804,6 +805,7 @@ dependencies = [
 name = "cutlass-ffi"
 version = "0.1.0"
 dependencies = [
+ "cutlass-logger",
  "cutlass-playback",
  "cutlass-session",
  "cutlass-storage",

@@ -1,3 +1,4 @@
+import AVFAudio
 import CoreGraphics
 import Foundation
 import Observation
@@ -160,17 +161,27 @@ final class EditorModel {
     /// Play with sound. Rust moves the playhead with the heard audio; each
     /// screen frame asks it where the playhead is, off the main thread, and
     /// draws that picture.
+    ///
+    /// The audio session is made active again first, off the main thread:
+    /// iOS lets it go when another app or a video preview takes the sound,
+    /// and Rust starts its stopped output again on play.
     func play() {
         guard let editor, durationUs > 0 else { return }
         stopCoast()
-        do {
-            try editor.play()
-        } catch {
-            show(error)
-            return
-        }
         isPlaying = true
         playback = Task.detached(priority: .userInitiated) { [weak self] in
+            try? AVAudioSession.sharedInstance().setActive(true)
+            // Paused while the session woke.
+            if Task.isCancelled { return }
+            do {
+                try editor.play()
+            } catch {
+                await MainActor.run {
+                    self?.show(error)
+                    self?.stopped()
+                }
+                return
+            }
             var last = ContinuousClock.now
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(16))

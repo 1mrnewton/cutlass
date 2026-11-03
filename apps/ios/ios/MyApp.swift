@@ -5,9 +5,8 @@ import SwiftUI
 @main struct MyApp: App {
     init() {
         // An editor's preview is heard with the ring switch off, like a video.
-        let audio = AVAudioSession.sharedInstance()
-        try? audio.setCategory(.playback, mode: .moviePlayback)
-        try? audio.setActive(true)
+        // The session is made active when play starts, off the main thread.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         do {
             try start(root: Places.root)
         } catch {

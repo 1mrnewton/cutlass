@@ -707,16 +707,17 @@ open class Editor: EditorProtocol, @unchecked Sendable {
 
     
     /**
-     * Open the project folder, or create an empty one when it has no draft.
-     * `bundle` must be a directory. The cache directory is created.
+     * Open a project folder in the Cutlass folder at `root`, or create an
+     * empty one when it has no draft. `bundle` is the app's read-only
+     * resources and must be a directory. The cache is the root's.
      */
-public static func `open`(project: String, bundle: String, cache: String)throws  -> Editor  {
+public static func `open`(root: String, bundle: String, project: String)throws  -> Editor  {
     return try  FfiConverterTypeEditor_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_constructor_editor_open(
-        FfiConverterString.lower(project),
+        FfiConverterString.lower(root),
         FfiConverterString.lower(bundle),
-        FfiConverterString.lower(cache),uniffiCallStatus
+        FfiConverterString.lower(project),uniffiCallStatus
     )
 })
 }
@@ -1498,8 +1499,8 @@ fileprivate struct FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffe
     }
 }
 /**
- * Write a new empty project under `root`, named like the desktop's, and
- * return its folder.
+ * Write a new empty project in the Cutlass folder at `root`, named like the
+ * desktop's, and return its folder.
  */
 public func createProject(root: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -1510,7 +1511,8 @@ public func createProject(root: String)throws  -> String  {
 })
 }
 /**
- * The projects under `root`, newest first. A missing root lists nothing.
+ * The projects in the Cutlass folder at `root`, newest first. A missing
+ * root lists nothing.
  */
 public func listProjects(root: String) -> [ProjectSummary]  {
     return try!  FfiConverterSequenceTypeProjectSummary.lift(try! rustCall() {
@@ -1519,6 +1521,21 @@ public func listProjects(root: String) -> [ProjectSummary]  {
         FfiConverterString.lower(root),uniffiCallStatus
     )
 })
+}
+/**
+ * Lay out the Cutlass folder under `root` and open the process log in it.
+ *
+ * `root` is the one folder everything Cutlass writes lives under: the
+ * projects, the cache, the downloads, the proxies, the models, and the
+ * logs. A phone passes a folder in its app container, once at launch.
+ * Calling it again with the same root changes nothing.
+ */
+public func start(root: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_start(
+        FfiConverterString.lower(root),uniffiCallStatus
+    )
+}
 }
 
 private enum InitializationResult {
@@ -1536,10 +1553,13 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_func_create_project() != 5444) {
+    if (uniffi_cutlass_ffi_bindings_checksum_func_create_project() != 16508) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 40427) {
+    if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_start() != 16636) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
@@ -1572,7 +1592,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_constructor_editor_open() != 19867) {
+    if (uniffi_cutlass_ffi_bindings_checksum_constructor_editor_open() != 960) {
         return InitializationResult.apiChecksumMismatch
     }
 

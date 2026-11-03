@@ -255,7 +255,7 @@ void uniffi_cutlass_ffi_bindings_fn_free_editor(uint64_t handle, RustCallStatus 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_CONSTRUCTOR_EDITOR_OPEN
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_CONSTRUCTOR_EDITOR_OPEN
-uint64_t uniffi_cutlass_ffi_bindings_fn_constructor_editor_open(RustBuffer project, RustBuffer bundle, RustBuffer cache, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_cutlass_ffi_bindings_fn_constructor_editor_open(RustBuffer root, RustBuffer bundle, RustBuffer project, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_APPEND
@@ -316,6 +316,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_START
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_START
+void uniffi_cutlass_ffi_bindings_fn_func_start(RustBuffer root, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUSTBUFFER_ALLOC
@@ -587,6 +592,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_create_project(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_START
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_START
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_start(void
     
 );
 #endif

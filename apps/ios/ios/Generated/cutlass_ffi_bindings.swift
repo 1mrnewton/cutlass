@@ -1270,12 +1270,15 @@ public func FfiConverterTypeLaneKind_lower(_ value: LaneKind) -> RustBuffer {
 
 
 /**
- * What the phone read from a picked file.
+ * What the phone read from a picked file. A still lasts as long as it
+ * does on the desktop.
  */
 
 public enum Media: Equatable, Hashable {
     
-    case picture(still: Bool, width: Int32, height: Int32, durationUs: Int64
+    case still(width: Int32, height: Int32
+    )
+    case movie(width: Int32, height: Int32, durationUs: Int64
     )
     case sound(durationUs: Int64
     )
@@ -1300,10 +1303,13 @@ public struct FfiConverterTypeMedia: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .picture(still: try FfiConverterBool.read(from: &buf), width: try FfiConverterInt32.read(from: &buf), height: try FfiConverterInt32.read(from: &buf), durationUs: try FfiConverterInt64.read(from: &buf)
+        case 1: return .still(width: try FfiConverterInt32.read(from: &buf), height: try FfiConverterInt32.read(from: &buf)
         )
         
-        case 2: return .sound(durationUs: try FfiConverterInt64.read(from: &buf)
+        case 2: return .movie(width: try FfiConverterInt32.read(from: &buf), height: try FfiConverterInt32.read(from: &buf), durationUs: try FfiConverterInt64.read(from: &buf)
+        )
+        
+        case 3: return .sound(durationUs: try FfiConverterInt64.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -1314,16 +1320,21 @@ public struct FfiConverterTypeMedia: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .picture(still,width,height,durationUs):
+        case let .still(width,height):
             writeInt(&buf, Int32(1))
-            FfiConverterBool.write(still, into: &buf)
+            FfiConverterInt32.write(width, into: &buf)
+            FfiConverterInt32.write(height, into: &buf)
+            
+        
+        case let .movie(width,height,durationUs):
+            writeInt(&buf, Int32(2))
             FfiConverterInt32.write(width, into: &buf)
             FfiConverterInt32.write(height, into: &buf)
             FfiConverterInt64.write(durationUs, into: &buf)
             
         
         case let .sound(durationUs):
-            writeInt(&buf, Int32(2))
+            writeInt(&buf, Int32(3))
             FfiConverterInt64.write(durationUs, into: &buf)
             
         }

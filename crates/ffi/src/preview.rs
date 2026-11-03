@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use cutlass_eval::{NoFonts, ReaderFactory};
+use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_playback::FrameCache;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{Micros, Session};
@@ -54,6 +54,7 @@ impl Preview {
         &mut self,
         session: &Session,
         root: &Path,
+        fonts: &dyn Fonts,
         time: Micros,
     ) -> Result<Picture, FfiError> {
         if time.0 < 0 {
@@ -65,14 +66,7 @@ impl Preview {
         self.cache.set_patient(true);
         let readback = self
             .cache
-            .frame(
-                session,
-                &mut device,
-                time,
-                &self.readers,
-                Some(root),
-                &NoFonts,
-            )
+            .frame(session, &mut device, time, &self.readers, Some(root), fonts)
             .map_err(|error| FfiError::Frame {
                 reason: error.to_string(),
             })?;

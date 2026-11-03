@@ -17,6 +17,7 @@ mod player;
 mod preview;
 mod project;
 mod strip;
+mod text;
 mod timeline;
 
 pub use cache::ResourceCache;
@@ -37,11 +38,12 @@ pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, Strip};
+pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
 
-use cutlass_playback::Program;
+use cutlass_playback::{FaceTable, Program};
 use cutlass_session::{Draft, LinkageSettings, Request, Session};
 use cutlass_store::RepairNote;
 
@@ -76,6 +78,7 @@ pub struct PhoneHost {
     cache: ResourceCache,
     preview: Preview,
     strip: Strip,
+    faces: FaceTable,
 }
 
 impl PhoneHost {
@@ -114,6 +117,7 @@ impl PhoneHost {
             cache,
             preview: Preview::new(),
             strip: Strip::default(),
+            faces: FaceTable::default(),
         })
     }
 
@@ -293,8 +297,81 @@ impl PhoneHost {
 
     /// The composited picture at `time`, reading media from the project folder.
     pub fn frame(&mut self, time: Micros) -> Result<Picture, FfiError> {
-        self.preview
-            .frame(self.commands.session(), self.project.root(), time)
+        self.preview.frame(
+            self.commands.session(),
+            self.project.root(),
+            &self.faces,
+            time,
+        )
+    }
+
+    /// Look for faces in `folders` and the folders below them, replacing any
+    /// found before. Only each file's first bytes are read now.
+    pub fn set_font_folders(&mut self, folders: &[PathBuf]) {
+        self.faces = FaceTable::scan(folders);
+    }
+
+    /// The faces text can be set in, by file name.
+    #[must_use]
+    pub fn fonts(&self) -> Vec<PhoneFont> {
+        text::fonts(self.faces.names())
+    }
+
+    /// Add `content` at `at` in `face`, or in the first face when `face` is
+    /// empty, as one undo step. Returns the new clip's id.
+    pub fn add_text(
+        &mut self,
+        content: &str,
+        face: &str,
+        at: Micros,
+    ) -> Result<SegmentId, FfiError> {
+        let face = if face.is_empty() {
+            self.faces.name()
+        } else {
+            face
+        };
+        if face.is_empty() {
+            return Err(FfiError::Refused {
+                reason: "no fonts were found".to_owned(),
+            });
+        }
+        let (request, segment_id) = text::add_request(self.draft(), content, face, at);
+        self.apply(self.revision(), &[request])?;
+        Ok(segment_id)
+    }
+
+    /// Change what `segment_id` says, as one undo step. Blank words are
+    /// refused; delete the clip instead.
+    pub fn set_text(&mut self, segment_id: &SegmentId, content: &str) -> Result<(), FfiError> {
+        if content.trim().is_empty() {
+            return Err(cutlass_session::EditError::TextEmpty.into());
+        }
+        self.apply(
+            self.revision(),
+            &[Request::SetTextContent {
+                segment_id: segment_id.clone(),
+                content: content.to_owned(),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Set `segment_id` in `face`, as one undo step.
+    pub fn set_text_font(&mut self, segment_id: &SegmentId, face: &str) -> Result<(), FfiError> {
+        self.apply(
+            self.revision(),
+            &[Request::SetTextFont {
+                segment_id: segment_id.clone(),
+                face: face.to_owned(),
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// What `segment_id` says, or `None` when it is not a text clip.
+    #[must_use]
+    pub fn text(&self, segment_id: &SegmentId) -> Option<PhoneText> {
+        text::text_of(self.draft(), segment_id)
     }
 
     /// The rows to draw, top first.
@@ -871,6 +948,94 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
         assert_eq!(host.draft(), &before);
+    }
+
+    /// A folder holding the repo's sample face as `Sample.ttf`.
+    fn font_folder(temp: &Temp) -> PathBuf {
+        let folder = temp.path.join("fonts");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("Sample.ttf"),
+            include_bytes!("../../font/fixtures/sample.ttf"),
+        )
+        .unwrap();
+        folder
+    }
+
+    #[test]
+    fn text_goes_on_a_free_text_row_in_a_found_face_and_draws() {
+        use crate::{Bar, NEW_TEXT_LENGTH, PhoneFont, PhoneText, SegmentId};
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let plain = host.frame(Micros(500_000)).unwrap();
+
+        host.set_font_folders(&[font_folder(&temp)]);
+        assert_eq!(
+            host.fonts(),
+            [PhoneFont {
+                name: "Sample.ttf".to_owned(),
+                label: "Sample".to_owned(),
+            }]
+        );
+        let first = host.add_text("A", "", Micros(0)).unwrap();
+        assert_eq!(
+            host.text(&first),
+            Some(PhoneText {
+                content: "A".to_owned(),
+                face: "Sample.ttf".to_owned(),
+            })
+        );
+        // The sample face has one letter, A.
+        assert!(host.frame(Micros(500_000)).unwrap() != plain);
+
+        // Room after the first clip: same row. Overlapping it: a new row.
+        let after = host.add_text("Later", "", NEW_TEXT_LENGTH).unwrap();
+        let over = host
+            .add_text("Over", "Sample.ttf", Micros(1_000_000))
+            .unwrap();
+        let row_of = |host: &PhoneHost, id: &SegmentId| {
+            host.lanes()
+                .into_iter()
+                .position(|lane| lane.clips.iter().any(|clip| &clip.id == id))
+                .unwrap()
+        };
+        assert_eq!(row_of(&host, &first), row_of(&host, &after));
+        assert_ne!(row_of(&host, &first), row_of(&host, &over));
+        assert_eq!(host.clip_bar(&first), Some(Bar::TextClip));
+
+        host.set_text(&first, "Hello").unwrap();
+        assert_eq!(host.text(&first).unwrap().content, "Hello");
+        host.undo().unwrap();
+        assert_eq!(host.text(&first).unwrap().content, "A");
+    }
+
+    #[test]
+    fn text_without_words_a_face_or_a_text_clip_changes_nothing() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (still, _) = two_stills(&mut host);
+        let before = host.draft().clone();
+        assert!(matches!(
+            host.add_text("Hi", "", Micros(0)),
+            Err(FfiError::Refused { .. })
+        ));
+        host.set_font_folders(&[font_folder(&temp)]);
+        assert!(host.add_text("   ", "", Micros(0)).is_err());
+        assert!(host.add_text("Hi", "../Sample.ttf", Micros(0)).is_err());
+        assert_eq!(host.draft(), &before);
+        assert_eq!(host.text(&still), None);
+
+        let id = host.add_text("Hi", "", Micros(0)).unwrap();
+        let added = host.draft().clone();
+        assert!(host.set_text(&id, " ").is_err());
+        assert!(host.set_text_font(&id, "a/b.ttf").is_err());
+        assert_eq!(host.draft(), &added);
+        host.set_text_font(&id, "Other.ttf").unwrap();
+        assert_eq!(host.text(&id).unwrap().face, "Other.ttf");
     }
 
     #[test]

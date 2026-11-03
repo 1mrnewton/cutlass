@@ -158,6 +158,9 @@ pub(crate) fn ids(draft: &Draft) -> HashSet<String> {
     for audio in &draft.materials.audios {
         taken.insert(audio.id.as_str().to_owned());
     }
+    for text in &draft.materials.texts {
+        taken.insert(text.id.as_str().to_owned());
+    }
     taken
 }
 

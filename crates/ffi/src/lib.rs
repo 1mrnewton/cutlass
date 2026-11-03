@@ -39,7 +39,7 @@ pub use host::Commands;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
-pub use strip::{PhoneFilm, PhoneTick, PhoneTile, Strip};
+pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
 pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
@@ -519,6 +519,19 @@ impl PhoneHost {
             to,
             pixel_size,
             height,
+        )
+    }
+
+    /// The waveforms of the clips with sound that meet `from` to `to`.
+    pub fn waves(&mut self, from: Micros, to: Micros, pixel_size: f64) -> Vec<PhoneWave> {
+        let draft = self.commands.draft();
+        self.strip.waves(
+            draft,
+            self.project.root(),
+            self.preview.readers(),
+            from,
+            to,
+            pixel_size,
         )
     }
 
@@ -1155,6 +1168,77 @@ mod tests {
         assert!(out > 0.0 && out < size);
         assert_eq!(host.zoom(size, f64::NAN, 400.0), size);
         assert_eq!(host.zoom(size, -2.0, 400.0), size);
+    }
+
+    /// A mono 16-bit wave file: `seconds` of a loud tone.
+    fn tone(path: &Path, seconds: u32) {
+        let frames = 48_000 * seconds;
+        let mut bytes = Vec::new();
+        let data = frames * 2;
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&96_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        for frame in 0..frames {
+            let sample = if frame / 50 % 2 == 0 {
+                24_000_i16
+            } else {
+                -24_000
+            };
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_sound_clip_draws_its_waveform_and_a_still_has_none() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (still_clip, _) = two_stills(&mut host);
+        let file = temp.path.join("tone.wav");
+        tone(&file, 1);
+        let material = host.import(&file).unwrap();
+        let sound = host.append(&material).unwrap();
+        let size = 100.0 / 1e6;
+        let ready = |waves: &[crate::PhoneWave]| {
+            waves
+                .iter()
+                .find(|wave| wave.id == sound)
+                .is_some_and(|wave| wave.ready)
+        };
+        let mut waves = host.waves(Micros(0), Micros(3_000_000), size);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready(&waves) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            waves = host.waves(Micros(0), Micros(3_000_000), size);
+        }
+        let wave = waves.iter().find(|wave| wave.id == sound).expect("a wave");
+        assert!(wave.ready && !wave.under_picture && !wave.muted);
+        assert_eq!(wave.first, 0);
+        // A second of sound at 100 points a second.
+        assert_eq!(wave.levels.len(), 100);
+        assert!(wave.levels.iter().all(|level| (0.6..=1.0).contains(level)));
+        assert!(waves.iter().all(|wave| wave.id != still_clip));
+        // Half volume draws half as tall.
+        host.set_volume(&sound, 0.5).unwrap();
+        let half = host.waves(Micros(0), Micros(3_000_000), size);
+        let half = half.iter().find(|wave| wave.id == sound).unwrap();
+        assert!((half.levels[10] - wave.levels[10] / 2.0).abs() < 0.01);
+        // Nothing past the cut, and a bad size draws nothing.
+        assert!(
+            host.waves(Micros(9_000_000), Micros(10_000_000), size)
+                .is_empty()
+        );
+        assert!(host.waves(Micros(0), Micros(1), f64::NAN).is_empty());
     }
 
     #[test]

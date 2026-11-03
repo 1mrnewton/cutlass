@@ -1,10 +1,11 @@
 //! What the phone timeline paints besides the clips: the ruler, the zoom
-//! limits, and each clip's filmstrip.
+//! limits, each clip's filmstrip, and its waveform.
 //!
 //! The phone works in points and microseconds. A pixel size is points per
 //! microsecond. Filmstrip pictures come from a worker that starts with the
 //! first ask; a tile whose picture is not stored yet says so, and the phone
-//! asks again a moment later.
+//! asks again a moment later. Waveforms come from a second worker the same
+//! way, through the code the desktop draws its waves with.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,7 +13,7 @@ use std::path::Path;
 use cutlass_editor::{Zoom, ZoomBounds, ruler_ticks};
 use cutlass_eval::ReaderFactory;
 use cutlass_model::{Draft, FrameRate, TrackType};
-use cutlass_playback::{ThumbKey, Thumbnails, film_cells};
+use cutlass_playback::{ThumbKey, Thumbnails, Waveforms, clip_wave, film_cells};
 use cutlass_session::{Micros, SegmentId};
 
 use crate::preview::Picture;
@@ -40,6 +41,21 @@ pub struct PhoneTile {
 pub struct PhoneFilm {
     pub id: SegmentId,
     pub tiles: Vec<PhoneTile>,
+}
+
+/// One clip's sound over the columns asked for: a level, 0 to 1, per
+/// point from `first`, points from the clip's left edge, at the clip's
+/// volume. `ready` is false while the file is still being read, so the
+/// phone asks again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhoneWave {
+    pub id: SegmentId,
+    pub first: u32,
+    pub levels: Vec<f32>,
+    /// The sound of a video clip, drawn in a band over its picture's foot.
+    pub under_picture: bool,
+    pub muted: bool,
+    pub ready: bool,
 }
 
 /// How much closer a phone's labels sit than the desktop's. The editor
@@ -81,6 +97,7 @@ pub fn zoom(draft: &Draft, pixel_size: f64, factor: f64, lane_width: f64) -> f64
 pub struct Strip {
     thumbnails: Option<Thumbnails>,
     keys: HashMap<String, ThumbKey>,
+    waveforms: Option<Waveforms>,
 }
 
 impl Strip {
@@ -170,10 +187,66 @@ impl Strip {
         })
     }
 
-    /// Stop decoding tiles while playing, or carry on.
+    /// The waveform of every clip with sound that meets `from` to `to`, one
+    /// level per point at `pixel_size`, over the part inside that window.
+    /// Files not read yet are asked for, and their clips say so.
+    pub fn waves(
+        &mut self,
+        draft: &Draft,
+        project: &Path,
+        readers: &ReaderFactory,
+        from: Micros,
+        to: Micros,
+        pixel_size: f64,
+    ) -> Vec<PhoneWave> {
+        if !pixel_size.is_finite() || pixel_size <= 0.0 || to.0 < from.0 {
+            return Vec::new();
+        }
+        let waveforms = self
+            .waveforms
+            .get_or_insert_with(|| Waveforms::start(readers.clone(), || {}));
+        let mut asks = Vec::new();
+        let mut waves = Vec::new();
+        for segment in draft.tracks.iter().flat_map(|track| &track.segments) {
+            let start = segment.target.start.0;
+            let end = start.saturating_add(segment.target.duration.0);
+            if end < from.0 || start > to.0 {
+                continue;
+            }
+            let points = |time: i64| (time - start) as f64 * pixel_size;
+            let asked = asks.len();
+            let Some(wave) = clip_wave(
+                draft,
+                Some(project),
+                waveforms,
+                &segment.id,
+                pixel_size,
+                points(end),
+                points(from.0)..points(to.0),
+                &mut asks,
+            ) else {
+                continue;
+            };
+            waves.push(PhoneWave {
+                id: segment.id.clone(),
+                first: wave.first,
+                levels: wave.levels,
+                under_picture: wave.under_picture,
+                muted: wave.muted,
+                ready: asks.len() == asked,
+            });
+        }
+        waveforms.want(asks);
+        waves
+    }
+
+    /// Stop decoding tiles and sound while playing, or carry on.
     pub fn set_paused(&self, paused: bool) {
         if let Some(thumbnails) = self.thumbnails.as_ref() {
             thumbnails.set_paused(paused);
+        }
+        if let Some(waveforms) = self.waveforms.as_ref() {
+            waveforms.set_paused(paused);
         }
     }
 }

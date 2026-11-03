@@ -29,6 +29,8 @@ final class EditorModel {
     /// Ruler ticks and filmstrip tiles for the window around the playhead.
     private(set) var ticks: [Tick] = []
     private(set) var films: [String: [Tile]] = [:]
+    /// Each clip's sound over the window read, by clip id.
+    private(set) var waves: [String: Wave] = [:]
     /// Filmstrip pictures by tile key.
     private(set) var thumbs: [String: CGImage] = [:]
 
@@ -353,6 +355,8 @@ final class EditorModel {
             let read = try editor.film(
                 fromUs: wide.from, toUs: wide.to, pixelSize: pixelSize, height: Self.filmHeight)
             films = Dictionary(read.map { ($0.clipId, $0.tiles) }, uniquingKeysWith: { a, _ in a })
+            let sound = try editor.waves(fromUs: wide.from, toUs: wide.to, pixelSize: pixelSize)
+            waves = Dictionary(sound.map { ($0.clipId, $0) }, uniquingKeysWith: { a, _ in a })
         } catch {
             show(error)
             return
@@ -382,7 +386,7 @@ final class EditorModel {
         }
         if thumbs.count > 600 { thumbs.removeAll() }
         stripRetry?.cancel()
-        if tiles.contains(where: { !$0.ready }) {
+        if tiles.contains(where: { !$0.ready }) || waves.values.contains(where: { !$0.ready }) {
             stripRetry = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled, let self else { return }

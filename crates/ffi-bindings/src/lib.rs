@@ -104,6 +104,18 @@ pub struct Tile {
     pub ready: bool,
 }
 
+/// One clip's sound: a level, 0 to 1, per point from `first`, points from
+/// the clip's left edge. `ready` is false while the file is still read.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Wave {
+    pub clip_id: String,
+    pub first: u32,
+    pub levels: Vec<f32>,
+    pub under_picture: bool,
+    pub muted: bool,
+    pub ready: bool,
+}
+
 /// The filmstrip tiles of one clip.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Film {
@@ -757,6 +769,27 @@ impl Editor {
     }
 
     /// The picture of a tile [`Self::film`] named, once stored.
+    /// The waveforms of the clips with sound from `from_us` to `to_us`.
+    pub fn waves(
+        &self,
+        from_us: i64,
+        to_us: i64,
+        pixel_size: f64,
+    ) -> Result<Vec<Wave>, EditorError> {
+        let waves = self.run(move |host| host.waves(Micros(from_us), Micros(to_us), pixel_size))?;
+        Ok(waves
+            .into_iter()
+            .map(|wave| Wave {
+                clip_id: wave.id.as_str().to_owned(),
+                first: wave.first,
+                levels: wave.levels,
+                under_picture: wave.under_picture,
+                muted: wave.muted,
+                ready: wave.ready,
+            })
+            .collect())
+    }
+
     pub fn thumb(&self, key: String) -> Result<Option<Frame>, EditorError> {
         let picture = self.run(move |host| host.thumb(&key))?;
         Ok(picture.map(|picture| Frame {

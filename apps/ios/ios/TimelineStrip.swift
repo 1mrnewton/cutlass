@@ -165,7 +165,7 @@ struct TimelineStrip: View {
         let moved = moving?.id == clip.id ? moving?.offset ?? .zero : .zero
         return ClipBlock(
             clip: clip, kind: lane.kind, selected: selected, height: height,
-            tiles: model.films[clip.id] ?? [], thumbs: model.thumbs,
+            tiles: model.films[clip.id] ?? [], thumbs: model.thumbs, wave: model.waves[clip.id],
             trimmedLeft: trimming?.id == clip.id && trimming?.startEdge == true
                 ? min(trimming?.dx ?? 0, x(clip.durationUs) - 4) : 0
         )
@@ -394,8 +394,12 @@ struct ClipBlock: View {
     let height: CGFloat
     let tiles: [Tile]
     let thumbs: [String: CGImage]
+    let wave: Wave?
     /// Points cut off the left while the start edge is dragged.
     let trimmedLeft: CGFloat
+
+    /// The band a video's sound draws in over the foot of its picture.
+    static let band: CGFloat = 16
 
     var body: some View {
         RoundedRectangle(cornerRadius: 6)
@@ -412,6 +416,7 @@ struct ClipBlock: View {
                     film
                 }
             }
+            .overlay(alignment: .bottomLeading) { sound }
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
@@ -436,6 +441,32 @@ struct ClipBlock: View {
                 .clipped()
                 .offset(x: tile.left - trimmedLeft)
             }
+        }
+    }
+
+    /// The clip's waveform: bars from the middle of an audio clip, from the
+    /// foot of a video's band. Dim when the row is muted.
+    @ViewBuilder
+    private var sound: some View {
+        if let wave, !wave.levels.isEmpty {
+            let under = wave.underPicture
+            let tall = under ? Self.band : height
+            Canvas { context, size in
+                var path = Path()
+                let left = CGFloat(wave.first) - trimmedLeft
+                for (index, level) in wave.levels.enumerated() {
+                    let x = left + CGFloat(index)
+                    guard x >= -1, x <= size.width else { continue }
+                    let bar = max(CGFloat(level) * (under ? size.height - 2 : size.height * 0.8), 1)
+                    let top = under ? size.height - bar : (size.height - bar) / 2
+                    path.addRect(CGRect(x: x, y: top, width: 1, height: bar))
+                }
+                context.fill(path, with: .color(.white.opacity(wave.muted ? 0.25 : 0.7)))
+            }
+            .frame(height: tall)
+            .background(under ? Color.black.opacity(0.45) : Color.clear)
+        } else if let wave, wave.underPicture {
+            Color.black.opacity(0.45).frame(height: Self.band)
         }
     }
 

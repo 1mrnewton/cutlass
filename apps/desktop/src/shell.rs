@@ -76,21 +76,7 @@ pub const NOTICE_FADE: Duration = Duration::from_millis(160);
 /// The shortest time between two automatic writes of the project.
 pub const AUTOSAVE_GAP: Duration = Duration::from_millis(500);
 
-/// A clip's waveform over its visible pixel columns.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClipWave {
-    /// The first column, pixels from the clip's left edge.
-    pub first: u32,
-    /// One level, 0 to 1, per column.
-    pub levels: Vec<f32>,
-    /// The clip's gain at each column, its volume keyframes applied: 1 is
-    /// the file as recorded.
-    pub gains: Vec<f32>,
-    /// The sound of a video clip, drawn in a band under its picture.
-    pub under_picture: bool,
-    /// The clip's track is muted, or silenced by another track's solo.
-    pub muted: bool,
-}
+pub use cutlass_playback::ClipWave;
 
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
@@ -644,73 +630,16 @@ impl Shell {
     ) -> Option<ClipWave> {
         let waveforms = self.waveforms.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
-        let (track, segment) = draft.tracks.iter().find_map(|track| {
-            track
-                .segments
-                .iter()
-                .find(|segment| &segment.id == id)
-                .map(|segment| (track, segment))
-        })?;
-        let muted = track.attribute.contains(TrackAttribute::MUTE)
-            || track.attribute.contains(TrackAttribute::MUTE_BY_SOLO);
-        let under_picture = match draft.materials.get(segment.material_id.as_str()) {
-            Some(MaterialRef::Audio(_)) => false,
-            Some(MaterialRef::Video(video)) if video.kind != MetaType::Photo.as_str() => true,
-            _ => return None,
-        };
-        let path = self.media_file(cutlass_engine::media_path(draft, segment))?;
-        let map = cutlass_engine::placement_of(draft, segment).ok()?;
-        let Some(peaks) = waveforms.get(&path) else {
-            self.wave_asks.push(path);
-            // Hold a video's band open while it is read, so the filmstrip
-            // does not jump when the sound arrives.
-            return under_picture.then(|| ClipWave {
-                first: 0,
-                levels: Vec::new(),
-                gains: Vec::new(),
-                under_picture,
-                muted,
-            });
-        };
-        if !peaks.complete {
-            self.wave_asks.push(path);
-        } else if peaks.levels.is_empty() {
-            return None;
-        }
-        let pixel_size = self.pixel_size;
-        let usable = |value: f64| value.is_finite() && value > 0.0;
-        if !usable(pixel_size) || !usable(clip_width) {
-            return None;
-        }
-        let first = visible.start.max(0.0).floor();
-        let last = visible.end.min(clip_width).ceil();
-        let start = segment.target.start.0;
-        let end = segment.target.end().0.saturating_sub(1).max(start);
-        let at = |x: f64| {
-            let time = Micros((start as f64 + x / pixel_size) as i64).min(Micros(end));
-            cutlass_engine::map_timeline(&map, time).ok()
-        };
-        let mut levels = Vec::new();
-        let mut gains = Vec::new();
-        let mut x = first;
-        while x < last && levels.len() < 16_384 {
-            let level = match (at(x), at(x + 1.0)) {
-                (Some(from), Some(to)) => peaks.level(from, to),
-                _ => 0.0,
-            };
-            let offset = Micros((x / pixel_size) as i64);
-            let gain = cutlass_engine::clip_volume(segment, offset).max(0.0) as f32;
-            levels.push((level * gain).min(1.0));
-            gains.push(gain);
-            x += 1.0;
-        }
-        Some(ClipWave {
-            first: first as u32,
-            levels,
-            gains,
-            under_picture,
-            muted,
-        })
+        cutlass_playback::clip_wave(
+            draft,
+            self.path.as_deref(),
+            waveforms,
+            id,
+            self.pixel_size,
+            clip_width,
+            visible,
+            &mut self.wave_asks,
+        )
     }
 
     /// The library poster of material `id`: a thumbnail of its first frame,

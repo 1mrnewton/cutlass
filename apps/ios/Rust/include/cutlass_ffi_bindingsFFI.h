@@ -413,6 +413,11 @@ int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_trim(uint64_t ptr, RustBuff
 void uniffi_cutlass_ffi_bindings_fn_method_editor_undo(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_WAVES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_WAVES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_waves(uint64_t ptr, int64_t from_us, int64_t to_us, double pixel_size, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ZOOM
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ZOOM
 double uniffi_cutlass_ffi_bindings_fn_method_editor_zoom(uint64_t ptr, double pixel_size, double factor, double lane_width, RustCallStatus *_Nonnull out_status
@@ -972,6 +977,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_trim(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_UNDO
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_UNDO
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_undo(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_WAVES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_WAVES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_waves(void
     
 );
 #endif

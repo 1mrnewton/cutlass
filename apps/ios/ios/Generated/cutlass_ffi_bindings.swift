@@ -497,6 +497,22 @@ fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
+    typealias FfiType = Float
+    typealias SwiftType = Float
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
+        return try lift(readFloat(&buf))
+    }
+
+    public static func write(_ value: Float, into buf: inout [UInt8]) {
+        writeFloat(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
     typealias FfiType = Double
     typealias SwiftType = Double
@@ -745,9 +761,6 @@ public protocol EditorProtocol: AnyObject, Sendable {
      */
     func text(clipId: String) throws  -> TextInfo?
     
-    /**
-     * The picture of a tile [`Self::film`] named, once stored.
-     */
     func thumb(key: String) throws  -> Frame?
     
     /**
@@ -763,6 +776,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
     
     func undo() throws 
+    
+    /**
+     * The picture of a tile [`Self::film`] named, once stored.
+     * The waveforms of the clips with sound from `from_us` to `to_us`.
+     */
+    func waves(fromUs: Int64, toUs: Int64, pixelSize: Double) throws  -> [Wave]
     
     /**
      * `pixel_size` times `factor`, held inside what the cut and a row
@@ -1196,9 +1215,6 @@ open func text(clipId: String)throws  -> TextInfo?  {
 })
 }
     
-    /**
-     * The picture of a tile [`Self::film`] named, once stored.
-     */
 open func thumb(key: String)throws  -> Frame?  {
     return try  FfiConverterOptionTypeFrame.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
@@ -1247,6 +1263,22 @@ open func undo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * The picture of a tile [`Self::film`] named, once stored.
+     * The waveforms of the clips with sound from `from_us` to `to_us`.
+     */
+open func waves(fromUs: Int64, toUs: Int64, pixelSize: Double)throws  -> [Wave]  {
+    return try  FfiConverterSequenceTypeWave.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_waves(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(fromUs),
+        FfiConverterInt64.lower(toUs),
+        FfiConverterDouble.lower(pixelSize),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -2018,6 +2050,80 @@ public func FfiConverterTypeToolItem_lower(_ value: ToolItem) -> RustBuffer {
 
 
 /**
+ * One clip's sound: a level, 0 to 1, per point from `first`, points from
+ * the clip's left edge. `ready` is false while the file is still read.
+ */
+public struct Wave: Equatable, Hashable {
+    public var clipId: String
+    public var first: UInt32
+    public var levels: [Float]
+    public var underPicture: Bool
+    public var muted: Bool
+    public var ready: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(clipId: String, first: UInt32, levels: [Float], underPicture: Bool, muted: Bool, ready: Bool) {
+        self.clipId = clipId
+        self.first = first
+        self.levels = levels
+        self.underPicture = underPicture
+        self.muted = muted
+        self.ready = ready
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Wave: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWave: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Wave {
+        return
+            try Wave(
+                clipId: FfiConverterString.read(from: &buf), 
+                first: FfiConverterUInt32.read(from: &buf), 
+                levels: FfiConverterSequenceFloat.read(from: &buf), 
+                underPicture: FfiConverterBool.read(from: &buf), 
+                muted: FfiConverterBool.read(from: &buf), 
+                ready: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Wave, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.clipId, into: &buf)
+        FfiConverterUInt32.write(value.first, into: &buf)
+        FfiConverterSequenceFloat.write(value.levels, into: &buf)
+        FfiConverterBool.write(value.underPicture, into: &buf)
+        FfiConverterBool.write(value.muted, into: &buf)
+        FfiConverterBool.write(value.ready, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWave_lift(_ buf: RustBuffer) throws -> Wave {
+    return try FfiConverterTypeWave.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWave_lower(_ value: Wave) -> RustBuffer {
+    return FfiConverterTypeWave.lower(value)
+}
+
+
+/**
  * Why a call left the project as it was.
  */
 public 
@@ -2729,6 +2835,31 @@ fileprivate struct FfiConverterOptionTypeToolBar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
+    typealias SwiftType = [Float]
+
+    public static func write(_ value: [Float], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterFloat.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Float] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Float]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterFloat.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2971,6 +3102,31 @@ fileprivate struct FfiConverterSequenceTypeToolItem: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeToolItem.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWave: FfiConverterRustBuffer {
+    typealias SwiftType = [Wave]
+
+    public static func write(_ value: [Wave], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWave.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Wave] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Wave]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWave.read(from: &buf))
         }
         return seq
     }
@@ -3220,7 +3376,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text() != 30726) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 28776) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 22426) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
@@ -3230,6 +3386,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_waves() != 4586) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_zoom() != 36237) {

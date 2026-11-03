@@ -809,8 +809,10 @@ dependencies = [
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-playback",
  "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
 ]
 

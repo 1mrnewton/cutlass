@@ -13,6 +13,7 @@
 mod config;
 mod run;
 mod sidecars;
+mod sound;
 
 pub use config::{
     AudioExport, ExportError, ExportRequest, GIF_LONG_SIDES, MAX_FRAMES, SidecarKind,
@@ -22,3 +23,4 @@ pub use run::{
     ExportResult, ExportRun, ExportedFrame, export, frame_indexes, same_software_pixels,
 };
 pub use sidecars::{sidecar_text, write_sidecar};
+pub use sound::file_audio;

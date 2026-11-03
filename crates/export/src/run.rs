@@ -1411,6 +1411,123 @@ mod tests {
         samples_of(audio)
     }
 
+    fn wav_readers() -> ReaderFactory {
+        fn open_wav(
+            path: &std::path::Path,
+        ) -> Result<Box<dyn cutlass_container::Demux>, cutlass_container::OpenError> {
+            let file = std::fs::File::open(path).map_err(|error| {
+                cutlass_container::OpenError::Source {
+                    message: error.to_string(),
+                }
+            })?;
+            let length = file
+                .metadata()
+                .map_err(|error| cutlass_container::OpenError::Source {
+                    message: error.to_string(),
+                })?
+                .len();
+            Ok(Box::new(cutlass_riff::WavDemux::open(file, length)?))
+        }
+        let mut readers = ReaderFactory::new();
+        readers.register_container(cutlass_riff::probe, open_wav);
+        cutlass_pcm::register_decoders(readers.decoders_mut());
+        readers
+    }
+
+    /// One second of mono 16-bit PCM at 48 kHz, every sample `value`.
+    fn write_wav(path: &std::path::Path, value: i16) {
+        let rate = 48_000_u32;
+        let payload: Vec<u8> = std::iter::repeat_n(value.to_le_bytes(), 48_000)
+            .flatten()
+            .collect();
+        let data = u32::try_from(payload.len()).expect("size");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        std::fs::write(path, bytes).expect("wav");
+    }
+
+    fn file_audio_samples(draft: &Draft, root: &std::path::Path) -> Vec<f32> {
+        let mut request = gif_request(TimeRange::new(0, 2_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        let readers = wav_readers();
+        let result = export(
+            ExportRun {
+                draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: &readers,
+                mux: &mut mux,
+                destination: None,
+                root: Some(root),
+                fonts: &cutlass_eval::NoFonts,
+            },
+            crate::file_audio(&readers, draft, Some(root)),
+        )
+        .expect("export");
+        result
+            .finished
+            .packets()
+            .iter()
+            .filter(|packet| packet.stream() == 1)
+            .flat_map(samples_of)
+            .collect()
+    }
+
+    #[test]
+    fn file_audio_reads_each_clip_from_the_project_and_a_path_outside_is_silent() {
+        let root =
+            std::env::temp_dir().join(format!("cutlass-export-sound-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("root");
+        write_wav(&root.join("tone.wav"), 16_384);
+        let mut draft = color_draft(240, 135, 1_000_000);
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone.wav".to_owned(),
+            duration: Micros(1_000_000),
+            ..cutlass_model::MaterialAudio::default()
+        });
+        push_sound(&mut draft, "tone", 1.0, 0, false);
+        draft.tracks.last_mut().expect("audio").segments[0].source_range =
+            Some(TimeRange::new(0, 1_000_000));
+        let before = draft.clone();
+        let samples = file_audio_samples(&draft, &root);
+        assert_eq!(samples.len(), 8, "two frames of 4 kHz audio");
+        for sample in &samples {
+            assert!((sample - 0.5).abs() < 0.01, "{samples:?}");
+        }
+        assert_eq!(draft, before);
+
+        draft.materials.audios[0].path = "../tone.wav".to_owned();
+        let escaped = file_audio_samples(&draft, &root);
+        assert_eq!(escaped, vec![0.0; 8]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn each_clip_is_asked_for_its_sound_at_the_frame_time() {
         let mut request = gif_request(TimeRange::new(0, 3_000));

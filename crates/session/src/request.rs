@@ -189,6 +189,31 @@ pub enum Request {
     },
     /// Store the face file name on a text clip.
     SetTextFont { segment_id: SegmentId, face: String },
+    /// Ring the letters in `color`, `width` ems wide. An empty color
+    /// takes the outline off.
+    SetTextOutline {
+        segment_id: SegmentId,
+        color: String,
+        width: f64,
+    },
+    /// Cast a shadow in `color`, `distance` hundredths of an em toward
+    /// `angle` degrees, blurred by `blur` from 0 to 1. An empty color takes
+    /// the shadow off.
+    SetTextShadow {
+        segment_id: SegmentId,
+        color: String,
+        distance: f64,
+        angle: f64,
+        blur: f64,
+    },
+    /// Fill a box behind the letters in `color` at `alpha`, its corners
+    /// rounded by `round` from 0 to 1. An empty color takes the box off.
+    SetTextBackground {
+        segment_id: SegmentId,
+        color: String,
+        alpha: f64,
+        round: f64,
+    },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {

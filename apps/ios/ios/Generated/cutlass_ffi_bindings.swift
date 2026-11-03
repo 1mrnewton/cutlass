@@ -851,6 +851,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func stagePick(atUs: Int64, x: Double, y: Double) throws  -> String?
     
     /**
+     * Change how a title looks. Changes made while `live` join one undo
+     * step, so a slider drag is one step; its last change passes `live`
+     * false, and so does a single tap.
+     */
+    func styleText(clipId: String, change: TextStyleChange, live: Bool) throws 
+    
+    /**
      * What a text clip says, or `None` when it is not a text clip.
      */
     func text(clipId: String) throws  -> TextInfo?
@@ -1440,6 +1447,22 @@ open func stagePick(atUs: Int64, x: Double, y: Double)throws  -> String?  {
         FfiConverterDouble.lower(y),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Change how a title looks. Changes made while `live` join one undo
+     * step, so a slider drag is one step; its last change passes `live`
+     * false, and so does a single tap.
+     */
+open func styleText(clipId: String, change: TextStyleChange, live: Bool)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_style_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterTypeTextStyleChange_lower(change),
+        FfiConverterBool.lower(live),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -2565,17 +2588,19 @@ public func FfiConverterTypeStage_lower(_ value: Stage) -> RustBuffer {
 
 
 /**
- * What a text clip says and the face it says it in.
+ * What a text clip says, the face it says it in, and how it looks.
  */
 public struct TextInfo: Equatable, Hashable {
     public var content: String
     public var face: String
+    public var style: TextStyle
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(content: String, face: String) {
+    public init(content: String, face: String, style: TextStyle) {
         self.content = content
         self.face = face
+        self.style = style
     }
 
     
@@ -2595,13 +2620,15 @@ public struct FfiConverterTypeTextInfo: FfiConverterRustBuffer {
         return
             try TextInfo(
                 content: FfiConverterString.read(from: &buf), 
-                face: FfiConverterString.read(from: &buf)
+                face: FfiConverterString.read(from: &buf), 
+                style: FfiConverterTypeTextStyle.read(from: &buf)
         )
     }
 
     public static func write(_ value: TextInfo, into buf: inout [UInt8]) {
         FfiConverterString.write(value.content, into: &buf)
         FfiConverterString.write(value.face, into: &buf)
+        FfiConverterTypeTextStyle.write(value.style, into: &buf)
     }
 }
 
@@ -2618,6 +2645,96 @@ public func FfiConverterTypeTextInfo_lift(_ buf: RustBuffer) throws -> TextInfo 
 #endif
 public func FfiConverterTypeTextInfo_lower(_ value: TextInfo) -> RustBuffer {
     return FfiConverterTypeTextInfo.lower(value)
+}
+
+
+/**
+ * How a title looks. A part with an empty color is off. Widths and
+ * distances are in ems and hundredths of an em; the rest are 0 to 1.
+ */
+public struct TextStyle: Equatable, Hashable {
+    public var size: Double
+    public var color: String
+    public var outlineColor: String
+    public var outlineWidth: Double
+    public var shadowColor: String
+    public var shadowDistance: Double
+    public var shadowBlur: Double
+    public var backgroundColor: String
+    public var backgroundAlpha: Double
+    public var backgroundRound: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(size: Double, color: String, outlineColor: String, outlineWidth: Double, shadowColor: String, shadowDistance: Double, shadowBlur: Double, backgroundColor: String, backgroundAlpha: Double, backgroundRound: Double) {
+        self.size = size
+        self.color = color
+        self.outlineColor = outlineColor
+        self.outlineWidth = outlineWidth
+        self.shadowColor = shadowColor
+        self.shadowDistance = shadowDistance
+        self.shadowBlur = shadowBlur
+        self.backgroundColor = backgroundColor
+        self.backgroundAlpha = backgroundAlpha
+        self.backgroundRound = backgroundRound
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TextStyle: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextStyle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextStyle {
+        return
+            try TextStyle(
+                size: FfiConverterDouble.read(from: &buf), 
+                color: FfiConverterString.read(from: &buf), 
+                outlineColor: FfiConverterString.read(from: &buf), 
+                outlineWidth: FfiConverterDouble.read(from: &buf), 
+                shadowColor: FfiConverterString.read(from: &buf), 
+                shadowDistance: FfiConverterDouble.read(from: &buf), 
+                shadowBlur: FfiConverterDouble.read(from: &buf), 
+                backgroundColor: FfiConverterString.read(from: &buf), 
+                backgroundAlpha: FfiConverterDouble.read(from: &buf), 
+                backgroundRound: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TextStyle, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.size, into: &buf)
+        FfiConverterString.write(value.color, into: &buf)
+        FfiConverterString.write(value.outlineColor, into: &buf)
+        FfiConverterDouble.write(value.outlineWidth, into: &buf)
+        FfiConverterString.write(value.shadowColor, into: &buf)
+        FfiConverterDouble.write(value.shadowDistance, into: &buf)
+        FfiConverterDouble.write(value.shadowBlur, into: &buf)
+        FfiConverterString.write(value.backgroundColor, into: &buf)
+        FfiConverterDouble.write(value.backgroundAlpha, into: &buf)
+        FfiConverterDouble.write(value.backgroundRound, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextStyle_lift(_ buf: RustBuffer) throws -> TextStyle {
+    return try FfiConverterTypeTextStyle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextStyle_lower(_ value: TextStyle) -> RustBuffer {
+    return FfiConverterTypeTextStyle.lower(value)
 }
 
 
@@ -3164,6 +3281,116 @@ public func FfiConverterTypeLaneKind_lift(_ buf: RustBuffer) throws -> LaneKind 
 #endif
 public func FfiConverterTypeLaneKind_lower(_ value: LaneKind) -> RustBuffer {
     return FfiConverterTypeLaneKind.lower(value)
+}
+
+
+
+/**
+ * One change to a title's look. See [`TextStyle`] for the units.
+ */
+
+public enum TextStyleChange: Equatable, Hashable {
+    
+    case size(size: Double
+    )
+    case color(color: String
+    )
+    case outline(color: String, width: Double
+    )
+    case shadow(color: String, distance: Double, blur: Double
+    )
+    case background(color: String, alpha: Double, round: Double
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension TextStyleChange: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextStyleChange: FfiConverterRustBuffer {
+    typealias SwiftType = TextStyleChange
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextStyleChange {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .size(size: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 2: return .color(color: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .outline(color: try FfiConverterString.read(from: &buf), width: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 4: return .shadow(color: try FfiConverterString.read(from: &buf), distance: try FfiConverterDouble.read(from: &buf), blur: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 5: return .background(color: try FfiConverterString.read(from: &buf), alpha: try FfiConverterDouble.read(from: &buf), round: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TextStyleChange, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .size(size):
+            writeInt(&buf, Int32(1))
+            FfiConverterDouble.write(size, into: &buf)
+            
+        
+        case let .color(color):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(color, into: &buf)
+            
+        
+        case let .outline(color,width):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(width, into: &buf)
+            
+        
+        case let .shadow(color,distance,blur):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(distance, into: &buf)
+            FfiConverterDouble.write(blur, into: &buf)
+            
+        
+        case let .background(color,alpha,round):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(alpha, into: &buf)
+            FfiConverterDouble.write(round, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextStyleChange_lift(_ buf: RustBuffer) throws -> TextStyleChange {
+    return try FfiConverterTypeTextStyleChange.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextStyleChange_lower(_ value: TextStyleChange) -> RustBuffer {
+    return FfiConverterTypeTextStyleChange.lower(value)
 }
 
 
@@ -4426,6 +4653,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick() != 22121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_style_text() != 8659) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text() != 30726) {

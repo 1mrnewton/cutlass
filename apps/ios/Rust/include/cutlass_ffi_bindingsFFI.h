@@ -454,6 +454,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage_move(uint64_t ptr,
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage_pick(uint64_t ptr, int64_t at_us, double x, double y, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STYLE_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STYLE_TEXT
+void uniffi_cutlass_ffi_bindings_fn_method_editor_style_text(uint64_t ptr, RustBuffer clip_id, RustBuffer change, int8_t live, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TEXT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_text(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
@@ -1156,6 +1161,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_move(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_PICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_PICK
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STYLE_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STYLE_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_style_text(void
     
 );
 #endif

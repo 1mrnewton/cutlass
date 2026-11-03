@@ -141,6 +141,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
         EditError::TextFont => "the face is not a file name".to_owned(),
+        EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
         EditError::TextEmpty => "type something to add text".to_owned(),
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
         EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),

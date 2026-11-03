@@ -118,6 +118,8 @@ pub enum EditError {
     LineWidth,
     /// The face is empty or is not a file name.
     TextFont,
+    /// An outline, shadow, or background amount is out of its range.
+    TextStyle,
     /// A new text clip needs something to say.
     TextEmpty,
     /// The effect is not one the app ships.
@@ -266,6 +268,24 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
         } => text::set_line_width(draft, segment_id, *width, face),
         Request::SetTextFont { segment_id, face } => text::set_text_font(draft, segment_id, face),
+        Request::SetTextOutline {
+            segment_id,
+            color,
+            width,
+        } => text::set_text_outline(draft, segment_id, color, *width),
+        Request::SetTextShadow {
+            segment_id,
+            color,
+            distance,
+            angle,
+            blur,
+        } => text::set_text_shadow(draft, segment_id, color, [*distance, *angle, *blur]),
+        Request::SetTextBackground {
+            segment_id,
+            color,
+            alpha,
+            round,
+        } => text::set_text_background(draft, segment_id, color, *alpha, *round),
         Request::AddText {
             track_id,
             segment_id,

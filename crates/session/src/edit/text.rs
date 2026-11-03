@@ -218,6 +218,104 @@ pub fn set_text_font(
     Ok(())
 }
 
+/// The widest outline, in ems.
+pub const MAX_OUTLINE: f64 = 0.25;
+/// The farthest shadow, in hundredths of an em.
+pub const MAX_SHADOW_DISTANCE: f64 = 100.0;
+/// Room around the letters a new background box gets, in ems.
+const BACKGROUND_PAD: (f64, f64) = (0.2, 0.1);
+
+/// Ring the letters in `color`, `width` ems wide, fully opaque. An empty
+/// color takes the outline off and keeps the width.
+pub fn set_text_outline(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    color: &str,
+    width: f64,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    let color = style_color(color)?;
+    if !(0.0..=MAX_OUTLINE).contains(&width) {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.border_color = color.to_owned();
+    text.border_width = width;
+    if !color.is_empty() {
+        text.border_alpha = 1.0;
+    }
+    Ok(())
+}
+
+/// Cast a shadow in `color`. `shape` is the distance in hundredths of an
+/// em, the angle in degrees, and the blur from 0 to 1. An empty color takes
+/// the shadow off and keeps the rest. A shadow with no opacity yet is made
+/// nearly opaque.
+pub fn set_text_shadow(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    color: &str,
+    shape: [f64; 3],
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    let color = style_color(color)?;
+    let [distance, angle, blur] = shape;
+    if !(0.0..=MAX_SHADOW_DISTANCE).contains(&distance)
+        || !angle.is_finite()
+        || !(0.0..=1.0).contains(&blur)
+    {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.has_shadow = !color.is_empty();
+    if !color.is_empty() {
+        text.shadow_color = color.to_owned();
+        if text.shadow_alpha <= 0.0 {
+            text.shadow_alpha = 0.9;
+        }
+    }
+    text.shadow_distance = distance;
+    text.shadow_angle = angle;
+    text.shadow_smoothing = blur;
+    Ok(())
+}
+
+/// Fill a box behind the letters in `color` at `alpha` from 0 to 1, its
+/// corners rounded by `round` from 0 to 1. An empty color takes the box
+/// off. A box with no room around the letters yet gets some.
+pub fn set_text_background(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    color: &str,
+    alpha: f64,
+    round: f64,
+) -> Result<(), EditError> {
+    let index = text_index(draft, segment_id)?;
+    let color = style_color(color)?;
+    if !(0.0..=1.0).contains(&alpha) || !(0.0..=1.0).contains(&round) {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.background_style = i32::from(!color.is_empty());
+    text.background_color = color.to_owned();
+    text.background_alpha = alpha;
+    text.background_round_radius = round;
+    if !color.is_empty() && text.background_width <= 0.0 && text.background_height <= 0.0 {
+        (text.background_width, text.background_height) = BACKGROUND_PAD;
+    }
+    Ok(())
+}
+
+/// A trimmed color that is empty or hex.
+fn style_color(color: &str) -> Result<&str, EditError> {
+    let color = color.trim();
+    if color.is_empty() || hex_color(color) {
+        Ok(color)
+    } else {
+        Err(EditError::TextColor)
+    }
+}
+
 fn face_file(face: &str) -> bool {
     !face.is_empty() && face.len() <= 255 && !face.contains(['/', '\\', '\0'])
 }
@@ -282,6 +380,87 @@ mod tests {
             .segments
             .push(Segment::new("a", "caption", TimeRange::new(0, 1_000_000)));
         Session::open(draft)
+    }
+
+    #[test]
+    fn outline_shadow_and_background_go_on_and_come_off() {
+        let mut session = open();
+        let outline = |color: &str, width: f64| Request::SetTextOutline {
+            segment_id: "a".into(),
+            color: color.to_owned(),
+            width,
+        };
+        let shadow = |color: &str| Request::SetTextShadow {
+            segment_id: "a".into(),
+            color: color.to_owned(),
+            distance: 8.0,
+            angle: -45.0,
+            blur: 0.4,
+        };
+        let background = |color: &str, alpha: f64| Request::SetTextBackground {
+            segment_id: "a".into(),
+            color: color.to_owned(),
+            alpha,
+            round: 0.5,
+        };
+        session
+            .apply(
+                0,
+                &[
+                    outline("#000000", 0.08),
+                    shadow("#000000"),
+                    background("#FFCC00", 0.8),
+                ],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(
+            (text.border_color.as_str(), text.border_width),
+            ("#000000", 0.08)
+        );
+        assert_eq!(text.border_alpha, 1.0);
+        assert!(text.has_shadow);
+        assert_eq!(text.shadow_alpha, 0.9);
+        assert_eq!(
+            (
+                text.shadow_distance,
+                text.shadow_angle,
+                text.shadow_smoothing
+            ),
+            (8.0, -45.0, 0.4)
+        );
+        assert_eq!(text.background_style, 1);
+        assert_eq!(text.background_alpha, 0.8);
+        assert_eq!(text.background_round_radius, 0.5);
+        assert!(text.background_width > 0.0 && text.background_height > 0.0);
+        assert_eq!(text.words.text, ["A"]);
+
+        session
+            .apply(1, &[outline("", 0.08), shadow(""), background("", 0.8)])
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert!(text.border_color.is_empty());
+        assert!(!text.has_shadow);
+        assert_eq!(text.background_style, 0);
+        assert!(text.background_color.is_empty());
+
+        for (request, error) in [
+            (outline("#000000", 1.0), EditError::TextStyle),
+            (outline("black", 0.1), EditError::TextColor),
+            (background("#000000", 2.0), EditError::TextStyle),
+            (
+                Request::SetTextShadow {
+                    segment_id: "a".into(),
+                    color: "#000000".to_owned(),
+                    distance: 8.0,
+                    angle: f64::NAN,
+                    blur: 0.4,
+                },
+                EditError::TextStyle,
+            ),
+        ] {
+            assert_eq!(session.apply(2, &[request]).unwrap_err(), error);
+        }
     }
 
     #[test]

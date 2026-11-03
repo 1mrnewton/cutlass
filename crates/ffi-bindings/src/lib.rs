@@ -336,11 +336,98 @@ pub struct EffectChoice {
     pub preview: String,
 }
 
-/// What a text clip says and the face it says it in.
+/// What a text clip says, the face it says it in, and how it looks.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TextInfo {
     pub content: String,
     pub face: String,
+    pub style: TextStyle,
+}
+
+/// How a title looks. A part with an empty color is off. Widths and
+/// distances are in ems and hundredths of an em; the rest are 0 to 1.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TextStyle {
+    pub size: f64,
+    pub color: String,
+    pub outline_color: String,
+    pub outline_width: f64,
+    pub shadow_color: String,
+    pub shadow_distance: f64,
+    pub shadow_blur: f64,
+    pub background_color: String,
+    pub background_alpha: f64,
+    pub background_round: f64,
+}
+
+impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
+    fn from(style: cutlass_ffi::PhoneTextStyle) -> Self {
+        Self {
+            size: style.size,
+            color: style.color,
+            outline_color: style.outline_color,
+            outline_width: style.outline_width,
+            shadow_color: style.shadow_color,
+            shadow_distance: style.shadow_distance,
+            shadow_blur: style.shadow_blur,
+            background_color: style.background_color,
+            background_alpha: style.background_alpha,
+            background_round: style.background_round,
+        }
+    }
+}
+
+/// One change to a title's look. See [`TextStyle`] for the units.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum TextStyleChange {
+    Size {
+        size: f64,
+    },
+    Color {
+        color: String,
+    },
+    Outline {
+        color: String,
+        width: f64,
+    },
+    Shadow {
+        color: String,
+        distance: f64,
+        blur: f64,
+    },
+    Background {
+        color: String,
+        alpha: f64,
+        round: f64,
+    },
+}
+
+impl From<TextStyleChange> for cutlass_ffi::TextStyleChange {
+    fn from(change: TextStyleChange) -> Self {
+        match change {
+            TextStyleChange::Size { size } => Self::Size(size),
+            TextStyleChange::Color { color } => Self::Color(color),
+            TextStyleChange::Outline { color, width } => Self::Outline { color, width },
+            TextStyleChange::Shadow {
+                color,
+                distance,
+                blur,
+            } => Self::Shadow {
+                color,
+                distance,
+                blur,
+            },
+            TextStyleChange::Background {
+                color,
+                alpha,
+                round,
+            } => Self::Background {
+                color,
+                alpha,
+                round,
+            },
+        }
+    }
 }
 
 /// A phone tool bar. See [`tool_bar`].
@@ -723,12 +810,26 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Change how a title looks. Changes made while `live` join one undo
+    /// step, so a slider drag is one step; its last change passes `live`
+    /// false, and so does a single tap.
+    pub fn style_text(
+        &self,
+        clip_id: String,
+        change: TextStyleChange,
+        live: bool,
+    ) -> Result<(), EditorError> {
+        self.run(move |host| host.style_text(&SegmentId::new(clip_id), change.into(), live))?
+            .map_err(EditorError::from)
+    }
+
     /// What a text clip says, or `None` when it is not a text clip.
     pub fn text(&self, clip_id: String) -> Result<Option<TextInfo>, EditorError> {
         let text = self.run(move |host| host.text(&SegmentId::new(clip_id)))?;
         Ok(text.map(|text| TextInfo {
             content: text.content,
             face: text.face,
+            style: text.style.into(),
         }))
     }
 

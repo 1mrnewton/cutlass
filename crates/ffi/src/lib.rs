@@ -50,7 +50,7 @@ pub use preview::{Picture, Preview};
 pub use project::Project;
 pub use stage::PhoneStage;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
-pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText};
+pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText, PhoneTextStyle, TextStyleChange};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
@@ -95,6 +95,8 @@ pub struct PhoneHost {
     live: Option<stage::Live>,
     /// The title being typed into, and the revision of its last change.
     typing: Option<(SegmentId, u64)>,
+    /// The title a slider is restyling, and the revision of its last change.
+    styling: Option<(SegmentId, u64)>,
 }
 
 impl PhoneHost {
@@ -136,6 +138,7 @@ impl PhoneHost {
             faces: FaceTable::default(),
             live: None,
             typing: None,
+            styling: None,
         })
     }
 
@@ -592,6 +595,30 @@ impl PhoneHost {
                 face: face.to_owned(),
             }],
         )?;
+        Ok(())
+    }
+
+    /// Change how `segment_id` looks. Changes made while `live` join one
+    /// undo step, so a slider drag is one step; its last change passes
+    /// `live` false, and so does a single tap.
+    pub fn style_text(
+        &mut self,
+        segment_id: &SegmentId,
+        change: TextStyleChange,
+        live: bool,
+    ) -> Result<(), FfiError> {
+        let requests = [text::style_request(self.draft(), segment_id, change)];
+        let revision = self.revision();
+        let joins = self
+            .styling
+            .as_ref()
+            .is_some_and(|(styled, at)| styled == segment_id && *at == revision);
+        let revision = if joins {
+            self.commands.fold(revision, &requests)?
+        } else {
+            self.apply(revision, &requests)?
+        };
+        self.styling = live.then(|| (segment_id.clone(), revision));
         Ok(())
     }
 
@@ -1340,13 +1367,8 @@ mod tests {
             }]
         );
         let first = host.add_text("A", "", Micros(0)).unwrap();
-        assert_eq!(
-            host.text(&first),
-            Some(PhoneText {
-                content: "A".to_owned(),
-                face: "Sample.ttf".to_owned(),
-            })
-        );
+        let PhoneText { content, face, .. } = host.text(&first).unwrap();
+        assert_eq!((content.as_str(), face.as_str()), ("A", "Sample.ttf"));
         // The sample face has one letter, A.
         assert!(host.frame(Micros(500_000)).unwrap() != plain);
 
@@ -1369,6 +1391,46 @@ mod tests {
         assert_eq!(host.text(&first).unwrap().content, "Hello");
         host.undo().unwrap();
         assert_eq!(host.text(&first).unwrap().content, "A");
+    }
+
+    #[test]
+    fn a_slider_drag_restyles_a_title_in_one_step() {
+        use crate::TextStyleChange;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let title = host.add_text("A", "", Micros(0)).unwrap();
+        let outline = |width: f64| TextStyleChange::Outline {
+            color: "#000000".to_owned(),
+            width,
+        };
+        for (width, live) in [(0.02, true), (0.05, true), (0.08, false)] {
+            host.style_text(&title, outline(width), live).unwrap();
+        }
+        let style = host.text(&title).unwrap().style;
+        assert_eq!(
+            (style.outline_color.as_str(), style.outline_width),
+            ("#000000", 0.08)
+        );
+        // A tap after the drag is its own step.
+        host.style_text(&title, TextStyleChange::Color("#FF0000".to_owned()), false)
+            .unwrap();
+        let shadow = TextStyleChange::Shadow {
+            color: "#000000".to_owned(),
+            distance: 10.0,
+            blur: 0.3,
+        };
+        host.style_text(&title, shadow, false).unwrap();
+        assert_eq!(host.text(&title).unwrap().style.shadow_color, "#000000");
+        assert_eq!(host.draft().materials.texts[0].shadow_angle, -45.0);
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.text(&title).unwrap().style.outline_width, 0.08);
+        host.undo().unwrap();
+        assert!(host.text(&title).unwrap().style.outline_color.is_empty());
     }
 
     #[test]

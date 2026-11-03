@@ -7,7 +7,10 @@ use cutlass_encode::{EncodeFactory, Encoder};
 
 use crate::limits::even_picture;
 
-const VIDEO: [CodecId; 1] = [CodecId::H264];
+const VIDEO: [CodecId; 2] = [CodecId::H264, CodecId::Hevc];
+
+/// AAC, JPEG, and PNG, which are registered whatever the picture switch says.
+const OTHER: [CodecId; 3] = [CodecId::Aac, CodecId::Jpeg, CodecId::Png];
 
 /// Register the Media Foundation decoders. Off Windows every opener declines.
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -15,12 +18,16 @@ pub fn register_decoders(factory: &mut DecodeFactory) {
 }
 
 /// `video` false leaves the picture decoders out, so the factory asks the
-/// next opener for those ids.
+/// next opener for those ids. Audio and still decoders are registered
+/// either way.
 pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
     if video {
         for id in VIDEO {
             factory.register(id, open_video_decoder);
         }
+    }
+    for id in OTHER {
+        factory.register(id, open_other_decoder);
     }
 }
 
@@ -30,12 +37,16 @@ pub fn register_encoders(factory: &mut EncodeFactory) {
 }
 
 /// `video` false leaves the picture encoders out, so the factory asks the
-/// next opener for those ids.
+/// next opener for those ids. Audio and still encoders are registered
+/// either way.
 pub fn register_encoders_with(factory: &mut EncodeFactory, video: bool) {
     if video {
         for id in VIDEO {
             factory.register(id, open_video_encoder);
         }
+    }
+    for id in OTHER {
+        factory.register(id, open_other_encoder);
     }
 }
 
@@ -61,6 +72,14 @@ fn open_video_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecErr
     Err(CodecError::Unsupported {
         what: "media foundation",
     })
+}
+
+fn open_other_decoder(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Err(CodecError::Unsupported { what: "wic" })
+}
+
+fn open_other_encoder(_params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
+    Err(CodecError::Unsupported { what: "wic" })
 }
 
 #[cfg(test)]

@@ -1,26 +1,31 @@
-//! Media Foundation H.264 decode and encode.
+//! Media Foundation H.264 and HEVC decode and encode.
 //!
-//! Both sides use the in-box Microsoft transforms in their synchronous,
-//! software form: `CMSH264DecoderMFT` and `CMSH264EncoderMFT`. Neither is
-//! given a Direct3D device, so pictures cross as NV12 in system memory.
-//! A decoded picture is CPU RGBA, or planar 4:2:0 when the caller asks for
-//! [`PixelFormat::Yuv420p`]. The encoder takes either of those.
+//! Hardware goes first. A decoder is the codec's decoder transform handed a
+//! Direct3D 11 device, so DXVA decodes on the GPU and the picture is copied
+//! back once. An encoder is a hardware encoder transform, such as Intel
+//! Quick Sync, NVENC, or AMF, found by `MFTEnumEx`. When the hardware path
+//! will not open, or refuses its first unit, the same codec runs as the
+//! software transform: `CMSH264DecoderMFT` and `CMSH264EncoderMFT` for
+//! H.264, and whatever HEVC transform is registered, which on most machines
+//! is the HEVC Video Extensions package.
 //!
-//! The decoder wants Annex B. A length-prefixed unit is rewritten with
-//! start codes, and the `avcC` parameter sets go in front of the first unit
-//! after open, a new configuration, or a reset. The transform reorders
-//! internally, so pictures leave in display order. `drain` asks it for
-//! every picture it still holds.
+//! Pictures cross as NV12. A decoded picture is CPU RGBA, or planar 4:2:0
+//! when the caller asks for [`PixelFormat::Yuv420p`]. The encoder takes
+//! either of those. A platform token is [`CodecError::Unsupported`].
+//!
+//! The decoder wants Annex B. A length-prefixed unit is rewritten with start
+//! codes, and the configuration's parameter sets go in front of the first
+//! unit after open, a new configuration, or a reset. The transform reorders
+//! internally, so pictures leave in display order.
 //!
 //! The encoder writes Annex B with the parameter sets in band. Each unit
 //! leaves as 4-byte length-prefixed NAL units without those sets, and the
-//! first keyframe carries the `avcC` as [`SideData::Config`], which is what
-//! the VideoToolbox encoder emits too. The encoder asks for Baseline, so
-//! there are no B-frames and units leave in input order.
+//! first keyframe carries the `avcC` or `hvcC` as [`SideData::Config`]. B
+//! pictures are turned off and the keyframe interval is 30, as on Apple, so
+//! units leave in input order.
 //!
-//! A transform this Windows cannot create, such as on an N edition without
-//! the media feature pack, is [`CodecError::Unsupported`], so the factory
-//! moves on to the Rust codec.
+//! A codec this Windows has no transform for is [`CodecError::Unsupported`],
+//! so the factory moves on to the Rust codec.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -32,7 +37,9 @@ use cutlass_decode::{
 };
 use cutlass_encode::{AudioInput, Encoder, FrameInput, FrameTime, PictureInput};
 
-use super::com::{self, Com, Hresult};
+use super::com::{self, Com, DeviceManager, Hresult};
+use super::transform::Transform;
+use crate::format::Guid;
 use crate::limits::{self, even_picture};
 use crate::nal::{self, AvcConfig, Nal};
 use crate::nv12::{self, Layout};
@@ -40,84 +47,312 @@ use crate::nv12::{self, Layout};
 /// Media Foundation time is in 100-nanosecond units.
 const HNS: i128 = 10_000_000;
 
-/// Output samples one call may produce before the loop gives up on a
-/// transform that never asks for more input.
-const MAX_OUTPUTS: usize = 64;
+/// Pictures between keyframes, as VideoToolbox is asked for.
+const KEYFRAME_INTERVAL: u32 = 30;
+
+/// The two codecs this module runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    H264,
+    Hevc,
+}
+
+impl Kind {
+    fn of(codec: CodecId) -> Result<Self, CodecError> {
+        match codec {
+            CodecId::H264 => Ok(Self::H264),
+            CodecId::Hevc => Ok(Self::Hevc),
+            _ => Err(CodecError::Unsupported {
+                what: "media foundation codec",
+            }),
+        }
+    }
+
+    fn codec(self) -> CodecId {
+        match self {
+            Self::H264 => CodecId::H264,
+            Self::Hevc => CodecId::Hevc,
+        }
+    }
+
+    fn subtype(self) -> Guid {
+        match self {
+            Self::H264 => com::MF_VIDEO_FORMAT_H264,
+            Self::Hevc => com::MF_VIDEO_FORMAT_HEVC,
+        }
+    }
+
+    fn profile(self) -> u32 {
+        match self {
+            Self::H264 => com::H264_BASELINE,
+            Self::Hevc => com::HEVC_MAIN,
+        }
+    }
+
+    /// The NAL type, from the header's low five bits or bits 1 to 6.
+    fn nal_type(self, nal: &[u8]) -> Option<u8> {
+        match self {
+            Self::H264 => nal::h264_type(nal),
+            Self::Hevc => nal::hevc_type(nal),
+        }
+    }
+
+    fn is_parameter_set(self, kind: u8) -> bool {
+        match self {
+            Self::H264 => matches!(kind, 7 | 8),
+            Self::Hevc => matches!(kind, 32..=34),
+        }
+    }
+
+    fn is_delimiter(self, kind: u8) -> bool {
+        match self {
+            Self::H264 => kind == 9,
+            Self::Hevc => kind == 35,
+        }
+    }
+
+    /// IDR for H.264; an intra random access point for HEVC.
+    fn is_keyframe(self, kind: u8) -> bool {
+        match self {
+            Self::H264 => kind == 5,
+            Self::Hevc => matches!(kind, 16..=21),
+        }
+    }
+
+    /// Parameter sets and NAL length size from an `avcC` or `hvcC`.
+    fn read_config(self, extra: &[u8]) -> Result<(u8, Vec<Vec<u8>>), CodecError> {
+        match self {
+            Self::H264 => {
+                let config = nal::avc_config(extra)?;
+                Ok((
+                    config.length_size,
+                    config.sps.into_iter().chain(config.pps).collect(),
+                ))
+            }
+            Self::Hevc => {
+                let config = nal::read_hevc_sets(extra)?;
+                Ok((config.length_size, config.nals))
+            }
+        }
+    }
+
+    fn write_config(self, sets: &[Vec<u8>]) -> Result<Vec<u8>, CodecError> {
+        match self {
+            Self::H264 => {
+                let (sps, pps): (Vec<_>, Vec<_>) = sets
+                    .iter()
+                    .cloned()
+                    .partition(|set| nal::h264_type(set) == Some(7));
+                let first = sps.first().cloned().unwrap_or_default();
+                nal::write_avc_config(&AvcConfig {
+                    length_size: 4,
+                    profile: first.get(1).copied().unwrap_or(66),
+                    compatibility: first.get(2).copied().unwrap_or(0),
+                    level: first.get(3).copied().unwrap_or(0x1f),
+                    sps,
+                    pps,
+                })
+            }
+            Self::Hevc => nal::write_hevc_config(sets),
+        }
+    }
+
+    /// The decoder transforms to try, best first. `hardware` asks for DXVA.
+    fn decoders(self, hardware: bool) -> Vec<Candidate> {
+        let mut found = Vec::new();
+        let software = || -> Vec<Com> {
+            let input = (com::MF_MEDIA_TYPE_VIDEO, self.subtype());
+            let output = (com::MF_MEDIA_TYPE_VIDEO, com::MF_VIDEO_FORMAT_NV12);
+            com::enumerate(
+                &com::MFT_CATEGORY_VIDEO_DECODER,
+                com::ENUM_SOFTWARE,
+                &input,
+                &output,
+            )
+        };
+        let make = |dxva: bool| -> Vec<Candidate> {
+            let mut list = Vec::new();
+            if self == Self::H264 {
+                list.push(Candidate::Class(com::CLSID_H264_DECODER, dxva));
+            }
+            list.extend(
+                software()
+                    .into_iter()
+                    .map(|found| Candidate::Activate(found, dxva)),
+            );
+            list
+        };
+        if hardware {
+            found.extend(make(true));
+        }
+        found.extend(make(false));
+        found
+    }
+
+    /// The encoder transforms to try, best first.
+    fn encoders(self, hardware: bool) -> Vec<Candidate> {
+        let input = (com::MF_MEDIA_TYPE_VIDEO, com::MF_VIDEO_FORMAT_NV12);
+        let output = (com::MF_MEDIA_TYPE_VIDEO, self.subtype());
+        let mut found = Vec::new();
+        if hardware {
+            found.extend(
+                com::enumerate(
+                    &com::MFT_CATEGORY_VIDEO_ENCODER,
+                    com::ENUM_HARDWARE,
+                    &input,
+                    &output,
+                )
+                .into_iter()
+                .map(Candidate::Hardware),
+            );
+        }
+        if self == Self::H264 {
+            found.push(Candidate::Class(com::CLSID_H264_ENCODER, false));
+        }
+        found.extend(
+            com::enumerate(
+                &com::MFT_CATEGORY_VIDEO_ENCODER,
+                com::ENUM_SOFTWARE,
+                &input,
+                &output,
+            )
+            .into_iter()
+            .map(|found| Candidate::Activate(found, false)),
+        );
+        found
+    }
+}
+
+/// One way to make a transform. The flag on a software transform asks for a
+/// Direct3D device.
+enum Candidate {
+    Class(Guid, bool),
+    Activate(Com, bool),
+    Hardware(Com),
+}
+
+impl Candidate {
+    fn make(&self) -> Result<(Transform, bool), Hresult> {
+        match self {
+            Self::Class(clsid, dxva) => {
+                let mft = com::transform(clsid)?;
+                Self::with_device(mft, *dxva)
+            }
+            Self::Activate(activate, dxva) => {
+                let mft = com::activate(activate)?;
+                Self::with_device(mft, *dxva)
+            }
+            Self::Hardware(activate) => {
+                let mft = com::activate(activate)?;
+                Ok((Transform::new(mft, true, None)?, true))
+            }
+        }
+    }
+
+    fn with_device(mft: Com, dxva: bool) -> Result<(Transform, bool), Hresult> {
+        if !dxva {
+            return Ok((Transform::new(mft, false, None)?, false));
+        }
+        if !com::d3d11_aware(&mft) {
+            return Err(com::MF_E_NOTACCEPTING);
+        }
+        let device = DeviceManager::create()?;
+        device.attach(&mft)?;
+        Ok((Transform::new(mft, true, Some(device))?, true))
+    }
+}
 
 pub struct VideoDecoder {
+    kind: Kind,
     width: u32,
     height: u32,
     planar: bool,
     /// 0 when units arrive as Annex B.
     length_size: u8,
-    /// SPS and PPS from the `avcC`, with no start codes.
+    /// Parameter sets from the configuration, with no start codes.
     sets: Vec<Vec<u8>>,
     send_sets: bool,
-    transform: Com,
-    output: OutputSlot,
-    layout: Option<Layout>,
+    transform: Transform,
+    picture: PictureSlot,
     timescale: u32,
+    /// Whether a picture has come out yet. Until one has, a hardware
+    /// decoder that refuses a unit is swapped for the software one.
+    produced: bool,
+}
+
+/// Where the picture sits in the transform's output buffers.
+#[derive(Clone, Copy, Default)]
+struct PictureSlot {
+    width: u32,
+    height: u32,
+    columns: u32,
+    rows: u32,
+    stride: usize,
 }
 
 pub struct VideoEncoder {
+    kind: Kind,
     width: u32,
     height: u32,
     bitrate: u32,
     rate: (u32, u32),
-    transform: Com,
-    output: OutputSlot,
+    transform: Transform,
     started: bool,
     attached: bool,
+    /// Parameter sets from the transform's output type, for an encoder that
+    /// does not repeat them in band.
+    header: Vec<Vec<u8>>,
     /// Times of the pictures handed in and not yet out, by their
     /// Media Foundation time, so a unit leaves with the caller's own clock.
     times: VecDeque<(i64, FrameTime)>,
     cancel: Arc<AtomicBool>,
 }
 
-/// Whether the transform allocates its output samples, and how large the
-/// caller's must be when it does not.
-#[derive(Clone, Copy)]
-struct OutputSlot {
-    provides: bool,
-    size: usize,
-}
-
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
-    h264_only(params.codec)?;
-    let (width, height) = video_size(params.width, params.height)?;
-    com::enter()?;
-    let transform = com::transform(&com::CLSID_H264_DECODER).map_err(|_| decline())?;
-    let input = com::media_type().map_err(|_| decline())?;
-    com::set_guid(&input, &com::MF_MT_MAJOR_TYPE, &com::MF_MEDIA_TYPE_VIDEO)
-        .and_then(|()| com::set_guid(&input, &com::MF_MT_SUBTYPE, &com::MF_VIDEO_FORMAT_H264))
-        .and_then(|()| com::set_pair(&input, &com::MF_MT_FRAME_SIZE, width, height))
-        .and_then(|()| com::set_input_type(&transform, &input))
-        .map_err(|_| decline())?;
-    let mut decoder = VideoDecoder {
-        width,
-        height,
-        planar: params.pixel == PixelFormat::Yuv420p,
-        length_size: params.nal_length_size,
-        sets: Vec::new(),
-        send_sets: false,
-        transform,
-        output: OutputSlot {
-            provides: false,
-            size: 0,
-        },
-        layout: None,
-        timescale: 30,
-    };
-    decoder.choose_output().map_err(|_| decline())?;
-    if !params.extra.is_empty() {
-        decoder.configure(&params.extra)?;
-    }
-    start(&decoder.transform).map_err(|_| decline())?;
-    Ok(Box::new(decoder))
+    Ok(Box::new(open_decoder_on(params, true)?))
 }
 
 pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
-    h264_only(params.codec)?;
+    Ok(Box::new(open_encoder_on(params, true)?))
+}
+
+/// The decoder, on the GPU first when `hardware` is set.
+pub fn open_decoder_on(params: &CodecParams, hardware: bool) -> Result<VideoDecoder, CodecError> {
+    let kind = Kind::of(params.codec)?;
+    let (width, height) = video_size(params.width, params.height)?;
+    com::enter()?;
+    let (mut length_size, mut sets) = (params.nal_length_size, Vec::new());
+    if !params.extra.is_empty() {
+        (length_size, sets) = kind.read_config(&params.extra)?;
+    }
+    let mut picture = PictureSlot {
+        width,
+        height,
+        ..PictureSlot::default()
+    };
+    let transform = kind
+        .decoders(hardware)
+        .iter()
+        .find_map(|candidate| build_decoder(kind, candidate, &mut picture).ok())
+        .ok_or_else(decline)?;
+    Ok(VideoDecoder {
+        kind,
+        width,
+        height,
+        planar: params.pixel == PixelFormat::Yuv420p,
+        length_size,
+        send_sets: !sets.is_empty(),
+        sets,
+        transform,
+        picture,
+        timescale: 30,
+        produced: false,
+    })
+}
+
+/// The encoder, on a hardware transform first when `hardware` is set.
+pub fn open_encoder_on(params: &CodecParams, hardware: bool) -> Result<VideoEncoder, CodecError> {
+    let kind = Kind::of(params.codec)?;
     let (width, height) = video_size(params.width, params.height)?;
     if !matches!(
         params.pixel,
@@ -130,36 +365,54 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
     com::enter()?;
     let bitrate = target_bitrate(params);
     let rate = (30, 1);
-    let (transform, output) = build_encoder(width, height, bitrate, rate)?;
-    Ok(Box::new(VideoEncoder {
+    let transform = first_encoder(kind, width, height, bitrate, rate, hardware)?;
+    Ok(VideoEncoder {
+        kind,
         width,
         height,
         bitrate,
         rate,
         transform,
-        output,
         started: false,
         attached: false,
+        header: Vec::new(),
         times: VecDeque::new(),
         cancel: Arc::new(AtomicBool::new(false)),
-    }))
+    })
+}
+
+#[cfg(test)]
+impl VideoDecoder {
+    /// Whether DXVA is decoding.
+    pub fn hardware(&self) -> bool {
+        self.transform.hardware()
+    }
+}
+
+#[cfg(test)]
+impl VideoEncoder {
+    /// Whether a hardware encoder transform is encoding.
+    pub fn hardware(&self) -> bool {
+        self.transform.hardware()
+    }
 }
 
 impl Decoder for VideoDecoder {
     fn codec(&self) -> CodecId {
-        CodecId::H264
+        self.kind.codec()
     }
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         limits::packet_ok(packet.data.len())?;
         com::enter()?;
         if let Some(config) = config_of(packet) {
-            self.configure(config)?;
+            (self.length_size, self.sets) = self.kind.read_config(config)?;
+            self.send_sets = true;
         }
         let mut unit = self.annex_b(&packet.data)?;
         if self.send_sets {
-            let mut with_sets =
-                nal::to_annex_b(&self.sets.iter().cloned().map(nal_of).collect::<Vec<_>>());
+            let sets: Vec<Nal> = self.sets.iter().cloned().map(nal_of).collect();
+            let mut with_sets = nal::to_annex_b(&sets);
             with_sets.append(&mut unit);
             unit = with_sets;
         }
@@ -175,46 +428,65 @@ impl Decoder for VideoDecoder {
         )
         .map_err(|_| malformed())?;
         self.timescale = timescale;
-        let mut outputs = Vec::new();
-        let mut code = com::process_input(&self.transform, &sample);
-        if code == com::MF_E_NOTACCEPTING {
-            outputs = self.collect()?;
-            code = com::process_input(&self.transform, &sample);
-        }
-        if code < 0 {
-            return Err(malformed());
-        }
+        let samples = match self.feed(&sample) {
+            Ok(samples) => samples,
+            Err(_) if self.transform.hardware() && !self.produced => {
+                self.fall_back()?;
+                self.feed(&sample).map_err(|_| malformed())?
+            }
+            Err(_) => return Err(malformed()),
+        };
         self.send_sets = false;
-        outputs.extend(self.collect()?);
-        Ok(outputs)
+        self.pictures(&samples)
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
         com::enter()?;
-        com::message(&self.transform, com::MFT_MESSAGE_NOTIFY_END_OF_STREAM)
-            .and_then(|()| com::message(&self.transform, com::MFT_MESSAGE_COMMAND_DRAIN))
+        let mut picture = self.picture;
+        let kind = self.kind;
+        let samples = self
+            .transform
+            .drain(&mut |mft| choose_output(kind, mft, &mut picture))
             .map_err(|_| malformed())?;
-        let outputs = self.collect();
-        let _ = com::message(&self.transform, com::MFT_MESSAGE_NOTIFY_START_OF_STREAM);
-        outputs
+        self.picture = picture;
+        self.pictures(&samples)
     }
 
     fn reset(&mut self) {
         if com::enter().is_err() {
             return;
         }
-        let _ = com::message(&self.transform, com::MFT_MESSAGE_COMMAND_FLUSH);
+        self.transform.flush();
         self.send_sets = !self.sets.is_empty();
     }
 }
 
 impl VideoDecoder {
-    /// Take the parameter sets and NAL length size from an `avcC`.
-    fn configure(&mut self, extra: &[u8]) -> Result<(), CodecError> {
-        let config = nal::avc_config(extra)?;
-        self.length_size = config.length_size;
-        self.sets = config.sps.into_iter().chain(config.pps).collect();
-        self.send_sets = true;
+    fn feed(&mut self, sample: &Com) -> Result<Vec<Com>, Hresult> {
+        let mut picture = self.picture;
+        let kind = self.kind;
+        let samples = self
+            .transform
+            .feed(sample, &mut |mft| choose_output(kind, mft, &mut picture));
+        self.picture = picture;
+        samples
+    }
+
+    /// Swap a hardware decoder that refused its first unit for software.
+    fn fall_back(&mut self) -> Result<(), CodecError> {
+        let mut picture = PictureSlot {
+            width: self.width,
+            height: self.height,
+            ..PictureSlot::default()
+        };
+        self.transform = self
+            .kind
+            .decoders(false)
+            .iter()
+            .find_map(|candidate| build_decoder(self.kind, candidate, &mut picture).ok())
+            .ok_or_else(malformed)?;
+        self.picture = picture;
+        self.send_sets = !self.sets.is_empty();
         Ok(())
     }
 
@@ -233,71 +505,20 @@ impl VideoDecoder {
         Ok(data.to_vec())
     }
 
-    /// Pick NV12 out of the transform's output types and read where the
-    /// picture sits in its buffer.
-    fn choose_output(&mut self) -> Result<(), Hresult> {
-        let mut index = 0;
-        let chosen = loop {
-            let Some(kind) = com::output_available_type(&self.transform, index)? else {
-                return Err(com::MF_E_NO_MORE_TYPES);
-            };
-            if com::get_guid(&kind, &com::MF_MT_SUBTYPE) == Some(com::MF_VIDEO_FORMAT_NV12) {
-                break kind;
-            }
-            index += 1;
-        };
-        com::set_output_type(&self.transform, &chosen)?;
-        let current = com::output_current_type(&self.transform)?;
-        let (columns, rows) =
-            com::get_pair(&current, &com::MF_MT_FRAME_SIZE).unwrap_or((self.width, self.height));
-        let stride = com::get_u32(&current, &com::MF_MT_DEFAULT_STRIDE)
-            .and_then(|stride| i32::try_from(stride).ok())
-            .filter(|stride| *stride > 0)
-            .map_or(columns as usize, |stride| stride as usize);
-        let (width, height) = com::get_blob::<16>(&current, &com::MF_MT_MINIMUM_DISPLAY_APERTURE)
-            .and_then(aperture)
-            .unwrap_or((self.width.min(columns), self.height.min(rows)));
-        let layout = Layout {
-            width: width & !1,
-            height: height & !1,
-            stride,
-            rows: rows as usize,
-        };
-        self.layout = layout.len().is_ok().then_some(layout);
-        let info = com::output_stream_info(&self.transform)?;
-        self.output = OutputSlot {
-            provides: info.flags & com::MFT_OUTPUT_STREAM_PROVIDES_SAMPLES != 0,
-            size: info.size as usize,
-        };
-        Ok(())
-    }
-
-    /// Every picture the transform has ready.
-    fn collect(&mut self) -> Result<Vec<Output>, CodecError> {
-        let mut outputs = Vec::new();
-        for _ in 0..MAX_OUTPUTS {
-            let provided = self.output.sample().map_err(|_| malformed())?;
-            match com::process_output(&self.transform, provided) {
-                Ok(sample) => outputs.push(Output::Picture(self.picture(&sample)?)),
-                Err(com::MF_E_TRANSFORM_NEED_MORE_INPUT) => return Ok(outputs),
-                Err(com::MF_E_TRANSFORM_STREAM_CHANGE) => {
-                    self.choose_output().map_err(|_| malformed())?;
-                }
-                Err(_) => return Err(malformed()),
-            }
+    fn pictures(&mut self, samples: &[Com]) -> Result<Vec<Output>, CodecError> {
+        let mut out = Vec::with_capacity(samples.len());
+        for sample in samples {
+            out.push(Output::Picture(self.picture(sample)?));
         }
-        Ok(outputs)
+        self.produced |= !out.is_empty();
+        Ok(out)
     }
 
     fn picture(&self, sample: &Com) -> Result<PictureOutput, CodecError> {
-        let Some(layout) = self.layout else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "picture size",
-            });
-        };
+        let slot = self.picture;
         let planar = self.planar;
         let bytes = com::with_sample_bytes(sample, |bytes| {
+            let layout = slot.layout(bytes.len())?;
             if planar {
                 nv12::to_planar(layout, bytes)
             } else {
@@ -307,8 +528,8 @@ impl VideoDecoder {
         .map_err(|_| malformed())??;
         let pts = com::sample_time(sample).map_or(0, |time| from_hns(time, self.timescale));
         let info = PictureInfo {
-            width: layout.width,
-            height: layout.height,
+            width: slot.width & !1,
+            height: slot.height & !1,
             pixel: if planar {
                 PixelFormat::Yuv420p
             } else {
@@ -321,9 +542,105 @@ impl VideoDecoder {
     }
 }
 
+impl PictureSlot {
+    /// The layout of a buffer `len` bytes long. The software decoder pads
+    /// its rows to the default stride. A Direct3D surface copies out with
+    /// rows as wide as the frame. Whichever stride fills the buffer exactly
+    /// is the one used.
+    fn layout(self, len: usize) -> Result<Layout, CodecError> {
+        let columns = self.columns.max(self.width) as usize;
+        let rows = self.rows.max(self.height) as usize;
+        let mut strides = vec![self.stride, columns];
+        if rows > 0 && (len * 2).is_multiple_of(rows * 3) {
+            strides.push(len * 2 / (rows * 3));
+        }
+        let fits = |stride: usize| {
+            let layout = Layout {
+                width: self.width & !1,
+                height: self.height & !1,
+                stride,
+                rows,
+            };
+            layout.len().ok().map(|need| (need, layout))
+        };
+        strides
+            .iter()
+            .filter_map(|stride| fits(*stride))
+            .find(|(need, _)| *need == len)
+            .or_else(|| {
+                strides
+                    .iter()
+                    .filter_map(|stride| fits(*stride))
+                    .find(|(need, _)| *need <= len)
+            })
+            .map(|(_, layout)| layout)
+            .ok_or(CodecError::Truncated {
+                at_bit: (len as u64).saturating_mul(8),
+                what: "nv12 buffer",
+            })
+    }
+}
+
+fn build_decoder(
+    kind: Kind,
+    candidate: &Candidate,
+    picture: &mut PictureSlot,
+) -> Result<Transform, Hresult> {
+    let (mut transform, _) = candidate.make()?;
+    // A transform without the attribute decodes the same, only later.
+    let _ = com::set_low_latency(transform.mft());
+    let input = com::media_type()?;
+    com::set_guid(&input, &com::MF_MT_MAJOR_TYPE, &com::MF_MEDIA_TYPE_VIDEO)?;
+    com::set_guid(&input, &com::MF_MT_SUBTYPE, &kind.subtype())?;
+    com::set_pair(
+        &input,
+        &com::MF_MT_FRAME_SIZE,
+        picture.width,
+        picture.height,
+    )?;
+    com::set_input_type(transform.mft(), &input)?;
+    choose_output(kind, transform.mft(), picture)?;
+    transform.start()?;
+    Ok(transform)
+}
+
+/// Pick NV12 out of the transform's output types and read where the
+/// picture sits in its buffer.
+fn choose_output(_kind: Kind, mft: &Com, picture: &mut PictureSlot) -> Result<(), Hresult> {
+    let mut index = 0;
+    let chosen = loop {
+        let Some(kind) = com::output_available_type(mft, index)? else {
+            return Err(com::MF_E_NO_MORE_TYPES);
+        };
+        if com::get_guid(&kind, &com::MF_MT_SUBTYPE) == Some(com::MF_VIDEO_FORMAT_NV12) {
+            break kind;
+        }
+        index += 1;
+    };
+    com::set_output_type(mft, &chosen)?;
+    let current = com::output_current_type(mft)?;
+    let (columns, rows) =
+        com::get_pair(&current, &com::MF_MT_FRAME_SIZE).unwrap_or((picture.width, picture.height));
+    let stride = com::get_u32(&current, &com::MF_MT_DEFAULT_STRIDE)
+        .and_then(|stride| i32::try_from(stride).ok())
+        .filter(|stride| *stride > 0)
+        .map_or(columns as usize, |stride| stride as usize);
+    let (width, height) = com::get_blob::<16>(&current, &com::MF_MT_MINIMUM_DISPLAY_APERTURE)
+        .and_then(aperture)
+        .unwrap_or((picture.width.min(columns), picture.height.min(rows)));
+    *picture = PictureSlot {
+        width,
+        height,
+        columns,
+        rows,
+        stride,
+    };
+    Ok(())
+}
+
 impl Encoder for VideoEncoder {
     fn codec(&self) -> CodecId {
-        CodecId::H264
+        self.kind.codec()
     }
 
     fn push(&mut self, _input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
@@ -367,19 +684,24 @@ impl Encoder for VideoEncoder {
         let hns = to_hns(time.pts(), time.timescale());
         let sample = com::sample_from(&picture, hns, to_hns(time.duration(), time.timescale()))
             .map_err(|_| refused())?;
-        let mut packets = Vec::new();
-        let mut code = com::process_input(&self.transform, &sample);
-        if code == com::MF_E_NOTACCEPTING {
-            packets = self.collect()?;
-            code = com::process_input(&self.transform, &sample);
-        }
-        if code < 0 {
-            return Err(refused());
-        }
+        let samples = match self.feed(&sample) {
+            Ok(samples) => samples,
+            Err(_) if self.transform.hardware() && !self.started => {
+                self.transform = first_encoder(
+                    self.kind,
+                    self.width,
+                    self.height,
+                    self.bitrate,
+                    self.rate,
+                    false,
+                )?;
+                self.feed(&sample).map_err(|_| refused())?
+            }
+            Err(_) => return Err(refused()),
+        };
         self.started = true;
         self.times.push_back((hns, time));
-        packets.extend(self.collect()?);
-        Ok(packets)
+        self.packets(&samples)
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
@@ -387,11 +709,14 @@ impl Encoder for VideoEncoder {
             return Ok(Vec::new());
         }
         com::enter()?;
-        com::message(&self.transform, com::MFT_MESSAGE_NOTIFY_END_OF_STREAM)
-            .and_then(|()| com::message(&self.transform, com::MFT_MESSAGE_COMMAND_DRAIN))
-            .map_err(|_| refused())?;
-        let packets = self.collect();
-        let _ = com::message(&self.transform, com::MFT_MESSAGE_NOTIFY_START_OF_STREAM);
+        let mut header = std::mem::take(&mut self.header);
+        let kind = self.kind;
+        let samples = self
+            .transform
+            .drain(&mut |mft| encoder_output_changed(kind, mft, &mut header))
+            .map_err(|_| refused());
+        self.header = header;
+        let packets = self.packets(&samples?);
         self.times.clear();
         packets
     }
@@ -405,11 +730,16 @@ impl Encoder for VideoEncoder {
         if com::enter().is_err() {
             return;
         }
-        if let Ok((transform, output)) =
-            build_encoder(self.width, self.height, self.bitrate, self.rate)
-        {
+        let hardware = self.transform.hardware();
+        if let Ok(transform) = first_encoder(
+            self.kind,
+            self.width,
+            self.height,
+            self.bitrate,
+            self.rate,
+            hardware,
+        ) {
             self.transform = transform;
-            self.output = output;
         }
     }
 
@@ -426,54 +756,53 @@ impl VideoEncoder {
         if rate == self.rate {
             return Ok(());
         }
-        let (transform, output) = build_encoder(self.width, self.height, self.bitrate, rate)?;
-        self.transform = transform;
-        self.output = output;
+        let hardware = self.transform.hardware();
+        self.transform = first_encoder(
+            self.kind,
+            self.width,
+            self.height,
+            self.bitrate,
+            rate,
+            hardware,
+        )?;
         self.rate = rate;
         Ok(())
     }
 
-    fn collect(&mut self) -> Result<Vec<Packet>, CodecError> {
-        let mut packets = Vec::new();
-        for _ in 0..MAX_OUTPUTS {
-            let provided = self.output.sample().map_err(|_| refused())?;
-            match com::process_output(&self.transform, provided) {
-                Ok(sample) => {
-                    if let Some(packet) = self.packet(&sample)? {
-                        packets.push(packet);
-                    }
-                }
-                Err(com::MF_E_TRANSFORM_NEED_MORE_INPUT) => return Ok(packets),
-                Err(com::MF_E_TRANSFORM_STREAM_CHANGE) => {
-                    let kind = com::output_available_type(&self.transform, 0)
-                        .ok()
-                        .flatten()
-                        .ok_or_else(refused)?;
-                    com::set_output_type(&self.transform, &kind).map_err(|_| refused())?;
-                    let info = com::output_stream_info(&self.transform).map_err(|_| refused())?;
-                    self.output = OutputSlot::from_info(&info);
-                }
-                Err(_) => return Err(refused()),
+    fn feed(&mut self, sample: &Com) -> Result<Vec<Com>, Hresult> {
+        let mut header = std::mem::take(&mut self.header);
+        let kind = self.kind;
+        let samples = self.transform.feed(sample, &mut |mft| {
+            encoder_output_changed(kind, mft, &mut header)
+        });
+        self.header = header;
+        samples
+    }
+
+    fn packets(&mut self, samples: &[Com]) -> Result<Vec<Packet>, CodecError> {
+        let mut packets = Vec::with_capacity(samples.len());
+        for sample in samples {
+            if let Some(packet) = self.packet(sample)? {
+                packets.push(packet);
             }
         }
         Ok(packets)
     }
 
-    /// One length-prefixed unit, with the `avcC` on the first keyframe.
+    /// One length-prefixed unit, with the configuration on the first
+    /// keyframe.
     fn packet(&mut self, sample: &Com) -> Result<Option<Packet>, CodecError> {
         let bytes = com::sample_bytes(sample).map_err(|_| refused())?;
         let nals = nal::annex_b(&bytes)?;
-        let mut sps = Vec::new();
-        let mut pps = Vec::new();
+        let mut sets = Vec::new();
         let mut units = Vec::new();
         let mut keyframe = false;
         for unit in nals {
-            match nal::h264_type(&unit.bytes) {
-                Some(7) => sps.push(unit.bytes),
-                Some(8) => pps.push(unit.bytes),
-                Some(9) => {}
+            match self.kind.nal_type(&unit.bytes) {
+                Some(kind) if self.kind.is_parameter_set(kind) => sets.push(unit.bytes),
+                Some(kind) if self.kind.is_delimiter(kind) => {}
                 kind => {
-                    keyframe |= kind == Some(5);
+                    keyframe |= kind.is_some_and(|kind| self.kind.is_keyframe(kind));
                     units.push(unit);
                 }
             }
@@ -492,24 +821,20 @@ impl VideoEncoder {
             keyframe,
             side: Vec::new(),
         };
-        if keyframe && !self.attached && !sps.is_empty() && !pps.is_empty() {
-            let config = nal::write_avc_config(&AvcConfig {
-                length_size: 4,
-                profile: sps[0].get(1).copied().unwrap_or(66),
-                compatibility: sps[0].get(2).copied().unwrap_or(0),
-                level: sps[0].get(3).copied().unwrap_or(0x1f),
-                sps,
-                pps,
-            })?;
-            packet.side.push(SideData::Config(config));
-            self.attached = true;
+        if keyframe && !self.attached {
+            if sets.is_empty() {
+                sets = self.header.clone();
+            }
+            if let Ok(config) = self.kind.write_config(&sets) {
+                packet.side.push(SideData::Config(config));
+                self.attached = true;
+            }
         }
         Ok(Some(packet))
     }
 
-    /// The caller's time for the picture at `hns`. Baseline does not
-    /// reorder, so this is the oldest one; a time the transform moved is
-    /// matched by value first.
+    /// The caller's time for the picture at `hns`, matched by value, else
+    /// the oldest one still waiting.
     fn take_time(&mut self, hns: i64, sample: &Com) -> Result<FrameTime, CodecError> {
         let at = self
             .times
@@ -525,59 +850,103 @@ impl VideoEncoder {
     }
 }
 
-impl OutputSlot {
-    fn from_info(info: &com::OutputStreamInfo) -> Self {
-        Self {
-            provides: info.flags & com::MFT_OUTPUT_STREAM_PROVIDES_SAMPLES != 0,
-            size: info.size as usize,
-        }
+/// An encoder that changes its output type mid-stream: take its first
+/// offered type, and keep any parameter sets it now carries.
+fn encoder_output_changed(kind: Kind, mft: &Com, header: &mut Vec<Vec<u8>>) -> Result<(), Hresult> {
+    let offered = com::output_available_type(mft, 0)?.ok_or(com::MF_E_NO_MORE_TYPES)?;
+    com::set_output_type(mft, &offered)?;
+    if let Ok(current) = com::output_current_type(mft) {
+        *header = sequence_header(kind, &current);
     }
+    Ok(())
+}
 
-    /// A sample for the transform to fill, or `None` when it brings its own.
-    fn sample(self) -> Result<Option<Com>, Hresult> {
-        if self.provides {
-            Ok(None)
-        } else {
-            com::empty_sample(self.size).map(Some)
-        }
-    }
+/// The parameter sets in `MF_MT_MPEG_SEQUENCE_HEADER`, which a hardware
+/// encoder fills when its output type is set.
+fn sequence_header(kind: Kind, output: &Com) -> Vec<Vec<u8>> {
+    com::get_blob_vec(output, &com::MF_MT_MPEG_SEQUENCE_HEADER)
+        .and_then(|bytes| nal::annex_b(&bytes).ok())
+        .map(|nals| {
+            nals.into_iter()
+                .map(|nal| nal.bytes)
+                .filter(|bytes| {
+                    kind.nal_type(bytes)
+                        .is_some_and(|t| kind.is_parameter_set(t))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The first encoder candidate that takes the types, best first.
+fn first_encoder(
+    kind: Kind,
+    width: u32,
+    height: u32,
+    bitrate: u32,
+    rate: (u32, u32),
+    hardware: bool,
+) -> Result<Transform, CodecError> {
+    kind.encoders(hardware)
+        .iter()
+        .find_map(|candidate| build_encoder(kind, candidate, width, height, bitrate, rate).ok())
+        .ok_or_else(decline)
 }
 
 fn build_encoder(
+    kind: Kind,
+    candidate: &Candidate,
     width: u32,
     height: u32,
     bitrate: u32,
     (numerator, denominator): (u32, u32),
-) -> Result<(Com, OutputSlot), CodecError> {
-    let transform = com::transform(&com::CLSID_H264_ENCODER).map_err(|_| decline())?;
-    let output = com::media_type().map_err(|_| decline())?;
-    com::set_guid(&output, &com::MF_MT_MAJOR_TYPE, &com::MF_MEDIA_TYPE_VIDEO)
-        .and_then(|()| com::set_guid(&output, &com::MF_MT_SUBTYPE, &com::MF_VIDEO_FORMAT_H264))
-        .and_then(|()| com::set_u32(&output, &com::MF_MT_AVG_BITRATE, bitrate))
-        .and_then(|()| com::set_pair(&output, &com::MF_MT_FRAME_RATE, numerator, denominator))
-        .and_then(|()| com::set_pair(&output, &com::MF_MT_FRAME_SIZE, width, height))
-        .and_then(|()| com::set_pair(&output, &com::MF_MT_PIXEL_ASPECT_RATIO, 1, 1))
-        .and_then(|()| com::set_u32(&output, &com::MF_MT_INTERLACE_MODE, com::PROGRESSIVE))
-        .and_then(|()| com::set_u32(&output, &com::MF_MT_MPEG2_PROFILE, com::H264_BASELINE))
-        .and_then(|()| com::set_output_type(&transform, &output))
-        .map_err(|_| decline())?;
-    let input = com::media_type().map_err(|_| decline())?;
-    com::set_guid(&input, &com::MF_MT_MAJOR_TYPE, &com::MF_MEDIA_TYPE_VIDEO)
-        .and_then(|()| com::set_guid(&input, &com::MF_MT_SUBTYPE, &com::MF_VIDEO_FORMAT_NV12))
-        .and_then(|()| com::set_pair(&input, &com::MF_MT_FRAME_RATE, numerator, denominator))
-        .and_then(|()| com::set_pair(&input, &com::MF_MT_FRAME_SIZE, width, height))
-        .and_then(|()| com::set_pair(&input, &com::MF_MT_PIXEL_ASPECT_RATIO, 1, 1))
-        .and_then(|()| com::set_u32(&input, &com::MF_MT_INTERLACE_MODE, com::PROGRESSIVE))
-        .and_then(|()| com::set_input_type(&transform, &input))
-        .map_err(|_| decline())?;
-    let info = com::output_stream_info(&transform).map_err(|_| decline())?;
-    start(&transform).map_err(|_| decline())?;
-    Ok((transform, OutputSlot::from_info(&info)))
+) -> Result<Transform, Hresult> {
+    let (mut transform, _) = candidate.make()?;
+    let mft = transform.mft();
+    let _ = com::set_codec_u32(mft, &com::CODECAPI_B_PICTURE_COUNT, b_pictures());
+    let _ = com::set_codec_u32(mft, &com::CODECAPI_GOP_SIZE, KEYFRAME_INTERVAL);
+    let _ = com::set_codec_u32(mft, &com::CODECAPI_MEAN_BIT_RATE, bitrate);
+    let output = com::media_type()?;
+    com::set_guid(&output, &com::MF_MT_MAJOR_TYPE, &com::MF_MEDIA_TYPE_VIDEO)?;
+    com::set_guid(&output, &com::MF_MT_SUBTYPE, &kind.subtype())?;
+    com::set_u32(&output, &com::MF_MT_AVG_BITRATE, bitrate)?;
+    com::set_pair(&output, &com::MF_MT_FRAME_RATE, numerator, denominator)?;
+    com::set_pair(&output, &com::MF_MT_FRAME_SIZE, width, height)?;
+    com::set_pair(&output, &com::MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+    com::set_u32(&output, &com::MF_MT_INTERLACE_MODE, com::PROGRESSIVE)?;
+    com::set_u32(&output, &com::MF_MT_MPEG2_PROFILE, kind.profile())?;
+    com::set_output_type(mft, &output)?;
+    let input = com::media_type()?;
+    com::set_guid(&input, &com::MF_MT_MAJOR_TYPE, &com::MF_MEDIA_TYPE_VIDEO)?;
+    com::set_guid(&input, &com::MF_MT_SUBTYPE, &com::MF_VIDEO_FORMAT_NV12)?;
+    com::set_pair(&input, &com::MF_MT_FRAME_RATE, numerator, denominator)?;
+    com::set_pair(&input, &com::MF_MT_FRAME_SIZE, width, height)?;
+    com::set_pair(&input, &com::MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+    com::set_u32(&input, &com::MF_MT_INTERLACE_MODE, com::PROGRESSIVE)?;
+    com::set_input_type(mft, &input)?;
+    // Some hardware encoders take these only once their types are set.
+    let _ = com::set_codec_u32(mft, &com::CODECAPI_B_PICTURE_COUNT, b_pictures());
+    let _ = com::set_codec_u32(mft, &com::CODECAPI_GOP_SIZE, KEYFRAME_INTERVAL);
+    transform.start()?;
+    Ok(transform)
 }
 
-fn start(transform: &Com) -> Result<(), Hresult> {
-    com::message(transform, com::MFT_MESSAGE_NOTIFY_BEGIN_STREAMING)?;
-    com::message(transform, com::MFT_MESSAGE_NOTIFY_START_OF_STREAM)
+/// B pictures between anchors. Always none, so units leave in input
+/// order; a test asks for some to check the decoder puts them back.
+fn b_pictures() -> u32 {
+    #[cfg(test)]
+    {
+        TEST_B_PICTURES.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        0
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static TEST_B_PICTURES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// `MFVideoArea`: two `MFOffset` then a `SIZE`. Only the size is used; a
@@ -588,16 +957,6 @@ fn aperture(area: [u8; 16]) -> Option<(u32, u32)> {
     match (u32::try_from(width), u32::try_from(height)) {
         (Ok(width), Ok(height)) if width > 0 && height > 0 => Some((width, height)),
         _ => None,
-    }
-}
-
-fn h264_only(codec: CodecId) -> Result<(), CodecError> {
-    if codec == CodecId::H264 {
-        Ok(())
-    } else {
-        Err(CodecError::Unsupported {
-            what: "media foundation codec",
-        })
     }
 }
 
@@ -640,13 +999,13 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     a.max(1)
 }
 
-fn to_hns(ticks: i64, timescale: u32) -> i64 {
+pub(super) fn to_hns(ticks: i64, timescale: u32) -> i64 {
     let scaled = i128::from(ticks) * HNS;
     let timescale = i128::from(timescale.max(1));
     i64::try_from(round_div(scaled, timescale)).unwrap_or(i64::MAX)
 }
 
-fn from_hns(hns: i64, timescale: u32) -> i64 {
+pub(super) fn from_hns(hns: i64, timescale: u32) -> i64 {
     let scaled = i128::from(hns) * i128::from(timescale.max(1));
     i64::try_from(round_div(scaled, HNS)).unwrap_or(i64::MAX)
 }
@@ -665,7 +1024,7 @@ fn nal_of(bytes: Vec<u8>) -> Nal {
     Nal { bytes }
 }
 
-fn config_of(packet: &Packet) -> Option<&[u8]> {
+pub(super) fn config_of(packet: &Packet) -> Option<&[u8]> {
     packet.side.iter().find_map(|side| match side {
         SideData::Config(bytes) if !bytes.is_empty() => Some(bytes.as_slice()),
         _ => None,
@@ -674,20 +1033,20 @@ fn config_of(packet: &Packet) -> Option<&[u8]> {
 
 fn decline() -> CodecError {
     CodecError::Unsupported {
-        what: "media foundation h264",
+        what: "media foundation video",
     }
 }
 
 fn malformed() -> CodecError {
     CodecError::Malformed {
         at_bit: 0,
-        what: "media foundation h264",
+        what: "media foundation video",
     }
 }
 
 fn refused() -> CodecError {
     CodecError::Malformed {
         at_bit: 0,
-        what: "media foundation h264 encode",
+        what: "media foundation video encode",
     }
 }

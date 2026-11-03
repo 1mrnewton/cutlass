@@ -3934,6 +3934,14 @@ fn lane_color(kind: &cutlass_model::TrackType) -> Color32 {
     }
 }
 
+/// What the export dialog offers: the frame at the playhead as a PNG, or
+/// the whole cut as an MP4.
+const EXPORT_FORMATS: [(cutlass_decode::CodecId, &str, &str); 3] = [
+    (cutlass_decode::CodecId::Png, "PNG frame", "png"),
+    (cutlass_decode::CodecId::H264, "MP4 H.264", "mp4"),
+    (cutlass_decode::CodecId::Hevc, "MP4 HEVC", "mp4"),
+];
+
 fn export_dialog(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -3948,6 +3956,23 @@ fn export_dialog(
                 .clicked()
             {
                 view.export_side = side;
+            }
+        }
+        ui.label(RichText::new("Format").color(tokens::MUTED));
+        for (codec, label, extension) in EXPORT_FORMATS {
+            if ui
+                .selectable_label(view.export_codec == codec, label)
+                .clicked()
+                && view.export_codec != codec
+            {
+                view.export_codec = codec;
+                view.replace_prompt = false;
+                if !view.export_path.is_empty() {
+                    view.export_path = std::path::Path::new(&view.export_path)
+                        .with_extension(extension)
+                        .display()
+                        .to_string();
+                }
             }
         }
         if view.replace_prompt {

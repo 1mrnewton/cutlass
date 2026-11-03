@@ -340,6 +340,76 @@ pub fn read_hevc_sets(data: &[u8]) -> Result<HevcConfig, CodecError> {
     hevc_config(data)
 }
 
+/// Build an `hvcC` from VPS, SPS, and PPS NAL units, with 4-byte lengths.
+///
+/// The profile, tier, and level are copied from the SPS. Chroma format and
+/// bit depth are not parsed from it: Main is 4:2:0 at 8 bits, Main 10 at 10,
+/// which are the profiles an encoder here is asked for.
+pub fn write_hevc_config(nals: &[Vec<u8>]) -> Result<Vec<u8>, CodecError> {
+    let of = |kind: u8| -> Vec<Vec<u8>> {
+        nals.iter()
+            .filter(|nal| hevc_type(nal) == Some(kind))
+            .cloned()
+            .collect()
+    };
+    let (vps, sps, pps) = (of(32), of(33), of(34));
+    let Some(first) = sps.first() else {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "hvcC sps",
+        });
+    };
+    if vps.is_empty() || pps.is_empty() {
+        return Err(CodecError::Malformed {
+            at_bit: 0,
+            what: "hvcC sets",
+        });
+    }
+    // Two header bytes, one byte of ids and sub-layer count, then the
+    // 12-byte general profile, tier, and level.
+    let rbsp = unescape(first);
+    if rbsp.len() < 15 {
+        return Err(CodecError::Truncated {
+            at_bit: bit_at(rbsp.len()),
+            what: "hevc sps",
+        });
+    }
+    let sub_layers = (rbsp[2] >> 1) & 0x07;
+    let nested = rbsp[2] & 0x01;
+    let general = &rbsp[3..15];
+    let profile = general[0] & 0x1f;
+    let depth = if profile == 2 { 2 } else { 0 };
+    let mut out = Vec::with_capacity(64);
+    out.push(1);
+    out.extend_from_slice(general);
+    out.extend_from_slice(&[0xF0, 0x00, 0xFC, 0xFD, 0xF8 | depth, 0xF8 | depth, 0, 0]);
+    out.push(((sub_layers + 1) << 3) | (nested << 2) | 3);
+    out.push(3);
+    for (kind, sets) in [(32_u8, &vps), (33, &sps), (34, &pps)] {
+        out.push(0x80 | kind);
+        let count =
+            u16::try_from(sets.len()).map_err(|_| CodecError::Limit { what: "hvcC sets" })?;
+        out.extend_from_slice(&count.to_be_bytes());
+        write_sets(&mut out, sets)?;
+    }
+    Ok(out)
+}
+
+/// Drop emulation prevention bytes: `00 00 03` reads as `00 00`.
+fn unescape(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut zeros = 0;
+    for &byte in data {
+        if zeros >= 2 && byte == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if byte == 0 { zeros + 1 } else { 0 };
+        out.push(byte);
+    }
+    out
+}
+
 fn read_sets(
     data: &[u8],
     at: &mut usize,
@@ -557,5 +627,24 @@ mod tests {
         let config = read_hevc_sets(&bytes).expect("read");
         assert_eq!(config.length_size, 4);
         assert_eq!(config.nals, nals);
+    }
+
+    #[test]
+    fn an_hvcc_carries_the_sps_profile_and_reads_back() {
+        let vps = vec![0x40, 0x01, 0x0c];
+        // Main profile, compatibility bit 1, level 3.1 (93), one sub-layer.
+        let mut sps = vec![
+            0x42, 0x01, 0x01, 0x01, 0x60, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 93,
+        ];
+        sps.extend_from_slice(&[0xa0, 0x03]);
+        let pps = vec![0x44, 0x01, 0xc1];
+        let bytes = write_hevc_config(&[vps.clone(), sps.clone(), pps.clone()]).expect("write");
+        assert_eq!(bytes[1], 0x01, "profile space, tier, and Main");
+        assert_eq!(bytes[12], 93, "level");
+        assert_eq!(bytes[21] & 0x03, 3, "4-byte lengths");
+        let config = hevc_config(&bytes).expect("read");
+        assert_eq!(config.length_size, 4);
+        assert_eq!(config.nals, vec![vps, sps, pps]);
+        assert!(write_hevc_config(&[vec![0x42, 0x01]]).is_err());
     }
 }

@@ -4144,14 +4144,17 @@ impl Shell {
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
         }
-        if request.codec != CodecId::Png {
-            return Err(ShellError::ExportUnavailable);
-        }
         let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
                 "the short side is not one of the steps".to_owned(),
             ));
         };
+        if matches!(request.codec, CodecId::H264 | CodecId::Hevc) {
+            return self.export_movie(&request, short_side);
+        }
+        if request.codec != CodecId::Png {
+            return Err(ShellError::ExportUnavailable);
+        }
         let rate = draft.frame_rate().unwrap_or(FrameRate::FPS_30);
         let range = playhead_frame(rate, self.playhead)?;
         let export_request = cutlass_export::ExportRequest {
@@ -4193,6 +4196,86 @@ impl Shell {
             ));
         };
         write_replaced(&request.path, bytes)
+    }
+
+    /// Writes the whole cut as an MP4: the picture in `request.codec` and
+    /// the sound as AAC, through this shell's encoders, so the platform
+    /// encoders go first. The file is written beside its destination and
+    /// moved there only once it is finished, so a failed export leaves
+    /// nothing behind.
+    fn export_movie(&self, request: &ExportRequest, short_side: u32) -> Result<(), ShellError> {
+        let draft = self.session_draft()?;
+        let end = self.cut_duration().0;
+        if end <= 0 {
+            return Err(ShellError::Unavailable(
+                "there is nothing to export".to_owned(),
+            ));
+        }
+        if request.path.is_dir() {
+            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        }
+        let name = request
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| ShellError::Io("the export has no file name".to_owned()))?;
+        let part = request.path.with_file_name(format!(".{name}.part"));
+        let export_request = cutlass_export::ExportRequest {
+            range: TimeRange::new(0, end),
+            short_side,
+            codec: request.codec,
+            bitrate: movie_bitrate(short_side),
+            frame_rate: draft.frame_rate().unwrap_or(FrameRate::FPS_30),
+            container: cutlass_codec::ContainerId::Isobmff,
+            audio: Some(MOVIE_SOUND),
+            sidecar: None,
+            late_by: 0,
+        };
+        let written = self.write_movie(draft, &export_request, &part);
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&part);
+            return Err(error);
+        }
+        std::fs::rename(&part, &request.path).map_err(|error| {
+            let _ = std::fs::remove_file(&part);
+            ShellError::Io(error.to_string())
+        })
+    }
+
+    fn write_movie(
+        &self,
+        draft: &Draft,
+        request: &cutlass_export::ExportRequest,
+        part: &Path,
+    ) -> Result<(), ShellError> {
+        let root = self.path.as_deref();
+        let file =
+            std::fs::File::create(part).map_err(|error| ShellError::Io(error.to_string()))?;
+        let mut mux = cutlass_isobmff::Mp4Mux::new(std::io::BufWriter::new(file));
+        let mut device = SoftwareDevice::new();
+        cutlass_export::export(
+            cutlass_export::ExportRun {
+                draft,
+                device: &mut device,
+                request,
+                factory: &self.encoders,
+                readers: &self.readers,
+                mux: &mut mux,
+                destination: None,
+                root,
+                fonts: &self.face,
+                // The preview's device, so an effect clip is in the file.
+                renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
+                progress: None,
+            },
+            cutlass_export::file_audio(&self.readers, draft, root),
+        )
+        .map_err(export_failure)?;
+        let mut writer = mux
+            .into_writer()
+            .map_err(|error| ShellError::Io(error.to_string()))?;
+        std::io::Write::flush(&mut writer).map_err(|error| ShellError::Io(error.to_string()))
     }
 
     pub fn drag_timeline(&mut self, delta_y: f32, window_height: f32) {
@@ -4534,6 +4617,26 @@ fn playhead_frame(rate: FrameRate, playhead: Micros) -> Result<TimeRange, ShellE
         .filter(|span| *span > 0)
         .ok_or_else(|| ShellError::Unavailable("the playhead is not a frame".to_owned()))?;
     Ok(TimeRange::new(start.0, duration))
+}
+
+/// The sound every movie export carries, as on the phone.
+const MOVIE_SOUND: cutlass_export::AudioExport = cutlass_export::AudioExport {
+    codec: CodecId::Aac,
+    bitrate: 192_000,
+    sample_rate: 48_000,
+    channels: 2,
+    limiter: 0,
+};
+
+/// Bits a second for a picture `short_side` pixels on its short side, the
+/// phone export's steps, with 4K and up given more.
+fn movie_bitrate(short_side: u32) -> u32 {
+    match short_side {
+        0..=720 => 6_000_000,
+        721..=1080 => 12_000_000,
+        1081..=1440 => 24_000_000,
+        _ => 40_000_000,
+    }
 }
 
 fn export_failure(error: cutlass_export::ExportError) -> ShellError {
@@ -8915,7 +9018,7 @@ mod tests {
         let movie = desktop.export(ExportRequest {
             path: destination.clone(),
             short_side: 480,
-            codec: CodecId::H264,
+            codec: CodecId::Vp9,
             replace: true,
         });
         assert!(matches!(
@@ -8932,6 +9035,222 @@ mod tests {
         });
         assert!(matches!(step, Err(ShellError::Unavailable(_))));
         assert_eq!(SHORT_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
+    }
+
+    /// The whole cut written as an MP4 through the desktop's encoders, then
+    /// opened again with the desktop's readers: one picture stream of the
+    /// asked codec at the exported size, the colour of the clip in a decoded
+    /// frame, and an AAC sound stream.
+    fn movie_round_trip(codec: CodecId, codec_name: &str) {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let destination = temp.path.join("out.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec,
+                replace: false,
+            })
+            .unwrap();
+        assert!(
+            !temp.path.join(".out.mp4.part").exists(),
+            "the part file was moved"
+        );
+
+        let readers = crate::readers::installed_readers();
+        let mut media = readers.open(&destination).unwrap();
+        let info = media.info().clone();
+        assert_eq!(info.family, ContainerId::Isobmff);
+        let video = info
+            .streams
+            .iter()
+            .find(|stream| stream.width.is_some())
+            .expect("a picture stream");
+        assert_eq!(video.codec, codec_name);
+        assert_eq!((video.width, video.height), (Some(960), Some(480)));
+        let sound = info
+            .streams
+            .iter()
+            .find(|stream| stream.sample_rate.is_some())
+            .expect("a sound stream");
+        assert_eq!((sound.sample_rate, sound.channels), (Some(48_000), Some(2)));
+
+        let held = media
+            .decode_at(Micros(500_000), &TimeRange::new(0, 1_000_000))
+            .unwrap();
+        let cutlass_engine::DecodedFrame::Coded {
+            width,
+            height,
+            pixel,
+            bytes,
+            ..
+        } = held.frame
+        else {
+            panic!("a CPU picture");
+        };
+        assert_eq!((width, height), (960, 480));
+        // 0x336699 is Y 97, Cb 156, Cr 104 in limited-range BT.709.
+        let (expect, got): ([u32; 3], [u32; 3]) = match pixel {
+            PixelFormat::Yuv420p => {
+                let luma = (width * height) as usize;
+                let mean = |plane: &[u8]| {
+                    plane.iter().map(|&value| u32::from(value)).sum::<u32>() / plane.len() as u32
+                };
+                let (y, chroma) = bytes.split_at(luma);
+                let (u, v) = chroma.split_at(luma / 4);
+                ([97, 156, 104], [mean(y), mean(u), mean(v)])
+            }
+            PixelFormat::Rgba8 => {
+                let pixels = bytes.as_chunks::<4>().0;
+                let mean = |channel: usize| {
+                    pixels
+                        .iter()
+                        .map(|pixel| u32::from(pixel[channel]))
+                        .sum::<u32>()
+                        / pixels.len() as u32
+                };
+                ([0x33, 0x66, 0x99], [mean(0), mean(1), mean(2)])
+            }
+            other => panic!("{other:?}"),
+        };
+        for (want, have) in expect.iter().zip(got) {
+            assert!(
+                want.abs_diff(have) <= 6,
+                "{pixel:?}: want {expect:?}, got {got:?}"
+            );
+        }
+
+        let mut again = readers.open(&destination).unwrap();
+        let heard = again.pull_audio().unwrap().expect("a sound buffer");
+        assert_eq!(heard.pcm.rate, 48_000);
+        assert!(heard.pcm.samples > 0);
+    }
+
+    #[test]
+    fn export_writes_an_h264_movie_that_opens_again() {
+        movie_round_trip(CodecId::H264, "H264");
+    }
+
+    /// No Rust HEVC encoder is registered, so this one only runs where a
+    /// platform encoder takes HEVC: Media Foundation or VideoToolbox.
+    #[test]
+    fn export_writes_an_hevc_movie_where_the_platform_can() {
+        let (_, encoders) = crate::register_codecs();
+        if encoders
+            .open(&CodecParams::video(CodecId::Hevc, 960, 480))
+            .is_err()
+        {
+            eprintln!("skipped: no HEVC encoder here");
+            return;
+        }
+        movie_round_trip(CodecId::Hevc, "Hevc");
+    }
+
+    /// The movie `CUTLASS_MOVIE` names, imported, dropped on the timeline,
+    /// and exported as an MP4 through the desktop's encoders. The file opens
+    /// again with its picture at the canvas size, its sound as 48 kHz AAC,
+    /// and every picture in order across the cut.
+    #[test]
+    #[ignore = "exports the movie CUTLASS_MOVIE names"]
+    fn a_named_movie_exports_and_opens_again() {
+        let Some(movie) = std::env::var_os("CUTLASS_MOVIE").map(PathBuf::from) else {
+            eprintln!("skipped: CUTLASS_MOVIE is not set");
+            return;
+        };
+        let temp = Temp::new();
+        draft_only(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&movie).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let cut = desktop.cut_duration().0;
+        let destination = temp.path.join("export.mp4");
+        let started = std::time::Instant::now();
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 720,
+                codec: CodecId::H264,
+                replace: false,
+            })
+            .unwrap();
+        let took = started.elapsed();
+        let size = std::fs::metadata(&destination).unwrap().len();
+        eprintln!(
+            "exported {cut} us of {} in {took:?}, {size} bytes",
+            movie.display()
+        );
+
+        let readers = crate::readers::installed_readers();
+        let mut media = readers.open(&destination).unwrap();
+        let info = media.info().clone();
+        eprintln!("streams {:?}", info.streams);
+        let video = info
+            .streams
+            .iter()
+            .find(|stream| stream.width.is_some())
+            .unwrap();
+        assert_eq!(video.codec, "H264");
+        assert_eq!(video.width.min(video.height), Some(720));
+        let sound = info
+            .streams
+            .iter()
+            .find(|stream| stream.sample_rate.is_some())
+            .expect("a sound stream");
+        assert_eq!(sound.sample_rate, Some(48_000));
+        let duration = info.duration.expect("a duration").0;
+        assert!(
+            (duration - cut).abs() < 100_000,
+            "file {duration} us, cut {cut} us"
+        );
+
+        let cover = TimeRange::new(0, duration);
+        let (mut time, mut last, mut pictures) = (0_i64, -1_i64, 0);
+        while time < duration {
+            let held = media.decode_at(Micros(time), &cover).unwrap();
+            assert!(held.start.0 <= time && time < held.end.0, "at {time}");
+            assert!(held.start.0 > last, "at {time}");
+            last = held.start.0;
+            pictures += 1;
+            time = held.end.0;
+        }
+        let mut again = readers.open(&destination).unwrap();
+        let heard = again.pull_audio().unwrap().expect("a sound buffer");
+        assert_eq!(heard.pcm.rate, 48_000);
+        eprintln!("read back {pictures} pictures in order and sound at 48 kHz");
+    }
+
+    #[test]
+    fn a_movie_export_of_an_empty_cut_writes_nothing() {
+        let temp = Temp::new();
+        draft_only(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let destination = temp.path.join("empty.mp4");
+        let result = desktop.export(ExportRequest {
+            path: destination.clone(),
+            short_side: 480,
+            codec: CodecId::H264,
+            replace: false,
+        });
+        assert!(
+            matches!(
+                result,
+                Err(ShellError::Unavailable(_) | ShellError::CodecDeclined(_))
+            ),
+            "{result:?}"
+        );
+        assert!(!destination.exists());
+        assert!(!temp.path.join(".empty.mp4.part").exists());
     }
 
     #[test]

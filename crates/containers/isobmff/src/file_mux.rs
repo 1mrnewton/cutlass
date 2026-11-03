@@ -92,19 +92,25 @@ fn rejected(message: &str) -> MuxError {
     }
 }
 
-/// The box writer's parameters for `stream`: H.264 pictures or AAC sound.
+/// The box writer's parameters for `stream`: H.264 or HEVC pictures, or
+/// AAC sound.
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
-        return Err(rejected("mp4 export writes H.264 and AAC"));
+        return Err(rejected("mp4 export writes H.264, HEVC, and AAC"));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
     let mut params = match codec {
-        Id::H264 => {
+        Id::H264 | Id::Hevc => {
             let size = stream
                 .params
                 .size()
                 .ok_or_else(|| rejected("a picture track needs a size"))?;
-            StreamParams::video(CodecId::H264, scale, size.width(), size.height())
+            let codec = if *codec == Id::H264 {
+                CodecId::H264
+            } else {
+                CodecId::Hevc
+            };
+            StreamParams::video(codec, scale, size.width(), size.height())
         }
         Id::Aac => {
             let rate = stream
@@ -117,7 +123,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
                 .ok_or_else(|| rejected("a sound track needs channels"))?;
             StreamParams::audio(CodecId::Aac, scale, rate, channels, 16, SampleFormat::S16Le)
         }
-        _ => return Err(rejected("mp4 export writes H.264 and AAC")),
+        _ => return Err(rejected("mp4 export writes H.264, HEVC, and AAC")),
     };
     params.extradata = stream.params.extradata().to_vec();
     Ok(params)

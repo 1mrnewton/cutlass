@@ -1,9 +1,12 @@
-//! Media Foundation decoders and encoders, and the WASAPI preview queue.
+//! Media Foundation and WIC decoders and encoders, and the WASAPI preview
+//! queue.
 //!
-//! The Media Foundation openers sit behind [`cutlass_decode::Decoder`] and
-//! [`cutlass_encode::Encoder`]. The desktop registers them first. An opener
-//! that this Windows cannot run returns [`cutlass_decode::CodecError::Unsupported`],
-//! and the factory asks the next opener. Off Windows every opener declines.
+//! H.264, HEVC, and AAC go through Media Foundation, on the GPU first, and
+//! JPEG and PNG through the Windows Imaging Component, all behind
+//! [`cutlass_decode::Decoder`] and [`cutlass_encode::Encoder`]. The desktop
+//! registers them first. An opener that this Windows cannot run returns
+//! [`cutlass_decode::CodecError::Unsupported`], and the factory asks the next
+//! opener. Off Windows every opener declines.
 //!
 //! [`OutputQueue`] is a shared-mode WASAPI stream. Playback calls that safe
 //! queue. This crate does not mix samples.

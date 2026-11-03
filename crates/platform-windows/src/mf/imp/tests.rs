@@ -4,11 +4,15 @@ use cutlass_decode::{
 };
 use cutlass_encode::{CpuFrame, EncodeFactory, Encoder, FrameInput, FrameTime, PlatformFrame};
 
-use super::video::{open_decoder, open_encoder};
+use super::video::{open_decoder, open_decoder_on, open_encoder, open_encoder_on};
 use crate::nal;
 
 fn video_params(width: u32, height: u32) -> CodecParams {
-    let mut params = CodecParams::with_format(CodecId::H264, width, height, PixelFormat::Rgba8);
+    codec_params(CodecId::H264, width, height)
+}
+
+fn codec_params(codec: CodecId, width: u32, height: u32) -> CodecParams {
+    let mut params = CodecParams::with_format(codec, width, height, PixelFormat::Rgba8);
     params.bitrate = 500_000;
     params.primaries = ColorPrimaries::Bt709;
     params
@@ -238,10 +242,10 @@ fn an_odd_size_or_another_codec_is_declined() {
         open_encoder(&video_params(64, 47)),
         Err(CodecError::Unsupported { .. })
     ));
-    let mut hevc = video_params(64, 48);
-    hevc.codec = CodecId::Hevc;
+    let mut vp8 = video_params(64, 48);
+    vp8.codec = CodecId::Vp8;
     assert!(matches!(
-        open_decoder(&hevc),
+        open_decoder(&vp8),
         Err(CodecError::Unsupported { .. })
     ));
 }
@@ -309,4 +313,147 @@ fn the_factory_uses_media_foundation_first() {
     let mut none = DecodeFactory::new();
     super::register_decoders_with(&mut none, false);
     assert!(none.open(&params).is_err());
+}
+
+/// Encode red on one engine and decode on another, and check the colour.
+/// Returns whether each side really ran on the GPU.
+fn round_trip(
+    codec: CodecId,
+    (width, height): (u32, u32),
+    encode_on_gpu: bool,
+    decode_on_gpu: bool,
+) -> Result<(bool, bool), CodecError> {
+    let mut encoder = open_encoder_on(&codec_params(codec, width, height), encode_on_gpu)?;
+    let encoded_on_gpu = encoder.hardware();
+    let packets = encode(&mut encoder, width, height, 4);
+    assert_eq!(packets.len(), 4, "{codec:?} {encoded_on_gpu}");
+    assert!(packets[0].keyframe);
+    let mut params = codec_params(codec, width, height);
+    params.extra = config(&packets);
+    let mut decoder = open_decoder_on(&params, decode_on_gpu)?;
+    let pictures = decode_all(&mut decoder, &packets);
+    let decoded_on_gpu = decoder.hardware();
+    assert_eq!(
+        pictures.len(),
+        4,
+        "{codec:?} decode on gpu {decoded_on_gpu}"
+    );
+    for (index, picture) in pictures.iter().enumerate() {
+        assert_eq!(picture.pts(), index as i64);
+        let info = picture.info();
+        assert_eq!((info.width, info.height), (width, height));
+        let PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("cpu");
+        };
+        let (red, green, blue) = (
+            mean_channel(bytes, 0),
+            mean_channel(bytes, 1),
+            mean_channel(bytes, 2),
+        );
+        assert!(
+            red > 180 && green < 50 && blue < 50,
+            "{codec:?} gpu encode {encoded_on_gpu} decode {decoded_on_gpu}: {red} {green} {blue}"
+        );
+    }
+    Ok((encoded_on_gpu, decoded_on_gpu))
+}
+
+#[test]
+fn h264_round_trips_on_every_engine() {
+    for size in [(64, 48), (1920, 1080)] {
+        for (encode_on_gpu, decode_on_gpu) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let ran = round_trip(CodecId::H264, size, encode_on_gpu, decode_on_gpu).expect("h264");
+            eprintln!("h264 {size:?}: asked gpu {encode_on_gpu}/{decode_on_gpu}, ran {ran:?}");
+            if !encode_on_gpu {
+                assert!(!ran.0, "a software encode stays in software");
+            }
+            if !decode_on_gpu {
+                assert!(!ran.1, "a software decode stays in software");
+            }
+        }
+    }
+}
+
+#[test]
+fn hevc_round_trips_when_windows_can() {
+    for size in [(64, 48), (1920, 1080)] {
+        for (encode_on_gpu, decode_on_gpu) in [(true, true), (true, false)] {
+            match round_trip(CodecId::Hevc, size, encode_on_gpu, decode_on_gpu) {
+                Ok(ran) => eprintln!(
+                    "hevc {size:?}: asked gpu {encode_on_gpu}/{decode_on_gpu}, ran {ran:?}"
+                ),
+                Err(CodecError::Unsupported { what }) => {
+                    eprintln!("hevc {size:?}: this Windows declines ({what})");
+                }
+                Err(error) => panic!("hevc {size:?}: {error}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn an_hevc_config_is_a_real_hvcc() {
+    let Ok(mut encoder) = open_encoder_on(&codec_params(CodecId::Hevc, 64, 48), true) else {
+        return;
+    };
+    let packets = encode(&mut encoder, 64, 48, 1);
+    let bytes = config(&packets);
+    assert_eq!(bytes[0], 1, "configurationVersion");
+    let sets = nal::hevc_config(&bytes).expect("hvcC parses");
+    let kinds: Vec<_> = sets.nals.iter().map(|set| nal::hevc_type(set)).collect();
+    assert_eq!(kinds, [Some(32), Some(33), Some(34)]);
+}
+
+/// A hardware HEVC encoder asked for B pictures emits units out of display
+/// order (H.264 is asked for Baseline, which has none). Each decoder, on the GPU and off it, gives the pictures back in
+/// display order with their own times.
+#[test]
+fn b_pictures_come_back_in_display_order() {
+    super::video::TEST_B_PICTURES.with(|count| count.set(2));
+    let encoder = open_encoder_on(&codec_params(CodecId::Hevc, 320, 240), true);
+    super::video::TEST_B_PICTURES.with(|count| count.set(0));
+    let mut encoder = encoder.expect("encoder");
+    if !encoder.hardware() {
+        eprintln!("skipped: no hardware encoder to make B pictures");
+        return;
+    }
+    let mut packets = Vec::new();
+    for pts in 0..30 {
+        let shade = (pts * 8) as u8;
+        packets.extend(
+            encoder
+                .push_frame(&solid(320, 240, [shade, 255 - shade, 40, 255], pts))
+                .expect("encode"),
+        );
+    }
+    packets.extend(encoder.drain().expect("drain"));
+    let order: Vec<i64> = packets.iter().map(|packet| packet.pts).collect();
+    let reordered = order.windows(2).any(|pair| pair[1] < pair[0]);
+    eprintln!("decode order {order:?}");
+    if !reordered {
+        eprintln!("skipped: the encoder made no B pictures");
+        return;
+    }
+    let mut params = codec_params(CodecId::Hevc, 320, 240);
+    params.extra = config(&packets);
+    for on_gpu in [true, false] {
+        let mut decoder = open_decoder_on(&params, on_gpu).expect("decoder");
+        let pictures = decode_all(&mut decoder, &packets);
+        let shown: Vec<i64> = pictures.iter().map(PictureOutput::pts).collect();
+        assert_eq!(shown, (0..30).collect::<Vec<_>>(), "gpu {on_gpu}");
+        for picture in &pictures {
+            let PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("cpu");
+            };
+            let want = (picture.pts() * 8) as u64;
+            let red = mean_channel(bytes, 0);
+            assert!(
+                red.abs_diff(want) <= 12,
+                "gpu {on_gpu} pts {} red {red} want {want}",
+                picture.pts()
+            );
+        }
+    }
 }

@@ -238,6 +238,34 @@ impl Shell {
         })
     }
 
+    /// The selected effect, filter, or adjustment's strength from 0 to 1. A
+    /// filter with none stored reads as the halfway default.
+    #[must_use]
+    pub fn effect_strength(&self) -> Option<f64> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        match draft.materials.get(segment.material_id.as_str())? {
+            MaterialRef::VideoEffect(effect) => Some(effect.value),
+            MaterialRef::Effect(effect) if effect.kind != MaterialEffect::BLOOM => {
+                Some(effect.value.unwrap_or(MaterialEffect::MAPPING_VALUE))
+            }
+            _ => None,
+        }
+    }
+
+    /// Store the selected effect, filter, or adjustment's strength. A split
+    /// clip's halves get their own once one changes. One undo restores it.
+    pub fn set_effect_strength(&mut self, value: f64) -> Result<(), ShellError> {
+        let segment_id = self.selected_or_refuse()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("effect"));
+        self.apply(Request::SetEffectStrength {
+            segment_id,
+            material_id,
+            value,
+        })
+    }
+
     /// Turn the selected picture to `degrees`, clockwise on the preview.
     /// One undo restores the previous turn.
     pub fn set_rotation(&mut self, degrees: f64) -> Result<(), ShellError> {
@@ -701,6 +729,42 @@ mod tests {
         pick(&mut desktop, "sticker");
         assert_eq!(
             desktop.set_rotation(90.0).unwrap_err().to_string(),
+            "the track is locked"
+        );
+    }
+
+    #[test]
+    fn an_effect_or_filter_strength_is_one_step_and_a_title_has_none() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "fx");
+        assert_eq!(desktop.effect_strength(), Some(1.0));
+        let before = desktop.draft().unwrap().clone();
+        desktop.set_effect_strength(0.4).unwrap();
+        assert_eq!(desktop.effect_strength(), Some(0.4));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &before);
+
+        pick(&mut desktop, "look");
+        assert_eq!(desktop.effect_strength(), Some(0.5));
+        desktop.set_effect_strength(0.9).unwrap();
+        assert_eq!(desktop.effect_strength(), Some(0.9));
+        assert_eq!(
+            desktop.set_effect_strength(1.5).unwrap_err().to_string(),
+            "the strength must be from zero to one"
+        );
+        assert_eq!(desktop.effect_strength(), Some(0.9));
+
+        pick(&mut desktop, "words");
+        assert_eq!(desktop.effect_strength(), None);
+        assert_eq!(
+            desktop.set_effect_strength(0.5).unwrap_err().to_string(),
+            "a strength belongs on an effect, filter, or adjustment"
+        );
+        lock(&mut desktop, "f");
+        pick(&mut desktop, "look");
+        assert_eq!(
+            desktop.set_effect_strength(0.1).unwrap_err().to_string(),
             "the track is locked"
         );
     }

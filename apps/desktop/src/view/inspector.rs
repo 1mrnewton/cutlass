@@ -55,7 +55,8 @@ pub(super) fn clip_panel(
                 placement(shell, ui, view, inspection);
             }
             Panel::Sticker => placement(shell, ui, view, inspection),
-            Panel::Effect | Panel::Filter | Panel::Adjust | Panel::Other => {}
+            Panel::Effect | Panel::Filter | Panel::Adjust => strength(shell, ui, view),
+            Panel::Other => {}
         }
     });
 }
@@ -222,6 +223,17 @@ fn picture(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, inspection: &In
         )
     {
         send(shell, |shell| shell.set_letterbox(&value));
+    }
+}
+
+fn strength(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some(stored) = shell.effect_strength() else {
+        return;
+    };
+    group(ui, "Amount");
+    let hint = "0 to 1. Kept in the draft; the preview does not scale by it yet";
+    if let Some(value) = number(ui, view, "Strength", stored, hint) {
+        send(shell, |shell| shell.set_effect_strength(value));
     }
 }
 

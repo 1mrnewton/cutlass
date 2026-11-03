@@ -4012,7 +4012,7 @@ mod tests {
             ("said", &["Caption", "1.50 s", "Style"], &["Sound"]),
             (
                 "look",
-                &["Filter", "Warm", "Timing"],
+                &["Filter", "Warm", "Timing", "Amount", "Strength"],
                 &["Transform", "Sound", "Style"],
             ),
             (

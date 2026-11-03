@@ -617,6 +617,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func durationUs() throws  -> Int64
     
     /**
+     * Filmstrip tiles, `height` points tall, for the picture clips that
+     * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
+     */
+    func film(fromUs: Int64, toUs: Int64, pixelSize: Double, height: Double) throws  -> [Film]
+    
+    /**
      * The picture at `time_us`.
      */
     func frame(timeUs: Int64) throws  -> Frame
@@ -657,6 +663,18 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func remove(clipId: String) throws 
     
     /**
+     * Put a main clip at `place` in the main row's order, counted from zero
+     * without it, as one undo step.
+     */
+    func reorder(clipId: String, place: UInt32) throws 
+    
+    /**
+     * Ruler ticks from `from_us` through `to_us` at `pixel_size` points per
+     * microsecond.
+     */
+    func ruler(pixelSize: Double, fromUs: Int64, toUs: Int64) throws  -> [Tick]
+    
+    /**
      * Write the draft into the project folder.
      */
     func save() throws 
@@ -684,6 +702,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func split(clipId: String, atUs: Int64) throws  -> String
     
     /**
+     * The picture of a tile [`Self::film`] named, once stored.
+     */
+    func thumb(key: String) throws  -> Frame?
+    
+    /**
      * Move a playing playhead by `elapsed_us` with the heard sound and
      * return it. Call once per screen frame while playing.
      */
@@ -696,6 +719,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
     
     func undo() throws 
+    
+    /**
+     * `pixel_size` times `factor`, held inside what the cut and a row
+     * `lane_width` points wide allow.
+     */
+    func zoom(pixelSize: Double, factor: Double, laneWidth: Double) throws  -> Double
     
 }
 /**
@@ -791,6 +820,23 @@ open func durationUs()throws  -> Int64  {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Filmstrip tiles, `height` points tall, for the picture clips that
+     * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
+     */
+open func film(fromUs: Int64, toUs: Int64, pixelSize: Double, height: Double)throws  -> [Film]  {
+    return try  FfiConverterSequenceTypeFilm.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_film(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(fromUs),
+        FfiConverterInt64.lower(toUs),
+        FfiConverterDouble.lower(pixelSize),
+        FfiConverterDouble.lower(height),uniffiCallStatus
     )
 })
 }
@@ -903,6 +949,36 @@ open func remove(clipId: String)throws   {try rustCallWithError(FfiConverterType
 }
     
     /**
+     * Put a main clip at `place` in the main row's order, counted from zero
+     * without it, as one undo step.
+     */
+open func reorder(clipId: String, place: UInt32)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_reorder(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterUInt32.lower(place),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Ruler ticks from `from_us` through `to_us` at `pixel_size` points per
+     * microsecond.
+     */
+open func ruler(pixelSize: Double, fromUs: Int64, toUs: Int64)throws  -> [Tick]  {
+    return try  FfiConverterSequenceTypeTick.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_ruler(
+            self.uniffiCloneHandle(),
+        FfiConverterDouble.lower(pixelSize),
+        FfiConverterInt64.lower(fromUs),
+        FfiConverterInt64.lower(toUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Write the draft into the project folder.
      */
 open func save()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -968,6 +1044,19 @@ open func split(clipId: String, atUs: Int64)throws  -> String  {
 }
     
     /**
+     * The picture of a tile [`Self::film`] named, once stored.
+     */
+open func thumb(key: String)throws  -> Frame?  {
+    return try  FfiConverterOptionTypeFrame.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_thumb(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(key),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Move a playing playhead by `elapsed_us` with the heard sound and
      * return it. Call once per screen frame while playing.
      */
@@ -1005,6 +1094,22 @@ open func undo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * `pixel_size` times `factor`, held inside what the cut and a row
+     * `lane_width` points wide allow.
+     */
+open func zoom(pixelSize: Double, factor: Double, laneWidth: Double)throws  -> Double  {
+    return try  FfiConverterDouble.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_zoom(
+            self.uniffiCloneHandle(),
+        FfiConverterDouble.lower(pixelSize),
+        FfiConverterDouble.lower(factor),
+        FfiConverterDouble.lower(laneWidth),uniffiCallStatus
+    )
+})
 }
     
 
@@ -1137,6 +1242,63 @@ public func FfiConverterTypeClip_lift(_ buf: RustBuffer) throws -> Clip {
 #endif
 public func FfiConverterTypeClip_lower(_ value: Clip) -> RustBuffer {
     return FfiConverterTypeClip.lower(value)
+}
+
+
+/**
+ * The filmstrip tiles of one clip.
+ */
+public struct Film: Equatable, Hashable {
+    public var clipId: String
+    public var tiles: [Tile]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(clipId: String, tiles: [Tile]) {
+        self.clipId = clipId
+        self.tiles = tiles
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Film: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFilm: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Film {
+        return
+            try Film(
+                clipId: FfiConverterString.read(from: &buf), 
+                tiles: FfiConverterSequenceTypeTile.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Film, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.clipId, into: &buf)
+        FfiConverterSequenceTypeTile.write(value.tiles, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilm_lift(_ buf: RustBuffer) throws -> Film {
+    return try FfiConverterTypeFilm.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilm_lower(_ value: Film) -> RustBuffer {
+    return FfiConverterTypeFilm.lower(value)
 }
 
 
@@ -1333,6 +1495,133 @@ public func FfiConverterTypeProjectSummary_lower(_ value: ProjectSummary) -> Rus
 
 
 /**
+ * One ruler tick. A major tick carries its label.
+ */
+public struct Tick: Equatable, Hashable {
+    public var timeUs: Int64
+    public var major: Bool
+    public var label: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timeUs: Int64, major: Bool, label: String?) {
+        self.timeUs = timeUs
+        self.major = major
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Tick: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTick: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Tick {
+        return
+            try Tick(
+                timeUs: FfiConverterInt64.read(from: &buf), 
+                major: FfiConverterBool.read(from: &buf), 
+                label: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Tick, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.timeUs, into: &buf)
+        FfiConverterBool.write(value.major, into: &buf)
+        FfiConverterOptionString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTick_lift(_ buf: RustBuffer) throws -> Tick {
+    return try FfiConverterTypeTick.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTick_lower(_ value: Tick) -> RustBuffer {
+    return FfiConverterTypeTick.lower(value)
+}
+
+
+/**
+ * One filmstrip tile, in points from the clip's left edge. `key` names the
+ * picture for [`Editor::thumb`]; `ready` says it is stored.
+ */
+public struct Tile: Equatable, Hashable {
+    public var left: Double
+    public var width: Double
+    public var key: String
+    public var ready: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(left: Double, width: Double, key: String, ready: Bool) {
+        self.left = left
+        self.width = width
+        self.key = key
+        self.ready = ready
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Tile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Tile {
+        return
+            try Tile(
+                left: FfiConverterDouble.read(from: &buf), 
+                width: FfiConverterDouble.read(from: &buf), 
+                key: FfiConverterString.read(from: &buf), 
+                ready: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Tile, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.left, into: &buf)
+        FfiConverterDouble.write(value.width, into: &buf)
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterBool.write(value.ready, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTile_lift(_ buf: RustBuffer) throws -> Tile {
+    return try FfiConverterTypeTile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTile_lower(_ value: Tile) -> RustBuffer {
+    return FfiConverterTypeTile.lower(value)
+}
+
+
+/**
  * Why a call left the project as it was.
  */
 public 
@@ -1523,6 +1812,54 @@ public func FfiConverterTypeLaneKind_lower(_ value: LaneKind) -> RustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
+    typealias SwiftType = String?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
+    typealias SwiftType = Frame?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFrame.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFrame.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeClip: FfiConverterRustBuffer {
     typealias SwiftType = [Clip]
 
@@ -1540,6 +1877,31 @@ fileprivate struct FfiConverterSequenceTypeClip: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeClip.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFilm: FfiConverterRustBuffer {
+    typealias SwiftType = [Film]
+
+    public static func write(_ value: [Film], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFilm.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Film] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Film]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFilm.read(from: &buf))
         }
         return seq
     }
@@ -1594,6 +1956,56 @@ fileprivate struct FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffe
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTick: FfiConverterRustBuffer {
+    typealias SwiftType = [Tick]
+
+    public static func write(_ value: [Tick], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTick.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Tick] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Tick]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTick.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTile: FfiConverterRustBuffer {
+    typealias SwiftType = [Tile]
+
+    public static func write(_ value: [Tile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Tile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Tile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTile.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * Write a new empty project in the Cutlass folder at `root`, named like the
  * desktop's, and return its folder.
@@ -1619,6 +2031,29 @@ public func listProjects(root: String) -> [ProjectSummary]  {
 })
 }
 /**
+ * The speed at scale `position`, 0 to 1. The marks 0.1, 1, 2, 5, 10 and
+ * 100 sit the same distance apart.
+ */
+public func speedAt(position: Double) -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_speed_at(
+        FfiConverterDouble.lower(position),uniffiCallStatus
+    )
+})
+}
+/**
+ * Where `speed` sits on the speed scale, 0 to 1.
+ */
+public func speedPosition(speed: Double) -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_speed_position(
+        FfiConverterDouble.lower(speed),uniffiCallStatus
+    )
+})
+}
+/**
  * Lay out the Cutlass folder under `root` and open the process log in it.
  *
  * `root` is the one folder everything Cutlass writes lives under: the
@@ -1632,6 +2067,29 @@ public func start(root: String)throws   {try rustCallWithError(FfiConverterTypeE
         FfiConverterString.lower(root),uniffiCallStatus
     )
 }
+}
+/**
+ * The gain at volume slider `position`, 0 to 1. Unity is the middle and
+ * the right end is ten times.
+ */
+public func volumeAt(position: Double) -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_volume_at(
+        FfiConverterDouble.lower(position),uniffiCallStatus
+    )
+})
+}
+/**
+ * Where `volume` sits on the volume slider, 0 to 1.
+ */
+public func volumePosition(volume: Double) -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_volume_position(
+        FfiConverterDouble.lower(volume),uniffiCallStatus
+    )
+})
 }
 
 private enum InitializationResult {
@@ -1655,13 +2113,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_speed_at() != 24871) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_speed_position() != 63073) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_start() != 16636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_volume_at() != 31091) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_volume_position() != 27181) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_film() != 35426) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() != 13353) {
@@ -1691,6 +2164,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() != 65039) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_reorder() != 12502) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ruler() != 61631) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_save() != 50350) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1706,6 +2185,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 28776) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1713,6 +2195,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_zoom() != 36237) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_constructor_editor_open() != 960) {

@@ -268,6 +268,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_append(uint64_t ptr, Rus
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FILM
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FILM
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_film(uint64_t ptr, int64_t from_us, int64_t to_us, double pixel_size, double height, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FRAME
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FRAME
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_frame(uint64_t ptr, int64_t time_us, RustCallStatus *_Nonnull out_status
@@ -313,6 +318,16 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_redo(uint64_t ptr, RustCallSta
 void uniffi_cutlass_ffi_bindings_fn_method_editor_remove(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REORDER
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REORDER
+void uniffi_cutlass_ffi_bindings_fn_method_editor_reorder(uint64_t ptr, RustBuffer clip_id, uint32_t place, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_RULER
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_RULER
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_ruler(uint64_t ptr, double pixel_size, int64_t from_us, int64_t to_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SAVE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SAVE
 void uniffi_cutlass_ffi_bindings_fn_method_editor_save(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -338,6 +353,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(uint64_t ptr, RustB
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_THUMB
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_THUMB
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_thumb(uint64_t ptr, RustBuffer key, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TICK
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_tick(uint64_t ptr, int64_t elapsed_us, RustCallStatus *_Nonnull out_status
@@ -353,6 +373,11 @@ int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_trim(uint64_t ptr, RustBuff
 void uniffi_cutlass_ffi_bindings_fn_method_editor_undo(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ZOOM
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ZOOM
+double uniffi_cutlass_ffi_bindings_fn_method_editor_zoom(uint64_t ptr, double pixel_size, double factor, double lane_width, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, RustCallStatus *_Nonnull out_status
@@ -363,9 +388,29 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, R
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SPEED_AT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SPEED_AT
+double uniffi_cutlass_ffi_bindings_fn_func_speed_at(double position, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SPEED_POSITION
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_SPEED_POSITION
+double uniffi_cutlass_ffi_bindings_fn_func_speed_position(double speed, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_START
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_START
 void uniffi_cutlass_ffi_bindings_fn_func_start(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_VOLUME_AT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_VOLUME_AT
+double uniffi_cutlass_ffi_bindings_fn_func_volume_at(double position, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_VOLUME_POSITION
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_VOLUME_POSITION
+double uniffi_cutlass_ffi_bindings_fn_func_volume_position(double volume, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUSTBUFFER_ALLOC
@@ -640,9 +685,33 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SPEED_AT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SPEED_AT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_speed_at(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SPEED_POSITION
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_SPEED_POSITION
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_speed_position(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_START
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_START
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_start(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_VOLUME_AT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_VOLUME_AT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_volume_at(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_VOLUME_POSITION
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_VOLUME_POSITION
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_volume_position(void
     
 );
 #endif
@@ -655,6 +724,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_append(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DURATION_US
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DURATION_US
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_FILM
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_FILM
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_film(void
     
 );
 #endif
@@ -712,6 +787,18 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_remove(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REORDER
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REORDER
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_reorder(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_RULER
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_RULER
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_ruler(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SAVE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SAVE
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_save(void
@@ -742,6 +829,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_split(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_THUMB
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_THUMB
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TICK
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_tick(void
@@ -757,6 +850,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_trim(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_UNDO
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_UNDO
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_undo(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ZOOM
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ZOOM
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_zoom(void
     
 );
 #endif

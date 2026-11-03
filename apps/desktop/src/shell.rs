@@ -547,6 +547,19 @@ impl Shell {
         ensure_shortcut(&mut settings, "cut", "primary+x");
         ensure_shortcut(&mut settings, "paste", "primary+v");
         ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
+        // Control-Y is the second redo. On Windows and Linux Control is the primary key.
+        ensure_shortcut(
+            &mut settings,
+            "redo_y",
+            if cfg!(target_os = "macos") {
+                "ctrl+y"
+            } else {
+                "primary+y"
+            },
+        );
+        ensure_shortcut(&mut settings, "select_all", "primary+a");
+        ensure_shortcut(&mut settings, "delete_left", "q");
+        ensure_shortcut(&mut settings, "delete_right", "w");
         Self {
             decoders,
             encoders,
@@ -1599,7 +1612,7 @@ impl Shell {
             .map(|shortcut| shortcut.action.clone());
         match action.as_deref() {
             Some("undo") => self.undo(),
-            Some("redo") => self.redo(),
+            Some("redo" | "redo_y") => self.redo(),
             Some("play") => {
                 self.toggle_play();
                 Ok(())
@@ -1612,6 +1625,9 @@ impl Shell {
             Some("cut") => self.cut_selected(),
             Some("paste") => self.paste(),
             Some("extract_audio") => self.extract_audio(),
+            Some("select_all") => self.select_all(),
+            Some("delete_left") => self.delete_side(TrimEdge::Start),
+            Some("delete_right") => self.delete_side(TrimEdge::End),
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -2287,6 +2303,18 @@ impl Shell {
                 self.selection.push(id);
             }
         }
+    }
+
+    /// Select every clip on the timeline.
+    pub fn select_all(&mut self) -> Result<(), ShellError> {
+        let ids: Vec<SegmentId> = self
+            .session_draft()?
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter().map(|segment| segment.id.clone()))
+            .collect();
+        self.select_box(ids, false);
+        Ok(())
     }
 
     pub fn selected(&self) -> Option<&SegmentId> {
@@ -4220,6 +4248,39 @@ impl Shell {
             .clip_under(at)
             .ok_or_else(|| ShellError::Unavailable("split is not available".to_owned()))?;
         self.split_clip(segment_id, at)
+    }
+
+    /// Delete the part of the clip under the playhead before it (`Start`) or after it (`End`).
+    ///
+    /// The selection wins when it covers the playhead. Each side must keep a
+    /// frame, as in a split. After a left delete the playhead goes to the
+    /// clip's new start, so the frame under it stays the same with the magnet on.
+    pub fn delete_side(&mut self, edge: TrimEdge) -> Result<(), ShellError> {
+        let at = self.playhead;
+        let refused = || ShellError::Unavailable("delete is not available".to_owned());
+        let segment_id = self.clip_under(at).ok_or_else(refused)?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let (segment, _) = locate(draft, &segment_id).ok_or_else(refused)?;
+        let start = segment.target.start.0;
+        let end = start.saturating_add(segment.target.duration.0);
+        let margin = split_margin(draft);
+        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
+            return Err(refused());
+        }
+        self.apply(Request::Trim {
+            segment_id: segment_id.clone(),
+            edge,
+            time: at,
+        })?;
+        if edge == TrimEdge::Start
+            && let Some((segment, _)) = self.draft().and_then(|draft| locate(draft, &segment_id))
+        {
+            let start = segment.target.start;
+            self.seek(start);
+        }
+        self.select(Some(segment_id));
+        Ok(())
     }
 
     /// Cut one clip at a lane pixel. `x` is from the left of the lanes.
@@ -9841,6 +9902,78 @@ mod tests {
                 .filter(|segment| segment.target.start == Micros(8_800_000))
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn q_and_w_delete_either_side_of_the_playhead_and_command_a_selects_every_clip() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "media", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "b",
+            "media",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.magnet_enabled());
+        let targets = |desktop: &Shell| -> Vec<TimeRange> {
+            desktop.draft().unwrap().tracks[0]
+                .segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect()
+        };
+
+        desktop.seek(Micros(400_000));
+        desktop.run_shortcut("q").unwrap();
+        assert_eq!(
+            targets(&desktop),
+            [
+                TimeRange::new(0, 600_000),
+                TimeRange::new(600_000, 1_000_000)
+            ]
+        );
+        assert_eq!(desktop.playhead(), Micros(0));
+        assert_eq!(desktop.selection(), [SegmentId::new("a")]);
+
+        desktop.seek(Micros(300_000));
+        desktop.run_shortcut("w").unwrap();
+        assert_eq!(
+            targets(&desktop),
+            [
+                TimeRange::new(0, 300_000),
+                TimeRange::new(300_000, 1_000_000)
+            ]
+        );
+        assert_eq!(desktop.playhead(), Micros(300_000));
+
+        desktop.seek(Micros(310_000));
+        assert_eq!(
+            desktop.run_shortcut("q").unwrap_err().to_string(),
+            "delete is not available"
+        );
+
+        desktop.undo().unwrap();
+        assert_eq!(targets(&desktop)[0], TimeRange::new(0, 600_000));
+        let redo = if cfg!(target_os = "macos") {
+            "ctrl+y"
+        } else {
+            "primary+y"
+        };
+        desktop.run_shortcut(redo).unwrap();
+        assert_eq!(targets(&desktop)[0], TimeRange::new(0, 300_000));
+
+        desktop.run_shortcut("primary+a").unwrap();
+        assert_eq!(
+            desktop.selection(),
+            [SegmentId::new("a"), SegmentId::new("b")]
         );
     }
 

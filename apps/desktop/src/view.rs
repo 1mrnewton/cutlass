@@ -4025,12 +4025,17 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::C => "c",
         egui::Key::X => "x",
         egui::Key::V => "v",
+        egui::Key::A => "a",
+        egui::Key::Q => "q",
+        egui::Key::W => "w",
         _ => return None,
     };
     let modifiers = input.modifiers;
-    let plain = !(modifiers.command || modifiers.alt || modifiers.shift);
+    // Control apart from the primary key, as on a Mac.
+    let control = modifiers.ctrl && !modifiers.command;
+    let plain = !(modifiers.command || modifiers.alt || modifiers.shift || control);
     let blocked = match name {
-        "space" | "left" | "right" | "delete" => !plain,
+        "space" | "left" | "right" | "delete" | "q" | "w" => !plain,
         // S splits, and Shift-Command-S extracts the audio.
         "s" => !plain && !(modifiers.command && modifiers.shift && !modifiers.alt),
         _ => false,
@@ -4039,6 +4044,9 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         return None;
     }
     let mut parts = Vec::new();
+    if control {
+        parts.push("ctrl");
+    }
     if input.modifiers.command {
         parts.push("primary");
     }
@@ -5329,6 +5337,51 @@ mod tests {
         );
         assert_eq!(chord(egui::Modifiers::COMMAND), None);
         assert_eq!(chord(egui::Modifiers::SHIFT), None);
+    }
+
+    #[test]
+    fn control_y_q_w_and_command_a_build_their_chords() {
+        let chord = |key: egui::Key, modifiers: egui::Modifiers| {
+            let ctx = egui::Context::default();
+            let mut chord = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::ModifiersChanged(modifiers),
+                        egui::Event::Key {
+                            key,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| chord = ui.input(pressed_chord),
+            );
+            output.textures_delta.clear();
+            chord
+        };
+        let control = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(chord(egui::Key::Y, control).as_deref(), Some("ctrl+y"));
+        assert_eq!(
+            chord(egui::Key::A, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+a")
+        );
+        assert_eq!(
+            chord(egui::Key::Q, egui::Modifiers::default()).as_deref(),
+            Some("q")
+        );
+        assert_eq!(
+            chord(egui::Key::W, egui::Modifiers::default()).as_deref(),
+            Some("w")
+        );
+        assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
+        assert_eq!(chord(egui::Key::Space, control), None);
     }
 
     #[test]

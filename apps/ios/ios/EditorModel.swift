@@ -20,6 +20,8 @@ final class EditorModel {
     private(set) var canvasAspect: CGFloat = 16 / 9
     /// The canvas ratios, Original first, as Rust sizes them for this project.
     private(set) var ratios: [CanvasRatio] = []
+    /// What fills the canvas around the main clips.
+    private(set) var background: Background = .none
     private(set) var isPlaying = false
     private(set) var isOpening = true
     private(set) var isImporting = false
@@ -342,6 +344,11 @@ final class EditorModel {
         edit { try $0.setRatio(ratio: ratio) }
     }
 
+    /// Fill the canvas around the main clips.
+    func setBackground(_ background: Background) {
+        edit { try $0.setBackground(background: background) }
+    }
+
     /// Play the clip at a constant speed. Its length follows.
     func setSpeed(_ clip: String, _ speed: Double) {
         edit { try $0.setSpeed(clipId: clip, speed: speed) }
@@ -390,6 +397,7 @@ final class EditorModel {
             lanes = try editor.lanes()
             durationUs = try editor.durationUs()
             ratios = try editor.ratios()
+            background = try editor.background()
         } catch {
             show(error)
         }

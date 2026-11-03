@@ -14,7 +14,7 @@ struct EditorScreen: View {
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
-        case volume, speed, effects, ratio
+        case volume, speed, effects, ratio, background
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -54,7 +54,7 @@ struct EditorScreen: View {
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
         .onChange(of: model.selectedClip) { _, id in
-            if id == nil, panel != .text(nil), panel != .effects, panel != .ratio { panel = nil }
+            if id == nil, panel != .text(nil), panel != .effects, panel != .ratio, panel != .background { panel = nil }
         }
         .onDisappear { model.pause() }
         .sheet(isPresented: $exporting) {
@@ -139,6 +139,9 @@ struct EditorScreen: View {
         } else if panel == .ratio {
             RatioPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .background {
+            BackgroundPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -148,7 +151,7 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects, .ratio: EmptyView()
+                case .text, .effects, .ratio, .background: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -187,6 +190,9 @@ struct EditorScreen: View {
         case .aspectRatio:
             model.selectedClip = nil
             panel = .ratio
+        case .background:
+            model.selectedClip = nil
+            panel = .background
         default: model.say("\(tool.label) is coming soon")
         }
     }

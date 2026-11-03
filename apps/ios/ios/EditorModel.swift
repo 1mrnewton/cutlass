@@ -70,7 +70,8 @@ final class EditorModel {
     /// main-lane clip under the playhead.
     var deleteTarget: Clip? { selection ?? clipUnderPlayhead }
 
-    private var selection: Clip? {
+    /// The selected clip as the project holds it now.
+    var selection: Clip? {
         guard let id = selectedClip else { return nil }
         return lanes.lazy.flatMap(\.clips).first { $0.id == id }
     }
@@ -184,6 +185,16 @@ final class EditorModel {
                 clipId: clip, startEdge: startEdge, timeUs: timeUs, snapUs: snapUs,
                 playheadUs: playheadUs)
         }
+    }
+
+    /// Set the clip's linear gain: 1 is unity and 0 is silence.
+    func setVolume(_ clip: String, _ volume: Double) {
+        edit { try $0.setVolume(clipId: clip, volume: volume) }
+    }
+
+    /// Play the clip at a constant speed. Its length follows.
+    func setSpeed(_ clip: String, _ speed: Double) {
+        edit { try $0.setSpeed(clipId: clip, speed: speed) }
     }
 
     func undo() { edit { try $0.undo() } }

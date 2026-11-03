@@ -7,6 +7,7 @@ struct EditorScreen: View {
     let home: () -> Void
     @State private var model: EditorModel
     @State private var picked: [PhotosPickerItem] = []
+    @State private var adjusting = false
 
     init(project: ProjectSummary, home: @escaping () -> Void) {
         name = project.name
@@ -34,11 +35,18 @@ struct EditorScreen: View {
             TimelineStrip(model: model)
                 .frame(maxHeight: .infinity)
                 .background(Color(white: 0.09))
-            tools
+            if adjusting, let clip = model.selection {
+                ClipPanel(model: model, clip: clip) { adjusting = false }
+                    .transition(.move(edge: .bottom))
+            } else {
+                tools
+            }
         }
+        .animation(.easeOut(duration: 0.2), value: adjusting)
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
+        .onChange(of: model.selectedClip) { _, id in if id == nil { adjusting = false } }
         .onDisappear { model.pause() }
     }
 
@@ -97,6 +105,8 @@ struct EditorScreen: View {
                 .disabled(!model.hasClips)
             Button { model.deleteClip() } label: { tool("Delete", "trash") }
                 .disabled(!model.hasClips)
+            Button { adjusting = true } label: { tool("Adjust", "slider.horizontal.3") }
+                .disabled(model.selection == nil)
         }
         .foregroundStyle(.white)
         .padding(.top, 10)

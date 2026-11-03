@@ -10,6 +10,7 @@
 
 mod cache;
 mod codecs;
+mod effect;
 mod error;
 mod host;
 mod media;
@@ -32,6 +33,7 @@ pub use cutlass_probe::{ProbeError, Probed};
 pub use cutlass_session::{Micros, SegmentId};
 pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
+pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
 pub use host::Commands;
 pub use player::PhonePlayer;
@@ -337,6 +339,14 @@ impl PhoneHost {
             });
         }
         let (request, segment_id) = text::add_request(self.draft(), content, face, at);
+        self.apply(self.revision(), &[request])?;
+        Ok(segment_id)
+    }
+
+    /// Add the bundled effect `effect_id` at `at` over everything below it,
+    /// as one undo step. Returns the new clip's id.
+    pub fn add_effect(&mut self, effect_id: &str, at: Micros) -> Result<SegmentId, FfiError> {
+        let (request, segment_id) = effect::add_request(self.draft(), effect_id, at);
         self.apply(self.revision(), &[request])?;
         Ok(segment_id)
     }
@@ -1011,6 +1021,57 @@ mod tests {
         assert_eq!(host.text(&first).unwrap().content, "Hello");
         host.undo().unwrap();
         assert_eq!(host.text(&first).unwrap().content, "A");
+    }
+
+    #[test]
+    fn every_effect_has_its_preview_video_in_the_phone_app() {
+        let folder =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ios/ios/EffectPreviews");
+        let effects = crate::phone_effects();
+        assert_eq!(effects.len(), 10);
+        for effect in effects {
+            assert!(effect.id.starts_with("recipe/"), "{}", effect.id);
+            assert!(!effect.name.is_empty());
+            assert!(folder.join(&effect.preview).is_file(), "{}", effect.preview);
+        }
+    }
+
+    #[test]
+    fn an_effect_goes_on_an_effect_row_changes_the_picture_and_undoes() {
+        use crate::NEW_EFFECT_LENGTH;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let plain = host.frame(Micros(500_000)).unwrap();
+        let flash_time = host.frame(Micros(80_000)).unwrap();
+        let before = host.draft().clone();
+
+        assert!(host.add_effect("recipe/none", Micros(0)).is_err());
+        assert!(host.add_effect("shake", Micros(0)).is_err());
+        assert_eq!(host.draft(), &before);
+
+        let first = host.add_effect("recipe/white-flash", Micros(0)).unwrap();
+        assert_ne!(host.frame(Micros(80_000)).unwrap(), flash_time);
+        let after = host
+            .add_effect("recipe/vignette", NEW_EFFECT_LENGTH)
+            .unwrap();
+        let over = host.add_effect("recipe/vhs", Micros(1_000_000)).unwrap();
+        let row_of = |host: &PhoneHost, id: &crate::SegmentId| {
+            host.lanes()
+                .into_iter()
+                .position(|lane| lane.clips.iter().any(|clip| &clip.id == id))
+                .unwrap()
+        };
+        assert_eq!(row_of(&host, &first), row_of(&host, &after));
+        assert_ne!(row_of(&host, &first), row_of(&host, &over));
+
+        host.undo().unwrap();
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.draft(), &before);
+        assert_eq!(host.frame(Micros(500_000)).unwrap(), plain);
     }
 
     #[test]

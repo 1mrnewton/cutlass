@@ -119,6 +119,20 @@ pub fn clock(time_us: i64) -> String {
     cutlass_ffi::clock(Micros(time_us))
 }
 
+/// The effects that ship in the app, in picker order.
+#[uniffi::export]
+#[must_use]
+pub fn effects() -> Vec<EffectChoice> {
+    cutlass_ffi::phone_effects()
+        .into_iter()
+        .map(|effect| EffectChoice {
+            id: effect.id,
+            name: effect.name,
+            preview: effect.preview,
+        })
+        .collect()
+}
+
 /// The gain at volume slider `position`, 0 to 1. Unity is the middle and
 /// the right end is ten times.
 #[uniffi::export]
@@ -155,6 +169,15 @@ pub fn speed_position(speed: f64) -> f64 {
 pub struct Font {
     pub name: String,
     pub label: String,
+}
+
+/// An effect the picker shows. `id` is what `add_effect` takes; `preview`
+/// is the file name of its looping preview video in the app bundle.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct EffectChoice {
+    pub id: String,
+    pub name: String,
+    pub preview: String,
 }
 
 /// What a text clip says and the face it says it in.
@@ -501,6 +524,14 @@ impl Editor {
         at_us: i64,
     ) -> Result<String, EditorError> {
         self.run(move |host| host.add_text(&content, &face, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Add the effect `effect_id` at `at_us` over everything below it, as
+    /// one undo step. Returns the new clip's id.
+    pub fn add_effect(&self, effect_id: String, at_us: i64) -> Result<String, EditorError> {
+        self.run(move |host| host.add_effect(&effect_id, Micros(at_us)))?
             .map(|id| id.as_str().to_owned())
             .map_err(EditorError::from)
     }

@@ -196,7 +196,7 @@ const TEXT: &[Tool] = &[
     later(T::Draw, "Draw"),
 ];
 
-const EFFECTS: &[Tool] = &[later(T::VideoEffects, "Video effects")];
+const EFFECTS: &[Tool] = &[ready(T::VideoEffects, "Video effects")];
 
 const OVERLAY: &[Tool] = &[later(T::AddOverlay, "Add overlay")];
 

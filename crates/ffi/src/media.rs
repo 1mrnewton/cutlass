@@ -8,7 +8,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use cutlass_editor::{AppendLane, append_placement, material_span};
-use cutlass_model::{MaterialAudio, MaterialId, MaterialVideo, MetaType, Segment, TimeRange};
+use cutlass_model::{
+    MaterialAudio, MaterialId, MaterialVideo, MetaType, Segment, TimeRange, TrackAttribute,
+    TrackType,
+};
 use cutlass_probe::Probed;
 use cutlass_session::{Draft, ImportedMedium, Micros, Request, SegmentId, TrackId};
 
@@ -161,10 +164,43 @@ pub(crate) fn ids(draft: &Draft) -> HashSet<String> {
     for text in &draft.materials.texts {
         taken.insert(text.id.as_str().to_owned());
     }
+    for effect in &draft.materials.video_effects {
+        taken.insert(effect.id.as_str().to_owned());
+    }
     taken
 }
 
 /// `prefix-N` for the first N not in `taken`.
+/// The first unlocked `kind` row with nothing between `at` and `at +
+/// length`, else a new row id, then a new clip id, and every id now taken.
+pub(crate) fn room(
+    draft: &Draft,
+    kind: TrackType,
+    at: Micros,
+    length: Micros,
+) -> (TrackId, SegmentId, HashSet<String>) {
+    let at = Micros(at.0.max(0));
+    let end = at.0.saturating_add(length.0);
+    let mut taken = ids(draft);
+    let free = draft.tracks.iter().find(|track| {
+        track.kind == kind
+            && !track.attribute.contains(TrackAttribute::LOCK)
+            && track.segments.iter().all(|segment| {
+                let start = segment.target.start.0;
+                let stop = start.saturating_add(segment.target.duration.0);
+                stop <= at.0 || start >= end
+            })
+    });
+    let track_id = match free {
+        Some(track) => track.id.clone(),
+        None => TrackId::new(fresh(&taken, "track")),
+    };
+    taken.insert(track_id.as_str().to_owned());
+    let segment_id = SegmentId::new(fresh(&taken, "seg"));
+    taken.insert(segment_id.as_str().to_owned());
+    (track_id, segment_id, taken)
+}
+
 pub(crate) fn fresh(taken: &HashSet<String>, prefix: &str) -> String {
     (1_u64..)
         .map(|n| format!("{prefix}-{n}"))

@@ -2,10 +2,10 @@
 //! its face, and read them back. Faces come from the folders the shell
 //! names; the draft keeps a face's file name.
 
-use cutlass_model::{Draft, MaterialId, MaterialRef, TrackAttribute, TrackId, TrackType};
+use cutlass_model::{Draft, MaterialId, MaterialRef, TrackType};
 use cutlass_session::{Micros, Request, SegmentId};
 
-use crate::media::{fresh, ids};
+use crate::media::{fresh, room};
 
 /// How long a new text clip lasts.
 pub const NEW_TEXT_LENGTH: Micros = Micros(3_000_000);
@@ -42,25 +42,8 @@ pub(crate) fn add_request(
     face: &str,
     at: Micros,
 ) -> (Request, SegmentId) {
+    let (track_id, segment_id, taken) = room(draft, TrackType::Text, at, NEW_TEXT_LENGTH);
     let at = Micros(at.0.max(0));
-    let end = at.0.saturating_add(NEW_TEXT_LENGTH.0);
-    let mut taken = ids(draft);
-    let free = draft.tracks.iter().find(|track| {
-        track.kind == TrackType::Text
-            && !track.attribute.contains(TrackAttribute::LOCK)
-            && track.segments.iter().all(|segment| {
-                let start = segment.target.start.0;
-                let stop = start.saturating_add(segment.target.duration.0);
-                stop <= at.0 || start >= end
-            })
-    });
-    let track_id = match free {
-        Some(track) => track.id.clone(),
-        None => TrackId::new(fresh(&taken, "track")),
-    };
-    taken.insert(track_id.as_str().to_owned());
-    let segment_id = SegmentId::new(fresh(&taken, "seg"));
-    taken.insert(segment_id.as_str().to_owned());
     let material_id = MaterialId::new(fresh(&taken, "text"));
     let request = Request::AddText {
         track_id,

@@ -7,7 +7,8 @@
 //! like `border_width`; a shadow's `distance`, `angle`, and `feather` read
 //! like `shadow_distance`, `shadow_angle`, and `shadow_smoothing`. A range
 //! with no `strokes` or `shadows` key takes the title's own; an empty list
-//! has none. Keys this model does not name stay as they were.
+//! has none. A `font`'s `path` names the face file its letters are set
+//! in. Keys this model does not name stay as they were.
 
 use std::borrow::Cow;
 
@@ -37,9 +38,22 @@ pub struct RichStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<RichFont>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strokes: Option<Vec<RichStroke>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadows: Option<Vec<RichShadow>>,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// The face a range's letters are set in.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct RichFont {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub id: String,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -285,10 +299,11 @@ mod tests {
     #[test]
     fn a_range_reads_its_size_strokes_and_shadows() {
         let style: RichStyle = serde_json::from_str(
-            r#"{"range":[0,1],"size":8,"strokes":[{"content":{"solid":{"color":[0,0,0]}},"width":0.08}],"shadows":[{"alpha":0.5,"content":{"solid":{"alpha":1,"color":[0,0,1]},"render_type":"solid"},"distance":8,"angle":-45,"feather":0.33}]}"#,
+            r#"{"range":[0,1],"size":8,"font":{"path":"/fonts/Bold.ttf","id":"7"},"strokes":[{"content":{"solid":{"color":[0,0,0]}},"width":0.08}],"shadows":[{"alpha":0.5,"content":{"solid":{"alpha":1,"color":[0,0,1]},"render_type":"solid"},"distance":8,"angle":-45,"feather":0.33}]}"#,
         )
         .unwrap();
         assert_eq!(style.size, Some(8.0));
+        assert_eq!(style.font.as_ref().unwrap().path, "/fonts/Bold.ttf");
         let stroke = &style.strokes.as_ref().unwrap()[0];
         assert_eq!(
             (stroke.width, stroke.rgba()),

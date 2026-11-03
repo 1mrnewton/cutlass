@@ -34,7 +34,9 @@ pub use mark::{
     TimeMarkItem, VisibleMark, clip_mark_time, new_time_mark, referenced_time_marks,
     segment_time_mark, set_time_mark_items, time_mark_items, visible_marks,
 };
-pub use rich::{RichFill, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText};
+pub use rich::{
+    RichFill, RichFont, RichPaint, RichShadow, RichSolid, RichStroke, RichStyle, RichText,
+};
 pub use shape::MaterialShape;
 pub use speed::{
     ConstantSpeedError, CurveSpeed, MaterialSpeed, SpeedPoint, constant_target_duration,

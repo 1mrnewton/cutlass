@@ -5,7 +5,8 @@
 //! a solid fill paints its letters in that color. A range's `size` scales
 //! its letters against the title's `font_size`, and its strokes and shadows
 //! replace the title's outline and shadow on its letters; only the first of
-//! each is drawn. A rich title whose content does not read is refused
+//! each is drawn. A range's `font` path sets its letters in that face, when
+//! the shell has it. A rich title whose content does not read is refused
 //! instead of being drawn as raw JSON.
 
 use std::borrow::Cow;
@@ -36,6 +37,8 @@ pub(crate) struct Run {
     pub(crate) size: f32,
     pub(crate) outline: Option<Option<Outline>>,
     pub(crate) shadow: Option<Option<Shadow>>,
+    /// The face file its letters are set in, when not the title's.
+    pub(crate) font: Option<String>,
 }
 
 /// The range holding the letter at byte `source`. A later range wins.
@@ -104,6 +107,11 @@ pub(crate) fn read(material: &MaterialText) -> Result<Words<'_>, TextError> {
                 size: scale(style.size, material.font_size),
                 outline,
                 shadow,
+                font: style
+                    .font
+                    .as_ref()
+                    .map(|font| font.path.trim().to_owned())
+                    .filter(|path| !path.is_empty()),
             }
         })
         .filter(|run| run.start < run.end)

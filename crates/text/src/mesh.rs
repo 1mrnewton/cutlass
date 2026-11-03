@@ -18,6 +18,8 @@ pub struct GlyphRecord {
     pub missing: bool,
     pub source: usize,
     pub line: u32,
+    /// Which of the layout's faces draws it; 0 is the title's own.
+    pub face: usize,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -37,11 +39,24 @@ pub fn build(
     layout: &Layout,
     atlas: &Atlas,
 ) -> Result<TextMesh, TextError> {
+    build_faces(material_id, layout, std::slice::from_ref(atlas))
+}
+
+/// Build a mesh from a layout whose glyphs are already in `atlases`, one
+/// for each of its faces.
+pub(crate) fn build_faces(
+    material_id: MaterialId,
+    layout: &Layout,
+    atlases: &[Atlas],
+) -> Result<TextMesh, TextError> {
     let mut glyphs = Vec::new();
     for (index, line) in layout.lines.iter().enumerate() {
         let line_index = u32::try_from(index).map_err(|_| TextError::Limit)?;
         for placed in &line.glyphs {
-            let Some(image) = atlas.image(placed.glyph_id) else {
+            let Some(image) = atlases
+                .get(placed.face)
+                .and_then(|atlas| atlas.image(placed.glyph_id))
+            else {
                 return Err(TextError::Limit);
             };
             glyphs.push(record(placed, line.baseline, layout, image, line_index)?);
@@ -104,13 +119,18 @@ fn record(
     image: &GlyphImage,
     line: u32,
 ) -> Result<GlyphRecord, TextError> {
-    let (x, y, width, height) =
-        glyph_quad(placed, baseline, layout.font_size, layout.scale, image)?;
+    let scale = layout
+        .scales
+        .get(placed.face)
+        .copied()
+        .unwrap_or(layout.scale);
+    let (x, y, width, height) = glyph_quad(placed, baseline, layout.font_size, scale, image)?;
     Ok(GlyphRecord {
         glyph_id: placed.glyph_id,
         missing: placed.missing,
         source: placed.source,
         line,
+        face: placed.face,
         x,
         y,
         width,

@@ -13,8 +13,8 @@ use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
-use crate::layout::layout;
-use crate::mesh::{GlyphRecord, TextMesh, build};
+use crate::layout::layout_faces;
+use crate::mesh::{GlyphRecord, TextMesh, build_faces};
 use crate::richtext::{Run, run_at};
 use crate::style::{Area, Layers, Outline, Shadow, Style, compose, premultiply};
 
@@ -52,7 +52,8 @@ pub struct TextSource {
     range: TimeRange,
     material_id: cutlass_model::MaterialId,
     fill: [u8; 4],
-    atlas: Atlas,
+    /// One for each face, the title's own first.
+    atlases: Vec<Atlas>,
     mesh: TextMesh,
     style: Style,
     /// How each glyph in the mesh looks, in its order.
@@ -87,6 +88,21 @@ impl TextSource {
         glow: Option<&BloomParams>,
         segment: &Segment,
     ) -> Result<Self, TextError> {
+        Self::open_with_faces(bytes, face, material, glow, segment, &|_| None)
+    }
+
+    /// [`Self::open_with_glow`], with a rich title's ranges set in the
+    /// faces they name. `faces` gives the bytes of one face for a range's
+    /// font path; a range whose face it does not give, or that does not
+    /// read, keeps the title's own.
+    pub fn open_with_faces<'f>(
+        bytes: &[u8],
+        face: Option<u32>,
+        material: &MaterialText,
+        glow: Option<&BloomParams>,
+        segment: &Segment,
+        faces: &dyn Fn(&str) -> Option<&'f [u8]>,
+    ) -> Result<Self, TextError> {
         if segment.target.duration.0 > 0
             && segment
                 .target
@@ -101,28 +117,53 @@ impl TextSource {
             None => cutlass_font::read(bytes).map_err(TextError::Font)?,
             Some(index) => cutlass_font::read_collection(bytes, index).map_err(TextError::Font)?,
         };
-        Self::from_font(&font, material, glow, segment)
+        let runs = crate::richtext::read(material)?.runs;
+        let mut fonts = vec![font];
+        let mut named: Vec<(&str, usize)> = Vec::new();
+        for path in runs.iter().filter_map(|run| run.font.as_deref()) {
+            if named.iter().any(|(seen, _)| *seen == path) {
+                continue;
+            }
+            let Some(other) = faces(path).and_then(|bytes| cutlass_font::read(bytes).ok()) else {
+                named.push((path, 0));
+                continue;
+            };
+            named.push((path, fonts.len()));
+            fonts.push(other);
+        }
+        let pick = |source: usize| {
+            run_at(&runs, source)
+                .and_then(|run| run.font.as_deref())
+                .and_then(|path| named.iter().find(|(seen, _)| *seen == path))
+                .map_or(0, |(_, index)| *index)
+        };
+        Self::from_fonts(&fonts, &pick, &runs, material, glow, segment)
     }
 
-    fn from_font(
-        font: &Font<'_>,
+    fn from_fonts(
+        fonts: &[Font<'_>],
+        pick: &dyn Fn(usize) -> usize,
+        runs: &[Run],
         material: &MaterialText,
         glow: Option<&BloomParams>,
         segment: &Segment,
     ) -> Result<Self, TextError> {
         let fill = fill_rgba(material)?;
-        let laid = layout(font, material)?;
-        let mut atlas = Atlas::new();
+        let laid = layout_faces(fonts, material, pick)?;
+        let mut atlases: Vec<Atlas> = fonts.iter().map(|_| Atlas::new()).collect();
         for placed in laid.glyphs() {
+            let (Some(atlas), Some(font)) = (atlases.get_mut(placed.face), fonts.get(placed.face))
+            else {
+                return Err(TextError::Limit);
+            };
             let _image = atlas.glyph(font, placed.glyph_id)?;
         }
-        let mesh = build(material.id.clone(), &laid, &atlas)?;
-        let runs = crate::richtext::read(material)?.runs;
+        let mesh = build_faces(material.id.clone(), &laid, &atlases)?;
         let style = Style::of(material, glow, laid.font_size)?;
         let looks: Vec<Look> = mesh
             .glyphs
             .iter()
-            .map(|record| Look::of(&style, &runs, record.source, laid.font_size))
+            .map(|record| Look::of(&style, runs, record.source, laid.font_size))
             .collect();
         let mut shadows: Vec<Shadow> = Vec::new();
         for shadow in looks.iter().filter_map(|look| look.shadow.as_ref()) {
@@ -136,7 +177,7 @@ impl TextSource {
             range: segment.target.clone(),
             material_id: material.id.clone(),
             fill,
-            atlas,
+            atlases,
             mesh,
             style,
             looks,
@@ -161,7 +202,7 @@ impl TextSource {
 
     #[must_use]
     pub fn atlas_paints(&self) -> u32 {
-        self.atlas.paints()
+        self.atlases.iter().map(Atlas::paints).sum()
     }
 
     #[must_use]
@@ -192,7 +233,7 @@ impl TextSource {
         let mut shadows: Vec<(Shadow, Vec<f32>)> = Vec::new();
         let mut shape = vec![0.0_f32; pixels];
         for (record, look) in self.mesh.glyphs.iter().zip(&self.looks) {
-            let Some(image) = self.atlas.image(record.glyph_id) else {
+            let Some(image) = self.image(record) else {
                 continue;
             };
             let draw = Mask {
@@ -252,8 +293,7 @@ impl TextSource {
         );
         for record in &self.mesh.glyphs {
             if self
-                .atlas
-                .image(record.glyph_id)
+                .image(record)
                 .is_some_and(|image| image.kind == GlyphKind::Color)
             {
                 self.splat(&mut rgba, record);
@@ -263,8 +303,12 @@ impl TextSource {
         Ok(Picture::Cpu(bytes))
     }
 
+    fn image(&self, record: &GlyphRecord) -> Option<&crate::GlyphImage> {
+        self.atlases.get(record.face)?.image(record.glyph_id)
+    }
+
     fn splat(&self, rgba: &mut [u8], record: &GlyphRecord) {
-        let Some(image) = self.atlas.image(record.glyph_id) else {
+        let Some(image) = self.image(record) else {
             return;
         };
         blit(Blit {
@@ -961,6 +1005,29 @@ mod tests {
             }
         }
         found
+    }
+
+    #[test]
+    fn a_range_sets_its_letters_in_the_face_it_names() {
+        const OTHER: &[u8] = include_bytes!("../../font/fixtures/sample.otf");
+        let text = rich(r#"{"range":[1,2],"font":{"path":"/fonts/Other.otf"}}"#);
+        let faces = |path: &str| (path == "/fonts/Other.otf").then_some(OTHER);
+        let source =
+            TextSource::open_with_faces(TTF, None, &text, None, &segment(), &faces).expect("open");
+        let faces_of: Vec<usize> = source.records().iter().map(|record| record.face).collect();
+        assert_eq!(faces_of, [0, 1]);
+        let (width, height) = source.size();
+        let drawn = cpu(source.sample(Micros(1_000)));
+        assert_eq!(drawn.len(), (width * height * 4) as usize);
+        assert!(has(&drawn, [255, 255, 255, 255]));
+
+        // A face the shell does not have keeps the title's.
+        let none = |_: &str| None;
+        let source =
+            TextSource::open_with_faces(TTF, None, &text, None, &segment(), &none).expect("open");
+        assert!(source.records().iter().all(|record| record.face == 0));
+        let (plain_w, plain_h, _) = picture(&material("AA"));
+        assert_eq!(source.size(), (plain_w, plain_h));
     }
 
     #[test]

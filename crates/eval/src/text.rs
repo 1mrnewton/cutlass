@@ -139,7 +139,14 @@ pub(crate) fn text_layers(
                     .filter(|(drawn, _)| *drawn == wanted)
                     .cloned();
                 let Some((drawn, bytes)) = kept.or_else(|| {
-                    title_picture(face, material, glow.as_ref(), segment, time, wanted)
+                    title_picture(
+                        Faces { fonts, face },
+                        material,
+                        glow.as_ref(),
+                        segment,
+                        time,
+                        wanted,
+                    )
                 }) else {
                     continue;
                 };
@@ -165,7 +172,7 @@ pub(crate) fn text_layers(
 /// A title drawn with `density` pixels to each shown pixel, and that
 /// density; at 1 when it cannot be drawn larger.
 fn title_picture(
-    face: &[u8],
+    faces: Faces<'_>,
     material: &MaterialText,
     glow: Option<&BloomParams>,
     segment: &Segment,
@@ -176,7 +183,11 @@ fn title_picture(
         let mut larger = material.clone();
         larger.font_size *= density;
         larger.line_max_width *= density;
-        let source = TextSource::open_with_glow(face, None, &larger, glow, segment).ok()?;
+        let source =
+            TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &|path| {
+                faces.named(path)
+            })
+            .ok()?;
         match source.sample(time) {
             Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
             _ => None,
@@ -223,8 +234,32 @@ pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<
     }
     let face = fonts.face(&material.font_path)?;
     let glow = glow(draft, segment);
-    let source = TextSource::open_with_glow(face, None, material, glow.as_ref(), segment).ok()?;
+    let faces = Faces { fonts, face };
+    let source =
+        TextSource::open_with_faces(face, None, material, glow.as_ref(), segment, &|path| {
+            faces.named(path)
+        })
+        .ok()?;
     Some(source.size())
+}
+
+/// A title's own face, and the shell's fonts for its ranges.
+#[derive(Clone, Copy)]
+struct Faces<'a> {
+    fonts: &'a dyn Fonts,
+    face: &'a [u8],
+}
+
+impl<'a> Faces<'a> {
+    /// The face a range's font `path` names: by the whole path, else by its
+    /// file name, else the first face of a collection by that name.
+    fn named(&self, path: &str) -> Option<&'a [u8]> {
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        self.fonts
+            .face(path)
+            .or_else(|| self.fonts.face(file))
+            .or_else(|| self.fonts.face(&format!("{file}#0")))
+    }
 }
 
 /// The glow a title's clip points at, when it reads as one.
@@ -507,6 +542,31 @@ mod tests {
         let mut missing = draft.clone();
         missing.materials.texts[0].font_path = "other.ttf".to_owned();
         assert_eq!(super::text_size(&missing, &OneFont, segment), None);
+    }
+
+    #[test]
+    fn a_rich_range_is_set_in_the_face_its_path_names() {
+        struct TwoFonts;
+        impl Fonts for TwoFonts {
+            fn face(&self, path: &str) -> Option<&[u8]> {
+                match path {
+                    "sample.ttf" => Some(FONT),
+                    "Other.otf" => Some(include_bytes!("../../font/fixtures/sample.otf")),
+                    _ => None,
+                }
+            }
+        }
+        let content = |path: &str| {
+            format!(r#"{{"text":"AB","styles":[{{"range":[1,2],"font":{{"path":"{path}"}}}}]}}"#)
+        };
+        let own = text_segment(&content("/nowhere/Missing.otf"), true);
+        let other = text_segment(&content("/Library/Fonts/Other.otf"), true);
+        let segment = &own.tracks[0].segments[0];
+        let size = |draft: &Draft| super::text_size(draft, &TwoFonts, segment).unwrap();
+        // A face the table lacks keeps the title's; one it has by file name
+        // sets the range in it.
+        assert_eq!(size(&own), size(&text_segment("AB", false)));
+        assert_ne!(size(&other), size(&own));
     }
 
     #[test]

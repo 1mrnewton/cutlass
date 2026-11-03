@@ -32,7 +32,7 @@ pub use host::Commands;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
-pub use timeline::{PhoneClip, PhoneLane, phone_lanes};
+pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
 
@@ -298,6 +298,34 @@ impl PhoneHost {
         let (request, right_id) = timeline::split_request(self.draft(), segment_id, at)?;
         self.apply(self.revision(), &[request])?;
         Ok(right_id)
+    }
+
+    /// Move `segment_id` to the row and start in `drag`, as one undo step.
+    /// Returns where it starts once the session placed it: snapped, and
+    /// packed when the row is magnetic.
+    pub fn move_clip(&mut self, segment_id: &SegmentId, drag: Drag) -> Result<Micros, FfiError> {
+        let (request, asked) = timeline::move_request(self.draft(), segment_id, drag)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(self
+            .draft()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| &segment.id == segment_id)
+            .map_or(asked, |segment| segment.target.start))
+    }
+
+    /// Drag the start or end edge of `segment_id` to `drag.time`, as one undo
+    /// step. Returns where the edge landed.
+    pub fn trim(
+        &mut self,
+        segment_id: &SegmentId,
+        start: bool,
+        drag: Drag,
+    ) -> Result<Micros, FfiError> {
+        let (request, time) = timeline::trim_request(self.draft(), segment_id, start, drag)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(time)
     }
 
     /// Remove one clip. Its dependents go with it when linkage follow is on.
@@ -625,6 +653,74 @@ mod tests {
 
         assert_eq!(host.draft(), &before);
         assert_eq!(host.revision(), revision);
+    }
+
+    fn drag(row: u32, time: i64) -> crate::Drag {
+        crate::Drag {
+            row,
+            time: cutlass_session::Micros(time),
+            snap: cutlass_session::Micros(0),
+            playhead: cutlass_session::Micros(0),
+        }
+    }
+
+    fn two_stills(
+        host: &mut PhoneHost,
+    ) -> (cutlass_session::SegmentId, cutlass_session::SegmentId) {
+        let source = fixture("pattern.png");
+        let first = host.import_probed(&source, still(2_000_000)).unwrap();
+        let second = host.import_probed(&source, still(1_000_000)).unwrap();
+        (host.append(&first).unwrap(), host.append(&second).unwrap())
+    }
+
+    #[test]
+    fn a_dragged_edge_trims_the_clip_as_one_undo_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (_, second) = two_stills(&mut host);
+        let landed = host.trim(&second, false, drag(0, 2_500_000)).unwrap();
+        assert_eq!(landed.0, 2_500_000);
+        let main = &host.draft().tracks[0];
+        assert_eq!(
+            main.segments[1].target,
+            cutlass_model::TimeRange::new(2_000_000, 500_000)
+        );
+        host.undo().unwrap();
+        assert_eq!(
+            host.draft().tracks[0].segments[1].target,
+            cutlass_model::TimeRange::new(2_000_000, 1_000_000)
+        );
+        let past = host.trim(&second, true, drag(0, 9_000_000)).unwrap();
+        assert!(past.0 < 3_000_000, "the start edge stays before the end");
+    }
+
+    #[test]
+    fn a_dragged_clip_moves_and_a_drop_off_the_rows_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, second) = two_stills(&mut host);
+        let before = host.draft().clone();
+        let revision = host.revision();
+        let error = host.move_clip(&second, drag(7, 0)).unwrap_err();
+        assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
+        let error = host
+            .move_clip(&cutlass_session::SegmentId::new("nope"), drag(0, 0))
+            .unwrap_err();
+        assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
+        assert_eq!(host.draft(), &before);
+        assert_eq!(host.revision(), revision);
+
+        let start = host.move_clip(&first, drag(0, 4_000_000)).unwrap();
+        let main = &host.draft().tracks[0];
+        let moved = main
+            .segments
+            .iter()
+            .find(|segment| segment.id == first)
+            .unwrap();
+        assert_eq!(moved.target.start, start);
+        assert!(host.revision() > revision);
     }
 
     #[test]

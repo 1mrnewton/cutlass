@@ -4181,6 +4181,17 @@ mod tests {
     }
 
     #[test]
+    fn a_bar_climbs_in_decibels_from_the_floor_to_full_scale() {
+        assert_eq!(wave_height(0.0), 0.0);
+        assert_eq!(wave_height(1.0), 1.0);
+        assert_eq!(wave_height(2.0), 1.0);
+        // -6 dB of a 48 dB range.
+        assert!((wave_height(0.5) - 0.875).abs() < 0.001);
+        assert_eq!(wave_height(0.001), 0.0);
+        assert_eq!(wave_height(f32::NAN), 0.0);
+    }
+
+    #[test]
     fn lanes_take_capcut_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);

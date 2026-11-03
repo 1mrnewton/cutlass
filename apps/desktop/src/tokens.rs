@@ -92,6 +92,12 @@ pub const CLIP_AUDIO: Color32 = Color32::from_rgb(29, 54, 94);
 pub const CLIP_AUDIO_CHIP: Color32 = Color32::from_rgb(45, 72, 114);
 pub const CLIP_AUDIO_BAR: Color32 = Color32::from_rgb(58, 130, 200);
 pub const CLIP_AUDIO_LINE: Color32 = Color32::from_rgb(100, 138, 186);
+/// The text in a clip's chips.
+pub const CLIP_TEXT: Color32 = Color32::from_rgb(224, 224, 224);
+/// The row across the top of a main-track or audio clip that holds its
+/// name chip, and on the main track its length chip.
+pub const CLIP_HEADER: f32 = 18.0;
+
 /// The cap on a loud waveform bar, and the tip on one that clips.
 pub const WAVE_LOUD: Color32 = Color32::from_rgb(226, 143, 72);
 pub const WAVE_CLIPPED: Color32 = Color32::from_rgb(215, 68, 50);

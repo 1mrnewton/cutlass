@@ -2717,15 +2717,22 @@ struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::Te
 /// Textures kept before the oldest are let go.
 const FILM_TEXTURES: usize = 1500;
 
-/// The clip's filmstrip inside `clip_rect`, over the tiles that meet
-/// `visible`. A tile without its picture yet keeps the clip color.
-fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visible: Rect) {
+/// The clip's filmstrip in the `film` rows of `clip_rect`, over the tiles
+/// that meet `visible`. A tile without its picture yet keeps the clip color.
+fn paint_film(
+    shell: &mut Shell,
+    ui: &Ui,
+    id: &SegmentId,
+    clip_rect: Rect,
+    film: Rect,
+    visible: Rect,
+) {
     let span =
         f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
     let cells = shell.film(
         id,
         f64::from(clip_rect.width()),
-        f64::from(clip_rect.height()),
+        f64::from(film.height()),
         span,
     );
     if cells.is_empty() {
@@ -2741,7 +2748,7 @@ fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visib
     }
     let painter = ui
         .painter()
-        .with_clip_rect(clip_rect.shrink(1.0).intersect(visible));
+        .with_clip_rect(film.intersect(clip_rect.shrink(1.0)).intersect(visible));
     for cell in cells {
         let Some(thumb) = cell.thumb else {
             continue;
@@ -2754,10 +2761,10 @@ fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visib
             ui.ctx()
                 .load_texture("film", image, egui::TextureOptions::LINEAR)
         });
-        let full = clip_rect.height() * thumb.width as f32 / thumb.height as f32;
+        let full = film.height() * thumb.width as f32 / thumb.height as f32;
         let tile = Rect::from_min_size(
-            Pos2::new(clip_rect.left() + cell.tile.left as f32, clip_rect.top()),
-            Vec2::new(cell.tile.width as f32, clip_rect.height()),
+            Pos2::new(clip_rect.left() + cell.tile.left as f32, film.top()),
+            Vec2::new(cell.tile.width as f32, film.height()),
         );
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new((tile.width() / full).min(1.0), 1.0));
         painter.image(texture.id(), tile, uv, Color32::from_gray(210));
@@ -2828,6 +2835,58 @@ fn wave_band(clip_height: f32) -> f32 {
     (clip_height / 3.0).max(10.0).min(clip_height)
 }
 
+/// A clip's header row, when it has one, and the body under it.
+struct ClipParts {
+    header: Option<Rect>,
+    body: Rect,
+}
+
+/// Main-track and audio clips carry a header row; the rest are all body.
+fn clip_parts(clip_rect: Rect, main: bool, audio: bool) -> ClipParts {
+    if !main && !audio {
+        return ClipParts {
+            header: None,
+            body: clip_rect,
+        };
+    }
+    let split = clip_rect.top() + tokens::CLIP_HEADER.min(clip_rect.height());
+    ClipParts {
+        header: Some(Rect::from_min_max(
+            clip_rect.min,
+            Pos2::new(clip_rect.right(), split),
+        )),
+        body: Rect::from_min_max(Pos2::new(clip_rect.left(), split), clip_rect.max),
+    }
+}
+
+/// The header's chips, left to right from its left edge: the clip's name,
+/// then its length when given.
+fn paint_header(ui: &Ui, header: Rect, clip: Rect, chips: &[String], fill: Color32, faded: bool) {
+    let painter = ui
+        .painter()
+        .with_clip_rect(clip.shrink(1.0).intersect(header));
+    let text = if faded {
+        tokens::CLIP_TEXT.gamma_multiply(0.45)
+    } else {
+        tokens::CLIP_TEXT
+    };
+    let mut left = header.left() + 4.0;
+    for chip in chips {
+        let galley = painter.layout_no_wrap(chip.clone(), FontId::proportional(11.0), text);
+        let rect = Rect::from_min_size(
+            Pos2::new(left, header.top() + 1.5),
+            Vec2::new(galley.size().x + 8.0, header.height() - 3.0),
+        );
+        painter.rect_filled(rect, CornerRadius::same(3), fill);
+        painter.galley(
+            Pos2::new(rect.left() + 4.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text,
+        );
+        left = rect.right() + 4.0;
+    }
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -2868,9 +2927,11 @@ fn paint_clip(
         lane_color(&lane.kind)
     };
     painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
+    let audio = is_audio(lane);
+    let parts = clip_parts(clip_rect, lane.main, audio);
     if !ghost {
-        paint_film(shell, ui, &clip.id, clip_rect, visible);
-        paint_wave(shell, ui, &clip.id, clip_rect, visible);
+        paint_film(shell, ui, &clip.id, clip_rect, parts.body, visible);
+        paint_wave(shell, ui, &clip.id, parts.body, visible);
     }
     if selected {
         painter.rect_stroke(
@@ -2880,20 +2941,33 @@ fn paint_clip(
             egui::StrokeKind::Inside,
         );
     }
-    let painter = ui
-        .painter()
-        .with_clip_rect(clip_rect.shrink(6.0).intersect(row));
-    painter.text(
-        clip_rect.left_center() + Vec2::new(8.0, 0.0),
-        Align2::LEFT_CENTER,
-        &clip.name,
-        FontId::proportional(11.0),
-        if ghost {
-            Color32::WHITE.gamma_multiply(0.45)
+    if let Some(header) = parts.header {
+        let mut chips = vec![clip.name.clone()];
+        if lane.main {
+            chips.push(shell.timecode_at(duration));
+        }
+        let chip = if audio {
+            tokens::CLIP_AUDIO_CHIP
         } else {
-            Color32::WHITE
-        },
-    );
+            tokens::CLIP_VIDEO_CHIP
+        };
+        paint_header(ui, header, clip_rect.intersect(row), &chips, chip, ghost);
+    } else {
+        let painter = ui
+            .painter()
+            .with_clip_rect(clip_rect.shrink(6.0).intersect(row));
+        painter.text(
+            clip_rect.left_center() + Vec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            &clip.name,
+            FontId::proportional(11.0),
+            if ghost {
+                Color32::WHITE.gamma_multiply(0.45)
+            } else {
+                Color32::WHITE
+            },
+        );
+    }
     let span = format!(
         "{} · {}–{}",
         clip.name,

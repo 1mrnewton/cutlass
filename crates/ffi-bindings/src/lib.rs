@@ -86,6 +86,61 @@ pub struct Lane {
     pub clips: Vec<Clip>,
 }
 
+/// One ruler tick. A major tick carries its label.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Tick {
+    pub time_us: i64,
+    pub major: bool,
+    pub label: Option<String>,
+}
+
+/// One filmstrip tile, in points from the clip's left edge. `key` names the
+/// picture for [`Editor::thumb`]; `ready` says it is stored.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Tile {
+    pub left: f64,
+    pub width: f64,
+    pub key: String,
+    pub ready: bool,
+}
+
+/// The filmstrip tiles of one clip.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Film {
+    pub clip_id: String,
+    pub tiles: Vec<Tile>,
+}
+
+/// The gain at volume slider `position`, 0 to 1. Unity is the middle and
+/// the right end is ten times.
+#[uniffi::export]
+#[must_use]
+pub fn volume_at(position: f64) -> f64 {
+    cutlass_ffi::volume_at(position)
+}
+
+/// Where `volume` sits on the volume slider, 0 to 1.
+#[uniffi::export]
+#[must_use]
+pub fn volume_position(volume: f64) -> f64 {
+    cutlass_ffi::volume_position(volume)
+}
+
+/// The speed at scale `position`, 0 to 1. The marks 0.1, 1, 2, 5, 10 and
+/// 100 sit the same distance apart.
+#[uniffi::export]
+#[must_use]
+pub fn speed_at(position: f64) -> f64 {
+    cutlass_ffi::speed_at(position)
+}
+
+/// Where `speed` sits on the speed scale, 0 to 1.
+#[uniffi::export]
+#[must_use]
+pub fn speed_position(speed: f64) -> f64 {
+    cutlass_ffi::speed_position(speed)
+}
+
 /// One saved project in the launch list. `modified_ms` is milliseconds
 /// since 1970.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -373,6 +428,77 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Put a main clip at `place` in the main row's order, counted from zero
+    /// without it, as one undo step.
+    pub fn reorder(&self, clip_id: String, place: u32) -> Result<(), EditorError> {
+        self.run(move |host| host.reorder(&SegmentId::new(clip_id), place))?
+            .map_err(EditorError::from)
+    }
+
+    /// Ruler ticks from `from_us` through `to_us` at `pixel_size` points per
+    /// microsecond.
+    pub fn ruler(
+        &self,
+        pixel_size: f64,
+        from_us: i64,
+        to_us: i64,
+    ) -> Result<Vec<Tick>, EditorError> {
+        let ticks = self.run(move |host| host.ruler(pixel_size, Micros(from_us), Micros(to_us)))?;
+        Ok(ticks
+            .into_iter()
+            .map(|tick| Tick {
+                time_us: tick.time.0,
+                major: tick.major,
+                label: tick.label,
+            })
+            .collect())
+    }
+
+    /// `pixel_size` times `factor`, held inside what the cut and a row
+    /// `lane_width` points wide allow.
+    pub fn zoom(&self, pixel_size: f64, factor: f64, lane_width: f64) -> Result<f64, EditorError> {
+        self.run(move |host| host.zoom(pixel_size, factor, lane_width))
+    }
+
+    /// Filmstrip tiles, `height` points tall, for the picture clips that
+    /// meet `from_us` to `to_us`. Pictures not stored yet are asked for.
+    pub fn film(
+        &self,
+        from_us: i64,
+        to_us: i64,
+        pixel_size: f64,
+        height: f64,
+    ) -> Result<Vec<Film>, EditorError> {
+        let films =
+            self.run(move |host| host.film(Micros(from_us), Micros(to_us), pixel_size, height))?;
+        Ok(films
+            .into_iter()
+            .map(|film| Film {
+                clip_id: film.id.as_str().to_owned(),
+                tiles: film
+                    .tiles
+                    .into_iter()
+                    .map(|tile| Tile {
+                        left: tile.left,
+                        width: tile.width,
+                        key: tile.key,
+                        ready: tile.ready,
+                    })
+                    .collect(),
+            })
+            .collect())
+    }
+
+    /// The picture of a tile [`Self::film`] named, once stored.
+    pub fn thumb(&self, key: String) -> Result<Option<Frame>, EditorError> {
+        let picture = self.run(move |host| host.thumb(&key))?;
+        Ok(picture.map(|picture| Frame {
+            width: picture.width,
+            height: picture.height,
+            rgba: picture.rgba,
+        }))
+    }
+
     pub fn remove(&self, clip_id: String) -> Result<(), EditorError> {
         self.run(move |host| host.remove(&SegmentId::new(clip_id)))?
             .map_err(EditorError::from)
@@ -521,6 +647,50 @@ mod tests {
         let super::EditorError::Failed { message } = editor.set_volume(clip, -1.0).unwrap_err();
         assert!(message.contains("volume"), "{message}");
         assert_eq!(editor.lanes().unwrap()[0].clips[0].volume, 0.25);
+    }
+
+    #[test]
+    fn the_strip_reorders_draws_a_ruler_and_fills_a_filmstrip() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        let first = editor.append(editor.import(pattern()).unwrap()).unwrap();
+        let second = editor.append(editor.import(pattern()).unwrap()).unwrap();
+        editor.reorder(first.clone(), 1).unwrap();
+        let ids: Vec<String> = editor.lanes().unwrap()[0]
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect();
+        assert_eq!(ids, [second, first.clone()]);
+        assert!(editor.reorder("nope".to_owned(), 0).is_err());
+
+        let size = 0.000_05;
+        let ticks = editor.ruler(size, 0, 1_000_000).unwrap();
+        assert_eq!(ticks[0].label.as_deref(), Some("00:00"));
+        assert_eq!(editor.zoom(size, 2.0, 400.0).unwrap(), size * 2.0);
+
+        let end = editor.duration_us().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let tile = loop {
+            let films = editor.film(0, end, size, 40.0).unwrap();
+            assert_eq!(films.len(), 2);
+            let tile = films[0].tiles[0].clone();
+            if tile.ready || std::time::Instant::now() > deadline {
+                break tile;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let frame = editor.thumb(tile.key).unwrap().expect("stored");
+        assert_eq!(frame.rgba.len(), (frame.width * frame.height * 4) as usize);
+        assert!(editor.thumb("nothing".to_owned()).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_control_curves_cross_the_boundary() {
+        assert_eq!(super::volume_at(0.5), 1.0);
+        assert_eq!(super::volume_position(1.0), 0.5);
+        assert_eq!(super::speed_at(0.2), 1.0);
+        assert_eq!(super::speed_position(100.0), 1.0);
     }
 
     #[test]

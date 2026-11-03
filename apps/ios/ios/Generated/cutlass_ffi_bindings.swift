@@ -872,6 +872,14 @@ public protocol EditorProtocol: AnyObject, Sendable {
      */
     func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
     
+    /**
+     * Type into a title as the words change. With no `clip_id`, the first
+     * words that are not blank add one at `at_us` in `face`. The whole
+     * typing is one undo step; blank words change nothing. Returns the
+     * clip, or nothing when none has been added yet.
+     */
+    func typeText(clipId: String?, content: String, face: String, atUs: Int64) throws  -> String?
+    
     func undo() throws 
     
     /**
@@ -1488,6 +1496,25 @@ open func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, pl
         FfiConverterInt64.lower(timeUs),
         FfiConverterInt64.lower(snapUs),
         FfiConverterInt64.lower(playheadUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Type into a title as the words change. With no `clip_id`, the first
+     * words that are not blank add one at `at_us` in `face`. The whole
+     * typing is one undo step; blank words change nothing. Returns the
+     * clip, or nothing when none has been added yet.
+     */
+open func typeText(clipId: String?, content: String, face: String, atUs: Int64)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_type_text(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(clipId),
+        FfiConverterString.lower(content),
+        FfiConverterString.lower(face),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
     )
 })
 }
@@ -2452,13 +2479,20 @@ public struct Stage: Equatable, Hashable {
     public var turn: Double
     public var verticalGuide: Bool
     public var horizontalGuide: Bool
+    /**
+     * The clip is a title, not a picture.
+     */
+    public var text: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(canvasWidth: Double, canvasHeight: Double, centerX: Double, centerY: Double, width: Double, height: Double, 
         /**
          * Degrees clockwise on screen.
-         */turn: Double, verticalGuide: Bool, horizontalGuide: Bool) {
+         */turn: Double, verticalGuide: Bool, horizontalGuide: Bool, 
+        /**
+         * The clip is a title, not a picture.
+         */text: Bool) {
         self.canvasWidth = canvasWidth
         self.canvasHeight = canvasHeight
         self.centerX = centerX
@@ -2468,6 +2502,7 @@ public struct Stage: Equatable, Hashable {
         self.turn = turn
         self.verticalGuide = verticalGuide
         self.horizontalGuide = horizontalGuide
+        self.text = text
     }
 
     
@@ -2494,7 +2529,8 @@ public struct FfiConverterTypeStage: FfiConverterRustBuffer {
                 height: FfiConverterDouble.read(from: &buf), 
                 turn: FfiConverterDouble.read(from: &buf), 
                 verticalGuide: FfiConverterBool.read(from: &buf), 
-                horizontalGuide: FfiConverterBool.read(from: &buf)
+                horizontalGuide: FfiConverterBool.read(from: &buf), 
+                text: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -2508,6 +2544,7 @@ public struct FfiConverterTypeStage: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.turn, into: &buf)
         FfiConverterBool.write(value.verticalGuide, into: &buf)
         FfiConverterBool.write(value.horizontalGuide, into: &buf)
+        FfiConverterBool.write(value.text, into: &buf)
     }
 }
 
@@ -4401,6 +4438,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() != 7512) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_type_text() != 45610) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {

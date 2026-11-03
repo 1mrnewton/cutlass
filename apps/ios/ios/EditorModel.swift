@@ -294,15 +294,16 @@ final class EditorModel {
 
     // MARK: Text
 
-    /// Add `content` at the playhead in `face` and select it.
-    func addText(_ content: String, face: String) {
-        var added: String?
-        edit { added = try $0.addText(content: content, face: face, atUs: playheadUs) }
-        if let added { selectedClip = added }
-    }
-
-    func setText(_ clip: String, _ content: String) {
-        edit { try $0.setText(clipId: clip, content: content) }
+    /// Type into `clip` as the words change, or add a title at the playhead
+    /// in `face` once the words are not blank, and select it. The whole
+    /// typing is one undo step. Returns the clip, or nil while none exists.
+    func typeText(into clip: String?, _ content: String, face: String) -> String? {
+        var typed = clip
+        edit {
+            typed = try $0.typeText(clipId: clip, content: content, face: face, atUs: playheadUs)
+        }
+        if let typed { selectedClip = typed }
+        return typed
     }
 
     func setTextFont(_ clip: String, face: String) {

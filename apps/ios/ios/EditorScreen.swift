@@ -94,7 +94,7 @@ struct EditorScreen: View {
                     .aspectRatio(model.canvasAspect, contentMode: .fit)
             }
             if !model.isPlaying {
-                StageOverlay(model: model)
+                StageOverlay(model: model) { panel = .text($0) }
             }
             if model.isOpening || model.isImporting {
                 ProgressView().tint(.white)

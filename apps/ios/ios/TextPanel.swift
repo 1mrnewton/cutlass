@@ -1,13 +1,16 @@
 import SwiftUI
 
 /// Add text, or change a text clip: the words on top with a check that
-/// saves them, the faces Rust found below. A new clip is placed at the
-/// playhead when the check is tapped. On a clip, picking a face applies it
-/// at once, so each pick is one undo step.
+/// closes, the faces Rust found below. The words show on the preview as
+/// they are typed: the first letter adds the clip at the playhead, and the
+/// whole typing is one undo step. Picking a face applies it at once, as an
+/// undo step of its own.
 struct TextPanel: View {
     let model: EditorModel
     /// The clip being changed, or nil to add one.
     let clip: String?
+    /// The clip the words go into: `clip`, or the one the first letter added.
+    @State private var typed: String?
     let close: () -> Void
     @State private var words: String
     @State private var face: String
@@ -17,6 +20,7 @@ struct TextPanel: View {
         self.model = model
         self.clip = clip
         self.close = close
+        _typed = State(initialValue: clip)
         let text = clip.flatMap { model.text(of: $0) }
         _words = State(initialValue: text?.content ?? "")
         _face = State(initialValue: text?.face ?? model.fonts.first?.name ?? "")
@@ -73,24 +77,19 @@ struct TextPanel: View {
         .padding(.bottom, 16)
         .background(Color(white: 0.11))
         .onAppear { typing = clip == nil }
+        .onChange(of: words) { _, words in
+            typed = model.typeText(into: typed, words, face: face)
+        }
     }
 
     private func pick(_ name: String) {
         face = name
-        if let clip { model.setTextFont(clip, face: name) }
+        if let typed { model.setTextFont(typed, face: name) }
     }
 
-    /// Save the words and close. Blank words add nothing; on a clip they
-    /// leave its words as they were.
+    /// Close. The words are already in the clip; blank words added nothing
+    /// and leave a clip's words as they were.
     private func done() {
-        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let clip {
-            if !trimmed.isEmpty, model.text(of: clip)?.content != words {
-                model.setText(clip, words)
-            }
-        } else if !trimmed.isEmpty {
-            model.addText(words, face: face)
-        }
         typing = false
         close()
     }

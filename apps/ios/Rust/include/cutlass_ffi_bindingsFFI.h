@@ -474,6 +474,11 @@ int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_tick(uint64_t ptr, int64_t 
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_trim(uint64_t ptr, RustBuffer clip_id, int8_t start_edge, int64_t time_us, int64_t snap_us, int64_t playhead_us, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TYPE_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TYPE_TEXT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_type_text(uint64_t ptr, RustBuffer clip_id, RustBuffer content, RustBuffer face, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_UNDO
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_UNDO
 void uniffi_cutlass_ffi_bindings_fn_method_editor_undo(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -1175,6 +1180,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_tick(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TRIM
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TRIM
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_trim(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TYPE_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TYPE_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_type_text(void
     
 );
 #endif

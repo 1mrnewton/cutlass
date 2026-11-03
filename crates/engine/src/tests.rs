@@ -433,6 +433,78 @@ fn a_planar_420_frame_uses_the_color_converter() {
     );
 }
 
+/// Longer than a read used to wait for the clip's thread before it gave up.
+const SLOW: std::time::Duration = std::time::Duration::from_millis(2_500);
+
+/// Decodes after [`SLOW`], or fails after it when the flag is off.
+struct Slow(bool);
+
+impl Decoder for Slow {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        std::thread::sleep(SLOW);
+        if !self.0 {
+            return Err(CodecError::Unsupported { what: "slow" });
+        }
+        Planar.push(packet)
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        Ok(Vec::new())
+    }
+
+    fn reset(&mut self) {}
+
+    fn decode_picture(
+        &mut self,
+        _packet: &Packet,
+    ) -> Result<Vec<cutlass_decode::StillOutput>, CodecError> {
+        Err(CodecError::Unsupported {
+            what: "picture output",
+        })
+    }
+}
+
+#[test]
+fn a_patient_read_waits_for_a_slow_decode_and_a_failed_one_is_its_error() {
+    let path = fixture("pattern.jpg");
+    let (draft, id) = draft_for(&path);
+
+    let mut factory = ReaderFactory::new();
+    factory.register_container(probe_still, open_still);
+    factory
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Slow(true))));
+    let mut source = open_segment(&factory, &draft, &id, ClockKind::Export, 1).expect("source");
+    source.read_ahead(&factory, 2).expect("thread");
+    source.set_patient(true);
+    let started = std::time::Instant::now();
+    let picture = source.picture_at(Micros(0)).expect("the slow picture");
+    assert!(
+        started.elapsed() >= SLOW,
+        "the picture came from the thread"
+    );
+    let Picture::Cpu(bytes) = picture else {
+        panic!("cpu picture");
+    };
+    assert_eq!((bytes.width(), bytes.height()), (2, 2));
+    assert!(!source.take_stale());
+
+    let mut factory = ReaderFactory::new();
+    factory.register_container(probe_still, open_still);
+    factory
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Slow(false))));
+    let mut source = open_segment(&factory, &draft, &id, ClockKind::Export, 1).expect("source");
+    source.read_ahead(&factory, 2).expect("thread");
+    source.set_patient(true);
+    let error = source.picture_at(Micros(0)).expect_err("no picture");
+    assert_ne!(error, EngineError::NotReady, "the decode's own error");
+}
+
 #[test]
 fn a_platform_buffer_is_the_picture_source_and_text_does_not_open_a_decoder() {
     reset_counts();

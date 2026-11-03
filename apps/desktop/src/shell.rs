@@ -3884,6 +3884,17 @@ impl Shell {
         self.clip_menu
     }
 
+    /// The kind of track the selected clip sits on.
+    #[must_use]
+    pub fn selected_track_kind(&self) -> Option<TrackType> {
+        let id = self.selected()?;
+        self.draft()?
+            .tracks
+            .iter()
+            .find(|track| track.segments.iter().any(|segment| &segment.id == id))
+            .map(|track| track.kind.clone())
+    }
+
     /// The split tool is armed. A click on a clip cuts it at that time.
     #[must_use]
     pub fn blade(&self) -> bool {

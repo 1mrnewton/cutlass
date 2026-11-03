@@ -1966,96 +1966,46 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
         shell.close_clip_menu();
         return;
     }
-    let width = 132.0;
-    let row_height = 28.0;
-    let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
-    if shell.extract_audio_enabled() {
-        labels.insert(0, "Extract audio");
-    }
-    if shell.split_scenes_enabled() {
-        labels.insert(0, "Split scenes");
-    }
-    if shell.transcribe_enabled() {
-        labels.insert(0, "Transcribe");
-    }
-    if shell.crop_enabled() {
-        labels.insert(0, "Crop");
-    }
-    if shell.rotate_enabled() {
-        labels.insert(0, "Rotate");
-    }
-    if shell.mirror_enabled() {
-        labels.insert(0, "Mirror");
-    }
-    if shell.reverse_enabled() {
-        labels.insert(0, "Reverse");
-    }
-    if shell.freeze_enabled() {
-        labels.insert(0, "Freeze");
-    }
-    let rect = Rect::from_min_size(
+    let Some(kind) = shell.selected_track_kind() else {
+        shell.close_clip_menu();
+        return;
+    };
+    let enabled = |id: &str| match id {
+        "edit-crop" => shell.crop_enabled(),
+        "split-scenes" => shell.split_scenes_enabled(),
+        "transcript" => shell.transcribe_enabled(),
+        "extract-audio" => shell.extract_audio_enabled(),
+        "flip" => shell.mirror_enabled(),
+        _ => true,
+    };
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("clip-menu"),
         Pos2::new(menu.x, menu.y),
-        Vec2::new(width, row_height * labels.len() as f32),
+        crate::menu::clip_entries(&kind),
+        &enabled,
     );
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(8), tokens::PANEL);
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(8),
-        egui::Stroke::new(1.0, tokens::LANE_LINE),
-        egui::StrokeKind::Inside,
-    );
-    let mut acted = false;
-    for (index, label) in labels.iter().enumerate() {
-        let item = Rect::from_min_size(
-            Pos2::new(rect.left(), rect.top() + index as f32 * row_height),
-            Vec2::new(width, row_height),
-        );
-        let response = ui.interact(
-            item,
-            ui.scope_id().with(("clip-menu", *label)),
-            Sense::click(),
-        );
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(item, CornerRadius::same(6), tokens::ICON_BUTTON);
-        }
-        ui.painter().text(
-            item.left_center() + Vec2::new(12.0, 0.0),
-            Align2::LEFT_CENTER,
-            *label,
-            FontId::proportional(12.0),
-            tokens::TEXT,
-        );
-        if response.clicked() {
-            let result = match *label {
-                "Copy" => shell.copy_selected(),
-                "Cut" => shell.cut_selected(),
-                "Paste" => shell.paste(),
-                "Freeze" => shell.toggle_freeze(),
-                "Reverse" => shell.toggle_reverse(),
-                "Mirror" => shell.toggle_mirror(),
-                "Rotate" => shell.turn_clockwise(),
-                "Crop" => shell.toggle_crop(),
-                "Transcribe" => shell.transcribe(),
-                "Split scenes" => shell.split_scenes(),
-                "Extract audio" => shell.extract_audio(),
-                _ => shell.remove_selected(),
-            };
-            if let Err(error) = result {
-                shell.set_notice(error.to_string());
+    if let Some(item) = shown.picked {
+        shell.close_clip_menu();
+        let result = match item.id {
+            _ if !item.built => {
+                shell.set_notice(format!("{} is not built yet", item.label));
+                Ok(())
             }
-            acted = true;
+            "copy" => shell.copy_selected(),
+            "cut" => shell.cut_selected(),
+            "delete" => shell.remove_selected(),
+            "edit-crop" => shell.toggle_crop(),
+            "split-scenes" => shell.split_scenes(),
+            "transcript" => shell.transcribe(),
+            "extract-audio" => shell.extract_audio(),
+            "flip" => shell.toggle_mirror(),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            shell.set_notice(error.to_string());
         }
-    }
-    let outside = ui.input(|input| {
-        input.pointer.primary_clicked()
-            && input
-                .pointer
-                .interact_pos()
-                .is_none_or(|pos| !rect.contains(pos))
-    });
-    if acted || outside {
+    } else if shown.dismissed {
         shell.close_clip_menu();
     }
 }
@@ -2081,7 +2031,7 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     let Some(pos) = pos else {
         return;
     };
-    if !lane_area.contains(pos) {
+    if !lane_area.contains(pos) || over_menu(ui, pos) {
         return;
     }
     let pixels = if delta.x.abs() >= delta.y.abs() {
@@ -2090,6 +2040,13 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
         delta.y
     };
     shell.pan_pixels(-f64::from(pixels));
+}
+
+/// A right-click menu is open under `pos`, so a wheel there scrolls the menu.
+fn over_menu(ui: &Ui, pos: Pos2) -> bool {
+    ui.ctx()
+        .layer_id_at(pos)
+        .is_some_and(|layer| layer.order == egui::Order::Foreground)
 }
 
 /// A pinch, or a wheel with the zoom modifier, scales the lanes around the pointer.
@@ -2101,7 +2058,7 @@ fn zoom_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     let Some(pos) = pos else {
         return;
     };
-    if !lane_area.contains(pos) {
+    if !lane_area.contains(pos) || over_menu(ui, pos) {
         return;
     }
     let x = f64::from(pos.x - lane_area.left()).max(0.0);
@@ -5582,9 +5539,10 @@ mod tests {
             },
             |ui| show(&mut shell, ui, &mut view, None),
         );
-        output.textures_delta.clear();
         assert!(shell.clip_menu().is_some());
-        let copy = Pos2::new(text.x + 24.0, text.y + 10.0);
+        // A clip low in the window opens its menu moved up to fit.
+        let copy = text_pos(&output, "Copy").expect("the Copy row") + Vec2::new(4.0, 6.0);
+        output.textures_delta.clear();
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: screen,

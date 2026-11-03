@@ -118,6 +118,25 @@ pub const MAIN_CLIP_INSET: f32 = 8.0;
 /// The gap above and below any other clip.
 pub const CLIP_INSET: f32 = 6.0;
 
+/// A right-click menu.
+pub const MENU: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c);
+/// The menu row under the pointer, and the row whose submenu is open.
+pub const MENU_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+/// A menu row that cannot run now.
+pub const MENU_DISABLED: Color32 = Color32::from_rgb(0x6f, 0x6f, 0x6f);
+/// A menu shortcut.
+pub const MENU_KEY: Color32 = Color32::from_rgb(0x8d, 0x8d, 0x8d);
+/// The shortcut of a row that cannot run now.
+pub const MENU_KEY_DISABLED: Color32 = Color32::from_rgb(0x5c, 0x5c, 0x5c);
+/// The arrow of a row with a submenu.
+pub const MENU_CHEVRON: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
+/// The line between menu groups.
+pub const MENU_SEPARATOR: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
+/// The badge on a menu row this build cannot do yet.
+pub const MENU_BADGE: Color32 = Color32::from_rgb(0x6d, 0x5e, 0xfc);
+/// The narrowest a menu is drawn.
+pub const MENU_WIDTH: f32 = 248.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

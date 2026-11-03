@@ -12,7 +12,11 @@ struct EditorScreen: View {
     @State private var openBar: ToolBar = .root
 
     /// The tool panel open over the tool bar.
-    enum Panel { case volume, speed }
+    enum Panel: Equatable {
+        case volume, speed
+        /// Add text, or change the text clip with this id.
+        case text(String?)
+    }
 
     init(project: ProjectSummary, home: @escaping () -> Void) {
         name = project.name
@@ -48,7 +52,9 @@ struct EditorScreen: View {
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
-        .onChange(of: model.selectedClip) { _, id in if id == nil { panel = nil } }
+        .onChange(of: model.selectedClip) { _, id in
+            if id == nil, panel != .text(nil) { panel = nil }
+        }
         .onDisappear { model.pause() }
     }
 
@@ -98,11 +104,16 @@ struct EditorScreen: View {
     /// root tools opened. Rust lists every bar.
     @ViewBuilder
     private var bottom: some View {
-        if let panel, let clip = model.selection {
+        if case let .text(clip) = panel {
+            TextPanel(model: model, clip: clip) { self.panel = nil }
+                .id(clip ?? "new")
+                .transition(.move(edge: .bottom))
+        } else if let panel, let clip = model.selection {
             Group {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
+                case .text: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -135,6 +146,8 @@ struct EditorScreen: View {
         case .volume: panel = .volume
         case .speed: panel = .speed
         case .delete: model.deleteClip()
+        case .addText: panel = .text(nil)
+        case .editText: panel = .text(model.selectedClip)
         default: model.say("\(tool.label) is coming soon")
         }
     }

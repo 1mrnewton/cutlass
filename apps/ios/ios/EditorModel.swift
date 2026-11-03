@@ -38,6 +38,10 @@ final class EditorModel {
     }
 
     private static let log = Logger(subsystem: "cutlass", category: "editor")
+    /// Where the system keeps the faces text can be set in.
+    nonisolated private static let fontFolders = ["/System/Library/Fonts"]
+    /// The faces text can be set in, as Rust found them.
+    private(set) var fonts: [Font] = []
     private var editor: Editor?
     private var drawing = false
     private var waiting: Int64?
@@ -55,13 +59,16 @@ final class EditorModel {
         let bundle = Places.bundle
         Task.detached(priority: .userInitiated) { [weak self] in
             let opened = Result {
-                try Editor.open(root: root, bundle: bundle, project: project)
+                let editor = try Editor.open(root: root, bundle: bundle, project: project)
+                try editor.setFontFolders(folders: Self.fontFolders)
+                return editor
             }
             await MainActor.run {
                 guard let self else { return }
                 switch opened {
                 case let .success(editor):
                     self.editor = editor
+                    self.fonts = (try? editor.fonts()) ?? []
                     self.reload()
                 case let .failure(error):
                     self.show(error)
@@ -186,6 +193,28 @@ final class EditorModel {
             return
         }
         edit { _ = try $0.split(clipId: clip.id, atUs: playheadUs) }
+    }
+
+    // MARK: Text
+
+    /// Add `content` at the playhead in `face` and select it.
+    func addText(_ content: String, face: String) {
+        var added: String?
+        edit { added = try $0.addText(content: content, face: face, atUs: playheadUs) }
+        if let added { selectedClip = added }
+    }
+
+    func setText(_ clip: String, _ content: String) {
+        edit { try $0.setText(clipId: clip, content: content) }
+    }
+
+    func setTextFont(_ clip: String, face: String) {
+        edit { try $0.setTextFont(clipId: clip, face: face) }
+    }
+
+    /// What `clip` says, or nil when it is not a text clip.
+    func text(of clip: String) -> TextInfo? {
+        try? editor?.text(clipId: clip)
     }
 
     func deleteClip() {

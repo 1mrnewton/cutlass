@@ -2790,6 +2790,38 @@ fn wave_height(level: f32) -> f32 {
     ((20.0 * level.log10() + WAVE_FLOOR_DB) / WAVE_FLOOR_DB).clamp(0.0, 1.0)
 }
 
+/// A waveform's bars and volume line, and the clip fill it sits on.
+#[derive(Clone, Copy)]
+struct WaveColors {
+    bar: Color32,
+    line: Color32,
+    fill: Color32,
+}
+
+impl WaveColors {
+    const VIDEO: Self = Self {
+        bar: tokens::CLIP_VIDEO_BAR,
+        line: tokens::CLIP_VIDEO_LINE,
+        fill: tokens::CLIP_VIDEO,
+    };
+    const AUDIO: Self = Self {
+        bar: tokens::CLIP_AUDIO_BAR,
+        line: tokens::CLIP_AUDIO_LINE,
+        fill: tokens::CLIP_AUDIO,
+    };
+}
+
+/// `from` moved `t` of the way to `to`, channel by channel.
+fn lerp(from: Color32, to: Color32, t: f32) -> Color32 {
+    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+        mix(from.a(), to.a()),
+    )
+}
+
 /// Where the volume line sits in the band for a gain: 100% at CapCut's 45%,
 /// +20 dB, the most a clip takes, at the top, and quieter gains down the
 /// same decibel scale as the bars.
@@ -2814,9 +2846,15 @@ fn paint_wave(
     clip_left: f32,
     band: Rect,
     visible: Rect,
-    bar: Color32,
-    line: Color32,
+    colors: WaveColors,
 ) {
+    let WaveColors { bar, line, fill } = colors;
+    // A muted track's bars fade almost into the clip, without their caps.
+    let bar = if wave.muted {
+        lerp(fill, bar, 0.2)
+    } else {
+        bar
+    };
     let painter = ui.painter().with_clip_rect(band.intersect(visible));
     let floor = band.bottom() - 1.0;
     let reach = (band.height() - 2.0).max(1.0);
@@ -2844,6 +2882,9 @@ fn paint_wave(
                 color,
             );
         };
+        if wave.muted {
+            continue;
+        }
         if level >= WAVE_CLIPPED {
             cap(top, tokens::WAVE_CLIPPED, &mut mesh);
             cap(top + 1.0, tokens::WAVE_LOUD, &mut mesh);
@@ -2992,12 +3033,12 @@ fn paint_clip(
             paint_film(shell, ui, &clip.id, clip_rect, film, visible);
         }
         if let (Some(band), Some(wave)) = (parts.band, wave.as_ref()) {
-            let (bar, line) = if audio {
-                (tokens::CLIP_AUDIO_BAR, tokens::CLIP_AUDIO_LINE)
+            let colors = if audio {
+                WaveColors::AUDIO
             } else {
-                (tokens::CLIP_VIDEO_BAR, tokens::CLIP_VIDEO_LINE)
+                WaveColors::VIDEO
             };
-            paint_wave(ui, wave, clip_rect.left(), band, visible, bar, line);
+            paint_wave(ui, wave, clip_rect.left(), band, visible, colors);
         }
     }
     if selected {
@@ -4247,17 +4288,10 @@ mod tests {
             levels: vec![0.1, 0.1, 0.8, 0.8, 1.0, 1.0],
             gains: vec![1.0; 6],
             under_picture: true,
+            muted: false,
         };
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(
-                ui,
-                &wave,
-                0.0,
-                band,
-                band,
-                tokens::CLIP_VIDEO_BAR,
-                tokens::CLIP_VIDEO_LINE,
-            );
+            paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
         });
         let colors: Vec<(f32, Color32)> = output
             .shapes
@@ -4304,17 +4338,10 @@ mod tests {
             levels: vec![0.0; 4],
             gains: vec![1.0, 1.0, 10.0, 10.0],
             under_picture: true,
+            muted: false,
         };
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(
-                ui,
-                &wave,
-                0.0,
-                band,
-                band,
-                tokens::CLIP_VIDEO_BAR,
-                tokens::CLIP_VIDEO_LINE,
-            );
+            paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
         });
         let tops: Vec<f32> = output
             .shapes

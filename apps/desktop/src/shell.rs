@@ -88,6 +88,8 @@ pub struct ClipWave {
     pub gains: Vec<f32>,
     /// The sound of a video clip, drawn in a band under its picture.
     pub under_picture: bool,
+    /// The clip's track is muted, or silenced by another track's solo.
+    pub muted: bool,
 }
 
 /// One filmstrip tile of a clip, and its picture once stored.
@@ -725,11 +727,15 @@ impl Shell {
     ) -> Option<ClipWave> {
         let waveforms = self.waveforms.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
-        let segment = draft
-            .tracks
-            .iter()
-            .flat_map(|track| &track.segments)
-            .find(|segment| &segment.id == id)?;
+        let (track, segment) = draft.tracks.iter().find_map(|track| {
+            track
+                .segments
+                .iter()
+                .find(|segment| &segment.id == id)
+                .map(|segment| (track, segment))
+        })?;
+        let muted = track.attribute.contains(TrackAttribute::MUTE)
+            || track.attribute.contains(TrackAttribute::MUTE_BY_SOLO);
         let under_picture = match draft.materials.get(segment.material_id.as_str()) {
             Some(MaterialRef::Audio(_)) => false,
             Some(MaterialRef::Video(video)) if video.kind != MetaType::Photo.as_str() => true,
@@ -746,6 +752,7 @@ impl Shell {
                 levels: Vec::new(),
                 gains: Vec::new(),
                 under_picture,
+                muted,
             });
         };
         if !peaks.complete {
@@ -785,6 +792,7 @@ impl Shell {
             levels,
             gains,
             under_picture,
+            muted,
         })
     }
 
@@ -6316,6 +6324,7 @@ mod tests {
                 levels: Vec::new(),
                 gains: Vec::new(),
                 under_picture: true,
+                muted: false,
             }),
             "a video holds its band open while it is read"
         );
@@ -6417,6 +6426,7 @@ mod tests {
                 levels: Vec::new(),
                 gains: Vec::new(),
                 under_picture: true,
+                muted: false,
             }),
             "a video holds its band open while it is read"
         );

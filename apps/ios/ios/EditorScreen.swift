@@ -88,7 +88,7 @@ struct EditorScreen: View {
         HStack {
             PhotosPicker(
                 selection: $picked, matching: .any(of: [.images, .videos]),
-                preferredItemEncoding: .compatible
+                preferredItemEncoding: .current
             ) {
                 tool("Add", "plus")
             }

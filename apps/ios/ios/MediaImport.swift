@@ -6,6 +6,10 @@ import UniformTypeIdentifiers
 /// A picked item, copied out of the Photos library into a temporary file
 /// that keeps its own name. Rust reads the file: what it is, its upright
 /// size, and its length.
+///
+/// A movie comes as recorded; the Apple decoder plays HEVC, so nothing is
+/// converted. A photo is asked for as PNG or JPEG, so Photos hands a HEIC
+/// photo over as JPEG.
 struct PickedFile: Transferable {
     let url: URL
 
@@ -19,7 +23,8 @@ struct PickedFile: Transferable {
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(importedContentType: .movie) { try copy($0) }
-        FileRepresentation(importedContentType: .image) { try copy($0) }
+        FileRepresentation(importedContentType: .png) { try copy($0) }
+        FileRepresentation(importedContentType: .jpeg) { try copy($0) }
     }
 
     private static func copy(_ received: ReceivedTransferredFile) throws -> PickedFile {

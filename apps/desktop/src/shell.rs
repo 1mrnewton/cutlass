@@ -187,6 +187,7 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("the line width must be from zero through 8192")
             }
             Self::Edit(EditError::TextFont) => formatter.write_str("the face is not a file name"),
+            Self::Edit(EditError::TextEmpty) => formatter.write_str("type something to add text"),
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
             }

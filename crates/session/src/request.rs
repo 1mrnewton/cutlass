@@ -189,6 +189,17 @@ pub enum Request {
     },
     /// Store the face file name on a text clip.
     SetTextFont { segment_id: SegmentId, face: String },
+    /// Place a new text clip saying `content` in `face`, from `start` for
+    /// `duration`. `track_id` is created as a text row when it is missing.
+    AddText {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        content: String,
+        face: String,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

@@ -613,9 +613,21 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func `import`(path: String) throws  -> String
     
     /**
+     * Play stopped at the end, or was never started.
+     */
+    func isPlaying() throws  -> Bool
+    
+    /**
      * The rows to draw, top first.
      */
     func lanes() throws  -> [Lane]
+    
+    func pause() throws 
+    
+    /**
+     * Play from the playhead with sound. An empty project does not play.
+     */
+    func play() throws 
     
     func redo() throws 
     
@@ -630,9 +642,21 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func save() throws 
     
     /**
+     * Move the playhead to `time_us`, held inside the project. Playing
+     * goes on from there.
+     */
+    func seek(timeUs: Int64) throws 
+    
+    /**
      * Cut a clip at `at_us`. Returns the right piece's id.
      */
     func split(clipId: String, atUs: Int64) throws  -> String
+    
+    /**
+     * Move a playing playhead by `elapsed_us` with the heard sound and
+     * return it. Call once per screen frame while playing.
+     */
+    func tick(elapsedUs: Int64) throws  -> Int64
     
     func undo() throws 
     
@@ -763,6 +787,18 @@ open func `import`(path: String)throws  -> String  {
 }
     
     /**
+     * Play stopped at the end, or was never started.
+     */
+open func isPlaying()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_is_playing(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The rows to draw, top first.
      */
 open func lanes()throws  -> [Lane]  {
@@ -772,6 +808,25 @@ open func lanes()throws  -> [Lane]  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func pause()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_pause(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Play from the playhead with sound. An empty project does not play.
+     */
+open func play()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_play(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 open func redo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -806,6 +861,19 @@ open func save()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift
 }
     
     /**
+     * Move the playhead to `time_us`, held inside the project. Playing
+     * goes on from there.
+     */
+open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_seek(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(timeUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Cut a clip at `at_us`. Returns the right piece's id.
      */
 open func split(clipId: String, atUs: Int64)throws  -> String  {
@@ -815,6 +883,20 @@ open func split(clipId: String, atUs: Int64)throws  -> String  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Move a playing playhead by `elapsed_us` with the heard sound and
+     * return it. Call once per screen frame while playing.
+     */
+open func tick(elapsedUs: Int64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_tick(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(elapsedUs),uniffiCallStatus
     )
 })
 }
@@ -1470,7 +1552,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import() != 38694) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_is_playing() != 37181) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes() != 20121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_pause() != 24082) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_play() != 7672) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_redo() != 49063) {
@@ -1482,7 +1573,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_save() != 50350) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {

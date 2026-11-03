@@ -236,6 +236,29 @@ pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
     }
 }
 
+/// The menu for a media card in the library.
+pub const LIBRARY_CARD: &[Entry] = &[
+    todo("open-file", "Open file location", ""),
+    todo("delete", "Delete", ""),
+    todo("new-folder-with", "New folder with selected item", ""),
+    todo("link-media", "Link to media", ""),
+    todo("split-scenes", "Split scenes", ""),
+    todo("export", "Export selected clips", ""),
+];
+
+/// The menu for the empty space between library cards.
+pub const LIBRARY_EMPTY: &[Entry] = &[
+    todo("new-folder", "New folder", ""),
+    sub(
+        "sort",
+        "Sort",
+        &[
+            todo("sort-name", "Name", ""),
+            todo("sort-duration", "Duration", ""),
+        ],
+    ),
+];
+
 const PAD: f32 = 6.0;
 const ROW: f32 = 32.0;
 const ROW_PAD: f32 = 10.0;
@@ -613,7 +636,7 @@ mod tests {
             |ui| {
                 shown = show(
                     ui.ctx(),
-                    Id::new("menu"),
+                    ui.scope_id().with("menu"),
                     Pos2::new(100.0, 100.0),
                     VIDEO,
                     &|_| true,

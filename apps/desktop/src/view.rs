@@ -106,6 +106,14 @@ impl Shelf {
     }
 }
 
+/// The open library menu: where it opens, and whether it is for the
+/// picked cards or for the space between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LibraryMenu {
+    at: Pos2,
+    on_card: bool,
+}
+
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     export_open: bool,
@@ -134,6 +142,11 @@ pub struct ViewState {
     dialogs: Dialogs,
     library_query: String,
     library_shelf: Shelf,
+    /// The library cards picked, by card id, and the card a Shift-click
+    /// range starts from.
+    library_picked: Vec<String>,
+    library_anchor: Option<String>,
+    library_menu: Option<LibraryMenu>,
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
@@ -171,6 +184,9 @@ impl Default for ViewState {
             dialogs: Dialogs::new(),
             library_query: String::new(),
             library_shelf: Shelf::Media,
+            library_picked: Vec::new(),
+            library_anchor: None,
+            library_menu: None,
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
@@ -644,7 +660,7 @@ fn regions(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, row: Rect, size
     shell.chrome.inspector = true;
 }
 
-fn library_panel(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+fn library_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let rail = Rect::from_min_size(rect.min, Vec2::new(tokens::RAIL_WIDTH, rect.height()));
     shelf_rail(ui, view, rail);
     let hairline = Rect::from_min_size(
@@ -697,7 +713,7 @@ fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
     response.on_hover_text(shelf.label())
 }
 
-fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     column.add(
         egui::TextEdit::singleline(&mut view.library_query)
@@ -709,8 +725,22 @@ fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     );
     column.add_space(12.0);
     let grid = column.available_rect_before_wrap();
-    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let shelf = view.library_shelf;
+    let bin = matches!(shelf, Shelf::Media | Shelf::Audio);
+    // The space between and below the cards. Cards sit above it, so a
+    // click here missed every card.
+    let back = column.interact(grid, column.scope_id().with("library-back"), Sense::click());
+    if back.clicked() {
+        view.library_picked.clear();
+        view.library_anchor = None;
+    }
+    if bin
+        && back.secondary_clicked()
+        && let Some(at) = back.interact_pointer_pos()
+    {
+        view.library_menu = Some(LibraryMenu { at, on_card: false });
+    }
+    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let query = view.library_query.clone();
     ScrollArea::vertical()
         .id_salt("library-cards")
@@ -735,12 +765,79 @@ fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
                         .color(tokens::MUTED),
                 );
             } else {
-                card_grid(ui, &cards);
+                card_grid(ui, view, &cards, bin);
             }
         });
+    library_menu(shell, &column, view);
 }
 
-fn card_grid(ui: &mut Ui, cards: &[BinCard]) {
+/// The library menu, while open. No row is built yet, so a pick says so.
+fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
+    let Some(menu) = view.library_menu else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && pos != menu.at
+    {
+        view.library_menu = None;
+        return;
+    }
+    let entries = if menu.on_card {
+        crate::menu::LIBRARY_CARD
+    } else {
+        crate::menu::LIBRARY_EMPTY
+    };
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("library-menu"),
+        menu.at,
+        entries,
+        &|_| true,
+    );
+    if let Some(item) = shown.picked {
+        view.library_menu = None;
+        shell.set_notice(format!("{} is not built yet", item.label));
+    } else if shown.dismissed {
+        view.library_menu = None;
+    }
+}
+
+/// Pick `id` the way a click does: alone, toggled with Command, or the run
+/// from the anchor with Shift.
+fn pick_card(view: &mut ViewState, cards: &[BinCard], id: &str, modifiers: egui::Modifiers) {
+    let toggle = modifiers.command || modifiers.ctrl;
+    let index = |wanted: &str| cards.iter().position(|card| card.id == wanted);
+    if modifiers.shift
+        && let Some(from) = view.library_anchor.as_deref().and_then(index)
+        && let Some(to) = index(id)
+    {
+        let run = cards[from.min(to)..=from.max(to)]
+            .iter()
+            .map(|card| card.id.clone());
+        if toggle {
+            for card in run {
+                if !view.library_picked.contains(&card) {
+                    view.library_picked.push(card);
+                }
+            }
+        } else {
+            view.library_picked = run.collect();
+        }
+        return;
+    }
+    if toggle {
+        if let Some(at) = view.library_picked.iter().position(|card| card == id) {
+            view.library_picked.remove(at);
+        } else {
+            view.library_picked.push(id.to_owned());
+        }
+    } else {
+        view.library_picked = vec![id.to_owned()];
+    }
+    view.library_anchor = Some(id.to_owned());
+}
+
+fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) {
     let width = ui.available_width().max(CARD_W);
     ui.set_min_width(width);
     let cols = ((width + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
@@ -755,18 +852,40 @@ fn card_grid(ui: &mut Ui, cards: &[BinCard]) {
                 (index / cols) as f32 * (CARD_H + CARD_GAP),
             );
         let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H));
-        paint_bin_card(ui, rect, card);
-        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::drag());
+        paint_bin_card(ui, rect, card, view.library_picked.contains(&card.id));
+        // A click picks the card. A drag only starts once the pointer moves.
+        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::click_and_drag());
         response.dnd_set_drag_payload(LibraryDrop {
             material_id: card.id.clone(),
         });
+        if response.clicked() {
+            let modifiers = ui.input(|input| input.modifiers);
+            pick_card(view, cards, &card.id, modifiers);
+        }
+        if response.secondary_clicked() {
+            if !view.library_picked.contains(&card.id) {
+                view.library_picked = vec![card.id.clone()];
+                view.library_anchor = Some(card.id.clone());
+            }
+            if bin && let Some(at) = response.interact_pointer_pos() {
+                view.library_menu = Some(LibraryMenu { at, on_card: true });
+            }
+        }
         response.on_hover_text(&card.name);
     }
 }
 
-fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard) {
+fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
     let painter = ui.painter().with_clip_rect(rect);
     paint_card_face(&painter, rect, card);
+    if picked {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(12),
+            egui::Stroke::new(tokens::STROKE, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+    }
 }
 
 fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
@@ -4471,6 +4590,103 @@ mod tests {
             notice.y > tick.y,
             "notice {notice:?} overlaps tick {tick:?}"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    fn library_cards(cards: &[&str]) -> Vec<BinCard> {
+        cards
+            .iter()
+            .map(|id| BinCard {
+                id: (*id).to_owned(),
+                name: (*id).to_owned(),
+                meta: String::new(),
+                on_timeline: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_click_picks_one_card_command_toggles_and_shift_takes_the_run() {
+        let cards = library_cards(&["a", "b", "c", "d"]);
+        let mut view = ViewState::new();
+        let plain = egui::Modifiers::default();
+        pick_card(&mut view, &cards, "b", plain);
+        assert_eq!(view.library_picked, ["b"]);
+        pick_card(&mut view, &cards, "d", egui::Modifiers::SHIFT);
+        assert_eq!(view.library_picked, ["b", "c", "d"]);
+        pick_card(&mut view, &cards, "c", egui::Modifiers::COMMAND);
+        assert_eq!(view.library_picked, ["b", "d"]);
+        pick_card(&mut view, &cards, "a", egui::Modifiers::COMMAND);
+        assert_eq!(view.library_picked, ["b", "d", "a"]);
+        pick_card(&mut view, &cards, "c", plain);
+        assert_eq!(view.library_picked, ["c"]);
+    }
+
+    #[test]
+    fn a_click_on_a_library_card_picks_it_and_a_right_click_opens_its_menu() {
+        let temp = std::env::temp_dir().join(format!("cutlass-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let card = text_pos(&output, "pattern.png").expect("library card");
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Primary),
+        );
+        frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(view.library_picked.len(), 1);
+        assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+        assert!(shell.lanes().iter().all(|lane| lane.clips.is_empty()));
+        let picked = view.library_picked.clone();
+        let output = frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Secondary),
+        );
+        assert_eq!(view.library_picked, picked);
+        assert!(view.library_menu.is_some_and(|menu| menu.on_card));
+        let row = text_pos(&output, "Delete").expect("the Delete row") + Vec2::new(4.0, 6.0);
+        frame(
+            &mut shell,
+            &mut view,
+            click(row, egui::PointerButton::Primary),
+        );
+        assert!(view.library_menu.is_none());
+        assert_eq!(shell.notice(), "Delete is not built yet");
+        assert!(shell.draft().unwrap().materials.videos.len() == 1);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -1295,7 +1295,7 @@ mod tests {
         // Three seconds of pictures at the draft's 30 a second.
         assert_eq!(made.frames, 90);
         assert_eq!(seen.last(), Some(&(90, 90)));
-        assert_eq!(made.width.max(made.height), 720);
+        assert_eq!(made.width.min(made.height), 720);
         assert!(!temp.path.join(".cut.mp4.part").exists());
         // The phone's own readers open what it wrote.
         let cutlass_probe::Probed::Video {

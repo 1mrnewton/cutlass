@@ -1110,7 +1110,7 @@ mod tests {
         let done = editor.export(path.clone(), 720, all.clone()).unwrap();
         assert_eq!(done.path, path);
         assert_eq!(all.heard.load(Ordering::Relaxed), done.frames);
-        assert_eq!(done.width.max(done.height), 720);
+        assert_eq!(done.width.min(done.height), 720);
         assert!(std::fs::metadata(&movie).unwrap().len() > 0);
         assert_eq!(super::export_sides(), [720, 1080, 2160]);
         // The editor still answers afterwards.

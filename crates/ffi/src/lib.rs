@@ -22,6 +22,7 @@ pub use cache::ResourceCache;
 pub use codecs::{decoders, readers};
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
+pub use cutlass_playback::AudioHost;
 pub use cutlass_probe::{ProbeError, Probed};
 pub use cutlass_session::{Micros, SegmentId};
 pub use cutlass_storage::Home;
@@ -35,6 +36,7 @@ pub use timeline::{PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
 
+use cutlass_playback::Program;
 use cutlass_session::{Draft, LinkageSettings, Request, Session};
 use cutlass_store::RepairNote;
 
@@ -201,9 +203,37 @@ impl PhoneHost {
         self.commands.session()
     }
 
-    /// Start play when the playhead is inside the stored duration.
+    /// Open this device's audio output. Until then sound goes to the
+    /// software buffer, as in tests.
+    pub fn open_audio(&mut self, host: AudioHost) {
+        self.player.open_output(host);
+    }
+
+    /// Play from the playhead with sound. An empty cut does not play.
     pub fn play(&mut self) -> Result<(), FfiError> {
-        self.player.play(self.commands.session())
+        let end = self.draft().duration;
+        let program = program(&self.commands, &self.project, &self.preview);
+        self.player.play(program, end)
+    }
+
+    pub fn pause(&mut self) {
+        self.player.pause();
+    }
+
+    /// Move the playhead, held inside the cut. Playing goes on from there.
+    pub fn seek(&mut self, time: Micros) {
+        let end = self.draft().duration;
+        let program = program(&self.commands, &self.project, &self.preview);
+        self.player.seek(program, time, end);
+    }
+
+    /// Move a playing playhead by `elapsed` microseconds with the heard
+    /// sound, and return it. Play stops at the end of the cut. An edit made
+    /// while playing is heard from the playhead on.
+    pub fn tick(&mut self, elapsed: i64) -> Micros {
+        let end = self.draft().duration;
+        let program = program(&self.commands, &self.project, &self.preview);
+        self.player.tick(program, elapsed, end)
     }
 
     /// The playhead, in microseconds.
@@ -212,7 +242,6 @@ impl PhoneHost {
         self.player.playhead()
     }
 
-    /// Play is running inside the stored duration.
     #[must_use]
     pub fn is_playing(&self) -> bool {
         self.player.is_playing()
@@ -286,6 +315,16 @@ impl PhoneHost {
     /// This does not start a transfer.
     pub fn resource(&self, id: &str) -> Result<PathBuf, FfiError> {
         self.cache.resolve(id)
+    }
+}
+
+/// What playback hears: the session draft, read from the project folder.
+fn program<'a>(commands: &'a Commands, project: &'a Project, preview: &'a Preview) -> Program<'a> {
+    Program {
+        draft: commands.session().draft(),
+        revision: commands.revision(),
+        root: Some(project.root()),
+        readers: preview.readers(),
     }
 }
 
@@ -556,6 +595,36 @@ mod tests {
         host.undo().unwrap();
         assert_eq!(host.draft().tracks[0].segments.len(), 1);
         assert!(host.revision() > revision);
+    }
+
+    #[test]
+    fn play_ticks_through_the_cut_and_stops_at_its_end_without_writing_the_draft() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(100_000))
+            .unwrap();
+        host.append(&id).unwrap();
+        let before = host.draft().clone();
+        let revision = host.revision();
+
+        host.play().unwrap();
+        assert!(host.is_playing());
+        assert_eq!(host.tick(40_000).0, 40_000);
+        host.pause();
+        assert_eq!(host.tick(40_000).0, 40_000, "a paused playhead holds");
+        host.seek(cutlass_session::Micros(90_000));
+        host.play().unwrap();
+        assert_eq!(host.tick(40_000).0, 100_000);
+        assert!(!host.is_playing(), "play stops at the end of the cut");
+        host.play().unwrap();
+        assert_eq!(host.playhead().0, 0, "play from the end starts over");
+        host.seek(cutlass_session::Micros(5_000_000));
+        assert_eq!(host.playhead().0, 100_000, "a seek stays inside the cut");
+
+        assert_eq!(host.draft(), &before);
+        assert_eq!(host.revision(), revision);
     }
 
     #[test]

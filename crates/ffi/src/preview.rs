@@ -42,6 +42,12 @@ impl Preview {
         }
     }
 
+    /// The readers playback mixes sound with.
+    #[must_use]
+    pub fn readers(&self) -> &ReaderFactory {
+        &self.readers
+    }
+
     /// The picture at `time`, waiting for every clip's picture. A time
     /// outside the cut draws the canvas alone.
     pub fn frame(

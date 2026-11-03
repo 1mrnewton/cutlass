@@ -4251,6 +4251,8 @@ impl Shell {
                 destination: None,
                 root: root.as_deref(),
                 fonts: &self.face,
+                // The preview's device, so an effect clip is in the file.
+                renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
             },
             |_, _, _, _| Ok(cutlass_eval::ClipPcm::Missing),
         )
@@ -9032,6 +9034,74 @@ mod tests {
         let image = &picture[0].image;
         assert_eq!(image.color, cutlass_decode::ColorType::Rgba);
         (image.width, image.height, image.samples.clone())
+    }
+
+    /// A grey frame with a vignette clip over it, exported as a PNG at the
+    /// first frame: with eframe's GPU the corners are darker than the middle.
+    #[test]
+    fn an_export_draws_an_effect_clip_through_the_preview_gpu() {
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let state = match pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) {
+            Ok(state) => state,
+            Err(error) if std::env::var_os(cutlass_render::REQUIRE_GPU).is_some() => {
+                panic!("a GPU is required: {error}")
+            }
+            Err(_) => {
+                eprintln!("skipped: no GPU");
+                return;
+            }
+        };
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 16;
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "grey".into(),
+            is_color_clip: true,
+            solid_color: "0xFF808080".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("grey", "grey", TimeRange::new(0, 1_000_000)));
+        draft
+            .materials
+            .video_effects
+            .push(cutlass_model::MaterialVideoEffect {
+                id: "fx".into(),
+                effect_id: "recipe/vignette".to_owned(),
+                ..cutlass_model::MaterialVideoEffect::default()
+            });
+        let mut row = Track::main("effects");
+        row.kind = TrackType::Effect;
+        let mut effect = Segment::new("fx", "fx", TimeRange::new(0, 1_000_000));
+        effect.render_index = 11_000;
+        row.segments.push(effect);
+        draft.tracks.push(row);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        let destination = temp.path.join("out.png");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                long_side: 480,
+                codec: CodecId::Png,
+                replace: false,
+            })
+            .unwrap();
+        let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
+        let at = |x: u32, y: u32| samples[usize::try_from((y * width + x) * 4).unwrap()];
+        let (middle, corner) = (at(width / 2, height / 2), at(0, 0));
+        assert!(corner + 40 < middle, "corner {corner}, middle {middle}");
     }
 
     fn export_still(dir: &Path, media: &Path) {

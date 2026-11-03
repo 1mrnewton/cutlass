@@ -36,6 +36,11 @@ impl Preview {
         }
     }
 
+    /// The compositor on eframe's device, which export draws through too.
+    pub(crate) fn renderer(&self) -> &Renderer {
+        &self.renderer
+    }
+
     /// The texture and size when `key` is what the canvas already shows.
     pub(crate) fn shown(&self, key: &Drawn) -> Option<(egui::TextureId, [u32; 2])> {
         if self.drawn.as_ref() != Some(key) {

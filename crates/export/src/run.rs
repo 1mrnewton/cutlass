@@ -1,7 +1,9 @@
 //! Walk a range, encode each frame, and mux the packets.
 //!
-//! A frame is included when its start is inside the half-open range. The
-//! picture is `eval::frame`, then the export clock. Audio is the same mix
+//! A frame is included when its start is inside the half-open range. With
+//! a renderer the picture is eval's frame layers drawn on the GPU, so
+//! recipe effects are in the file; without one it is `eval::frame` on the
+//! CPU, which has no recipe effects. Then the export clock. Audio is the same mix
 //! playback uses, on the export clock, so a missing clip is an error.
 
 use std::path::{Path, PathBuf};
@@ -15,10 +17,12 @@ use cutlass_encode::{
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
 };
 use cutlass_eval::{
-    AudioError, ClipPcm, ClockKind, Device, EvalError, Fonts, MixWindow, OpenClips, ReaderFactory,
-    Snapshot, audio_slice, frame_in, wait_export_frame,
+    AudioError, ClipPcm, ClockKind, Device, EvalError, Fonts, Frame, MixWindow, OpenClips,
+    ReaderFactory, Snapshot, audio_slice, frame_in, layers_in, wait_export_frame,
 };
+use cutlass_gpu::Extent;
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
+use cutlass_render::{RenderError, Renderer, frame_layers};
 
 use crate::config::{AudioExport, ExportError, ExportRequest, output_size, validate};
 use crate::sidecars::{file_name, sidecar_text, write_sidecar};
@@ -58,6 +62,9 @@ pub struct ExportRun<'a, D, M> {
     pub root: Option<&'a Path>,
     /// Faces for text segments. A face this does not supply is not drawn.
     pub fonts: &'a dyn Fonts,
+    /// Draws each frame on the GPU, as the preview does, so recipe effects
+    /// are in the file. `None` composes on the CPU, without them.
+    pub renderer: Option<&'a Renderer>,
 }
 
 struct TrackTicks {
@@ -418,6 +425,7 @@ where
         clips,
         root: run.root,
         fonts: run.fonts,
+        renderer: run.renderer,
     })?;
     let bytes = scale_rgba(
         evaluated.width,
@@ -486,6 +494,7 @@ struct FrameInputs<'a, D> {
     clips: &'a mut OpenClips,
     root: Option<&'a Path>,
     fonts: &'a dyn Fonts,
+    renderer: Option<&'a Renderer>,
 }
 
 fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<ExportedFrame, ExportError> {
@@ -498,9 +507,17 @@ fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<ExportedFrame
         clips,
         root,
         fonts,
+        renderer,
     } = input;
     let snapshot = Snapshot::with_fonts(draft, fonts);
-    let picture = frame_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?;
+    let picture = match renderer {
+        Some(renderer) => {
+            let composed =
+                layers_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?;
+            drawn(renderer, composed)?
+        }
+        None => frame_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?,
+    };
     let picture = wait_export_frame::<D::Error>(time, ready_at, picture).map_err(map_eval)?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| ExportError::Canvas)?;
@@ -513,6 +530,26 @@ fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<ExportedFrame
         height,
         rgba: picture.rgba,
     })
+}
+
+/// `composed` drawn on the GPU and read back.
+fn drawn(renderer: &Renderer, composed: cutlass_eval::Composed) -> Result<Frame, ExportError> {
+    let layers = frame_layers(composed).map_err(drawing)?;
+    let canvas = renderer
+        .canvas(layers.width, layers.height)
+        .map_err(drawing)?;
+    renderer.draw_frame(&canvas, &layers).map_err(drawing)?;
+    Ok(Frame {
+        extent: Extent {
+            width: layers.width,
+            height: layers.height,
+        },
+        rgba: renderer.read(&canvas).map_err(drawing)?,
+    })
+}
+
+fn drawing(error: RenderError) -> ExportError {
+    ExportError::Picture(error.to_string())
 }
 
 fn map_eval<E: std::fmt::Display>(error: EvalError<E>) -> ExportError {
@@ -1057,6 +1094,96 @@ mod tests {
         assert_eq!(draft, before);
     }
 
+    fn gpu() -> Option<cutlass_render::Renderer> {
+        let renderer = cutlass_render::Renderer::for_test().expect("a GPU is required");
+        if renderer.is_none() {
+            eprintln!("skipped: no GPU");
+        }
+        renderer
+    }
+
+    fn frames_of(draft: &Draft, renderer: Option<&cutlass_render::Renderer>) -> Vec<Vec<u8>> {
+        let request = gif_request(TimeRange::new(0, 100_000));
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        export(
+            ExportRun {
+                draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer,
+            },
+            |_, _, _, _| Ok(ClipPcm::Missing),
+        )
+        .expect("export")
+        .frames
+        .into_iter()
+        .map(|frame| frame.rgba)
+        .collect()
+    }
+
+    /// `draft` with a white flash over everything from the start.
+    fn flashed(mut draft: Draft) -> Draft {
+        draft
+            .materials
+            .video_effects
+            .push(cutlass_model::MaterialVideoEffect {
+                id: "fx".into(),
+                effect_id: "recipe/white-flash".to_owned(),
+                ..cutlass_model::MaterialVideoEffect::default()
+            });
+        let mut row = Track::main("effects");
+        row.kind = TrackType::Effect;
+        let mut segment = Segment::new("fx", "fx", TimeRange::new(0, 1_000_000));
+        segment.render_index = 11_000;
+        row.segments.push(segment);
+        draft.tracks.push(row);
+        draft
+    }
+
+    #[test]
+    fn a_gpu_export_matches_the_cpu_export_without_effects() {
+        let Some(renderer) = gpu() else { return };
+        let draft = color_draft(64, 36, 1_000_000);
+        let gpu = frames_of(&draft, Some(&renderer));
+        let cpu = frames_of(&draft, None);
+        assert_eq!(gpu.len(), 3);
+        assert_eq!(gpu, cpu);
+    }
+
+    #[test]
+    fn a_recipe_effect_is_in_a_gpu_export_and_not_in_a_cpu_one() {
+        let Some(renderer) = gpu() else { return };
+        let draft = flashed(color_draft(64, 36, 1_000_000));
+        let before = draft.clone();
+        let gpu = frames_of(&draft, Some(&renderer));
+        let cpu = frames_of(&draft, None);
+        assert_eq!(draft, before);
+        // The flash starts clear and climbs to 0.9 at 0.08 s, so frame 2 at
+        // 30 fps (0.067 s) is three quarters of the way to white.
+        assert_eq!(cpu[2], red(64, 36));
+        assert!(
+            gpu[2]
+                .chunks(4)
+                .all(|pixel| pixel[0] == 255 && (186..=196).contains(&pixel[1])),
+            "{:?}",
+            &gpu[2][..4]
+        );
+        assert_eq!(gpu[0], red(64, 36));
+    }
+
     #[test]
     fn export_encodes_each_eval_frame_and_muxes_it_in_the_file_timescale() {
         let draft = color_draft(240, 135, 33_334);
@@ -1081,6 +1208,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1136,6 +1264,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1165,6 +1294,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1190,6 +1320,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1228,6 +1359,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1296,6 +1428,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1321,6 +1454,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1384,6 +1518,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |segment, _when, frames, rate| {
                 assert_eq!(frames, 4);
@@ -1485,6 +1620,7 @@ mod tests {
                 destination: None,
                 root: Some(root),
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             crate::file_audio(&readers, draft, Some(root)),
         )
@@ -1558,6 +1694,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |segment, when, _, _| {
                 asked.push((segment.as_str().to_owned(), when));
@@ -1624,6 +1761,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1681,6 +1819,7 @@ mod tests {
                 destination: Some(&dir),
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1710,6 +1849,7 @@ mod tests {
                 destination: Some(&dir),
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1742,6 +1882,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1790,6 +1931,7 @@ mod tests {
                 destination: None,
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
+                renderer: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1836,6 +1978,7 @@ mod tests {
             clips: &mut clips,
             root: None,
             fonts: &cutlass_eval::NoFonts,
+            renderer: None,
         })
         .expect("bare");
         let mut clips = OpenClips::new();
@@ -1848,6 +1991,7 @@ mod tests {
             clips: &mut clips,
             root: None,
             fonts: &SampleFace,
+            renderer: None,
         })
         .expect("drawn");
         assert!(bare.rgba.iter().all(|byte| *byte == 0));

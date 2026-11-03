@@ -20,10 +20,12 @@
 #![forbid(unsafe_code)]
 
 mod blur;
+mod effect;
 mod frame;
 mod layer;
 mod target;
 
+pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
 pub use frame::frame_layers;
 pub use layer::{Layer, Plane, Planes, Rgba};
@@ -74,6 +76,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     layers: layer::Pipelines,
     blurs: blur::Blurs,
+    effects: effect::Effects,
 }
 
 impl Renderer {
@@ -82,11 +85,13 @@ impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let layers = layer::Pipelines::new(&device);
         let blurs = blur::Blurs::new(&device);
+        let effects = effect::Effects::new(&device);
         Self {
             device,
             queue,
             layers,
             blurs,
+            effects,
         }
     }
 
@@ -204,8 +209,45 @@ impl Renderer {
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
+                Layer::Effect(steps) => {
+                    if steps.is_empty() {
+                        continue;
+                    }
+                    // What is drawn so far becomes one picture the steps
+                    // run over, and that result is the bottom layer again.
+                    let first = blur::scratch(device, size);
+                    let second = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let result = self
+                        .effects
+                        .run(device, queue, encoder, &first, &second, size, steps)
+                        .clone();
+                    let uploaded = layer::Uploaded {
+                        views: [result.clone(), result.clone(), result],
+                        size,
+                        yuv: false,
+                    };
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &uploaded,
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
             }
         }
+        Self::paint(&self.layers, encoder, target, &bound);
+        Ok(())
+    }
+
+    /// Clear `target` and draw `bound` into it in one pass.
+    fn paint(
+        layers: &layer::Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bound: &[layer::Bound],
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render layers"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -222,10 +264,9 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        for layer in &bound {
-            self.layers.draw(&mut pass, layer);
+        for layer in bound {
+            layers.draw(&mut pass, layer);
         }
-        Ok(())
     }
 
     /// Draw `uploaded` through `cover` into a canvas-sized texture and blur

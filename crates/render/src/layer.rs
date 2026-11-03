@@ -14,6 +14,7 @@
 //! path applies, and has an alpha of one. Opacity scales the premultiplied
 //! color.
 
+use cutlass_effects::Step;
 use cutlass_gpu::{Affine, Placement};
 
 use crate::{CANVAS_FORMAT, RenderError};
@@ -90,6 +91,8 @@ pub enum Layer<'a> {
         size: (u32, u32),
         placement: Placement,
     },
+    /// An effect over everything drawn before it in the same list.
+    Effect(&'a [Step]),
 }
 
 /// A layer's textures once uploaded: three views (the same one three times

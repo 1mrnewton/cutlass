@@ -1321,11 +1321,8 @@ impl Shell {
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let stale = cache.take_stale();
         drop(cache);
-        let layers = match composed {
-            cutlass_eval::Composed::Layers(layers) => layers,
-            cutlass_eval::Composed::Frame(frame) => cutlass_eval::FrameLayers::pixels(frame)
-                .ok_or_else(|| ShellError::Eval("the frame has no pixels".to_owned()))?,
-        };
+        let layers = cutlass_render::frame_layers(composed)
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
         let shown = gpu
             .show(&layers, key)
             .map_err(|error| ShellError::Eval(error.to_string()))?;

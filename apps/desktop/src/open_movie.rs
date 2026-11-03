@@ -747,12 +747,9 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
         return;
     }
-    let renderer = match cutlass_render::Renderer::headless() {
-        Ok(renderer) => renderer,
-        Err(error) => {
-            eprintln!("skipped: {error}");
-            return;
-        }
+    let Some(renderer) = cutlass_render::Renderer::for_test().expect("a GPU is required") else {
+        eprintln!("skipped: no GPU");
+        return;
     };
     let fonts = crate::face::installed();
     let cases: [(&str, (u32, u32), Edit); 10] = [
@@ -897,7 +894,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             );
         }
         let canvas = renderer.canvas(width, height).unwrap();
-        crate::gpu::draw(&renderer, &canvas, &layers).unwrap();
+        renderer.draw_frame(&canvas, &layers).unwrap();
         let gpu = renderer.read(&canvas).unwrap();
         assert_eq!(gpu.len(), cpu.len(), "{name}");
         let pixels = cpu.len() / 4;

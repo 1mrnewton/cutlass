@@ -5,58 +5,10 @@
 
 use std::sync::Arc;
 
-use cutlass_eval::{FrameLayers, GpuSource};
-use cutlass_render::{Canvas, Layer, Planes, RenderError, Renderer, Rgba};
+use cutlass_eval::FrameLayers;
+use cutlass_render::{Canvas, RenderError, Renderer};
 use eframe::{egui_wgpu, wgpu};
 use egui::mutex::RwLock;
-
-/// Draw `frame` into `canvas`, which must be the frame's size.
-pub(crate) fn draw(
-    renderer: &Renderer,
-    canvas: &Canvas,
-    frame: &FrameLayers,
-) -> Result<(), RenderError> {
-    renderer.draw(canvas, &layers_of(frame)?)
-}
-
-/// The render layers for `frame`, a compound's child frame included.
-fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
-    let mut layers = Vec::with_capacity(frame.layers.len());
-    for layer in &frame.layers {
-        layers.push(match &layer.source {
-            GpuSource::Yuv {
-                width,
-                height,
-                bytes,
-            } => {
-                let planes = Planes::packed(*width, *height, bytes)?;
-                match layer.backdrop {
-                    Some(backdrop) => Layer::YuvOverBlur {
-                        planes,
-                        placement: layer.placement,
-                        cover: backdrop.cover,
-                        radius: backdrop.radius,
-                    },
-                    None => Layer::Yuv(planes, layer.placement),
-                }
-            }
-            GpuSource::Rgba(picture) => Layer::Rgba(
-                Rgba {
-                    width: picture.width(),
-                    height: picture.height(),
-                    bytes: picture.rgba(),
-                },
-                layer.placement,
-            ),
-            GpuSource::Nested(child) => Layer::Nested {
-                layers: layers_of(child)?,
-                size: (child.width, child.height),
-                placement: layer.placement,
-            },
-        });
-    }
-    Ok(layers)
-}
 
 /// What the preview canvas last showed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,7 +98,7 @@ impl Preview {
                 height: size.1,
             });
         };
-        draw(&self.renderer, canvas, frame)?;
+        self.renderer.draw_frame(canvas, frame)?;
         self.drawn = Some(key);
         Ok((*id, [size.0, size.1]))
     }

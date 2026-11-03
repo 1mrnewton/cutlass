@@ -10,22 +10,30 @@
 //! `cutlass-eval` to within rounding: texels are fetched, not filtered, and
 //! each stage of the CPU path floors to a whole pixel before the next.
 //!
-//! The preview shares the device eframe already opened, so the canvas can be
+//! [`Renderer::draw_frame`] draws eval's frame layers, so the desktop and
+//! the phones draw a frame the same way.
+//!
+//! The desktop preview shares the device eframe already opened, so the canvas can be
 //! shown without a copy. Export and the tests open their own device with
 //! [`Renderer::headless`] and read the canvas back.
 
 #![forbid(unsafe_code)]
 
 mod blur;
+mod frame;
 mod layer;
 mod target;
 
 pub use cutlass_gpu::{Affine, Placement};
+pub use frame::frame_layers;
 pub use layer::{Layer, Plane, Planes, Rgba};
 pub use target::Canvas;
 pub use wgpu;
 
 use std::fmt;
+
+/// Set in CI so a test that needs a GPU fails instead of skipping.
+pub const REQUIRE_GPU: &str = "CUTLASS_REQUIRE_GPU";
 
 /// The canvas pixel format. Bytes are premultiplied RGBA.
 pub const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -90,12 +98,25 @@ impl Renderer {
             ..wgpu::RequestAdapterOptions::default()
         }))
         .map_err(|error| RenderError::NoDevice(error.to_string()))?;
+        // Ask for what this adapter has, not wgpu's desktop defaults: the iOS
+        // simulator, for one, falls short of them and its device would not open.
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("cutlass-render"),
+            required_limits: adapter.limits(),
             ..wgpu::DeviceDescriptor::default()
         }))
         .map_err(|error| RenderError::NoDevice(error.to_string()))?;
         Ok(Self::new(device, queue))
+    }
+
+    /// A headless renderer for a test. `Ok(None)` means this machine has no
+    /// GPU and the test may skip; with [`REQUIRE_GPU`] set that is an error.
+    pub fn for_test() -> Result<Option<Self>, RenderError> {
+        match Self::headless() {
+            Ok(renderer) => Ok(Some(renderer)),
+            Err(error) if std::env::var_os(REQUIRE_GPU).is_some() => Err(error),
+            Err(_) => Ok(None),
+        }
     }
 
     #[must_use]
@@ -259,15 +280,12 @@ impl Renderer {
 mod tests {
     use super::{Affine, Layer, Placement, Planes, Renderer, Rgba};
 
-    /// The GPU tests skip on a machine with no adapter.
     fn renderer() -> Option<Renderer> {
-        match Renderer::headless() {
-            Ok(renderer) => Some(renderer),
-            Err(error) => {
-                eprintln!("skipped: {error}");
-                None
-            }
+        let renderer = Renderer::for_test().expect("a GPU is required");
+        if renderer.is_none() {
+            eprintln!("skipped: no GPU");
         }
+        renderer
     }
 
     fn close(got: &[u8], expected: &[u8], tolerance: u8) {

@@ -1300,7 +1300,7 @@ mod tests {
         assert_eq!(draft, before);
         // The flash starts clear and climbs to 0.9 at 0.08 s, so frame 2 at
         // 30 fps (0.067 s) is three quarters of the way to white.
-        assert_eq!(cpu[2], red(240, 135));
+        assert_eq!(cpu[2], red(426, 240));
         assert!(
             gpu[2]
                 .chunks(4)
@@ -1308,12 +1308,12 @@ mod tests {
             "{:?}",
             &gpu[2][..4]
         );
-        assert_eq!(gpu[0], red(240, 135));
+        assert_eq!(gpu[0], red(426, 240));
     }
 
     #[test]
     fn export_encodes_each_eval_frame_and_muxes_it_in_the_file_timescale() {
-        let draft = color_draft(240, 135, 33_334);
+        let draft = color_draft(426, 240, 33_334);
         let before = draft.clone();
         let request = gif_request(TimeRange::new(0, 66_667));
         let mut mux = MuxDraft::new(
@@ -1347,12 +1347,12 @@ mod tests {
         assert_eq!(result.frames[1].time, Micros(33_334));
         assert_eq!(
             (result.frames[0].width, result.frames[0].height),
-            (240, 135)
+            (426, 240)
         );
         let packets = result.finished.packets();
         assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0].bytes(), red(240, 135));
-        assert_eq!(packets[1].bytes(), clear(240, 135));
+        assert_eq!(packets[0].bytes(), red(426, 240));
+        assert_eq!(packets[1].bytes(), clear(426, 240));
         assert_eq!(packets[0].timestamp().presentation(), Some(0));
         assert_eq!(packets[1].timestamp().presentation(), Some(1));
         assert_eq!(packets[0].timestamp().duration(), Some(1));
@@ -1365,9 +1365,9 @@ mod tests {
         let mut playback = SoftwareDevice::new();
         let first = played_rgba(&draft, Micros(0), &mut playback);
         let second = played_rgba(&draft, Micros(33_334), &mut playback);
-        same_software_pixels(&draft, 240, 135, &first, packets[0].bytes()).expect("lock");
-        same_software_pixels(&draft, 240, 135, &second, packets[1].bytes()).expect("lock");
-        assert_eq!(first, red(240, 135));
+        same_software_pixels(&draft, 426, 240, &first, packets[0].bytes()).expect("lock");
+        same_software_pixels(&draft, 426, 240, &second, packets[1].bytes()).expect("lock");
+        assert_eq!(first, red(426, 240));
     }
 
     #[test]
@@ -1401,7 +1401,7 @@ mod tests {
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("late");
-        assert_eq!(result.finished.packets()[0].bytes(), red(240, 135));
+        assert_eq!(result.finished.packets()[0].bytes(), red(426, 240));
         assert_eq!(draft, before);
 
         let mut declined = gif_request(TimeRange::new(0, 33_334));
@@ -2004,7 +2004,7 @@ mod tests {
 
     #[test]
     fn scaled_output_keeps_the_eval_pixels_and_encodes_the_fitted_size() {
-        let draft = color_draft(480, 240, 1_000_000);
+        let draft = color_draft(960, 480, 1_000_000);
         let request = gif_request(TimeRange::new(0, 33_334));
         let mut mux = MuxDraft::new(
             ContainerId::Isobmff,
@@ -2031,18 +2031,18 @@ mod tests {
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("scale");
-        assert_eq!(result.output_width, 240);
-        assert_eq!(result.output_height, 120);
+        assert_eq!(result.output_width, 480);
+        assert_eq!(result.output_height, 240);
         assert_eq!(
             (result.frames[0].width, result.frames[0].height),
-            (480, 240)
+            (960, 480)
         );
-        assert_eq!(result.finished.packets()[0].bytes(), red(240, 120));
+        assert_eq!(result.finished.packets()[0].bytes(), red(480, 240));
         let mut playback = SoftwareDevice::new();
         let played = played_rgba(&draft, Micros(0), &mut playback);
-        assert_eq!(played, red(480, 240));
+        assert_eq!(played, red(960, 480));
         assert_eq!(
-            scale_rgba(480, 240, &played, 240, 120).unwrap(),
+            scale_rgba(960, 480, &played, 480, 240).unwrap(),
             result.finished.packets()[0].bytes()
         );
     }

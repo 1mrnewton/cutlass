@@ -6319,6 +6319,53 @@ mod tests {
     }
 
     #[test]
+    fn a_waveform_follows_the_clip_volume() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.duration = Micros(5_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(5_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 5_000_000));
+        segment.source_range = Some(TimeRange::new(0, 5_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 5_000_000.0;
+        let id = SegmentId::new("song");
+        let _ = desktop.wave(&id, 400.0, 0.0..400.0);
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("peaks");
+        let full = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
+        desktop.select(Some(id.clone()));
+        desktop.set_volume(0.5).unwrap();
+        let half = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
+        for (full, half) in full.iter().zip(&half) {
+            assert!((full * 0.5 - half).abs() < 1e-6);
+        }
+        desktop.set_volume(0.0).unwrap();
+        let muted = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
+        assert!(muted.iter().all(|level| *level == 0.0));
+        assert!(full.iter().any(|level| *level > 0.05));
+    }
+
+    #[test]
     fn a_video_clip_without_sound_has_no_waveform() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
         let movie = root.join("7150172-hd_720_1280_50fps.mp4");

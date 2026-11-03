@@ -731,6 +731,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func isPlaying() throws  -> Bool
     
     /**
+     * A picture or title clip's keyframes, and whether one is under
+     * `at_us`. Other clips have none.
+     */
+    func keyframes(clipId: String, atUs: Int64) throws  -> Keyframes?
+    
+    /**
      * The rows to draw, top first.
      */
     func lanes() throws  -> [Lane]
@@ -824,14 +830,16 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func split(clipId: String, atUs: Int64) throws  -> String
     
     /**
-     * The box of a picture clip on the canvas. Other clips have none.
+     * The box of a picture clip on the canvas at `at_us`, where its
+     * keyframes put it. Other clips have none.
      */
-    func stage(clipId: String) throws  -> Stage?
+    func stage(clipId: String, atUs: Int64) throws  -> Stage?
     
     /**
-     * Start moving a picture clip on the preview.
+     * Start moving a picture clip on the preview at `at_us`. A clip with
+     * keyframes keys its new pose there.
      */
-    func stageBegin(clipId: String) throws 
+    func stageBegin(clipId: String, atUs: Int64) throws 
     
     /**
      * End the preview gesture.
@@ -872,6 +880,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * return it. Call once per screen frame while playing.
      */
     func tick(elapsedUs: Int64) throws  -> Int64
+    
+    /**
+     * The keyframe button: remove the keyframe under `at_us`, else key the
+     * clip there. One undo step.
+     */
+    func toggleKeyframe(clipId: String, atUs: Int64) throws 
     
     /**
      * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
@@ -1144,6 +1158,21 @@ open func isPlaying()throws  -> Bool  {
 }
     
     /**
+     * A picture or title clip's keyframes, and whether one is under
+     * `at_us`. Other clips have none.
+     */
+open func keyframes(clipId: String, atUs: Int64)throws  -> Keyframes?  {
+    return try  FfiConverterOptionTypeKeyframes.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_keyframes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * The rows to draw, top first.
      */
 open func lanes()throws  -> [Lane]  {
@@ -1381,26 +1410,30 @@ open func split(clipId: String, atUs: Int64)throws  -> String  {
 }
     
     /**
-     * The box of a picture clip on the canvas. Other clips have none.
+     * The box of a picture clip on the canvas at `at_us`, where its
+     * keyframes put it. Other clips have none.
      */
-open func stage(clipId: String)throws  -> Stage?  {
+open func stage(clipId: String, atUs: Int64)throws  -> Stage?  {
     return try  FfiConverterOptionTypeStage.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_stage(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(clipId),uniffiCallStatus
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
     )
 })
 }
     
     /**
-     * Start moving a picture clip on the preview.
+     * Start moving a picture clip on the preview at `at_us`. A clip with
+     * keyframes keys its new pose there.
      */
-open func stageBegin(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+open func stageBegin(clipId: String, atUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_stage_begin(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(clipId),uniffiCallStatus
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
     )
 }
 }
@@ -1503,6 +1536,20 @@ open func tick(elapsedUs: Int64)throws  -> Int64  {
         FfiConverterInt64.lower(elapsedUs),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * The keyframe button: remove the keyframe under `at_us`, else key the
+     * clip there. One undo step.
+     */
+open func toggleKeyframe(clipId: String, atUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_keyframe(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -2351,6 +2398,70 @@ public func FfiConverterTypeFrame_lift(_ buf: RustBuffer) throws -> Frame {
 #endif
 public func FfiConverterTypeFrame_lower(_ value: Frame) -> RustBuffer {
     return FfiConverterTypeFrame.lower(value)
+}
+
+
+/**
+ * A clip's keyframes as timeline times, earliest first, and the one under
+ * the playhead.
+ */
+public struct Keyframes: Equatable, Hashable {
+    public var timesUs: [Int64]
+    /**
+     * A keyframe is within a frame of the playhead.
+     */
+    public var here: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timesUs: [Int64], 
+        /**
+         * A keyframe is within a frame of the playhead.
+         */here: Bool) {
+        self.timesUs = timesUs
+        self.here = here
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Keyframes: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeKeyframes: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Keyframes {
+        return
+            try Keyframes(
+                timesUs: FfiConverterSequenceInt64.read(from: &buf), 
+                here: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Keyframes, into buf: inout [UInt8]) {
+        FfiConverterSequenceInt64.write(value.timesUs, into: &buf)
+        FfiConverterBool.write(value.here, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeKeyframes_lift(_ buf: RustBuffer) throws -> Keyframes {
+    return try FfiConverterTypeKeyframes.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeKeyframes_lower(_ value: Keyframes) -> RustBuffer {
+    return FfiConverterTypeKeyframes.lower(value)
 }
 
 
@@ -3989,6 +4100,30 @@ fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeKeyframes: FfiConverterRustBuffer {
+    typealias SwiftType = Keyframes?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeKeyframes.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeKeyframes.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeStage: FfiConverterRustBuffer {
     typealias SwiftType = Stage?
 
@@ -4078,6 +4213,31 @@ fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceInt64: FfiConverterRustBuffer {
+    typealias SwiftType = [Int64]
+
+    public static func write(_ value: [Int64], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterInt64.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Int64] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Int64]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterInt64.read(from: &buf))
         }
         return seq
     }
@@ -4728,6 +4888,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_is_playing() != 37181) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_keyframes() != 41971) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes() != 20121) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4785,10 +4948,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage() != 61551) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage() != 63018) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_begin() != 16443) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_begin() != 38884) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_end() != 7216) {
@@ -4810,6 +4973,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe() != 8108) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() != 7512) {

@@ -358,6 +358,24 @@ pub struct Stage {
     pub text: bool,
 }
 
+/// A clip's keyframes as timeline times, earliest first, and the one under
+/// the playhead.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Keyframes {
+    pub times_us: Vec<i64>,
+    /// A keyframe is within a frame of the playhead.
+    pub here: bool,
+}
+
+impl From<cutlass_ffi::PhoneKeys> for Keyframes {
+    fn from(keys: cutlass_ffi::PhoneKeys) -> Self {
+        Self {
+            times_us: keys.times.iter().map(|time| time.0).collect(),
+            here: keys.here.is_some(),
+        }
+    }
+}
+
 impl From<cutlass_ffi::PhoneStage> for Stage {
     fn from(stage: cutlass_ffi::PhoneStage) -> Self {
         Self {
@@ -1033,10 +1051,11 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
-    /// The box of a picture clip on the canvas. Other clips have none.
-    pub fn stage(&self, clip_id: String) -> Result<Option<Stage>, EditorError> {
+    /// The box of a picture clip on the canvas at `at_us`, where its
+    /// keyframes put it. Other clips have none.
+    pub fn stage(&self, clip_id: String, at_us: i64) -> Result<Option<Stage>, EditorError> {
         Ok(self
-            .run(move |host| host.stage(&SegmentId::new(clip_id)))?
+            .run(move |host| host.stage(&SegmentId::new(clip_id), Micros(at_us)))?
             .map(Stage::from))
     }
 
@@ -1047,9 +1066,25 @@ impl Editor {
             .map(|id| id.as_str().to_owned()))
     }
 
-    /// Start moving a picture clip on the preview.
-    pub fn stage_begin(&self, clip_id: String) -> Result<(), EditorError> {
-        self.run(move |host| host.stage_begin(&SegmentId::new(clip_id)))?
+    /// Start moving a picture clip on the preview at `at_us`. A clip with
+    /// keyframes keys its new pose there.
+    pub fn stage_begin(&self, clip_id: String, at_us: i64) -> Result<(), EditorError> {
+        self.run(move |host| host.stage_begin(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map_err(EditorError::from)
+    }
+
+    /// A picture or title clip's keyframes, and whether one is under
+    /// `at_us`. Other clips have none.
+    pub fn keyframes(&self, clip_id: String, at_us: i64) -> Result<Option<Keyframes>, EditorError> {
+        Ok(self
+            .run(move |host| host.keyframes(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map(Keyframes::from))
+    }
+
+    /// The keyframe button: remove the keyframe under `at_us`, else key the
+    /// clip there. One undo step.
+    pub fn toggle_keyframe(&self, clip_id: String, at_us: i64) -> Result<(), EditorError> {
+        self.run(move |host| host.toggle_keyframe(&SegmentId::new(clip_id), Micros(at_us)))?
             .map_err(EditorError::from)
     }
 

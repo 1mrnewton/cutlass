@@ -107,13 +107,26 @@ struct EditorScreen: View {
     }
 
     /// The clock on the left, play pinned to the middle so it never moves
-    /// with the clock, undo and redo on the right.
+    /// with the clock, undo and redo on the right. A selected picture or
+    /// title adds the keyframe button before undo.
     private var transport: some View {
         HStack {
             Text(clock(timeUs: model.playheadUs) + " / " + clock(timeUs: model.durationUs))
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.7))
             Spacer()
+            if let keys = model.keys {
+                Button { model.toggleKeyframe() } label: {
+                    HugeIcon("keyframe")
+                        .overlay(alignment: .topTrailing) {
+                            Text(keys.here ? "−" : "+")
+                                .font(.system(size: 11, weight: .bold))
+                                .offset(x: 5, y: -5)
+                        }
+                }
+                .accessibilityLabel(keys.here ? "Remove keyframe" : "Add keyframe")
+                .padding(.trailing, 16)
+            }
             Button { model.undo() } label: { HugeIcon("undo") }
                 .accessibilityLabel("Undo")
             Button { model.redo() } label: { HugeIcon("redo") }

@@ -15,6 +15,7 @@ mod effect;
 mod error;
 mod export;
 mod host;
+mod keys;
 mod media;
 mod player;
 mod preview;
@@ -45,6 +46,7 @@ pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
 pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders, video_bitrate};
 pub use host::Commands;
+pub use keys::PhoneKeys;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
@@ -365,11 +367,11 @@ impl PhoneHost {
         Ok(())
     }
 
-    /// The box of the picture clip `segment_id` on the canvas. A clip that
-    /// is not a picture has none.
+    /// The box of the picture clip `segment_id` on the canvas at `time`,
+    /// where its keyframes put it. A clip that is not a picture has none.
     #[must_use]
-    pub fn stage(&self, segment_id: &SegmentId) -> Option<PhoneStage> {
-        let stage = cutlass_editor::stage_box(self.draft(), segment_id, &self.sizes())?;
+    pub fn stage(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneStage> {
+        let stage = cutlass_editor::stage_box(self.draft(), segment_id, time, &self.sizes())?;
         let canvas = cutlass_editor::canvas_size(self.draft());
         Some(PhoneStage::new(
             self.draft(),
@@ -385,10 +387,11 @@ impl PhoneHost {
         cutlass_editor::stage_pick(self.draft(), time, (x, y), &self.sizes())
     }
 
-    /// Start moving the picture clip `segment_id` on the preview. A gesture
-    /// still open is ended first.
-    pub fn stage_begin(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let gesture = cutlass_editor::stage_gesture(self.draft(), segment_id, &self.sizes())
+    /// Start moving the picture clip `segment_id` on the preview at `time`.
+    /// A clip with keyframes keys its new pose there. A gesture still open
+    /// is ended first.
+    pub fn stage_begin(&mut self, segment_id: &SegmentId, time: Micros) -> Result<(), FfiError> {
+        let gesture = cutlass_editor::stage_gesture(self.draft(), segment_id, time, &self.sizes())
             .ok_or_else(|| FfiError::Refused {
                 reason: "only an unlocked picture or title moves on the preview".to_owned(),
             })?;
@@ -437,6 +440,35 @@ impl PhoneHost {
     /// End the preview gesture. A gesture that changed nothing leaves no step.
     pub fn stage_end(&mut self) {
         self.live = None;
+    }
+
+    /// The keyframes of the picture or title clip `segment_id`, and the one
+    /// within a frame of `time`. Other clips have none to show.
+    #[must_use]
+    pub fn keyframes(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneKeys> {
+        cutlass_editor::stage_box(self.draft(), segment_id, time, &self.sizes())?;
+        PhoneKeys::of(self.draft(), segment_id, time)
+    }
+
+    /// Remove the keyframe within a frame of `time` on the clip, or key the
+    /// clip's pose and opacity at `time`. One undo step.
+    pub fn toggle_keyframe(
+        &mut self,
+        segment_id: &SegmentId,
+        time: Micros,
+    ) -> Result<(), FfiError> {
+        let keys = self
+            .keyframes(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only a picture or title takes keyframes".to_owned(),
+            })?;
+        let request = keys
+            .toggle(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "move the playhead onto the clip to key it".to_owned(),
+            })?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
     }
 
     fn sizes(&self) -> stage::Sizes<'_> {
@@ -1135,7 +1167,7 @@ mod tests {
             .import_probed(&fixture("pattern.png"), still(1_000_000))
             .unwrap();
         let clip = host.append(&id).unwrap();
-        let stage = host.stage(&clip).unwrap();
+        let stage = host.stage(&clip, Micros(0)).unwrap();
         let middle = (stage.canvas_width / 2.0, stage.canvas_height / 2.0);
         assert_eq!(
             host.stage_pick(Micros(0), middle.0, middle.1),
@@ -1145,22 +1177,62 @@ mod tests {
         assert!(host.stage_move(1.0, 1.0, 1.0, 0.0).is_err());
 
         let steps = host.revision();
-        host.stage_begin(&clip).unwrap();
+        host.stage_begin(&clip, Micros(0)).unwrap();
         host.stage_move(0.0, 0.0, 1.0, 0.0).unwrap();
         assert_eq!(host.revision(), steps);
         host.stage_move(100.0, 0.0, 1.0, 0.0).unwrap();
         let moved = host.stage_move(200.0, 0.0, 0.5, 30.0).unwrap();
         host.stage_end();
         assert!(host.revision() > steps);
-        assert_eq!(host.stage(&clip).unwrap().center_x, moved.center_x);
+        assert_eq!(
+            host.stage(&clip, Micros(0)).unwrap().center_x,
+            moved.center_x
+        );
         assert!((moved.center_x - middle.0 - 200.0).abs() < 1e-6);
         assert!((moved.turn - 30.0).abs() < 1e-6);
         let segment = &host.draft().tracks[0].segments[0];
         assert!((segment.uniform_scale.value - 0.5).abs() < 1e-9);
 
         host.undo().unwrap();
-        let back = host.stage(&clip).unwrap();
+        let back = host.stage(&clip, Micros(0)).unwrap();
         assert_eq!((back.center_x, back.turn), (middle.0, 0.0));
+    }
+
+    #[test]
+    fn the_keyframe_button_keys_a_clip_and_a_drag_keys_it_again_later() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let none = host.keyframes(&clip, Micros(0)).unwrap();
+        assert!(none.times.is_empty() && none.here.is_none());
+
+        host.toggle_keyframe(&clip, Micros(100_000)).unwrap();
+        let keyed = host.keyframes(&clip, Micros(110_000)).unwrap();
+        assert_eq!(keyed.times, [Micros(100_000)]);
+        assert_eq!(keyed.here, Some(Micros(100_000)));
+        assert_eq!(host.keyframes(&clip, Micros(500_000)).unwrap().here, None);
+
+        let middle = host.stage(&clip, Micros(500_000)).unwrap().center_x;
+        host.stage_begin(&clip, Micros(500_000)).unwrap();
+        host.stage_move(200.0, 0.0, 1.0, 0.0).unwrap();
+        host.stage_end();
+        let keyed = host.keyframes(&clip, Micros(500_000)).unwrap();
+        assert_eq!(keyed.times, [Micros(100_000), Micros(500_000)]);
+        let halfway = host.stage(&clip, Micros(300_000)).unwrap().center_x;
+        assert!((halfway - middle - 100.0).abs() < 1e-6, "{halfway}");
+
+        host.toggle_keyframe(&clip, Micros(495_000)).unwrap();
+        assert_eq!(
+            host.keyframes(&clip, Micros(0)).unwrap().times,
+            [Micros(100_000)]
+        );
+        assert!(host.toggle_keyframe(&clip, Micros(2_000_000)).is_err());
+        host.undo().unwrap();
+        assert_eq!(host.keyframes(&clip, Micros(0)).unwrap().times.len(), 2);
     }
 
     #[test]
@@ -1493,7 +1565,7 @@ mod tests {
         host.type_text(Some(&title), "", "", Micros(0)).unwrap();
         assert_eq!(host.text(&title).unwrap().content, "AAA");
 
-        let stage = host.stage(&title).unwrap();
+        let stage = host.stage(&title, Micros(0)).unwrap();
         assert!(stage.text);
         // The test canvas is 16 pixels, so the title fits it.
         assert!((stage.width - stage.canvas_width).abs() < 1e-6 && stage.height > 0.0);
@@ -1503,12 +1575,12 @@ mod tests {
             Some(title.clone())
         );
         let picture = host.draft().main_track().unwrap().segments[0].id.clone();
-        assert!(!host.stage(&picture).unwrap().text);
+        assert!(!host.stage(&picture, Micros(0)).unwrap().text);
 
-        host.stage_begin(&title).unwrap();
+        host.stage_begin(&title, Micros(0)).unwrap();
         host.stage_move(100.0, 0.0, 2.0, 0.0).unwrap();
         host.stage_end();
-        let moved = host.stage(&title).unwrap();
+        let moved = host.stage(&title, Micros(0)).unwrap();
         assert!((moved.width - stage.width * 2.0).abs() < 1e-6, "{moved:?}");
         assert_eq!(moved.turn, 0.0);
         host.undo().unwrap();

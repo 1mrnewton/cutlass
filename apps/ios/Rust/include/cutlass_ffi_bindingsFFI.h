@@ -334,6 +334,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_import(uint64_t ptr, Rus
 int8_t uniffi_cutlass_ffi_bindings_fn_method_editor_is_playing(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_KEYFRAMES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_KEYFRAMES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_keyframes(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_LANES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_LANES
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_lanes(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -431,12 +436,12 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, Rust
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE
-RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_BEGIN
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_BEGIN
-void uniffi_cutlass_ffi_bindings_fn_method_editor_stage_begin(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
+void uniffi_cutlass_ffi_bindings_fn_method_editor_stage_begin(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_END
@@ -472,6 +477,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_thumb(uint64_t ptr, Rust
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TICK
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_tick(uint64_t ptr, int64_t elapsed_us, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TOGGLE_KEYFRAME
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TOGGLE_KEYFRAME
+void uniffi_cutlass_ffi_bindings_fn_method_editor_toggle_keyframe(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TRIM
@@ -1044,6 +1054,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_is_playing(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_KEYFRAMES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_KEYFRAMES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_keyframes(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_LANES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_LANES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes(void
@@ -1209,6 +1225,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TICK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TICK
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_tick(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TOGGLE_KEYFRAME
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TOGGLE_KEYFRAME
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_toggle_keyframe(void
     
 );
 #endif

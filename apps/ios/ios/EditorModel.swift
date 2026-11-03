@@ -15,7 +15,9 @@ import os
 final class EditorModel {
     private(set) var lanes: [Lane] = []
     private(set) var durationUs: Int64 = 0
-    private(set) var playheadUs: Int64 = 0
+    private(set) var playheadUs: Int64 = 0 {
+        didSet { if playheadUs != oldValue, selectedClip != nil { refreshStage() } }
+    }
     private(set) var picture: CGImage?
     private(set) var canvasAspect: CGFloat = 16 / 9
     /// The canvas ratios, Original first, as Rust sizes them for this project.
@@ -35,6 +37,9 @@ final class EditorModel {
     /// The box for the draft as it is now. After an edit it waits for the
     /// picture drawn from that draft, so the box never runs ahead of it.
     private var placed: (clip: String?, stage: Stage?) = (nil, nil)
+    /// The selected clip's keyframes, and whether one is under the
+    /// playhead. Clips that take none have nil.
+    private(set) var keys: Keyframes?
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -393,7 +398,7 @@ final class EditorModel {
         guard let editor else { return false }
         pause()
         do {
-            try editor.stageBegin(clipId: clip)
+            try editor.stageBegin(clipId: clip, atUs: playheadUs)
         } catch {
             return false
         }
@@ -425,9 +430,20 @@ final class EditorModel {
     /// Read the selected box again. `now` shows it at once, for a new
     /// selection; otherwise it waits for the next picture.
     private func refreshStage(now: Bool = false) {
-        let box = selectedClip.flatMap { clip in try? editor?.stage(clipId: clip) }
+        let at = playheadUs
+        let box = selectedClip.flatMap { clip in try? editor?.stage(clipId: clip, atUs: at) }
         placed = (selectedClip, box)
         if now { stage = box }
+        keys = selectedClip.flatMap { clip in try? editor?.keyframes(clipId: clip, atUs: at) }
+    }
+
+    /// The keyframe button: remove the keyframe under the playhead, else key
+    /// the selected clip there.
+    func toggleKeyframe() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.toggleKeyframe(clipId: clip, atUs: at) }
     }
 
     /// Put a main clip at `place` in the main row's order.

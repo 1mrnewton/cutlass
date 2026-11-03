@@ -4,6 +4,8 @@
 //! returns an RGBA picture. A sample outside the segment is a miss. The draft
 //! is not written. Sampling does not paint the atlas again. A color strike
 //! keeps its color. A gray or mono strike is coverage under the text color.
+//! The title's outline, shadow, and background are drawn with the letters,
+//! so the picture grows to hold them. The picture is premultiplied.
 
 use cutlass_font::Font;
 use cutlass_model::{MaterialText, Micros, Segment, TimeRange};
@@ -13,6 +15,7 @@ use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
 use crate::layout::layout;
 use crate::mesh::{GlyphRecord, TextMesh, build};
+use crate::style::{Area, Layers, Style, compose, premultiply};
 
 /// A text segment that can be sampled at a timeline microsecond.
 pub struct TextSource {
@@ -21,6 +24,9 @@ pub struct TextSource {
     fill: [u8; 4],
     atlas: Atlas,
     mesh: TextMesh,
+    style: Style,
+    /// The box behind the letters, in picture pixels.
+    background: Option<Area>,
     origin_x: f32,
     origin_y: f32,
     width: u32,
@@ -67,13 +73,17 @@ impl TextSource {
             let _image = atlas.glyph(font, placed.glyph_id)?;
         }
         let mesh = build(material.id.clone(), &laid, &atlas)?;
-        let (origin_x, origin_y, width, height) = picture_bounds(&mesh)?;
+        let style = Style::of(material, laid.font_size)?;
+        let (origin_x, origin_y, width, height, background) =
+            picture_bounds(&mesh, &style, laid.font_size)?;
         Ok(Self {
             range: segment.target.clone(),
             material_id: material.id.clone(),
             fill,
             atlas,
             mesh,
+            style,
+            background,
             origin_x,
             origin_y,
             width,
@@ -110,8 +120,61 @@ impl TextSource {
     fn raster(&self) -> Result<Picture, TextError> {
         let len = rgba_len(self.width, self.height).ok_or(TextError::Limit)?;
         let mut rgba = vec![0_u8; len];
+        let pixels = len / 4;
+        let mut fill = vec![0.0_f32; pixels];
+        let mut grown = self.style.outline.as_ref().map(|_| vec![0.0_f32; pixels]);
+        let mut shape = vec![0.0_f32; pixels];
+        let grow = self
+            .style
+            .outline
+            .as_ref()
+            .map_or(0.0, |outline| outline.width);
         for record in &self.mesh.glyphs {
-            self.splat(&mut rgba, record);
+            let Some(image) = self.atlas.image(record.glyph_id) else {
+                continue;
+            };
+            let draw = Mask {
+                width: self.width,
+                height: self.height,
+                record,
+                image,
+                origin_x: self.origin_x,
+                origin_y: self.origin_y,
+            };
+            if image.kind == GlyphKind::Color {
+                draw.cover(&mut shape, 0.0);
+                continue;
+            }
+            draw.cover(&mut fill, 0.0);
+            if let Some(grown) = &mut grown {
+                draw.cover(grown, grow);
+            }
+        }
+        for (index, cover) in shape.iter_mut().enumerate() {
+            let grown = grown.as_ref().map_or(0.0, |grown| grown[index]);
+            *cover = cover.max(fill[index]).max(grown);
+        }
+        compose(
+            &Layers {
+                style: &self.style,
+                ink: premultiply(self.fill),
+                fill: &fill,
+                grown: grown.as_deref(),
+                shape: &shape,
+                background: self.background,
+                width: self.width as usize,
+                height: self.height as usize,
+            },
+            &mut rgba,
+        );
+        for record in &self.mesh.glyphs {
+            if self
+                .atlas
+                .image(record.glyph_id)
+                .is_some_and(|image| image.kind == GlyphKind::Color)
+            {
+                self.splat(&mut rgba, record);
+            }
         }
         let bytes = CpuBytes::new(self.width, self.height, rgba).map_err(|_| TextError::Limit)?;
         Ok(Picture::Cpu(bytes))
@@ -143,6 +206,79 @@ pub(crate) struct Blit<'a> {
     pub(crate) fill: [u8; 4],
     pub(crate) origin_x: f32,
     pub(crate) origin_y: f32,
+}
+
+/// One glyph's coverage laid into a picture-sized mask.
+struct Mask<'a> {
+    width: u32,
+    height: u32,
+    record: &'a GlyphRecord,
+    image: &'a crate::GlyphImage,
+    origin_x: f32,
+    origin_y: f32,
+}
+
+impl Mask<'_> {
+    /// Keep the larger coverage of each pixel, with a distance field glyph
+    /// grown by `grow` pixels.
+    fn cover(&self, mask: &mut [f32], grow: f32) {
+        let Self {
+            width,
+            height,
+            record,
+            image,
+            origin_x,
+            origin_y,
+        } = *self;
+        if record.width <= 0.0 || record.height <= 0.0 {
+            return;
+        }
+        if image.width == 0 || image.height == 0 || !drawable(image) {
+            return;
+        }
+        let left = record.x - origin_x;
+        let top = record.y - origin_y;
+        let Some((x0, x1)) = span(left, left + record.width, width) else {
+            return;
+        };
+        let Some((y0, y1)) = span(top, top + record.height, height) else {
+            return;
+        };
+        let texels = pixel(image.width) / record.width;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = (pixel(x) + 0.5 - left) / record.width;
+                let v = (pixel(y) + 0.5 - top) / record.height;
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                let Some(cover) = cover_at(image, u, v, texels, grow) else {
+                    continue;
+                };
+                let Some(slot) = usize::try_from(y * width + x)
+                    .ok()
+                    .and_then(|index| mask.get_mut(index))
+                else {
+                    continue;
+                };
+                *slot = slot.max(cover);
+            }
+        }
+    }
+}
+
+/// How much of the pixel at `u`, `v` the glyph covers, from 0 to 1.
+fn cover_at(image: &crate::GlyphImage, u: f32, v: f32, texels: f32, grow: f32) -> Option<f32> {
+    let (col, row) = image_texel(image, u, v)?;
+    let byte = match image.kind {
+        GlyphKind::Distance => coverage(distance_at(image, u, v)?, texels, grow),
+        GlyphKind::Coverage => *image.sdf.get(texel_offset(image, col, row)?)?,
+        GlyphKind::Color => {
+            let offset = texel_offset(image, col, row)?.checked_mul(4)?;
+            *image.color.get(offset + 3)?
+        }
+    };
+    Some(f32::from(byte) / 255.0)
 }
 
 pub(crate) fn blit(draw: Blit<'_>) {
@@ -211,7 +347,13 @@ fn covers(range: &TimeRange, time: Micros) -> bool {
     time.0 >= range.start.0 && time.0 < end
 }
 
-fn picture_bounds(mesh: &TextMesh) -> Result<(f32, f32, u32, u32), TextError> {
+/// The picture's origin and size around the letters and their style, and
+/// the box behind the letters in picture pixels.
+fn picture_bounds(
+    mesh: &TextMesh,
+    style: &Style,
+    font_size: f32,
+) -> Result<(f32, f32, u32, u32, Option<Area>), TextError> {
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
     let mut max_x = f32::MIN;
@@ -234,14 +376,41 @@ fn picture_bounds(mesh: &TextMesh) -> Result<(f32, f32, u32, u32), TextError> {
         max_y = max_y.max(glyph.y + glyph.height);
     }
     if !any {
-        return Ok((0.0, 0.0, 1, 1));
+        return Ok((0.0, 0.0, 1, 1, None));
     }
-    let width = edge(max_x - min_x)?;
-    let height = edge(max_y - min_y)?;
+    let cells = Area {
+        left: min_x,
+        top: min_y,
+        right: max_x,
+        bottom: max_y,
+    };
+    let area = style.bounds(cells, font_size);
+    if ![area.left, area.top, area.right, area.bottom]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(TextError::Limit);
+    }
+    let left = area.left.floor();
+    let top = area.top.floor();
+    // Even edges keep the picture's centre on a pixel corner, so a title
+    // drawn at whole multiples of its size lands on whole pixels.
+    let even = |edge: u32| edge + edge % 2;
+    let width = even(edge(area.right - left)?);
+    let height = even(edge(area.bottom - top)?);
     if rgba_len(width, height).is_none() {
         return Err(TextError::Limit);
     }
-    Ok((min_x, min_y, width, height))
+    let background = style.background.as_ref().map(|back| {
+        let behind = back.area(cells, font_size);
+        Area {
+            left: behind.left - left,
+            top: behind.top - top,
+            right: behind.right - left,
+            bottom: behind.bottom - top,
+        }
+    });
+    Ok((left, top, width, height, background))
 }
 
 fn edge(value: f32) -> Result<u32, TextError> {
@@ -296,12 +465,17 @@ fn ink_at(
     let (col, row) = image_texel(image, u, v)?;
     match image.kind {
         GlyphKind::Distance => {
-            let covered = coverage(distance_at(image, u, v)?, texels);
+            let covered = coverage(distance_at(image, u, v)?, texels, 0.0);
             if covered == 0 {
                 return None;
             }
             let alpha = u16::from(covered) * u16::from(fill[3]) / 255;
-            Some([fill[0], fill[1], fill[2], u8::try_from(alpha).ok()?])
+            Some(premultiply([
+                fill[0],
+                fill[1],
+                fill[2],
+                u8::try_from(alpha).ok()?,
+            ]))
         }
         GlyphKind::Coverage => {
             let covered = *image.sdf.get(texel_offset(image, col, row)?)?;
@@ -309,7 +483,12 @@ fn ink_at(
                 return None;
             }
             let alpha = u16::from(covered) * u16::from(fill[3]) / 255;
-            Some([fill[0], fill[1], fill[2], u8::try_from(alpha).ok()?])
+            Some(premultiply([
+                fill[0],
+                fill[1],
+                fill[2],
+                u8::try_from(alpha).ok()?,
+            ]))
         }
         GlyphKind::Color => {
             let offset = texel_offset(image, col, row)?.checked_mul(4)?;
@@ -374,8 +553,9 @@ fn distance_at(image: &crate::GlyphImage, u: f32, v: f32) -> Option<f32> {
 }
 
 /// How much of a drawn pixel the glyph covers, with the outline mixed over
-/// one pixel. `texels` is distance field texels per drawn pixel.
-fn coverage(sdf: f32, texels: f32) -> u8 {
+/// one pixel. `texels` is distance field texels per drawn pixel, and
+/// `grow` widens the glyph by that many drawn pixels.
+fn coverage(sdf: f32, texels: f32, grow: f32) -> u8 {
     // The field holds SPREAD texels each side of the outline.
     let inside = (sdf / 255.0 - 0.5) * 2.0 * crate::atlas::SPREAD;
     let texels = if texels.is_finite() && texels > 0.0 {
@@ -383,7 +563,7 @@ fn coverage(sdf: f32, texels: f32) -> u8 {
     } else {
         1.0
     };
-    let covered = (inside / texels + 0.5).clamp(0.0, 1.0);
+    let covered = (inside / texels + grow + 0.5).clamp(0.0, 1.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let byte = (covered * 255.0).round() as u8;
     byte
@@ -438,7 +618,7 @@ fn unit_u8(value: f64) -> Result<u8, TextError> {
     Ok(byte as u8)
 }
 
-fn parse_hex(text: &str) -> Result<([u8; 3], Option<u8>), TextError> {
+pub(crate) fn parse_hex(text: &str) -> Result<([u8; 3], Option<u8>), TextError> {
     if text.is_empty() {
         return Ok(([255, 255, 255], None));
     }
@@ -581,10 +761,88 @@ mod tests {
         assert_eq!(gray_source.atlas_paints(), 1);
         let covered = cpu(gray_source.sample(Micros(1_000)));
         assert!(covered.chunks(4).any(|pixel| pixel == [255, 0, 0, 255]));
-        assert!(covered.chunks(4).any(|pixel| pixel == [255, 0, 0, 128]));
-        assert!(covered.chunks(4).any(|pixel| pixel == [255, 0, 0, 64]));
+        // Premultiplied, so a half covered red pixel is half as red.
+        assert!(covered.chunks(4).any(|pixel| pixel == [128, 0, 0, 128]));
+        assert!(covered.chunks(4).any(|pixel| pixel == [64, 0, 0, 64]));
         assert!(covered.chunks(4).any(|pixel| pixel[3] == 0));
         assert_eq!(gray_source.atlas_paints(), 1);
+    }
+
+    fn picture(text: &MaterialText) -> (u32, u32, Vec<u8>) {
+        let source = TextSource::open(TTF, None, text, &segment()).expect("open");
+        let (width, height) = source.size();
+        (width, height, cpu(source.sample(Micros(1_000))))
+    }
+
+    fn has(rgba: &[u8], color: [u8; 4]) -> bool {
+        rgba.chunks(4).any(|pixel| pixel == color)
+    }
+
+    #[test]
+    fn an_outline_rings_the_letters_in_its_color() {
+        let plain = material("A");
+        let mut ringed = plain.clone();
+        ringed.border_color = "#FF0000".to_owned();
+        ringed.border_width = 0.06;
+        let (width, height, rgba) = picture(&ringed);
+        let (plain_w, plain_h, _) = picture(&plain);
+        assert_eq!((width, height), (plain_w, plain_h));
+        assert!(has(&rgba, [255, 0, 0, 255]));
+        assert!(has(&rgba, [255, 255, 255, 255]));
+        // No width, or no color, draws no outline.
+        ringed.border_width = 0.0;
+        assert!(!has(&picture(&ringed).2, [255, 0, 0, 255]));
+        ringed.border_width = 0.06;
+        ringed.border_color.clear();
+        assert!(!has(&picture(&ringed).2, [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn a_shadow_falls_by_its_angle_and_grows_the_picture() {
+        let plain = material("A");
+        let mut shaded = plain.clone();
+        shaded.has_shadow = true;
+        shaded.shadow_color = "#0000FF".to_owned();
+        shaded.shadow_alpha = 1.0;
+        shaded.shadow_distance = 20.0;
+        shaded.shadow_angle = -90.0;
+        let (plain_w, plain_h, _) = picture(&plain);
+        let (width, height, rgba) = picture(&shaded);
+        assert!(height >= plain_h + 12, "{plain_h} {height}");
+        assert!(width.abs_diff(plain_w) <= 2, "{plain_w} {width}");
+        let row = |y: u32| {
+            rgba[(y * width * 4) as usize..((y + 1) * width * 4) as usize]
+                .chunks(4)
+                .any(|pixel| pixel == [0, 0, 255, 255])
+        };
+        // The shadow is straight below, so only the lower rows are blue.
+        assert!((height / 2..height).any(row));
+        assert!(!(0..plain_h / 3).any(row));
+        shaded.has_shadow = false;
+        assert_eq!(picture(&shaded).0, plain_w);
+    }
+
+    #[test]
+    fn a_background_fills_a_box_around_the_letters() {
+        let mut boxed = material("A");
+        boxed.background_style = 1;
+        boxed.background_color = "#00FF00".to_owned();
+        boxed.background_alpha = 0.5;
+        boxed.background_width = 0.3;
+        boxed.background_height = 0.3;
+        let (width, height, rgba) = picture(&boxed);
+        let (plain_w, plain_h, _) = picture(&material("A"));
+        assert!(width > plain_w && height > plain_h);
+        // Half green, premultiplied, near a corner; the letters stay white.
+        let inside = ((width + 1) * 4) as usize;
+        assert_eq!(&rgba[inside..inside + 4], &[0, 128, 0, 128]);
+        assert!(has(&rgba, [255, 255, 255, 255]));
+        // Round ends leave the corner clear.
+        boxed.background_round_radius = 1.0;
+        assert_eq!(&picture(&boxed).2[inside..inside + 4], &[0, 0, 0, 0]);
+        // Style 0 is no background, whatever its color.
+        boxed.background_style = 0;
+        assert_eq!(picture(&boxed).0, plain_w);
     }
 
     #[test]
@@ -617,6 +875,13 @@ mod tests {
         bad.text_color = "#gg0000".to_owned();
         assert!(matches!(
             TextSource::open(TTF, None, &bad, &clip),
+            Err(TextError::Color)
+        ));
+        let mut ringed = material("A");
+        ringed.border_color = "red".to_owned();
+        ringed.border_width = 0.1;
+        assert!(matches!(
+            TextSource::open(TTF, None, &ringed, &clip),
             Err(TextError::Color)
         ));
         let mut huge = material("A");

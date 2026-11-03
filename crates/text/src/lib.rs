@@ -1,8 +1,9 @@
 //! Text runs: glyph positions, line layout, and a picture sampled from a
 //! glyph atlas.
 //!
-//! Rich-text commands, stroke, shadow, and background are not implemented
-//! here. [`paint_glyphs`] draws glyphs a caption sampler has already placed.
+//! A title's outline, shadow, and background are drawn with its letters.
+//! Rich-text commands are not implemented here. [`paint_glyphs`] draws
+//! glyphs a caption sampler has already placed.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +14,7 @@ mod paint;
 mod richtext;
 mod shape;
 mod source;
+mod style;
 
 pub use atlas::{Atlas, AtlasRoute, GlyphImage, paint_bytes, route};
 pub use layout::{Alignment, Layout, Line, PlacedGlyph, layout, layout_text};

@@ -17,7 +17,7 @@ mod sound;
 
 pub use config::{
     AudioExport, ExportError, ExportRequest, GIF_LONG_SIDES, MAX_FRAMES, SidecarKind,
-    SidecarRequest, VIDEO_LONG_SIDES, output_size, validate,
+    SidecarRequest, VIDEO_LONG_SIDES, coded_size, output_size, validate,
 };
 pub use run::{
     ExportResult, ExportRun, ExportedFrame, export, frame_indexes, same_software_pixels,

@@ -219,6 +219,22 @@ pub fn output_size(
     }
 }
 
+/// `size` as `codec` can code it: a codec that halves its colour planes
+/// both ways needs even edges, so an odd edge loses one pixel. Other codecs
+/// keep the size.
+#[must_use]
+pub fn coded_size(codec: CodecId, (width, height): (u32, u32)) -> (u32, u32) {
+    let halved = matches!(
+        codec,
+        CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp8 | CodecId::Vp9
+    );
+    if halved {
+        ((width & !1).max(2), (height & !1).max(2))
+    } else {
+        (width, height)
+    }
+}
+
 fn scale_edge(short: u32, long: u32, long_side: u32) -> Result<u32, ExportError> {
     let value = u64::from(short) * u64::from(long_side) / u64::from(long);
     let value = u32::try_from(value).map_err(|_| ExportError::Limit)?;
@@ -231,8 +247,8 @@ fn scale_edge(short: u32, long: u32, long_side: u32) -> Result<u32, ExportError>
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioExport, ExportError, ExportRequest, GIF_LONG_SIDES, VIDEO_LONG_SIDES, output_size,
-        validate,
+        AudioExport, ExportError, ExportRequest, GIF_LONG_SIDES, VIDEO_LONG_SIDES, coded_size,
+        output_size, validate,
     };
     use cutlass_codec::{CodecId, ContainerId};
     use cutlass_model::{FrameRate, TimeRange};
@@ -309,5 +325,15 @@ mod tests {
         assert_eq!(output_size(0, 10, 480), Err(ExportError::Canvas));
         assert_eq!(output_size(-1, 10, 480), Err(ExportError::Canvas));
         assert_eq!(output_size(100_000, 1, 480), Err(ExportError::Canvas));
+    }
+
+    #[test]
+    fn a_half_chroma_codec_codes_even_edges() {
+        use cutlass_codec::CodecId;
+        assert_eq!(coded_size(CodecId::H264, (720, 405)), (720, 404));
+        assert_eq!(coded_size(CodecId::Hevc, (607, 1080)), (606, 1080));
+        assert_eq!(coded_size(CodecId::H264, (1, 1)), (2, 2));
+        assert_eq!(coded_size(CodecId::Png, (720, 405)), (720, 405));
+        assert_eq!(coded_size(CodecId::Gif, (607, 1080)), (607, 1080));
     }
 }

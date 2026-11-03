@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cutlass_codec::access::SideData;
 use cutlass_codec::{
     FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale, Timestamp,
 };
@@ -24,7 +25,7 @@ use cutlass_gpu::Extent;
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 use cutlass_render::{RenderError, Renderer, frame_layers};
 
-use crate::config::{AudioExport, ExportError, ExportRequest, output_size, validate};
+use crate::config::{AudioExport, ExportError, ExportRequest, coded_size, output_size, validate};
 use crate::sidecars::{file_name, sidecar_text, write_sidecar};
 
 const MAX_SAMPLES_PER_FRAME: u32 = 480_000;
@@ -163,11 +164,14 @@ where
     }
     let sidecar_body = prepare_sidecar(run.draft, run.request, run.destination)?;
     let indexes = frame_indexes(run.request.frame_rate, &run.request.range)?;
-    let output = output_size(
-        run.draft.canvas_config.width,
-        run.draft.canvas_config.height,
-        run.request.long_side,
-    )?;
+    let output = coded_size(
+        run.request.codec,
+        output_size(
+            run.draft.canvas_config.width,
+            run.draft.canvas_config.height,
+            run.request.long_side,
+        )?,
+    );
     let mut video = open_video(run.factory, run.request, output)?;
     let mut audio_encoder = open_audio(run.factory, run.request)?;
     let mut tracks = add_tracks(run.mux, run.request, output)?;
@@ -634,8 +638,41 @@ where
     if mixed.pcm.samples == 0 {
         silence(settings.sample_rate, settings.channels, frames)
     } else {
-        Ok(mixed.pcm)
+        to_channels(mixed.pcm, settings.channels)
     }
+}
+
+/// `pcm` with `channels` channels, as the encoder was opened: mono is copied
+/// to both sides, and stereo is averaged down to one.
+fn to_channels(pcm: Pcm, channels: u16) -> Result<Pcm, ExportError> {
+    let wanted = layout(channels)?;
+    if pcm.layout == wanted {
+        return Ok(pcm);
+    }
+    let from = pcm.layout.len();
+    let samples: Vec<f32> = match pcm.as_f32() {
+        Some(samples) => samples.to_vec(),
+        None => pcm
+            .as_i16()
+            .ok_or(ExportError::AudioLayout)?
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_768.0)
+            .collect(),
+    };
+    let mixed: Vec<f32> = match (from, channels) {
+        (1, 2) => samples
+            .iter()
+            .flat_map(|sample| [*sample, *sample])
+            .collect(),
+        (2, 1) => samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[left, right]| (left + right) / 2.0)
+            .collect(),
+        _ => return Err(ExportError::AudioLayout),
+    };
+    Pcm::from_f32(pcm.rate, wanted, mixed).map_err(|_| ExportError::AudioLayout)
 }
 
 fn samples_between(start: i64, end: i64, rate: u32) -> Result<u32, ExportError> {
@@ -736,6 +773,17 @@ fn write_packets<M: Mux>(
     ticks: &mut i64,
 ) -> Result<(), ExportError> {
     for packet in packets {
+        for side in &packet.side {
+            match side {
+                SideData::Config(config) => {
+                    mux.set_config(TrackId::new(stream), config)
+                        .map_err(|_| ExportError::SideData)?;
+                }
+                // The priming the encoder adds is left in the file.
+                SideData::Gapless { .. } => {}
+                _ => return Err(ExportError::SideData),
+            }
+        }
         let file = file_packet(stream, packet)?;
         let duration = file.timestamp().duration().ok_or(ExportError::Packet)?;
         mux.write_packet(&file).map_err(ExportError::Mux)?;
@@ -745,9 +793,6 @@ fn write_packets<M: Mux>(
 }
 
 fn file_packet(stream: u32, packet: &AccessPacket) -> Result<FilePacket, ExportError> {
-    if !packet.side.is_empty() {
-        return Err(ExportError::SideData);
-    }
     if packet.duration < 0 {
         return Err(ExportError::Packet);
     }
@@ -827,7 +872,7 @@ mod tests {
     use cutlass_renderer_software::SoftwareDevice;
     use cutlass_session::Session;
 
-    use super::{ExportRun, export, frame_indexes, same_software_pixels};
+    use super::{ExportRun, export, frame_indexes, same_software_pixels, to_channels};
     use crate::config::{AudioExport, ExportError, ExportRequest, SidecarKind, SidecarRequest};
 
     struct Stamp {
@@ -1103,6 +1148,18 @@ mod tests {
         let rgba = played_rgba(&draft, Micros(0), &mut device);
         assert_eq!(rgba, [255, 0, 0, 255]);
         assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn the_mix_is_given_the_channels_the_encoder_was_opened_with() {
+        let mono = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.5, -0.25]).unwrap();
+        let stereo = to_channels(mono.clone(), 2).unwrap();
+        assert_eq!(stereo.layout, ChannelLayout::stereo());
+        assert_eq!(stereo.as_f32().unwrap(), [0.5, 0.5, -0.25, -0.25]);
+        let back = to_channels(stereo, 1).unwrap();
+        assert_eq!(back.as_f32().unwrap(), [0.5, -0.25]);
+        assert_eq!(to_channels(mono.clone(), 1).unwrap(), mono);
+        assert_eq!(to_channels(mono, 6), Err(ExportError::AudioLayout));
     }
 
     #[test]

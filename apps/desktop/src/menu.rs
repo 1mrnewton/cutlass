@@ -348,6 +348,11 @@ pub fn show(
             right
         };
         let sub_rect = place(screen, corner, size);
+        // A sublayer always paints just above its parent.
+        ctx.set_sublayer(
+            LayerId::new(Order::Foreground, id),
+            LayerId::new(Order::Foreground, id.with("sub")),
+        );
         paint_menu(
             ctx,
             id.with("sub"),
@@ -444,6 +449,9 @@ fn paint_menu(
     row: &mut dyn FnMut(&Item, Rect, &egui::Response),
 ) -> Vec<Item> {
     let layer = LayerId::new(Order::Foreground, id);
+    // A layer painted by a bare Ui has no place in egui's stacking order
+    // until it is raised, and then its paint order among equals is not fixed.
+    ctx.move_to_top(layer);
     let ui = egui::Ui::new(
         ctx.clone(),
         id,
@@ -680,6 +688,42 @@ mod tests {
                 .iter()
                 .any(|clipped| clipped.clip_rect.contains(Pos2::new(110.0, 90.0)))
         );
+    }
+
+    #[test]
+    fn a_submenu_lies_above_its_menu() {
+        let ctx = Context::default();
+        let mut id = None;
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let menu = ui.scope_id().with("menu");
+                    id = Some(menu);
+                    show(ui.ctx(), menu, Pos2::new(100.0, 100.0), VIDEO, &|_| true);
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(Vec::new());
+        let edit = label_at(&output, "Edit").expect("the Edit row") + Vec2::new(4.0, 6.0);
+        frame(vec![egui::Event::PointerMoved(edit)]);
+        let output = frame(vec![egui::Event::PointerMoved(edit)]);
+        assert!(label_at(&output, "Crop").is_some(), "the submenu is open");
+        let id = id.expect("shown");
+        let layers: Vec<LayerId> = ctx.memory(|memory| memory.layer_ids().collect());
+        let at = |id: Id| {
+            layers
+                .iter()
+                .position(|layer| *layer == LayerId::new(Order::Foreground, id))
+                .expect("stacked")
+        };
+        assert!(at(id.with("sub")) > at(id));
     }
 
     #[test]

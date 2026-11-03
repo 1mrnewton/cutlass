@@ -170,7 +170,7 @@ const AUDIO_CLIP: &[Tool] = &[
 ];
 
 const TEXT_CLIP: &[Tool] = &[
-    later(T::EditText, "Edit"),
+    ready(T::EditText, "Edit"),
     ready(T::Split, "Split"),
     later(T::Animations, "Animations"),
     ready(T::Delete, "Delete"),
@@ -190,7 +190,7 @@ const AUDIO: &[Tool] = &[
 ];
 
 const TEXT: &[Tool] = &[
-    later(T::AddText, "Add text"),
+    ready(T::AddText, "Add text"),
     later(T::Captions, "Captions"),
     later(T::Stickers, "Stickers"),
     later(T::Draw, "Draw"),

@@ -141,6 +141,21 @@ pub fn speed_position(speed: f64) -> f64 {
     cutlass_ffi::speed_position(speed)
 }
 
+/// A face text can be set in. `name` is what a clip stores; `label` is for
+/// people.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Font {
+    pub name: String,
+    pub label: String,
+}
+
+/// What a text clip says and the face it says it in.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TextInfo {
+    pub content: String,
+    pub face: String,
+}
+
 /// A phone tool bar. See [`tool_bar`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
 pub enum ToolBar {
@@ -448,6 +463,59 @@ impl Editor {
         self.run(move |host| host.append(&material_id))?
             .map(|id| id.as_str().to_owned())
             .map_err(EditorError::from)
+    }
+
+    /// Look for faces in `folders` and the folders below them, replacing
+    /// any found before.
+    pub fn set_font_folders(&self, folders: Vec<String>) -> Result<(), EditorError> {
+        let folders: Vec<PathBuf> = folders.into_iter().map(Into::into).collect();
+        self.run(move |host| host.set_font_folders(&folders))
+    }
+
+    /// The faces text can be set in, by file name.
+    pub fn fonts(&self) -> Result<Vec<Font>, EditorError> {
+        let fonts = self.run(|host| host.fonts())?;
+        Ok(fonts
+            .into_iter()
+            .map(|font| Font {
+                name: font.name,
+                label: font.label,
+            })
+            .collect())
+    }
+
+    /// Add `content` at `at_us` in `face`, or in the first face when `face`
+    /// is empty, as one undo step. Returns the new clip's id.
+    pub fn add_text(
+        &self,
+        content: String,
+        face: String,
+        at_us: i64,
+    ) -> Result<String, EditorError> {
+        self.run(move |host| host.add_text(&content, &face, Micros(at_us)))?
+            .map(|id| id.as_str().to_owned())
+            .map_err(EditorError::from)
+    }
+
+    /// Change what a text clip says, as one undo step.
+    pub fn set_text(&self, clip_id: String, content: String) -> Result<(), EditorError> {
+        self.run(move |host| host.set_text(&SegmentId::new(clip_id), &content))?
+            .map_err(EditorError::from)
+    }
+
+    /// Set a text clip in `face`, as one undo step.
+    pub fn set_text_font(&self, clip_id: String, face: String) -> Result<(), EditorError> {
+        self.run(move |host| host.set_text_font(&SegmentId::new(clip_id), &face))?
+            .map_err(EditorError::from)
+    }
+
+    /// What a text clip says, or `None` when it is not a text clip.
+    pub fn text(&self, clip_id: String) -> Result<Option<TextInfo>, EditorError> {
+        let text = self.run(move |host| host.text(&SegmentId::new(clip_id)))?;
+        Ok(text.map(|text| TextInfo {
+            content: text.content,
+            face: text.face,
+        }))
     }
 
     /// The rows to draw, top first.
@@ -848,6 +916,45 @@ mod tests {
         let frame = editor.thumb(tile.key).unwrap().expect("stored");
         assert_eq!(frame.rgba.len(), (frame.width * frame.height * 4) as usize);
         assert!(editor.thumb("nothing".to_owned()).unwrap().is_none());
+    }
+
+    #[test]
+    fn text_crosses_the_boundary_with_its_face() {
+        let temp = Temp::new();
+        let fonts = temp.0.join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../font/fixtures/sample.ttf"),
+            fonts.join("Sample.ttf"),
+        )
+        .unwrap();
+        let editor = temp.open();
+        assert!(editor.add_text("A".to_owned(), String::new(), 0).is_err());
+        editor
+            .set_font_folders(vec![fonts.display().to_string()])
+            .unwrap();
+        let found = editor.fonts().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Sample.ttf");
+        assert_eq!(found[0].label, "Sample");
+
+        let id = editor.add_text("A".to_owned(), String::new(), 0).unwrap();
+        let text = editor.text(id.clone()).unwrap().unwrap();
+        assert_eq!(text.content, "A");
+        assert_eq!(text.face, "Sample.ttf");
+        editor.set_text(id.clone(), "AA".to_owned()).unwrap();
+        assert_eq!(editor.text(id.clone()).unwrap().unwrap().content, "AA");
+        assert!(editor.set_text(id.clone(), String::new()).is_err());
+        assert!(
+            editor
+                .set_text_font(id.clone(), "a/b.ttf".to_owned())
+                .is_err()
+        );
+        assert_eq!(
+            editor.clip_bar(id.clone()).unwrap(),
+            Some(super::ToolBar::TextClip)
+        );
+        assert!(editor.text("nope".to_owned()).unwrap().is_none());
     }
 
     #[test]

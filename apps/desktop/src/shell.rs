@@ -4182,6 +4182,7 @@ impl Shell {
                 fonts: &self.face,
                 // The preview's device, so an effect clip is in the file.
                 renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
+                progress: None,
             },
             |_, _, _, _| Ok(cutlass_eval::ClipPcm::Missing),
         )

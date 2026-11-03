@@ -65,6 +65,10 @@ pub struct ExportRun<'a, D, M> {
     /// Draws each frame on the GPU, as the preview does, so recipe effects
     /// are in the file. `None` composes on the CPU, without them.
     pub renderer: Option<&'a Renderer>,
+    /// Told the frames encoded and the frames in all after each picture.
+    /// Returning false stops the export with [`ExportError::Cancelled`],
+    /// and the mux is cancelled, so no part file is finished.
+    pub progress: Option<&'a mut dyn FnMut(u64, u64) -> bool>,
 }
 
 struct TrackTicks {
@@ -386,10 +390,17 @@ where
 {
     let mut frames = Vec::with_capacity(indexes.len());
     let mut clips = OpenClips::new();
+    let total = u64::try_from(indexes.len()).map_err(|_| ExportError::Limit)?;
     for index in indexes {
         frames.push(encode_picture(
             run, video, tracks, *index, output, &mut clips,
         )?);
+        if let Some(progress) = run.progress.as_mut() {
+            let done = u64::try_from(frames.len()).map_err(|_| ExportError::Limit)?;
+            if !progress(done, total) {
+                return Err(ExportError::Cancelled);
+            }
+        }
     }
     Ok(frames)
 }
@@ -1094,6 +1105,52 @@ mod tests {
         assert_eq!(draft, before);
     }
 
+    #[test]
+    fn progress_counts_each_frame_and_a_stop_cancels_the_file() {
+        let draft = color_draft(16, 16, 1_000_000);
+        let request = gif_request(TimeRange::new(0, 100_000));
+        let factory = factory();
+        let run = |progress: &mut dyn FnMut(u64, u64) -> bool| {
+            let mut mux = MuxDraft::new(
+                ContainerId::Isobmff,
+                MuxMode::Progressive,
+                IndexPlace::End,
+                Limits::standard(),
+            );
+            let mut device = SoftwareDevice::new();
+            let result = export(
+                ExportRun {
+                    draft: &draft,
+                    device: &mut device,
+                    request: &request,
+                    factory: &factory,
+                    readers: readers(),
+                    mux: &mut mux,
+                    destination: None,
+                    root: None,
+                    fonts: &cutlass_eval::NoFonts,
+                    renderer: None,
+                    progress: Some(progress),
+                },
+                |_, _, _, _| Ok(ClipPcm::Missing),
+            );
+            (result.map(|result| result.frames.len()), mux.status())
+        };
+        let mut seen = Vec::new();
+        let (frames, _) = run(&mut |done, total| {
+            seen.push((done, total));
+            true
+        });
+        let frames = frames.expect("export");
+        let total = u64::try_from(frames).unwrap();
+        assert!(total > 1);
+        let expected: Vec<(u64, u64)> = (1..=total).map(|done| (done, total)).collect();
+        assert_eq!(seen, expected);
+        let (stopped, status) = run(&mut |done, _| done < 2);
+        assert_eq!(stopped, Err(ExportError::Cancelled));
+        assert_ne!(status, MuxStatus::Finished);
+    }
+
     fn gpu() -> Option<cutlass_render::Renderer> {
         let renderer = cutlass_render::Renderer::for_test().expect("a GPU is required");
         if renderer.is_none() {
@@ -1124,6 +1181,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1209,6 +1267,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1265,6 +1324,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1295,6 +1355,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1321,6 +1382,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1360,6 +1422,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1429,6 +1492,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1455,6 +1519,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1519,6 +1584,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |segment, _when, frames, rate| {
                 assert_eq!(frames, 4);
@@ -1621,6 +1687,7 @@ mod tests {
                 root: Some(root),
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             crate::file_audio(&readers, draft, Some(root)),
         )
@@ -1695,6 +1762,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |segment, when, _, _| {
                 asked.push((segment.as_str().to_owned(), when));
@@ -1762,6 +1830,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1820,6 +1889,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1850,6 +1920,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1883,6 +1954,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
@@ -1932,6 +2004,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
                 renderer: None,
+                progress: None,
             },
             |_, _, _, _| Ok(ClipPcm::Missing),
         )

@@ -114,6 +114,8 @@ pub enum ExportError {
     NotSoftwareRgba,
     /// Playback and export RGBA differ.
     PixelMismatch,
+    /// The progress callback asked export to stop.
+    Cancelled,
 }
 
 impl fmt::Display for ExportError {
@@ -142,6 +144,7 @@ impl fmt::Display for ExportError {
             Self::HdrNotThisCase => formatter.write_str("HDR is not the software pixel comparison"),
             Self::NotSoftwareRgba => formatter.write_str("the bytes are not software RGBA"),
             Self::PixelMismatch => formatter.write_str("playback and export pixels differ"),
+            Self::Cancelled => formatter.write_str("export was stopped"),
         }
     }
 }

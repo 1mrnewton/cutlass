@@ -466,6 +466,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetCanvasBackground { .. } => "set_canvas_background",
         Request::SetCanvasSize { .. } => "set_canvas_size",
         Request::SetLetterbox { .. } => "set_letterbox",
+        Request::SetLetterboxBlur { .. } => "set_letterbox_blur",
         Request::SetFrameRate { .. } => "set_frame_rate",
         Request::SetDropFrame { .. } => "set_drop_frame",
         Request::SetColorSpace { .. } => "set_color_space",

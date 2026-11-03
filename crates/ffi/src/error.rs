@@ -147,6 +147,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),
         EditError::Letterbox => "a letterbox belongs on a picture".to_owned(),
+        EditError::LetterboxBlur => "the blur is not a fraction from 0 through 1".to_owned(),
         EditError::FrameRate => "the frame rate is not a project rate".to_owned(),
         EditError::ColorSpace => "the color space is not a project color space".to_owned(),
     }

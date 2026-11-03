@@ -218,6 +218,96 @@ pub fn set_letterbox(
     Ok(())
 }
 
+/// Cover the canvas behind a picture with a blurred copy of it.
+///
+/// `Some` turns the segment's canvas into a blur, keeping its color, or
+/// adds one named `canvas_id`. `None` removes the segment's canvas, and the
+/// material too once nothing else uses it, so the project color shows. A
+/// video or a composition can hold it.
+pub fn set_letterbox_blur(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    blur: Option<f64>,
+    canvas_id: &MaterialId,
+) -> Result<(), EditError> {
+    if blur.is_some_and(|blur| !(0.0..=1.0).contains(&blur)) {
+        return Err(EditError::LetterboxBlur);
+    }
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    let material_id = draft.tracks[track_index].segments[segment_index]
+        .material_id
+        .clone();
+    match draft.materials.get(material_id.as_str()) {
+        Some(MaterialRef::Video(_) | MaterialRef::Draft(_)) => {}
+        Some(_) => return Err(EditError::Letterbox),
+        None => return Err(EditError::MissingMaterial),
+    }
+    let existing = segment_canvas(draft, track_index, segment_index);
+    let Some(blur) = blur else {
+        if let Some(existing_id) = existing {
+            let refs = &mut draft.tracks[track_index].segments[segment_index].extra_material_refs;
+            refs.retain(|id| *id != existing_id);
+            let used = draft.tracks.iter().any(|track| {
+                track
+                    .segments
+                    .iter()
+                    .any(|segment| segment.extra_material_refs.contains(&existing_id))
+            });
+            if !used {
+                draft
+                    .materials
+                    .canvases
+                    .retain(|canvas| canvas.id != existing_id);
+            }
+        }
+        return Ok(());
+    };
+    if let Some(existing_id) = existing {
+        let Some(canvas) = draft
+            .materials
+            .canvases
+            .iter_mut()
+            .find(|canvas| canvas.id == existing_id)
+        else {
+            return Err(EditError::MissingMaterial);
+        };
+        canvas.kind = "canvas_blur".to_owned();
+        canvas.blur = blur;
+        return Ok(());
+    }
+    if canvas_id.is_empty() {
+        return Err(EditError::MissingMaterial);
+    }
+    if draft.materials.get(canvas_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    draft.materials.canvases.push(MaterialCanvas {
+        id: canvas_id.clone(),
+        kind: "canvas_blur".to_owned(),
+        blur,
+        ..MaterialCanvas::default()
+    });
+    draft.tracks[track_index].segments[segment_index]
+        .extra_material_refs
+        .push(canvas_id.clone());
+    Ok(())
+}
+
+/// The canvas material a segment refers to, if any.
+fn segment_canvas(draft: &Draft, track_index: usize, segment_index: usize) -> Option<MaterialId> {
+    draft.tracks[track_index].segments[segment_index]
+        .extra_material_refs
+        .iter()
+        .find(|material_id| {
+            matches!(
+                draft.materials.get(material_id.as_str()),
+                Some(MaterialRef::Canvas(_))
+            )
+        })
+        .cloned()
+}
+
 /// A color the preview paints as the project canvas.
 ///
 /// Eight digits are read as `AARRGGBB` before a six-digit `RRGGBB` color.
@@ -474,6 +564,55 @@ mod tests {
             .segments
             .push(Segment::new("tall", "tall", TimeRange::new(0, 1_000_000)));
         assert_eq!(super::follow_first_picture(&draft, "tall"), None);
+    }
+
+    #[test]
+    fn a_blur_covers_the_canvas_behind_a_picture_and_none_removes_it() {
+        let mut draft = Draft::empty("D");
+        draft.materials.videos.push(MaterialVideo::new("picture"));
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        let mut session = Session::open(draft);
+        let blur = |blur: Option<f64>, canvas_id: &str| Request::SetLetterboxBlur {
+            segment_id: "picture".into(),
+            blur,
+            canvas_id: MaterialId::new(canvas_id),
+        };
+        session.apply(0, &[blur(Some(0.1), "back")]).unwrap();
+        let canvas = &session.draft().materials.canvases[0];
+        assert_eq!((canvas.kind.as_str(), canvas.blur), ("canvas_blur", 0.1));
+        assert_eq!(
+            session.draft().tracks[0].segments[0].extra_material_refs,
+            [MaterialId::new("back")]
+        );
+
+        // A second blur changes the same canvas; the new id is not used.
+        session.apply(1, &[blur(Some(0.2), "unused")]).unwrap();
+        assert_eq!(session.draft().materials.canvases.len(), 1);
+        assert_eq!(session.draft().materials.canvases[0].blur, 0.2);
+
+        session.apply(2, &[blur(None, "")]).unwrap();
+        assert!(session.draft().materials.canvases.is_empty());
+        assert!(
+            session.draft().tracks[0].segments[0]
+                .extra_material_refs
+                .is_empty()
+        );
+        session.undo().unwrap();
+        assert_eq!(session.draft().materials.canvases[0].blur, 0.2);
+
+        let before = session.draft().clone();
+        let revision = session.revision();
+        for wrong in [-0.1, 1.5, f64::NAN] {
+            assert_eq!(
+                session.apply(revision, &[blur(Some(wrong), "x")]),
+                Err(EditError::LetterboxBlur)
+            );
+        }
+        assert_eq!(session.draft(), &before);
     }
 
     #[test]

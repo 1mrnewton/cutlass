@@ -130,6 +130,8 @@ pub enum EditError {
     CanvasRatio,
     /// A letterbox color belongs on a video or a composition.
     Letterbox,
+    /// A letterbox blur is not a fraction from 0 through 1.
+    LetterboxBlur,
     /// The frame rate is not a clock the draft can step.
     FrameRate,
     /// The color space is not one the player keeps.
@@ -329,6 +331,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             canvas_id,
         } => canvas::set_letterbox(draft, segment_id, color, canvas_id),
+        Request::SetLetterboxBlur {
+            segment_id,
+            blur,
+            canvas_id,
+        } => canvas::set_letterbox_blur(draft, segment_id, *blur, canvas_id),
         Request::SetFrameRate { fps, drop_frame } => rate::set_frame_rate(draft, *fps, *drop_frame),
         Request::SetDropFrame { on } => rate::set_drop_frame(draft, *on),
         Request::SetColorSpace { space } => color::set_color_space(draft, *space),

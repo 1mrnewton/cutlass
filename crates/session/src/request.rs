@@ -262,6 +262,14 @@ pub enum Request {
         color: String,
         canvas_id: MaterialId,
     },
+    /// Cover the canvas behind a picture with a blurred copy of it, or
+    /// with `None` remove the backdrop and its color, so the project color
+    /// shows. `blur` is a fraction of the short side, from 0 through 1.
+    SetLetterboxBlur {
+        segment_id: SegmentId,
+        blur: Option<f64>,
+        canvas_id: MaterialId,
+    },
     /// Store the project frame rate. `drop_frame` is a timecode label.
     SetFrameRate { fps: f64, drop_frame: bool },
     /// Store the drop-frame timecode label. The frame rate stays.

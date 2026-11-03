@@ -4206,6 +4206,48 @@ mod tests {
     }
 
     #[test]
+    fn loud_bars_wear_an_orange_cap_and_clipped_bars_a_red_tip() {
+        let ctx = egui::Context::default();
+        let band = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(8.0, 20.0));
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![0.1, 0.1, 0.8, 0.8, 1.0, 1.0],
+            under_picture: true,
+        };
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui, &wave, 0.0, band, band, tokens::CLIP_VIDEO_BAR);
+        });
+        let colors: Vec<(f32, Color32)> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .step_by(4)
+            .map(|vertex| (vertex.pos.x, vertex.color))
+            .collect();
+        let at = |x: f32| -> Vec<Color32> {
+            colors
+                .iter()
+                .filter(|(left, _)| *left == x)
+                .map(|(_, color)| *color)
+                .collect()
+        };
+        assert_eq!(at(0.0), [tokens::CLIP_VIDEO_BAR]);
+        assert_eq!(at(2.0), [tokens::CLIP_VIDEO_BAR, tokens::WAVE_LOUD]);
+        assert_eq!(
+            at(4.0),
+            [
+                tokens::CLIP_VIDEO_BAR,
+                tokens::WAVE_CLIPPED,
+                tokens::WAVE_LOUD
+            ]
+        );
+    }
+
+    #[test]
     fn lanes_take_capcut_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);

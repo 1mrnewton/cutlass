@@ -18,8 +18,7 @@ struct EffectsPanel: View {
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Button(action: close) {
-                    Image(systemName: "checkmark")
-                        .font(.body.weight(.semibold))
+                    HugeIcon("done", size: 20)
                         .frame(width: 40, height: 32)
                         .contentShape(Rectangle())
                 }

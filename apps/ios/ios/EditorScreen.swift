@@ -31,8 +31,7 @@ struct EditorScreen: View {
                     model.pause()
                     home()
                 } label: {
-                    Image(systemName: "house")
-                        .font(.title3)
+                    HugeIcon("home")
                         .foregroundStyle(Palette.text)
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
@@ -82,9 +81,9 @@ struct EditorScreen: View {
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.7))
             Spacer()
-            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+            Button { model.undo() } label: { HugeIcon("undo") }
                 .accessibilityLabel("Undo")
-            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+            Button { model.redo() } label: { HugeIcon("redo") }
                 .accessibilityLabel("Redo")
                 .padding(.leading, 16)
         }
@@ -92,8 +91,7 @@ struct EditorScreen: View {
             Button {
                 model.togglePlay()
             } label: {
-                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.title3)
+                HugeIcon(model.isPlaying ? "pause" : "play", size: 24)
             }
             .disabled(!model.hasClips)
             .accessibilityLabel(model.isPlaying ? "Pause" : "Play")

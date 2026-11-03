@@ -15,8 +15,7 @@ struct PanelFrame<Content: View>: View {
                 HStack {
                     Spacer()
                     Button(action: close) {
-                        Image(systemName: "checkmark")
-                            .font(.body.weight(.semibold))
+                        HugeIcon("done", size: 20)
                             .frame(width: 40, height: 32)
                             .contentShape(Rectangle())
                     }
@@ -100,8 +99,7 @@ struct SpeedPanel: View {
                     .foregroundStyle(.white.opacity(0.55))
                 Text(seconds(before))
                     .foregroundStyle(.white.opacity(0.55))
-                Image(systemName: "arrow.right")
-                    .font(.caption)
+                HugeIcon("arrowRight", size: 14)
                     .foregroundStyle(Palette.accent)
                 Text(seconds(newLength))
                 Spacer()

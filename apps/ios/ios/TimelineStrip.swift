@@ -241,8 +241,7 @@ struct TimelineStrip: View {
             selection: $picked, matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .current
         ) {
-            Image(systemName: "plus")
-                .font(.system(size: 20, weight: .semibold))
+            HugeIcon("plus", size: 22)
                 .foregroundStyle(.black)
                 .frame(width: 40, height: 40)
                 .background(.white, in: RoundedRectangle(cornerRadius: 8))

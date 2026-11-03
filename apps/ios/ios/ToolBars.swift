@@ -12,8 +12,7 @@ struct ToolBarView: View {
         HStack(spacing: 0) {
             if let back {
                 Button(action: back) {
-                    Image(systemName: "chevron.left")
-                        .font(.body.weight(.semibold))
+                    HugeIcon("chevronLeft", size: 20)
                         .foregroundStyle(.white)
                         .frame(width: 40, height: 52)
                         .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 6))
@@ -44,8 +43,7 @@ private struct ToolLabel: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Image(systemName: tool.kind.symbol)
-                .font(.title3)
+            HugeIcon(tool.kind.icon)
                 .frame(height: 26)
             Text(tool.label).font(.caption2).lineLimit(1).minimumScaleFactor(0.8)
         }
@@ -57,43 +55,44 @@ private struct ToolLabel: View {
 
 extension ToolKind {
     /// The SF Symbol drawn for this tool.
-    var symbol: String {
+    /// The name in `crates/icons/icons.txt`.
+    var icon: String {
         switch self {
         case .edit: "scissors"
-        case .audio: "music.note"
-        case .text: "textformat"
-        case .effects: "sparkles"
-        case .overlay: "square.on.square"
-        case .captions: "captions.bubble"
-        case .filters: "camera.filters"
-        case .adjust: "slider.horizontal.3"
-        case .stickers: "face.smiling"
-        case .aspectRatio: "aspectratio"
-        case .background: "paintpalette"
-        case .split: "square.split.2x1"
-        case .volume: "speaker.wave.2"
-        case .speed: "gauge.with.dots.needle.67percent"
-        case .animations: "play.square.stack"
-        case .delete: "trash"
-        case .duplicate: "plus.square.on.square"
-        case .replace: "arrow.triangle.2.circlepath"
+        case .audio: "audio"
+        case .text: "text"
+        case .effects: "effects"
+        case .overlay: "overlay"
+        case .captions: "captions"
+        case .filters: "filters"
+        case .adjust: "adjustments"
+        case .stickers: "stickers"
+        case .aspectRatio: "aspectRatio"
+        case .background: "background"
+        case .split: "split"
+        case .volume: "volume"
+        case .speed: "speed"
+        case .animations: "animations"
+        case .delete: "delete"
+        case .duplicate: "duplicate"
+        case .replace: "replace"
         case .crop: "crop"
-        case .mirror: "arrow.left.and.right.righttriangle.left.righttriangle.right"
-        case .rotate: "rotate.right"
-        case .reverse: "backward"
-        case .freeze: "snowflake"
-        case .extractAudio: "waveform"
-        case .fade: "waveform.path"
-        case .beats: "metronome"
-        case .unlink: "link"
-        case .splice: "arrow.down.to.line"
-        case .addOverlay: "rectangle.badge.plus"
-        case .importSound: "music.note.list"
-        case .record: "mic"
-        case .addText: "character.textbox"
-        case .editText: "pencil"
-        case .draw: "scribble"
-        case .videoEffects: "wand.and.stars"
+        case .mirror: "mirror"
+        case .rotate: "rotate"
+        case .reverse: "reverse"
+        case .freeze: "freeze"
+        case .extractAudio: "extractAudio"
+        case .fade: "fade"
+        case .beats: "beat"
+        case .unlink: "unlink"
+        case .splice: "splice"
+        case .addOverlay: "addOverlay"
+        case .importSound: "importSound"
+        case .record: "record"
+        case .addText: "addText"
+        case .editText: "editText"
+        case .draw: "draw"
+        case .videoEffects: "plugin"
         }
     }
 }

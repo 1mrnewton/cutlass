@@ -33,8 +33,7 @@ struct TextPanel: View {
                     .background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 8))
                     .submitLabel(.done)
                 Button(action: done) {
-                    Image(systemName: "checkmark")
-                        .font(.body.weight(.semibold))
+                    HugeIcon("done", size: 20)
                         .frame(width: 40, height: 36)
                         .contentShape(Rectangle())
                 }

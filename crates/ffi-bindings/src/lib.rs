@@ -58,6 +58,10 @@ pub struct Clip {
     pub name: String,
     pub start_us: i64,
     pub duration_us: i64,
+    /// Linear gain: 1 is unity and 0 is silence.
+    pub volume: f64,
+    /// Constant speed: 2 plays twice as fast.
+    pub speed: f64,
 }
 
 /// What a row holds.
@@ -255,6 +259,8 @@ impl Editor {
                         name: clip.name,
                         start_us: clip.start.0,
                         duration_us: clip.duration.0,
+                        volume: clip.volume,
+                        speed: clip.speed,
                     })
                     .collect(),
             })
@@ -355,6 +361,18 @@ impl Editor {
     }
 
     /// Remove one clip.
+    /// Set a clip's linear gain, as one undo step. Below zero is refused.
+    pub fn set_volume(&self, clip_id: String, volume: f64) -> Result<(), EditorError> {
+        self.run(move |host| host.set_volume(&SegmentId::new(clip_id), volume))?
+            .map_err(EditorError::from)
+    }
+
+    /// Play a clip at a constant speed, as one undo step. Its length follows.
+    pub fn set_speed(&self, clip_id: String, speed: f64) -> Result<(), EditorError> {
+        self.run(move |host| host.set_speed(&SegmentId::new(clip_id), speed))?
+            .map_err(EditorError::from)
+    }
+
     pub fn remove(&self, clip_id: String) -> Result<(), EditorError> {
         self.run(move |host| host.remove(&SegmentId::new(clip_id)))?
             .map_err(EditorError::from)
@@ -487,6 +505,22 @@ mod tests {
         let super::EditorError::Failed { message } =
             editor.move_clip(first, 9, 0, 0, 0).unwrap_err();
         assert!(!message.is_empty());
+    }
+
+    #[test]
+    fn volume_and_speed_show_on_the_clip_and_a_negative_volume_says_why() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        let clip = editor.append(editor.import(pattern()).unwrap()).unwrap();
+        let length = editor.duration_us().unwrap();
+        editor.set_volume(clip.clone(), 0.25).unwrap();
+        editor.set_speed(clip.clone(), 2.0).unwrap();
+        let shown = editor.lanes().unwrap()[0].clips[0].clone();
+        assert_eq!((shown.volume, shown.speed), (0.25, 2.0));
+        assert_eq!(shown.duration_us, length / 2);
+        let super::EditorError::Failed { message } = editor.set_volume(clip, -1.0).unwrap_err();
+        assert!(message.contains("volume"), "{message}");
+        assert_eq!(editor.lanes().unwrap()[0].clips[0].volume, 0.25);
     }
 
     #[test]

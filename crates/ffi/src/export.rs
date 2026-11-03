@@ -22,7 +22,7 @@ use cutlass_renderer_software::SoftwareDevice;
 
 use crate::error::FfiError;
 
-/// The long sides, in pixels, the phone offers.
+/// The short sides, in pixels, the phone offers.
 pub const PHONE_EXPORT_SIDES: [u32; 3] = [720, 1080, 2160];
 
 /// The sound every phone export carries.
@@ -54,11 +54,11 @@ pub fn encoders() -> EncodeFactory {
     encoders
 }
 
-/// Bits a second for a picture `long_side` pixels on its long side: about
+/// Bits a second for a picture `short_side` pixels on its short side: about
 /// what a phone's own camera records at that size.
 #[must_use]
-pub fn video_bitrate(long_side: u32) -> u32 {
-    match long_side {
+pub fn video_bitrate(short_side: u32) -> u32 {
+    match short_side {
         0..=720 => 6_000_000,
         721..=1080 => 12_000_000,
         _ => 40_000_000,
@@ -74,16 +74,16 @@ pub(crate) struct Sources<'a> {
     pub renderer: Option<&'a Renderer>,
 }
 
-/// Write the whole cut to `destination` at `long_side`. `progress` hears
+/// Write the whole cut to `destination` at `short_side`. `progress` hears
 /// the frames done and the frames in all after each picture, and stops the
 /// export by returning false.
 pub(crate) fn export_movie(
     sources: &Sources<'_>,
     destination: &Path,
-    long_side: u32,
+    short_side: u32,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<PhoneExport, FfiError> {
-    if !PHONE_EXPORT_SIDES.contains(&long_side) {
+    if !PHONE_EXPORT_SIDES.contains(&short_side) {
         return Err(refused("that size is not offered"));
     }
     if sources.draft.duration.0 <= 0 {
@@ -97,9 +97,9 @@ pub(crate) fn export_movie(
     let part = destination.with_file_name(format!(".{name}.part"));
     let request = ExportRequest {
         range: TimeRange::new(0, sources.draft.duration.0),
-        long_side,
+        short_side,
         codec: CodecId::H264,
-        bitrate: video_bitrate(long_side),
+        bitrate: video_bitrate(short_side),
         frame_rate: sources.draft.frame_rate().unwrap_or(FrameRate::FPS_30),
         container: ContainerId::Isobmff,
         audio: Some(SOUND),

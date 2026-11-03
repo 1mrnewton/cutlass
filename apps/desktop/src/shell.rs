@@ -47,7 +47,7 @@ use crate::tokens;
 use cutlass_probe::{self as probe, Probed};
 
 /// Long-side steps the export dialog offers.
-pub const LONG_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
+pub const SHORT_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
 /// A blend the Transitions shelf can drop onto a main-track cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,7 +278,7 @@ pub struct Inspection {
 #[derive(Clone, Debug)]
 pub struct ExportRequest {
     pub path: PathBuf,
-    pub long_side: i32,
+    pub short_side: i32,
     pub codec: CodecId,
     pub replace: bool,
 }
@@ -4124,14 +4124,14 @@ impl Shell {
 
     /// Writes a PNG of the frame at the playhead.
     ///
-    /// The long side is one of [`LONG_SIDES`]. A PNG is one picture, so the
+    /// The short side is one of [`SHORT_SIDES`]. A PNG is one picture, so the
     /// export range is that frame. The software encoder writes it, and the
     /// still mux checks the file before it replaces `request.path`. A codec
     /// this shell cannot mux is refused after the encoder probe.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
-        if !LONG_SIDES.contains(&request.long_side) {
+        if !SHORT_SIDES.contains(&request.short_side) {
             return Err(ShellError::Unavailable(
-                "the long side is not one of the steps".to_owned(),
+                "the short side is not one of the steps".to_owned(),
             ));
         }
         if request.path.exists() && !request.replace {
@@ -4139,7 +4139,7 @@ impl Shell {
         }
         let root = self.path.clone();
         let draft = self.session_draft()?;
-        let (width, height) = self.scaled_canvas(request.long_side);
+        let (width, height) = self.scaled_canvas(request.short_side)?;
         let params = CodecParams::video(request.codec, width, height);
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
@@ -4147,16 +4147,16 @@ impl Shell {
         if request.codec != CodecId::Png {
             return Err(ShellError::ExportUnavailable);
         }
-        let Ok(long_side) = u32::try_from(request.long_side) else {
+        let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
-                "the long side is not one of the steps".to_owned(),
+                "the short side is not one of the steps".to_owned(),
             ));
         };
         let rate = draft.frame_rate().unwrap_or(FrameRate::FPS_30);
         let range = playhead_frame(rate, self.playhead)?;
         let export_request = cutlass_export::ExportRequest {
             range,
-            long_side,
+            short_side,
             codec: CodecId::Png,
             bitrate: 0,
             frame_rate: rate,
@@ -4495,20 +4495,14 @@ impl Shell {
             ))
     }
 
-    fn scaled_canvas(&self, long_side: i32) -> (u32, u32) {
+    /// The size export writes the canvas at, from the shared export rule.
+    fn scaled_canvas(&self, short_side: i32) -> Result<(u32, u32), ShellError> {
         let (width, height) = self
             .draft()
             .map(|draft| (draft.canvas_config.width, draft.canvas_config.height))
             .unwrap_or((1920, 1080));
-        let width = f64::from(width.max(1));
-        let height = f64::from(height.max(1));
-        let scale = f64::from(long_side.max(1)) / width.max(height);
-        let scaled_width = (width * scale).round().max(1.0);
-        let scaled_height = (height * scale).round().max(1.0);
-        (
-            u32::try_from(scaled_width as i64).unwrap_or(1),
-            u32::try_from(scaled_height as i64).unwrap_or(1),
-        )
+        let side = u32::try_from(short_side).unwrap_or(0);
+        cutlass_export::output_size(width, height, side).map_err(export_failure)
     }
 
     fn side_max(&self, window_width: f32, other: f32, floor: f32) -> f32 {
@@ -5443,7 +5437,7 @@ fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportRequest, LONG_SIDES, Shell, ShellError};
+    use super::{ExportRequest, SHORT_SIDES, Shell, ShellError};
     use cutlass_codec::{
         CodecId, ContainerId, FrameSize, Packet as FilePacket, StreamCodec, StreamParams,
         Timescale, Timestamp,
@@ -8853,7 +8847,7 @@ mod tests {
         let temp = Temp::new();
         let missing = shell().export(ExportRequest {
             path: temp.path.join("missing.png"),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::Png,
             replace: false,
         });
@@ -8867,7 +8861,7 @@ mod tests {
         let destination = temp.path.join("out.png");
         let declined = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::Vp8,
             replace: false,
         });
@@ -8878,14 +8872,15 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
             })
             .unwrap();
         let written = std::fs::read(&destination).unwrap();
         let (width, height, samples) = png_samples(&written);
-        assert_eq!((width, height), (480, 240));
+        // The short side is 480; the 2:1 canvas keeps its shape.
+        assert_eq!((width, height), (960, 480));
         assert!(
             samples
                 .chunks(4)
@@ -8896,7 +8891,7 @@ mod tests {
         let kept = std::fs::read(&destination).unwrap();
         let overwrite = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::Png,
             replace: false,
         });
@@ -8907,19 +8902,19 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: true,
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
-        assert_eq!((width, height), (480, 240));
+        assert_eq!((width, height), (960, 480));
         assert!(samples.iter().all(|sample| *sample == 0));
         assert_eq!(desktop.draft().unwrap(), &before);
         let clear = std::fs::read(&destination).unwrap();
         let movie = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::H264,
             replace: true,
         });
@@ -8931,12 +8926,12 @@ mod tests {
 
         let step = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 1000,
+            short_side: 1000,
             codec: CodecId::Png,
             replace: true,
         });
         assert!(matches!(step, Err(ShellError::Unavailable(_))));
-        assert_eq!(LONG_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
+        assert_eq!(SHORT_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
     }
 
     #[test]
@@ -9023,7 +9018,7 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
             })
@@ -9057,7 +9052,7 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
             })

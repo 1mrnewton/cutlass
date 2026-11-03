@@ -139,7 +139,7 @@ pub trait ExportProgress: Send + Sync {
     fn progress(&self, done: u64, total: u64) -> bool;
 }
 
-/// The long sides, in pixels, an export may be, smallest first.
+/// The short sides, in pixels, an export may be, smallest first.
 #[uniffi::export]
 #[must_use]
 pub fn export_sides() -> Vec<u32> {
@@ -849,19 +849,19 @@ impl Editor {
         }))
     }
 
-    /// Write the whole cut to `path` as an MP4, `long_side` pixels on its
-    /// long side: one of [`export_sides`]. Play stops first. `progress`
+    /// Write the whole cut to `path` as an MP4, `short_side` pixels on its
+    /// short side: one of [`export_sides`]. Play stops first. `progress`
     /// hears each picture on the editor's own thread and stops the export
     /// by returning false; a stopped or failed export leaves no file. Every
     /// other call waits until it is done.
     pub fn export(
         &self,
         path: String,
-        long_side: u32,
+        short_side: u32,
         progress: Arc<dyn ExportProgress>,
     ) -> Result<Exported, EditorError> {
         let exported = self.run(move |host| {
-            host.export(&PathBuf::from(path), long_side, &mut |done, total| {
+            host.export(&PathBuf::from(path), short_side, &mut |done, total| {
                 progress.progress(done, total)
             })
         })??;

@@ -3941,8 +3941,8 @@ fn export_dialog(
     parent: Option<&eframe::Frame>,
 ) {
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
-        ui.label(RichText::new("Long side").color(tokens::MUTED));
-        for side in crate::shell::LONG_SIDES {
+        ui.label(RichText::new("Short side").color(tokens::MUTED));
+        for side in crate::shell::SHORT_SIDES {
             if ui
                 .selectable_label(view.export_side == side, side.to_string())
                 .clicked()
@@ -4025,7 +4025,7 @@ fn import_chosen(
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
     shell.export(ExportRequest {
         path: std::path::PathBuf::from(&view.export_path),
-        long_side: view.export_side,
+        short_side: view.export_side,
         codec: view.export_codec,
         replace: view.replace_prompt,
     })

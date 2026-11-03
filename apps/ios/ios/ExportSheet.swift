@@ -174,7 +174,7 @@ struct ExportSheet: View {
                 Result {
                     try editor.export(
                         path: file.path(percentEncoded: false),
-                        longSide: side,
+                        shortSide: side,
                         progress: listener
                     )
                 }

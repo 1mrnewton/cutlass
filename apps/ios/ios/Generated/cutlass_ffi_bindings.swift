@@ -673,13 +673,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func durationUs() throws  -> Int64
     
     /**
-     * Write the whole cut to `path` as an MP4, `long_side` pixels on its
-     * long side: one of [`export_sides`]. Play stops first. `progress`
+     * Write the whole cut to `path` as an MP4, `short_side` pixels on its
+     * short side: one of [`export_sides`]. Play stops first. `progress`
      * hears each picture on the editor's own thread and stops the export
      * by returning false; a stopped or failed export leaves no file. Every
      * other call waits until it is done.
      */
-    func export(path: String, longSide: UInt32, progress: ExportProgress) throws  -> Exported
+    func export(path: String, shortSide: UInt32, progress: ExportProgress) throws  -> Exported
     
     /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
@@ -966,19 +966,19 @@ open func durationUs()throws  -> Int64  {
 }
     
     /**
-     * Write the whole cut to `path` as an MP4, `long_side` pixels on its
-     * long side: one of [`export_sides`]. Play stops first. `progress`
+     * Write the whole cut to `path` as an MP4, `short_side` pixels on its
+     * short side: one of [`export_sides`]. Play stops first. `progress`
      * hears each picture on the editor's own thread and stops the export
      * by returning false; a stopped or failed export leaves no file. Every
      * other call waits until it is done.
      */
-open func export(path: String, longSide: UInt32, progress: ExportProgress)throws  -> Exported  {
+open func export(path: String, shortSide: UInt32, progress: ExportProgress)throws  -> Exported  {
     return try  FfiConverterTypeExported_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_export(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),
-        FfiConverterUInt32.lower(longSide),
+        FfiConverterUInt32.lower(shortSide),
         FfiConverterTypeExportProgress_lower(progress),uniffiCallStatus
     )
 })
@@ -3577,7 +3577,7 @@ public func effectChoices() -> [EffectChoice]  {
 })
 }
 /**
- * The long sides, in pixels, an export may be, smallest first.
+ * The short sides, in pixels, an export may be, smallest first.
  */
 public func exportSides() -> [UInt32]  {
     return try!  FfiConverterSequenceUInt32.lift(try! rustCall() {
@@ -3720,7 +3720,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() != 59474) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_func_export_sides() != 4458) {
+    if (uniffi_cutlass_ffi_bindings_checksum_func_export_sides() != 28968) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_fling_start() != 16462) {
@@ -3765,7 +3765,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 4799) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 5234) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_film() != 35426) {

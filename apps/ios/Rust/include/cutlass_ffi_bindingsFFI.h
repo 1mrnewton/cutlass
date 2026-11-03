@@ -301,7 +301,7 @@ int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(uint64_t ptr, R
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
-RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_export(uint64_t ptr, RustBuffer path, uint32_t long_side, uint64_t progress, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_export(uint64_t ptr, RustBuffer path, uint32_t short_side, uint64_t progress, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FILM

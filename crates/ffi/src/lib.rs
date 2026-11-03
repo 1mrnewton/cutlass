@@ -310,14 +310,14 @@ impl PhoneHost {
         )
     }
 
-    /// Write the whole cut to `destination` as an MP4 at `long_side`, one
+    /// Write the whole cut to `destination` as an MP4 at `short_side`, one
     /// of [`PHONE_EXPORT_SIDES`]. Play stops first. `progress` hears the
     /// frames done and the frames in all, and stops the export by returning
     /// false; nothing is left at `destination` then.
     pub fn export(
         &mut self,
         destination: &Path,
-        long_side: u32,
+        short_side: u32,
         progress: &mut dyn FnMut(u64, u64) -> bool,
     ) -> Result<PhoneExport, FfiError> {
         self.pause();
@@ -334,7 +334,7 @@ impl PhoneHost {
                 renderer: Some(renderer),
             },
             destination,
-            long_side,
+            short_side,
             progress,
         )
     }

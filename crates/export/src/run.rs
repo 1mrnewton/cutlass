@@ -176,7 +176,7 @@ where
         output_size(
             run.draft.canvas_config.width,
             run.draft.canvas_config.height,
-            run.request.long_side,
+            run.request.short_side,
         )?,
     );
     let mut video = open_video(run.factory, run.request, output)?;
@@ -1053,7 +1053,7 @@ mod tests {
     fn gif_request(range: TimeRange) -> ExportRequest {
         ExportRequest {
             range,
-            long_side: 240,
+            short_side: 240,
             codec: CodecId::Gif,
             bitrate: 2_000_000,
             frame_rate: FrameRate::FPS_30,
@@ -1406,7 +1406,7 @@ mod tests {
 
         let mut declined = gif_request(TimeRange::new(0, 33_334));
         declined.codec = CodecId::Mjpeg;
-        declined.long_side = 480;
+        declined.short_side = 480;
         let wide = color_draft(480, 270, 1_000_000);
         let before_wide = wide.clone();
         let mut mux = MuxDraft::new(
@@ -1473,7 +1473,7 @@ mod tests {
         let before = draft.clone();
         let mut request = gif_request(TimeRange::new(0, 33_334));
         request.codec = CodecId::Vp9;
-        request.long_side = 480;
+        request.short_side = 480;
         let mut mux = MuxDraft::new(
             ContainerId::Isobmff,
             MuxMode::Progressive,

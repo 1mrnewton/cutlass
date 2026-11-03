@@ -14,6 +14,7 @@ mod lane;
 mod reorder;
 mod ruler;
 mod snap;
+mod tools;
 mod zoom;
 
 pub use append::{Append, AppendLane, append_placement, material_span};
@@ -28,6 +29,7 @@ pub use lane::{Lane, lane_category, lanes};
 pub use reorder::{place_of, reorder_start};
 pub use ruler::{RulerStep, Tick, ruler_step, ruler_ticks, zoom_ceiling};
 pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
+pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use zoom::{
     Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,
 };

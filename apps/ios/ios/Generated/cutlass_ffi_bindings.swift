@@ -612,6 +612,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func append(materialId: String) throws  -> String
     
     /**
+     * The tool bar for `clip_id` while it is selected, or `None` for an id
+     * no row holds.
+     */
+    func clipBar(clipId: String) throws  -> ToolBar?
+    
+    /**
      * The end of the last clip, in microseconds.
      */
     func durationUs() throws  -> Int64
@@ -808,6 +814,20 @@ open func append(materialId: String)throws  -> String  {
     uniffi_cutlass_ffi_bindings_fn_method_editor_append(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(materialId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The tool bar for `clip_id` while it is selected, or `None` for an id
+     * no row holds.
+     */
+open func clipBar(clipId: String)throws  -> ToolBar?  {
+    return try  FfiConverterOptionTypeToolBar.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
     )
 })
 }
@@ -1622,6 +1642,72 @@ public func FfiConverterTypeTile_lower(_ value: Tile) -> RustBuffer {
 
 
 /**
+ * A tool as a bar shows it. `ready` says it works on the phone today;
+ * `opens` names the bar it opens instead of acting.
+ */
+public struct ToolItem: Equatable, Hashable {
+    public var kind: ToolKind
+    public var label: String
+    public var ready: Bool
+    public var opens: ToolBar?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(kind: ToolKind, label: String, ready: Bool, opens: ToolBar?) {
+        self.kind = kind
+        self.label = label
+        self.ready = ready
+        self.opens = opens
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ToolItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeToolItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ToolItem {
+        return
+            try ToolItem(
+                kind: FfiConverterTypeToolKind.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                ready: FfiConverterBool.read(from: &buf), 
+                opens: FfiConverterOptionTypeToolBar.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ToolItem, into buf: inout [UInt8]) {
+        FfiConverterTypeToolKind.write(value.kind, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterBool.write(value.ready, into: &buf)
+        FfiConverterOptionTypeToolBar.write(value.opens, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeToolItem_lift(_ buf: RustBuffer) throws -> ToolItem {
+    return try FfiConverterTypeToolItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeToolItem_lower(_ value: ToolItem) -> RustBuffer {
+    return FfiConverterTypeToolItem.lower(value)
+}
+
+
+/**
  * Why a call left the project as it was.
  */
 public 
@@ -1809,6 +1895,431 @@ public func FfiConverterTypeLaneKind_lower(_ value: LaneKind) -> RustBuffer {
 }
 
 
+
+/**
+ * A phone tool bar. See [`tool_bar`].
+ */
+
+public enum ToolBar: Equatable, Hashable {
+    
+    case root
+    case mainClip
+    case overlayClip
+    case audioClip
+    case textClip
+    case otherClip
+    case audio
+    case text
+    case effects
+    case overlay
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ToolBar: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeToolBar: FfiConverterRustBuffer {
+    typealias SwiftType = ToolBar
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ToolBar {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .root
+        
+        case 2: return .mainClip
+        
+        case 3: return .overlayClip
+        
+        case 4: return .audioClip
+        
+        case 5: return .textClip
+        
+        case 6: return .otherClip
+        
+        case 7: return .audio
+        
+        case 8: return .text
+        
+        case 9: return .effects
+        
+        case 10: return .overlay
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ToolBar, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .root:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .mainClip:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .overlayClip:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .audioClip:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .textClip:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .otherClip:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .audio:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .text:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .effects:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .overlay:
+            writeInt(&buf, Int32(10))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeToolBar_lift(_ buf: RustBuffer) throws -> ToolBar {
+    return try FfiConverterTypeToolBar.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeToolBar_lower(_ value: ToolBar) -> RustBuffer {
+    return FfiConverterTypeToolBar.lower(value)
+}
+
+
+
+/**
+ * One tool. Each shell maps it to its own icon.
+ */
+
+public enum ToolKind: Equatable, Hashable {
+    
+    case edit
+    case audio
+    case text
+    case effects
+    case overlay
+    case captions
+    case filters
+    case adjust
+    case stickers
+    case aspectRatio
+    case background
+    case split
+    case volume
+    case speed
+    case animations
+    case delete
+    case duplicate
+    case replace
+    case crop
+    case mirror
+    case rotate
+    case reverse
+    case freeze
+    case extractAudio
+    case fade
+    case beats
+    case unlink
+    case splice
+    case addOverlay
+    case importSound
+    case record
+    case addText
+    case editText
+    case draw
+    case videoEffects
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ToolKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeToolKind: FfiConverterRustBuffer {
+    typealias SwiftType = ToolKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ToolKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .edit
+        
+        case 2: return .audio
+        
+        case 3: return .text
+        
+        case 4: return .effects
+        
+        case 5: return .overlay
+        
+        case 6: return .captions
+        
+        case 7: return .filters
+        
+        case 8: return .adjust
+        
+        case 9: return .stickers
+        
+        case 10: return .aspectRatio
+        
+        case 11: return .background
+        
+        case 12: return .split
+        
+        case 13: return .volume
+        
+        case 14: return .speed
+        
+        case 15: return .animations
+        
+        case 16: return .delete
+        
+        case 17: return .duplicate
+        
+        case 18: return .replace
+        
+        case 19: return .crop
+        
+        case 20: return .mirror
+        
+        case 21: return .rotate
+        
+        case 22: return .reverse
+        
+        case 23: return .freeze
+        
+        case 24: return .extractAudio
+        
+        case 25: return .fade
+        
+        case 26: return .beats
+        
+        case 27: return .unlink
+        
+        case 28: return .splice
+        
+        case 29: return .addOverlay
+        
+        case 30: return .importSound
+        
+        case 31: return .record
+        
+        case 32: return .addText
+        
+        case 33: return .editText
+        
+        case 34: return .draw
+        
+        case 35: return .videoEffects
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ToolKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .edit:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .audio:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .text:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .effects:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .overlay:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .captions:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .filters:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .adjust:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .stickers:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .aspectRatio:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .background:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .split:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .volume:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .speed:
+            writeInt(&buf, Int32(14))
+        
+        
+        case .animations:
+            writeInt(&buf, Int32(15))
+        
+        
+        case .delete:
+            writeInt(&buf, Int32(16))
+        
+        
+        case .duplicate:
+            writeInt(&buf, Int32(17))
+        
+        
+        case .replace:
+            writeInt(&buf, Int32(18))
+        
+        
+        case .crop:
+            writeInt(&buf, Int32(19))
+        
+        
+        case .mirror:
+            writeInt(&buf, Int32(20))
+        
+        
+        case .rotate:
+            writeInt(&buf, Int32(21))
+        
+        
+        case .reverse:
+            writeInt(&buf, Int32(22))
+        
+        
+        case .freeze:
+            writeInt(&buf, Int32(23))
+        
+        
+        case .extractAudio:
+            writeInt(&buf, Int32(24))
+        
+        
+        case .fade:
+            writeInt(&buf, Int32(25))
+        
+        
+        case .beats:
+            writeInt(&buf, Int32(26))
+        
+        
+        case .unlink:
+            writeInt(&buf, Int32(27))
+        
+        
+        case .splice:
+            writeInt(&buf, Int32(28))
+        
+        
+        case .addOverlay:
+            writeInt(&buf, Int32(29))
+        
+        
+        case .importSound:
+            writeInt(&buf, Int32(30))
+        
+        
+        case .record:
+            writeInt(&buf, Int32(31))
+        
+        
+        case .addText:
+            writeInt(&buf, Int32(32))
+        
+        
+        case .editText:
+            writeInt(&buf, Int32(33))
+        
+        
+        case .draw:
+            writeInt(&buf, Int32(34))
+        
+        
+        case .videoEffects:
+            writeInt(&buf, Int32(35))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeToolKind_lift(_ buf: RustBuffer) throws -> ToolKind {
+    return try FfiConverterTypeToolKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeToolKind_lower(_ value: ToolKind) -> RustBuffer {
+    return FfiConverterTypeToolKind.lower(value)
+}
+
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1852,6 +2363,30 @@ fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFrame.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeToolBar: FfiConverterRustBuffer {
+    typealias SwiftType = ToolBar?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeToolBar.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeToolBar.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -2006,6 +2541,31 @@ fileprivate struct FfiConverterSequenceTypeTile: FfiConverterRustBuffer {
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeToolItem: FfiConverterRustBuffer {
+    typealias SwiftType = [ToolItem]
+
+    public static func write(_ value: [ToolItem], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeToolItem.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ToolItem] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ToolItem]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeToolItem.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * Write a new empty project in the Cutlass folder at `root`, named like the
  * desktop's, and return its folder.
@@ -2069,6 +2629,17 @@ public func start(root: String)throws   {try rustCallWithError(FfiConverterTypeE
 }
 }
 /**
+ * The tools on `bar`, in order.
+ */
+public func toolBar(bar: ToolBar) -> [ToolItem]  {
+    return try!  FfiConverterSequenceTypeToolItem.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_tool_bar(
+        FfiConverterTypeToolBar_lower(bar),uniffiCallStatus
+    )
+})
+}
+/**
  * The gain at volume slider `position`, 0 to 1. Unity is the middle and
  * the right end is ten times.
  */
@@ -2122,6 +2693,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_start() != 16636) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_tool_bar() != 18374) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_volume_at() != 31091) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2129,6 +2703,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar() != 29840) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {

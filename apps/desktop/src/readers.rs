@@ -113,6 +113,27 @@ mod tests {
     }
 
     #[test]
+    fn an_iphone_movie_with_spatial_audio_plays_its_picture_and_aac_sound() {
+        // Recent iPhones store an `apac` spatial-audio track beside the AAC.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/IMG_9197.mov");
+        if !path.is_file() {
+            eprintln!("skipped: {} is missing", path.display());
+            return;
+        }
+        let mut media = installed_readers().open(&path).expect("open");
+        let held = media
+            .decode_at(
+                cutlass_model::Micros(1_000_000),
+                &cutlass_model::TimeRange::new(0, 10_000_000),
+            )
+            .expect("picture");
+        assert_eq!((held.frame.width(), held.frame.height()), (3840, 2160));
+        let sound = media.pull_audio().expect("pull").expect("pcm");
+        assert_eq!(sound.pcm.rate, 48_000);
+    }
+
+    #[test]
     fn a_fragmented_movie_without_sidx_or_mfra_decodes_the_picture_at_two_seconds() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../local-files/16929689_1920_1080_30fps.mp4");

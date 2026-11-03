@@ -14,7 +14,7 @@ struct EditorScreen: View {
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
-        case volume, speed, effects
+        case volume, speed, effects, ratio
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -54,7 +54,7 @@ struct EditorScreen: View {
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
         .onChange(of: model.selectedClip) { _, id in
-            if id == nil, panel != .text(nil), panel != .effects { panel = nil }
+            if id == nil, panel != .text(nil), panel != .effects, panel != .ratio { panel = nil }
         }
         .onDisappear { model.pause() }
         .sheet(isPresented: $exporting) {
@@ -84,7 +84,10 @@ struct EditorScreen: View {
 
     private var preview: some View {
         ZStack {
+            // Lighter than the canvas, so the canvas shows its ratio.
+            Color(white: 0.06)
             Color.black
+                .aspectRatio(model.canvasAspect, contentMode: .fit)
             if let picture = model.picture {
                 Image(decorative: picture, scale: 1)
                     .resizable()
@@ -133,6 +136,9 @@ struct EditorScreen: View {
         if panel == .effects {
             EffectsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .ratio {
+            RatioPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -142,7 +148,7 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects: EmptyView()
+                case .text, .effects, .ratio: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -178,6 +184,9 @@ struct EditorScreen: View {
         case .addText: panel = .text(nil)
         case .editText: panel = .text(model.selectedClip)
         case .videoEffects: panel = .effects
+        case .aspectRatio:
+            model.selectedClip = nil
+            panel = .ratio
         default: model.say("\(tool.label) is coming soon")
         }
     }

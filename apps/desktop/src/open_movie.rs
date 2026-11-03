@@ -735,7 +735,7 @@ fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
     frame.layers.iter().any(|layer| match &layer.source {
         cutlass_eval::GpuSource::Yuv { .. } => true,
         cutlass_eval::GpuSource::Nested(child) => decodes_on_gpu(child),
-        cutlass_eval::GpuSource::Rgba(_) => false,
+        cutlass_eval::GpuSource::Rgba(_) | cutlass_eval::GpuSource::Effect(_) => false,
     })
 }
 

@@ -3,10 +3,13 @@
 //! A video clip with no effect is a decoded 4:2:0 picture and the maps that
 //! place it, so the GPU converts and places it. Every other layer, and a
 //! clip the GPU path does not cover, is premultiplied RGBA from the CPU
-//! path. A frame with an effect mark or a clip filter is composed on the
-//! CPU as before.
+//! path. A recipe effect is a layer of its own that the GPU runs over the
+//! layers before it. A frame with any other effect mark or a clip filter is
+//! composed on the CPU as before, and its recipe effects still run on the
+//! GPU over that picture.
 
 use cutlass_compositor::Frame;
+use cutlass_effects::Step;
 use cutlass_gpu::{Affine, Placement};
 use cutlass_picture::CpuBytes;
 
@@ -23,6 +26,9 @@ pub enum GpuSource {
     Rgba(CpuBytes),
     /// A compound clip's child frame, drawn onto its own canvas first.
     Nested(Box<FrameLayers>),
+    /// A recipe effect over every layer before it, with its values at this
+    /// frame's time.
+    Effect(Vec<Step>),
 }
 
 /// One layer and where it lands.
@@ -49,6 +55,15 @@ impl GpuLayer {
         Self {
             source: GpuSource::Rgba(picture),
             placement,
+            backdrop: None,
+        }
+    }
+
+    /// An effect over everything below it on a `width` by `height` canvas.
+    pub(crate) fn effect(steps: Vec<Step>, width: u32, height: u32) -> Self {
+        Self {
+            source: GpuSource::Effect(steps),
+            placement: Placement::canvas(width, height),
             backdrop: None,
         }
     }

@@ -64,6 +64,7 @@ fn layers_of(frame: &FrameLayers) -> Result<Vec<Layer<'_>>, RenderError> {
                 size: (child.width, child.height),
                 placement: layer.placement,
             },
+            GpuSource::Effect(steps) => Layer::Effect(steps),
         });
     }
     Ok(layers)
@@ -146,6 +147,36 @@ mod tests {
         let canvas = renderer.canvas(4, 2).expect("canvas");
         renderer.draw_frame(&canvas, &frame).expect("draw");
         assert_eq!(renderer.read(&canvas).expect("read"), pixels());
+    }
+
+    #[test]
+    fn an_effect_layer_runs_over_the_layers_before_it() {
+        let Some(renderer) = renderer() else {
+            return;
+        };
+        let invert = cutlass_effects::Step {
+            block: cutlass_effects::Block::Invert,
+            values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let frame = FrameLayers {
+            width: 4,
+            height: 2,
+            layers: vec![
+                picture_layer(4, 2, pixels()),
+                GpuLayer {
+                    source: GpuSource::Effect(vec![invert]),
+                    placement: Placement::canvas(4, 2),
+                    backdrop: None,
+                },
+            ],
+        };
+        let canvas = renderer.canvas(4, 2).expect("canvas");
+        renderer.draw_frame(&canvas, &frame).expect("draw");
+        let expected: Vec<u8> = pixels()
+            .chunks(4)
+            .flat_map(|pixel| [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], pixel[3]])
+            .collect();
+        assert_eq!(renderer.read(&canvas).expect("read"), expected);
     }
 
     #[test]

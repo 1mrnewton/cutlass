@@ -3104,7 +3104,7 @@ const WAVE_LOUD: f32 = 0.9;
 const WAVE_CLIPPED: f32 = 0.999;
 
 /// How much of the band a level fills: decibels from the floor up to full
-/// scale, the way CapCut's speech sits high in the band.
+/// scale, so speech sits high in the band.
 fn wave_height(level: f32) -> f32 {
     if level <= 0.0 || !level.is_finite() {
         return 0.0;
@@ -3144,7 +3144,7 @@ fn lerp(from: Color32, to: Color32, t: f32) -> Color32 {
     )
 }
 
-/// Where the volume line sits in the band for a gain: 100% at CapCut's 45%,
+/// Where the volume line sits in the band for a gain: 100% at 45%,
 /// +20 dB, the most a clip takes, at the top, and quieter gains down the
 /// same decibel scale as the bars.
 fn volume_height(gain: f32) -> f32 {
@@ -3242,7 +3242,7 @@ struct ClipParts {
 }
 
 /// Main-track and audio clips carry a header row. Under it a main-track
-/// clip with sound gives CapCut's 30% to the band and the rest to the
+/// clip with sound gives 30% to the band and the rest to the
 /// filmstrip; an audio clip is all band. Other clips are all filmstrip.
 fn clip_parts(clip_rect: Rect, main: bool, audio: bool, sound: bool) -> ClipParts {
     if !main && !audio {
@@ -4773,7 +4773,7 @@ mod tests {
     }
 
     #[test]
-    fn lanes_take_capcut_heights_around_the_centered_main_track() {
+    fn lanes_take_their_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);
         let heights: Vec<f32> = rows.iter().map(Rect::height).collect();

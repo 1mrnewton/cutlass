@@ -1,4 +1,4 @@
-//! The timeline ruler: CapCut 9.6.0's step table at the draft rate.
+//! The timeline ruler: the step table at the draft rate.
 //!
 //! Pixel size is pixels per microsecond. The steps run coarse to fine, and
 //! the ruler keeps the first whose threshold is at least the pixel size.
@@ -31,7 +31,7 @@ const CLOCK_STEPS: [(i64, f64); 18] = [
     (1, 3e-4),
 ];
 
-/// One of CapCut's eight rates.
+/// One of the eight rates.
 struct RateSteps {
     fps: f64,
     nominal: i64,

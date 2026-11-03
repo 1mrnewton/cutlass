@@ -1,4 +1,4 @@
-//! Where a clip's filmstrip tiles sit, as CapCut 9.6.0 lays them out.
+//! Where a clip's filmstrip tiles sit.
 //!
 //! Tiles start at the clip's left edge and sit side by side, each one tile
 //! wide; the last is cut at the clip's right edge. Only tiles that touch the

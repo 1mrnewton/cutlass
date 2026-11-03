@@ -3,7 +3,7 @@
 //! A segment the factory cannot open is omitted. The other layers still draw.
 //! Identity fits the decoded picture inside the canvas, keeping its shape,
 //! and centers it, so a smaller picture is scaled up and a larger one down.
-//! Scale 1 is that fitted picture, as CapCut draws it. The segment
+//! Scale 1 is that fitted picture. The segment
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
 //! A translation of 1 is half the canvas. A file display quarter turn is

@@ -6,13 +6,13 @@
 //! Stdout is never written, because `cutlass mcp` speaks on stdout.
 //!
 //! A call formats one line, writes it, and flushes before it returns.
-//! Keep it off the per-frame and per-sample paths. Call [`init`] or
-//! [`init_default`] once at process start. A record before that is discarded.
+//! Keep it off the per-frame and per-sample paths. Call [`init`] once at
+//! process start with the logs folder of the Cutlass root. A record before
+//! that is discarded.
 //! A failed write does not fail the caller. The next record tries again.
 
 #![forbid(unsafe_code)]
 
-mod dir;
 mod time;
 
 use std::fmt;
@@ -22,8 +22,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::SystemTime;
-
-pub use dir::default_directory;
 
 /// Live log size that triggers rotation, in bytes.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -45,8 +43,6 @@ static STATE: Mutex<Option<Logger>> = Mutex::new(None);
 /// Why the log file could not be opened.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InitError {
-    /// No home or state directory is set, so there is nowhere to put the file.
-    NoDirectory,
     /// The log path is a symlink. It is not followed.
     Symlink {
         /// The path that was refused.
@@ -64,7 +60,6 @@ pub enum InitError {
 impl fmt::Display for InitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoDirectory => formatter.write_str("no log directory is available"),
             Self::Symlink { path } => {
                 write!(formatter, "log file {} is a symlink", path.display())
             }
@@ -128,22 +123,6 @@ pub fn init(directory: &Path) -> Result<PathBuf, InitError> {
     let result = install(directory, process_console(), MAX_FILE_BYTES);
     report_open(&result);
     result
-}
-
-/// Open `cutlass.log` in [`default_directory`].
-pub fn init_default() -> Result<PathBuf, InitError> {
-    match default_directory() {
-        Ok(directory) => init(&directory),
-        Err(error) => {
-            install_console_only(process_console());
-            record(
-                Level::Error,
-                "cutlass_logger",
-                &format!("log file unavailable: {error}"),
-            );
-            Err(error)
-        }
-    }
 }
 
 /// Write one record. Before [`init`], this does nothing.
@@ -262,19 +241,6 @@ fn install(directory: &Path, console: Console, max_bytes: u64) -> Result<PathBuf
             }
             Err(error)
         }
-    }
-}
-
-fn install_console_only(console: Console) {
-    if !console_is_on(&console) {
-        return;
-    }
-    let mut guard = lock();
-    if guard.is_none() {
-        *guard = Some(Logger {
-            file: None,
-            console,
-        });
     }
 }
 

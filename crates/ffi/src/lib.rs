@@ -45,11 +45,6 @@ pub fn start_log(directory: &Path) -> Result<PathBuf, LogError> {
     cutlass_logger::init(directory)
 }
 
-/// Open the process log in the per-user log directory.
-pub fn start_default_log() -> Result<PathBuf, LogError> {
-    cutlass_logger::init_default()
-}
-
 /// The open project, its session, the playhead, and the resource cache.
 ///
 /// Save writes the session draft into the project folder. The undo stack stays

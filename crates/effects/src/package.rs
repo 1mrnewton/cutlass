@@ -238,6 +238,7 @@ pub fn map_storage_error(id: &str, error: &StorageError) -> PackageError {
         StorageError::EmptyUrl
         | StorageError::LeavesRoot { .. }
         | StorageError::NotADirectory { .. }
+        | StorageError::NotAbsolute { .. }
         | StorageError::SameRoot { .. }
         | StorageError::Download { .. }
         | StorageError::IndexVersion { .. }

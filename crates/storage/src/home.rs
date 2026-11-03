@@ -140,16 +140,22 @@ const fn current_host() -> Host {
 ///
 /// macOS: `~/Library/Application Support/Cutlass`. Windows:
 /// `%APPDATA%\Cutlass`. Elsewhere: `$XDG_DATA_HOME/cutlass`, else
-/// `~/.local/share/cutlass`. `None` when the variables it needs are unset.
-/// A phone passes its app container instead.
+/// `~/.local/share/cutlass`. When the variables it needs are unset, a
+/// `cutlass` folder in the temporary directory. A phone passes its app
+/// container to [`Home::open`] instead.
 #[must_use]
-pub fn desktop_root() -> Option<PathBuf> {
-    root_from(
+pub fn desktop_home() -> Home {
+    let root = root_from(
         current_host(),
         variable("HOME").as_deref(),
         variable("APPDATA").as_deref(),
         variable("XDG_DATA_HOME").as_deref(),
     )
+    .unwrap_or_else(|| {
+        let temp = env::temp_dir().join("cutlass");
+        std::path::absolute(&temp).unwrap_or(temp)
+    });
+    Home { root }
 }
 
 fn root_from(
@@ -187,7 +193,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Home, Host, desktop_root, root_from};
+    use super::{Home, Host, desktop_home, root_from};
     use crate::StorageError;
 
     struct Temp(PathBuf);
@@ -322,10 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn this_desktop_root_is_absolute_when_known() {
-        if let Some(root) = desktop_root() {
-            assert!(root.is_absolute());
-            assert!(Home::at(root).is_ok());
-        }
+    fn this_desktop_root_is_absolute_and_is_not_created() {
+        let home = desktop_home();
+        assert!(home.root().is_absolute(), "{}", home.root().display());
+        assert!(home.root().ends_with("Cutlass") || home.root().ends_with("cutlass"));
     }
 }

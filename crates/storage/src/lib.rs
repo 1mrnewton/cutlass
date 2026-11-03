@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use cutlass_download::hash_file;
 
 pub use cutlass_download::{Checksum, DownloadError, Downloader, Job, JobId, Priority, Progress};
-pub use home::{Home, desktop_root};
+pub use home::{Home, desktop_home};
 pub use index::{Place, Record, ResourceId};
 pub use quota::{Quota, Shortfall};
 

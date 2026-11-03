@@ -37,6 +37,7 @@ use cutlass_playback::{
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
+use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
     FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
@@ -891,26 +892,27 @@ impl Shell {
             .unwrap_or_else(|| "Untitled".to_owned())
     }
 
+    /// The one folder everything Cutlass writes lives under.
+    ///
+    /// On macOS this is `~/Library/Application Support/Cutlass`. Naming it
+    /// does not create it.
+    #[must_use]
+    pub fn home() -> Home {
+        cutlass_storage::desktop_home()
+    }
+
     /// Where new projects are created and where the launch list looks.
     ///
-    /// On macOS this is `~/Library/Application Support/Cutlass/Projects`.
     /// The directory is created when the first project is saved.
     #[must_use]
     pub fn projects_directory() -> PathBuf {
-        application_support()
-            .map(|base| base.join("Cutlass").join("Projects"))
-            .unwrap_or_else(|| std::env::temp_dir().join("cutlass-projects"))
+        Self::home().projects()
     }
 
     /// The user's settings file.
-    ///
-    /// On macOS this is `~/Library/Application Support/Cutlass/settings.json`.
     #[must_use]
     pub fn settings_path() -> PathBuf {
-        application_support()
-            .map(|base| base.join("Cutlass"))
-            .unwrap_or_else(|| std::env::temp_dir().join("cutlass"))
-            .join("settings.json")
+        Self::home().settings_file()
     }
 
     /// Projects under `root`, newest first. A folder without a draft is skipped.
@@ -5659,30 +5661,6 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
         }
     }
     Err(ShellError::Io("the project resources are full".to_owned()))
-}
-
-#[cfg(target_os = "macos")]
-fn application_support() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support"),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn application_support() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(PathBuf::from)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn application_support() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return Some(PathBuf::from(xdg));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".local").join("share"))
 }
 
 /// `peaks` spread over `columns`: the loudest level in each column's share
@@ -11588,8 +11566,7 @@ mod tests {
     #[test]
     fn naming_the_projects_directory_does_not_create_it() {
         let path = Shell::projects_directory();
-        let under_support = path.ends_with(Path::new("Cutlass").join("Projects"));
-        let fallback = path.ends_with("cutlass-projects");
-        assert!(under_support || fallback, "{}", path.display());
+        assert_eq!(path, Shell::home().projects());
+        assert!(path.starts_with(Shell::home().root()));
     }
 }

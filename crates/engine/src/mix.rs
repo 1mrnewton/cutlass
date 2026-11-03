@@ -259,12 +259,22 @@ fn apply_gain(pcm: &Pcm, volume: f64) -> Result<Pcm, EngineError> {
     Pcm::from_f32(pcm.rate, pcm.layout.clone(), scaled).map_err(|_| EngineError::Layout)
 }
 
+/// Every buffer added together in the widest layout among them. A mono
+/// buffer is heard on both sides of a stereo mix, as a clip with no sound
+/// of its own (silence) sits beside music. Other differing layouts are
+/// refused.
 fn sum(rate: u32, buffers: &[Pcm]) -> Result<Pcm, EngineError> {
     if buffers.is_empty() {
         return Pcm::from_f32(rate, ChannelLayout::mono(), Vec::new())
             .map_err(|_| EngineError::Layout);
     }
-    let layout = buffers[0].layout.clone();
+    let Some(layout) = buffers
+        .iter()
+        .map(|pcm| pcm.layout.clone())
+        .max_by_key(ChannelLayout::len)
+    else {
+        return Err(EngineError::Layout);
+    };
     let channels = layout.len();
     let frames = buffers.iter().map(|pcm| pcm.samples).max().unwrap_or(0);
     let len = usize::try_from(frames)
@@ -273,15 +283,24 @@ fn sum(rate: u32, buffers: &[Pcm]) -> Result<Pcm, EngineError> {
         .ok_or(EngineError::Overflow)?;
     let mut mixed = vec![0.0_f32; len];
     for pcm in buffers {
-        if pcm.layout != layout || pcm.rate != rate {
+        if pcm.rate != rate {
             return Err(EngineError::Layout);
         }
         let Some(samples) = pcm.as_f32() else {
             return Err(EngineError::Layout);
         };
+        let spread = if pcm.layout == layout {
+            1
+        } else if pcm.layout.len() == 1 {
+            channels
+        } else {
+            return Err(EngineError::Layout);
+        };
         for (index, sample) in samples.iter().enumerate() {
-            if let Some(slot) = mixed.get_mut(index) {
-                *slot += sample;
+            for side in 0..spread {
+                if let Some(slot) = mixed.get_mut(index * spread + side) {
+                    *slot += sample;
+                }
             }
         }
     }
@@ -298,6 +317,18 @@ mod tests {
 
     fn mono(rate: u32, samples: Vec<f32>) -> Pcm {
         Pcm::from_f32(rate, ChannelLayout::mono(), samples).expect("pcm")
+    }
+
+    #[test]
+    fn a_mono_clip_is_heard_on_both_sides_of_a_stereo_mix() {
+        let stereo = Pcm::from_f32(4, ChannelLayout::stereo(), vec![0.1, 0.2, 0.3, 0.4]).unwrap();
+        let summed = sum(4, &[mono(4, vec![0.5, 0.0]), stereo.clone()]).unwrap();
+        assert_eq!(summed.layout, ChannelLayout::stereo());
+        assert_eq!(summed.as_f32().unwrap(), [0.6, 0.7, 0.3, 0.4]);
+        // The same either way round.
+        let other = sum(4, &[stereo, mono(4, vec![0.5, 0.0])]).unwrap();
+        assert_eq!(other, summed);
+        assert_eq!(sum(8, &[mono(4, vec![0.5])]), Err(EngineError::Layout));
     }
 
     fn sound(pcm: Pcm) -> MixClip {

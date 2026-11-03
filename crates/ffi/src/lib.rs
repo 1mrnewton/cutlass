@@ -19,6 +19,7 @@ mod media;
 mod player;
 mod preview;
 mod project;
+mod stage;
 mod strip;
 mod text;
 mod timeline;
@@ -47,6 +48,7 @@ pub use host::Commands;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
+pub use stage::PhoneStage;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
 pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
@@ -89,6 +91,8 @@ pub struct PhoneHost {
     preview: Preview,
     strip: Strip,
     faces: FaceTable,
+    /// The preview gesture in flight.
+    live: Option<stage::Live>,
 }
 
 impl PhoneHost {
@@ -128,6 +132,7 @@ impl PhoneHost {
             preview: Preview::new(),
             strip: Strip::default(),
             faces: FaceTable::default(),
+            live: None,
         })
     }
 
@@ -349,6 +354,76 @@ impl PhoneHost {
             })?;
         self.apply(self.revision(), &requests)?;
         Ok(())
+    }
+
+    /// The box of the picture clip `segment_id` on the canvas. A clip that
+    /// is not a picture has none.
+    #[must_use]
+    pub fn stage(&self, segment_id: &SegmentId) -> Option<PhoneStage> {
+        let stage = cutlass_editor::stage_box(self.draft(), segment_id)?;
+        let canvas = cutlass_editor::canvas_size(self.draft());
+        Some(PhoneStage::new(canvas, &stage, Default::default()))
+    }
+
+    /// The topmost picture clip under the canvas point `(x, y)` at `time`.
+    #[must_use]
+    pub fn stage_pick(&self, time: Micros, x: f64, y: f64) -> Option<SegmentId> {
+        cutlass_editor::stage_pick(self.draft(), time, x, y)
+    }
+
+    /// Start moving the picture clip `segment_id` on the preview. A gesture
+    /// still open is ended first.
+    pub fn stage_begin(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        let gesture = cutlass_editor::stage_gesture(self.draft(), segment_id).ok_or_else(|| {
+            FfiError::Refused {
+                reason: "only an unlocked picture moves on the preview".to_owned(),
+            }
+        })?;
+        self.live = Some(stage::Live {
+            gesture,
+            applied: None,
+        });
+        Ok(())
+    }
+
+    /// Place the clip `(shift_x, shift_y)` canvas pixels from where the
+    /// gesture started, `pinch` times its size, and turned `turn` degrees
+    /// clockwise. The first change is an undo step and later ones join it.
+    pub fn stage_move(
+        &mut self,
+        shift_x: f64,
+        shift_y: f64,
+        pinch: f64,
+        turn: f64,
+    ) -> Result<PhoneStage, FfiError> {
+        let live = self.live.as_ref().ok_or_else(|| FfiError::Refused {
+            reason: "no preview gesture is open".to_owned(),
+        })?;
+        let step = live.gesture.step(shift_x, shift_y, pinch, turn);
+        let canvas = cutlass_editor::canvas_size(self.draft());
+        let stage = PhoneStage::new(canvas, &step.stage, step.guides);
+        let revision = self.revision();
+        let joins = match live.applied {
+            Some((_, pose)) if pose == step.pose => return Ok(stage),
+            Some((applied, _)) => applied == revision,
+            None if live.gesture.start() == step.pose => return Ok(stage),
+            None => false,
+        };
+        let requests = live.gesture.requests(step.pose);
+        let revision = if joins {
+            self.commands.fold(revision, &requests)?
+        } else {
+            self.apply(revision, &requests)?
+        };
+        if let Some(live) = self.live.as_mut() {
+            live.applied = Some((revision, step.pose));
+        }
+        Ok(stage)
+    }
+
+    /// End the preview gesture. A gesture that changed nothing leaves no step.
+    pub fn stage_end(&mut self) {
+        self.live = None;
     }
 
     /// The composited picture at `time`, reading media from the project folder.
@@ -961,6 +1036,43 @@ mod tests {
         assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
         host.undo().unwrap();
         assert_eq!(canvas(&host), (1_920, 1_080, "16:9".to_owned()));
+    }
+
+    #[test]
+    fn a_preview_gesture_moves_a_picture_as_one_undo_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let stage = host.stage(&clip).unwrap();
+        let middle = (stage.canvas_width / 2.0, stage.canvas_height / 2.0);
+        assert_eq!(
+            host.stage_pick(Micros(0), middle.0, middle.1),
+            Some(clip.clone())
+        );
+        assert_eq!(host.stage_pick(Micros(0), -1.0, -1.0), None);
+        assert!(host.stage_move(1.0, 1.0, 1.0, 0.0).is_err());
+
+        let steps = host.revision();
+        host.stage_begin(&clip).unwrap();
+        host.stage_move(0.0, 0.0, 1.0, 0.0).unwrap();
+        assert_eq!(host.revision(), steps);
+        host.stage_move(100.0, 0.0, 1.0, 0.0).unwrap();
+        let moved = host.stage_move(200.0, 0.0, 0.5, 30.0).unwrap();
+        host.stage_end();
+        assert!(host.revision() > steps);
+        assert_eq!(host.stage(&clip).unwrap().center_x, moved.center_x);
+        assert!((moved.center_x - middle.0 - 200.0).abs() < 1e-6);
+        assert!((moved.turn - 30.0).abs() < 1e-6);
+        let segment = &host.draft().tracks[0].segments[0];
+        assert!((segment.uniform_scale.value - 0.5).abs() < 1e-9);
+
+        host.undo().unwrap();
+        let back = host.stage(&clip).unwrap();
+        assert_eq!((back.center_x, back.turn), (middle.0, 0.0));
     }
 
     #[test]

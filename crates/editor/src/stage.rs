@@ -186,6 +186,12 @@ impl StageGesture {
         &self.segment_id
     }
 
+    /// The placement the clip had when the gesture started.
+    #[must_use]
+    pub const fn start(&self) -> Pose {
+        self.start
+    }
+
     /// Where the clip is after the fingers moved `(shift_x, shift_y)` canvas
     /// pixels, pinched by `pinch` (1 is no change), and turned `turn`
     /// degrees clockwise, all since the start. The centre snaps to the

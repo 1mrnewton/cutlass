@@ -459,7 +459,7 @@ fn store(state: &mut State, held: HeldFrame, ahead: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BEHIND, State, store};
+    use super::{BEHIND, BEHIND_BYTES, Job, State, aim, next_job, store};
     use crate::reader::{DecodedFrame, HeldFrame};
     use cutlass_model::Micros;
     use std::collections::VecDeque;
@@ -498,6 +498,71 @@ mod tests {
         let starts: Vec<i64> = state.frames.iter().map(|held| held.start.0).collect();
         assert_eq!(starts.len(), BEHIND + 1 + 3);
         assert_eq!(starts, [30, 40, 50, 60, 70, 80]);
+    }
+
+    fn sized(start: i64, bytes: usize) -> HeldFrame {
+        HeldFrame {
+            start: Micros(start),
+            end: Micros(start + 10),
+            frame: DecodedFrame::Coded {
+                width: 1,
+                height: 1,
+                pixel: cutlass_decode::PixelFormat::Yuv420p,
+                primaries: cutlass_decode::ColorPrimaries::Bt709,
+                transfer: cutlass_decode::Transfer::Bt709,
+                bytes: vec![0; bytes],
+            },
+        }
+    }
+
+    #[test]
+    fn moving_back_keeps_the_pictures_behind_up_to_the_memory_budget() {
+        let mut state = state(50);
+        aim(&mut state, Micros(40));
+        assert!(state.backward);
+        let each = BEHIND_BYTES / 3;
+        for start in [0, 10, 20, 30, 40] {
+            store(&mut state, sized(start, each), 3);
+        }
+        let starts: Vec<i64> = state.frames.iter().map(|held| held.start.0).collect();
+        // The picture at 40 covers the asked time. Three behind it fill the
+        // budget, so the oldest goes.
+        assert_eq!(starts, [10, 20, 30, 40]);
+        aim(&mut state, Micros(45));
+        assert!(!state.backward);
+        store(&mut state, sized(50, each), 3);
+        let starts: Vec<i64> = state.frames.iter().map(|held| held.start.0).collect();
+        assert_eq!(starts.len(), BEHIND + 2, "{starts:?}");
+    }
+
+    #[test]
+    fn moving_back_fills_before_the_run_once_it_runs_low() {
+        let mut state = state(50);
+        aim(&mut state, Micros(40));
+        let each = BEHIND_BYTES / 8;
+        for start in [20, 30, 40] {
+            store(&mut state, sized(start, each), 3);
+        }
+        assert!(matches!(next_job(&state, 3), Some(Job::Behind(Micros(20)))));
+        // A fill that found nothing earlier is not tried again.
+        state.floor = Some(Micros(20));
+        assert!(next_job(&state, 3).is_none());
+        // A full run waits.
+        let mut state = state_at(40, true);
+        for start in [0, 10, 20, 30, 40] {
+            store(&mut state, sized(start, BEHIND_BYTES / 4), 3);
+        }
+        assert!(next_job(&state, 3).is_none());
+        // Moving forward reads ahead instead.
+        let mut state = state_at(40, false);
+        store(&mut state, sized(40, 1), 3);
+        assert!(matches!(next_job(&state, 3), Some(Job::Ahead(Micros(50)))));
+    }
+
+    fn state_at(want: i64, backward: bool) -> State {
+        let mut state = state(want);
+        state.backward = backward;
+        state
     }
 
     #[test]

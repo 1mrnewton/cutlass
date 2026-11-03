@@ -83,6 +83,9 @@ pub struct ClipWave {
     pub first: u32,
     /// One level, 0 to 1, per column.
     pub levels: Vec<f32>,
+    /// The clip's gain at each column, its volume keyframes applied: 1 is
+    /// the file as recorded.
+    pub gains: Vec<f32>,
     /// The sound of a video clip, drawn in a band under its picture.
     pub under_picture: bool,
 }
@@ -741,6 +744,7 @@ impl Shell {
             return under_picture.then(|| ClipWave {
                 first: 0,
                 levels: Vec::new(),
+                gains: Vec::new(),
                 under_picture,
             });
         };
@@ -763,6 +767,7 @@ impl Shell {
             cutlass_engine::map_timeline(&map, time).ok()
         };
         let mut levels = Vec::new();
+        let mut gains = Vec::new();
         let mut x = first;
         while x < last && levels.len() < 16_384 {
             let level = match (at(x), at(x + 1.0)) {
@@ -772,11 +777,13 @@ impl Shell {
             let offset = Micros((x / pixel_size) as i64);
             let gain = cutlass_engine::clip_volume(segment, offset).max(0.0) as f32;
             levels.push((level * gain).min(1.0));
+            gains.push(gain);
             x += 1.0;
         }
         Some(ClipWave {
             first: first as u32,
             levels,
+            gains,
             under_picture,
         })
     }
@@ -6307,6 +6314,7 @@ mod tests {
             Some(super::ClipWave {
                 first: 0,
                 levels: Vec::new(),
+                gains: Vec::new(),
                 under_picture: true,
             }),
             "a video holds its band open while it is read"
@@ -6371,7 +6379,9 @@ mod tests {
         let full = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
         desktop.select(Some(id.clone()));
         desktop.set_volume(0.5).unwrap();
-        let half = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
+        let half = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks");
+        assert!(half.gains.iter().all(|gain| *gain == 0.5));
+        let half = half.levels;
         for (full, half) in full.iter().zip(&half) {
             assert!((full * 0.5 - half).abs() < 1e-6);
         }
@@ -6405,6 +6415,7 @@ mod tests {
             Some(super::ClipWave {
                 first: 0,
                 levels: Vec::new(),
+                gains: Vec::new(),
                 under_picture: true,
             }),
             "a video holds its band open while it is read"

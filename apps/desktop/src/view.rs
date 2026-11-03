@@ -4212,6 +4212,7 @@ mod tests {
         let wave = crate::shell::ClipWave {
             first: 0,
             levels: vec![0.1, 0.1, 0.8, 0.8, 1.0, 1.0],
+            gains: vec![1.0; 6],
             under_picture: true,
         };
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {

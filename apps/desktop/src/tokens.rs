@@ -81,6 +81,18 @@ pub const MIN_WINDOW_HEIGHT: f32 = 700.0;
 /// Lane height shared by drawing and hit testing.
 pub const LANE_HEIGHT: f64 = 48.0;
 
+/// A main-track clip, CapCut's 76 track height less its border: a header
+/// row, then the filmstrip over the sound band.
+pub const MAIN_CLIP_HEIGHT: f32 = 74.0;
+/// An audio clip: a header row over its waveform.
+pub const AUDIO_CLIP_HEIGHT: f32 = 46.0;
+/// Any other clip.
+pub const CLIP_HEIGHT: f32 = 28.0;
+/// The gap above and below a main-track clip inside its lane row.
+pub const MAIN_CLIP_INSET: f32 = 8.0;
+/// The gap above and below any other clip.
+pub const CLIP_INSET: f32 = 6.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;

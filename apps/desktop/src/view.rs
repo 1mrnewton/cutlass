@@ -1808,8 +1808,11 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     );
     let snap_at = shell.snap_line();
     let rows = shell.lanes();
-    let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
-    let boxes = lane_rects(flags, lane_area);
+    let kinds: Vec<(bool, bool)> = rows
+        .iter()
+        .map(|lane| (lane.main, is_audio(lane)))
+        .collect();
+    let boxes = lane_rects(kinds, lane_area);
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -2379,7 +2382,7 @@ fn ruler_rate(shell: &Shell) -> (FrameRate, bool) {
 }
 
 fn paint_empty_main(ui: &Ui, area: Rect) {
-    let height = 64.0;
+    let height = row_height(true, false);
     let lane = Rect::from_min_size(
         Pos2::new(area.left(), area.center().y - height / 2.0),
         Vec2::new(area.width(), height),
@@ -2589,7 +2592,15 @@ fn clips_touching(
     for (lane, row) in rows.iter().zip(boxes.iter().copied()) {
         for clip in &lane.clips {
             let (start, duration) = preview_bounds(shell, clip);
-            let bounds = clip_bounds(shell, lane.main, start, duration, row, lanes_left);
+            let bounds = clip_bounds(
+                shell,
+                lane.main,
+                is_audio(lane),
+                start,
+                duration,
+                row,
+                lanes_left,
+            );
             if bounds.intersects(rect) {
                 ids.push(clip.id.clone());
             }
@@ -2601,12 +2612,13 @@ fn clips_touching(
 fn clip_bounds(
     shell: &Shell,
     main: bool,
+    audio: bool,
     start: Micros,
     duration: Micros,
     row: Rect,
     lanes_left: f32,
 ) -> Rect {
-    let (inset, height) = if main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let height = clip_height(main, audio);
     let x = lane_x(
         lanes_left,
         shell.pixel_size(),
@@ -2614,7 +2626,39 @@ fn clip_bounds(
         start.0,
     );
     let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height))
+    Rect::from_min_size(
+        Pos2::new(x, row.top() + clip_inset(main)),
+        Vec2::new(width, height),
+    )
+}
+
+/// A clip's height: the main track is tallest, audio holds its waveform
+/// under a header, the rest are a single row.
+fn clip_height(main: bool, audio: bool) -> f32 {
+    if main {
+        tokens::MAIN_CLIP_HEIGHT
+    } else if audio {
+        tokens::AUDIO_CLIP_HEIGHT
+    } else {
+        tokens::CLIP_HEIGHT
+    }
+}
+
+fn is_audio(lane: &crate::shell::LaneView) -> bool {
+    lane.kind == cutlass_model::TrackType::Audio
+}
+
+fn clip_inset(main: bool) -> f32 {
+    if main {
+        tokens::MAIN_CLIP_INSET
+    } else {
+        tokens::CLIP_INSET
+    }
+}
+
+/// A lane row: its clips and the gap above and below them.
+fn row_height(main: bool, audio: bool) -> f32 {
+    clip_height(main, audio) + 2.0 * clip_inset(main)
 }
 
 fn paint_transitions(
@@ -2743,7 +2787,10 @@ fn paint_wave(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visib
     let bar = |index: usize| clip_rect.left() + (first as usize + index) as f32;
     if under_picture {
         let band = Rect::from_min_max(
-            Pos2::new(clip_rect.left(), clip_rect.bottom() - wave_band(clip_rect.height())),
+            Pos2::new(
+                clip_rect.left(),
+                clip_rect.bottom() - wave_band(clip_rect.height()),
+            ),
             clip_rect.max,
         );
         painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(110));
@@ -2791,7 +2838,15 @@ fn paint_clip(
     index: usize,
 ) {
     let (start, duration) = preview_bounds(shell, clip);
-    let clip_rect = clip_bounds(shell, lane.main, start, duration, row, lanes_left);
+    let clip_rect = clip_bounds(
+        shell,
+        lane.main,
+        is_audio(lane),
+        start,
+        duration,
+        row,
+        lanes_left,
+    );
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
@@ -3194,15 +3249,15 @@ fn paint_move_follower(
     row: Rect,
     lanes_left: f32,
 ) {
-    let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
-    let x = lane_x(
+    let clip_rect = clip_bounds(
+        shell,
+        lane.main,
+        is_audio(lane),
+        preview.start,
+        preview.duration,
+        row,
         lanes_left,
-        shell.pixel_size(),
-        shell.view_origin().0,
-        preview.start.0,
     );
-    let width = (preview.duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
@@ -3275,20 +3330,24 @@ fn edge_strips(visible: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
-fn lane_rects(main_flags: Vec<bool>, area: Rect) -> Vec<Rect> {
+/// Each lane's row, the main lane centered. `kinds` is each lane's main and
+/// audio flags.
+fn lane_rects(kinds: Vec<(bool, bool)>, area: Rect) -> Vec<Rect> {
+    let main_flags: Vec<bool> = kinds.iter().map(|(main, _)| *main).collect();
+    let height = |index: usize| row_height(kinds[index].0, kinds[index].1);
     let Some(main) = main_flags.iter().position(|main| *main) else {
-        return main_flags
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                Rect::from_min_size(
-                    Pos2::new(area.left(), area.top() + index as f32 * 48.0),
-                    Vec2::new(area.width(), 40.0),
-                )
+        let mut top = area.top();
+        return (0..kinds.len())
+            .map(|index| {
+                let rect = Rect::from_min_size(
+                    Pos2::new(area.left(), top),
+                    Vec2::new(area.width(), height(index)),
+                );
+                top += height(index) + 8.0;
+                rect
             })
             .collect();
     };
-    let height = |index: usize| if main_flags[index] { 64.0 } else { 40.0 };
     let mut tops = vec![0.0; main_flags.len()];
     tops[main] = area.center().y - height(main) / 2.0;
     let mut y = tops[main];
@@ -3942,10 +4001,23 @@ mod tests {
             .flatten()
             .collect();
         assert!(bars.len() / 4 > 100, "{} bars", bars.len() / 4);
-        assert!(bars.iter().all(|pos| pos.y >= band.top() && pos.y <= band.bottom()));
+        assert!(
+            bars.iter()
+                .all(|pos| pos.y >= band.top() && pos.y <= band.bottom())
+        );
         let floor = bars.iter().map(|pos| pos.y).fold(f32::MIN, f32::max);
         assert_eq!(floor, band.bottom() - 2.0);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn lanes_take_capcut_heights_around_the_centered_main_track() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);
+        let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
+        assert_eq!(heights, [40.0, 90.0, 58.0]);
+        assert_eq!(rows[1].center().y, 200.0);
+        assert_eq!(rows[2].top() - rows[1].bottom(), 8.0);
     }
 
     #[test]

@@ -306,6 +306,8 @@ pub struct Stage {
     pub turn: f64,
     pub vertical_guide: bool,
     pub horizontal_guide: bool,
+    /// The clip is a title, not a picture.
+    pub text: bool,
 }
 
 impl From<cutlass_ffi::PhoneStage> for Stage {
@@ -320,6 +322,7 @@ impl From<cutlass_ffi::PhoneStage> for Stage {
             turn: stage.turn,
             vertical_guide: stage.vertical_guide,
             horizontal_guide: stage.horizontal_guide,
+            text: stage.text,
         }
     }
 }

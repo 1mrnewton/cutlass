@@ -93,6 +93,8 @@ pub struct PhoneHost {
     faces: FaceTable,
     /// The preview gesture in flight.
     live: Option<stage::Live>,
+    /// The title being typed into, and the revision of its last change.
+    typing: Option<(SegmentId, u64)>,
 }
 
 impl PhoneHost {
@@ -133,6 +135,7 @@ impl PhoneHost {
             strip: Strip::default(),
             faces: FaceTable::default(),
             live: None,
+            typing: None,
         })
     }
 
@@ -360,25 +363,29 @@ impl PhoneHost {
     /// is not a picture has none.
     #[must_use]
     pub fn stage(&self, segment_id: &SegmentId) -> Option<PhoneStage> {
-        let stage = cutlass_editor::stage_box(self.draft(), segment_id)?;
+        let stage = cutlass_editor::stage_box(self.draft(), segment_id, &self.sizes())?;
         let canvas = cutlass_editor::canvas_size(self.draft());
-        Some(PhoneStage::new(canvas, &stage, Default::default()))
+        Some(PhoneStage::new(
+            self.draft(),
+            canvas,
+            &stage,
+            Default::default(),
+        ))
     }
 
     /// The topmost picture clip under the canvas point `(x, y)` at `time`.
     #[must_use]
     pub fn stage_pick(&self, time: Micros, x: f64, y: f64) -> Option<SegmentId> {
-        cutlass_editor::stage_pick(self.draft(), time, x, y)
+        cutlass_editor::stage_pick(self.draft(), time, (x, y), &self.sizes())
     }
 
     /// Start moving the picture clip `segment_id` on the preview. A gesture
     /// still open is ended first.
     pub fn stage_begin(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
-        let gesture = cutlass_editor::stage_gesture(self.draft(), segment_id).ok_or_else(|| {
-            FfiError::Refused {
-                reason: "only an unlocked picture moves on the preview".to_owned(),
-            }
-        })?;
+        let gesture = cutlass_editor::stage_gesture(self.draft(), segment_id, &self.sizes())
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only an unlocked picture or title moves on the preview".to_owned(),
+            })?;
         self.live = Some(stage::Live {
             gesture,
             applied: None,
@@ -401,7 +408,7 @@ impl PhoneHost {
         })?;
         let step = live.gesture.step(shift_x, shift_y, pinch, turn);
         let canvas = cutlass_editor::canvas_size(self.draft());
-        let stage = PhoneStage::new(canvas, &step.stage, step.guides);
+        let stage = PhoneStage::new(self.draft(), canvas, &step.stage, step.guides);
         let revision = self.revision();
         let joins = match live.applied {
             Some((_, pose)) if pose == step.pose => return Ok(stage),
@@ -424,6 +431,13 @@ impl PhoneHost {
     /// End the preview gesture. A gesture that changed nothing leaves no step.
     pub fn stage_end(&mut self) {
         self.live = None;
+    }
+
+    fn sizes(&self) -> stage::Sizes<'_> {
+        stage::Sizes {
+            draft: self.draft(),
+            fonts: &self.faces,
+        }
     }
 
     /// The composited picture at `time`, reading media from the project folder.
@@ -499,6 +513,50 @@ impl PhoneHost {
         let (request, segment_id) = text::add_request(self.draft(), content, face, at);
         self.apply(self.revision(), &[request])?;
         Ok(segment_id)
+    }
+
+    /// Type into a title as the words change. With no `segment_id`, the
+    /// first words that are not blank add one at `at` in `face`, as
+    /// [`Self::add_text`] does. The first change is an undo step and the
+    /// rest of the typing joins it. Blank words change nothing. Returns the
+    /// clip, or `None` when nothing has been added yet.
+    pub fn type_text(
+        &mut self,
+        segment_id: Option<&SegmentId>,
+        content: &str,
+        face: &str,
+        at: Micros,
+    ) -> Result<Option<SegmentId>, FfiError> {
+        if content.trim().is_empty() {
+            return Ok(segment_id.cloned());
+        }
+        let Some(segment_id) = segment_id else {
+            let added = self.add_text(content, face, at)?;
+            self.typing = Some((added.clone(), self.revision()));
+            return Ok(Some(added));
+        };
+        if self
+            .text(segment_id)
+            .is_some_and(|text| text.content == content)
+        {
+            return Ok(Some(segment_id.clone()));
+        }
+        let requests = [Request::SetTextContent {
+            segment_id: segment_id.clone(),
+            content: content.to_owned(),
+        }];
+        let revision = self.revision();
+        let joins = self
+            .typing
+            .as_ref()
+            .is_some_and(|(typed, at)| typed == segment_id && *at == revision);
+        let revision = if joins {
+            self.commands.fold(revision, &requests)?
+        } else {
+            self.apply(revision, &requests)?
+        };
+        self.typing = Some((segment_id.clone(), revision));
+        Ok(Some(segment_id.clone()))
     }
 
     /// Add the bundled effect `effect_id` at `at` over everything below it,
@@ -1311,6 +1369,48 @@ mod tests {
         assert_eq!(host.text(&first).unwrap().content, "Hello");
         host.undo().unwrap();
         assert_eq!(host.text(&first).unwrap().content, "A");
+    }
+
+    #[test]
+    fn typing_adds_a_title_as_one_step_and_it_moves_on_the_preview() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let steps = host.revision();
+        assert_eq!(host.type_text(None, " ", "", Micros(0)).unwrap(), None);
+        assert_eq!(host.revision(), steps);
+
+        let title = host.type_text(None, "A", "", Micros(0)).unwrap().unwrap();
+        for words in ["AA", "AAA", "AAA"] {
+            let typed = host.type_text(Some(&title), words, "", Micros(0)).unwrap();
+            assert_eq!(typed.as_ref(), Some(&title));
+        }
+        host.type_text(Some(&title), "", "", Micros(0)).unwrap();
+        assert_eq!(host.text(&title).unwrap().content, "AAA");
+
+        let stage = host.stage(&title).unwrap();
+        assert!(stage.text);
+        // The test canvas is 16 pixels, so the title fits it.
+        assert!((stage.width - stage.canvas_width).abs() < 1e-6 && stage.height > 0.0);
+        let middle = (stage.canvas_width / 2.0, stage.canvas_height / 2.0);
+        assert_eq!(
+            host.stage_pick(Micros(0), middle.0, middle.1),
+            Some(title.clone())
+        );
+        let picture = host.draft().main_track().unwrap().segments[0].id.clone();
+        assert!(!host.stage(&picture).unwrap().text);
+
+        host.stage_begin(&title).unwrap();
+        host.stage_move(100.0, 0.0, 2.0, 0.0).unwrap();
+        host.stage_end();
+        let moved = host.stage(&title).unwrap();
+        assert!((moved.width - stage.width * 2.0).abs() < 1e-6, "{moved:?}");
+        assert_eq!(moved.turn, 0.0);
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.text(&title), None);
     }
 
     #[test]

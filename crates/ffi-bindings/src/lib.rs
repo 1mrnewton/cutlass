@@ -358,13 +358,17 @@ pub struct Stage {
     pub text: bool,
 }
 
-/// A clip's keyframes as timeline times, earliest first, and the one under
-/// the playhead.
+/// A clip's keyframes as timeline times, earliest first, the one under the
+/// playhead, and the span between two of them the playhead is in.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Keyframes {
     pub times_us: Vec<i64>,
     /// A keyframe is within a frame of the playhead.
     pub here: bool,
+    /// The playhead is in a span between two keyframes, which Graphs eases.
+    pub in_span: bool,
+    /// The Graphs curve easing that span, or empty for a straight one.
+    pub graph: String,
 }
 
 impl From<cutlass_ffi::PhoneKeys> for Keyframes {
@@ -372,8 +376,33 @@ impl From<cutlass_ffi::PhoneKeys> for Keyframes {
         Self {
             times_us: keys.times.iter().map(|time| time.0).collect(),
             here: keys.here.is_some(),
+            in_span: keys.span.is_some(),
+            graph: keys.graph.unwrap_or_default(),
         }
     }
+}
+
+/// A Graphs curve: its name and its line through the unit square, x the
+/// share of time and y the share of the change, y up.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GraphCurve {
+    pub name: String,
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+}
+
+/// The Graphs panel's curves, in its order after None.
+#[uniffi::export]
+#[must_use]
+pub fn graph_curves() -> Vec<GraphCurve> {
+    cutlass_ffi::graphs()
+        .into_iter()
+        .map(|graph| GraphCurve {
+            name: graph.name,
+            xs: graph.points.iter().map(|point| point.0).collect(),
+            ys: graph.points.iter().map(|point| point.1).collect(),
+        })
+        .collect()
 }
 
 impl From<cutlass_ffi::PhoneStage> for Stage {
@@ -1079,6 +1108,19 @@ impl Editor {
         Ok(self
             .run(move |host| host.keyframes(&SegmentId::new(clip_id), Micros(at_us)))?
             .map(Keyframes::from))
+    }
+
+    /// Ease the span between keyframes that `at_us` is in along the Graphs
+    /// curve `graph`, or make it straight with an empty name. One undo step.
+    pub fn ease_keyframes(
+        &self,
+        clip_id: String,
+        at_us: i64,
+        graph: String,
+    ) -> Result<(), EditorError> {
+        let graph = (!graph.is_empty()).then_some(graph);
+        self.run(move |host| host.ease_keyframes(&SegmentId::new(clip_id), Micros(at_us), graph))?
+            .map_err(EditorError::from)
     }
 
     /// The keyframe button: remove the keyframe under `at_us`, else key the

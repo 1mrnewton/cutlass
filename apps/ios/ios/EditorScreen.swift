@@ -14,7 +14,7 @@ struct EditorScreen: View {
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
-        case volume, speed, effects, ratio, background
+        case volume, speed, effects, ratio, background, graphs
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -108,13 +108,19 @@ struct EditorScreen: View {
 
     /// The clock on the left, play pinned to the middle so it never moves
     /// with the clock, undo and redo on the right. A selected picture or
-    /// title adds the keyframe button before undo.
+    /// title adds the keyframe button before undo, and the Graphs button
+    /// when the playhead is between two of its keyframes.
     private var transport: some View {
         HStack {
             Text(clock(timeUs: model.playheadUs) + " / " + clock(timeUs: model.durationUs))
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.7))
             Spacer()
+            if let keys = model.keys, keys.inSpan {
+                Button { panel = .graphs } label: { HugeIcon("graphs") }
+                    .accessibilityLabel("Graphs")
+                    .padding(.trailing, 16)
+            }
             if let keys = model.keys {
                 Button { model.toggleKeyframe() } label: {
                     HugeIcon("keyframe")
@@ -160,6 +166,9 @@ struct EditorScreen: View {
         } else if panel == .background {
             BackgroundPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .graphs {
+            GraphsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -169,7 +178,7 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects, .ratio, .background: EmptyView()
+                case .text, .effects, .ratio, .background, .graphs: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))

@@ -694,6 +694,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func durationUs() throws  -> Int64
     
     /**
+     * Ease the span between keyframes that `at_us` is in along the Graphs
+     * curve `graph`, or make it straight with an empty name. One undo step.
+     */
+    func easeKeyframes(clipId: String, atUs: Int64, graph: String) throws 
+    
+    /**
      * Write the whole cut to `path` as an MP4, `short_side` pixels on its
      * short side: one of [`export_sides`]. Play stops first. `progress`
      * hears each picture on the editor's own thread and stops the export
@@ -1067,6 +1073,21 @@ open func durationUs()throws  -> Int64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Ease the span between keyframes that `at_us` is in along the Graphs
+     * curve `graph`, or make it straight with an empty name. One undo step.
+     */
+open func easeKeyframes(clipId: String, atUs: Int64, graph: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_ease_keyframes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterString.lower(graph),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -2402,8 +2423,70 @@ public func FfiConverterTypeFrame_lower(_ value: Frame) -> RustBuffer {
 
 
 /**
- * A clip's keyframes as timeline times, earliest first, and the one under
- * the playhead.
+ * A Graphs curve: its name and its line through the unit square, x the
+ * share of time and y the share of the change, y up.
+ */
+public struct GraphCurve: Equatable, Hashable {
+    public var name: String
+    public var xs: [Double]
+    public var ys: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, xs: [Double], ys: [Double]) {
+        self.name = name
+        self.xs = xs
+        self.ys = ys
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GraphCurve: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGraphCurve: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GraphCurve {
+        return
+            try GraphCurve(
+                name: FfiConverterString.read(from: &buf), 
+                xs: FfiConverterSequenceDouble.read(from: &buf), 
+                ys: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GraphCurve, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceDouble.write(value.xs, into: &buf)
+        FfiConverterSequenceDouble.write(value.ys, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGraphCurve_lift(_ buf: RustBuffer) throws -> GraphCurve {
+    return try FfiConverterTypeGraphCurve.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGraphCurve_lower(_ value: GraphCurve) -> RustBuffer {
+    return FfiConverterTypeGraphCurve.lower(value)
+}
+
+
+/**
+ * A clip's keyframes as timeline times, earliest first, the one under the
+ * playhead, and the span between two of them the playhead is in.
  */
 public struct Keyframes: Equatable, Hashable {
     public var timesUs: [Int64]
@@ -2411,15 +2494,31 @@ public struct Keyframes: Equatable, Hashable {
      * A keyframe is within a frame of the playhead.
      */
     public var here: Bool
+    /**
+     * The playhead is in a span between two keyframes, which Graphs eases.
+     */
+    public var inSpan: Bool
+    /**
+     * The Graphs curve easing that span, or empty for a straight one.
+     */
+    public var graph: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(timesUs: [Int64], 
         /**
          * A keyframe is within a frame of the playhead.
-         */here: Bool) {
+         */here: Bool, 
+        /**
+         * The playhead is in a span between two keyframes, which Graphs eases.
+         */inSpan: Bool, 
+        /**
+         * The Graphs curve easing that span, or empty for a straight one.
+         */graph: String) {
         self.timesUs = timesUs
         self.here = here
+        self.inSpan = inSpan
+        self.graph = graph
     }
 
     
@@ -2439,13 +2538,17 @@ public struct FfiConverterTypeKeyframes: FfiConverterRustBuffer {
         return
             try Keyframes(
                 timesUs: FfiConverterSequenceInt64.read(from: &buf), 
-                here: FfiConverterBool.read(from: &buf)
+                here: FfiConverterBool.read(from: &buf), 
+                inSpan: FfiConverterBool.read(from: &buf), 
+                graph: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: Keyframes, into buf: inout [UInt8]) {
         FfiConverterSequenceInt64.write(value.timesUs, into: &buf)
         FfiConverterBool.write(value.here, into: &buf)
+        FfiConverterBool.write(value.inSpan, into: &buf)
+        FfiConverterString.write(value.graph, into: &buf)
     }
 }
 
@@ -4446,6 +4549,31 @@ fileprivate struct FfiConverterSequenceTypeFont: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeGraphCurve: FfiConverterRustBuffer {
+    typealias SwiftType = [GraphCurve]
+
+    public static func write(_ value: [GraphCurve], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGraphCurve.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GraphCurve] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GraphCurve]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGraphCurve.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeLane: FfiConverterRustBuffer {
     typealias SwiftType = [Lane]
 
@@ -4682,6 +4810,16 @@ public func flingStep(velocity: Double, elapsed: Double) -> Fling  {
 })
 }
 /**
+ * The Graphs panel's curves, in its order after None.
+ */
+public func graphCurves() -> [GraphCurve]  {
+    return try!  FfiConverterSequenceTypeGraphCurve.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_graph_curves(uniffiCallStatus
+    )
+})
+}
+/**
  * The projects in the Cutlass folder at `root`, newest first. A missing
  * root lists nothing.
  */
@@ -4825,6 +4963,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_fling_step() != 37021) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_graph_curves() != 9398) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4868,6 +5009,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes() != 37443) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 5234) {

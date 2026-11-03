@@ -46,7 +46,7 @@ pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
 pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders, video_bitrate};
 pub use host::Commands;
-pub use keys::PhoneKeys;
+pub use keys::{PhoneGraph, PhoneKeys, graphs};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
@@ -448,6 +448,29 @@ impl PhoneHost {
     pub fn keyframes(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneKeys> {
         cutlass_editor::stage_box(self.draft(), segment_id, time, &self.sizes())?;
         PhoneKeys::of(self.draft(), segment_id, time)
+    }
+
+    /// Ease the span of the clip's keyframes that `time` is in along the
+    /// Graphs panel curve `graph`, or make it straight with `None`. One undo
+    /// step.
+    pub fn ease_keyframes(
+        &mut self,
+        segment_id: &SegmentId,
+        time: Micros,
+        graph: Option<String>,
+    ) -> Result<(), FfiError> {
+        let keys = self
+            .keyframes(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only a picture or title takes keyframes".to_owned(),
+            })?;
+        let request = keys
+            .ease(segment_id, graph)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "move the playhead between two keyframes to ease them".to_owned(),
+            })?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
     }
 
     /// Remove the keyframe within a frame of `time` on the clip, or key the
@@ -1233,6 +1256,50 @@ mod tests {
         assert!(host.toggle_keyframe(&clip, Micros(2_000_000)).is_err());
         host.undo().unwrap();
         assert_eq!(host.keyframes(&clip, Micros(0)).unwrap().times.len(), 2);
+    }
+
+    #[test]
+    fn a_graph_eases_the_span_the_playhead_is_in() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        host.toggle_keyframe(&clip, Micros(0)).unwrap();
+        let start = host.stage(&clip, Micros(0)).unwrap().center_x;
+        host.stage_begin(&clip, Micros(800_000)).unwrap();
+        host.stage_move(400.0, 0.0, 1.0, 0.0).unwrap();
+        host.stage_end();
+
+        let keys = host.keyframes(&clip, Micros(0)).unwrap();
+        assert_eq!(
+            (keys.span, keys.graph.as_deref()),
+            (Some(Micros(800_000)), None)
+        );
+        assert_eq!(host.keyframes(&clip, Micros(800_000)).unwrap().span, None);
+        assert!(host.ease_keyframes(&clip, Micros(900_000), None).is_err());
+
+        let straight = host.stage(&clip, Micros(400_000)).unwrap().center_x;
+        assert!((straight - start - 200.0).abs() < 1e-6, "{straight}");
+        host.ease_keyframes(&clip, Micros(400_000), Some("Ease In".to_owned()))
+            .unwrap();
+        let keys = host.keyframes(&clip, Micros(400_000)).unwrap();
+        assert_eq!(keys.graph.as_deref(), Some("Ease In"));
+        let eased = host.stage(&clip, Micros(400_000)).unwrap().center_x;
+        assert!(eased < straight - 50.0, "{eased} {straight}");
+        host.undo().unwrap();
+        assert_eq!(host.keyframes(&clip, Micros(400_000)).unwrap().graph, None);
+
+        let graphs = crate::graphs();
+        assert_eq!(graphs.len(), 26);
+        assert_eq!(graphs[0].name, "Linear");
+        for graph in &graphs {
+            let (first, last) = (graph.points[0], graph.points[graph.points.len() - 1]);
+            assert_eq!(first, (0.0, 0.0), "{}", graph.name);
+            assert!((last.0 - 1.0).abs() < 1e-9 && (last.1 - 1.0).abs() < 1e-9);
+        }
     }
 
     #[test]

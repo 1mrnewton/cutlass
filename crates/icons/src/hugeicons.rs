@@ -1103,6 +1103,20 @@ pub static ICONS: &[IconData] = &[
         }],
     },
     IconData {
+        name: "graphs",
+        source: Some("EaseInOutIcon"),
+        marks: &[Mark {
+            shape: Shape::Path("M21 4C11.0535 4 12.9465 20 3 20"),
+            fill: false,
+            even_odd: false,
+            stroke: Some(Stroke {
+                width: 1.5,
+                cap: Cap::Round,
+                join: Join::Round,
+            }),
+        }],
+    },
+    IconData {
         name: "reset",
         source: Some("RefreshIcon"),
         marks: &[Mark {

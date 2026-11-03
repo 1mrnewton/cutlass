@@ -304,6 +304,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(uint64_t ptr, R
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EASE_KEYFRAMES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EASE_KEYFRAMES
+void uniffi_cutlass_ffi_bindings_fn_method_editor_ease_keyframes(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustBuffer graph, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_export(uint64_t ptr, RustBuffer path, uint32_t short_side, uint64_t progress, RustCallStatus *_Nonnull out_status
@@ -571,6 +576,12 @@ double uniffi_cutlass_ffi_bindings_fn_func_fling_start(double velocity, RustCall
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_FLING_STEP
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_FLING_STEP
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_fling_step(double velocity, double elapsed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_GRAPH_CURVES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_GRAPH_CURVES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_graph_curves(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
@@ -928,6 +939,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_fling_step(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_GRAPH_CURVES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_GRAPH_CURVES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_graph_curves(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
@@ -1015,6 +1032,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DURATION_US
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DURATION_US
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EASE_KEYFRAMES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EASE_KEYFRAMES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes(void
     
 );
 #endif

@@ -446,6 +446,15 @@ final class EditorModel {
         edit { try $0.toggleKeyframe(clipId: clip, atUs: at) }
     }
 
+    /// Ease the span the playhead is in along the named curve; an empty
+    /// name makes it straight.
+    func easeKeyframes(_ graph: String) {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.easeKeyframes(clipId: clip, atUs: at, graph: graph) }
+    }
+
     /// Put a main clip at `place` in the main row's order.
     func reorder(_ clip: String, place: Int) {
         edit { try $0.reorder(clipId: clip, place: UInt32(max(place, 0))) }

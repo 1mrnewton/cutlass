@@ -37,6 +37,7 @@ alignTop       AlignTopIcon
 alignMiddle    AlignVerticalCenterIcon
 alignBottom    AlignBottomIcon
 keyframe       KeyframeIcon
+graphs         EaseInOutIcon
 reset          RefreshIcon
 rotate         RotateClockwiseIcon
 search         Search01Icon

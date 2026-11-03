@@ -6000,7 +6000,7 @@ mod tests {
         let cells = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
         for cell in &cells {
             let thumb = cell.thumb.as_ref().expect("stored");
-            assert_eq!((thumb.width, thumb.height), (171, 96));
+            assert_eq!((thumb.width, thumb.height), (284, 160));
             assert!(thumb.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
         }
         assert_ne!(cells[0].thumb, cells[4].thumb);
@@ -6035,7 +6035,7 @@ mod tests {
         let tall = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
         assert_eq!(tall[0].tile.width, 27.0);
         let thumb = tall[0].thumb.as_ref().expect("stored");
-        assert_eq!((thumb.width, thumb.height), (54, 96));
+        assert_eq!((thumb.width, thumb.height), (90, 160));
     }
 
     #[test]

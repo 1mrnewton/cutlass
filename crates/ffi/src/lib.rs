@@ -684,4 +684,76 @@ mod tests {
         assert!(host.remove(&right).is_err());
         assert_eq!(host.lanes()[0].clips.len(), 1);
     }
+
+    #[test]
+    fn an_edit_redraws_the_picture_at_the_same_time() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        host.apply(
+            0,
+            &[Request::SetCanvasSize {
+                width: 16,
+                height: 16,
+                ratio: "1:1".to_owned(),
+            }],
+        )
+        .unwrap();
+        let png = host
+            .import(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let jpeg = host
+            .import(&fixture("pattern.jpg"), still(1_000_000))
+            .unwrap();
+        let first = host.append(&png).unwrap();
+        host.append(&jpeg).unwrap();
+        let at = cutlass_session::Micros(500_000);
+        let before = host.frame(at).unwrap();
+        let second = host.frame(cutlass_session::Micros(1_500_000)).unwrap();
+        assert_ne!(before, second);
+
+        host.remove(&first).unwrap();
+        assert_eq!(host.frame(at).unwrap(), second);
+        host.undo().unwrap();
+        assert_eq!(host.frame(at).unwrap(), before);
+    }
+
+    #[test]
+    fn a_split_and_a_ripple_delete_redraw_a_movie_at_the_cut() {
+        let movie = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie is not in ../local-files");
+            return;
+        }
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import(
+                &movie,
+                crate::Probed::Picture {
+                    still: false,
+                    width: 1920,
+                    height: 1080,
+                    duration: cutlass_session::Micros(10_210_000),
+                },
+            )
+            .unwrap();
+        let left = host.append(&id).unwrap();
+        let at = cutlass_session::Micros(3_000_000);
+        let whole = host.frame(at).unwrap();
+        host.split(&left, at).unwrap();
+        let cut = host.frame(at).unwrap();
+        assert_eq!(cut, whole);
+        let later = host.frame(cutlass_session::Micros(6_000_000)).unwrap();
+        assert_ne!(cut, later);
+
+        host.remove(&left).unwrap();
+        assert_eq!(host.frame(at).unwrap(), later);
+        host.undo().unwrap();
+        assert_eq!(host.frame(at).unwrap(), cut);
+        host.redo().unwrap();
+        assert_eq!(host.frame(at).unwrap(), later);
+    }
 }

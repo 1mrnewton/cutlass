@@ -20,6 +20,8 @@ use crate::widgets;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
+/// The name row under a card's picture.
+const CARD_LABEL: f32 = 24.0;
 const CARD_GAP: f32 = 8.0;
 const TRIM_EDGE: f32 = 6.0;
 
@@ -746,10 +748,11 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         .id_salt("library-cards")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
-            let cards = shell
+            let mut cards = shell
                 .draft()
                 .map(|draft| bin_cards(draft, shelf, &query))
                 .unwrap_or_default();
+            fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
                     "No matches."
@@ -843,15 +846,16 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) {
     let cols = ((width + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
     let cols = cols.max(1);
     let rows = cards.len().div_ceil(cols);
-    let height = rows as f32 * (CARD_H + CARD_GAP);
+    let pitch = CARD_H + CARD_LABEL + CARD_GAP;
+    let height = rows as f32 * pitch;
     let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     for (index, card) in cards.iter().enumerate() {
         let origin = area.min
             + Vec2::new(
                 (index % cols) as f32 * (CARD_W + CARD_GAP),
-                (index / cols) as f32 * (CARD_H + CARD_GAP),
+                (index / cols) as f32 * pitch,
             );
-        let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H));
+        let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H + CARD_LABEL));
         paint_bin_card(ui, rect, card, view.library_picked.contains(&card.id));
         // A click picks the card. A drag only starts once the pointer moves.
         let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::click_and_drag());
@@ -875,44 +879,152 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) {
     }
 }
 
+/// A card: its picture, then its name under it.
 fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
+    let picture = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_H));
     let painter = ui.painter().with_clip_rect(rect);
-    paint_card_face(&painter, rect, card);
+    paint_card_face(&painter, picture, card);
     if picked {
         painter.rect_stroke(
-            rect,
-            CornerRadius::same(12),
+            picture,
+            CornerRadius::same(CLIP_RADIUS),
             egui::Stroke::new(tokens::STROKE, tokens::SELECTED),
             egui::StrokeKind::Inside,
         );
     }
+    let font = FontId::proportional(12.0);
+    let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0);
+    painter.text(
+        Pos2::new(rect.left() + 2.0, picture.bottom() + 6.0),
+        Align2::LEFT_TOP,
+        name,
+        font,
+        tokens::MUTED,
+    );
 }
 
+/// `text` cut in the middle with an ellipsis until it fits `width`, the way
+/// a file name keeps its start and its extension.
+fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -> String {
+    let fits = |text: &str| {
+        ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), tokens::TEXT)
+                .size()
+                .x
+        }) <= width
+    };
+    if fits(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = chars.len();
+    while keep > 1 {
+        keep -= 1;
+        let head = keep.div_ceil(2);
+        let tail = keep / 2;
+        let cut: String = chars[..head]
+            .iter()
+            .chain(std::iter::once(&'…'))
+            .chain(&chars[chars.len() - tail..])
+            .collect();
+        if fits(&cut) {
+            return cut;
+        }
+    }
+    "…".to_owned()
+}
+
+/// Read each card's picture or sound from the shell, asking for what is
+/// missing.
+fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
+    with_film_textures(ctx, |textures| {
+        for card in cards.iter_mut() {
+            match card.look {
+                CardLook::Picture(_) => {
+                    if let Some((key, Some(thumb))) = shell.poster(&card.id) {
+                        let texture = film_texture(ctx, textures, key, &thumb);
+                        card.look = CardLook::Picture(Some((texture, [thumb.width, thumb.height])));
+                    }
+                }
+                CardLook::Sound(_) => {
+                    if let Some(levels) = shell.material_wave(&card.id, CARD_W as usize) {
+                        card.look = CardLook::Sound(levels);
+                    }
+                }
+                CardLook::Swatch => {}
+            }
+        }
+    });
+}
+
+/// The card's picture: the file's first frame cut to fill, its sound, or a
+/// color, with "Added" at the top left once on the timeline and the length
+/// at the top right.
 fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
-    let swatch = swatch_color(&card.name);
-    painter.rect_filled(rect, CornerRadius::same(12), swatch);
-    painter.text(
-        rect.left_bottom() + Vec2::new(8.0, -22.0),
-        Align2::LEFT_BOTTOM,
-        &card.name,
-        FontId::proportional(12.0),
-        Color32::WHITE,
-    );
-    painter.text(
-        rect.left_bottom() + Vec2::new(8.0, -8.0),
-        Align2::LEFT_BOTTOM,
-        &card.meta,
-        FontId::proportional(11.0),
-        Color32::from_white_alpha(220),
-    );
+    let radius = CornerRadius::same(CLIP_RADIUS);
+    match &card.look {
+        CardLook::Swatch => {
+            painter.rect_filled(rect, radius, swatch_color(&card.name));
+        }
+        CardLook::Picture(None) => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+        }
+        CardLook::Picture(Some((texture, [width, height]))) => {
+            let uv = cover_uv(rect.size(), *width as f32, *height as f32);
+            painter.add(
+                egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
+                    .with_texture(*texture, uv),
+            );
+        }
+        CardLook::Sound(levels) => {
+            painter.rect_filled(rect, radius, tokens::CLIP_AUDIO);
+            let wave = crate::shell::ClipWave {
+                first: 0,
+                levels: levels.clone(),
+                gains: Vec::new(),
+                under_picture: false,
+                muted: false,
+            };
+            paint_wave(painter, &wave, rect.left(), rect, rect, WaveColors::AUDIO);
+        }
+    }
+    let small = FontId::proportional(11.0);
     if card.on_timeline {
-        painter.text(
-            rect.left_top() + Vec2::new(8.0, 8.0),
-            Align2::LEFT_TOP,
-            "On timeline",
-            FontId::proportional(10.0),
-            Color32::WHITE,
+        let galley = painter.layout_no_wrap("Added".to_owned(), small.clone(), Color32::WHITE);
+        let chip = Rect::from_min_size(
+            rect.left_top() + Vec2::new(6.0, 6.0),
+            galley.size() + Vec2::new(10.0, 4.0),
         );
+        painter.rect_filled(chip, CornerRadius::same(4), Color32::from_black_alpha(170));
+        painter.galley(chip.min + Vec2::new(5.0, 2.0), galley, Color32::WHITE);
+    }
+    if !card.meta.is_empty() {
+        let corner = rect.right_top() + Vec2::new(-8.0, 8.0);
+        painter.text(
+            corner + Vec2::new(0.0, 1.0),
+            Align2::RIGHT_TOP,
+            &card.meta,
+            small.clone(),
+            Color32::from_black_alpha(160),
+        );
+        painter.text(corner, Align2::RIGHT_TOP, &card.meta, small, Color32::WHITE);
+    }
+}
+
+/// The part of a `width` by `height` picture that fills `size` without
+/// stretching: the middle, cut at the sides or the top and bottom.
+fn cover_uv(size: Vec2, width: f32, height: f32) -> Rect {
+    if width <= 0.0 || height <= 0.0 || size.x <= 0.0 || size.y <= 0.0 {
+        return Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    }
+    let shown = (size.x / size.y) / (width / height);
+    if shown < 1.0 {
+        let cut = (1.0 - shown) / 2.0;
+        Rect::from_min_max(Pos2::new(cut, 0.0), Pos2::new(1.0 - cut, 1.0))
+    } else {
+        let cut = (1.0 - 1.0 / shown) / 2.0;
+        Rect::from_min_max(Pos2::new(0.0, cut), Pos2::new(1.0, 1.0 - cut))
     }
 }
 
@@ -921,6 +1033,18 @@ struct BinCard {
     name: String,
     meta: String,
     on_timeline: bool,
+    look: CardLook,
+}
+
+/// What fills a library card's picture.
+#[derive(Clone, Debug, PartialEq)]
+enum CardLook {
+    /// A color from the name, for a card with no file.
+    Swatch,
+    /// A file's first frame, and its size in pixels, once read.
+    Picture(Option<(egui::TextureId, [u32; 2])>),
+    /// A sound file's levels, one per point across the card, once read.
+    Sound(Vec<f32>),
 }
 
 #[derive(Clone, Debug)]
@@ -947,6 +1071,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     video.id.as_str(),
                     &video.path,
                     video.duration.0,
+                    CardLook::Picture(None),
                 );
             }
         }
@@ -959,6 +1084,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     audio.id.as_str(),
                     &audio.path,
                     audio.duration.0,
+                    CardLook::Sound(Vec::new()),
                 );
             }
         }
@@ -972,6 +1098,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     name: offer.name.to_owned(),
                     meta: card_meta(offer.duration),
                     on_timeline: false,
+                    look: CardLook::Swatch,
                 });
             }
         }
@@ -992,6 +1119,7 @@ fn push_card(
     id: &str,
     path: &str,
     duration: i64,
+    look: CardLook,
 ) {
     let name = file_label(path);
     if !query.is_empty() && !name.to_lowercase().contains(query) {
@@ -1000,9 +1128,21 @@ fn push_card(
     cards.push(BinCard {
         id: id.to_owned(),
         name,
-        meta: card_meta(duration),
+        meta: card_clock(duration),
         on_timeline: used.contains(id),
+        look,
     });
+}
+
+/// A media card's length: minutes and seconds, with hours when it has them.
+fn card_clock(micros: i64) -> String {
+    let seconds = micros.max(0) / 1_000_000;
+    let (hours, minutes, seconds) = (seconds / 3_600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 fn card_meta(micros: i64) -> String {
@@ -2250,16 +2390,17 @@ fn lane_under(boxes: &[Rect], pos: Pos2) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn paint_library_ghost(shell: &Shell, ui: &Ui) {
+fn paint_library_ghost(shell: &mut Shell, ui: &Ui) {
     let Some(payload) = egui::DragAndDrop::payload::<LibraryDrop>(ui.ctx()) else {
         return;
     };
     let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
         return;
     };
-    let Some(card) = ghost_card(shell, &payload.material_id) else {
+    let Some(mut card) = ghost_card(shell, &payload.material_id) else {
         return;
     };
+    fill_looks(shell, ui.ctx(), std::slice::from_mut(&mut card));
     let rect = Rect::from_center_size(pos, Vec2::new(CARD_W, CARD_H));
     let layer = egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("library-ghost"));
     paint_card_face(&ui.ctx().layer_painter(layer), rect, &card);
@@ -2275,6 +2416,7 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
             name: offer.name.to_owned(),
             meta: card_meta(offer.duration),
             on_timeline: false,
+            look: CardLook::Swatch,
         });
     }
     let draft = shell.draft()?;
@@ -2293,8 +2435,9 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
         return Some(BinCard {
             id: video.id.as_str().to_owned(),
             name: file_label(&video.path),
-            meta: card_meta(video.duration.0),
+            meta: card_clock(video.duration.0),
             on_timeline: used.contains(video.id.as_str()),
+            look: CardLook::Picture(None),
         });
     }
     let audio = draft
@@ -2305,8 +2448,9 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
     Some(BinCard {
         id: audio.id.as_str().to_owned(),
         name: file_label(&audio.path),
-        meta: card_meta(audio.duration.0),
+        meta: card_clock(audio.duration.0),
         on_timeline: used.contains(audio.id.as_str()),
+        look: CardLook::Sound(Vec::new()),
     })
 }
 
@@ -2793,6 +2937,40 @@ struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::Te
 /// Textures kept before the oldest are let go.
 const FILM_TEXTURES: usize = 1500;
 
+/// Run `f` on the thumbnail textures, then keep them for the next frame.
+fn with_film_textures<R>(ctx: &egui::Context, f: impl FnOnce(&mut FilmTextures) -> R) -> R {
+    let store = egui::Id::NULL.with("film textures");
+    let mut textures = ctx
+        .data_mut(|data| data.get_temp::<FilmTextures>(store))
+        .unwrap_or_default();
+    if textures.0.len() > FILM_TEXTURES {
+        textures.0.clear();
+    }
+    let result = f(&mut textures);
+    ctx.data_mut(|data| data.insert_temp(store, textures));
+    result
+}
+
+/// The texture of `thumb`, loaded the first time it is shown.
+fn film_texture(
+    ctx: &egui::Context,
+    textures: &mut FilmTextures,
+    key: cutlass_engine::ThumbKey,
+    thumb: &cutlass_engine::Thumb,
+) -> egui::TextureId {
+    textures
+        .0
+        .entry(key)
+        .or_insert_with(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [thumb.width as usize, thumb.height as usize],
+                &thumb.rgba,
+            );
+            ctx.load_texture("film", image, egui::TextureOptions::LINEAR)
+        })
+        .id()
+}
+
 /// The clip's filmstrip in the `film` rows of `clip_rect`, over the tiles
 /// that meet `visible`. A tile without its picture yet keeps the clip color.
 fn paint_film(
@@ -2814,71 +2992,57 @@ fn paint_film(
     if cells.is_empty() {
         return;
     }
-    let store = egui::Id::NULL.with("film textures");
-    let mut textures = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<FilmTextures>(store))
-        .unwrap_or_default();
-    if textures.0.len() > FILM_TEXTURES {
-        textures.0.clear();
-    }
-    // Inside the clip's edge, rounded where a picture meets a corner.
-    let inner = clip_rect.shrink(1.0);
-    let radius = CLIP_RADIUS - 1;
-    let painter = ui.painter().with_clip_rect(visible);
-    for cell in cells {
-        let Some(thumb) = cell.thumb else {
-            continue;
-        };
-        let texture = textures.0.entry(cell.key).or_insert_with(|| {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [thumb.width as usize, thumb.height as usize],
-                &thumb.rgba,
+    with_film_textures(ui.ctx(), |textures| {
+        // Inside the clip's edge, rounded where a picture meets a corner.
+        let inner = clip_rect.shrink(1.0);
+        let radius = CLIP_RADIUS - 1;
+        let painter = ui.painter().with_clip_rect(visible);
+        for cell in cells {
+            let Some(thumb) = cell.thumb else {
+                continue;
+            };
+            let texture = film_texture(ui.ctx(), textures, cell.key, &thumb);
+            let full = film.height() * thumb.width as f32 / thumb.height as f32;
+            let tile = Rect::from_min_size(
+                Pos2::new(clip_rect.left() + cell.tile.left as f32, film.top()),
+                Vec2::new(cell.tile.width as f32, film.height()),
             );
-            ui.ctx()
-                .load_texture("film", image, egui::TextureOptions::LINEAR)
-        });
-        let full = film.height() * thumb.width as f32 / thumb.height as f32;
-        let tile = Rect::from_min_size(
-            Pos2::new(clip_rect.left() + cell.tile.left as f32, film.top()),
-            Vec2::new(cell.tile.width as f32, film.height()),
-        );
-        let drawn = tile.intersect(inner).intersect(film);
-        if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
-            continue;
+            let drawn = tile.intersect(inner).intersect(film);
+            if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
+                continue;
+            }
+            let uv = Rect::from_min_max(
+                Pos2::new(
+                    (drawn.left() - tile.left()) / full,
+                    (drawn.top() - film.top()) / film.height(),
+                ),
+                Pos2::new(
+                    ((drawn.right() - tile.left()) / full).min(1.0),
+                    (drawn.bottom() - film.top()) / film.height(),
+                ),
+            );
+            let at = |a: f32, b: f32| (a - b).abs() < 0.5;
+            let corner = |side: bool, end: bool| if side && end { radius } else { 0 };
+            let (left, right) = (
+                at(drawn.left(), inner.left()),
+                at(drawn.right(), inner.right()),
+            );
+            let (top, bottom) = (
+                at(drawn.top(), inner.top()),
+                at(drawn.bottom(), inner.bottom()),
+            );
+            let corners = CornerRadius {
+                nw: corner(left, top),
+                ne: corner(right, top),
+                sw: corner(left, bottom),
+                se: corner(right, bottom),
+            };
+            painter.add(
+                egui::epaint::RectShape::filled(drawn, corners, Color32::from_gray(210))
+                    .with_texture(texture, uv),
+            );
         }
-        let uv = Rect::from_min_max(
-            Pos2::new(
-                (drawn.left() - tile.left()) / full,
-                (drawn.top() - film.top()) / film.height(),
-            ),
-            Pos2::new(
-                ((drawn.right() - tile.left()) / full).min(1.0),
-                (drawn.bottom() - film.top()) / film.height(),
-            ),
-        );
-        let at = |a: f32, b: f32| (a - b).abs() < 0.5;
-        let corner = |side: bool, end: bool| if side && end { radius } else { 0 };
-        let (left, right) = (
-            at(drawn.left(), inner.left()),
-            at(drawn.right(), inner.right()),
-        );
-        let (top, bottom) = (
-            at(drawn.top(), inner.top()),
-            at(drawn.bottom(), inner.bottom()),
-        );
-        let corners = CornerRadius {
-            nw: corner(left, top),
-            ne: corner(right, top),
-            sw: corner(left, bottom),
-            se: corner(right, bottom),
-        };
-        painter.add(
-            egui::epaint::RectShape::filled(drawn, corners, Color32::from_gray(210))
-                .with_texture(texture.id(), uv),
-        );
-    }
-    ui.ctx().data_mut(|data| data.insert_temp(store, textures));
+    });
 }
 
 /// The corner radius of a clip.
@@ -2965,7 +3129,7 @@ fn volume_height(gain: f32) -> f32 {
 /// The waveform as bars rising from the bottom of `band`, each the loudest
 /// of the pixel columns under it, crossed by the volume line. Columns count from `clip_left`.
 fn paint_wave(
-    ui: &Ui,
+    painter: &egui::Painter,
     wave: &crate::shell::ClipWave,
     clip_left: f32,
     band: Rect,
@@ -2979,7 +3143,7 @@ fn paint_wave(
     } else {
         bar
     };
-    let painter = ui.painter().with_clip_rect(band.intersect(visible));
+    let painter = painter.with_clip_rect(band.intersect(visible));
     let floor = band.bottom() - 1.0;
     let reach = (band.height() - 2.0).max(1.0);
     let mut mesh = egui::Mesh::default();
@@ -3021,7 +3185,7 @@ fn paint_wave(
         }
     }
     // The volume line, a device pixel thick, at each column's gain.
-    let thick = 1.0 / ui.ctx().pixels_per_point();
+    let thick = 1.0 / painter.pixels_per_point();
     for (index, gain) in wave.gains.iter().enumerate() {
         let left = clip_left + (wave.first as usize + index) as f32;
         let y = (floor - volume_height(*gain) * reach).round();
@@ -3169,7 +3333,7 @@ fn paint_clip(
             } else {
                 WaveColors::VIDEO
             };
-            paint_wave(ui, wave, clip_rect.left(), band, visible, colors);
+            paint_wave(ui.painter(), wave, clip_rect.left(), band, visible, colors);
         }
     }
     if selected {
@@ -4433,7 +4597,7 @@ mod tests {
             muted: true,
         };
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(ui, &wave, 0.0, band, band, WaveColors::AUDIO);
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::AUDIO);
         });
         output.textures_delta.clear();
         let mut bottoms = Vec::new();
@@ -4466,7 +4630,7 @@ mod tests {
             muted: false,
         };
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::VIDEO);
         });
         output.textures_delta.clear();
         let colors: Vec<(f32, Color32)> = output
@@ -4517,7 +4681,7 @@ mod tests {
             muted: false,
         };
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::VIDEO);
         });
         output.textures_delta.clear();
         let tops: Vec<f32> = output
@@ -4548,7 +4712,7 @@ mod tests {
             muted: true,
         };
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::VIDEO);
         });
         output.textures_delta.clear();
         let colors: Vec<Color32> = output
@@ -4619,6 +4783,47 @@ mod tests {
     }
 
     #[test]
+    fn a_card_shows_its_length_as_a_clock() {
+        assert_eq!(card_clock(0), "00:00");
+        assert_eq!(card_clock(93_400_000), "01:33");
+        assert_eq!(card_clock(1_011_000_000), "16:51");
+        assert_eq!(card_clock(3_725_000_000), "1:02:05");
+    }
+
+    #[test]
+    fn a_poster_fills_its_card_cut_at_the_sides_or_the_ends() {
+        let card = Vec2::new(144.0, 96.0);
+        let wide = cover_uv(card, 1920.0, 1080.0);
+        assert!((wide.min.x - (1.0 - 1.5 / (16.0 / 9.0)) / 2.0).abs() < 1e-5);
+        assert_eq!((wide.min.y, wide.max.y), (0.0, 1.0));
+        let tall = cover_uv(card, 1080.0, 1920.0);
+        assert_eq!((tall.min.x, tall.max.x), (0.0, 1.0));
+        assert!(tall.min.y > 0.0 && (tall.min.y + tall.max.y - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_long_name_keeps_its_start_and_its_extension() {
+        let ctx = egui::Context::default();
+        let mut cut = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cut = middle_ellipsis(
+                ui.ctx(),
+                "GOOGLE IS BACK with Gemini 3 (flash).mp4",
+                &FontId::proportional(12.0),
+                120.0,
+            );
+        });
+        output.textures_delta.clear();
+        assert!(cut.starts_with("GOOGLE"), "{cut}");
+        assert!(cut.ends_with(".mp4"), "{cut}");
+        assert!(cut.contains('…'), "{cut}");
+        assert_eq!(
+            middle_ellipsis(&ctx, "short.mp4", &FontId::proportional(12.0), 120.0),
+            "short.mp4"
+        );
+    }
+
+    #[test]
     fn a_video_on_the_main_lane_is_a_media_card() {
         let mut draft = cutlass_model::Draft::empty("draft");
         let mut video = cutlass_model::MaterialVideo::new("mat");
@@ -4633,7 +4838,8 @@ mod tests {
         let cards = bin_cards(&draft, Shelf::Media, "");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].name, "clip.mp4");
-        assert_eq!(cards[0].meta, "2.5s");
+        assert_eq!(cards[0].meta, "00:02");
+        assert_eq!(cards[0].look, CardLook::Picture(None));
         assert!(cards[0].on_timeline);
         assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
@@ -4700,6 +4906,7 @@ mod tests {
                 name: (*id).to_owned(),
                 meta: String::new(),
                 on_timeline: false,
+                look: CardLook::Swatch,
             })
             .collect()
     }
@@ -4871,7 +5078,7 @@ mod tests {
         );
         let painted = painted_text(&output);
         output.textures_delta.clear();
-        assert!(painted.contains("On timeline"), "{painted}");
+        assert!(painted.contains("Added"), "{painted}");
         assert!(!painted.contains("No clips"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
     }

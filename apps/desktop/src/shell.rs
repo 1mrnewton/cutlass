@@ -797,6 +797,48 @@ impl Shell {
         })
     }
 
+    /// The library poster of material `id`: a thumbnail of its first frame,
+    /// with the key it is stored under. Asked for when the frame ends while
+    /// missing. Sound has no poster.
+    pub fn poster(&mut self, id: &str) -> Option<(ThumbKey, Option<std::sync::Arc<Thumb>>)> {
+        let thumbnails = self.thumbnails.as_ref()?;
+        let draft = self.session.as_ref().map(Session::draft)?;
+        let Some(MaterialRef::Video(video)) = draft.materials.get(id) else {
+            return None;
+        };
+        let path = self.media_file(Some(&video.path))?;
+        let key = ThumbKey {
+            path,
+            time: Micros(0),
+        };
+        let thumb = thumbnails.get(&key);
+        if thumb.is_none() {
+            self.film_asks.push(key.clone());
+        }
+        Some((key, thumb))
+    }
+
+    /// The library waveform of audio material `id`: `columns` levels, 0 to
+    /// 1, across the whole file, once any of it is read. Asked for when the
+    /// frame ends while missing or still being read.
+    pub fn material_wave(&mut self, id: &str, columns: usize) -> Option<Vec<f32>> {
+        let waveforms = self.waveforms.as_ref()?;
+        let draft = self.session.as_ref().map(Session::draft)?;
+        let Some(MaterialRef::Audio(audio)) = draft.materials.get(id) else {
+            return None;
+        };
+        let duration = audio.duration.0;
+        let path = self.media_file(Some(&audio.path))?;
+        let Some(peaks) = waveforms.get(&path) else {
+            self.wave_asks.push(path);
+            return None;
+        };
+        if !peaks.complete {
+            self.wave_asks.push(path);
+        }
+        Some(spread_peaks(&peaks, duration, columns))
+    }
+
     /// A stored media path as a file: inside the project when relative.
     fn media_file(&self, stored: Option<&str>) -> Option<PathBuf> {
         let stored = stored?;
@@ -5630,6 +5672,24 @@ fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// `peaks` spread over `columns`: the loudest level in each column's share
+/// of `duration`, the file's length. Past what was read is silence.
+fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) -> Vec<f32> {
+    let length = if duration > 0 {
+        duration
+    } else {
+        peaks.levels.len() as i64 * 1_000_000 / i64::from(cutlass_engine::BUCKETS_PER_SECOND)
+    };
+    let count = columns.max(1) as i64;
+    (0..count)
+        .map(|column| {
+            let from = Micros(length * column / count);
+            let to = Micros((length * (column + 1) / count - 1).max(from.0));
+            peaks.level(from, to)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ExportRequest, LONG_SIDES, Shell, ShellError};
@@ -6306,6 +6366,50 @@ mod tests {
         assert!(levels.iter().all(|level| (0.0..=1.0).contains(level)));
         let loud = levels.iter().filter(|level| **level > 0.05).count();
         assert!(loud > 100, "{loud} of {} columns have sound", levels.len());
+    }
+
+    #[test]
+    fn a_library_waveform_takes_the_loudest_level_in_each_column() {
+        let peaks = cutlass_engine::Peaks {
+            levels: vec![0.1, 0.9, 0.2, 0.3, 0.0, 0.5],
+            complete: true,
+        };
+        // 60 ms of sound across three columns, 20 ms each.
+        assert_eq!(super::spread_peaks(&peaks, 60_000, 3), [0.9, 0.3, 0.5]);
+        // Without a stored length, the peaks say how long the file is.
+        assert_eq!(super::spread_peaks(&peaks, 0, 2), [0.9, 0.5]);
+    }
+
+    #[test]
+    fn a_library_picture_shows_its_first_frame_once_read() {
+        let temp = Temp::new();
+        Folder::new(Draft::empty("draft")).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        assert!(desktop.poster(&id).is_none(), "no worker, no poster");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        let (_, thumb) = desktop.poster(&id).expect("a picture has a poster");
+        assert!(thumb.is_none());
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the poster was read");
+        let (_, thumb) = desktop.poster(&id).unwrap();
+        assert!(thumb.is_some_and(|thumb| thumb.width > 0 && thumb.height > 0));
+        assert!(
+            desktop.material_wave(&id, 10).is_none(),
+            "a picture has no sound"
+        );
     }
 
     #[test]

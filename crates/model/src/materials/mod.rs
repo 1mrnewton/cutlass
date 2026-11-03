@@ -26,7 +26,8 @@ pub use beat::{
 pub use color::{MaterialCanvas, MaterialColorConfig};
 pub use draft::MaterialDraft;
 pub use effect::{
-    MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideoEffect, StickerAnimation,
+    BloomParams, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideoEffect,
+    StickerAnimation, segment_bloom,
 };
 pub use mark::{
     TimeMarkItem, VisibleMark, clip_mark_time, new_time_mark, referenced_time_marks,

@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    Clip, Draft, MaterialRef, MaterialText, Micros, Segment, SegmentId, TrackAttribute,
-    UniformScale, WordColumns,
+    BloomParams, Clip, Draft, MaterialEffect, MaterialRef, MaterialText, Micros, Segment,
+    SegmentId, TrackAttribute, UniformScale, WordColumns, segment_bloom,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
@@ -133,13 +133,14 @@ pub(crate) fn text_layers(
                 (bytes, transform)
             } else {
                 let wanted = density(&clip, &uniform, material.font_size);
+                let glow = glow(draft, segment);
                 let kept = rasters
                     .get(&segment.id)
                     .filter(|(drawn, _)| *drawn == wanted)
                     .cloned();
-                let Some((drawn, bytes)) =
-                    kept.or_else(|| title_picture(face, material, segment, time, wanted))
-                else {
+                let Some((drawn, bytes)) = kept.or_else(|| {
+                    title_picture(face, material, glow.as_ref(), segment, time, wanted)
+                }) else {
                     continue;
                 };
                 rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
@@ -166,6 +167,7 @@ pub(crate) fn text_layers(
 fn title_picture(
     face: &[u8],
     material: &MaterialText,
+    glow: Option<&BloomParams>,
     segment: &Segment,
     time: Micros,
     density: f64,
@@ -174,7 +176,7 @@ fn title_picture(
         let mut larger = material.clone();
         larger.font_size *= density;
         larger.line_max_width *= density;
-        let source = TextSource::open(face, None, &larger, segment).ok()?;
+        let source = TextSource::open_with_glow(face, None, &larger, glow, segment).ok()?;
         match source.sample(time) {
             Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
             _ => None,
@@ -220,8 +222,14 @@ pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<
         return None;
     }
     let face = fonts.face(&material.font_path)?;
-    let source = TextSource::open(face, None, material, segment).ok()?;
+    let glow = glow(draft, segment);
+    let source = TextSource::open_with_glow(face, None, material, glow.as_ref(), segment).ok()?;
     Some(source.size())
+}
+
+/// The glow a title's clip points at, when it reads as one.
+fn glow(draft: &Draft, segment: &Segment) -> Option<BloomParams> {
+    segment_bloom(&draft.materials, segment).and_then(MaterialEffect::bloom)
 }
 
 fn words_present(material: &MaterialText) -> bool {
@@ -360,8 +368,9 @@ fn covers(start: i64, duration: i64, time: i64) -> bool {
 mod tests {
     use cutlass_engine::ReaderFactory;
     use cutlass_model::{
-        Clip, CommonKeyframe, CommonKeyframeGroup, Draft, MaterialDraft, MaterialText, Micros,
-        Segment, TimeRange, TrackAttribute, WordColumns,
+        BloomParams, Clip, CommonKeyframe, CommonKeyframeGroup, Draft, MaterialDraft,
+        MaterialEffect, MaterialId, MaterialText, Micros, Segment, TimeRange, TrackAttribute,
+        WordColumns,
     };
     use cutlass_renderer_software::SoftwareDevice;
 
@@ -498,6 +507,36 @@ mod tests {
         let mut missing = draft.clone();
         missing.materials.texts[0].font_path = "other.ttf".to_owned();
         assert_eq!(super::text_size(&missing, &OneFont, segment), None);
+    }
+
+    #[test]
+    fn a_title_glows_with_the_bloom_its_clip_points_at() {
+        let plain = text_segment("A", false);
+        let mut glowing = plain.clone();
+        let bloom = BloomParams {
+            color: "#00FF00".to_owned(),
+            strength: 1.0,
+            range: 0.5,
+            ..BloomParams::default()
+        };
+        glowing
+            .materials
+            .effects
+            .push(MaterialEffect::glow("glow", &bloom));
+        glowing.tracks[0].segments[0]
+            .extra_material_refs
+            .push(MaterialId::new("glow"));
+        let green = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| pixel[0] == 0 && pixel[1] > 0 && pixel[2] == 0)
+                .count()
+        };
+        assert_eq!(green(&pixels(&plain, 0)), 0);
+        assert!(green(&pixels(&glowing, 0)) > 50);
+        let segment = &glowing.tracks[0].segments[0];
+        let (plain_w, _) = super::text_size(&plain, &OneFont, segment).unwrap();
+        let (glow_w, _) = super::text_size(&glowing, &OneFont, segment).unwrap();
+        assert!(glow_w > plain_w, "{plain_w} {glow_w}");
     }
 
     #[test]

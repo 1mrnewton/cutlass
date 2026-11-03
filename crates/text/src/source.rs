@@ -8,7 +8,7 @@
 //! so the picture grows to hold them. The picture is premultiplied.
 
 use cutlass_font::Font;
-use cutlass_model::{MaterialText, Micros, Segment, TimeRange};
+use cutlass_model::{BloomParams, MaterialText, Micros, Segment, TimeRange};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
@@ -44,6 +44,17 @@ impl TextSource {
         material: &MaterialText,
         segment: &Segment,
     ) -> Result<Self, TextError> {
+        Self::open_with_glow(bytes, face, material, None, segment)
+    }
+
+    /// [`Self::open`], with the clip's glow drawn behind the letters.
+    pub fn open_with_glow(
+        bytes: &[u8],
+        face: Option<u32>,
+        material: &MaterialText,
+        glow: Option<&BloomParams>,
+        segment: &Segment,
+    ) -> Result<Self, TextError> {
         if segment.target.duration.0 > 0
             && segment
                 .target
@@ -58,12 +69,13 @@ impl TextSource {
             None => cutlass_font::read(bytes).map_err(TextError::Font)?,
             Some(index) => cutlass_font::read_collection(bytes, index).map_err(TextError::Font)?,
         };
-        Self::from_font(&font, material, segment)
+        Self::from_font(&font, material, glow, segment)
     }
 
     fn from_font(
         font: &Font<'_>,
         material: &MaterialText,
+        glow: Option<&BloomParams>,
         segment: &Segment,
     ) -> Result<Self, TextError> {
         let fill = fill_rgba(material)?;
@@ -73,7 +85,7 @@ impl TextSource {
             let _image = atlas.glyph(font, placed.glyph_id)?;
         }
         let mesh = build(material.id.clone(), &laid, &atlas)?;
-        let style = Style::of(material, laid.font_size)?;
+        let style = Style::of(material, glow, laid.font_size)?;
         let (origin_x, origin_y, width, height, background) =
             picture_bounds(&mesh, &style, laid.font_size)?;
         Ok(Self {
@@ -645,7 +657,7 @@ mod tests {
     use super::TextSource;
     use crate::TextError;
     use cutlass_font::FontError;
-    use cutlass_model::{Draft, MaterialText, Micros, Segment, TimeRange};
+    use cutlass_model::{BloomParams, Draft, MaterialText, Micros, Segment, TimeRange};
     use cutlass_picture::{Picture, PictureSource, Sample};
 
     const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
@@ -820,6 +832,46 @@ mod tests {
         assert!(!(0..plain_h / 3).any(row));
         shaded.has_shadow = false;
         assert_eq!(picture(&shaded).0, plain_w);
+    }
+
+    #[test]
+    fn a_glow_spreads_its_color_around_the_letters() {
+        let text = material("A");
+        let (plain_w, plain_h, _) = picture(&text);
+        let mut bloom = BloomParams {
+            color: "#FF00FF".to_owned(),
+            strength: 1.0,
+            range: 0.5,
+            ..BloomParams::default()
+        };
+        let glowing = |bloom: &BloomParams| {
+            let source = TextSource::open_with_glow(TTF, None, &text, Some(bloom), &segment())
+                .expect("open");
+            let (width, height) = source.size();
+            (width, height, cpu(source.sample(Micros(1_000))))
+        };
+        let (width, height, rgba) = glowing(&bloom);
+        assert!(width > plain_w && height > plain_h, "{width} {height}");
+        // Magenta reaches past the letters, which stay white.
+        let magenta = rgba
+            .chunks(4)
+            .filter(|pixel| pixel[1] == 0 && pixel[0] > 0 && pixel[0] == pixel[2])
+            .count();
+        assert!(magenta > 50, "{magenta}");
+        assert!(has(&rgba, [255, 255, 255, 255]));
+        // A full-strength glow is close to opaque next to the letters.
+        let brightest = rgba
+            .chunks(4)
+            .filter(|pixel| pixel[1] == 0 && pixel[0] == pixel[2])
+            .map(|pixel| pixel[3])
+            .max();
+        assert!(brightest >= Some(230), "{brightest:?}");
+        // No strength is no glow.
+        bloom.strength = 0.0;
+        assert_eq!(glowing(&bloom).0, plain_w);
+        bloom.strength = 1.0;
+        bloom.color = "pink".to_owned();
+        assert!(TextSource::open_with_glow(TTF, None, &text, Some(&bloom), &segment()).is_err());
     }
 
     #[test]

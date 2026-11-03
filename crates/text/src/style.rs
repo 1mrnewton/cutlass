@@ -8,10 +8,14 @@
 //! degrees, counterclockwise from the right. `background_round_radius` from
 //! 0 to 1 rounds the box's corners up to half its height.
 //!
+//! A glow is the clip's `bloom` effect: its `strength` from 0 to 1 is how
+//! bright it is, and its `range` from 0 to 1 how far it spreads, up to
+//! [`GLOW_REACH`] ems.
+//!
 //! An outline is grown from the glyph distance field, so it reaches at most
 //! the field's spread beyond each letter; a wider one is drawn that wide.
 
-use cutlass_model::MaterialText;
+use cutlass_model::{BloomParams, MaterialText};
 
 use crate::TextError;
 use crate::atlas::{ATLAS_EM, SPREAD};
@@ -21,7 +25,19 @@ use crate::atlas::{ATLAS_EM, SPREAD};
 pub(crate) struct Style {
     pub(crate) outline: Option<Outline>,
     pub(crate) shadow: Option<Shadow>,
+    pub(crate) glow: Option<Glow>,
     pub(crate) background: Option<Background>,
+}
+
+/// How far a full-range glow spreads, in ems.
+pub const GLOW_REACH: f64 = 0.3;
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Glow {
+    /// Premultiplied.
+    pub(crate) color: [u8; 4],
+    pub(crate) blur: f32,
+    pub(crate) strength: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,8 +112,12 @@ pub(crate) fn cell_pad(font_size: f32) -> f32 {
 impl Style {
     /// The style `material` asks for at `font_size` pixels. A color that is
     /// not a hex color is an error; a part with no color, no width, or no
-    /// opacity is left out.
-    pub(crate) fn of(material: &MaterialText, font_size: f32) -> Result<Self, TextError> {
+    /// opacity is left out, and so is a glow with no strength.
+    pub(crate) fn of(
+        material: &MaterialText,
+        bloom: Option<&BloomParams>,
+        font_size: f32,
+    ) -> Result<Self, TextError> {
         let global = unit(material.global_alpha);
         let outline = if material.border_color.trim().is_empty() {
             None
@@ -152,9 +172,23 @@ impl Style {
                     round,
                 })
             };
+        let glow = match bloom {
+            Some(bloom) if !bloom.color.trim().is_empty() => {
+                let color = color(&bloom.color, global)?;
+                #[allow(clippy::cast_possible_truncation)]
+                let strength = unit(bloom.strength) as f32;
+                (color[3] > 0 && strength > 0.0).then(|| Glow {
+                    color,
+                    blur: em(unit(bloom.range) * GLOW_REACH, font_size).max(1.0),
+                    strength,
+                })
+            }
+            _ => None,
+        };
         Ok(Self {
             outline,
             shadow,
+            glow,
             background,
         })
     }
@@ -165,6 +199,10 @@ impl Style {
         if let Some(shadow) = &self.shadow {
             let reach = shadow.blur * 2.0 + 1.0;
             area = area.union(cells.shift(shadow.dx, shadow.dy).grow(reach, reach));
+        }
+        if let Some(glow) = &self.glow {
+            let reach = glow.blur * 2.0 + 1.0;
+            area = area.union(cells.grow(reach, reach));
         }
         if let Some(background) = &self.background {
             area = area.union(background.area(cells, font_size));
@@ -198,7 +236,7 @@ pub(crate) struct Layers<'a> {
     pub(crate) height: usize,
 }
 
-/// Paint the background, shadow, outline, and fill, in that order.
+/// Paint the background, shadow, glow, outline, and fill, in that order.
 pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
     let Layers {
         style,
@@ -229,6 +267,19 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
                 let cover = blurred[sy * width + sx];
                 over(rgba, y * width + x, shadow.color, cover);
             }
+        }
+    }
+    if let Some(glow) = &style.glow {
+        // Doubled so the glow stays bright at the letters' edges, where the
+        // blur would leave only half.
+        let blurred = blur(shape, width, height, glow.blur);
+        for (index, cover) in blurred.iter().enumerate() {
+            over(
+                rgba,
+                index,
+                glow.color,
+                (cover * 2.0).min(1.0) * glow.strength,
+            );
         }
     }
     if let (Some(outline), Some(grown)) = (&style.outline, grown) {

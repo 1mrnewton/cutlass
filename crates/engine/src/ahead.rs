@@ -31,8 +31,8 @@ pub const BEHIND: usize = 2;
 pub const BEHIND_BYTES: usize = 384 << 20;
 /// Pictures this close are one run with no picture missing between them.
 const TOUCHING: i64 = 1_000;
-/// The longest a caller waits for one picture.
-const WAIT: Duration = Duration::from_secs(2);
+/// How often a waiting caller checks that the worker is still running.
+const CHECK: Duration = Duration::from_millis(100);
 /// How often a long decode stores a picture on its way, so a caller that
 /// does not wait sees it move.
 const PUBLISH: Duration = Duration::from_millis(50);
@@ -148,7 +148,9 @@ impl ReadAhead {
     }
 
     /// The picture that covers `source`, waiting for the worker when it is
-    /// not decoded yet.
+    /// not decoded yet. The wait ends when the worker answers, fails, or has
+    /// stopped, never after a fixed time, so a busy machine slows the read
+    /// instead of returning no picture.
     pub(crate) fn picture(&self, source: Micros) -> Result<HeldFrame, EngineError> {
         let mut state = lock(&self.shared.state);
         if let Some(held) = find(&state, source) {
@@ -163,20 +165,28 @@ impl ReadAhead {
         state.answer = None;
         state.failed = None;
         self.shared.wake.notify_all();
-        let (mut state, _) = self
-            .shared
-            .wake
-            .wait_timeout_while(state, WAIT, |state| {
-                find(state, source).is_none()
-                    && state.failed.as_ref().is_none_or(|(at, _)| *at != source)
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(held) = find(&state, source) {
-            return Ok(held.clone());
+        loop {
+            (state, _) = self
+                .shared
+                .wake
+                .wait_timeout_while(state, CHECK, |state| {
+                    find(state, source).is_none()
+                        && state.failed.as_ref().is_none_or(|(at, _)| *at != source)
+                })
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(held) = find(&state, source) {
+                return Ok(held.clone());
+            }
+            if state.failed.as_ref().is_some_and(|(at, _)| *at == source) {
+                break;
+            }
+            if self.worker.as_ref().is_none_or(JoinHandle::is_finished) {
+                return Err(EngineError::NotReady);
+            }
         }
         match state.failed.take() {
-            Some((at, error)) if at == source => Err(error),
-            _ => Err(EngineError::NotReady),
+            Some((_, error)) => Err(error),
+            None => Err(EngineError::NotReady),
         }
     }
 }

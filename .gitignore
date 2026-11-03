@@ -29,3 +29,4 @@ google-services.json
 # Added by cargo
 
 /target
+.vscode/

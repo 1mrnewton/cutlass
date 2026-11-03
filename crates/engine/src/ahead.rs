@@ -8,6 +8,12 @@
 //!
 //! The worker keeps at most `ahead` pictures past the asked time and
 //! [`BEHIND`] before it. It stops reading ahead at the end of the stream.
+//!
+//! Moving backward, a long-GOP file can only be decoded forward from a
+//! keyframe. So while the asked time moves back the worker keeps every
+//! picture it decodes behind it, up to [`BEHIND_BYTES`], and once it has
+//! answered it fills in the pictures before those, a keyframe run at a time,
+//! so stepping back finds them already decoded.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -21,6 +27,10 @@ use crate::reader::{HeldFrame, Media, Steer};
 
 /// Pictures kept before the asked time, for a short step back.
 pub const BEHIND: usize = 2;
+/// The memory kept in pictures before the asked time while it moves back.
+pub const BEHIND_BYTES: usize = 384 << 20;
+/// Pictures this close are one run with no picture missing between them.
+const TOUCHING: i64 = 1_000;
 /// The longest a caller waits for one picture.
 const WAIT: Duration = Duration::from_secs(2);
 /// How often a long decode stores a picture on its way, so a caller that
@@ -51,6 +61,11 @@ struct State {
     failed: Option<(Micros, EngineError)>,
     /// Decoding forward reached the last picture.
     ended: bool,
+    /// The asked time last moved earlier.
+    backward: bool,
+    /// A fill behind this picture start found nothing earlier: the start of
+    /// the stream, or a run that would not decode.
+    floor: Option<Micros>,
     stop: bool,
 }
 
@@ -64,6 +79,8 @@ impl ReadAhead {
                 answer: None,
                 failed: None,
                 ended: false,
+                backward: false,
+                floor: None,
                 stop: false,
             }),
             wake: Condvar::new(),
@@ -88,7 +105,7 @@ impl ReadAhead {
         if let Some(held) = find(&state, source) {
             let held = held.clone();
             if state.want != Some(source) {
-                state.want = Some(source);
+                aim(&mut state, source);
                 self.shared.wake.notify_all();
             }
             return Ok(Some(held));
@@ -99,7 +116,7 @@ impl ReadAhead {
             return Err(error.clone());
         }
         if state.want != Some(source) {
-            state.want = Some(source);
+            aim(&mut state, source);
             state.answer = None;
             state.failed = None;
             self.shared.wake.notify_all();
@@ -124,7 +141,7 @@ impl ReadAhead {
         if state.want == Some(source) || find(&state, source).is_some() {
             return;
         }
-        state.want = Some(source);
+        aim(&mut state, source);
         state.answer = None;
         state.failed = None;
         self.shared.wake.notify_all();
@@ -137,12 +154,12 @@ impl ReadAhead {
         if let Some(held) = find(&state, source) {
             let held = held.clone();
             if state.want != Some(source) {
-                state.want = Some(source);
+                aim(&mut state, source);
                 self.shared.wake.notify_all();
             }
             return Ok(held);
         }
-        state.want = Some(source);
+        aim(&mut state, source);
         state.answer = None;
         state.failed = None;
         self.shared.wake.notify_all();
@@ -174,6 +191,16 @@ impl Drop for ReadAhead {
     }
 }
 
+/// Ask for `source`, noting whether the asked time moved back.
+fn aim(state: &mut State, source: Micros) {
+    if let Some(want) = state.want
+        && want != source
+    {
+        state.backward = source.0 < want.0;
+    }
+    state.want = Some(source);
+}
+
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state
         .lock()
@@ -203,6 +230,8 @@ enum Job {
     Answer(Micros),
     /// Read ahead from the end of the last picture.
     Ahead(Micros),
+    /// Moving back, decode the pictures before this picture start.
+    Behind(Micros),
 }
 
 fn next_job(state: &State, ahead: usize) -> Option<Job> {
@@ -212,6 +241,9 @@ fn next_job(state: &State, ahead: usize) -> Option<Job> {
             return None;
         }
         return Some(Job::Answer(want));
+    }
+    if state.backward {
+        return behind_job(state, want);
     }
     if state.ended {
         return None;
@@ -225,6 +257,28 @@ fn next_job(state: &State, ahead: usize) -> Option<Job> {
         return None;
     }
     state.frames.back().map(|last| Job::Ahead(last.end))
+}
+
+/// Fill in before the run of pictures that ends at `want`, once it holds
+/// less than three quarters of [`BEHIND_BYTES`]. Waiting for the run to run
+/// low keeps each step back from decoding a keyframe run for one picture.
+fn behind_job(state: &State, want: Micros) -> Option<Job> {
+    let found = find(state, want)?.start;
+    let mut index = state.frames.iter().position(|held| held.start == found)?;
+    let mut bytes = 0;
+    while index > 0 {
+        let (earlier, later) = (&state.frames[index - 1], &state.frames[index]);
+        if earlier.end.0.saturating_add(TOUCHING) < later.start.0 {
+            break;
+        }
+        bytes += earlier.frame.byte_size();
+        index -= 1;
+    }
+    let edge = state.frames[index].start;
+    if bytes >= BEHIND_BYTES / 4 * 3 || state.floor == Some(edge) {
+        return None;
+    }
+    Some(Job::Behind(edge))
 }
 
 fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
@@ -244,6 +298,21 @@ fn run(shared: &Shared, mut media: Media, cover: &TimeRange, ahead: usize) {
         let (mut time, answering) = match job {
             Job::Answer(time) => (time, true),
             Job::Ahead(time) => (time, false),
+            Job::Behind(edge) => {
+                let filled = fill(shared, &mut media, cover, ahead, edge);
+                state = lock(&shared.state);
+                let interrupted = matches!(filled, Err(EngineError::Interrupted));
+                match filled {
+                    Ok(held) => store(&mut state, held, ahead),
+                    Err(EngineError::Interrupted) => {}
+                    Err(_) => state.floor = Some(edge),
+                }
+                if !interrupted && !state.frames.iter().any(|held| held.start.0 < edge.0) {
+                    state.floor = Some(edge);
+                }
+                shared.wake.notify_all();
+                continue;
+            }
         };
         let decoded = if answering {
             answer(shared, &mut media, cover, ahead, &mut time)
@@ -299,7 +368,8 @@ fn answer(
         if state.stop {
             return Steer::Stop;
         }
-        if published.elapsed() >= PUBLISH {
+        // Moving back, every picture on the way is one a later step wants.
+        if state.backward || published.elapsed() >= PUBLISH {
             published = Instant::now();
             store(&mut state, held.clone(), ahead);
             shared.wake.notify_all();
@@ -315,8 +385,37 @@ fn answer(
     })
 }
 
+/// Decode the pictures before `edge`, from the keyframe before it, and
+/// store each one. A turn forward, or an asked time this run will not reach,
+/// stops it.
+fn fill(
+    shared: &Shared,
+    media: &mut Media,
+    cover: &TimeRange,
+    ahead: usize,
+    edge: Micros,
+) -> Result<HeldFrame, EngineError> {
+    media.decode_steered(Micros(edge.0.saturating_sub(1)), cover, &mut |held| {
+        let mut state = lock(&shared.state);
+        if state.stop || !state.backward {
+            return Steer::Stop;
+        }
+        store(&mut state, held.clone(), ahead);
+        shared.wake.notify_all();
+        match state.want {
+            Some(want)
+                if find(&state, want).is_none() && !(held.start.0 <= want.0 && want.0 < edge.0) =>
+            {
+                Steer::Stop
+            }
+            _ => Steer::Go,
+        }
+    })
+}
+
 /// Insert `held` in display order and drop pictures outside the window
-/// around the asked time.
+/// around the asked time. Moving back, the pictures nearest it are kept up to
+/// [`BEHIND_BYTES`]; otherwise [`BEHIND`] of them.
 fn store(state: &mut State, held: HeldFrame, ahead: usize) {
     if !state.frames.iter().any(|stored| stored.start == held.start) {
         let at = state
@@ -336,11 +435,13 @@ fn store(state: &mut State, held: HeldFrame, ahead: usize) {
     let keep = |held: &HeldFrame| {
         answer == Some(held.start) || held.end.0 > want.0 || held.start.0 > want.0
     };
-    let mut behind = 0;
+    let budget = if state.backward { BEHIND_BYTES } else { 0 };
+    let (mut behind, mut bytes) = (0, 0);
     for index in (0..state.frames.len()).rev() {
         if !keep(&state.frames[index]) {
             behind += 1;
-            if behind > BEHIND {
+            bytes += state.frames[index].frame.byte_size();
+            if behind > BEHIND && bytes > budget {
                 state.frames.remove(index);
             }
         }
@@ -382,6 +483,8 @@ mod tests {
             answer: None,
             failed: None,
             ended: false,
+            backward: false,
+            floor: None,
             stop: false,
         }
     }

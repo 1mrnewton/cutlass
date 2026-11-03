@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
+use std::time::UNIX_EPOCH;
 
 use cutlass_ffi::{FfiError, PhoneHost, Probed, STILL_DURATION};
 use cutlass_ffi::{Micros, SegmentId};
@@ -123,6 +124,45 @@ pub struct Lane {
     pub main: bool,
     pub locked: bool,
     pub clips: Vec<Clip>,
+}
+
+/// One saved project in the launch list. `modified_ms` is milliseconds
+/// since 1970.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ProjectSummary {
+    pub path: String,
+    pub name: String,
+    pub duration_us: i64,
+    pub modified_ms: i64,
+}
+
+/// The projects under `root`, newest first. A missing root lists nothing.
+#[uniffi::export]
+#[must_use]
+pub fn list_projects(root: String) -> Vec<ProjectSummary> {
+    cutlass_ffi::list_projects(&PathBuf::from(root))
+        .into_iter()
+        .map(|project| ProjectSummary {
+            path: project.path.display().to_string(),
+            name: project.name,
+            duration_us: project.duration.0,
+            modified_ms: project
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| {
+                    i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+                }),
+        })
+        .collect()
+}
+
+/// Write a new empty project under `root`, named like the desktop's, and
+/// return its folder.
+#[uniffi::export]
+pub fn create_project(root: String) -> Result<String, EditorError> {
+    cutlass_ffi::create_project(&PathBuf::from(root))
+        .map(|path| path.display().to_string())
+        .map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
 /// One open project.
@@ -300,7 +340,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Editor, LaneKind, Media};
+    use super::{Editor, LaneKind, Media, create_project, list_projects};
 
     struct Temp(PathBuf);
 
@@ -402,5 +442,37 @@ mod tests {
             temp.0.join("cache").display().to_string(),
         );
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn a_created_project_is_listed_and_opens() {
+        let temp = Temp::new();
+        let root = temp.0.join("Projects").display().to_string();
+        assert!(list_projects(root.clone()).is_empty());
+        let made = create_project(root.clone()).unwrap();
+        assert!(made.ends_with("Project"));
+        let listed = list_projects(root.clone());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Project");
+        assert_eq!(listed[0].path, made);
+        assert_eq!(listed[0].duration_us, 0);
+        assert!(listed[0].modified_ms > 0);
+        let editor = Editor::open(
+            made,
+            temp.0.join("bundle").display().to_string(),
+            temp.0.join("cache").display().to_string(),
+        )
+        .unwrap();
+        assert_eq!(editor.duration_us().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_root_that_is_a_file_cannot_hold_a_project() {
+        let temp = Temp::new();
+        let file = temp.0.join("not-a-folder");
+        std::fs::write(&file, b"x").unwrap();
+        let root = file.display().to_string();
+        assert!(list_projects(root.clone()).is_empty());
+        assert!(create_project(root).is_err());
     }
 }

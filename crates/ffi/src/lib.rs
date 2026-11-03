@@ -23,6 +23,7 @@ pub use codecs::{decoders, readers};
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
 pub use cutlass_session::{Micros, SegmentId};
+pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use error::FfiError;
 pub use host::Commands;
 pub use media::{Probed, STILL_DURATION};

@@ -12,6 +12,7 @@ mod cache;
 mod codecs;
 mod effect;
 mod error;
+mod export;
 mod host;
 mod media;
 mod player;
@@ -36,6 +37,7 @@ pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
+pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders, video_bitrate};
 pub use host::Commands;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
@@ -305,6 +307,35 @@ impl PhoneHost {
             self.project.root(),
             &self.faces,
             time,
+        )
+    }
+
+    /// Write the whole cut to `destination` as an MP4 at `long_side`, one
+    /// of [`PHONE_EXPORT_SIDES`]. Play stops first. `progress` hears the
+    /// frames done and the frames in all, and stops the export by returning
+    /// false; nothing is left at `destination` then.
+    pub fn export(
+        &mut self,
+        destination: &Path,
+        long_side: u32,
+        progress: &mut dyn FnMut(u64, u64) -> bool,
+    ) -> Result<PhoneExport, FfiError> {
+        self.pause();
+        let draft = self.commands.draft();
+        let readers = self.preview.readers().clone();
+        let root = self.project.root().to_path_buf();
+        let renderer = self.preview.renderer()?;
+        export::export_movie(
+            &export::Sources {
+                draft,
+                root: &root,
+                readers: &readers,
+                fonts: &self.faces,
+                renderer: Some(renderer),
+            },
+            destination,
+            long_side,
+            progress,
         )
     }
 
@@ -1240,6 +1271,79 @@ mod tests {
                 .is_empty()
         );
         assert!(host.waves(Micros(0), Micros(1), f64::NAN).is_empty());
+    }
+
+    #[test]
+    fn the_cut_exports_as_an_mp4_with_picture_and_sound() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (_, _) = two_stills(&mut host);
+        let file = temp.path.join("tone.wav");
+        tone(&file, 1);
+        let material = host.import(&file).unwrap();
+        host.append(&material).unwrap();
+        let out = temp.path.join("cut.mp4");
+        let mut seen = Vec::new();
+        let made = host
+            .export(&out, 720, &mut |done, total| {
+                seen.push((done, total));
+                true
+            })
+            .unwrap();
+        assert_eq!(made.path, out);
+        // Three seconds of pictures at the draft's 30 a second.
+        assert_eq!(made.frames, 90);
+        assert_eq!(seen.last(), Some(&(90, 90)));
+        assert_eq!(made.width.max(made.height), 720);
+        assert!(!temp.path.join(".cut.mp4.part").exists());
+        // The phone's own readers open what it wrote.
+        let cutlass_probe::Probed::Video {
+            width,
+            height,
+            duration,
+            ..
+        } = cutlass_probe::probe(&out).unwrap()
+        else {
+            panic!("a movie");
+        };
+        assert_eq!(
+            (width, height),
+            (
+                i32::try_from(made.width).unwrap(),
+                i32::try_from(made.height).unwrap()
+            )
+        );
+        assert!((2_900_000..=3_100_000).contains(&duration), "{duration}");
+        let imported = host.import(&out).unwrap();
+        assert!(
+            host.draft()
+                .materials
+                .videos
+                .iter()
+                .any(|video| video.id.as_str() == imported)
+        );
+    }
+
+    #[test]
+    fn a_stopped_or_refused_export_leaves_no_file() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let out = temp.path.join("cut.mp4");
+        assert!(
+            host.export(&out, 720, &mut |_, _| true).is_err(),
+            "nothing to export"
+        );
+        two_stills(&mut host);
+        assert!(
+            host.export(&out, 999, &mut |_, _| true).is_err(),
+            "not a size"
+        );
+        let stopped = host.export(&out, 720, &mut |done, _| done < 5).unwrap_err();
+        assert_eq!(stopped.to_string(), "export was stopped");
+        assert!(!out.exists());
+        assert!(!temp.path.join(".cut.mp4.part").exists());
     }
 
     #[test]

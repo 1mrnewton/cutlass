@@ -66,6 +66,16 @@ impl Preview {
         &self.readers
     }
 
+    /// The GPU the preview draws on, opened now if no frame has been drawn.
+    pub(crate) fn renderer(&mut self) -> Result<&Renderer, FfiError> {
+        if self.renderer.is_none() {
+            self.renderer = Some(Renderer::headless().map_err(drawing)?);
+        }
+        self.renderer
+            .as_ref()
+            .ok_or_else(|| drawing(RenderError::NoDevice("not opened".to_owned())))
+    }
+
     /// The picture at `time`, waiting for every clip's picture. A time
     /// outside the cut draws the canvas alone.
     pub fn frame(

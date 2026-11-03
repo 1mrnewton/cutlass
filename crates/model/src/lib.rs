@@ -14,6 +14,7 @@
 mod clip;
 mod draft;
 mod enums;
+pub mod graphs;
 mod id;
 mod keyframe;
 mod linkage;
@@ -31,10 +32,11 @@ pub use enums::{
     AnimType, ApplyType, CanvasRatio, CropRatio, HdrDisplayMode, HdrType, KeyframeCurve,
     RenderIndexMode, SegmentSource, SpeedMode, TrackAttribute, TrackFlag, TrackType,
 };
+pub use graphs::{GRAPH_PRESETS, GraphPreset};
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{
-    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, POSE_KEYS, add_keys, clip_at, key_offsets,
-    put_key, remove_keys, sample,
+    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, POSE_KEYS, add_keys,
+    clip_at, key_offsets, put_key, remove_keys, sample,
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{

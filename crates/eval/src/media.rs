@@ -30,8 +30,8 @@ use cutlass_engine::{
 };
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    Clip, Crop, Draft, DraftId, MaterialCanvas, MaterialRef, Micros, Segment, SegmentId, TimeRange,
-    TrackAttribute, UniformScale,
+    Clip, Crop, Draft, DraftId, KeyframeGraph, MaterialCanvas, MaterialRef, Micros, Segment,
+    SegmentId, TimeRange, TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
@@ -385,7 +385,8 @@ pub(crate) fn video_layers<'a>(
             };
             let crop = video.crop;
             let crop_scale = video.crop_scale;
-            let Some((clip, uniform)) = segment_clip(segment, time) else {
+            let Some((clip, uniform)) = segment_clip(&draft.keyframe_graph_list, segment, time)
+            else {
                 continue;
             };
             let Some(transform) = picture_transform(&clip, &uniform, width, height) else {
@@ -465,7 +466,7 @@ pub(crate) fn video_picture(
     };
     let crop = video.crop;
     let crop_scale = video.crop_scale;
-    let (clip, uniform) = segment_clip(segment, time)?;
+    let (clip, uniform) = segment_clip(&draft.keyframe_graph_list, segment, time)?;
     let transform = picture_transform(&clip, &uniform, width, height)?;
     if transform.omitted() {
         return None;
@@ -560,9 +561,14 @@ fn decode_canvas_image(media: &ReaderFactory, path: &str) -> Option<CpuBytes> {
     orient(bytes, display)
 }
 
-/// The clip at `time`; see [`cutlass_model::clip_at`].
-pub(crate) fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
-    cutlass_model::clip_at(segment, time)
+/// The clip at `time`, eased by the draft's `graphs`; see
+/// [`cutlass_model::clip_at`].
+pub(crate) fn segment_clip(
+    graphs: &[KeyframeGraph],
+    segment: &Segment,
+    time: Micros,
+) -> Option<(Clip, UniformScale)> {
+    cutlass_model::clip_at(segment, graphs, time)
 }
 
 fn covers(start: i64, duration: i64, time: i64) -> bool {
@@ -1733,23 +1739,23 @@ mod tests {
     #[test]
     fn line_keyframes_move_the_clip_from_the_segment_start() {
         let segment = keyed(1_000, vec![line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)])]);
-        let (start, _) = segment_clip(&segment, Micros(1_000)).expect("clip");
+        let (start, _) = segment_clip(&[], &segment, Micros(1_000)).expect("clip");
         assert_eq!(start.alpha, 0.0);
-        let (mid, uniform) = segment_clip(&segment, Micros(1_500)).expect("clip");
+        let (mid, uniform) = segment_clip(&[], &segment, Micros(1_500)).expect("clip");
         assert!((mid.alpha - 0.5).abs() < 1e-9);
         let rgba = paint(1, 1, solid(1, 1, [200, 0, 0, 255]), mid, uniform);
         assert_eq!(rgba, vec![100, 0, 0, 128]);
-        let (end, _) = segment_clip(&segment, Micros(3_000)).expect("clip");
+        let (end, _) = segment_clip(&[], &segment, Micros(3_000)).expect("clip");
         assert_eq!(end.alpha, 1.0);
 
         let mut curved = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
         curved.keyframe_list[1].curve_type = "CurveIn".to_owned();
         let segment = keyed(0, vec![curved]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.5).abs() < 1e-9);
 
         let segment = keyed(0, vec![line("alpha", &[(0, 0.25)])]);
-        let (held, _) = segment_clip(&segment, Micros(40)).expect("clip");
+        let (held, _) = segment_clip(&[], &segment, Micros(40)).expect("clip");
         assert_eq!(held.alpha, 0.25);
 
         let later = keyed(
@@ -1759,22 +1765,22 @@ mod tests {
                 line("KFTypeAlpha", &[(0, 0.75)]),
             ],
         );
-        let (clip, _) = segment_clip(&later, Micros(0)).expect("clip");
+        let (clip, _) = segment_clip(&[], &later, Micros(0)).expect("clip");
         assert_eq!(clip.alpha, 0.75);
 
         let mut blank = line("KFTypeAlpha", &[(0, 0.25)]);
         blank.keyframe_list[0].values.clear();
         let segment = keyed(0, vec![blank]);
-        let (clip, _) = segment_clip(&segment, Micros(0)).expect("clip");
+        let (clip, _) = segment_clip(&[], &segment, Micros(0)).expect("clip");
         assert_eq!(clip.alpha, 1.0);
 
         let segment = keyed(0, vec![line("KFTypePositionX", &[(0, 1.0)])]);
-        let (moved, uniform) = segment_clip(&segment, Micros(0)).expect("clip");
+        let (moved, uniform) = segment_clip(&[], &segment, Micros(0)).expect("clip");
         let rgba = paint(4, 1, solid(1, 1, [9, 0, 0, 255]), moved, uniform);
         assert_eq!(&rgba[12..16], &[9, 0, 0, 255]);
 
         let segment = keyed(0, vec![line("KFTypeRotation", &[(0, 90.0)])]);
-        let (turned, uniform) = segment_clip(&segment, Micros(0)).expect("clip");
+        let (turned, uniform) = segment_clip(&[], &segment, Micros(0)).expect("clip");
         let picture = CpuBytes::new(3, 1, vec![1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255]).unwrap();
         let rgba = paint(3, 3, picture, turned, uniform);
         assert_eq!([rgba[4], rgba[16], rgba[28]], [3, 2, 1]);
@@ -1786,35 +1792,35 @@ mod tests {
         raised.keyframe_list[0].curve_type = "CurveOut".to_owned();
         raised.keyframe_list[0].right_control.y = 1.0;
         let segment = keyed(0, vec![raised.clone()]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.875).abs() < 1e-12);
         raised.keyframe_list[0].right_control.y = 2.0;
         let segment = keyed(0, vec![raised.clone()]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 1.25).abs() < 1e-12);
         raised.keyframe_list[0].right_control.y = 1.0;
         let segment = keyed(0, vec![raised.clone()]);
-        let (held, _) = segment_clip(&segment, Micros(0)).expect("clip");
+        let (held, _) = segment_clip(&[], &segment, Micros(0)).expect("clip");
         assert_eq!(held.alpha, 0.0);
-        let (end, _) = segment_clip(&segment, Micros(5_000)).expect("clip");
+        let (end, _) = segment_clip(&[], &segment, Micros(5_000)).expect("clip");
         assert_eq!(end.alpha, 1.0);
 
         raised.keyframe_list[0].curve_type = "FreeCurveInOut".to_owned();
         raised.keyframe_list[0].graph_id = "missing".to_owned();
         let segment = keyed(0, vec![raised]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.875).abs() < 1e-12);
 
         let mut straight = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
         straight.keyframe_list[0].right_control.y = 1.0;
         straight.keyframe_list[0].curve_type = "Ease".to_owned();
         let segment = keyed(0, vec![straight.clone()]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.5).abs() < 1e-12);
         straight.keyframe_list[0].curve_type = "none".to_owned();
         straight.keyframe_list[0].right_control.y = f64::NAN;
         let segment = keyed(0, vec![straight]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.5).abs() < 1e-12);
 
         let mut eased = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
@@ -1823,27 +1829,27 @@ mod tests {
         eased.keyframe_list[1].curve_type = "CurveInOut".to_owned();
         eased.keyframe_list[1].left_control.x = -400.0;
         let segment = keyed(0, vec![eased]);
-        let (quarter, _) = segment_clip(&segment, Micros(250)).expect("clip");
+        let (quarter, _) = segment_clip(&[], &segment, Micros(250)).expect("clip");
         assert!((quarter.alpha - 0.13518434228493398).abs() < 1e-12);
-        let (three, _) = segment_clip(&segment, Micros(750)).expect("clip");
+        let (three, _) = segment_clip(&[], &segment, Micros(750)).expect("clip");
         assert!((three.alpha - 0.864_815_657_715_066).abs() < 1e-12);
 
         let mut replaced = line("KFTypeAlpha", &[(0, 0.0), (0, 0.0), (1_000, 1.0)]);
         replaced.keyframe_list[0].curve_type = "CurveOut".to_owned();
         replaced.keyframe_list[0].right_control.y = 1.0;
         let segment = keyed(0, vec![replaced.clone()]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.5).abs() < 1e-12);
         replaced.keyframe_list[1].curve_type = "CurveOut".to_owned();
         replaced.keyframe_list[1].right_control.y = 1.0;
         let segment = keyed(0, vec![replaced]);
-        let (mid, _) = segment_clip(&segment, Micros(500)).expect("clip");
+        let (mid, _) = segment_clip(&[], &segment, Micros(500)).expect("clip");
         assert!((mid.alpha - 0.875).abs() < 1e-12);
 
         let mut broken = line("KFTypeAlpha", &[(0, 0.0), (1_000, 1.0)]);
         broken.keyframe_list[0].curve_type = "CurveIn".to_owned();
         broken.keyframe_list[0].right_control.x = f64::INFINITY;
-        assert!(segment_clip(&keyed(0, vec![broken]), Micros(500)).is_none());
+        assert!(segment_clip(&[], &keyed(0, vec![broken]), Micros(500)).is_none());
     }
 
     #[test]
@@ -1855,7 +1861,7 @@ mod tests {
                 line("KFTypeScaleX", &[(0, 9.0)]),
             ],
         );
-        let (_, uniform) = segment_clip(&segment, Micros(0)).expect("clip");
+        let (_, uniform) = segment_clip(&[], &segment, Micros(0)).expect("clip");
         assert_eq!(uniform.value, 2.0);
         let transform = transform_of(Clip::default(), uniform, 3, 1);
         assert_eq!(transform.scale_x, 2.0);
@@ -1868,14 +1874,14 @@ mod tests {
             ],
         );
         separate.uniform_scale.on = false;
-        let (clip, uniform) = segment_clip(&separate, Micros(0)).expect("clip");
+        let (clip, uniform) = segment_clip(&[], &separate, Micros(0)).expect("clip");
         assert_eq!((clip.scale.x, clip.scale.y), (2.0, 4.0));
         assert!(!uniform.on);
 
         let broken = keyed(0, vec![line("KFTypeAlpha", &[(0, f64::NAN)])]);
-        assert!(segment_clip(&broken, Micros(0)).is_none());
+        assert!(segment_clip(&[], &broken, Micros(0)).is_none());
         let unused = keyed(0, vec![line("KFTypeScaleY", &[(0, f64::NAN)])]);
-        let (_, uniform) = segment_clip(&unused, Micros(0)).expect("clip");
+        let (_, uniform) = segment_clip(&[], &unused, Micros(0)).expect("clip");
         assert_eq!(uniform.value, 1.0);
         let axes = keyed(
             0,
@@ -1884,10 +1890,10 @@ mod tests {
                 line("KFTypeScaleY", &[(0, 3.0)]),
             ],
         );
-        let (_, uniform) = segment_clip(&axes, Micros(0)).expect("clip");
+        let (_, uniform) = segment_clip(&[], &axes, Micros(0)).expect("clip");
         assert_eq!(uniform.value, 3.0);
         let other = keyed(0, vec![line("KFTypeGlobalAlpha", &[(0, f64::NAN)])]);
-        let (clip, _) = segment_clip(&other, Micros(0)).expect("clip");
+        let (clip, _) = segment_clip(&[], &other, Micros(0)).expect("clip");
         assert_eq!(clip.alpha, 1.0);
     }
 

@@ -52,33 +52,40 @@ pub struct CommonKeyframe {
 /// and the later key's left handle are offsets from those samples. The sample
 /// solves that cubic in time, and stops when the time error is under a
 /// thousandth of the span. A handle that is not finite refuses the clip. A
-/// graph id is not sampled. `KFTypeScale` drives both axes through uniform
+/// key whose `graphID` names a graph in `graphs` eases the span that ends
+/// at it along that graph instead, whatever its curve; a graph with no
+/// points, or points that are not a Bézier chain, is a straight line. A
+/// graph id with no graph leaves the curve. `KFTypeScale` drives both axes through uniform
 /// scale when that switch is on, and through `clip.scale` when it is off.
 /// With uniform scale on and no `KFTypeScale`, `KFTypeScaleX` drives it, as
 /// the reference editor keys both axes even then. With it off,
 /// `KFTypeScaleX` and `KFTypeScaleY` replace one axis each.
-pub fn clip_at(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
+pub fn clip_at(
+    segment: &Segment,
+    graphs: &[KeyframeGraph],
+    time: Micros,
+) -> Option<(Clip, UniformScale)> {
     let offset = time.0.saturating_sub(segment.target.start.0);
     let mut clip = segment.clip.clone();
     let mut uniform = segment.uniform_scale.clone();
     let groups = &segment.common_keyframes;
-    if let Some(value) = sample(groups, &["KFTypeAlpha", "alpha"], offset)? {
+    if let Some(value) = sample(groups, graphs, &["KFTypeAlpha", "alpha"], offset)? {
         clip.alpha = value;
     }
-    if let Some(value) = sample(groups, &["KFTypeRotation", "rotation"], offset)? {
+    if let Some(value) = sample(groups, graphs, &["KFTypeRotation", "rotation"], offset)? {
         clip.rotation = value;
     }
-    if let Some(value) = sample(groups, &["KFTypePositionX"], offset)? {
+    if let Some(value) = sample(groups, graphs, &["KFTypePositionX"], offset)? {
         clip.transform.x = value;
     }
-    if let Some(value) = sample(groups, &["KFTypePositionY"], offset)? {
+    if let Some(value) = sample(groups, graphs, &["KFTypePositionY"], offset)? {
         clip.transform.y = value;
     }
-    let both = sample(groups, &["KFTypeScale"], offset)?;
+    let both = sample(groups, graphs, &["KFTypeScale"], offset)?;
     if uniform.on {
         let value = match both {
             Some(value) => Some(value),
-            None => sample(groups, &["KFTypeScaleX"], offset)?,
+            None => sample(groups, graphs, &["KFTypeScaleX"], offset)?,
         };
         if let Some(value) = value {
             uniform.value = value;
@@ -88,10 +95,10 @@ pub fn clip_at(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> 
             clip.scale.x = value;
             clip.scale.y = value;
         }
-        if let Some(value) = sample(groups, &["KFTypeScaleX"], offset)? {
+        if let Some(value) = sample(groups, graphs, &["KFTypeScaleX"], offset)? {
             clip.scale.x = value;
         }
-        if let Some(value) = sample(groups, &["KFTypeScaleY"], offset)? {
+        if let Some(value) = sample(groups, graphs, &["KFTypeScaleY"], offset)? {
             clip.scale.y = value;
         }
     }
@@ -99,8 +106,10 @@ pub fn clip_at(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> 
 }
 
 #[derive(Clone)]
-struct KeySample {
+struct KeySample<'a> {
     time: i64,
+    /// The graph easing the span that ends here.
+    graph: Option<&'a [GraphPoint]>,
     value: f64,
     order: usize,
     bends: bool,
@@ -110,7 +119,14 @@ struct KeySample {
     right_y: f64,
 }
 
-pub fn sample(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Option<Option<f64>> {
+/// The value of the groups named `names` at `offset`, as [`clip_at`] samples
+/// it: `None` when a key does not read, `Some(None)` when no group has keys.
+pub fn sample(
+    groups: &[CommonKeyframeGroup],
+    graphs: &[KeyframeGraph],
+    names: &[&str],
+    offset: i64,
+) -> Option<Option<f64>> {
     let mut keys = Vec::new();
     for group in groups {
         if !names.contains(&group.property_type.as_str()) {
@@ -142,8 +158,13 @@ pub fn sample(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Op
             } else {
                 (0.0, 0.0, 0.0, 0.0)
             };
+            let graph = (!key.graph_id.is_empty())
+                .then(|| graphs.iter().find(|graph| graph.id == key.graph_id))
+                .flatten()
+                .map(|graph| graph.graph_points.as_slice());
             keys.push(KeySample {
                 time: key.time_offset.0,
+                graph,
                 value,
                 order: keys.len(),
                 bends,
@@ -171,7 +192,7 @@ fn bends(curve_type: &str) -> bool {
     }
 }
 
-fn sample_keys(keys: &mut [KeySample], at: i64) -> Option<f64> {
+fn sample_keys(keys: &mut [KeySample<'_>], at: i64) -> Option<f64> {
     if keys.is_empty() {
         return None;
     }
@@ -180,7 +201,7 @@ fn sample_keys(keys: &mut [KeySample], at: i64) -> Option<f64> {
             .cmp(&right.time)
             .then(left.order.cmp(&right.order))
     });
-    let mut collapsed: Vec<KeySample> = Vec::new();
+    let mut collapsed: Vec<KeySample<'_>> = Vec::new();
     for key in keys.iter().cloned() {
         if let Some(last) = collapsed.last_mut()
             && last.time == key.time
@@ -206,13 +227,18 @@ fn sample_keys(keys: &mut [KeySample], at: i64) -> Option<f64> {
     Some(last.value)
 }
 
-fn blend(left: &KeySample, right: &KeySample, at: i64) -> f64 {
+fn blend(left: &KeySample<'_>, right: &KeySample<'_>, at: i64) -> f64 {
     let span = (right.time - left.time) as f64;
     if span == 0.0 {
         return right.value;
     }
     let along = (at - left.time) as f64 / span;
     let linear = left.value + (right.value - left.value) * along;
+    if let Some(points) = right.graph {
+        let eased = graph_ease(points, along).unwrap_or(along);
+        let value = left.value + (right.value - left.value) * eased;
+        return if value.is_finite() { value } else { linear };
+    }
     if !left.bends && !right.bends {
         return linear;
     }
@@ -294,6 +320,104 @@ fn bezier(y0: f64, y1: f64, y2: f64, y3: f64, t: f64) -> f64 {
     rest * rest * rest * y0 + 3.0 * rest * rest * t * y1 + 3.0 * rest * t * t * y2 + t * t * t * y3
 }
 
+/// An easing curve a key points at through its `graphID`, kept in the
+/// draft's `keyframe_graph_list`. See [`crate::graphs`] for the shape.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct KeyframeGraph {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub graph_points: Vec<GraphPoint>,
+    #[serde(default)]
+    pub resource_id: String,
+    #[serde(default)]
+    pub resource_name: String,
+    #[serde(default)]
+    pub source_platform: i64,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// One anchor (`type` 0) or handle (`type` 1) of a graph.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct GraphPoint {
+    #[serde(default)]
+    pub point: Point,
+    #[serde(default, rename = "type")]
+    pub kind: i64,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl KeyframeGraph {
+    /// The graph `id` holding `preset`'s curve.
+    #[must_use]
+    pub fn of(id: impl Into<String>, preset: &crate::GraphPreset) -> Self {
+        Self {
+            id: id.into(),
+            graph_points: preset
+                .points
+                .iter()
+                .map(|&(x, y, kind)| GraphPoint {
+                    point: Point {
+                        x,
+                        y,
+                        ..Point::default()
+                    },
+                    kind: i64::from(kind),
+                    ..GraphPoint::default()
+                })
+                .collect(),
+            resource_id: preset.resource_id.to_owned(),
+            resource_name: preset.name.to_owned(),
+            ..Self::default()
+        }
+    }
+}
+
+/// The share of the change at `along`, the share of the span's time, on a
+/// chain of cubic Béziers: anchor, handle, handle, anchor, and so on. The
+/// piece whose anchors hold `along` is solved in x, by bisection, for its
+/// y; a piece with no width is passed over. Points that are not such a
+/// chain, or not finite, have none.
+fn graph_ease(points: &[GraphPoint], along: f64) -> Option<f64> {
+    if points.len() < 4 || !(points.len() - 1).is_multiple_of(3) {
+        return None;
+    }
+    let at = |index: usize| (points[index].point.x, points[index].point.y);
+    if points
+        .iter()
+        .any(|point| !(point.point.x.is_finite() && point.point.y.is_finite()))
+    {
+        return None;
+    }
+    let pieces = (points.len() - 1) / 3;
+    let mut chosen = None;
+    for piece in 0..pieces {
+        let (start, end) = (at(piece * 3), at(piece * 3 + 3));
+        if end.0 <= start.0 {
+            continue;
+        }
+        chosen = Some(piece);
+        if along <= end.0 {
+            break;
+        }
+    }
+    let piece = chosen?;
+    let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|step| at(piece * 3 + step));
+    let target = along.clamp(p0.0, p3.0);
+    let (mut low, mut high) = (0.0_f64, 1.0_f64);
+    for _ in 0..48 {
+        let mid = (low + high) / 2.0;
+        if bezier(p0.0, p1.0, p2.0, p3.0, mid) < target {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Some(bezier(p0.1, p1.1, p2.1, p3.1, (low + high) / 2.0))
+}
+
 /// The properties a pose key holds, as the reference editor writes them
 /// when a preview gesture keys a clip.
 pub const POSE_KEYS: [&str; 5] = [
@@ -364,9 +488,9 @@ pub fn put_key(segment: &mut Segment, property: &str, offset: Micros, value: f64
 /// Key the clip's place, size, turn, and opacity as they are at `offset`
 /// from the segment start. A clip whose keys do not read is refused.
 #[must_use]
-pub fn add_keys(segment: &mut Segment, offset: Micros) -> Option<()> {
+pub fn add_keys(segment: &mut Segment, graphs: &[KeyframeGraph], offset: Micros) -> Option<()> {
     let at = Micros(segment.target.start.0.saturating_add(offset.0));
-    let (clip, uniform) = clip_at(segment, at)?;
+    let (clip, uniform) = clip_at(segment, graphs, at)?;
     let (scale_x, scale_y) = if uniform.on {
         (uniform.value, uniform.value)
     } else {
@@ -438,7 +562,7 @@ mod tests {
         put_key(&mut segment, "KFTypePositionX", Micros(2_000), 1.0);
         put_key(&mut segment, "KFTypeScaleX", Micros(2_000), 2.0);
         segment.clip.alpha = 0.5;
-        add_keys(&mut segment, Micros(1_000)).unwrap();
+        add_keys(&mut segment, &[], Micros(1_000)).unwrap();
         assert_eq!(
             key_offsets(&segment),
             [Micros(0), Micros(1_000), Micros(2_000)]
@@ -481,5 +605,54 @@ mod tests {
         assert!(!remove_keys(&mut segment, Micros(500)));
         assert_eq!(segment.common_keyframes.len(), 1);
         assert_eq!(key_offsets(&segment), [Micros(900)]);
+    }
+
+    #[test]
+    fn every_preset_is_a_chain_from_the_first_key_to_the_second() {
+        assert_eq!(crate::GRAPH_PRESETS.len(), 26);
+        for preset in crate::GRAPH_PRESETS {
+            let graph = KeyframeGraph::of("g", preset);
+            let points = &graph.graph_points;
+            assert!((points.len() - 1).is_multiple_of(3), "{}", preset.name);
+            for (index, point) in points.iter().enumerate() {
+                assert_eq!(point.kind, i64::from(index % 3 != 0), "{}", preset.name);
+            }
+            let start = graph_ease(points, 0.0).unwrap();
+            let end = graph_ease(points, 1.0).unwrap();
+            assert!(
+                start.abs() < 1e-6 && (end - 1.0).abs() < 1e-6,
+                "{}",
+                preset.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_graph_on_the_later_key_eases_its_span() {
+        let mut segment = segment();
+        put_key(&mut segment, "KFTypePositionX", Micros(0), 0.0);
+        put_key(&mut segment, "KFTypePositionX", Micros(2_000), 1.0);
+        let ease_in = crate::GRAPH_PRESETS
+            .iter()
+            .find(|preset| preset.name == "Ease In")
+            .unwrap();
+        let graphs = [KeyframeGraph::of("ease", ease_in)];
+        let x = |segment: &Segment, graphs: &[KeyframeGraph]| {
+            clip_at(segment, graphs, Micros(2_000))
+                .unwrap()
+                .0
+                .transform
+                .x
+        };
+        assert_eq!(x(&segment, &graphs), 0.5);
+        segment.common_keyframes[0].keyframe_list[1].graph_id = "ease".to_owned();
+        let eased = x(&segment, &graphs);
+        assert!(eased > 0.2 && eased < 0.4, "{eased}");
+        assert_eq!(x(&segment, &[]), 0.5);
+        let straight = [KeyframeGraph {
+            id: "ease".to_owned(),
+            ..KeyframeGraph::default()
+        }];
+        assert_eq!(x(&segment, &straight), 0.5);
     }
 }

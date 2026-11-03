@@ -13,7 +13,9 @@
 //! is drawn at, which only a host with the faces knows: it answers through
 //! [`TextSizes`].
 
-use cutlass_model::{Crop, Draft, MaterialRef, Segment, TrackAttribute, clip_at, key_offsets};
+use cutlass_model::{
+    Crop, Draft, KeyframeGraph, MaterialRef, Segment, TrackAttribute, clip_at, key_offsets,
+};
 use cutlass_session::{Micros, Request, SegmentId};
 
 /// A centre or an edge snaps within this share of the canvas's short side.
@@ -150,7 +152,12 @@ pub fn stage_box(
         .find(|segment| segment.id == *segment_id)?;
     let canvas = canvas_size(draft);
     let fitted = fitted(draft, segment, canvas, sizes)?;
-    Some(box_at(segment_id, canvas, fitted, pose_of(segment, time)))
+    Some(box_at(
+        segment_id,
+        canvas,
+        fitted,
+        pose_of(segment, &draft.keyframe_graph_list, time),
+    ))
 }
 
 /// The topmost picture or title clip under the canvas point `(x, y)` at
@@ -176,7 +183,8 @@ pub fn stage_pick(
             if !segment.visible || !(start..end).contains(&time.0) {
                 continue;
             }
-            let alpha = clip_at(segment, time).map_or(segment.clip.alpha, |(clip, _)| clip.alpha);
+            let alpha = clip_at(segment, &draft.keyframe_graph_list, time)
+                .map_or(segment.clip.alpha, |(clip, _)| clip.alpha);
             if alpha <= 0.0 {
                 continue;
             }
@@ -214,7 +222,7 @@ pub fn stage_gesture(
         segment_id: segment_id.clone(),
         canvas,
         fitted: fitted(draft, segment, canvas, sizes)?,
-        start: pose_of(segment, time),
+        start: pose_of(segment, &draft.keyframe_graph_list, time),
         keyed: key_at(segment, time),
     })
 }
@@ -343,8 +351,8 @@ fn key_at(segment: &Segment, time: Micros) -> Option<Micros> {
 }
 
 /// The clip's placement at `time`. Keys that do not read leave the stored one.
-fn pose_of(segment: &Segment, time: Micros) -> Pose {
-    let (clip, uniform) = clip_at(segment, time)
+fn pose_of(segment: &Segment, graphs: &[KeyframeGraph], time: Micros) -> Pose {
+    let (clip, uniform) = clip_at(segment, graphs, time)
         .unwrap_or_else(|| (segment.clip.clone(), segment.uniform_scale.clone()));
     let scale = if uniform.on {
         uniform.value
@@ -630,7 +638,7 @@ mod tests {
         let mut draft = draft();
         let main = SegmentId::new("main");
         let segment = &mut draft.tracks[0].segments[0];
-        cutlass_model::add_keys(segment, Micros(0)).unwrap();
+        cutlass_model::add_keys(segment, &[], Micros(0)).unwrap();
         cutlass_model::put_key(segment, "KFTypePositionX", Micros(10), 1.0);
         let middle = stage_box(&draft, &main, Micros(5), &NoText).unwrap();
         assert!(near(middle.center_x, 960.0 + 480.0), "{middle:?}");

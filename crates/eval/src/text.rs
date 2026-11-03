@@ -114,7 +114,8 @@ pub(crate) fn text_layers(
             let Some(face) = fonts.face(&material.font_path) else {
                 continue;
             };
-            let Some((clip, uniform)) = segment_clip(segment, time) else {
+            let Some((clip, uniform)) = segment_clip(&draft.keyframe_graph_list, segment, time)
+            else {
                 continue;
             };
             let Some(transform) = picture_transform(&clip, &uniform, width, height)

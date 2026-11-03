@@ -213,7 +213,7 @@ fn place_child<D: Device>(
     if skips_child(draft, child, pass.ancestors) {
         return Ok(None);
     }
-    let Some((clip, uniform)) = segment_clip(segment, time) else {
+    let Some((clip, uniform)) = segment_clip(&draft.keyframe_graph_list, segment, time) else {
         return Ok(None);
     };
     let Some(transform) = picture_transform(&clip, &uniform, pass.width, pass.height) else {

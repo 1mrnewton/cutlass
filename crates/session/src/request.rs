@@ -262,6 +262,14 @@ pub enum Request {
         segment_id: SegmentId,
         offset: Micros,
     },
+    /// Ease the span that ends at the key `offset` from the clip's start
+    /// along the Graphs panel curve named `graph`, or make it straight with
+    /// `None`.
+    SetKeyframeGraph {
+        segment_id: SegmentId,
+        offset: Micros,
+        graph: Option<String>,
+    },
     /// Store the picture's place, size, and turn, as the three requests
     /// above do, and key them at `offset` from the clip's start.
     KeyPose {

@@ -1,4 +1,6 @@
-use cutlass_model::{CommonKeyframeGroup, Draft, Micros, POSE_KEYS, Segment, SegmentId};
+use cutlass_model::{
+    CommonKeyframeGroup, Draft, GRAPH_PRESETS, KeyframeGraph, Micros, POSE_KEYS, Segment, SegmentId,
+};
 
 use super::speed::locate;
 use super::{EditError, ensure_unlocked, placement, rotate};
@@ -30,8 +32,9 @@ pub fn add_keyframe(
     segment_id: &SegmentId,
     offset: Micros,
 ) -> Result<(), EditError> {
+    let graphs = draft.keyframe_graph_list.clone();
     let segment = keyed(draft, segment_id, offset)?;
-    cutlass_model::add_keys(segment, offset).ok_or(EditError::KeyTime)
+    cutlass_model::add_keys(segment, &graphs, offset).ok_or(EditError::KeyTime)
 }
 
 /// Remove every key at `offset` from the clip's start.
@@ -41,11 +44,95 @@ pub fn remove_keyframe(
     offset: Micros,
 ) -> Result<(), EditError> {
     let segment = keyed(draft, segment_id, offset)?;
-    if cutlass_model::remove_keys(segment, offset) {
-        Ok(())
-    } else {
-        Err(EditError::NoKey)
+    let graphs: Vec<String> = segment
+        .common_keyframes
+        .iter()
+        .flat_map(|group| &group.keyframe_list)
+        .filter(|key| key.time_offset == offset && !key.graph_id.is_empty())
+        .map(|key| key.graph_id.clone())
+        .collect();
+    if !cutlass_model::remove_keys(segment, offset) {
+        return Err(EditError::NoKey);
     }
+    prune(draft, &graphs);
+    Ok(())
+}
+
+/// Ease the span that ends at the key `offset` from the clip's start along
+/// the Graphs panel curve `graph`, or make it straight with `None`, on each
+/// group with a key there and one before it. Each group gets its own copy
+/// of the curve, as the reference editor stores it.
+pub fn set_keyframe_graph(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    offset: Micros,
+    graph: Option<&str>,
+) -> Result<(), EditError> {
+    let preset = match graph {
+        Some(name) => Some(
+            GRAPH_PRESETS
+                .iter()
+                .find(|preset| preset.name == name)
+                .ok_or(EditError::Graph)?,
+        ),
+        None => None,
+    };
+    let segment = keyed(draft, segment_id, offset)?;
+    let owner = segment.id.as_str().to_owned();
+    let (mut old, mut new, mut spans) = (Vec::new(), Vec::new(), 0);
+    for group in &mut segment.common_keyframes {
+        let earlier = group
+            .keyframe_list
+            .iter()
+            .any(|key| key.time_offset.0 < offset.0);
+        let Some(key) = group
+            .keyframe_list
+            .iter_mut()
+            .find(|key| key.time_offset == offset)
+        else {
+            continue;
+        };
+        if !earlier {
+            continue;
+        }
+        spans += 1;
+        if !key.graph_id.is_empty() {
+            old.push(std::mem::take(&mut key.graph_id));
+        }
+        if let Some(preset) = preset {
+            let id = format!("{owner}-{}-{}-graph", group.property_type, offset.0);
+            key.graph_id.clone_from(&id);
+            new.push(KeyframeGraph::of(id, preset));
+        }
+    }
+    if spans == 0 {
+        return Err(EditError::NoKey);
+    }
+    let list = &mut draft.keyframe_graph_list;
+    for graph in new {
+        match list.iter_mut().find(|kept| kept.id == graph.id) {
+            Some(kept) => *kept = graph,
+            None => list.push(graph),
+        }
+    }
+    prune(draft, &old);
+    Ok(())
+}
+
+/// Drop the graphs `ids` that no key points at any more.
+fn prune(draft: &mut Draft, ids: &[String]) {
+    let used: Vec<String> = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .flat_map(|segment| &segment.common_keyframes)
+        .flat_map(|group| &group.keyframe_list)
+        .map(|key| key.graph_id.clone())
+        .filter(|id| ids.contains(id))
+        .collect();
+    draft
+        .keyframe_graph_list
+        .retain(|graph| !ids.contains(&graph.id) || used.contains(&graph.id));
 }
 
 /// Store the pose on the clip, and key it at `offset` from its start.
@@ -135,7 +222,7 @@ mod tests {
         let segment = &session.draft().tracks[0].segments[0];
         assert_eq!(key_offsets(segment), [Micros(0), Micros(500_000)]);
         assert_eq!(segment.clip.transform.x, 1.0);
-        let (clip, uniform) = cutlass_model::clip_at(segment, Micros(250_000)).unwrap();
+        let (clip, uniform) = cutlass_model::clip_at(segment, &[], Micros(250_000)).unwrap();
         assert_eq!(clip.transform.x, 0.5);
         assert_eq!(uniform.value, 1.5);
 
@@ -174,5 +261,77 @@ mod tests {
             ),
             Err(EditError::NoKey)
         );
+    }
+
+    fn graph(offset: i64, graph: Option<&str>) -> Request {
+        Request::SetKeyframeGraph {
+            segment_id: "a".into(),
+            offset: Micros(offset),
+            graph: graph.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_curve_eases_each_pose_group_and_goes_with_its_key() {
+        let mut session = open();
+        let revision = session
+            .apply(
+                1,
+                &[Request::AddKeyframe {
+                    segment_id: "a".into(),
+                    offset: Micros(0),
+                }],
+            )
+            .unwrap();
+        let revision = session.apply(revision, &[pose(500_000, 1.0)]).unwrap();
+        assert_eq!(
+            session.apply(revision, &[graph(0, Some("Ease In"))]),
+            Err(EditError::NoKey)
+        );
+        assert_eq!(
+            session.apply(revision, &[graph(500_000, Some("Wobble"))]),
+            Err(EditError::Graph)
+        );
+        let revision = session
+            .apply(revision, &[graph(500_000, Some("Ease In"))])
+            .unwrap();
+        let draft = session.draft();
+        assert_eq!(draft.keyframe_graph_list.len(), 5);
+        assert!(
+            draft
+                .keyframe_graph_list
+                .iter()
+                .all(|graph| graph.resource_name == "Ease In")
+        );
+        let segment = &draft.tracks[0].segments[0];
+        let (clip, _) =
+            cutlass_model::clip_at(segment, &draft.keyframe_graph_list, Micros(250_000)).unwrap();
+        assert!(clip.transform.x < 0.4, "{}", clip.transform.x);
+
+        let revision = session
+            .apply(revision, &[graph(500_000, Some("Ease Out"))])
+            .unwrap();
+        let names: Vec<&str> = session
+            .draft()
+            .keyframe_graph_list
+            .iter()
+            .map(|graph| graph.resource_name.as_str())
+            .collect();
+        assert_eq!(names, ["Ease Out"; 5]);
+
+        session.apply(revision, &[graph(500_000, None)]).unwrap();
+        assert!(session.draft().keyframe_graph_list.is_empty());
+        session.undo().unwrap();
+        assert_eq!(session.draft().keyframe_graph_list.len(), 5);
+        session
+            .apply(
+                session.revision(),
+                &[Request::RemoveKeyframe {
+                    segment_id: "a".into(),
+                    offset: Micros(500_000),
+                }],
+            )
+            .unwrap();
+        assert!(session.draft().keyframe_graph_list.is_empty());
     }
 }

@@ -106,6 +106,8 @@ pub enum EditError {
     KeyTime,
     /// No key is at that time.
     NoKey,
+    /// The curve is not one the Graphs panel offers.
+    Graph,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -339,6 +341,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::RemoveKeyframe { segment_id, offset } => {
             keyframe::remove_keyframe(draft, segment_id, *offset)
         }
+        Request::SetKeyframeGraph {
+            segment_id,
+            offset,
+            graph,
+        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref()),
         Request::KeyPose {
             segment_id,
             offset,

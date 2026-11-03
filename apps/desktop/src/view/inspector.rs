@@ -192,7 +192,9 @@ fn picture(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, inspection: &In
         {
             send(shell, Shell::toggle_mirror);
         }
-        if switch(ui, shell.flipped(), ("Flipped", "Upright"), "Top to bottom") {
+        if shell.place_enabled()
+            && switch(ui, shell.flipped(), ("Flipped", "Upright"), "Top to bottom")
+        {
             send(shell, Shell::toggle_vertical_flip);
         }
         if shell.rotate_enabled()

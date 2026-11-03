@@ -1,8 +1,9 @@
 //! Video pictures for one evaluated frame.
 //!
 //! A segment the factory cannot open is omitted. The other layers still draw.
-//! Identity keeps the decoded size when it fits, centered on the canvas. A
-//! larger picture is scaled down until it fits, then centered. The segment
+//! Identity fits the decoded picture inside the canvas, keeping its shape,
+//! and centers it, so a smaller picture is scaled up and a larger one down.
+//! Scale 1 is that fitted picture. The segment
 //! clip then scales, rotates, flips, and moves that picture, and multiplies
 //! its opacity. Rotation is degrees counterclockwise with positive Y up.
 //! A translation of 1 is half the canvas. A file display quarter turn is
@@ -22,9 +23,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use cutlass_codec::access::{ColorPrimaries, PixelFormat};
 use cutlass_engine::{
-    ClockKind, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture, open_segment_in,
+    ClockKind, DecodedFrame, DisplayQuarter, ReaderFactory, VideoSource, decoded_picture,
+    open_segment_in,
 };
+use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
     Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialCanvas, MaterialRef,
     Micros, Segment, SegmentId, TimeRange, TrackAttribute, UniformScale,
@@ -32,6 +36,25 @@ use cutlass_model::{
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::canvas::{Backdrop, cover, image_backdrop, over_backdrop, segment_backdrop};
+use crate::gpu::{GpuBackdrop, GpuLayer, GpuSource};
+
+/// Pictures each open clip decodes ahead of the time asked for.
+const READ_AHEAD: usize = 8;
+
+/// Open one clip and start its decode thread. A clip whose thread cannot
+/// start still decodes on the caller's thread.
+fn open_clip(
+    media: &ReaderFactory,
+    draft: &Draft,
+    id: &SegmentId,
+    root: Option<&Path>,
+    patient: bool,
+) -> Option<VideoSource> {
+    let mut source = open_segment_in(media, draft, id, ClockKind::Export, 1, root).ok()?;
+    let _ = source.read_ahead(media, READ_AHEAD);
+    source.set_patient(patient);
+    Some(source)
+}
 
 /// Open video files for one draft revision.
 pub struct OpenClips {
@@ -43,6 +66,10 @@ pub struct OpenClips {
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
+    /// Title rasters by segment. A title does not change within a revision.
+    texts: HashMap<SegmentId, CpuBytes>,
+    /// Off, a clip whose picture is not decoded yet shows its last one.
+    patient: bool,
 }
 
 impl OpenClips {
@@ -56,7 +83,34 @@ impl OpenClips {
             sources: HashMap::new(),
             nests: HashMap::new(),
             images: HashMap::new(),
+            texts: HashMap::new(),
+            patient: true,
         }
+    }
+
+    /// Wait for every clip's picture, as export must, or show a clip's last
+    /// picture while the one asked for decodes, as preview does.
+    pub fn set_patient(&mut self, patient: bool) {
+        self.patient = patient;
+        for source in self.sources.values() {
+            source.set_patient(patient);
+        }
+        for nest in self.nests.values_mut() {
+            nest.set_patient(patient);
+        }
+    }
+
+    /// Whether any clip showed an earlier picture than the one asked for
+    /// since the last call. A caller redraws until this is false.
+    pub fn take_stale(&mut self) -> bool {
+        let mut stale = false;
+        for source in self.sources.values() {
+            stale |= source.take_stale();
+        }
+        for nest in self.nests.values_mut() {
+            stale |= nest.take_stale();
+        }
+        stale
     }
 
     /// Drops every open file.
@@ -64,9 +118,15 @@ impl OpenClips {
         self.sources.clear();
         self.nests.clear();
         self.images.clear();
+        self.texts.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
+    }
+
+    /// Title rasters kept for this revision.
+    pub(crate) fn texts(&mut self) -> &mut HashMap<SegmentId, CpuBytes> {
+        &mut self.texts
     }
 
     /// Open files for the compound segment `id`.
@@ -75,9 +135,13 @@ impl OpenClips {
     /// its own copy of a nest does not share them.
     pub(crate) fn child(&mut self, id: &SegmentId) -> &mut Self {
         let root = self.root.clone();
+        let patient = self.patient;
         let child = self.nests.entry(id.clone()).or_default();
         if child.root.is_none() {
             child.root = root;
+        }
+        if child.patient != patient {
+            child.set_patient(patient);
         }
         child
     }
@@ -87,6 +151,55 @@ impl OpenClips {
         self.root = root.map(Path::to_path_buf);
     }
 
+    /// Open the video clips that start after `time` and within `horizon`,
+    /// and start decoding each one's first picture, so playback reaching a
+    /// cut finds it ready instead of opening and seeking on that frame.
+    pub fn preroll(
+        &mut self,
+        media: &ReaderFactory,
+        draft: &Draft,
+        revision: u64,
+        time: Micros,
+        horizon: Micros,
+    ) {
+        self.prepare(draft, revision);
+        let until = time.0.saturating_add(horizon.0);
+        for track in &draft.tracks {
+            if track.attribute.contains(TrackAttribute::HIDE) {
+                continue;
+            }
+            for segment in &track.segments {
+                let start = segment.target.start.0;
+                if !segment.visible
+                    || segment.source_range.is_none()
+                    || start <= time.0
+                    || start > until
+                    || !matches!(
+                        draft.materials.get(segment.material_id.as_str()),
+                        Some(MaterialRef::Video(_))
+                    )
+                {
+                    continue;
+                }
+                if !self.sources.contains_key(&segment.id) {
+                    let Some(source) = open_clip(
+                        media,
+                        draft,
+                        &segment.id,
+                        self.root.as_deref(),
+                        self.patient,
+                    ) else {
+                        continue;
+                    };
+                    self.sources.insert(segment.id.clone(), source);
+                }
+                if let Some(source) = self.sources.get(&segment.id) {
+                    source.prefetch(segment.target.start);
+                }
+            }
+        }
+    }
+
     pub(crate) fn prepare(&mut self, draft: &Draft, revision: u64) {
         if self.bound && self.draft.as_ref() == Some(&draft.id) && self.revision == revision {
             return;
@@ -94,6 +207,7 @@ impl OpenClips {
         self.sources.clear();
         self.nests.clear();
         self.images.clear();
+        self.texts.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;
@@ -131,6 +245,8 @@ pub(crate) struct PictureTransform {
     dy: f64,
     opacity: u8,
     geometry_identity: bool,
+    /// Keep the picture's own size instead of fitting it to the canvas.
+    native: bool,
 }
 
 pub(crate) struct Placed<'a> {
@@ -196,6 +312,7 @@ pub(crate) fn picture_transform(
         dy,
         opacity,
         geometry_identity,
+        native: false,
     })
 }
 
@@ -274,14 +391,12 @@ pub(crate) fn video_layers<'a>(
                 continue;
             }
             if !clips.sources.contains_key(&segment.id) {
-                let root = clips.root.clone();
-                let Ok(source) = open_segment_in(
+                let Some(source) = open_clip(
                     media,
                     draft,
                     &segment.id,
-                    ClockKind::Export,
-                    1,
-                    root.as_deref(),
+                    clips.root.as_deref(),
+                    clips.patient,
                 ) else {
                     continue;
                 };
@@ -352,16 +467,13 @@ pub(crate) fn video_picture(
         return None;
     }
     if !clips.sources.contains_key(&segment.id) {
-        let root = clips.root.clone();
-        let source = open_segment_in(
+        let source = open_clip(
             media,
             draft,
             &segment.id,
-            ClockKind::Export,
-            1,
-            root.as_deref(),
-        )
-        .ok()?;
+            clips.root.as_deref(),
+            clips.patient,
+        )?;
         clips.sources.insert(segment.id.clone(), source);
     }
     let backdrop = backdrop_for(draft, segment, media, clips, width, height);
@@ -716,7 +828,238 @@ impl PictureSource for Placed<'_> {
     }
 }
 
+impl Placed<'_> {
+    /// This clip as GPU layers: a color backdrop, if any, then the decoded
+    /// picture with the maps that place it.
+    ///
+    /// `None` when the GPU path does not reproduce the CPU path: a picture
+    /// that is not 4:2:0 or needs a gamut change, a crop quad that is not a
+    /// parallelogram, or a blur or image backdrop. The caller then uses the
+    /// CPU picture.
+    pub(crate) fn gpu(&self, time: Micros) -> Option<Vec<GpuLayer>> {
+        let (backdrop, blur) = match &self.backdrop {
+            Backdrop::None => (None, None),
+            Backdrop::Color(pixel) => (
+                Some(GpuLayer::fill(CpuBytes::new(1, 1, pixel.to_vec()).ok()?)),
+                None,
+            ),
+            Backdrop::Blur(radius) => (None, Some(*radius)),
+            Backdrop::Image(_) => return None,
+        };
+        let DecodedFrame::Coded {
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p,
+            primaries: ColorPrimaries::Unspecified | ColorPrimaries::Bt709,
+            bytes,
+            ..
+        } = self.source.decoded_at(time).ok()?
+        else {
+            return None;
+        };
+        if width % 2 != 0 || height % 2 != 0 {
+            return None;
+        }
+        let display = self.source.display();
+        let oriented = match display {
+            DisplayQuarter::Zero | DisplayQuarter::Half => (width, height),
+            DisplayQuarter::Clockwise90 | DisplayQuarter::Clockwise270 => (height, width),
+        };
+        let (to_oriented, picture) = gpu_crop(self.crop, self.crop_scale, oriented)?;
+        let placement = Placement {
+            to_picture: gpu_place(self.transform, picture, (self.width, self.height))?,
+            picture,
+            to_oriented,
+            oriented,
+            to_texture: gpu_turn(display, width, height),
+            opacity: f64::from(self.transform.opacity) / 255.0,
+        };
+        let mut layers: Vec<GpuLayer> = backdrop.into_iter().collect();
+        let backdrop = match blur {
+            Some(radius) => Some(GpuBackdrop {
+                cover: Placement {
+                    to_picture: gpu_cover(picture, (self.width, self.height))?,
+                    opacity: 1.0,
+                    ..placement
+                },
+                radius,
+            }),
+            None => None,
+        };
+        layers.push(GpuLayer {
+            source: GpuSource::Yuv {
+                width,
+                height,
+                bytes,
+            },
+            placement,
+            backdrop,
+        });
+        Some(layers)
+    }
+}
+
+/// Oriented-source pixel center to stored pixels, as [`turned_source`].
+fn gpu_turn(display: DisplayQuarter, width: u32, height: u32) -> Affine {
+    let (w, h) = (f64::from(width), f64::from(height));
+    Affine(match display {
+        DisplayQuarter::Zero => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        DisplayQuarter::Clockwise90 => [0.0, 1.0, 0.0, -1.0, 0.0, h],
+        DisplayQuarter::Half => [-1.0, 0.0, w, 0.0, -1.0, h],
+        DisplayQuarter::Clockwise270 => [0.0, -1.0, w, 1.0, 0.0, 0.0],
+    })
+}
+
+/// Canvas pixel center to picture pixels for a copy that covers the canvas,
+/// as [`crate::canvas::cover`]: scaled with left-edge sampling until both
+/// edges reach the canvas, then centered.
+fn gpu_cover(picture: (u32, u32), canvas: (u32, u32)) -> Option<Affine> {
+    if picture == canvas {
+        return Some(Affine::IDENTITY);
+    }
+    let (dw, dh) = crate::canvas::cover_size(picture.0, picture.1, canvas.0, canvas.1)?;
+    let x0 = f64::from(dw.checked_sub(canvas.0)? / 2);
+    let y0 = f64::from(dh.checked_sub(canvas.1)? / 2);
+    let kx = f64::from(picture.0) / f64::from(dw);
+    let ky = f64::from(picture.1) / f64::from(dh);
+    Some(Affine([kx, 0.0, kx * x0, 0.0, ky, ky * y0]))
+}
+
+/// Picture pixel center to oriented-source pixels, and the picture size,
+/// as [`apply_crop`]. A crop that is not a parallelogram is not affine.
+pub(crate) fn gpu_crop(
+    crop: Crop,
+    crop_scale: f64,
+    oriented: (u32, u32),
+) -> Option<(Affine, (u32, u32))> {
+    let uncropped = Some((Affine::IDENTITY, oriented));
+    if crop_absent(crop) {
+        return uncropped;
+    }
+    let quad = scale_quad(crop, crop_scale);
+    if !quad_finite(quad) {
+        return uncropped;
+    }
+    let (src_w, src_h) = oriented;
+    let Some(out_w) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.upper_right_x,
+        quad.upper_right_y,
+        src_w,
+        src_h,
+    )) else {
+        return uncropped;
+    };
+    let Some(out_h) = round_edge(edge_len(
+        quad.upper_left_x,
+        quad.upper_left_y,
+        quad.lower_left_x,
+        quad.lower_left_y,
+        src_w,
+        src_h,
+    )) else {
+        return uncropped;
+    };
+    let across = (
+        quad.upper_right_x - quad.upper_left_x,
+        quad.upper_right_y - quad.upper_left_y,
+    );
+    let below = (
+        quad.lower_right_x - quad.lower_left_x,
+        quad.lower_right_y - quad.lower_left_y,
+    );
+    if (across.0 - below.0).abs() > 1e-9 || (across.1 - below.1).abs() > 1e-9 {
+        return None;
+    }
+    let down = (
+        quad.lower_left_x - quad.upper_left_x,
+        quad.lower_left_y - quad.upper_left_y,
+    );
+    let (w, h) = (f64::from(src_w), f64::from(src_h));
+    let (ow, oh) = (f64::from(out_w), f64::from(out_h));
+    Some((
+        Affine([
+            w * across.0 / ow,
+            w * down.0 / oh,
+            w * quad.upper_left_x,
+            h * across.1 / ow,
+            h * down.1 / oh,
+            h * quad.upper_left_y,
+        ]),
+        (out_w, out_h),
+    ))
+}
+
+/// Canvas pixel center to placed-picture pixels, as [`place_with`].
+pub(crate) fn gpu_place(
+    transform: PictureTransform,
+    picture: (u32, u32),
+    canvas: (u32, u32),
+) -> Option<Affine> {
+    let (pw, ph) = picture;
+    let (cw, ch) = canvas;
+    if transform.geometry_identity {
+        if pw == cw && ph == ch {
+            return Some(Affine::IDENTITY);
+        }
+        // Stamped at the floored center, each canvas pixel center on the
+        // matching point of the picture.
+        let (dw, dh) = transform.drawn_size(picture, canvas)?;
+        let x0 = f64::from((cw - dw) / 2);
+        let y0 = f64::from((ch - dh) / 2);
+        let kx = f64::from(pw) / f64::from(dw);
+        let ky = f64::from(ph) / f64::from(dh);
+        return Some(Affine([kx, 0.0, -kx * x0, 0.0, ky, -ky * y0]));
+    }
+    let (fw, fh) = transform.drawn_size(picture, canvas)?;
+    let (fw, fh) = (f64::from(fw), f64::from(fh));
+    let (pw, ph) = (f64::from(pw), f64::from(ph));
+    let cx = f64::from(cw) / 2.0 + transform.dx;
+    let cy = f64::from(ch) / 2.0 - transform.dy;
+    let (sin, cos) = (transform.sin, transform.cos);
+    let (sx, sy) = (transform.scale_x, transform.scale_y);
+    // lx = (cos*(x-cx) + sin*(cy-y)) / sx ; ly = (-sin*(x-cx) + cos*(cy-y)) / sy
+    let lx = [cos / sx, -sin / sx, (-cos * cx + sin * cy) / sx];
+    let ly = [-sin / sy, -cos / sy, (sin * cx + cos * cy) / sy];
+    // su = lx * pw/fw + pw/2 ; sv = -ly * ph/fh + ph/2
+    let mut su = lx.map(|value| value * pw / fw);
+    su[2] += pw / 2.0;
+    let mut sv = ly.map(|value| -value * ph / fh);
+    sv[2] += ph / 2.0;
+    if transform.flip_h {
+        su = [-su[0], -su[1], pw - su[2]];
+    }
+    if transform.flip_v {
+        sv = [-sv[0], -sv[1], ph - sv[2]];
+    }
+    Some(Affine([su[0], su[1], su[2], sv[0], sv[1], sv[2]]))
+}
+
 impl PictureTransform {
+    /// Keep the picture's own size at scale 1: a title, whose raster is cut
+    /// tight around its glyphs. A picture larger than the canvas still
+    /// shrinks to fit.
+    pub(crate) const fn native(mut self) -> Self {
+        self.native = true;
+        self
+    }
+
+    /// The size the picture is drawn at scale 1. Media fits inside the
+    /// canvas, keeping its shape.
+    fn drawn_size(self, picture: (u32, u32), canvas: (u32, u32)) -> Option<(u32, u32)> {
+        let (pw, ph) = picture;
+        if self.native && pw > 0 && ph > 0 && pw <= canvas.0 && ph <= canvas.1 {
+            return Some(picture);
+        }
+        contain_size(pw, ph, canvas.0, canvas.1)
+    }
+
+    /// The clip's opacity, 0 to 255.
+    pub(crate) const fn opacity(self) -> u8 {
+        self.opacity
+    }
+
     /// Nothing to draw: the picture is fully transparent or scaled to nothing.
     pub(crate) fn omitted(self) -> bool {
         self.opacity == 0 || self.scale_x == 0.0 || self.scale_y == 0.0
@@ -951,7 +1294,7 @@ pub(crate) fn place_with(
         return Sample::Miss;
     };
     if transform.geometry_identity {
-        let sample = place(canvas_w, canvas_h, picture);
+        let sample = place(canvas_w, canvas_h, picture, transform);
         return if transform.opacity == 255 {
             sample
         } else {
@@ -1012,22 +1355,17 @@ fn pixel_at(width: u32, x: u32, y: u32) -> Option<usize> {
         .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)
 }
 
-fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes) -> Sample {
+fn place(canvas_w: u32, canvas_h: u32, picture: CpuBytes, transform: PictureTransform) -> Sample {
     let src_w = picture.width();
     let src_h = picture.height();
     if src_w == canvas_w && src_h == canvas_h {
         return Sample::Ready(Picture::Cpu(picture));
     }
-    let (draw_w, draw_h, pixels) = if src_w <= canvas_w && src_h <= canvas_h {
-        (src_w, src_h, picture.rgba().to_vec())
-    } else {
-        let Some((draw_w, draw_h)) = contain_size(src_w, src_h, canvas_w, canvas_h) else {
-            return Sample::Miss;
-        };
-        let Some(pixels) = nearest(src_w, src_h, picture.rgba(), draw_w, draw_h) else {
-            return Sample::Miss;
-        };
-        (draw_w, draw_h, pixels)
+    let Some((draw_w, draw_h)) = transform.drawn_size((src_w, src_h), (canvas_w, canvas_h)) else {
+        return Sample::Miss;
+    };
+    let Some(pixels) = crate::sample::scale(src_w, src_h, picture.rgba(), draw_w, draw_h) else {
+        return Sample::Miss;
     };
     let Some(canvas) = stamp(canvas_w, canvas_h, draw_w, draw_h, &pixels) else {
         return Sample::Miss;
@@ -1070,7 +1408,8 @@ fn sample_transformed(
 ) -> Sample {
     let src_w = picture.width();
     let src_h = picture.height();
-    let Some((fitted_w, fitted_h)) = fitted_size(src_w, src_h, canvas_w, canvas_h) else {
+    let Some((fitted_w, fitted_h)) = transform.drawn_size((src_w, src_h), (canvas_w, canvas_h))
+    else {
         return Sample::Miss;
     };
     let draw = Draw {
@@ -1096,10 +1435,10 @@ fn sample_transformed(
     let mut wrote = false;
     for y in y0..y1 {
         for x in x0..x1 {
-            let Some((sx, sy)) = source_pixel(x, y, &draw) else {
+            let Some((u, v)) = source_point(x, y, &draw) else {
                 continue;
             };
-            let Some(pixel) = src_pixel(src, src_w, sx, sy) else {
+            let Some(pixel) = crate::sample::bilinear(src, src_w, src_h, u, v) else {
                 continue;
             };
             let Some(dest) = canvas_slot(&mut canvas, canvas_w, x, y) else {
@@ -1118,17 +1457,6 @@ fn sample_transformed(
     match CpuBytes::new(canvas_w, canvas_h, canvas) {
         Ok(bytes) => Sample::Ready(Picture::Cpu(bytes)),
         Err(_) => Sample::Miss,
-    }
-}
-
-fn fitted_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<(u32, u32)> {
-    if src_w == 0 || src_h == 0 {
-        return None;
-    }
-    if src_w <= canvas_w && src_h <= canvas_h {
-        Some((src_w, src_h))
-    } else {
-        contain_size(src_w, src_h, canvas_w, canvas_h)
     }
 }
 
@@ -1199,7 +1527,9 @@ fn axis_bound(value: f64, limit: u32) -> Option<u32> {
     u32::try_from(value as u64).ok()
 }
 
-fn source_pixel(x: u32, y: u32, draw: &Draw) -> Option<(u32, u32)> {
+/// The continuous point of the picture under canvas pixel `(x, y)`, or none
+/// outside the drawn box.
+fn source_point(x: u32, y: u32, draw: &Draw) -> Option<(f64, f64)> {
     let rel_x = f64::from(x) + 0.5 - draw.center_x;
     let rel_y = f64::from(y) + 0.5 - draw.center_y;
     let up_y = -rel_y;
@@ -1213,17 +1543,16 @@ fn source_pixel(x: u32, y: u32, draw: &Draw) -> Option<(u32, u32)> {
     if local_x < -half_w || local_x >= half_w || local_y <= -half_h || local_y > half_h {
         return None;
     }
-    let su = (local_x + half_w) / draw.fitted_w * f64::from(draw.src_w);
-    let sv = (half_h - local_y) / draw.fitted_h * f64::from(draw.src_h);
-    let mut sx = floor_index(su, draw.src_w)?;
-    let mut sy = floor_index(sv, draw.src_h)?;
+    let (src_w, src_h) = (f64::from(draw.src_w), f64::from(draw.src_h));
+    let mut u = (local_x + half_w) / draw.fitted_w * src_w;
+    let mut v = (half_h - local_y) / draw.fitted_h * src_h;
     if draw.transform.flip_h {
-        sx = draw.src_w.saturating_sub(sx).saturating_sub(1);
+        u = src_w - u;
     }
     if draw.transform.flip_v {
-        sy = draw.src_h.saturating_sub(sy).saturating_sub(1);
+        v = src_h - v;
     }
-    Some((sx, sy))
+    Some((u, v))
 }
 
 fn floor_index(value: f64, limit: u32) -> Option<u32> {
@@ -1273,35 +1602,6 @@ fn contain_size(src_w: u32, src_h: u32, canvas_w: u32, canvas_h: u32) -> Option<
     }
 }
 
-fn nearest(src_w: u32, src_h: u32, src: &[u8], dst_w: u32, dst_h: u32) -> Option<Vec<u8>> {
-    if src.len() != rgba_len(src_w, src_h)? || dst_w == 0 || dst_h == 0 {
-        return None;
-    }
-    let dst_len = rgba_len(dst_w, dst_h)?;
-    let mut out = vec![0_u8; dst_len];
-    let src_stride = usize::try_from(src_w).ok()?.checked_mul(4)?;
-    let dst_stride = usize::try_from(dst_w).ok()?.checked_mul(4)?;
-    let src_h_us = usize::try_from(src_h).ok()?;
-    let src_w_us = usize::try_from(src_w).ok()?;
-    for y in 0..dst_h {
-        let sy = (u64::from(y) * u64::from(src_h) / u64::from(dst_h))
-            .min(u64::from(src_h.saturating_sub(1)));
-        let sy = usize::try_from(sy).ok()?;
-        let src_row = sy.min(src_h_us.saturating_sub(1)).checked_mul(src_stride)?;
-        let dst_row = usize::try_from(y).ok()?.checked_mul(dst_stride)?;
-        for x in 0..dst_w {
-            let sx = (u64::from(x) * u64::from(src_w) / u64::from(dst_w))
-                .min(u64::from(src_w.saturating_sub(1)));
-            let sx = usize::try_from(sx).ok()?.min(src_w_us.saturating_sub(1));
-            let from = src_row.checked_add(sx.checked_mul(4)?)?;
-            let to = dst_row.checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
-            let pixel = src.get(from..from + 4)?;
-            out.get_mut(to..to + 4)?.copy_from_slice(pixel);
-        }
-    }
-    Some(out)
-}
-
 fn stamp(canvas_w: u32, canvas_h: u32, draw_w: u32, draw_h: u32, pixels: &[u8]) -> Option<Vec<u8>> {
     if draw_w > canvas_w || draw_h > canvas_h || pixels.len() != rgba_len(draw_w, draw_h)? {
         return None;
@@ -1345,22 +1645,29 @@ mod tests {
     #[test]
     fn a_matching_canvas_keeps_the_decoded_bytes() {
         let picture = solid(2, 1, [9, 8, 7, 6]);
-        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 1, picture) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 1, picture, identity(2, 1)) else {
             panic!("ready");
         };
         assert_eq!(bytes.rgba(), &[9, 8, 7, 6, 9, 8, 7, 6]);
     }
 
     #[test]
-    fn a_smaller_picture_stays_native_and_centered() {
+    fn a_smaller_picture_is_scaled_up_to_fit() {
         let picture = solid(1, 1, [1, 2, 3, 4]);
-        let Sample::Ready(Picture::Cpu(bytes)) = place(3, 3, picture) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(3, 3, picture, identity(3, 3)) else {
+            panic!("ready");
+        };
+        assert!(bytes.rgba().chunks(4).all(|pixel| pixel == [1, 2, 3, 4]));
+
+        let wide = solid(2, 1, [5, 6, 7, 8]);
+        let Sample::Ready(Picture::Cpu(bytes)) = place(4, 4, wide, identity(4, 4)) else {
             panic!("ready");
         };
         let rgba = bytes.rgba();
+        // 2x1 fits 4x2, centered on rows 1 and 2.
         assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
-        assert_eq!(&rgba[16..20], &[1, 2, 3, 4]);
-        assert_eq!(rgba.iter().filter(|byte| **byte != 0).count(), 4);
+        assert!(rgba[16..48].chunks(4).all(|pixel| pixel == [5, 6, 7, 8]));
+        assert_eq!(&rgba[48..52], &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -1370,11 +1677,12 @@ mod tests {
             rgba.extend([pixel, 0, 0, 255]);
         }
         let picture = CpuBytes::new(4, 2, rgba).unwrap();
-        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 2, picture) else {
+        let Sample::Ready(Picture::Cpu(bytes)) = place(2, 2, picture, identity(2, 2)) else {
             panic!("ready");
         };
         let rgba = bytes.rgba();
-        assert_eq!(&rgba[0..8], &[1, 0, 0, 255, 3, 0, 0, 255]);
+        // Each output pixel averages a 2x2 block: 3.5 and 5.5, rounded.
+        assert_eq!(&rgba[0..8], &[4, 0, 0, 255, 6, 0, 0, 255]);
         assert_eq!(&rgba[8..16], &[0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -1385,6 +1693,10 @@ mod tests {
         height: u32,
     ) -> PictureTransform {
         picture_transform(&clip, &uniform, width, height).expect("transform")
+    }
+
+    fn identity(width: u32, height: u32) -> PictureTransform {
+        transform_of(Clip::default(), UniformScale::default(), width, height)
     }
 
     fn paint(
@@ -1556,13 +1868,12 @@ mod tests {
             rotation: 45.0,
             ..Clip::default()
         };
-        let rgba = paint(
-            3,
-            3,
-            solid(1, 1, [6, 0, 0, 255]),
-            clip,
-            UniformScale::default(),
-        );
+        // A third of the fitted picture keeps it one pixel wide.
+        let third = UniformScale {
+            value: 1.0 / 3.0,
+            ..UniformScale::default()
+        };
+        let rgba = paint(3, 3, solid(1, 1, [6, 0, 0, 255]), clip, third);
         assert_eq!(&rgba[16..20], &[6, 0, 0, 255]);
         assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
     }

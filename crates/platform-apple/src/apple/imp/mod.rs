@@ -11,12 +11,20 @@ use cutlass_decode::{CodecId, DecodeFactory};
 use cutlass_encode::EncodeFactory;
 
 pub use image::{decode_file, encode_file};
-pub use queue::{OutputQueue, QueueError};
+pub use queue::{OutputQueue, QueueError, StreamSink};
 pub use video::{release_buffer, to_cpu, with_pixel_buffer};
 
 pub fn register_decoders(factory: &mut DecodeFactory) {
-    for id in VIDEO {
-        factory.register(id, video::open_decoder);
+    register_decoders_with(factory, true);
+}
+
+/// `video` false leaves the picture decoders out, so the factory asks the
+/// next opener for those ids. Audio and still decoders are registered either way.
+pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
+    if video {
+        for id in VIDEO {
+            factory.register(id, video::open_decoder);
+        }
     }
     for id in AUDIO {
         factory.register(id, audio::open_decoder);
@@ -27,8 +35,16 @@ pub fn register_decoders(factory: &mut DecodeFactory) {
 }
 
 pub fn register_encoders(factory: &mut EncodeFactory) {
-    for id in VIDEO {
-        factory.register(id, video::open_encoder);
+    register_encoders_with(factory, true);
+}
+
+/// `video` false leaves the picture encoders out, so the factory asks the
+/// next opener for those ids. Audio and still encoders are registered either way.
+pub fn register_encoders_with(factory: &mut EncodeFactory, video: bool) {
+    if video {
+        for id in VIDEO {
+            factory.register(id, video::open_encoder);
+        }
     }
     for id in AUDIO {
         factory.register(id, audio::open_encoder);

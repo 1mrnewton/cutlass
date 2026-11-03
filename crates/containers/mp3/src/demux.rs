@@ -749,7 +749,7 @@ impl<R: Read + Seek> Demux for Mp3Demux<R> {
     }
 }
 
-impl<R: Read + Seek> cutlass_container::Demux for Mp3Demux<R> {
+impl<R: Read + Seek + Send> cutlass_container::Demux for Mp3Demux<R> {
     fn family(&self) -> ContainerId {
         ContainerId::Mp3
     }

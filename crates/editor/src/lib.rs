@@ -5,18 +5,22 @@
 
 #![forbid(unsafe_code)]
 
+mod filmstrip;
 mod gesture;
 mod hit;
 mod lane;
+mod ruler;
 mod snap;
 mod zoom;
 
+pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use lane::{Lane, lane_category, lanes};
+pub use ruler::{RulerStep, Tick, ruler_step, ruler_ticks, zoom_ceiling};
 pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
 pub use zoom::{
     Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,

@@ -16,11 +16,15 @@
 #![forbid(unsafe_code)]
 
 mod apple;
+mod mixer;
 mod playhead;
 mod present;
 mod preview;
 
-pub use apple::{AudioGap, AudioHost, AudioOutput, CopyOutcome};
+pub use apple::{
+    AudioGap, AudioHost, AudioOutput, AudioSink, CopyOutcome, RATE as PREVIEW_RATE, StreamClock,
+};
+pub use mixer::{LEAD as MIX_LEAD, MixJob, Mixer, WINDOW as MIX_WINDOW};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
 pub use present::{FrameCache, PresentError, Presentation};
 pub use preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix};

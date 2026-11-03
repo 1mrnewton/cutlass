@@ -74,6 +74,17 @@ impl PictureSource for Held {
     }
 }
 
+/// The frame has an effect mark or a clip filter, so it composes on the CPU.
+pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
+    !global_marks(draft, time, stack).is_empty()
+        || stack.iter().any(|layer| {
+            !matches!(
+                clip_filter(draft, layer.track_index, layer.segment_index),
+                ClipFilter::None
+            )
+        })
+}
+
 pub(crate) fn present<D: Device>(
     draft: &Draft,
     store: &dyn PackageStore,

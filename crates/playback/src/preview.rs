@@ -49,6 +49,15 @@ pub fn queue_mix(output: &mut AudioOutput, mix: PreviewMix<'_>) {
     output.queue(&mixed_bytes(mix, frames));
 }
 
+/// `frames` of mixed stereo at `mix.time`. A failed mix is silence of the
+/// same length.
+pub(crate) fn window_bytes(mix: PreviewMix<'_>, frames: u32) -> Vec<u8> {
+    let mut bytes = mixed_bytes(mix, frames);
+    let want = usize::try_from(frames).unwrap_or(0) * FRAME_BYTES;
+    bytes.resize(want, 0);
+    bytes
+}
+
 fn max_frames() -> u32 {
     u32::try_from(MAX_SLICE_BYTES / FRAME_BYTES).unwrap_or(0)
 }

@@ -1,6 +1,7 @@
-//! The user's settings: shortcuts, panels, playback preferences, model
-//! choice, sandbox choice, MCP servers, and skill folders.
+//! The user's settings: shortcuts, panels, playback preferences, hardware
+//! codecs, model choice, sandbox choice, MCP servers, and skill folders.
 //!
+//! Hardware decode and hardware encode are on.
 //! The local model switch is on. The cloud model switch is off. The local
 //! sandbox is on. The online sandbox is off. This crate has no draft types
 //! and does not open a socket.
@@ -48,6 +49,8 @@ pub struct Settings {
     #[serde(default)]
     pub playback: Playback,
     #[serde(default)]
+    pub hardware: Hardware,
+    #[serde(default)]
     pub model: ModelChoice,
     #[serde(default)]
     pub sandbox: SandboxChoice,
@@ -72,6 +75,7 @@ impl Default for Settings {
             shortcuts: Vec::new(),
             panels: Vec::new(),
             playback: Playback::default(),
+            hardware: Hardware::default(),
             model: ModelChoice::default(),
             sandbox: SandboxChoice::default(),
             mcp_servers: Vec::new(),
@@ -127,6 +131,34 @@ pub struct Playback {
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// Whether the platform codecs may run.
+///
+/// Off, the platform video opener is not registered and the Rust codec
+/// for the same id is used. A codec with no Rust opener is then refused.
+/// Audio and still codecs are not covered by these switches.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hardware {
+    /// Decode pictures with the platform decoder, such as VideoToolbox.
+    #[serde(default = "default_on")]
+    pub decode: bool,
+    /// Encode pictures with the platform encoder, such as VideoToolbox.
+    #[serde(default = "default_on")]
+    pub encode: bool,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl Default for Hardware {
+    fn default() -> Self {
+        Self {
+            decode: true,
+            encode: true,
+            rest: Map::new(),
+        }
+    }
 }
 
 /// Which model runners are on.
@@ -241,8 +273,8 @@ pub struct SkillFolder {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_STEP_CAP, McpServer, ModelChoice, Playback, SandboxChoice, SeekDuringPlayback,
-        Settings,
+        DEFAULT_STEP_CAP, Hardware, McpServer, ModelChoice, Playback, SandboxChoice,
+        SeekDuringPlayback, Settings,
     };
 
     #[test]
@@ -264,6 +296,8 @@ mod tests {
             settings.playback.seek_during_playback,
             SeekDuringPlayback::KeepPlaying
         );
+        assert!(settings.hardware.decode);
+        assert!(settings.hardware.encode);
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
         let parsed: Settings = serde_json::from_str("{}").unwrap();
@@ -317,6 +351,18 @@ mod tests {
             omitted.playback.seek_during_playback,
             SeekDuringPlayback::KeepPlaying
         );
+    }
+
+    #[test]
+    fn each_hardware_switch_is_stored_on_its_own() {
+        let settings: Settings = serde_json::from_str(r#"{"hardware":{"decode":false}}"#).unwrap();
+        assert!(!settings.hardware.decode);
+        assert!(settings.hardware.encode);
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["hardware"]["decode"], false);
+        assert_eq!(written["hardware"]["encode"], true);
+        let parsed: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.hardware, Hardware::default());
     }
 
     #[test]

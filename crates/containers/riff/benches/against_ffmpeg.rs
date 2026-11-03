@@ -187,7 +187,7 @@ fn open_wav(path: &Path) -> Result<WavDemux<File>, String> {
     WavDemux::open(file, length).map_err(|err| err.to_string())
 }
 
-fn stream_audio<R: Read + Seek>(demux: &WavDemux<R>) -> Result<(u32, u16), String> {
+fn stream_audio<R: Read + Seek + Send>(demux: &WavDemux<R>) -> Result<(u32, u16), String> {
     let stream = demux
         .streams()
         .first()

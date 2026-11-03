@@ -35,8 +35,16 @@ const STILL: [CodecId; 4] = [CodecId::Jpeg, CodecId::Png, CodecId::Webp, CodecId
 
 /// Register the Apple decoders. Off Apple every opener declines.
 pub fn register_decoders(factory: &mut DecodeFactory) {
-    for id in VIDEO {
-        factory.register(id, open_video_decoder);
+    register_decoders_with(factory, true);
+}
+
+/// `video` false leaves the picture decoders out, so the factory asks the
+/// next opener for those ids. Audio and still decoders are registered either way.
+pub fn register_decoders_with(factory: &mut DecodeFactory, video: bool) {
+    if video {
+        for id in VIDEO {
+            factory.register(id, open_video_decoder);
+        }
     }
     for id in AUDIO {
         factory.register(id, open_audio_decoder);
@@ -48,8 +56,16 @@ pub fn register_decoders(factory: &mut DecodeFactory) {
 
 /// Register the Apple encoders. Off Apple every opener declines.
 pub fn register_encoders(factory: &mut EncodeFactory) {
-    for id in VIDEO {
-        factory.register(id, open_video_encoder);
+    register_encoders_with(factory, true);
+}
+
+/// `video` false leaves the picture encoders out, so the factory asks the
+/// next opener for those ids. Audio and still encoders are registered either way.
+pub fn register_encoders_with(factory: &mut EncodeFactory, video: bool) {
+    if video {
+        for id in VIDEO {
+            factory.register(id, open_video_encoder);
+        }
     }
     for id in AUDIO {
         factory.register(id, open_audio_encoder);

@@ -25,6 +25,8 @@ pub struct AacDecoder {
     overlaps: Vec<Overlap>,
     frame_index: u64,
     live: bool,
+    /// The last packet's timestamp and timescale, for the frame a drain releases.
+    last: Option<(i64, u32)>,
 }
 
 impl AacDecoder {
@@ -38,6 +40,7 @@ impl AacDecoder {
             overlaps,
             frame_index: 0,
             live: false,
+            last: None,
         })
     }
 
@@ -109,6 +112,7 @@ impl AacDecoder {
         self.overlaps = vec![Overlap::new(frame); self.config.layout.len()];
         self.frame_index = 0;
         self.live = false;
+        self.last = None;
     }
 
     pub fn frame_index(&self) -> u64 {
@@ -280,12 +284,14 @@ fn decode_ics(
     let books = read_sections(bits, &ics)?;
     let scales = read_scales(bits, global_gain, &ics, &books)?;
     let mut quant = vec![0i32; config.frame_length];
-    if bits.read(1)? == 1 {
+    let pulses = if bits.read(1)? == 1 {
         if ics.short {
             return Err(malformed(bits, "pulse"));
         }
-        read_pulses(bits, &mut quant, bands, config.frame_length)?;
-    }
+        read_pulses(bits, bands, config.frame_length)?
+    } else {
+        Vec::new()
+    };
     let tns_present = bits.read(1)? == 1;
     let tns = if tns_present {
         let windows = if ics.short { 8 } else { 1 };
@@ -299,6 +305,7 @@ fn decode_ics(
         });
     }
     decode_coefficients(bits, &ics, &books, bands, &mut quant)?;
+    add_pulses(&mut quant, &pulses);
     let spec = dequantize(&quant, &ics, &books, &scales, bands);
     Ok(Channel {
         spec,
@@ -426,7 +433,7 @@ fn read_scales(
             0 => {}
             13 => {
                 if noise_pcm {
-                    noise = i32::try_from(bits.read(9)?).unwrap_or(0) - 256;
+                    noise += i32::try_from(bits.read(9)?).unwrap_or(0) - 256;
                     noise_pcm = false;
                 } else {
                     noise += read_scale_delta(bits)?;
@@ -456,31 +463,39 @@ fn read_scales(
     Ok(scales)
 }
 
+/// Pulse positions and amplitudes. They are read before the spectral data
+/// and added to it once it is decoded.
 fn read_pulses(
     bits: &mut BitReader<'_>,
-    quant: &mut [i32],
     bands: &[u16],
     frame: usize,
-) -> Result<(), CodecError> {
+) -> Result<Vec<(usize, i32)>, CodecError> {
     let count = bits.read(2)? as usize + 1;
     let start = bits.read(6)? as usize;
     let Some(&origin) = bands.get(start) else {
         return Err(malformed(bits, "pulse"));
     };
     let mut pos = i32::from(origin);
+    let mut pulses = Vec::with_capacity(count);
     for _ in 0..count {
         pos += i32::try_from(bits.read(5)?).unwrap_or(0);
         let amp = i32::try_from(bits.read(4)?).unwrap_or(0);
         let Some(bin) = usize::try_from(pos).ok().filter(|bin| *bin < frame) else {
             return Err(malformed(bits, "pulse"));
         };
+        pulses.push((bin, amp));
+    }
+    Ok(pulses)
+}
+
+fn add_pulses(quant: &mut [i32], pulses: &[(usize, i32)]) {
+    for &(bin, amp) in pulses {
         if quant[bin] > 0 {
             quant[bin] += amp;
         } else {
             quant[bin] -= amp;
         }
     }
-    Ok(())
 }
 
 fn decode_coefficients(
@@ -761,20 +776,6 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
             what: "intensity",
         });
     }
-    if right_book == 14 || right_book == 15 {
-        let mut scale = pow2_quarter(100 - right.scales[index]);
-        if right_book == 14 {
-            scale = -scale;
-        }
-        if ms_used {
-            scale = -scale;
-        }
-        let source = left.spec[left_band].to_vec();
-        for (dest, sample) in right.spec[right_band].iter_mut().zip(source) {
-            *dest = sample * scale;
-        }
-        return Ok(());
-    }
     if left_book == 13 && right_book == 13 && ms_used {
         let left_scale = pow2_quarter(left.scales[index]);
         let right_scale = pow2_quarter(right.scales[index]);
@@ -796,6 +797,22 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
             &mut left.spec[left_band.clone()],
         );
     }
+    if right_book == 14 || right_book == 15 {
+        // The intensity position is a gain of 0.5^(position / 4), with no
+        // scale-factor offset.
+        let mut scale = pow2_quarter(-right.scales[index]);
+        if right_book == 14 {
+            scale = -scale;
+        }
+        if ms_used {
+            scale = -scale;
+        }
+        let source = left.spec[left_band].to_vec();
+        for (dest, sample) in right.spec[right_band].iter_mut().zip(source) {
+            *dest = sample * scale;
+        }
+        return Ok(());
+    }
     if right_book == 13 {
         fill_noise(
             right_state,
@@ -803,7 +820,8 @@ fn mix_band(mix: BandMix<'_>) -> Result<(), CodecError> {
             &mut right.spec[right_band.clone()],
         );
     }
-    if ms_used {
+    // Mid/side leaves a band alone when either side of it is noise.
+    if ms_used && left_book != 13 && right_book != 13 {
         let mid = left.spec[left_band.clone()].to_vec();
         let side = right.spec[right_band.clone()].to_vec();
         for (dest, (left_sample, right_sample)) in
@@ -1045,19 +1063,46 @@ fn malformed(bits: &BitReader<'_>, what: &'static str) -> CodecError {
     }
 }
 
+/// Largest sample a decoded frame may hold. Full scale is 1; a frame far
+/// past it came from a stream this decoder misread.
+const LOUDEST: f32 = 4.0;
+
 impl AacDecoder {
-    fn output(&self, samples: Vec<f32>, index: u64) -> Result<AudioOutput, CodecError> {
+    /// One frame of PCM, stamped with the packet that carried it. A packet
+    /// with no clock is stamped with the frame count since the last reset.
+    ///
+    /// A frame with a sample that is not finite or is past [`LOUDEST`] is
+    /// silence marked concealed, and the overlap is cleared so the next
+    /// frame does not inherit it. A misread stream is then quiet, not a
+    /// burst at full volume.
+    fn output(
+        &mut self,
+        mut samples: Vec<f32>,
+        index: u64,
+        packet: Option<(i64, u32)>,
+    ) -> Result<AudioOutput, CodecError> {
+        let concealed = samples
+            .iter()
+            .any(|sample| !sample.is_finite() || sample.abs() > LOUDEST);
+        if concealed {
+            samples.fill(0.0);
+            let frame = self.config.frame_length;
+            self.overlaps = vec![Overlap::new(frame); self.config.layout.len()];
+        }
         let pcm = Pcm::from_f32(self.config.sample_rate, self.config.layout.clone(), samples)
             .map_err(|_| CodecError::Limit { what: "pcm" })?;
         let frame = u64::try_from(self.config.frame_length).unwrap_or(0);
-        let pts = i64::try_from(index.saturating_mul(frame)).unwrap_or(i64::MAX);
+        let (pts, timescale) = packet.filter(|(_, timescale)| *timescale > 0).unwrap_or((
+            i64::try_from(index.saturating_mul(frame)).unwrap_or(i64::MAX),
+            self.config.sample_rate,
+        ));
         Ok(AudioOutput {
             pcm,
             pts,
-            timescale: self.config.sample_rate,
+            timescale,
             skip_leading: 0,
             skip_trailing: 0,
-            concealed: false,
+            concealed,
         })
     }
 }
@@ -1070,7 +1115,9 @@ impl Decoder for AacDecoder {
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         let samples = self.push_packet(packet)?;
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![Output::Audio(self.output(samples, index)?)])
+        let stamp = Some((packet.pts, packet.timescale));
+        self.last = stamp;
+        Ok(vec![Output::Audio(self.output(samples, index, stamp)?)])
     }
 
     fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
@@ -1078,7 +1125,19 @@ impl Decoder for AacDecoder {
             return Ok(Vec::new());
         };
         let index = self.frame_index.saturating_sub(1);
-        Ok(vec![Output::Audio(self.output(samples, index)?)])
+        // The drained frame follows the last packet by one frame.
+        let frame = i64::try_from(self.config.frame_length).unwrap_or(0);
+        let stamp = self
+            .last
+            .filter(|(_, timescale)| *timescale > 0)
+            .map(|(pts, timescale)| {
+                let step = frame
+                    .saturating_mul(i64::from(timescale))
+                    .checked_div(i64::from(self.config.sample_rate.max(1)))
+                    .unwrap_or(0);
+                (pts.saturating_add(step), timescale)
+            });
+        Ok(vec![Output::Audio(self.output(samples, index, stamp)?)])
     }
 
     fn reset(&mut self) {
@@ -1095,6 +1154,28 @@ mod tests {
         ChannelLayout, CodecError, CodecId, CodecParams, DecodeFactory, Decoder, Output, Packet,
         SideData,
     };
+
+    #[test]
+    fn a_frame_far_past_full_scale_is_concealed_as_silence() {
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let frame = decoder.config().frame_length;
+        let quiet = decoder.output(vec![0.5; frame], 0, None).unwrap();
+        assert!(!quiet.concealed);
+        let mut loud = vec![0.25; frame];
+        loud[7] = 1_000.0;
+        let loud = decoder.output(loud, 1, None).unwrap();
+        assert!(loud.concealed);
+        assert!(
+            loud.pcm
+                .as_f32()
+                .unwrap()
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        let broken = decoder.output(vec![f32::NAN; frame], 2, None).unwrap();
+        assert!(broken.concealed);
+    }
 
     #[test]
     fn grouping_bits_follow_transmission_order() {
@@ -1118,6 +1199,163 @@ mod tests {
         writer.write_bits(0, 1).unwrap();
         writer.write_bits(7, 3).unwrap();
         writer.finish()
+    }
+
+    fn put(writer: &mut BitWriter, value: u32, width: u32) {
+        writer.write_bits(value, width).unwrap();
+    }
+
+    /// One long channel stream whose only section is band 0, four lines
+    /// wide at 48 kHz. `scale` is the band's scale-factor field as written.
+    struct Band {
+        gain: u32,
+        book: u32,
+        scale: (u32, u8),
+        quad: Option<[i32; 4]>,
+        pulse: Option<(u32, u32)>,
+    }
+
+    fn write_band(writer: &mut BitWriter, band: &Band, info: bool) {
+        put(writer, band.gain, 8);
+        if info {
+            put(writer, 0, 1);
+            put(writer, 0, 2);
+            put(writer, 0, 1);
+            put(writer, 1, 6);
+            put(writer, 0, 1);
+        }
+        put(writer, band.book, 4);
+        put(writer, 1, 5);
+        put(writer, band.scale.0, u32::from(band.scale.1));
+        match band.pulse {
+            Some((offset, amp)) => {
+                put(writer, 1, 1);
+                put(writer, 0, 2);
+                put(writer, 0, 6);
+                put(writer, offset, 5);
+                put(writer, amp, 4);
+            }
+            None => put(writer, 0, 1),
+        }
+        put(writer, 0, 1);
+        put(writer, 0, 1);
+        if let Some(quad) = band.quad {
+            let index = crate::huffman::quad_index(quad.map(|value| value + 1));
+            let (code, len) = crate::huffman::spectral_code(0, index).unwrap();
+            put(writer, code, u32::from(len));
+        }
+    }
+
+    fn mono_unit(band: &Band) -> Vec<f32> {
+        let mut writer = BitWriter::with_cap(64);
+        put(&mut writer, 0, 3);
+        put(&mut writer, 0, 4);
+        write_band(&mut writer, band, true);
+        put(&mut writer, 7, 3);
+        let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::mono());
+        let mut decoder = AacDecoder::open(&params).unwrap();
+        let packet = Packet::audio(writer.finish(), 0, 1024, 48_000);
+        decoder.push_packet(&packet).unwrap()
+    }
+
+    fn scale(delta: i32) -> (u32, u8) {
+        crate::huffman::scale_code(delta).unwrap()
+    }
+
+    /// A common-window pair whose right band is intensity-coded from the
+    /// left. The position scales the left band by 0.5^(position / 4).
+    #[test]
+    fn intensity_scales_the_left_band_by_its_position() {
+        for (position, gain) in [(0, 1.0f32), (4, 0.5), (-8, 4.0)] {
+            let mut writer = BitWriter::with_cap(64);
+            put(&mut writer, 1, 3);
+            put(&mut writer, 0, 4);
+            put(&mut writer, 1, 1);
+            put(&mut writer, 0, 1);
+            put(&mut writer, 0, 2);
+            put(&mut writer, 0, 1);
+            put(&mut writer, 1, 6);
+            put(&mut writer, 0, 1);
+            put(&mut writer, 0, 2);
+            let left = Band {
+                gain: 160,
+                book: 1,
+                scale: scale(0),
+                quad: Some([1, 0, -1, 0]),
+                pulse: None,
+            };
+            let right = Band {
+                gain: 160,
+                book: 15,
+                scale: scale(position),
+                quad: None,
+                pulse: None,
+            };
+            write_band(&mut writer, &left, false);
+            write_band(&mut writer, &right, false);
+            put(&mut writer, 7, 3);
+            let params = CodecParams::audio(CodecId::Aac, 48_000, ChannelLayout::stereo());
+            let mut decoder = AacDecoder::open(&params).unwrap();
+            let packet = Packet::audio(writer.finish(), 0, 1024, 48_000);
+            let pcm = decoder.push_packet(&packet).unwrap();
+            let peak = pcm
+                .iter()
+                .step_by(2)
+                .fold(0.0f32, |max, s| max.max(s.abs()));
+            assert!(peak > 1.0e-3 && peak < 1.0, "{peak}");
+            for [left, right] in pcm.as_chunks::<2>().0 {
+                assert!(
+                    (right - left * gain).abs() <= peak * 1.0e-5,
+                    "position {position}: {left} {right}"
+                );
+            }
+        }
+    }
+
+    /// Pulse data is read before the spectral data and added to it after.
+    #[test]
+    fn pulses_add_to_the_decoded_lines() {
+        let pulsed = mono_unit(&Band {
+            gain: 160,
+            book: 1,
+            scale: scale(0),
+            quad: Some([1, 0, 0, 0]),
+            pulse: Some((1, 1)),
+        });
+        let plain = mono_unit(&Band {
+            gain: 160,
+            book: 1,
+            scale: scale(0),
+            quad: Some([1, -1, 0, 0]),
+            pulse: None,
+        });
+        let peak = plain.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+        assert!(peak > 1.0e-3);
+        for (a, b) in pulsed.iter().zip(&plain) {
+            assert!((a - b).abs() <= peak * 1.0e-5, "{a} {b}");
+        }
+    }
+
+    /// The first noise energy is an offset from `global_gain - 90`, so four
+    /// more steps of global gain double the noise.
+    #[test]
+    fn the_first_noise_energy_follows_the_global_gain() {
+        let noise = |gain| {
+            mono_unit(&Band {
+                gain,
+                book: 13,
+                scale: (256, 9),
+                quad: None,
+                pulse: None,
+            })
+        };
+        let quiet = noise(150);
+        let loud = noise(154);
+        let peak = quiet.iter().fold(0.0f32, |max, s| max.max(s.abs()));
+        assert!(peak > 1.0e-4 && peak < 1.0, "{peak}");
+        for (a, b) in quiet.iter().zip(&loud) {
+            assert!((b - 2.0 * a).abs() <= peak * 1.0e-5, "{a} {b}");
+        }
     }
 
     fn refuse_platform(_params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {

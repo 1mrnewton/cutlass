@@ -26,10 +26,18 @@ pub fn run() -> eframe::Result {
             viewport,
             ..Default::default()
         },
-        Box::new(|_creation| {
-            let (decoders, encoders) = crate::register_codecs();
-            let mut shell = Shell::new(decoders, encoders, cutlass_settings::Settings::default());
+        Box::new(|creation| {
+            let settings = crate::load_settings(&Shell::settings_path());
+            let (decoders, encoders) = crate::register_codecs_with(&settings.hardware);
+            let mut shell = Shell::new(decoders, encoders, settings);
+            if let Some(state) = creation.wgpu_render_state.as_ref() {
+                shell.attach_gpu(state);
+            }
             shell.open_preview_audio(cutlass_playback::AudioHost::current());
+            let ctx = creation.egui_ctx.clone();
+            shell.start_thumbnails(move || ctx.request_repaint());
+            let ctx = creation.egui_ctx.clone();
+            shell.start_waveforms(move || ctx.request_repaint());
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),
@@ -67,5 +75,16 @@ impl eframe::App for DesktopWindow {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
         show(&mut self.shell, ui, &mut self.view, Some(frame));
+        if let Some(wait) = self.shell.autosave() {
+            ui.ctx().request_repaint_after(wait);
+        }
+    }
+
+    fn on_exit(&mut self) {
+        if self.shell.unsaved()
+            && let Err(error) = self.shell.save()
+        {
+            cutlass_logger::error!("save on quit: {error}");
+        }
     }
 }

@@ -186,6 +186,60 @@ pub(crate) struct DrawnWith<'a> {
     pub(crate) fonts: &'a dyn Fonts,
 }
 
+impl FrameCache {
+    /// Wait for every clip's picture, or show a clip's last picture while
+    /// the one asked for decodes. Preview does not wait, so a jump never
+    /// stops the window.
+    pub fn set_patient(&mut self, patient: bool) {
+        self.clips.set_patient(patient);
+    }
+
+    /// Whether the last frame showed an earlier picture than asked for. The
+    /// caller draws again until this is false.
+    pub fn take_stale(&mut self) -> bool {
+        self.clips.take_stale()
+    }
+
+    /// Open clips that start within `horizon` after `time` and start
+    /// decoding their first pictures.
+    pub fn preroll(
+        &mut self,
+        session: &Session,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        time: Micros,
+        horizon: Micros,
+    ) {
+        self.clips.set_project(root);
+        self.clips
+            .preroll(media, session.draft(), session.revision(), time, horizon);
+    }
+
+    /// The frame at `time` as GPU layers, or composed pixels when it needs
+    /// the CPU. The open clips are shared with [`Self::frame`]. Nothing is
+    /// stored: the caller keeps what it drew.
+    pub fn layers<D: Device>(
+        &mut self,
+        session: &Session,
+        device: &mut D,
+        time: Micros,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        fonts: &dyn Fonts,
+    ) -> Result<cutlass_eval::Composed, PresentError<D::Error>> {
+        cutlass_eval::layers_in(
+            &Snapshot::with_fonts(session.draft(), fonts),
+            time,
+            device,
+            media,
+            &mut self.clips,
+            session.revision(),
+            root,
+        )
+        .map_err(PresentError::Picture)
+    }
+}
+
 impl Default for FrameCache {
     fn default() -> Self {
         Self::new()

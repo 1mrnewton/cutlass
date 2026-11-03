@@ -568,10 +568,8 @@ dependencies = [
  "cutlass-playback",
  "cutlass-png",
  "cutlass-prores",
- "cutlass-renderer-android",
- "cutlass-renderer-metal",
+ "cutlass-render",
  "cutlass-renderer-software",
- "cutlass-renderer-windows",
  "cutlass-riff",
  "cutlass-session",
  "cutlass-settings",
@@ -585,6 +583,7 @@ dependencies = [
  "cutlass-webp",
  "eframe",
  "egui",
+ "pollster",
  "rfd",
  "serde_json",
 ]
@@ -776,6 +775,7 @@ dependencies = [
  "cutlass-effects",
  "cutlass-engine",
  "cutlass-generated",
+ "cutlass-gpu",
  "cutlass-model",
  "cutlass-pcm",
  "cutlass-picture",
@@ -1042,28 +1042,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutlass-renderer-android"
+name = "cutlass-render"
 version = "0.1.0"
 dependencies = [
  "cutlass-gpu",
-]
-
-[[package]]
-name = "cutlass-renderer-metal"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]
 name = "cutlass-renderer-software"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
-]
-
-[[package]]
-name = "cutlass-renderer-windows"
 version = "0.1.0"
 dependencies = [
  "cutlass-gpu",

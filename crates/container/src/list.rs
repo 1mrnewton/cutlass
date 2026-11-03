@@ -184,7 +184,7 @@ impl<R: Read + Seek> ListDemux<R> {
     }
 }
 
-impl<R: Read + Seek> Demux for ListDemux<R> {
+impl<R: Read + Seek + Send> Demux for ListDemux<R> {
     fn family(&self) -> ContainerId {
         self.family
     }

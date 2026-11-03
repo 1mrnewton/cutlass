@@ -178,24 +178,57 @@ impl FrameRate {
         Ok(frame_start.0 >= range.start.0 && frame_start.0 < end)
     }
 
-    /// Hours, minutes, seconds, and frames. Drop frame shows 23.976 as 24,
-    /// 29.97 as 30, and 59.94 as 60, with a semicolon before the frames.
+    /// Hours, minutes, seconds, and frames, counted at the nominal rate:
+    /// 24 for 23.976, 30 for 29.97, and 60 for 59.94. Drop frame applies
+    /// on 29.97 and 59.94 only. It skips 2 or 4 frame numbers at the start
+    /// of each minute, except every tenth, and puts a semicolon before the
+    /// frames. Other rates ignore the flag.
     #[must_use]
     pub fn label(self, time: Micros, drop_frame: bool) -> Option<TimecodeLabel> {
         let index = self.frame_index(time)?;
-        let rate = i64::from(self.display_rate(drop_frame)?);
-        if rate <= 0 {
-            return None;
-        }
-        let frames = u64::try_from(index % rate).ok()?;
-        let total_seconds = u64::try_from(index / rate).ok()?;
+        let nominal = i64::from(self.nominal()?);
+        let skip = if drop_frame {
+            self.dropped_per_minute()
+        } else {
+            0
+        };
+        let counted = if skip > 0 {
+            drop_frame_count(index, nominal, skip)
+        } else {
+            index
+        };
+        let frames = u64::try_from(counted % nominal).ok()?;
+        let total_seconds = u64::try_from(counted / nominal).ok()?;
         Some(TimecodeLabel {
             hours: total_seconds / 3600,
             minutes: (total_seconds / 60) % 60,
             seconds: total_seconds % 60,
             frames,
-            drop_frame,
+            drop_frame: skip > 0,
         })
+    }
+
+    /// Whole frames a timecode second counts: the rate rounded, so 24 for
+    /// 23.976 and 30 for 29.97.
+    #[must_use]
+    pub fn nominal(self) -> Option<u32> {
+        if self.numerator == 0 || self.denominator == 0 {
+            return None;
+        }
+        let rounded = (u64::from(self.numerator) + u64::from(self.denominator) / 2)
+            / u64::from(self.denominator);
+        u32::try_from(rounded).ok().filter(|rate| *rate > 0)
+    }
+
+    /// Frame numbers drop frame skips each minute: 2 at 29.97, 4 at 59.94,
+    /// and none at any other rate.
+    #[must_use]
+    pub fn dropped_per_minute(self) -> i64 {
+        match (self.numerator, self.denominator) {
+            (30_000, 1001) => 2,
+            (60_000, 1001) => 4,
+            _ => 0,
+        }
     }
 
     /// Read the draft's stored `fps` number. The drop-frame flag is not applied here.
@@ -223,23 +256,18 @@ impl FrameRate {
         }
         None
     }
+}
 
-    fn display_rate(self, drop_frame: bool) -> Option<u32> {
-        if drop_frame {
-            return match (self.numerator, self.denominator) {
-                (24_000, 1001) => Some(24),
-                (30_000, 1001) => Some(30),
-                (60_000, 1001) => Some(60),
-                (numerator, 1) if numerator > 0 => Some(numerator),
-                _ => None,
-            };
-        }
-        if self.denominator == 1 && self.numerator > 0 {
-            Some(self.numerator)
-        } else {
-            None
-        }
+/// The frame number SMPTE drop frame shows for frame `index`.
+fn drop_frame_count(index: i64, nominal: i64, skip: i64) -> i64 {
+    let per_minute = nominal * 60 - skip;
+    let per_ten = nominal * 600 - skip * 9;
+    let (tens, within) = (index / per_ten, index % per_ten);
+    let mut counted = index + skip * 9 * tens;
+    if within > skip {
+        counted += skip * ((within - skip) / per_minute);
     }
+    counted
 }
 
 impl TimecodeLabel {
@@ -377,14 +405,50 @@ mod tests {
                 .format(),
             "00:00:00;00"
         );
-        assert!(FrameRate::FPS_29_97.label(Micros(0), false).is_none());
         let one_second = FrameRate::FPS_23_976.frame_start(24).unwrap();
         assert_eq!(
             FrameRate::FPS_23_976
                 .label(one_second, true)
                 .unwrap()
                 .format(),
-            "00:00:01;00"
+            "00:00:01:00"
         );
+        assert_eq!(
+            FrameRate::FPS_30.label(Micros(0), true).unwrap().format(),
+            "00:00:00:00"
+        );
+    }
+
+    #[test]
+    fn a_fractional_rate_counts_nominal_frames_without_drop_frame() {
+        let rate = FrameRate::FPS_29_97;
+        let at = |index| rate.label(rate.frame_start(index).unwrap(), false);
+        assert_eq!(at(29).unwrap().format(), "00:00:00:29");
+        assert_eq!(at(30).unwrap().format(), "00:00:01:00");
+        assert_eq!(at(1800).unwrap().format(), "00:01:00:00");
+        assert_eq!(FrameRate::FPS_23_976.nominal(), Some(24));
+        assert_eq!(FrameRate::FPS_59_94.nominal(), Some(60));
+    }
+
+    #[test]
+    fn drop_frame_skips_numbers_each_minute_but_every_tenth() {
+        let label = |rate: FrameRate, index| {
+            rate.label(rate.frame_start(index).unwrap(), true)
+                .unwrap()
+                .format()
+        };
+        let ntsc = FrameRate::FPS_29_97;
+        assert_eq!(label(ntsc, 1799), "00:00:59;29");
+        assert_eq!(label(ntsc, 1800), "00:01:00;02");
+        assert_eq!(label(ntsc, 3597), "00:01:59;29");
+        assert_eq!(label(ntsc, 3598), "00:02:00;02");
+        assert_eq!(label(ntsc, 17_981), "00:09:59;29");
+        assert_eq!(label(ntsc, 17_982), "00:10:00;00");
+        // An hour of 29.97 is 107,892 frames.
+        assert_eq!(label(ntsc, 107_892), "01:00:00;00");
+        let double = FrameRate::FPS_59_94;
+        assert_eq!(label(double, 3596), "00:00:59;56");
+        assert_eq!(label(double, 3600), "00:01:00;04");
+        assert_eq!(label(double, 35_964), "00:10:00;00");
     }
 }

@@ -90,7 +90,11 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
     let destination = pcm_desc(params.sample_rate, layout.len(), format)?;
     let converter = Converter::new(&source, &destination)?;
     if !params.extra.is_empty() {
-        set_bytes(converter.raw, COOKIE_IN, &params.extra)?;
+        set_bytes(
+            converter.raw,
+            COOKIE_IN,
+            &cookie_for(params.codec, &params.extra),
+        )?;
     }
     Ok(Box::new(AudioDecoder {
         codec: params.codec,
@@ -100,6 +104,45 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
         format,
         primed: false,
     }))
+}
+
+/// The magic cookie AudioToolbox takes for `extra`.
+///
+/// An MP4 carries AAC's AudioSpecificConfig bare. AudioToolbox wants it
+/// inside an MPEG-4 ES descriptor, the body of an `esds` box, so a bare
+/// config is wrapped. A cookie that already starts with the ES descriptor
+/// tag, as this crate's encoder writes, is passed as it is. An
+/// AudioSpecificConfig cannot start with that byte: it would name object
+/// type zero.
+fn cookie_for(codec: CodecId, extra: &[u8]) -> Vec<u8> {
+    const ES: u8 = 0x03;
+    const DECODER_CONFIG: u8 = 0x04;
+    const SPECIFIC: u8 = 0x05;
+    const SYNC_LAYER: u8 = 0x06;
+    if codec != CodecId::Aac || extra.first() == Some(&ES) {
+        return extra.to_vec();
+    }
+    let descriptor = |tag: u8, body: &[u8]| {
+        let mut out = vec![tag];
+        // Four-byte length, as `esds` writers use, so any size fits.
+        let len = u32::try_from(body.len()).unwrap_or(0);
+        out.extend([
+            0x80 | ((len >> 21) & 0x7f) as u8,
+            0x80 | ((len >> 14) & 0x7f) as u8,
+            0x80 | ((len >> 7) & 0x7f) as u8,
+            (len & 0x7f) as u8,
+        ]);
+        out.extend_from_slice(body);
+        out
+    };
+    // Object type 0x40 is MPEG-4 audio; stream type 5 is audio, upstream 0,
+    // reserved 1. Buffer size and bitrates are not needed to decode.
+    let mut config = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    config.extend(descriptor(SPECIFIC, extra));
+    let mut es = vec![0, 0, 0];
+    es.extend(descriptor(DECODER_CONFIG, &config));
+    es.extend(descriptor(SYNC_LAYER, &[0x02]));
+    descriptor(ES, &es)
 }
 
 pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
@@ -401,7 +444,11 @@ impl Decoder for AudioDecoder {
                 .iter()
                 .find(|side| matches!(side, SideData::Config(_)))
             {
-                let _ = set_bytes(self.converter.raw, COOKIE_IN, cookie);
+                let _ = set_bytes(
+                    self.converter.raw,
+                    COOKIE_IN,
+                    &cookie_for(self.codec, cookie),
+                );
             }
             self.primed = true;
         }
@@ -717,6 +764,22 @@ mod tests {
         let mut params = CodecParams::audio(codec, rate, ChannelLayout::mono());
         params.bitrate = 64_000;
         params
+    }
+
+    #[test]
+    fn a_bare_aac_config_is_wrapped_as_an_es_descriptor_and_opens() {
+        let cookie = cookie_for(CodecId::Aac, &[0x12, 0x10]);
+        assert_eq!(cookie[0], 0x03);
+        let specific = cookie
+            .windows(7)
+            .position(|window| window == [0x05, 0x80, 0x80, 0x80, 0x02, 0x12, 0x10])
+            .expect("specific info");
+        assert!(specific > 0);
+        assert_eq!(cookie_for(CodecId::Aac, &cookie), cookie);
+        assert_eq!(cookie_for(CodecId::Alac, &[1, 2]), [1, 2]);
+        let mut params = CodecParams::audio(CodecId::Aac, 44_100, ChannelLayout::stereo());
+        params.extra = vec![0x12, 0x10];
+        assert!(open_decoder(&params).is_ok());
     }
 
     #[test]

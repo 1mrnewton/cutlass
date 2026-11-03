@@ -14,7 +14,7 @@ use std::fmt;
 use crate::playhead::PlayheadError;
 
 /// Preview sample rate, in hertz.
-pub(crate) const RATE: u32 = 48_000;
+pub const RATE: u32 = 48_000;
 
 /// Interleaved stereo.
 pub(crate) const CHANNELS: u16 = 2;
@@ -200,6 +200,116 @@ impl SampleBuffer {
         let _ = (self, sample);
         Ok(())
     }
+
+    fn sink(&self) -> Option<AudioSink> {
+        #[cfg(target_vendor = "apple")]
+        if let Some(queue) = &self.live {
+            return Some(AudioSink {
+                inner: queue.sink(),
+            });
+        }
+        let _ = self;
+        None
+    }
+
+    fn clock(&self) -> Option<StreamClock> {
+        #[cfg(target_vendor = "apple")]
+        if let Some(queue) = &self.live {
+            let (played, moved) = queue.played_frames();
+            return Some(StreamClock {
+                played,
+                since: moved.map(|moved| moved.elapsed()),
+                buffer: queue.buffer_frames(),
+                buffered: queue.buffered_frames(),
+                latency: queue.latency_frames(),
+            });
+        }
+        let _ = self;
+        None
+    }
+
+    fn clear_stream(&mut self) {
+        self.queued.clear();
+        #[cfg(target_vendor = "apple")]
+        if let Some(queue) = &self.live {
+            queue.clear();
+            return;
+        }
+        let _ = self.store_live(&[]);
+    }
+}
+
+/// Appends to a live stream from another thread, such as the mixer.
+#[derive(Clone)]
+pub struct AudioSink {
+    #[cfg(target_vendor = "apple")]
+    inner: cutlass_platform_apple::StreamSink,
+}
+
+impl AudioSink {
+    /// Play `sample` after what is already streamed.
+    pub fn append(&self, sample: &[u8]) {
+        #[cfg(target_vendor = "apple")]
+        {
+            let _ = self.inner.append(sample);
+        }
+        let _ = (self, sample);
+    }
+
+    /// Frames streamed that the device has not taken.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        #[cfg(target_vendor = "apple")]
+        {
+            self.inner.buffered_frames()
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = self;
+            0
+        }
+    }
+
+    /// Drop everything streamed and not yet played.
+    pub fn clear(&self) {
+        #[cfg(target_vendor = "apple")]
+        self.inner.clear();
+        let _ = self;
+    }
+}
+
+/// Where a live stream is, in frames at the preview rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamClock {
+    /// Frames handed to the device since it opened.
+    pub played: u64,
+    /// Time since `played` last moved.
+    pub since: Option<std::time::Duration>,
+    /// Frames the device takes at once.
+    pub buffer: u64,
+    /// Frames queued that the device has not taken.
+    pub buffered: usize,
+    /// Frames the device holds in its own buffers before they are heard.
+    pub latency: u64,
+}
+
+impl StreamClock {
+    /// Frames heard by now. The device takes whole buffers, so between two
+    /// takes the count moves on by elapsed time, never past one buffer.
+    #[must_use]
+    pub fn heard(&self) -> u64 {
+        let between = self.since.map_or(0, |since| {
+            let frames = since.as_secs_f64() * f64::from(RATE);
+            if frames.is_finite() && frames > 0.0 {
+                (frames as u64).min(self.buffer)
+            } else {
+                0
+            }
+        });
+        self.played
+            .saturating_add(between)
+            .saturating_sub(self.latency)
+    }
 }
 
 enum OutputKind {
@@ -247,6 +357,33 @@ impl AudioOutput {
         match &mut self.kind {
             OutputKind::Silent(gap) => Ok(CopyOutcome::Silent(*gap)),
             OutputKind::Buffer(queue) => queue.copy_one(sample, buffer).map(CopyOutcome::Copied),
+        }
+    }
+
+    /// A handle another thread can stream through, or `None` on a host with
+    /// no device stream.
+    #[must_use]
+    pub fn sink(&self) -> Option<AudioSink> {
+        match &self.kind {
+            OutputKind::Buffer(queue) => queue.sink(),
+            OutputKind::Silent(_) => None,
+        }
+    }
+
+    /// The live stream's clock, or `None` on a host with no device stream.
+    /// A caller without a clock follows the wall clock.
+    #[must_use]
+    pub fn clock(&self) -> Option<StreamClock> {
+        match &self.kind {
+            OutputKind::Buffer(queue) => queue.clock(),
+            OutputKind::Silent(_) => None,
+        }
+    }
+
+    /// Drop everything streamed and not yet played.
+    pub fn clear_stream(&mut self) {
+        if let OutputKind::Buffer(queue) = &mut self.kind {
+            queue.clear_stream();
         }
     }
 
@@ -408,6 +545,20 @@ mod tests {
     use crate::playhead::Player;
 
     const COLOR: [u8; 4] = [0x33, 0x66, 0x99, 0xFF];
+
+    #[test]
+    fn heard_frames_move_with_time_but_never_past_one_buffer() {
+        let clock = |since_ms: u64| StreamClock {
+            played: 10_000,
+            since: Some(std::time::Duration::from_millis(since_ms)),
+            buffer: 512,
+            buffered: 0,
+            latency: 1_536,
+        };
+        assert_eq!(clock(0).heard(), 10_000 - 1_536);
+        assert_eq!(clock(5).heard(), 10_000 + 240 - 1_536);
+        assert_eq!(clock(50).heard(), 10_000 + 512 - 1_536);
+    }
 
     #[test]
     fn the_callback_copies_one_pipeline_sample() {

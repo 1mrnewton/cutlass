@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 mod dialogs;
 mod face;
+mod gpu;
 pub mod icons;
+mod menu;
 pub mod probe;
 mod readers;
 
@@ -17,15 +19,26 @@ pub mod widgets;
 pub mod window;
 
 /// Platform openers go first. A codec they decline falls through to the
-/// software opener registered after them.
+/// software opener registered after them. Hardware decode and encode are on.
 pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
+    register_codecs_with(&cutlass_settings::Hardware::default())
+}
+
+/// [`register_codecs`] with the user's hardware switches. A switch that is
+/// off leaves the platform picture codecs out, so the Rust codec decodes or
+/// encodes that id.
+pub fn register_codecs_with(
+    hardware: &cutlass_settings::Hardware,
+) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
     #[cfg(target_os = "macos")]
     {
-        cutlass_platform_apple::register_decoders(&mut decoders);
-        cutlass_platform_apple::register_encoders(&mut encoders);
+        cutlass_platform_apple::register_decoders_with(&mut decoders, hardware.decode);
+        cutlass_platform_apple::register_encoders_with(&mut encoders, hardware.encode);
     }
+    #[cfg(not(target_os = "macos"))]
+    let _ = hardware;
     cutlass_png::register_decoders(&mut decoders);
     cutlass_png::register_encoders(&mut encoders);
     cutlass_jpeg::register_decoders(&mut decoders);
@@ -39,6 +52,24 @@ pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::Enco
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
     (decoders, encoders)
+}
+
+/// The user's settings at `path`, or the defaults.
+///
+/// A missing file is the defaults. A file that cannot be read is logged,
+/// left as it was, and the defaults are used.
+#[must_use]
+pub fn load_settings(path: &Path) -> cutlass_settings::Settings {
+    match cutlass_settings::load(path) {
+        Ok(loaded) => loaded.settings,
+        Err(cutlass_settings::SettingsError::Missing { .. }) => {
+            cutlass_settings::Settings::default()
+        }
+        Err(error) => {
+            cutlass_logger::warn!("{error}");
+            cutlass_settings::Settings::default()
+        }
+    }
 }
 
 /// Open the process log before the window.
@@ -77,6 +108,48 @@ mod tests {
         encoders
             .open(&picture(CodecId::H264, 64, 64))
             .expect("h264 encoder");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hardware_decode_off_leaves_videotoolbox_out() {
+        use cutlass_settings::Hardware;
+
+        let hevc = CodecParams::with_format(CodecId::Hevc, 64, 48, PixelFormat::Yuv420p);
+        let (on, _) = super::register_codecs_with(&Hardware::default());
+        on.open(&hevc).expect("videotoolbox hevc");
+        let off = Hardware {
+            decode: false,
+            ..Hardware::default()
+        };
+        let (decoders, encoders) = super::register_codecs_with(&off);
+        assert!(decoders.open(&hevc).is_err(), "hevc has no rust decoder");
+        let h264 = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
+        decoders.open(&h264).expect("rust h264");
+        encoders
+            .open(&picture(CodecId::H264, 64, 64))
+            .expect("hardware encode stays on");
+    }
+
+    #[test]
+    fn settings_load_from_the_file_or_fall_back_to_defaults() {
+        let dir = std::env::temp_dir().join(format!("cutlass-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("settings.json");
+        assert_eq!(
+            super::load_settings(&path),
+            cutlass_settings::Settings::default()
+        );
+        std::fs::write(&path, r#"{"hardware":{"decode":false}}"#).expect("write");
+        let loaded = super::load_settings(&path);
+        assert!(!loaded.hardware.decode);
+        assert!(loaded.hardware.encode);
+        std::fs::write(&path, "{").expect("write");
+        assert_eq!(
+            super::load_settings(&path),
+            cutlass_settings::Settings::default()
+        );
+        std::fs::remove_dir_all(&dir).expect("clean");
     }
 
     #[test]

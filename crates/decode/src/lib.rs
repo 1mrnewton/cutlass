@@ -343,16 +343,19 @@ pub trait VideoDecoder: Send {
     fn reset(&mut self);
 }
 
+#[derive(Clone)]
 pub struct DecodeFactory {
     openers: Vec<Opener>,
     video_openers: Vec<VideoOpener>,
 }
 
+#[derive(Clone)]
 struct Opener {
     id: CodecId,
     open: fn(&CodecParams) -> Result<Box<dyn Decoder>, CodecError>,
 }
 
+#[derive(Clone)]
 struct VideoOpener {
     id: CodecId,
     open: fn(&CodecParams) -> Result<Box<dyn VideoDecoder>, CodecError>,

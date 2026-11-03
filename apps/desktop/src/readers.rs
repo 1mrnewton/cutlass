@@ -5,13 +5,19 @@ use std::path::Path;
 
 use cutlass_codec::ContainerId;
 use cutlass_container::{Demux, Input, OpenError, ProbeResult};
+use cutlass_decode::DecodeFactory;
 use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
 /// The codecs [`crate::register_codecs`] installs, plus ISOBMFF, WAV, AIFF, and stills.
+#[cfg(test)]
 pub(crate) fn installed_readers() -> ReaderFactory {
-    let (decoders, _) = crate::register_codecs();
+    readers_with(crate::register_codecs().0)
+}
+
+/// ISOBMFF, WAV, AIFF, and stills, decoded with `decoders`.
+pub(crate) fn readers_with(decoders: DecodeFactory) -> ReaderFactory {
     let mut readers = ReaderFactory::new();
     readers.register_container(probe_isobmff, open_isobmff);
     readers.register_container(cutlass_riff::probe, open_wav);
@@ -104,6 +110,45 @@ mod tests {
         std::fs::remove_file(&path).expect("remove");
         let samples = ready.pcm.as_i16().expect("i16");
         assert_eq!(samples, &[0x4000]);
+    }
+
+    #[test]
+    fn an_iphone_movie_with_spatial_audio_plays_its_picture_and_aac_sound() {
+        // Recent iPhones store an `apac` spatial-audio track beside the AAC.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/IMG_9197.mov");
+        if !path.is_file() {
+            eprintln!("skipped: {} is missing", path.display());
+            return;
+        }
+        let mut media = installed_readers().open(&path).expect("open");
+        let held = media
+            .decode_at(
+                cutlass_model::Micros(1_000_000),
+                &cutlass_model::TimeRange::new(0, 10_000_000),
+            )
+            .expect("picture");
+        assert_eq!((held.frame.width(), held.frame.height()), (3840, 2160));
+        let sound = media.pull_audio().expect("pull").expect("pcm");
+        assert_eq!(sound.pcm.rate, 48_000);
+    }
+
+    #[test]
+    fn a_fragmented_movie_without_sidx_or_mfra_decodes_the_picture_at_two_seconds() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/16929689_1920_1080_30fps.mp4");
+        if !path.is_file() {
+            eprintln!("skipped: {} is missing", path.display());
+            return;
+        }
+        let mut media = installed_readers().open(&path).expect("open");
+        let at = cutlass_model::Micros(2_000_000);
+        let held = media
+            .decode_at(at, &cutlass_model::TimeRange::new(0, 10_000_000))
+            .expect("picture at 2 s");
+        assert!(held.start.0 <= at.0 && at.0 < held.end.0);
+        assert_eq!(held.frame.width(), 1920);
+        assert_eq!(held.frame.height(), 1080);
     }
 
     fn aiff_s16(frame: &[u8]) -> Vec<u8> {

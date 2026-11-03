@@ -28,7 +28,7 @@ use cutlass_still::{StillDemux, StillProbe, still_limits};
 use crate::clock::ClockKind;
 use crate::error::EngineError;
 use crate::map::ticks_to_micros;
-use crate::reader::{MAX_AUDIO_FRAMES, ReaderFactory};
+use crate::reader::{MAX_AUDIO_FRAMES, ReaderFactory, Steer};
 use crate::source::{open_segment, peaks_from};
 use crate::{MAX_BUCKETS, MAX_EDGE};
 
@@ -547,6 +547,134 @@ fn sixty_four_silent_pictures_hit_the_decode_bound() {
     assert!(matches!(error, EngineError::DecodeLimit));
 }
 
+#[test]
+fn decode_at_returns_the_picture_that_covers_the_time() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_eight);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let cover = TimeRange::new(0, 1_000_000);
+    for wanted in [3, 3, 5, 6, 1, 7, 0] {
+        let held = media
+            .decode_at(Micros(tick(wanted).0 + 10), &cover)
+            .expect("picture");
+        assert_eq!(held.start, tick(wanted), "tick {wanted}");
+    }
+    let past = media.decode_at(tick(20), &cover).expect("last picture");
+    assert_eq!(past.start, tick(7));
+}
+
+#[test]
+fn a_steered_decode_moves_to_a_later_time_or_stops_where_it_got_to() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_eight);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, open_one_picture);
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let tick = |ticks: i64| ticks_to_micros(ticks, Timescale::new(30)).expect("time");
+    let cover = TimeRange::new(0, 1_000_000);
+
+    let moved = media
+        .decode_steered(Micros(tick(2).0 + 10), &cover, &mut |held| {
+            if held.start == tick(1) {
+                Steer::Retarget(Micros(tick(5).0 + 10))
+            } else {
+                Steer::Go
+            }
+        })
+        .expect("retargeted");
+    assert_eq!(moved.start, tick(5));
+
+    let mut seen = Vec::new();
+    let stopped = media.decode_steered(Micros(tick(1).0 + 10), &cover, &mut |held| {
+        seen.push(held.start);
+        if held.start == tick(1) {
+            Steer::Retarget(tick(0))
+        } else {
+            Steer::Go
+        }
+    });
+    assert_eq!(stopped, Err(EngineError::Interrupted));
+    let next = media
+        .decode_steered(Micros(tick(3).0 + 10), &cover, &mut |held| {
+            seen.push(held.start);
+            Steer::Go
+        })
+        .expect("continued");
+    assert_eq!(next.start, tick(3));
+    // After stopping at tick 1 the stream went on from there, without a seek
+    // back to tick 0.
+    assert_eq!(seen, [tick(0), tick(1), tick(2), tick(3)]);
+}
+
+fn open_eight(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 8)))
+}
+
+#[test]
+fn pictures_a_drain_releases_reach_the_scan_at_their_own_times() {
+    let mut readers = ReaderFactory::new();
+    readers.register_container(probe_script, open_four);
+    readers
+        .decoders_mut()
+        .register(CodecId::Jpeg, |_params| Ok(Box::new(Held(Vec::new()))));
+    let mut media = readers.open(&fixture("pattern.jpg")).expect("open");
+    let frames = media
+        .pictures_across(&TimeRange::new(0, 1_000_000), 0, 10)
+        .expect("scan");
+    let starts: Vec<i64> = frames.iter().map(|held| held.start.0).collect();
+    let expected: Vec<i64> = (0..4)
+        .map(|ticks| ticks_to_micros(ticks, Timescale::new(30)).expect("time").0)
+        .collect();
+    assert_eq!(starts, expected);
+}
+
+fn open_four(_path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    Ok(Box::new(scripted(0, 4)))
+}
+
+/// Holds every picture until `drain`, like a decoder waiting on reorder.
+struct Held(Vec<(i64, u32)>);
+
+impl Decoder for Held {
+    fn codec(&self) -> CodecId {
+        CodecId::Jpeg
+    }
+
+    fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
+        self.0.push((packet.pts, packet.timescale));
+        Ok(Vec::new())
+    }
+
+    fn drain(&mut self) -> Result<Vec<Output>, CodecError> {
+        let mut outputs = Vec::new();
+        for (pts, timescale) in self.0.drain(..) {
+            let picture = PictureOutput::cpu(
+                PictureInfo {
+                    width: 2,
+                    height: 2,
+                    pixel: PixelFormat::Yuv420p,
+                    primaries: ColorPrimaries::Bt709,
+                    transfer: Transfer::Bt709,
+                },
+                vec![16, 16, 16, 16, 128, 128],
+                pts,
+                timescale,
+            )?;
+            outputs.push(Output::Picture(picture));
+        }
+        Ok(outputs)
+    }
+
+    fn reset(&mut self) {
+        self.0.clear();
+    }
+}
+
 fn probe_script(header: &[u8]) -> ProbeResult {
     if header.is_empty() {
         return ProbeResult::NeedBytes { have: 0, need: 1 };
@@ -809,6 +937,45 @@ fn a_pcm_wav_seeks_and_returns_full_scale_samples() {
     assert_eq!(head.as_f32(), Some(&[0.0][..]));
     let later = media.audio_from(Micros(21), 2).expect("seek");
     assert_eq!(later.as_f32(), Some(&[1.0, -1.0][..]));
+    std::fs::remove_file(&path).expect("remove");
+}
+
+#[test]
+fn audio_windows_join_without_a_seam_and_a_seek_lands_on_the_sample() {
+    let path = std::env::temp_dir().join(format!("cutlass-pcm-ramp-{}", std::process::id()));
+    let ramp: Vec<i16> = (0..9_600_i32)
+        .map(|index| i16::try_from(index - 4_800).expect("sample"))
+        .collect();
+    let payload: Vec<u8> = ramp
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    write_pcm_wav(&path, 48_000, 16, &payload);
+    let mut readers = ReaderFactory::new();
+    readers.register_container(cutlass_riff::probe, open_wav);
+    cutlass_pcm::register_decoders(readers.decoders_mut());
+    let expected = |from: usize, count: usize| -> Vec<f32> {
+        ramp[from..from + count]
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_767.0)
+            .collect()
+    };
+
+    let mut media = readers.open(&path).expect("open");
+    let mut joined = Vec::new();
+    for window in 0..10_i64 {
+        let pcm = media
+            .audio_from(Micros(30_000 + window * 10_000), 480)
+            .expect("window");
+        joined.extend_from_slice(pcm.as_f32().expect("f32"));
+    }
+    assert_eq!(joined, expected(1_440, 4_800));
+
+    let mut fresh = readers.open(&path).expect("open");
+    let landed = fresh.audio_from(Micros(125_000), 96).expect("seek");
+    assert_eq!(landed.as_f32().expect("f32"), &expected(6_000, 96)[..]);
+    let back = fresh.audio_from(Micros(20_000), 48).expect("seek back");
+    assert_eq!(back.as_f32().expect("f32"), &expected(960, 48)[..]);
     std::fs::remove_file(&path).expect("remove");
 }
 

@@ -174,7 +174,7 @@ fn covers(range: &cutlass_model::TimeRange, time: Micros) -> bool {
 
 fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> MixClip {
     let offset = Micros(time.0.saturating_sub(segment.target.start.0));
-    let volume = volume_from(segment, offset).unwrap_or(segment.volume);
+    let volume = clip_volume(segment, offset);
     let (fade_in_us, fade_out_us, fade_curve) = fade_of(draft, segment);
     let speed = map::placement_of(draft, segment)
         .and_then(|placement| map::speed_at(&placement, time))
@@ -190,6 +190,13 @@ fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> Mi
         muted: track_is_muted(track),
         role: ClipRole::Sound,
     }
+}
+
+/// The clip's gain `offset` into it, its volume keyframes applied. 1 is the
+/// file as recorded.
+#[must_use]
+pub fn clip_volume(segment: &Segment, offset: Micros) -> f64 {
+    volume_from(segment, offset).unwrap_or(segment.volume)
 }
 
 fn volume_from(segment: &Segment, offset: Micros) -> Result<f64, EngineError> {

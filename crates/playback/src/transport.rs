@@ -20,6 +20,9 @@ const AUDIO_SNAP: i64 = 60_000;
 /// The share of the drift corrected each tick. Small enough that the device's
 /// buffer-sized clock steps do not reach the picture.
 const AUDIO_PULL: i64 = 16;
+/// How long the playhead waits for the device to play the first frame before
+/// it gives up on the audio clock and follows the wall.
+const DEAF_GRACE: i64 = 300_000;
 
 /// What is playing: the draft at one revision, the folder its media paths
 /// resolve against, and the readers that open them.
@@ -47,6 +50,10 @@ struct Stream {
     played: u64,
     /// The device has played this stream's first frame.
     heard: bool,
+    /// Wall time spent waiting for the first frame.
+    waited: i64,
+    /// The device never played in time, so the wall moves the playhead.
+    deaf: bool,
 }
 
 impl Stream {
@@ -153,6 +160,8 @@ impl Transport {
             start: at,
             played: clock.played,
             heard: false,
+            waited: 0,
+            deaf: false,
         });
     }
 
@@ -202,7 +211,7 @@ impl Transport {
             };
         }
         let wall = playhead.0.saturating_add(elapsed);
-        let mut next = match self.streamed_playhead(wall) {
+        let mut next = match self.streamed_playhead(wall, elapsed) {
             Some(streamed) => streamed.max(playhead.0),
             None => wall,
         };
@@ -259,15 +268,34 @@ impl Transport {
         Some(self.stream?.time_at(self.heard_frames()?))
     }
 
-    fn streamed_playhead(&mut self, wall: i64) -> Option<i64> {
+    /// The playhead the heard audio gives, or `None` to follow the wall.
+    fn streamed_playhead(&mut self, wall: i64, elapsed: i64) -> Option<i64> {
         let heard_frames = self.heard_frames()?;
-        let stream = self.stream.as_mut()?;
-        let heard = stream.time_at(heard_frames).0;
-        if heard_frames == 0 {
-            return Some(stream.start.0);
+        self.stream.as_mut()?.playhead(heard_frames, wall, elapsed)
+    }
+}
+
+impl Stream {
+    /// The playhead once the device has played `heard_frames`: held at the
+    /// start until the first frame is heard, on it then, and leaning toward
+    /// it after. `None` once the device has played nothing for
+    /// [`DEAF_GRACE`], as when another app holds the audio, so the wall
+    /// moves the playhead instead of a picture frozen at the start.
+    fn playhead(&mut self, heard_frames: u64, wall: i64, elapsed: i64) -> Option<i64> {
+        if self.deaf {
+            return None;
         }
-        if !stream.heard {
-            stream.heard = true;
+        let heard = self.time_at(heard_frames).0;
+        if heard_frames == 0 {
+            self.waited = self.waited.saturating_add(elapsed);
+            if self.waited > DEAF_GRACE {
+                self.deaf = true;
+                return None;
+            }
+            return Some(self.start.0);
+        }
+        if !self.heard {
+            self.heard = true;
             return Some(heard);
         }
         Some(follow_audio(wall, heard))
@@ -304,11 +332,51 @@ mod tests {
             start: Micros(2_000_000),
             played: 0,
             heard: true,
+            waited: 0,
+            deaf: false,
         };
         assert_eq!(
             stream.time_at(u64::from(crate::MIX_WINDOW)),
             Micros(2_020_000)
         );
+    }
+
+    #[test]
+    fn a_device_that_never_plays_hands_the_playhead_to_the_wall() {
+        let mut stream = Stream {
+            start: Micros(1_000_000),
+            played: 0,
+            heard: false,
+            waited: 0,
+            deaf: false,
+        };
+        // Held at the start while the device warms up.
+        assert_eq!(stream.playhead(0, 1_016_000, 16_000), Some(1_000_000));
+        let mut wall = 1_016_000;
+        let mut last = Some(1_000_000);
+        while last.is_some() {
+            wall += 16_000;
+            last = stream.playhead(0, wall, 16_000);
+            assert!(wall < 1_400_000, "still held at {wall}");
+        }
+        assert!(stream.deaf);
+        // Sound arriving late does not pull the picture back.
+        assert_eq!(stream.playhead(4_800, wall, 16_000), None);
+    }
+
+    #[test]
+    fn the_first_heard_frame_lands_the_playhead_on_it() {
+        let mut stream = Stream {
+            start: Micros(0),
+            played: 0,
+            heard: false,
+            waited: 0,
+            deaf: false,
+        };
+        assert_eq!(stream.playhead(0, 16_000, 16_000), Some(0));
+        assert_eq!(stream.playhead(480, 32_000, 16_000), Some(10_000));
+        assert!(stream.heard && !stream.deaf);
+        assert_eq!(stream.playhead(960, 26_000, 16_000), Some(25_625));
     }
 
     fn program<'a>(

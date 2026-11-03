@@ -141,7 +141,10 @@ final class EditorModel {
                 let micros = elapsed.seconds * 1_000_000 + elapsed.attoseconds / 1_000_000_000_000
                 guard let time = try? editor.tick(elapsedUs: micros),
                       let playing = try? editor.isPlaying()
-                else { return }
+                else {
+                    await MainActor.run { self?.stopped() }
+                    return
+                }
                 let going = await MainActor.run { () -> Bool in
                     guard let self, self.isPlaying else { return false }
                     self.playheadUs = time

@@ -2822,9 +2822,10 @@ fn paint_film(
     if textures.0.len() > FILM_TEXTURES {
         textures.0.clear();
     }
-    let painter = ui
-        .painter()
-        .with_clip_rect(film.intersect(clip_rect.shrink(1.0)).intersect(visible));
+    // Inside the clip's edge, rounded where a picture meets a corner.
+    let inner = clip_rect.shrink(1.0);
+    let radius = CLIP_RADIUS - 1;
+    let painter = ui.painter().with_clip_rect(visible);
     for cell in cells {
         let Some(thumb) = cell.thumb else {
             continue;
@@ -2842,10 +2843,57 @@ fn paint_film(
             Pos2::new(clip_rect.left() + cell.tile.left as f32, film.top()),
             Vec2::new(cell.tile.width as f32, film.height()),
         );
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new((tile.width() / full).min(1.0), 1.0));
-        painter.image(texture.id(), tile, uv, Color32::from_gray(210));
+        let drawn = tile.intersect(inner).intersect(film);
+        if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
+            continue;
+        }
+        let uv = Rect::from_min_max(
+            Pos2::new(
+                (drawn.left() - tile.left()) / full,
+                (drawn.top() - film.top()) / film.height(),
+            ),
+            Pos2::new(
+                ((drawn.right() - tile.left()) / full).min(1.0),
+                (drawn.bottom() - film.top()) / film.height(),
+            ),
+        );
+        let at = |a: f32, b: f32| (a - b).abs() < 0.5;
+        let corner = |side: bool, end: bool| if side && end { radius } else { 0 };
+        let (left, right) = (
+            at(drawn.left(), inner.left()),
+            at(drawn.right(), inner.right()),
+        );
+        let (top, bottom) = (
+            at(drawn.top(), inner.top()),
+            at(drawn.bottom(), inner.bottom()),
+        );
+        let corners = CornerRadius {
+            nw: corner(left, top),
+            ne: corner(right, top),
+            sw: corner(left, bottom),
+            se: corner(right, bottom),
+        };
+        painter.add(
+            egui::epaint::RectShape::filled(drawn, corners, Color32::from_gray(210))
+                .with_texture(texture.id(), uv),
+        );
     }
     ui.ctx().data_mut(|data| data.insert_temp(store, textures));
+}
+
+/// The corner radius of a clip.
+const CLIP_RADIUS: u8 = 7;
+
+/// The lowest a bar at `x` reaches in `band`, which shares the clip's
+/// sides and bottom: the bottom, raised inside the rounded corners.
+fn corner_floor(band: Rect, x: f32) -> f32 {
+    let radius = f32::from(CLIP_RADIUS);
+    let inset = (x - band.left()).min(band.right() - x);
+    if inset >= radius {
+        return band.bottom();
+    }
+    let across = radius - inset.max(0.0);
+    band.bottom() - (radius - (radius * radius - across * across).max(0.0).sqrt())
 }
 
 /// Waveform bars are one point wide, one every two points.
@@ -2948,8 +2996,12 @@ fn paint_wave(
         }
         let left = clip_left + slot as f32 * BAR_PITCH;
         let top = floor - height;
+        let bottom = floor.min(corner_floor(band, left + 0.5));
+        if top >= bottom {
+            continue;
+        }
         mesh.add_colored_rect(
-            Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 1.0, floor)),
+            Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 1.0, bottom)),
             bar,
         );
         let cap = |from: f32, color: Color32, mesh: &mut egui::Mesh| {
@@ -2973,6 +3025,9 @@ fn paint_wave(
     for (index, gain) in wave.gains.iter().enumerate() {
         let left = clip_left + (wave.first as usize + index) as f32;
         let y = (floor - volume_height(*gain) * reach).round();
+        if y + thick > corner_floor(band, left + 0.5) {
+            continue;
+        }
         mesh.add_colored_rect(
             Rect::from_min_max(Pos2::new(left, y), Pos2::new(left + 1.0, y + thick)),
             line,
@@ -3094,7 +3149,7 @@ fn paint_clip(
     } else {
         lane_color(&lane.kind)
     };
-    painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
+    painter.rect_filled(clip_rect, CornerRadius::same(CLIP_RADIUS), fill);
     let audio = is_audio(lane);
     let span =
         f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
@@ -3120,7 +3175,7 @@ fn paint_clip(
     if selected {
         painter.rect_stroke(
             clip_rect,
-            CornerRadius::same(7),
+            CornerRadius::same(CLIP_RADIUS),
             egui::Stroke::new(1.5, tokens::SELECTED),
             egui::StrokeKind::Inside,
         );
@@ -4100,14 +4155,14 @@ mod tests {
                 |ui| show(shell, ui, view, None),
             );
             output.textures_delta.clear();
-            // Textured meshes in the lanes, below the preview.
+            // Textured tiles in the lanes, below the preview.
             output
                 .shapes
                 .iter()
                 .filter(|clipped| match &clipped.shape {
-                    egui::Shape::Mesh(mesh) => {
-                        mesh.texture_id != egui::TextureId::default()
-                            && mesh.calc_bounds().center().y > 450.0
+                    egui::Shape::Rect(rect) => {
+                        rect.fill_texture_id() != egui::TextureId::default()
+                            && rect.rect.center().y > 450.0
                     }
                     _ => false,
                 })
@@ -4359,6 +4414,44 @@ mod tests {
         assert!((wave_height(0.5) - 0.875).abs() < 0.001);
         assert_eq!(wave_height(0.001), 0.0);
         assert_eq!(wave_height(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn bars_in_a_bottom_corner_stop_at_the_rounded_edge() {
+        let band = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 20.0));
+        assert_eq!(corner_floor(band, 50.0), 20.0);
+        assert_eq!(corner_floor(band, 7.0), 20.0);
+        assert_eq!(corner_floor(band, 0.0), 13.0);
+        assert_eq!(corner_floor(band, 100.0), 13.0);
+        assert!((corner_floor(band, 3.5) - (20.0 - (7.0 - 36.75_f32.sqrt()))).abs() < 1e-4);
+        let ctx = egui::Context::default();
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![1.0; 100],
+            gains: Vec::new(),
+            under_picture: false,
+            muted: true,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui, &wave, 0.0, band, band, WaveColors::AUDIO);
+        });
+        output.textures_delta.clear();
+        let mut bottoms = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Mesh(mesh) = &clipped.shape {
+                for quad in mesh.vertices.chunks(4) {
+                    let bounds = Rect::from_points(&quad.iter().map(|v| v.pos).collect::<Vec<_>>());
+                    bottoms.push((bounds.left(), bounds.bottom()));
+                }
+            }
+        }
+        assert!(!bottoms.is_empty());
+        for (left, bottom) in bottoms {
+            assert!(
+                bottom <= corner_floor(band, left + 0.5) + 1e-4,
+                "bar at {left} reaches {bottom}"
+            );
+        }
     }
 
     #[test]

@@ -805,9 +805,26 @@ dependencies = [
 name = "cutlass-ffi"
 version = "0.1.0"
 dependencies = [
+ "cutlass-aac",
+ "cutlass-aiff",
+ "cutlass-codec",
+ "cutlass-container",
+ "cutlass-decode",
+ "cutlass-editor",
+ "cutlass-eval",
+ "cutlass-h264",
+ "cutlass-isobmff",
+ "cutlass-jpeg",
  "cutlass-logger",
+ "cutlass-model",
+ "cutlass-pcm",
+ "cutlass-platform-apple",
  "cutlass-playback",
+ "cutlass-png",
+ "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
+ "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
 ]

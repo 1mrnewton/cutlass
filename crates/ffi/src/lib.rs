@@ -9,21 +9,27 @@
 #![forbid(unsafe_code)]
 
 mod cache;
+mod codecs;
 mod error;
 mod host;
+mod media;
 mod player;
+mod preview;
 mod project;
 
 pub use cache::ResourceCache;
+pub use codecs::{decoders, readers};
 pub use cutlass_logger::InitError as LogError;
 pub use error::FfiError;
 pub use host::Commands;
+pub use media::Probed;
 pub use player::PhonePlayer;
+pub use preview::{Picture, Preview};
 pub use project::Project;
 
 use std::path::{Path, PathBuf};
 
-use cutlass_session::{Draft, LinkageSettings, Micros, Request, Session};
+use cutlass_session::{Draft, LinkageSettings, Micros, Request, SegmentId, Session};
 use cutlass_store::RepairNote;
 
 /// Open the process log in `directory`.
@@ -48,6 +54,7 @@ pub struct PhoneHost {
     commands: Commands,
     player: PhonePlayer,
     cache: ResourceCache,
+    preview: Preview,
 }
 
 impl PhoneHost {
@@ -84,6 +91,7 @@ impl PhoneHost {
             commands,
             player: PhonePlayer::new(),
             cache,
+            preview: Preview::new(),
         })
     }
 
@@ -195,6 +203,38 @@ impl PhoneHost {
     #[must_use]
     pub fn is_playing(&self) -> bool {
         self.player.is_playing()
+    }
+
+    /// Copy a file the phone picked into the project and add it to the library.
+    ///
+    /// Returns the new material id. A refused probe or a failed request
+    /// leaves the draft unchanged and removes the copy.
+    pub fn import(&mut self, source: &Path, probed: Probed) -> Result<String, FfiError> {
+        media::check(probed)?;
+        let id = media::fresh(&media::ids(self.draft()), "mat");
+        let (stored, copy) = media::copy_in(self.root(), source)?;
+        let request = Request::Import {
+            medium: media::imported(&id, stored, probed),
+        };
+        if let Err(error) = self.apply(self.revision(), &[request]) {
+            let _ = std::fs::remove_file(copy);
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    /// Add the whole of `material_id` at the end of its lane, as one undo step.
+    /// A picture goes on main; a sound opens an audio lane when there is none.
+    pub fn append(&mut self, material_id: &str) -> Result<SegmentId, FfiError> {
+        let (requests, segment_id) = media::append_requests(self.draft(), material_id)?;
+        self.apply(self.revision(), &requests)?;
+        Ok(segment_id)
+    }
+
+    /// The composited picture at `time`, reading media from the project folder.
+    pub fn frame(&mut self, time: Micros) -> Result<Picture, FfiError> {
+        self.preview
+            .frame(self.commands.session(), self.project.root(), time)
     }
 
     /// Published path for a bundled or cached id. A missing id is an error.
@@ -426,5 +466,154 @@ mod tests {
         let linkage = cutlass_session::linkage_from_biz(None, draft.id.as_str(), false);
         assert!(!linkage.enabled);
         assert_eq!(cutlass_session::Micros(5).0, 5);
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/fixtures")
+            .join(name)
+    }
+
+    fn still(duration: i64) -> crate::Probed {
+        crate::Probed::Picture {
+            still: true,
+            width: 16,
+            height: 16,
+            duration: cutlass_session::Micros(duration),
+        }
+    }
+
+    #[test]
+    fn an_imported_still_is_copied_in_and_appends_to_the_end_of_main() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let source = fixture("pattern.png");
+        let first = host.import(&source, still(2_000_000)).unwrap();
+        let second = host.import(&source, still(1_000_000)).unwrap();
+        assert_ne!(first, second);
+        let videos = &host.draft().materials.videos;
+        assert_eq!(videos[0].path, "Resources/pattern.png");
+        assert_eq!(videos[1].path, "Resources/pattern 2.png");
+        assert_eq!(videos[0].kind, "photo");
+        assert!(host.root().join("Resources/pattern 2.png").is_file());
+
+        host.append(&first).unwrap();
+        let segment = host.append(&second).unwrap();
+        let main = &host.draft().tracks[0];
+        assert_eq!(main.segments.len(), 2);
+        assert_eq!(main.segments[1].id, segment);
+        assert_eq!(
+            main.segments[1].target,
+            cutlass_model::TimeRange::new(2_000_000, 1_000_000)
+        );
+        let revision = host.revision();
+        host.undo().unwrap();
+        assert_eq!(host.draft().tracks[0].segments.len(), 1);
+        assert!(host.revision() > revision);
+    }
+
+    #[test]
+    fn a_sound_appends_to_a_new_audio_lane() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import(
+                &fixture("pattern.png"),
+                crate::Probed::Sound {
+                    duration: cutlass_session::Micros(500_000),
+                },
+            )
+            .unwrap();
+        host.append(&id).unwrap();
+        let draft = host.draft();
+        assert_eq!(draft.tracks.len(), 2);
+        let sound = draft
+            .tracks
+            .iter()
+            .find(|track| track.kind == cutlass_model::TrackType::Audio)
+            .unwrap();
+        assert_eq!(sound.segments[0].target.start.0, 0);
+    }
+
+    #[test]
+    fn a_refused_import_leaves_the_draft_and_writes_no_copy() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let before = host.draft().clone();
+        let error = host.import(&fixture("pattern.png"), still(0)).unwrap_err();
+        assert_eq!(error.to_string(), "the media has no duration");
+        let flat = crate::Probed::Picture {
+            still: false,
+            width: 0,
+            height: 9,
+            duration: cutlass_session::Micros(1),
+        };
+        let error = host.import(&fixture("pattern.png"), flat).unwrap_err();
+        assert_eq!(error.to_string(), "the picture has no size");
+        let missing = temp.path.join("missing.mov");
+        let error = host.import(&missing, still(1_000)).unwrap_err();
+        assert!(matches!(error, FfiError::Import { .. }));
+        let resources = host.root().join("Resources");
+        assert!(!resources.exists() || fs::read_dir(&resources).unwrap().next().is_none());
+        let error = host.append("nothing").unwrap_err();
+        assert_eq!(error.to_string(), "the media is not in the library");
+        assert_eq!(host.draft(), &before);
+        assert_eq!(host.revision(), 0);
+    }
+
+    #[test]
+    fn the_frame_shows_the_imported_picture_and_a_negative_time_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        host.apply(
+            0,
+            &[Request::SetCanvasSize {
+                width: 16,
+                height: 16,
+                ratio: "1:1".to_owned(),
+            }],
+        )
+        .unwrap();
+        let empty = host.frame(cutlass_session::Micros(0)).unwrap();
+        assert_eq!((empty.width, empty.height), (16, 16));
+        let id = host
+            .import(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        host.append(&id).unwrap();
+        let shown = host.frame(cutlass_session::Micros(500_000)).unwrap();
+        assert_eq!((shown.width, shown.height), (16, 16));
+        assert_eq!(shown.rgba.len(), 16 * 16 * 4);
+        assert_ne!(shown.rgba, empty.rgba);
+        assert!(matches!(
+            host.frame(cutlass_session::Micros(-1)),
+            Err(FfiError::Frame { .. })
+        ));
+    }
+
+    #[test]
+    fn a_truncated_picture_draws_the_canvas_without_a_panic() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        host.apply(
+            0,
+            &[Request::SetCanvasSize {
+                width: 16,
+                height: 16,
+                ratio: "1:1".to_owned(),
+            }],
+        )
+        .unwrap();
+        let empty = host.frame(cutlass_session::Micros(0)).unwrap();
+        let id = host
+            .import(&fixture("truncated.jpg"), still(1_000_000))
+            .unwrap();
+        host.append(&id).unwrap();
+        let shown = host.frame(cutlass_session::Micros(0)).unwrap();
+        assert_eq!(shown, empty);
     }
 }

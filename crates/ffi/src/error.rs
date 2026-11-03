@@ -28,6 +28,16 @@ pub enum FfiError {
         /// The path the phone asked for.
         name: String,
     },
+    /// The picked file could not be imported or placed. The draft is unchanged.
+    Import {
+        /// Why, for the phone to show.
+        reason: String,
+    },
+    /// The picture at that time could not be drawn.
+    Frame {
+        /// Why, for the phone to show.
+        reason: String,
+    },
 }
 
 impl fmt::Display for FfiError {
@@ -40,6 +50,7 @@ impl fmt::Display for FfiError {
             Self::PathEscapes { name } => {
                 write!(formatter, "path {name} leaves the project folder")
             }
+            Self::Import { reason } | Self::Frame { reason } => formatter.write_str(reason),
         }
     }
 }
@@ -50,7 +61,9 @@ impl std::error::Error for FfiError {
             Self::Store(error) => Some(error),
             Self::Playhead(error) => Some(error),
             Self::Storage(error) => Some(error),
-            Self::Edit(_) | Self::PathEscapes { .. } => None,
+            Self::Edit(_) | Self::PathEscapes { .. } | Self::Import { .. } | Self::Frame { .. } => {
+                None
+            }
         }
     }
 }

@@ -74,12 +74,21 @@ struct EditorScreen: View {
         .aspectRatio(16 / 10, contentMode: .fit)
     }
 
+    /// The clock on the left, play pinned to the middle so it never moves
+    /// with the clock, undo and redo on the right.
     private var transport: some View {
         HStack {
-            Text(clock(model.playheadUs) + " / " + clock(model.durationUs))
+            Text(clock(timeUs: model.playheadUs) + " / " + clock(timeUs: model.durationUs))
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.7))
             Spacer()
+            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                .accessibilityLabel("Undo")
+            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                .accessibilityLabel("Redo")
+                .padding(.leading, 16)
+        }
+        .overlay {
             Button {
                 model.togglePlay()
             } label: {
@@ -88,12 +97,6 @@ struct EditorScreen: View {
             }
             .disabled(!model.hasClips)
             .accessibilityLabel(model.isPlaying ? "Pause" : "Play")
-            Spacer()
-            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                .accessibilityLabel("Undo")
-            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-                .accessibilityLabel("Redo")
-                .padding(.leading, 16)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
@@ -187,9 +190,5 @@ struct EditorScreen: View {
             }
             model.endImport()
         }
-    }
-
-    private func clock(_ micros: Int64) -> String {
-        TimelineStrip.clock(Double(micros / 100_000) / 10)
     }
 }

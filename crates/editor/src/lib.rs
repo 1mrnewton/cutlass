@@ -27,7 +27,7 @@ pub use gesture::{
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use lane::{Lane, lane_category, lanes};
 pub use reorder::{place_of, reorder_start};
-pub use ruler::{RulerStep, Tick, ruler_step, ruler_ticks, zoom_ceiling};
+pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
 pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use zoom::{

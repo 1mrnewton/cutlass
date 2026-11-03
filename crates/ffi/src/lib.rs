@@ -23,7 +23,7 @@ mod timeline;
 pub use cache::ResourceCache;
 pub use codecs::{decoders, readers};
 pub use cutlass_editor::{
-    Bar, Tool, ToolId, speed_at, speed_position, tools, volume_at, volume_position,
+    Bar, Tool, ToolId, clock, speed_at, speed_position, tools, volume_at, volume_position,
 };
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;

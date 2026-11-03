@@ -125,13 +125,6 @@ struct TimelineStrip: View {
         .allowsHitTesting(false)
     }
 
-    static func clock(_ seconds: Double) -> String {
-        let whole = Int(seconds)
-        let fraction = seconds - Double(whole)
-        let text = String(format: "%02d:%02d", whole / 60, whole % 60)
-        return fraction > 0 ? text + String(format: ".%d", Int(fraction * 10)) : text
-    }
-
     // MARK: Rows
 
     private func row(_ lane: Lane, index: Int, origin: CGFloat) -> some View {

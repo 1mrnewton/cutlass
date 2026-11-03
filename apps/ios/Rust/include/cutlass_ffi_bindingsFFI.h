@@ -413,6 +413,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_undo(uint64_t ptr, RustCallSta
 double uniffi_cutlass_ffi_bindings_fn_method_editor_zoom(uint64_t ptr, double pixel_size, double factor, double lane_width, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CLOCK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CLOCK
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_clock(int64_t time_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, RustCallStatus *_Nonnull out_status
@@ -711,6 +716,12 @@ void ffi_cutlass_ffi_bindings_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUST_FUTURE_COMPLETE_VOID
 void ffi_cutlass_ffi_bindings_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CLOCK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CLOCK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_clock(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CREATE_PROJECT

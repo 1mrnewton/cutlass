@@ -111,6 +111,14 @@ pub struct Film {
     pub tiles: Vec<Tile>,
 }
 
+/// The transport clock at `time_us`: whole seconds as `MM:SS`, or
+/// `HH:MM:SS` from an hour.
+#[uniffi::export]
+#[must_use]
+pub fn clock(time_us: i64) -> String {
+    cutlass_ffi::clock(Micros(time_us))
+}
+
 /// The gain at volume slider `position`, 0 to 1. Unity is the middle and
 /// the right end is ten times.
 #[uniffi::export]

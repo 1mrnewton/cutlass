@@ -2868,6 +2868,18 @@ fileprivate struct FfiConverterSequenceTypeToolItem: FfiConverterRustBuffer {
     }
 }
 /**
+ * The transport clock at `time_us`: whole seconds as `MM:SS`, or
+ * `HH:MM:SS` from an hour.
+ */
+public func clock(timeUs: Int64) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_clock(
+        FfiConverterInt64.lower(timeUs),uniffiCallStatus
+    )
+})
+}
+/**
  * Write a new empty project in the Cutlass folder at `root`, named like the
  * desktop's, and return its folder.
  */
@@ -2978,6 +2990,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_cutlass_ffi_bindings_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_clock() != 41822) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_create_project() != 16508) {
         return InitializationResult.apiChecksumMismatch

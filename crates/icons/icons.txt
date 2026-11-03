@@ -96,6 +96,10 @@ record         Mic01Icon
 addText        TextCreationIcon
 editText       PencilEdit01Icon
 draw           PaintBrush01Icon
+export         Upload04Icon
+close          Cancel01Icon
+saved          CheckmarkCircle02Icon
+share          Share08Icon
 
 # Custom marks.
 blade          custom

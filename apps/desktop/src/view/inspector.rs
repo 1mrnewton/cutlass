@@ -58,13 +58,11 @@ pub(super) fn clip_panel(
     if state.clip != inspection.segment_id.as_str() {
         *state = InspectorState {
             clip: inspection.segment_id.as_str().to_owned(),
-            open: [
-                "blend".to_owned(),
-                "position".to_owned(),
-                "sound".to_owned(),
-            ]
-            .into_iter()
-            .collect(),
+            open: ["position", "sound"]
+                .into_iter()
+                .chain(matches!(panel, Panel::Text | Panel::Caption).then_some("blend"))
+                .map(str::to_owned)
+                .collect(),
             ..InspectorState::default()
         };
     }
@@ -1113,12 +1111,24 @@ fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
     ui.painter()
         .rect_filled(rect, CornerRadius::same(10), PAGES);
     let count = labels.len().max(1) as f32;
-    let step = (rect.width() - 6.0) / count;
+    let font = FontId::proportional(12.0);
+    let widths: Vec<f32> = labels
+        .iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap((*label).to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+        .collect();
+    let spare = ((rect.width() - 6.0 - widths.iter().sum::<f32>()) / count).max(0.0);
+    let mut left = rect.min.x + 3.0;
     for (index, label) in labels.iter().enumerate() {
         let cell = Rect::from_min_size(
-            rect.min + Vec2::new(3.0 + step * index as f32, 3.0),
-            Vec2::new(step, 24.0),
+            egui::pos2(left, rect.min.y + 3.0),
+            Vec2::new(widths[index] + spare, 24.0),
         );
+        left += cell.width();
         let response = ui.interact(
             cell,
             ui.make_persistent_id(("page", label, index)),
@@ -1136,7 +1146,7 @@ fn pages(ui: &mut Ui, labels: &[&str], current: &mut usize) {
             cell.center(),
             Align2::CENTER_CENTER,
             *label,
-            FontId::proportional(12.0),
+            font.clone(),
             if on { Color32::WHITE } else { tokens::MUTED },
         );
     }
@@ -1171,17 +1181,14 @@ fn section(
             let response = ui.add_enabled_ui(editable, |ui| check_box(ui, on)).inner;
             header.toggled = response.clicked();
         }
-        let chevron = if header.open { "▾" } else { "▸" };
         ui.spacing_mut().item_spacing.x = 6.0;
-        let fold = ui.add(
-            egui::Label::new(RichText::new(chevron).size(12.0).color(tokens::MUTED))
-                .sense(Sense::click()),
-        );
-        let name = ui.add(
-            egui::Label::new(RichText::new(label).size(13.0).color(Color32::WHITE))
-                .sense(Sense::click()),
-        );
-        let name = name.union(fold);
+        let name = if check.is_some() {
+            let name = section_name(ui, label);
+            name.union(chevron(ui, header.open))
+        } else {
+            let fold = chevron(ui, header.open);
+            section_name(ui, label).union(fold)
+        };
         if name.clicked() {
             header.open = !header.open;
             if header.open {
@@ -1207,7 +1214,46 @@ fn section(
         header.open = true;
         state.open.insert(key.to_owned());
     }
+    divider(ui);
     header
+}
+
+fn section_name(ui: &mut Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Label::new(RichText::new(label).size(13.0).color(Color32::WHITE))
+            .selectable(false)
+            .sense(Sense::click()),
+    )
+}
+
+/// A painted fold mark: down when open, right when shut.
+fn chevron(ui: &mut Ui, open: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::click());
+    let c = rect.center();
+    let points = if open {
+        vec![
+            c + Vec2::new(-3.5, -1.5),
+            c + Vec2::new(0.0, 2.0),
+            c + Vec2::new(3.5, -1.5),
+        ]
+    } else {
+        vec![
+            c + Vec2::new(-1.5, -3.5),
+            c + Vec2::new(2.0, 0.0),
+            c + Vec2::new(-1.5, 3.5),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::line(points, Stroke::new(1.5, tokens::MUTED)));
+    response
+}
+
+/// The faint line under a section header or a feature row.
+fn divider(ui: &mut Ui) {
+    let line = ui.cursor().min.y;
+    let span = ui.max_rect().x_range();
+    ui.painter()
+        .hline(span, line, Stroke::new(1.0, Color32::from_white_alpha(14)));
 }
 
 /// A feature the prototype lists that Cutlass cannot do yet: a dimmed row
@@ -1215,22 +1261,27 @@ fn section(
 fn later_row(ui: &mut Ui, label: &str) {
     ui.horizontal(|ui| {
         ui.set_min_height(40.0);
+        ui.spacing_mut().item_spacing.x = 6.0;
         ui.add_enabled_ui(false, |ui| check_box(ui, false));
         ui.label(RichText::new(label).size(13.0).color(tokens::FAINT));
+        chevron(ui, false);
         later_badge(ui);
     })
     .response
     .on_hover_text(LATER);
+    divider(ui);
 }
 
+/// A small "Later" mark, painted at text height so it never stretches a row.
 fn later_badge(ui: &mut Ui) {
-    egui::Frame::new()
-        .fill(BOX)
-        .corner_radius(CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(5, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new("Later").size(10.0).color(ACCENT));
-        });
+    let galley =
+        ui.painter()
+            .layout_no_wrap("Later".to_owned(), FontId::proportional(10.0), ACCENT);
+    let size = galley.size() + Vec2::new(10.0, 4.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(6), BOX);
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, ACCENT);
 }
 
 fn later_note(ui: &mut Ui, what: &str) {
@@ -1293,9 +1344,18 @@ fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 fn row_label(ui: &mut Ui, label: &str) {
-    ui.add_sized(
-        [LABEL_WIDTH, 26.0],
-        egui::Label::new(RichText::new(label).size(12.0).color(tokens::TEXT)).truncate(),
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(LABEL_WIDTH, 26.0), Sense::hover());
+    let color = if ui.is_enabled() {
+        tokens::TEXT
+    } else {
+        tokens::FAINT
+    };
+    ui.painter().with_clip_rect(rect).text(
+        rect.left_center(),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        color,
     );
 }
 
@@ -1375,14 +1435,16 @@ fn pair_row(
     second: (&str, f64),
 ) -> (Option<f64>, Option<f64>) {
     let mut out = (None, None);
-    let boxes = if second.1.is_nan() { 1.0 } else { 2.0 };
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(12.0).color(tokens::TEXT));
-        let room = ui.available_width() - boxes * (PAIR_BOX + 8.0);
-        ui.add_space(room.max(0.0));
-        out.0 = number_box(ui, state, &format!("{label} {}", first.0), first);
+        row_label(ui, label);
+        let width = if second.1.is_nan() {
+            PAIR_BOX
+        } else {
+            ((ui.available_width() - ui.spacing().item_spacing.x) / 2.0).max(PAIR_BOX - 24.0)
+        };
+        out.0 = number_box(ui, state, &format!("{label} {}", first.0), first, width);
         if !second.1.is_nan() {
-            out.1 = number_box(ui, state, &format!("{label} {}", second.0), second);
+            out.1 = number_box(ui, state, &format!("{label} {}", second.0), second, width);
         }
     });
     ui.add_space(4.0);
@@ -1394,7 +1456,10 @@ fn number_box(
     state: &mut InspectorState,
     key: &str,
     (unit, stored): (&str, f64),
+    width: f32,
 ) -> Option<f64> {
+    // Never show a minus sign on zero.
+    let stored = stored + 0.0;
     let text = state.fields.entry(key.to_owned()).or_default();
     let mut edited = None;
     egui::Frame::new()
@@ -1402,7 +1467,7 @@ fn number_box(
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
-            ui.set_width(PAIR_BOX - 16.0);
+            ui.set_width(width - 16.0);
             ui.horizontal(|ui| {
                 if unit == "°" {
                     paint_inline_icon(ui, "rotate");
@@ -1522,13 +1587,15 @@ fn check_box(ui: &mut Ui, on: bool) -> egui::Response {
         egui::StrokeKind::Inside,
     );
     if on {
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "✓",
-            FontId::proportional(11.0),
-            tokens::EXPORT_INK,
-        );
+        let c = rect.center();
+        ui.painter().add(egui::Shape::line(
+            vec![
+                c + Vec2::new(-4.0, 0.0),
+                c + Vec2::new(-1.0, 3.0),
+                c + Vec2::new(4.5, -3.0),
+            ],
+            Stroke::new(1.8, tokens::EXPORT_INK),
+        ));
     }
     response
 }

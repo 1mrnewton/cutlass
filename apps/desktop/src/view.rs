@@ -4000,15 +4000,14 @@ mod tests {
                     "Position",
                     "Rotate",
                     "Blend",
-                    "Mode",
-                    "Opacity",
                     "Stabilize",
                     "Motion blur",
                     "Canvas",
                     "Later",
                 ]
                 .as_slice(),
-                ["Font size", "Stroke", "Volume"].as_slice(),
+                // Blend starts shut on a video clip, as in the prototype.
+                ["Font size", "Stroke", "Volume", "Mode", "Opacity"].as_slice(),
             ),
             (
                 "sound",

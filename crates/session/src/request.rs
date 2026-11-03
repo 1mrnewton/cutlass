@@ -206,6 +206,16 @@ pub enum Request {
         angle: f64,
         blur: f64,
     },
+    /// Make the letters glow in `color`, `strength` and `range` from 0 to 1.
+    /// The glow is a bloom effect the clip points at; `glow_id` names a new
+    /// one when the clip has none of its own. An empty color takes it off.
+    SetTextGlow {
+        segment_id: SegmentId,
+        glow_id: MaterialId,
+        color: String,
+        strength: f64,
+        range: f64,
+    },
     /// Fill a box behind the letters in `color` at `alpha`, its corners
     /// rounded by `round` from 0 to 1. An empty color takes the box off.
     SetTextBackground {

@@ -286,6 +286,13 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetTextGlow {
+            segment_id,
+            glow_id,
+            color,
+            strength,
+            range,
+        } => text::set_text_glow(draft, segment_id, glow_id, color, [*strength, *range]),
         Request::AddText {
             track_id,
             segment_id,

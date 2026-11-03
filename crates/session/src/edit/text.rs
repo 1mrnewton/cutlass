@@ -1,5 +1,6 @@
 use cutlass_model::{
-    Draft, MaterialId, MaterialText, Segment, SegmentId, TimeRange, TrackId, TrackType,
+    Draft, MaterialEffect, MaterialId, MaterialText, Segment, SegmentId, TimeRange, TrackId,
+    TrackType, segment_bloom,
 };
 
 use super::speed::locate;
@@ -306,6 +307,96 @@ pub fn set_text_background(
     Ok(())
 }
 
+/// Make the letters glow in `color`. `glow` is the strength and the range,
+/// each from 0 to 1. The glow is a bloom effect among the clip's sidecars:
+/// one only this clip points at is changed in place, and otherwise a new
+/// one named `glow_id` takes its place, so a split clip's halves glow on
+/// their own. An empty color takes the glow off, and drops the effect when
+/// no clip points at it any more.
+pub fn set_text_glow(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    glow_id: &MaterialId,
+    color: &str,
+    glow: [f64; 2],
+) -> Result<(), EditError> {
+    text_index(draft, segment_id)?;
+    let color = style_color(color)?;
+    let [strength, range] = glow;
+    if !(0.0..=1.0).contains(&strength) || !(0.0..=1.0).contains(&range) {
+        return Err(EditError::TextStyle);
+    }
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    let segment = &draft.tracks[track_index].segments[segment_index];
+    let existing = segment_bloom(&draft.materials, segment).map(|effect| effect.id.clone());
+    let shared = existing
+        .as_ref()
+        .is_some_and(|id| pointed_at(draft, id) > 1);
+    if color.is_empty() {
+        let Some(id) = existing else {
+            return Ok(());
+        };
+        draft.tracks[track_index].segments[segment_index]
+            .extra_material_refs
+            .retain(|kept| *kept != id);
+        if !shared {
+            draft.materials.effects.retain(|effect| effect.id != id);
+        }
+        return Ok(());
+    }
+    let mut bloom = existing
+        .as_ref()
+        .and_then(|id| {
+            draft
+                .materials
+                .effects
+                .iter()
+                .find(|effect| &effect.id == id)
+        })
+        .and_then(MaterialEffect::bloom)
+        .unwrap_or_default();
+    bloom.color = color.to_owned();
+    bloom.strength = strength;
+    bloom.range = range;
+    if let Some(id) = existing.as_ref().filter(|_| !shared) {
+        if let Some(effect) = draft
+            .materials
+            .effects
+            .iter_mut()
+            .find(|effect| &effect.id == id)
+        {
+            effect.set_bloom(&bloom);
+        }
+        return Ok(());
+    }
+    if glow_id.is_empty() {
+        return Err(EditError::MissingMaterial);
+    }
+    if draft.materials.get(glow_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    draft
+        .materials
+        .effects
+        .push(MaterialEffect::glow(glow_id.clone(), &bloom));
+    let refs = &mut draft.tracks[track_index].segments[segment_index].extra_material_refs;
+    if let Some(id) = existing {
+        refs.retain(|kept| *kept != id);
+    }
+    refs.push(glow_id.clone());
+    Ok(())
+}
+
+/// How many clips point at material `id`.
+fn pointed_at(draft: &Draft, id: &MaterialId) -> usize {
+    draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .filter(|segment| segment.extra_material_refs.contains(id))
+        .count()
+}
+
 /// A trimmed color that is empty or hex.
 fn style_color(color: &str) -> Result<&str, EditError> {
     let color = color.trim();
@@ -460,6 +551,88 @@ mod tests {
             ),
         ] {
             assert_eq!(session.apply(2, &[request]).unwrap_err(), error);
+        }
+    }
+
+    #[test]
+    fn a_glow_is_a_bloom_effect_each_half_of_a_split_owns() {
+        let mut session = open();
+        let glow = |segment: &str, id: &str, color: &str, strength: f64| Request::SetTextGlow {
+            segment_id: segment.into(),
+            glow_id: MaterialId::new(id),
+            color: color.to_owned(),
+            strength,
+            range: 0.5,
+        };
+        let bloom = |session: &Session, id: &str| {
+            session
+                .draft()
+                .materials
+                .effects
+                .iter()
+                .find(|effect| effect.id.as_str() == id)
+                .and_then(cutlass_model::MaterialEffect::bloom)
+        };
+        session
+            .apply(0, &[glow("a", "g1", "#FFCC00", 0.6)])
+            .unwrap();
+        let first = bloom(&session, "g1").unwrap();
+        assert_eq!(
+            (first.color.as_str(), first.strength, first.range),
+            ("#FFCC00", 0.6, 0.5)
+        );
+        assert_eq!(session.draft().materials.effects[0].kind, "bloom");
+        assert_eq!(
+            session.draft().tracks[0].segments[0].extra_material_refs,
+            [MaterialId::new("g1")]
+        );
+
+        // Its own glow changes in place; the new id goes unused.
+        session
+            .apply(1, &[glow("a", "unused", "#FFCC00", 0.9)])
+            .unwrap();
+        assert_eq!(bloom(&session, "g1").unwrap().strength, 0.9);
+        assert!(bloom(&session, "unused").is_none());
+
+        // After a split, a change to one half gives it a glow of its own.
+        session
+            .apply(
+                2,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: cutlass_model::Micros(500_000),
+                    right_id: "b".into(),
+                }],
+            )
+            .unwrap();
+        session
+            .apply(3, &[glow("b", "g2", "#00FF00", 0.3)])
+            .unwrap();
+        assert_eq!(bloom(&session, "g1").unwrap().color, "#FFCC00");
+        assert_eq!(bloom(&session, "g2").unwrap().color, "#00FF00");
+        let refs = |session: &Session, index: usize| {
+            session.draft().tracks[0].segments[index]
+                .extra_material_refs
+                .clone()
+        };
+        assert_eq!(refs(&session, 1), [MaterialId::new("g2")]);
+
+        // Taking it off drops the effect nobody points at.
+        session.apply(4, &[glow("a", "", "", 0.0)]).unwrap();
+        assert!(refs(&session, 0).is_empty());
+        assert!(bloom(&session, "g1").is_none());
+        session.apply(5, &[glow("a", "", "", 0.0)]).unwrap();
+
+        for (request, error) in [
+            (glow("a", "g3", "#FFFFFF", 1.5), EditError::TextStyle),
+            (glow("a", "g3", "glow", 0.5), EditError::TextColor),
+            (glow("a", "", "#FFFFFF", 0.5), EditError::MissingMaterial),
+            (
+                glow("a", "caption", "#FFFFFF", 0.5),
+                EditError::DuplicateMaterial,
+            ),
+        ] {
+            assert_eq!(session.apply(6, &[request]).unwrap_err(), error);
         }
     }
 

@@ -168,6 +168,9 @@ pub(crate) fn ids(draft: &Draft) -> HashSet<String> {
     for effect in &draft.materials.video_effects {
         taken.insert(effect.id.as_str().to_owned());
     }
+    for effect in &draft.materials.effects {
+        taken.insert(effect.id.as_str().to_owned());
+    }
     for canvas in &draft.materials.canvases {
         taken.insert(canvas.id.as_str().to_owned());
     }

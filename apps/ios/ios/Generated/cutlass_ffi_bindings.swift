@@ -2663,10 +2663,13 @@ public struct TextStyle: Equatable, Hashable {
     public var backgroundColor: String
     public var backgroundAlpha: Double
     public var backgroundRound: Double
+    public var glowColor: String
+    public var glowStrength: Double
+    public var glowRange: Double
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(size: Double, color: String, outlineColor: String, outlineWidth: Double, shadowColor: String, shadowDistance: Double, shadowBlur: Double, backgroundColor: String, backgroundAlpha: Double, backgroundRound: Double) {
+    public init(size: Double, color: String, outlineColor: String, outlineWidth: Double, shadowColor: String, shadowDistance: Double, shadowBlur: Double, backgroundColor: String, backgroundAlpha: Double, backgroundRound: Double, glowColor: String, glowStrength: Double, glowRange: Double) {
         self.size = size
         self.color = color
         self.outlineColor = outlineColor
@@ -2677,6 +2680,9 @@ public struct TextStyle: Equatable, Hashable {
         self.backgroundColor = backgroundColor
         self.backgroundAlpha = backgroundAlpha
         self.backgroundRound = backgroundRound
+        self.glowColor = glowColor
+        self.glowStrength = glowStrength
+        self.glowRange = glowRange
     }
 
     
@@ -2704,7 +2710,10 @@ public struct FfiConverterTypeTextStyle: FfiConverterRustBuffer {
                 shadowBlur: FfiConverterDouble.read(from: &buf), 
                 backgroundColor: FfiConverterString.read(from: &buf), 
                 backgroundAlpha: FfiConverterDouble.read(from: &buf), 
-                backgroundRound: FfiConverterDouble.read(from: &buf)
+                backgroundRound: FfiConverterDouble.read(from: &buf), 
+                glowColor: FfiConverterString.read(from: &buf), 
+                glowStrength: FfiConverterDouble.read(from: &buf), 
+                glowRange: FfiConverterDouble.read(from: &buf)
         )
     }
 
@@ -2719,6 +2728,9 @@ public struct FfiConverterTypeTextStyle: FfiConverterRustBuffer {
         FfiConverterString.write(value.backgroundColor, into: &buf)
         FfiConverterDouble.write(value.backgroundAlpha, into: &buf)
         FfiConverterDouble.write(value.backgroundRound, into: &buf)
+        FfiConverterString.write(value.glowColor, into: &buf)
+        FfiConverterDouble.write(value.glowStrength, into: &buf)
+        FfiConverterDouble.write(value.glowRange, into: &buf)
     }
 }
 
@@ -2753,10 +2765,12 @@ public struct TextStyleRanges: Equatable, Hashable {
     public var shadowBlurStart: Double
     public var backgroundAlphaStart: Double
     public var backgroundRoundStart: Double
+    public var glowStrengthStart: Double
+    public var glowRangeStart: Double
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sizeMin: Double, sizeMax: Double, outlineMax: Double, outlineStart: Double, shadowDistanceMax: Double, shadowDistanceStart: Double, shadowBlurStart: Double, backgroundAlphaStart: Double, backgroundRoundStart: Double) {
+    public init(sizeMin: Double, sizeMax: Double, outlineMax: Double, outlineStart: Double, shadowDistanceMax: Double, shadowDistanceStart: Double, shadowBlurStart: Double, backgroundAlphaStart: Double, backgroundRoundStart: Double, glowStrengthStart: Double, glowRangeStart: Double) {
         self.sizeMin = sizeMin
         self.sizeMax = sizeMax
         self.outlineMax = outlineMax
@@ -2766,6 +2780,8 @@ public struct TextStyleRanges: Equatable, Hashable {
         self.shadowBlurStart = shadowBlurStart
         self.backgroundAlphaStart = backgroundAlphaStart
         self.backgroundRoundStart = backgroundRoundStart
+        self.glowStrengthStart = glowStrengthStart
+        self.glowRangeStart = glowRangeStart
     }
 
     
@@ -2792,7 +2808,9 @@ public struct FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer {
                 shadowDistanceStart: FfiConverterDouble.read(from: &buf), 
                 shadowBlurStart: FfiConverterDouble.read(from: &buf), 
                 backgroundAlphaStart: FfiConverterDouble.read(from: &buf), 
-                backgroundRoundStart: FfiConverterDouble.read(from: &buf)
+                backgroundRoundStart: FfiConverterDouble.read(from: &buf), 
+                glowStrengthStart: FfiConverterDouble.read(from: &buf), 
+                glowRangeStart: FfiConverterDouble.read(from: &buf)
         )
     }
 
@@ -2806,6 +2824,8 @@ public struct FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer {
         FfiConverterDouble.write(value.shadowBlurStart, into: &buf)
         FfiConverterDouble.write(value.backgroundAlphaStart, into: &buf)
         FfiConverterDouble.write(value.backgroundRoundStart, into: &buf)
+        FfiConverterDouble.write(value.glowStrengthStart, into: &buf)
+        FfiConverterDouble.write(value.glowRangeStart, into: &buf)
     }
 }
 
@@ -3388,6 +3408,8 @@ public enum TextStyleChange: Equatable, Hashable {
     )
     case background(color: String, alpha: Double, round: Double
     )
+    case glow(color: String, strength: Double, range: Double
+    )
 
 
 
@@ -3422,6 +3444,9 @@ public struct FfiConverterTypeTextStyleChange: FfiConverterRustBuffer {
         )
         
         case 5: return .background(color: try FfiConverterString.read(from: &buf), alpha: try FfiConverterDouble.read(from: &buf), round: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        case 6: return .glow(color: try FfiConverterString.read(from: &buf), strength: try FfiConverterDouble.read(from: &buf), range: try FfiConverterDouble.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -3460,6 +3485,13 @@ public struct FfiConverterTypeTextStyleChange: FfiConverterRustBuffer {
             FfiConverterString.write(color, into: &buf)
             FfiConverterDouble.write(alpha, into: &buf)
             FfiConverterDouble.write(round, into: &buf)
+            
+        
+        case let .glow(color,strength,range):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(color, into: &buf)
+            FfiConverterDouble.write(strength, into: &buf)
+            FfiConverterDouble.write(range, into: &buf)
             
         }
     }

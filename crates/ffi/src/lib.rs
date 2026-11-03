@@ -1437,6 +1437,44 @@ mod tests {
     }
 
     #[test]
+    fn a_glow_goes_on_a_title_and_a_drag_of_it_is_one_step() {
+        use crate::TextStyleChange;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let title = host.add_text("A", "", Micros(0)).unwrap();
+        let glow = |color: &str, strength: f64| TextStyleChange::Glow {
+            color: color.to_owned(),
+            strength,
+            range: 0.5,
+        };
+        host.style_text(&title, glow("#FFCC00", 0.6), false)
+            .unwrap();
+        for (strength, live) in [(0.7, true), (0.8, true), (0.9, false)] {
+            host.style_text(&title, glow("#FFCC00", strength), live)
+                .unwrap();
+        }
+        let style = host.text(&title).unwrap().style;
+        assert_eq!(
+            (
+                style.glow_color.as_str(),
+                style.glow_strength,
+                style.glow_range
+            ),
+            ("#FFCC00", 0.9, 0.5)
+        );
+        assert_eq!(host.draft().materials.effects.len(), 1);
+        host.undo().unwrap();
+        assert_eq!(host.text(&title).unwrap().style.glow_strength, 0.6);
+        host.style_text(&title, glow("", 0.6), false).unwrap();
+        assert!(host.text(&title).unwrap().style.glow_color.is_empty());
+        assert!(host.draft().materials.effects.is_empty());
+    }
+
+    #[test]
     fn typing_adds_a_title_as_one_step_and_it_moves_on_the_preview() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);

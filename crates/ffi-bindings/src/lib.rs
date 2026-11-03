@@ -242,6 +242,8 @@ pub struct TextStyleRanges {
     pub shadow_blur_start: f64,
     pub background_alpha_start: f64,
     pub background_round_start: f64,
+    pub glow_strength_start: f64,
+    pub glow_range_start: f64,
 }
 
 /// See [`TextStyleRanges`].
@@ -259,6 +261,8 @@ pub fn text_style_ranges() -> TextStyleRanges {
         shadow_blur_start: ranges.shadow_blur_start,
         background_alpha_start: ranges.background_alpha_start,
         background_round_start: ranges.background_round_start,
+        glow_strength_start: ranges.glow_strength_start,
+        glow_range_start: ranges.glow_range_start,
     }
 }
 
@@ -402,6 +406,9 @@ pub struct TextStyle {
     pub background_color: String,
     pub background_alpha: f64,
     pub background_round: f64,
+    pub glow_color: String,
+    pub glow_strength: f64,
+    pub glow_range: f64,
 }
 
 impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
@@ -417,6 +424,9 @@ impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
             background_color: style.background_color,
             background_alpha: style.background_alpha,
             background_round: style.background_round,
+            glow_color: style.glow_color,
+            glow_strength: style.glow_strength,
+            glow_range: style.glow_range,
         }
     }
 }
@@ -444,6 +454,11 @@ pub enum TextStyleChange {
         alpha: f64,
         round: f64,
     },
+    Glow {
+        color: String,
+        strength: f64,
+        range: f64,
+    },
 }
 
 impl From<TextStyleChange> for cutlass_ffi::TextStyleChange {
@@ -469,6 +484,15 @@ impl From<TextStyleChange> for cutlass_ffi::TextStyleChange {
                 color,
                 alpha,
                 round,
+            },
+            TextStyleChange::Glow {
+                color,
+                strength,
+                range,
+            } => Self::Glow {
+                color,
+                strength,
+                range,
             },
         }
     }

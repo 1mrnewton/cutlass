@@ -25,7 +25,7 @@ pub use cutlass_model::TrackType;
 pub use cutlass_session::{Micros, SegmentId};
 pub use error::FfiError;
 pub use host::Commands;
-pub use media::Probed;
+pub use media::{Probed, STILL_DURATION};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 
-use cutlass_ffi::{FfiError, PhoneHost, Probed};
+use cutlass_ffi::{FfiError, PhoneHost, Probed, STILL_DURATION};
 use cutlass_ffi::{Micros, SegmentId};
 
 uniffi::setup_scaffolding!();
@@ -42,11 +42,15 @@ impl From<FfiError> for EditorError {
     }
 }
 
-/// What the phone read from a picked file.
+/// What the phone read from a picked file. A still lasts as long as it
+/// does on the desktop.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum Media {
-    Picture {
-        still: bool,
+    Still {
+        width: i32,
+        height: i32,
+    },
+    Movie {
         width: i32,
         height: i32,
         duration_us: i64,
@@ -59,13 +63,18 @@ pub enum Media {
 impl From<Media> for Probed {
     fn from(media: Media) -> Self {
         match media {
-            Media::Picture {
-                still,
+            Media::Still { width, height } => Self::Picture {
+                still: true,
+                width,
+                height,
+                duration: STILL_DURATION,
+            },
+            Media::Movie {
                 width,
                 height,
                 duration_us,
             } => Self::Picture {
-                still,
+                still: false,
                 width,
                 height,
                 duration: Micros(duration_us),
@@ -328,11 +337,9 @@ mod tests {
             .to_string()
     }
 
-    const STILL: Media = Media::Picture {
-        still: true,
+    const STILL: Media = Media::Still {
         width: 16,
         height: 16,
-        duration_us: 1_000_000,
     };
 
     #[test]
@@ -349,7 +356,7 @@ mod tests {
         assert_eq!(lanes[0].kind, LaneKind::Video);
         assert_eq!(lanes[0].clips[0].id, clip);
         assert_eq!(lanes[0].clips[0].name, "pattern.png");
-        assert_eq!(editor.duration_us().unwrap(), 1_000_000);
+        assert_eq!(editor.duration_us().unwrap(), 3_000_000);
         let frame = editor.frame(500_000).unwrap();
         assert_eq!(
             frame.rgba.len(),

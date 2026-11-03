@@ -13,6 +13,9 @@ use cutlass_session::{Draft, ImportedMedium, Micros, Request, SegmentId, TrackId
 
 use crate::error::FfiError;
 
+/// How long a still lasts when it is added, the same as on the desktop.
+pub const STILL_DURATION: Micros = MaterialVideo::MAPPING_DURATION;
+
 /// What the phone read from a file before import.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Probed {

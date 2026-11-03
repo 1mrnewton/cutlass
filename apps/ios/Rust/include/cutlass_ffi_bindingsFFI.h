@@ -429,6 +429,31 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(uint64_t ptr, RustB
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_BEGIN
+void uniffi_cutlass_ffi_bindings_fn_method_editor_stage_begin(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_END
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_END
+void uniffi_cutlass_ffi_bindings_fn_method_editor_stage_end(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_MOVE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_MOVE
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage_move(uint64_t ptr, double shift_x, double shift_y, double pinch, double turn, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_PICK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_STAGE_PICK
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_stage_pick(uint64_t ptr, int64_t at_us, double x, double y, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TEXT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_text(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
@@ -1096,6 +1121,36 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SPLIT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SPLIT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_split(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_BEGIN
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_BEGIN
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_begin(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_END
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_END
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_end(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_MOVE
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_MOVE
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_move(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_PICK
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_STAGE_PICK
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick(void
     
 );
 #endif

@@ -26,7 +26,11 @@ final class EditorModel {
     private(set) var isOpening = true
     private(set) var isImporting = false
     private(set) var notice: Notice?
-    var selectedClip: String?
+    var selectedClip: String? {
+        didSet { if selectedClip != oldValue { refreshStage() } }
+    }
+    /// The selected picture clip's box on the canvas. Text and sound have none.
+    private(set) var stage: Stage?
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -354,6 +358,65 @@ final class EditorModel {
         edit { try $0.setSpeed(clipId: clip, speed: speed) }
     }
 
+    // MARK: Stage
+
+    /// The canvas size in pixels, from the chosen ratio.
+    var canvasSize: CGSize? {
+        guard let ratio = ratios.first(where: \.chosen), ratio.width > 0, ratio.height > 0 else {
+            return nil
+        }
+        return CGSize(width: Double(ratio.width), height: Double(ratio.height))
+    }
+
+    /// Select the topmost picture under the canvas point, or clear the
+    /// selection when there is none.
+    func pick(at point: CGPoint) {
+        guard let editor else { return }
+        selectedClip = try? editor.stagePick(atUs: playheadUs, x: point.x, y: point.y)
+    }
+
+    /// Start moving `clip` on the preview, selecting it. False when it
+    /// cannot move there.
+    func beginStage(_ clip: String) -> Bool {
+        guard let editor else { return false }
+        pause()
+        do {
+            try editor.stageBegin(clipId: clip)
+        } catch {
+            return false
+        }
+        selectedClip = clip
+        return true
+    }
+
+    /// Place the clip being moved. Rust snaps it and keeps one undo step.
+    func moveStage(shift: CGSize, pinch: Double, turn: Double) {
+        guard let editor else { return }
+        do {
+            stage = try editor.stageMove(
+                shiftX: shift.width, shiftY: shift.height, pinch: pinch, turn: turn
+            )
+        } catch {
+            show(error)
+            return
+        }
+        draw()
+    }
+
+    /// End the preview gesture and save.
+    func endStage() {
+        guard let editor else { return }
+        edit { _ in try editor.stageEnd() }
+    }
+
+    private func refreshStage() {
+        guard let editor, let clip = selectedClip else {
+            stage = nil
+            return
+        }
+        stage = try? editor.stage(clipId: clip)
+    }
+
     /// Put a main clip at `place` in the main row's order.
     func reorder(_ clip: String, place: Int) {
         edit { try $0.reorder(clipId: clip, place: UInt32(max(place, 0))) }
@@ -405,6 +468,7 @@ final class EditorModel {
             selectedClip = nil
         }
         playheadUs = min(playheadUs, durationUs)
+        refreshStage()
         draw()
     }
 

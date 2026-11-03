@@ -93,12 +93,17 @@ struct EditorScreen: View {
                     .resizable()
                     .aspectRatio(model.canvasAspect, contentMode: .fit)
             }
+            if !model.isPlaying {
+                StageOverlay(model: model)
+            }
             if model.isOpening || model.isImporting {
                 ProgressView().tint(.white)
             }
         }
         .frame(maxWidth: .infinity)
         .aspectRatio(16 / 10, contentMode: .fit)
+        // A box larger than the preview stays inside it.
+        .clipped()
     }
 
     /// The clock on the left, play pinned to the middle so it never moves

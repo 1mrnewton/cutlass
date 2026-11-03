@@ -824,6 +824,33 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func split(clipId: String, atUs: Int64) throws  -> String
     
     /**
+     * The box of a picture clip on the canvas. Other clips have none.
+     */
+    func stage(clipId: String) throws  -> Stage?
+    
+    /**
+     * Start moving a picture clip on the preview.
+     */
+    func stageBegin(clipId: String) throws 
+    
+    /**
+     * End the preview gesture.
+     */
+    func stageEnd() throws 
+    
+    /**
+     * Place the clip `(shift_x, shift_y)` canvas pixels from where the
+     * gesture started, `pinch` times its size, turned `turn` degrees
+     * clockwise. The whole gesture is one undo step.
+     */
+    func stageMove(shiftX: Double, shiftY: Double, pinch: Double, turn: Double) throws  -> Stage
+    
+    /**
+     * The topmost picture clip under the canvas point `(x, y)` at `at_us`.
+     */
+    func stagePick(atUs: Int64, x: Double, y: Double) throws  -> String?
+    
+    /**
      * What a text clip says, or `None` when it is not a text clip.
      */
     func text(clipId: String) throws  -> TextInfo?
@@ -1334,6 +1361,75 @@ open func split(clipId: String, atUs: Int64)throws  -> String  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The box of a picture clip on the canvas. Other clips have none.
+     */
+open func stage(clipId: String)throws  -> Stage?  {
+    return try  FfiConverterOptionTypeStage.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_stage(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Start moving a picture clip on the preview.
+     */
+open func stageBegin(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_stage_begin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * End the preview gesture.
+     */
+open func stageEnd()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_stage_end(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Place the clip `(shift_x, shift_y)` canvas pixels from where the
+     * gesture started, `pinch` times its size, turned `turn` degrees
+     * clockwise. The whole gesture is one undo step.
+     */
+open func stageMove(shiftX: Double, shiftY: Double, pinch: Double, turn: Double)throws  -> Stage  {
+    return try  FfiConverterTypeStage_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_stage_move(
+            self.uniffiCloneHandle(),
+        FfiConverterDouble.lower(shiftX),
+        FfiConverterDouble.lower(shiftY),
+        FfiConverterDouble.lower(pinch),
+        FfiConverterDouble.lower(turn),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The topmost picture clip under the canvas point `(x, y)` at `at_us`.
+     */
+open func stagePick(atUs: Int64, x: Double, y: Double)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_stage_pick(
+            self.uniffiCloneHandle(),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterDouble.lower(x),
+        FfiConverterDouble.lower(y),uniffiCallStatus
     )
 })
 }
@@ -2336,6 +2432,98 @@ public func FfiConverterTypeProjectSummary_lift(_ buf: RustBuffer) throws -> Pro
 #endif
 public func FfiConverterTypeProjectSummary_lower(_ value: ProjectSummary) -> RustBuffer {
     return FfiConverterTypeProjectSummary.lower(value)
+}
+
+
+/**
+ * A picture clip's box on the canvas, in canvas pixels with y down. The
+ * guides say the clip's centre sits on a canvas centre line.
+ */
+public struct Stage: Equatable, Hashable {
+    public var canvasWidth: Double
+    public var canvasHeight: Double
+    public var centerX: Double
+    public var centerY: Double
+    public var width: Double
+    public var height: Double
+    /**
+     * Degrees clockwise on screen.
+     */
+    public var turn: Double
+    public var verticalGuide: Bool
+    public var horizontalGuide: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(canvasWidth: Double, canvasHeight: Double, centerX: Double, centerY: Double, width: Double, height: Double, 
+        /**
+         * Degrees clockwise on screen.
+         */turn: Double, verticalGuide: Bool, horizontalGuide: Bool) {
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+        self.centerX = centerX
+        self.centerY = centerY
+        self.width = width
+        self.height = height
+        self.turn = turn
+        self.verticalGuide = verticalGuide
+        self.horizontalGuide = horizontalGuide
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Stage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Stage {
+        return
+            try Stage(
+                canvasWidth: FfiConverterDouble.read(from: &buf), 
+                canvasHeight: FfiConverterDouble.read(from: &buf), 
+                centerX: FfiConverterDouble.read(from: &buf), 
+                centerY: FfiConverterDouble.read(from: &buf), 
+                width: FfiConverterDouble.read(from: &buf), 
+                height: FfiConverterDouble.read(from: &buf), 
+                turn: FfiConverterDouble.read(from: &buf), 
+                verticalGuide: FfiConverterBool.read(from: &buf), 
+                horizontalGuide: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Stage, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.canvasWidth, into: &buf)
+        FfiConverterDouble.write(value.canvasHeight, into: &buf)
+        FfiConverterDouble.write(value.centerX, into: &buf)
+        FfiConverterDouble.write(value.centerY, into: &buf)
+        FfiConverterDouble.write(value.width, into: &buf)
+        FfiConverterDouble.write(value.height, into: &buf)
+        FfiConverterDouble.write(value.turn, into: &buf)
+        FfiConverterBool.write(value.verticalGuide, into: &buf)
+        FfiConverterBool.write(value.horizontalGuide, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStage_lift(_ buf: RustBuffer) throws -> Stage {
+    return try FfiConverterTypeStage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStage_lower(_ value: Stage) -> RustBuffer {
+    return FfiConverterTypeStage.lower(value)
 }
 
 
@@ -3418,6 +3606,30 @@ fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeStage: FfiConverterRustBuffer {
+    typealias SwiftType = Stage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeStage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeStage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTextInfo: FfiConverterRustBuffer {
     typealias SwiftType = TextInfo?
 
@@ -4162,6 +4374,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage() != 61551) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_begin() != 16443) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_end() != 7216) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_move() != 7208) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_stage_pick() != 22121) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text() != 30726) {

@@ -17,6 +17,15 @@ use cutlass_eval::Fonts;
 pub const MAX_FACES: usize = 400;
 /// The largest face file a scan keeps, in bytes.
 pub const MAX_FACE_BYTES: u64 = 40 * 1024 * 1024;
+/// Faces new text should start in, best first. A scan puts the first of
+/// these it finds ahead of the rest. Helvetica only counts as a single-face
+/// file; the system's collection is left out like every collection.
+pub const PREFERRED_FACES: &[&str] = &[
+    "Helvetica.ttf",
+    "HelveticaNeue.ttf",
+    "Arial.ttf",
+    "SFNS.ttf",
+];
 /// How many folders deep a scan looks below each folder it is given.
 const MAX_DEPTH: usize = 3;
 
@@ -75,7 +84,8 @@ impl FaceTable {
     /// The single-face TrueType and OpenType files in `folders` and the
     /// folders below them, by name. Collections are left out. At most
     /// [`MAX_FACES`] are kept; a file over [`MAX_FACE_BYTES`] is skipped.
-    /// Only each file's first bytes are read now.
+    /// Only each file's first bytes are read now. The first of
+    /// [`PREFERRED_FACES`] found comes first; the rest go by name.
     #[must_use]
     pub fn scan<P: AsRef<Path>>(folders: &[P]) -> Self {
         let mut found = Vec::new();
@@ -83,6 +93,13 @@ impl FaceTable {
             walk(folder.as_ref(), 0, &mut found);
         }
         found.sort_by(|a: &(String, PathBuf), b| a.0.cmp(&b.0));
+        if let Some(at) = PREFERRED_FACES
+            .iter()
+            .find_map(|preferred| found.iter().position(|(name, _)| name == preferred))
+        {
+            let face = found.remove(at);
+            found.insert(0, face);
+        }
         let mut table = Self::default();
         for (name, path) in found {
             if table.faces.len() == MAX_FACES {
@@ -93,7 +110,8 @@ impl FaceTable {
         table
     }
 
-    /// The first face. An empty table has an empty name.
+    /// The first face, which new text starts in. An empty table has an
+    /// empty name.
     #[must_use]
     pub fn name(&self) -> &str {
         self.faces.first().map_or("", |(name, _)| name.as_str())
@@ -261,6 +279,30 @@ mod tests {
         assert_eq!(table.names(), ["Alpha.otf", "Zed.TTF"]);
         assert_eq!(table.face("Alpha.otf"), Some(SAMPLE));
         assert!(table.face("Lost.ttf").is_none());
+    }
+
+    #[test]
+    fn a_scan_puts_the_best_preferred_face_first() {
+        let folder = Folder::new("preferred");
+        for name in ["Zed.ttf", "Arial.ttf", "Alpha.otf"] {
+            std::fs::write(folder.0.join(name), SAMPLE).unwrap();
+        }
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.names(), ["Arial.ttf", "Alpha.otf", "Zed.ttf"]);
+        assert_eq!(table.name(), "Arial.ttf");
+
+        std::fs::write(folder.0.join("Helvetica.ttf"), SAMPLE).unwrap();
+        // A collection never wins, even under a preferred stem.
+        std::fs::write(folder.0.join("HelveticaNeue.ttc"), SAMPLE).unwrap();
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(
+            table.names(),
+            ["Helvetica.ttf", "Alpha.otf", "Arial.ttf", "Zed.ttf"]
+        );
+
+        std::fs::remove_file(folder.0.join("Helvetica.ttf")).unwrap();
+        std::fs::remove_file(folder.0.join("Arial.ttf")).unwrap();
+        assert_eq!(FaceTable::scan(&[&folder.0]).name(), "Alpha.otf");
     }
 
     #[test]

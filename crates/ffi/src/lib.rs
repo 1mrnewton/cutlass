@@ -317,8 +317,9 @@ impl PhoneHost {
         text::fonts(self.faces.names())
     }
 
-    /// Add `content` at `at` in `face`, or in the first face when `face` is
-    /// empty, as one undo step. Returns the new clip's id.
+    /// Add `content` at `at` in `face`, or in the first face (a common one
+    /// when found) when `face` is empty, as one undo step. Returns the new
+    /// clip's id.
     pub fn add_text(
         &mut self,
         content: &str,

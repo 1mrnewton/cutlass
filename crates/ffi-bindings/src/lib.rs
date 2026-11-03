@@ -684,6 +684,25 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Type into a title as the words change. With no `clip_id`, the first
+    /// words that are not blank add one at `at_us` in `face`. The whole
+    /// typing is one undo step; blank words change nothing. Returns the
+    /// clip, or nothing when none has been added yet.
+    pub fn type_text(
+        &self,
+        clip_id: Option<String>,
+        content: String,
+        face: String,
+        at_us: i64,
+    ) -> Result<Option<String>, EditorError> {
+        self.run(move |host| {
+            let clip = clip_id.map(SegmentId::new);
+            host.type_text(clip.as_ref(), &content, &face, Micros(at_us))
+        })?
+        .map(|id| id.map(|id| id.as_str().to_owned()))
+        .map_err(EditorError::from)
+    }
+
     /// Add the effect `effect_id` at `at_us` over everything below it, as
     /// one undo step. Returns the new clip's id.
     pub fn add_effect(&self, effect_id: String, at_us: i64) -> Result<String, EditorError> {

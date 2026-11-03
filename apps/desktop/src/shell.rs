@@ -44,6 +44,10 @@ use cutlass_transcription::{
     FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
 };
 
+mod inspector;
+
+pub use inspector::{Panel, TextLook};
+
 use crate::face::FaceTable;
 use crate::tokens;
 use cutlass_probe::{self as probe, Probed};
@@ -5548,7 +5552,7 @@ mod tests {
         hash
     }
 
-    fn shell() -> Shell {
+    pub(super) fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
     }
@@ -5740,12 +5744,12 @@ mod tests {
         );
     }
 
-    struct Temp {
-        path: PathBuf,
+    pub(super) struct Temp {
+        pub(super) path: PathBuf,
     }
 
     impl Temp {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
                 "cutlass-desktop-{}-{}",

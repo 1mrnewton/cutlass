@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 mod apple;
+mod film;
 mod mixer;
 mod playhead;
 mod present;
@@ -25,6 +26,7 @@ mod transport;
 pub use apple::{
     AudioGap, AudioHost, AudioOutput, AudioSink, CopyOutcome, RATE as PREVIEW_RATE, StreamClock,
 };
+pub use film::{FilmCell, film_cells, media_file};
 pub use mixer::{LEAD as MIX_LEAD, MixJob, Mixer, WINDOW as MIX_WINDOW};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
 pub use present::{FrameCache, PresentError, Presentation};

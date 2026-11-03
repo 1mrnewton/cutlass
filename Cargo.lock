@@ -1050,6 +1050,8 @@ name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
  "cutlass-container",
+ "cutlass-editor",
+ "cutlass-engine",
  "cutlass-eval",
  "cutlass-gpu",
  "cutlass-model",

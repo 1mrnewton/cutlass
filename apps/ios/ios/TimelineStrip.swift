@@ -4,12 +4,18 @@ import SwiftUI
 ///
 /// Dragging sideways moves time under the playhead; a pinch changes how many
 /// points a second takes. A tap on a clip selects it, and a tap on empty
-/// space clears the selection.
+/// space clears the selection. A selected clip shows a handle at each end to
+/// trim it; a long press then a drag moves a clip to another time or row.
+/// Rust places and snaps the clip when the finger lifts.
 struct TimelineStrip: View {
     @Bindable var model: EditorModel
     @State private var pointsPerSecond: CGFloat = 60
     @State private var dragStart: Int64?
     @State private var pinchStart: CGFloat?
+    /// The clip being moved and how far the finger has gone.
+    @State private var moving: (id: String, offset: CGSize)?
+    /// The edge being trimmed and how far it has gone, in points.
+    @State private var trimming: (id: String, startEdge: Bool, dx: CGFloat)?
 
     private let rulerHeight: CGFloat = 22
     private let laneGap: CGFloat = 6
@@ -22,8 +28,9 @@ struct TimelineStrip: View {
                 Color.clear.contentShape(Rectangle())
                 ruler(width: geometry.size.width, origin: origin)
                 VStack(alignment: .leading, spacing: laneGap) {
-                    ForEach(Array(model.lanes.enumerated()), id: \.offset) { _, lane in
-                        row(lane, origin: origin)
+                    ForEach(Array(model.lanes.enumerated()), id: \.offset) { index, lane in
+                        row(lane, index: index, origin: origin)
+                            .zIndex(moving.map { id in lane.clips.contains { $0.id == id.id } } == true ? 1 : 0)
                     }
                 }
                 .padding(.top, rulerHeight + 8)
@@ -81,20 +88,21 @@ struct TimelineStrip: View {
         return fraction > 0 ? text + String(format: ".%d", Int(fraction * 10)) : text
     }
 
-    private func row(_ lane: Lane, origin: CGFloat) -> some View {
-        let height: CGFloat = lane.main ? 56 : 40
+    private func rowHeight(_ lane: Lane) -> CGFloat { lane.main ? 56 : 40 }
+
+    /// Points a snap reaches, as time at this zoom.
+    private var snapUs: Int64 { Int64(10 / pointsPerSecond * 1_000_000) }
+
+    private func micros(_ points: CGFloat) -> Int64 {
+        Int64(points / pointsPerSecond * 1_000_000)
+    }
+
+    private func row(_ lane: Lane, index: Int, origin: CGFloat) -> some View {
+        let height = rowHeight(lane)
         return ZStack(alignment: .topLeading) {
             Color.clear.frame(height: height)
             ForEach(lane.clips, id: \.id) { clip in
-                ClipBlock(
-                    clip: clip,
-                    kind: lane.kind,
-                    selected: model.selectedClip == clip.id,
-                    height: height
-                )
-                .frame(width: max(x(clip.durationUs) - 2, 2), height: height)
-                .offset(x: origin + x(clip.startUs) + 1)
-                .onTapGesture { model.selectedClip = clip.id }
+                clipView(clip, lane: lane, index: index, origin: origin, height: height)
             }
             if lane.main && lane.clips.isEmpty {
                 Text("Tap + to add a photo or video")
@@ -105,6 +113,102 @@ struct TimelineStrip: View {
             }
         }
         .frame(height: height)
+    }
+
+    private func clipView(
+        _ clip: Clip, lane: Lane, index: Int, origin: CGFloat, height: CGFloat
+    ) -> some View {
+        let selected = model.selectedClip == clip.id
+        var left = origin + x(clip.startUs)
+        var width = x(clip.durationUs)
+        if let trim = trimming, trim.id == clip.id {
+            if trim.startEdge {
+                let dx = min(trim.dx, width - 4)
+                left += dx
+                width -= dx
+            } else {
+                width = max(width + trim.dx, 4)
+            }
+        }
+        let moved = moving?.id == clip.id ? moving?.offset ?? .zero : .zero
+        return ClipBlock(clip: clip, kind: lane.kind, selected: selected, height: height)
+            .frame(width: max(width - 2, 2), height: height)
+            .overlay {
+                if selected && !lane.locked {
+                    HStack(spacing: 0) {
+                        handle(clip, startEdge: true)
+                        Spacer(minLength: 0)
+                        handle(clip, startEdge: false)
+                    }
+                }
+            }
+            .scaleEffect(moving?.id == clip.id ? 1.04 : 1)
+            .shadow(radius: moving?.id == clip.id ? 6 : 0)
+            .offset(x: left + 1 + moved.width, y: moved.height)
+            .onTapGesture { model.selectedClip = clip.id }
+            .gesture(lane.locked ? nil : move(clip, row: index))
+    }
+
+    /// A white tab on one end of the selected clip. Dragging it trims that end.
+    private func handle(_ clip: Clip, startEdge: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(.white)
+            .frame(width: 12)
+            .overlay {
+                Capsule().fill(.black.opacity(0.5)).frame(width: 2, height: 14)
+            }
+            .contentShape(Rectangle().inset(by: -8))
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { drag in
+                        model.pause()
+                        trimming = (clip.id, startEdge, drag.translation.width)
+                    }
+                    .onEnded { drag in
+                        trimming = nil
+                        let edge = startEdge ? clip.startUs : clip.endUs
+                        model.trim(
+                            clip.id, startEdge: startEdge,
+                            timeUs: edge + micros(drag.translation.width), snapUs: snapUs)
+                    }
+            )
+            .accessibilityLabel(startEdge ? "Trim start" : "Trim end")
+    }
+
+    /// Hold, then drag a clip to another time or row.
+    private func move(_ clip: Clip, row: Int) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.3)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if moving == nil {
+                    model.pause()
+                    model.selectedClip = clip.id
+                }
+                moving = (clip.id, drag?.translation ?? .zero)
+            }
+            .onEnded { value in
+                moving = nil
+                guard case .second(true, let drag?) = value else { return }
+                model.moveClip(
+                    clip.id, row: targetRow(from: row, dy: drag.translation.height),
+                    startUs: clip.startUs + micros(drag.translation.width), snapUs: snapUs)
+            }
+    }
+
+    /// The row a vertical drag of `dy` points from `row` lands on.
+    private func targetRow(from row: Int, dy: CGFloat) -> Int {
+        let lanes = model.lanes
+        guard lanes.indices.contains(row) else { return row }
+        var top: CGFloat = 0
+        for index in 0..<row { top += rowHeight(lanes[index]) + laneGap }
+        let finger = top + rowHeight(lanes[row]) / 2 + dy
+        var edge: CGFloat = 0
+        for (index, lane) in lanes.enumerated() {
+            edge += rowHeight(lane) + laneGap
+            if finger < edge { return index }
+        }
+        return lanes.count
     }
 
     private var scrub: some Gesture {

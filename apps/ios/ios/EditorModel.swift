@@ -167,6 +167,25 @@ final class EditorModel {
         selectedClip = nil
     }
 
+    /// Drop `clip` on `row` near `startUs`. It may snap within `snapUs` and
+    /// packs in on a magnetic row.
+    func moveClip(_ clip: String, row: Int, startUs: Int64, snapUs: Int64) {
+        edit {
+            _ = try $0.moveClip(
+                clipId: clip, row: UInt32(max(row, 0)), startUs: max(startUs, 0),
+                snapUs: snapUs, playheadUs: playheadUs)
+        }
+    }
+
+    /// Drag the start or end edge of `clip` to `timeUs`.
+    func trim(_ clip: String, startEdge: Bool, timeUs: Int64, snapUs: Int64) {
+        edit {
+            _ = try $0.trim(
+                clipId: clip, startEdge: startEdge, timeUs: timeUs, snapUs: snapUs,
+                playheadUs: playheadUs)
+        }
+    }
+
     func undo() { edit { try $0.undo() } }
     func redo() { edit { try $0.redo() } }
 

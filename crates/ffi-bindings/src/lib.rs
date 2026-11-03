@@ -292,6 +292,38 @@ pub struct CanvasRatio {
     pub chosen: bool,
 }
 
+/// A picture clip's box on the canvas, in canvas pixels with y down. The
+/// guides say the clip's centre sits on a canvas centre line.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Stage {
+    pub canvas_width: f64,
+    pub canvas_height: f64,
+    pub center_x: f64,
+    pub center_y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Degrees clockwise on screen.
+    pub turn: f64,
+    pub vertical_guide: bool,
+    pub horizontal_guide: bool,
+}
+
+impl From<cutlass_ffi::PhoneStage> for Stage {
+    fn from(stage: cutlass_ffi::PhoneStage) -> Self {
+        Self {
+            canvas_width: stage.canvas_width,
+            canvas_height: stage.canvas_height,
+            center_x: stage.center_x,
+            center_y: stage.center_y,
+            width: stage.width,
+            height: stage.height,
+            turn: stage.turn,
+            vertical_guide: stage.vertical_guide,
+            horizontal_guide: stage.horizontal_guide,
+        }
+    }
+}
+
 /// An effect the picker shows. `id` is what `add_effect` takes; `preview`
 /// is the file name of its looping preview video in the app bundle.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -808,6 +840,46 @@ impl Editor {
     pub fn set_volume(&self, clip_id: String, volume: f64) -> Result<(), EditorError> {
         self.run(move |host| host.set_volume(&SegmentId::new(clip_id), volume))?
             .map_err(EditorError::from)
+    }
+
+    /// The box of a picture clip on the canvas. Other clips have none.
+    pub fn stage(&self, clip_id: String) -> Result<Option<Stage>, EditorError> {
+        Ok(self
+            .run(move |host| host.stage(&SegmentId::new(clip_id)))?
+            .map(Stage::from))
+    }
+
+    /// The topmost picture clip under the canvas point `(x, y)` at `at_us`.
+    pub fn stage_pick(&self, at_us: i64, x: f64, y: f64) -> Result<Option<String>, EditorError> {
+        Ok(self
+            .run(move |host| host.stage_pick(Micros(at_us), x, y))?
+            .map(|id| id.as_str().to_owned()))
+    }
+
+    /// Start moving a picture clip on the preview.
+    pub fn stage_begin(&self, clip_id: String) -> Result<(), EditorError> {
+        self.run(move |host| host.stage_begin(&SegmentId::new(clip_id)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Place the clip `(shift_x, shift_y)` canvas pixels from where the
+    /// gesture started, `pinch` times its size, turned `turn` degrees
+    /// clockwise. The whole gesture is one undo step.
+    pub fn stage_move(
+        &self,
+        shift_x: f64,
+        shift_y: f64,
+        pinch: f64,
+        turn: f64,
+    ) -> Result<Stage, EditorError> {
+        self.run(move |host| host.stage_move(shift_x, shift_y, pinch, turn))?
+            .map(Stage::from)
+            .map_err(EditorError::from)
+    }
+
+    /// End the preview gesture.
+    pub fn stage_end(&self) -> Result<(), EditorError> {
+        self.run(PhoneHost::stage_end)
     }
 
     /// The canvas ratios, Original first.

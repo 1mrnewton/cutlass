@@ -2721,34 +2721,64 @@ fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visib
     ui.ctx().data_mut(|data| data.insert_temp(store, textures));
 }
 
-/// The audio clip's waveform inside `clip_rect`: each visible pixel column
-/// as tall as its loudest sample, mirrored around the middle.
+/// The clip's waveform inside `clip_rect`, one bar per visible pixel column
+/// as tall as its loudest sample. An audio clip's is mirrored around the
+/// middle; a video clip's rises from the bottom, in a band over its picture.
 fn paint_wave(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visible: Rect) {
     let span =
         f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
-    let Some(crate::shell::ClipWave { first, levels, .. }) =
-        shell.wave(id, f64::from(clip_rect.width()), span)
+    let Some(crate::shell::ClipWave {
+        first,
+        levels,
+        under_picture,
+    }) = shell.wave(id, f64::from(clip_rect.width()), span)
     else {
         return;
     };
-    let middle = clip_rect.center().y;
-    let reach = (clip_rect.height() / 2.0 - 4.0).max(1.0);
+    let painter = ui
+        .painter()
+        .with_clip_rect(clip_rect.shrink(1.0).intersect(visible));
     let color = Color32::from_white_alpha(150);
     let mut mesh = egui::Mesh::default();
-    for (index, level) in levels.iter().enumerate() {
-        let half = (level * reach).max(0.5);
-        let left = clip_rect.left() + (first as usize + index) as f32;
-        mesh.add_colored_rect(
-            Rect::from_min_max(
-                Pos2::new(left, middle - half),
-                Pos2::new(left + 1.0, middle + half),
-            ),
-            color,
+    let bar = |index: usize| clip_rect.left() + (first as usize + index) as f32;
+    if under_picture {
+        let band = Rect::from_min_max(
+            Pos2::new(clip_rect.left(), clip_rect.bottom() - wave_band(clip_rect.height())),
+            clip_rect.max,
         );
+        painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(110));
+        let floor = band.bottom() - 2.0;
+        let reach = (band.height() - 4.0).max(1.0);
+        for (index, level) in levels.iter().enumerate() {
+            let left = bar(index);
+            let top = floor - (level * reach).max(0.5);
+            mesh.add_colored_rect(
+                Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 1.0, floor)),
+                color,
+            );
+        }
+    } else {
+        let middle = clip_rect.center().y;
+        let reach = (clip_rect.height() / 2.0 - 4.0).max(1.0);
+        for (index, level) in levels.iter().enumerate() {
+            let half = (level * reach).max(0.5);
+            let left = bar(index);
+            mesh.add_colored_rect(
+                Rect::from_min_max(
+                    Pos2::new(left, middle - half),
+                    Pos2::new(left + 1.0, middle + half),
+                ),
+                color,
+            );
+        }
     }
-    ui.painter()
-        .with_clip_rect(clip_rect.shrink(1.0).intersect(visible))
-        .add(mesh);
+    painter.add(mesh);
+}
+
+/// The height of a video clip's sound band: a third of the clip, at least
+/// 10 pixels.
+fn wave_band(clip_height: f32) -> f32 {
+    (clip_height / 3.0).max(10.0).min(clip_height)
 }
 
 fn paint_clip(

@@ -1550,6 +1550,63 @@ public func FfiConverterTypeFilm_lower(_ value: Film) -> RustBuffer {
 
 
 /**
+ * One step of a timeline coast: points moved, and the speed after.
+ */
+public struct Fling: Equatable, Hashable {
+    public var distance: Double
+    public var velocity: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(distance: Double, velocity: Double) {
+        self.distance = distance
+        self.velocity = velocity
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Fling: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFling: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Fling {
+        return
+            try Fling(
+                distance: FfiConverterDouble.read(from: &buf), 
+                velocity: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Fling, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.distance, into: &buf)
+        FfiConverterDouble.write(value.velocity, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFling_lift(_ buf: RustBuffer) throws -> Fling {
+    return try FfiConverterTypeFling.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFling_lower(_ value: Fling) -> RustBuffer {
+    return FfiConverterTypeFling.lower(value)
+}
+
+
+/**
  * A face text can be set in. `name` is what a clip stores; `label` is for
  * people.
  */
@@ -3166,6 +3223,31 @@ public func effectChoices() -> [EffectChoice]  {
 })
 }
 /**
+ * The speed, in points a second, a timeline let go at `velocity` coasts
+ * from: zero for a slow swipe.
+ */
+public func flingStart(velocity: Double) -> Double  {
+    return try!  FfiConverterDouble.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_fling_start(
+        FfiConverterDouble.lower(velocity),uniffiCallStatus
+    )
+})
+}
+/**
+ * A coast at `velocity` points a second moved on by `elapsed` seconds.
+ * The speed is zero once at rest.
+ */
+public func flingStep(velocity: Double, elapsed: Double) -> Fling  {
+    return try!  FfiConverterTypeFling_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_fling_step(
+        FfiConverterDouble.lower(velocity),
+        FfiConverterDouble.lower(elapsed),uniffiCallStatus
+    )
+})
+}
+/**
  * The projects in the Cutlass folder at `root`, newest first. A missing
  * root lists nothing.
  */
@@ -3272,6 +3354,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() != 59474) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_fling_start() != 16462) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_fling_step() != 37021) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {

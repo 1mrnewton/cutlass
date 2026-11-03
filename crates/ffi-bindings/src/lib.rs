@@ -145,6 +145,33 @@ pub fn effect_choices() -> Vec<EffectChoice> {
         .collect()
 }
 
+/// One step of a timeline coast: points moved, and the speed after.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct Fling {
+    pub distance: f64,
+    pub velocity: f64,
+}
+
+/// The speed, in points a second, a timeline let go at `velocity` coasts
+/// from: zero for a slow swipe.
+#[uniffi::export]
+#[must_use]
+pub fn fling_start(velocity: f64) -> f64 {
+    cutlass_ffi::fling_start(velocity)
+}
+
+/// A coast at `velocity` points a second moved on by `elapsed` seconds.
+/// The speed is zero once at rest.
+#[uniffi::export]
+#[must_use]
+pub fn fling_step(velocity: f64, elapsed: f64) -> Fling {
+    let step = cutlass_ffi::fling_step(velocity, elapsed);
+    Fling {
+        distance: step.distance,
+        velocity: step.velocity,
+    }
+}
+
 /// The gain at volume slider `position`, 0 to 1. Unity is the middle and
 /// the right end is ten times.
 #[uniffi::export]

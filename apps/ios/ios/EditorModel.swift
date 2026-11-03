@@ -48,6 +48,8 @@ final class EditorModel {
     private var drawing = false
     private var waiting: Int64?
     private var playback: Task<Void, Never>?
+    /// The strip sliding on after a swipe.
+    private var coasting: Task<Void, Never>?
     /// The window the ticks and tiles cover, and the edit they were read for.
     private var stripWindow: (from: Int64, to: Int64, pixelSize: Double, edit: Int)?
     private var edits = 0
@@ -117,6 +119,36 @@ final class EditorModel {
         draw()
     }
 
+    /// Let the strip slide on after a swipe let go at `velocity` points a
+    /// second, finger right being back in time. Rust steps the slowing.
+    func coast(from velocity: Double) {
+        stopCoast()
+        var speed = flingStart(velocity: velocity)
+        guard speed != 0 else { return }
+        coasting = Task { [weak self] in
+            var last = ContinuousClock.now
+            while speed != 0 {
+                try? await Task.sleep(for: .milliseconds(16))
+                guard let self, !Task.isCancelled else { return }
+                let now = ContinuousClock.now
+                let elapsed = (now - last).components
+                last = now
+                let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+                let step = flingStep(velocity: speed, elapsed: seconds)
+                speed = step.velocity
+                let target = playheadUs - Int64(step.distance / pixelSize)
+                seek(target)
+                if target <= 0 || target >= durationUs { return }
+            }
+        }
+    }
+
+    /// Stop a coast where it is, as a finger landing on the strip does.
+    func stopCoast() {
+        coasting?.cancel()
+        coasting = nil
+    }
+
     func togglePlay() {
         isPlaying ? pause() : play()
     }
@@ -126,6 +158,7 @@ final class EditorModel {
     /// draws that picture.
     func play() {
         guard let editor, durationUs > 0 else { return }
+        stopCoast()
         do {
             try editor.play()
         } catch {

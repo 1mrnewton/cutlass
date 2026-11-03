@@ -8,6 +8,7 @@
 mod append;
 mod controls;
 mod filmstrip;
+mod fling;
 mod gesture;
 mod hit;
 mod lane;
@@ -20,6 +21,9 @@ mod zoom;
 pub use append::{Append, AppendLane, append_placement, material_span};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
+pub use fling::{
+    FLING_DECAY, FLING_LIMIT, FLING_REST, FLING_START, FlingStep, fling_start, fling_step,
+};
 pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,

@@ -439,6 +439,16 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_effect_choices(RustCallStatus *_N
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_FLING_START
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_FLING_START
+double uniffi_cutlass_ffi_bindings_fn_func_fling_start(double velocity, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_FLING_STEP
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_FLING_STEP
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_fling_step(double velocity, double elapsed, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
@@ -749,6 +759,18 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_create_project(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EFFECT_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EFFECT_CHOICES
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_effect_choices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_FLING_START
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_FLING_START
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_fling_start(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_FLING_STEP
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_FLING_STEP
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_fling_step(void
     
 );
 #endif

@@ -3,7 +3,8 @@ import SwiftUI
 
 /// The rows under a fixed playhead in the middle of the strip.
 ///
-/// Dragging sideways moves time under the playhead; a pinch zooms. Picture
+/// Dragging sideways moves time under the playhead, and a swipe let go
+/// slides on and slows to a stop until a tap or drag; a pinch zooms. Picture
 /// clips show a filmstrip. A tap selects a clip and a tap on empty space
 /// clears it. A selected clip shows its length and a grip at each end to
 /// trim it. A long press on a main clip folds the main row into squares to
@@ -61,7 +62,10 @@ struct TimelineStrip: View {
             .clipped()
             .gesture(scrub)
             .simultaneousGesture(zoom(width: geometry.size.width))
-            .onTapGesture { model.selectedClip = nil }
+            .onTapGesture {
+                model.stopCoast()
+                model.selectedClip = nil
+            }
             .onAppear { model.refreshStrip(halfWidth: middle) }
             .onChange(of: model.playheadUs) { model.refreshStrip(halfWidth: middle) }
             .onChange(of: model.pixelSize) { model.refreshStrip(halfWidth: middle) }
@@ -194,7 +198,10 @@ struct TimelineStrip: View {
         .scaleEffect(moving?.id == clip.id ? 1.04 : 1)
         .shadow(radius: moving?.id == clip.id ? 6 : 0)
         .offset(x: left + 1 + moved.width, y: moved.height)
-        .onTapGesture { model.selectedClip = clip.id }
+        .onTapGesture {
+            model.stopCoast()
+            model.selectedClip = clip.id
+        }
         .gesture(lane.locked ? nil : (lane.main ? reorder(clip) : nil))
         .gesture(lane.locked || lane.main ? nil : move(clip, row: index))
     }
@@ -365,13 +372,18 @@ struct TimelineStrip: View {
             .onChanged { drag in
                 guard reordering == nil else { return }
                 if dragStart == nil {
+                    model.stopCoast()
                     model.pause()
                     dragStart = model.playheadUs
                 }
                 let start = dragStart ?? model.playheadUs
                 model.seek(start - micros(drag.translation.width))
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { drag in
+                guard dragStart != nil else { return }
+                dragStart = nil
+                model.coast(from: drag.velocity.width)
+            }
     }
 
     private func zoom(width: CGFloat) -> some Gesture {

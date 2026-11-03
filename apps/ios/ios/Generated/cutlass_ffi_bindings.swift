@@ -481,22 +481,6 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
-    typealias FfiType = Int32
-    typealias SwiftType = Int32
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
-        return try lift(readInt(&buf))
-    }
-
-    public static func write(_ value: Int32, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
     typealias FfiType = Int64
     typealias SwiftType = Int64
@@ -622,10 +606,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func frame(timeUs: Int64) throws  -> Frame
     
     /**
-     * Copy a picked file into the project and add it to the library.
+     * Read a picked file, copy it into the project, and add it to the
+     * library. Rust probes it; the phone only hands over the path.
      * Returns the material id.
      */
-    func `import`(path: String, media: Media) throws  -> String
+    func `import`(path: String) throws  -> String
     
     /**
      * The rows to draw, top first.
@@ -763,16 +748,16 @@ open func frame(timeUs: Int64)throws  -> Frame  {
 }
     
     /**
-     * Copy a picked file into the project and add it to the library.
+     * Read a picked file, copy it into the project, and add it to the
+     * library. Rust probes it; the phone only hands over the path.
      * Returns the material id.
      */
-open func `import`(path: String, media: Media)throws  -> String  {
+open func `import`(path: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_import(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(path),
-        FfiConverterTypeMedia_lower(media),uniffiCallStatus
+        FfiConverterString.lower(path),uniffiCallStatus
     )
 })
 }
@@ -1335,95 +1320,6 @@ public func FfiConverterTypeLaneKind_lower(_ value: LaneKind) -> RustBuffer {
 }
 
 
-
-/**
- * What the phone read from a picked file. A still lasts as long as it
- * does on the desktop.
- */
-
-public enum Media: Equatable, Hashable {
-    
-    case still(width: Int32, height: Int32
-    )
-    case movie(width: Int32, height: Int32, durationUs: Int64
-    )
-    case sound(durationUs: Int64
-    )
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension Media: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeMedia: FfiConverterRustBuffer {
-    typealias SwiftType = Media
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Media {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        
-        case 1: return .still(width: try FfiConverterInt32.read(from: &buf), height: try FfiConverterInt32.read(from: &buf)
-        )
-        
-        case 2: return .movie(width: try FfiConverterInt32.read(from: &buf), height: try FfiConverterInt32.read(from: &buf), durationUs: try FfiConverterInt64.read(from: &buf)
-        )
-        
-        case 3: return .sound(durationUs: try FfiConverterInt64.read(from: &buf)
-        )
-        
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: Media, into buf: inout [UInt8]) {
-        switch value {
-        
-        
-        case let .still(width,height):
-            writeInt(&buf, Int32(1))
-            FfiConverterInt32.write(width, into: &buf)
-            FfiConverterInt32.write(height, into: &buf)
-            
-        
-        case let .movie(width,height,durationUs):
-            writeInt(&buf, Int32(2))
-            FfiConverterInt32.write(width, into: &buf)
-            FfiConverterInt32.write(height, into: &buf)
-            FfiConverterInt64.write(durationUs, into: &buf)
-            
-        
-        case let .sound(durationUs):
-            writeInt(&buf, Int32(3))
-            FfiConverterInt64.write(durationUs, into: &buf)
-            
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeMedia_lift(_ buf: RustBuffer) throws -> Media {
-    return try FfiConverterTypeMedia.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeMedia_lower(_ value: Media) -> RustBuffer {
-    return FfiConverterTypeMedia.lower(value)
-}
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1571,7 +1467,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() != 13353) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import() != 29987) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_import() != 38694) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes() != 20121) {

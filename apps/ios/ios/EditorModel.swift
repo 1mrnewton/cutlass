@@ -107,9 +107,9 @@ final class EditorModel {
 
     // MARK: Edits
 
-    func importFile(at url: URL, as media: Media) {
+    func importFile(at url: URL) {
         edit {
-            let material = try $0.import(path: url.path(percentEncoded: false), media: media)
+            let material = try $0.import(path: url.path(percentEncoded: false))
             let clip = try $0.append(materialId: material)
             selectedClip = clip
         }

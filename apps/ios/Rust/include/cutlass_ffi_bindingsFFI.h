@@ -275,7 +275,7 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_frame(uint64_t ptr, int6
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_IMPORT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_IMPORT
-RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_import(uint64_t ptr, RustBuffer path, RustBuffer media, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_import(uint64_t ptr, RustBuffer path, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_LANES

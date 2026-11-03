@@ -86,7 +86,10 @@ struct EditorScreen: View {
 
     private var tools: some View {
         HStack {
-            PhotosPicker(selection: $picked, matching: .any(of: [.images, .videos])) {
+            PhotosPicker(
+                selection: $picked, matching: .any(of: [.images, .videos]),
+                preferredItemEncoding: .compatible
+            ) {
                 tool("Add", "plus")
             }
             .disabled(model.isImporting)
@@ -135,9 +138,9 @@ struct EditorScreen: View {
         Task {
             for item in items {
                 do {
-                    let file = try await PickedMedia.load(item)
-                    model.importFile(at: file.url, as: file.media)
-                    try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent())
+                    let file = try await PickedFile.load(item)
+                    model.importFile(at: file)
+                    try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
                 } catch {
                     model.show(error)
                 }

@@ -36,13 +36,7 @@ final class EditorModel {
     /// Open the project folder at `project`.
     init(project: String) {
         do {
-            try FileManager.default.createDirectory(
-                at: Folders.bundle, withIntermediateDirectories: true)
-            editor = try Editor.open(
-                project: project,
-                bundle: Folders.bundle.path(percentEncoded: false),
-                cache: Folders.cache.path(percentEncoded: false)
-            )
+            editor = try Editor.open(root: Places.root, bundle: Places.bundle, project: project)
         } catch {
             editor = nil
             show(error)

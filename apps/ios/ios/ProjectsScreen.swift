@@ -1,10 +1,13 @@
 import SwiftUI
 
-/// Where the app keeps its projects and the files they share.
-enum Folders {
-    static let projects = URL.documentsDirectory.appending(path: "Projects")
-    static let bundle = URL.documentsDirectory.appending(path: "Bundle")
-    static let cache = URL.documentsDirectory.appending(path: "Cache")
+/// The two paths the app hands to Rust. Rust lays out everything under the
+/// root: the projects, the cache, the downloads, the proxies, the logs.
+enum Places {
+    /// The one Cutlass folder, private to the app.
+    static let root = URL.applicationSupportDirectory
+        .appending(path: "Cutlass").path(percentEncoded: false)
+    /// The app's read-only resources.
+    static let bundle = Bundle.main.resourceURL?.path(percentEncoded: false) ?? root
 }
 
 /// The whole app: the project list, or one open project in the editor.
@@ -75,12 +78,12 @@ struct ProjectsScreen: View {
     }
 
     private func reload() {
-        projects = listProjects(root: Folders.projects.path(percentEncoded: false))
+        projects = listProjects(root: Places.root)
     }
 
     private func newProject() {
         do {
-            let path = try createProject(root: Folders.projects.path(percentEncoded: false))
+            let path = try createProject(root: Places.root)
             failure = nil
             reload()
             if let made = projects.first(where: { $0.path == path }) {

@@ -2114,6 +2114,77 @@ impl Shell {
                 (track_id, start, Some(kind))
             }
         };
+        self.place_medium(material_id, track_id, start, duration, lane, first_clip)
+    }
+
+    /// Add a library item at the end of its lane: main for a picture, else the
+    /// first open lane of its kind. A new lane opens when there is none.
+    /// The playhead goes to the new clip.
+    pub fn add_medium(&mut self, material_id: &str) -> Result<(), ShellError> {
+        let (track_id, start, lane, duration, first_clip) = {
+            let draft = self.session_draft()?;
+            let (kind, duration) = medium_span(draft, material_id).ok_or_else(|| {
+                ShellError::Unavailable("the media is not in the library".to_owned())
+            })?;
+            let first_clip = draft.tracks.iter().all(|track| track.segments.is_empty());
+            let open = |track: &&cutlass_model::Track| !bit(track.attribute, TrackAttribute::LOCK);
+            let target = if kind == TrackType::Video {
+                draft.main_track().filter(|track| open(track))
+            } else {
+                None
+            }
+            .or_else(|| {
+                draft
+                    .tracks
+                    .iter()
+                    .filter(open)
+                    .find(|track| track.kind == kind)
+            });
+            match target {
+                Some(track) => {
+                    let end = track
+                        .segments
+                        .iter()
+                        .map(|segment| segment.target.end().0)
+                        .max()
+                        .unwrap_or(0);
+                    (track.id.clone(), Micros(end), None, duration, first_clip)
+                }
+                None => (
+                    TrackId::new(String::new()),
+                    Micros(0),
+                    Some(kind),
+                    duration,
+                    first_clip,
+                ),
+            }
+        };
+        if duration.0 <= 0 {
+            return Err(ShellError::Unavailable(
+                "the media has no duration".to_owned(),
+            ));
+        }
+        let track_id = if lane.is_some() {
+            TrackId::new(self.fresh("track"))
+        } else {
+            track_id
+        };
+        self.place_medium(material_id, track_id, start, duration, lane, first_clip)?;
+        self.seek(start);
+        Ok(())
+    }
+
+    /// Place the whole of `material_id` at `start` on `track_id`, opening the
+    /// lane first when `lane` names its kind. Linkage follows the drop rules.
+    fn place_medium(
+        &mut self,
+        material_id: &str,
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+        lane: Option<TrackType>,
+        first_clip: bool,
+    ) -> Result<(), ShellError> {
         let segment_id = SegmentId::new(self.fresh("seg"));
         let mut requests = Vec::new();
         if let Some(kind) = lane {
@@ -9974,6 +10045,65 @@ mod tests {
         assert_eq!(
             desktop.selection(),
             [SegmentId::new("a"), SegmentId::new("b")]
+        );
+    }
+
+    #[test]
+    fn the_card_plus_adds_at_the_end_of_the_matching_lane() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut picture = MaterialVideo::new("picture");
+        picture.duration = Micros(500_000);
+        draft.materials.videos.push(picture);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            duration: Micros(300_000),
+            ..MaterialAudio::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "picture", TimeRange::new(0, 1_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+
+        desktop.add_medium("picture").unwrap();
+        let main = &desktop.draft().unwrap().tracks[0];
+        assert_eq!(main.segments[1].target, TimeRange::new(1_000_000, 500_000));
+        assert_eq!(desktop.playhead(), Micros(1_000_000));
+
+        desktop.add_medium("tone").unwrap();
+        desktop.add_medium("tone").unwrap();
+        let draft = desktop.draft().unwrap();
+        let sound: Vec<&Track> = draft
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackType::Audio)
+            .collect();
+        assert_eq!(sound.len(), 1);
+        assert_eq!(
+            sound[0]
+                .segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect::<Vec<_>>(),
+            [TimeRange::new(0, 300_000), TimeRange::new(300_000, 300_000)]
+        );
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .all(|track| track.kind != TrackType::Audio)
+        );
+        assert_eq!(
+            desktop.add_medium("missing").unwrap_err().to_string(),
+            "the media is not in the library"
         );
     }
 

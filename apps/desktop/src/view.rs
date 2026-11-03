@@ -21,6 +21,8 @@ use crate::widgets;
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
 /// The name row under a card's picture.
+const CARD_PLUS_RADIUS: f32 = 11.0;
+const CARD_PLUS_INSET: f32 = 6.0;
 const CARD_LABEL: f32 = 24.0;
 const CARD_GAP: f32 = 8.0;
 const TRIM_EDGE: f32 = 6.0;
@@ -767,8 +769,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                         .size(tokens::TYPE_SIZE)
                         .color(tokens::MUTED),
                 );
-            } else {
-                card_grid(ui, view, &cards, bin);
+            } else if let Some(id) = card_grid(ui, view, &cards, bin)
+                && let Err(error) = shell.add_medium(&id)
+            {
+                shell.set_notice(error.to_string());
             }
         });
     library_menu(shell, &column, view);
@@ -840,7 +844,9 @@ fn pick_card(view: &mut ViewState, cards: &[BinCard], id: &str, modifiers: egui:
     view.library_anchor = Some(id.to_owned());
 }
 
-fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) {
+/// Lay out the cards. Returns the card whose plus was pressed.
+fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) -> Option<String> {
+    let mut added = None;
     let width = ui.available_width().max(CARD_W);
     ui.set_min_width(width);
     let cols = ((width + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
@@ -876,7 +882,35 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) {
             }
         }
         response.on_hover_text(&card.name);
+        if bin && ui.rect_contains_pointer(rect) && card_plus(ui, rect, &card.id) {
+            added = Some(card.id.clone());
+        }
     }
+    added
+}
+
+/// The round plus at the bottom right of a hovered card's picture. True when pressed.
+fn card_plus(ui: &mut Ui, card: Rect, id: &str) -> bool {
+    let center = Pos2::new(
+        card.right() - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+        card.top() + CARD_H - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+    );
+    let rect = Rect::from_center_size(center, Vec2::splat(CARD_PLUS_RADIUS * 2.0));
+    let response = ui
+        .interact(rect, ui.scope_id().with(("card-plus", id)), Sense::click())
+        .on_hover_text("Add to timeline");
+    let (fill, ink) = if response.hovered() {
+        (Color32::WHITE, tokens::PANEL)
+    } else {
+        (Color32::from_black_alpha(184), Color32::WHITE)
+    };
+    let painter = ui.painter();
+    painter.circle_filled(center, CARD_PLUS_RADIUS, fill);
+    let arm = 4.5;
+    let stroke = egui::Stroke::new(1.5, ink);
+    painter.line_segment([center - Vec2::X * arm, center + Vec2::X * arm], stroke);
+    painter.line_segment([center - Vec2::Y * arm, center + Vec2::Y * arm], stroke);
+    response.clicked()
 }
 
 /// A card: its picture, then its name under it.
@@ -5001,6 +5035,55 @@ mod tests {
         assert!(view.library_menu.is_none());
         assert_eq!(shell.notice(), "Delete is not built yet");
         assert!(shell.draft().unwrap().materials.videos.len() == 1);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_plus_on_a_hovered_card_adds_the_clip_to_the_main_lane() {
+        let temp = std::env::temp_dir().join(format!("cutlass-plus-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let name = text_pos(&output, "pattern.png").expect("library card");
+        let plus = Pos2::new(
+            name.x - 2.0 + CARD_W - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+            name.y - 6.0 - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+        );
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(plus)]);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: plus,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, vec![press(true), press(false)]);
+        let lanes = shell.lanes();
+        let main = lanes.iter().find(|lane| lane.main).expect("main lane");
+        assert_eq!(main.clips.len(), 1);
+        assert!(view.library_picked.is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -23,6 +23,15 @@ final class EditorModel {
     private(set) var notice: Notice?
     var selectedClip: String?
 
+    /// Points per microsecond on the timeline. Rust holds it inside what
+    /// the cut allows.
+    private(set) var pixelSize: Double = 60 / 1_000_000
+    /// Ruler ticks and filmstrip tiles for the window around the playhead.
+    private(set) var ticks: [Tick] = []
+    private(set) var films: [String: [Tile]] = [:]
+    /// Filmstrip pictures by tile key.
+    private(set) var thumbs: [String: CGImage] = [:]
+
     struct Notice: Equatable {
         let id = UUID()
         let text: String
@@ -33,6 +42,11 @@ final class EditorModel {
     private var drawing = false
     private var waiting: Int64?
     private var playback: Task<Void, Never>?
+    /// The window the ticks and tiles cover, and the edit they were read for.
+    private var stripWindow: (from: Int64, to: Int64, pixelSize: Double, edit: Int)?
+    private var edits = 0
+    private var stripRetry: Task<Void, Never>?
+    private var fetching: Set<String> = []
 
     /// Open the project folder at `project`. Rust reads it off the main
     /// thread; the screen shows a spinner until it is open.
@@ -151,6 +165,15 @@ final class EditorModel {
     func beginImport() { isImporting = true }
     func endImport() { isImporting = false }
 
+    /// Select the main clip under the playhead, for its tools.
+    func editUnderPlayhead() {
+        guard let clip = clipUnderPlayhead ?? lanes.first(where: \.main)?.clips.last else {
+            say("Add a photo or video first")
+            return
+        }
+        selectedClip = clip.id
+    }
+
     func split() {
         guard let clip = splitTarget else {
             say("Move the playhead over a clip to split it")
@@ -197,6 +220,11 @@ final class EditorModel {
         edit { try $0.setSpeed(clipId: clip, speed: speed) }
     }
 
+    /// Put a main clip at `place` in the main row's order.
+    func reorder(_ clip: String, place: Int) {
+        edit { try $0.reorder(clipId: clip, place: UInt32(max(place, 0))) }
+    }
+
     func undo() { edit { try $0.undo() } }
     func redo() { edit { try $0.redo() } }
 
@@ -230,6 +258,7 @@ final class EditorModel {
 
     private func reload() {
         guard let editor else { return }
+        edits += 1
         do {
             lanes = try editor.lanes()
             durationUs = try editor.durationUs()
@@ -242,6 +271,79 @@ final class EditorModel {
         playheadUs = min(playheadUs, durationUs)
         draw()
     }
+
+    // MARK: Strip
+
+    /// Zoom by `factor` for a strip `width` points wide.
+    func zoom(from start: Double, by factor: Double, width: Double) {
+        guard let editor, let size = try? editor.zoom(
+            pixelSize: start, factor: factor, laneWidth: width)
+        else { return }
+        pixelSize = size
+    }
+
+    /// Read the ticks and tiles when the strip, `halfWidth` points each side
+    /// of the playhead, leaves the window last read, the zoom changes, or
+    /// the cut changes. The window reaches a screen past each side.
+    func refreshStrip(halfWidth: Double) {
+        guard let editor, halfWidth > 0 else { return }
+        lastHalfWidth = halfWidth
+        let reach = Int64(halfWidth / pixelSize)
+        let from = playheadUs - reach
+        let to = playheadUs + reach
+        if let window = stripWindow, window.pixelSize == pixelSize, window.edit == edits,
+           window.from <= from, window.to >= to
+        {
+            return
+        }
+        let wide = (from: max(playheadUs - 3 * reach, 0), to: playheadUs + 3 * reach)
+        stripWindow = (wide.from, wide.to, pixelSize, edits)
+        do {
+            ticks = try editor.ruler(pixelSize: pixelSize, fromUs: wide.from, toUs: wide.to)
+            let read = try editor.film(
+                fromUs: wide.from, toUs: wide.to, pixelSize: pixelSize, height: Self.filmHeight)
+            films = Dictionary(read.map { ($0.clipId, $0.tiles) }, uniquingKeysWith: { a, _ in a })
+        } catch {
+            show(error)
+            return
+        }
+        fetchThumbs()
+    }
+
+    /// Tile height the filmstrip asks for, in points.
+    static let filmHeight: Double = 52
+
+    /// Fetch the stored pictures not yet held. While some are still being
+    /// decoded, read the tiles again shortly.
+    private func fetchThumbs() {
+        guard let editor else { return }
+        let tiles = films.values.joined()
+        let wanted = tiles.filter { $0.ready && thumbs[$0.key] == nil && !fetching.contains($0.key) }
+        for tile in wanted {
+            fetching.insert(tile.key)
+            let key = tile.key
+            Task.detached(priority: .utility) {
+                let image = (try? editor.thumb(key: key))??.image
+                await MainActor.run {
+                    self.fetching.remove(key)
+                    if let image { self.thumbs[key] = image }
+                }
+            }
+        }
+        if thumbs.count > 600 { thumbs.removeAll() }
+        stripRetry?.cancel()
+        if tiles.contains(where: { !$0.ready }) {
+            stripRetry = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let self else { return }
+                self.stripWindow = nil
+                self.refreshStrip(halfWidth: self.lastHalfWidth)
+            }
+        }
+    }
+
+    /// The half width the strip last drew at, for a retry.
+    var lastHalfWidth: Double = 0
 
     // MARK: Picture
 

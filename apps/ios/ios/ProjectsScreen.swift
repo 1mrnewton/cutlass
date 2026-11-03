@@ -187,4 +187,6 @@ enum Palette {
     static let exportInk = Color(red: 0x06 / 255, green: 0x22 / 255, blue: 0x26 / 255)
     static let text = Color(red: 0xf3 / 255, green: 0xf3 / 255, blue: 0xf3 / 255)
     static let muted = Color(red: 0xa3 / 255, green: 0xa3 / 255, blue: 0xa3 / 255)
+    /// Sliders, the selected control, and other live accents.
+    static let accent = export
 }

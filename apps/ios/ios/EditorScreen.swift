@@ -7,7 +7,10 @@ struct EditorScreen: View {
     let home: () -> Void
     @State private var model: EditorModel
     @State private var picked: [PhotosPickerItem] = []
-    @State private var adjusting = false
+    @State private var panel: Panel?
+
+    /// The tool panel open over the tool bar.
+    enum Panel { case volume, speed }
 
     init(project: ProjectSummary, home: @escaping () -> Void) {
         name = project.name
@@ -32,21 +35,17 @@ struct EditorScreen: View {
             }
             preview
             transport
-            TimelineStrip(model: model)
+            TimelineStrip(model: model, picked: $picked)
                 .frame(maxHeight: .infinity)
                 .background(Color(white: 0.09))
-            if adjusting, let clip = model.selection {
-                ClipPanel(model: model, clip: clip) { adjusting = false }
-                    .transition(.move(edge: .bottom))
-            } else {
-                tools
-            }
+            bottom
         }
-        .animation(.easeOut(duration: 0.2), value: adjusting)
+        .animation(.easeOut(duration: 0.2), value: panel)
+        .animation(.easeOut(duration: 0.15), value: model.selectedClip == nil)
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
-        .onChange(of: model.selectedClip) { _, id in if id == nil { adjusting = false } }
+        .onChange(of: model.selectedClip) { _, id in if id == nil { panel = nil } }
         .onDisappear { model.pause() }
     }
 
@@ -92,25 +91,69 @@ struct EditorScreen: View {
         .padding(.vertical, 10)
     }
 
-    private var tools: some View {
-        HStack {
+    /// A panel when one is open, the clip tools while a clip is selected,
+    /// else the root tools.
+    @ViewBuilder
+    private var bottom: some View {
+        if let panel, let clip = model.selection {
+            Group {
+                switch panel {
+                case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
+                case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
+                }
+            }
+            .transition(.move(edge: .bottom))
+        } else if model.selection != nil {
+            clipTools
+        } else {
+            rootTools
+        }
+    }
+
+    private var rootTools: some View {
+        toolBar {
+            Button { model.editUnderPlayhead() } label: { tool("Edit", "scissors") }
+                .disabled(!model.hasClips)
             PhotosPicker(
                 selection: $picked, matching: .any(of: [.images, .videos]),
                 preferredItemEncoding: .current
             ) {
-                tool("Add", "plus")
+                tool("Add", "plus.rectangle.on.rectangle")
             }
             .disabled(model.isOpening || model.isImporting)
-            Button { model.split() } label: { tool("Split", "scissors") }
-                .disabled(!model.hasClips)
-            Button { model.deleteClip() } label: { tool("Delete", "trash") }
-                .disabled(!model.hasClips)
-            Button { adjusting = true } label: { tool("Adjust", "slider.horizontal.3") }
-                .disabled(model.selection == nil)
+        }
+    }
+
+    private var clipTools: some View {
+        HStack(spacing: 0) {
+            Button { model.selectedClip = nil } label: {
+                Image(systemName: "chevron.left")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 52)
+                    .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .accessibilityLabel("Back")
+            .padding(.leading, 8)
+            toolBar {
+                Button { model.split() } label: { tool("Split", "square.split.2x1") }
+                Button { panel = .volume } label: { tool("Volume", "speaker.wave.2") }
+                Button { panel = .speed } label: { tool("Speed", "gauge.with.dots.needle.67percent") }
+                Button { model.deleteClip() } label: { tool("Delete", "trash") }
+            }
+        }
+        .background(Color(white: 0.11))
+    }
+
+    private func toolBar<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) { content() }
+                .padding(.horizontal, 8)
         }
         .foregroundStyle(.white)
         .padding(.top, 10)
         .padding(.bottom, 4)
+        .frame(maxWidth: .infinity)
         .background(Color(white: 0.11))
     }
 
@@ -119,7 +162,8 @@ struct EditorScreen: View {
             Image(systemName: symbol).font(.title3)
             Text(title).font(.caption2)
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: 68, height: 52)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder

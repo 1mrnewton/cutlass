@@ -871,6 +871,9 @@ mod tests {
         assert_eq!(ticks[0].time, Micros(0));
         assert_eq!(ticks[0].label.as_deref(), Some("00:00"));
         assert!(ticks.iter().any(|tick| !tick.major));
+        // At 50 points a second a label sits on each second.
+        let labels: Vec<_> = ticks.iter().filter_map(|tick| tick.label.clone()).collect();
+        assert_eq!(labels, ["00:00", "00:01", "00:02"]);
         assert!(host.ruler(-1.0, Micros(0), Micros(1)).is_empty());
 
         let wider = host.zoom(size, 2.0, 400.0);

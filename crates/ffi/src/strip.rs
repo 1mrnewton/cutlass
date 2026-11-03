@@ -42,11 +42,16 @@ pub struct PhoneFilm {
     pub tiles: Vec<PhoneTile>,
 }
 
-/// The ticks from `from` through `to` at `pixel_size`, at the draft's rate.
+/// How much closer a phone's labels sit than the desktop's. The editor
+/// picks its step for a wide window; a phone strip is about a fifth as wide.
+pub const LABEL_DENSITY: f64 = 5.0;
+
+/// The ticks from `from` through `to` at `pixel_size`, at the draft's rate,
+/// with labels [`LABEL_DENSITY`] times closer than the desktop's.
 #[must_use]
 pub fn ruler(draft: &Draft, pixel_size: f64, from: Micros, to: Micros) -> Vec<PhoneTick> {
     let rate = draft.frame_rate().unwrap_or(FrameRate::FPS_30);
-    ruler_ticks(rate, false, pixel_size, from, to)
+    ruler_ticks(rate, false, pixel_size * LABEL_DENSITY, from, to)
         .into_iter()
         .map(|tick| PhoneTick {
             time: tick.time,

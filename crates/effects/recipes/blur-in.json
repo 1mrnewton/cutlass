@@ -1,0 +1,12 @@
+{
+  "id": "blur-in",
+  "name": "Blur In",
+  "passes": [
+    {
+      "block": "blur",
+      "params": {
+        "radius": { "keys": [[0, 0.04], [1, 0], [2, 0]], "repeat": 2 }
+      }
+    }
+  ]
+}

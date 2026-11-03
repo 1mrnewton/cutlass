@@ -1,0 +1,7 @@
+{
+  "id": "vignette",
+  "name": "Vignette",
+  "passes": [
+    { "block": "vignette", "params": { "amount": 0.75, "size": 0.45 } }
+  ]
+}

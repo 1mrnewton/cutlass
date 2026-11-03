@@ -1,0 +1,20 @@
+{
+  "id": "glitch",
+  "name": "Glitch",
+  "passes": [
+    {
+      "block": "slices",
+      "params": {
+        "count": { "jitter": { "rate": 6, "from": 6, "to": 24, "seed": 11 } },
+        "amount": { "jitter": { "rate": 6, "from": 0.0, "to": 0.12, "seed": 12 } },
+        "seed": { "jitter": { "rate": 12, "from": 0, "to": 1000, "seed": 13 } }
+      }
+    },
+    {
+      "block": "rgb_split",
+      "params": {
+        "x": { "jitter": { "rate": 12, "from": -0.02, "to": 0.02, "seed": 14 } }
+      }
+    }
+  ]
+}

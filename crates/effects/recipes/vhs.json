@@ -1,0 +1,24 @@
+{
+  "id": "vhs",
+  "name": "VHS",
+  "passes": [
+    {
+      "block": "slices",
+      "params": {
+        "count": 40,
+        "amount": { "jitter": { "rate": 4, "from": 0.0, "to": 0.015, "seed": 21 } },
+        "seed": { "jitter": { "rate": 24, "from": 0, "to": 1000, "seed": 22 } }
+      }
+    },
+    { "block": "rgb_split", "params": { "x": 0.006 } },
+    { "block": "grade", "params": { "contrast": 1.1, "saturation": 0.75, "brightness": 0.03 } },
+    { "block": "scanlines", "params": { "amount": 0.25, "count": 180 } },
+    {
+      "block": "noise",
+      "params": {
+        "amount": 0.12,
+        "seed": { "jitter": { "rate": 24, "from": 0, "to": 1000, "seed": 23 } }
+      }
+    }
+  ]
+}

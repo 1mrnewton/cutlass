@@ -21,7 +21,9 @@ mod timeline;
 
 pub use cache::ResourceCache;
 pub use codecs::{decoders, readers};
-pub use cutlass_editor::{speed_at, speed_position, volume_at, volume_position};
+pub use cutlass_editor::{
+    Bar, Tool, ToolId, speed_at, speed_position, tools, volume_at, volume_position,
+};
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
 pub use cutlass_playback::AudioHost;
@@ -299,6 +301,18 @@ impl PhoneHost {
     #[must_use]
     pub fn lanes(&self) -> Vec<PhoneLane> {
         phone_lanes(self.draft())
+    }
+
+    /// The tool bar for `segment_id` while it is selected, or `None` for an
+    /// id no row holds.
+    #[must_use]
+    pub fn clip_bar(&self, segment_id: &SegmentId) -> Option<Bar> {
+        self.lanes().into_iter().find_map(|lane| {
+            lane.clips
+                .iter()
+                .any(|clip| &clip.id == segment_id)
+                .then(|| cutlass_editor::clip_bar(lane.kind, lane.main))
+        })
     }
 
     /// Cut `segment_id` at `at`. Returns the right piece's id.
@@ -857,6 +871,23 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
         assert_eq!(host.draft(), &before);
+    }
+
+    #[test]
+    fn a_selected_clip_gets_the_bar_of_its_row() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        use crate::{Bar, SegmentId, ToolId, tools};
+
+        assert_eq!(host.clip_bar(&first), Some(Bar::MainClip));
+        assert_eq!(host.clip_bar(&SegmentId::new("nope")), None);
+        assert!(
+            tools(Bar::MainClip)
+                .iter()
+                .any(|tool| tool.id == ToolId::Split)
+        );
     }
 
     #[test]

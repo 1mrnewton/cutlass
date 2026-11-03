@@ -141,6 +141,159 @@ pub fn speed_position(speed: f64) -> f64 {
     cutlass_ffi::speed_position(speed)
 }
 
+/// A phone tool bar. See [`tool_bar`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum ToolBar {
+    Root,
+    MainClip,
+    OverlayClip,
+    AudioClip,
+    TextClip,
+    OtherClip,
+    Audio,
+    Text,
+    Effects,
+    Overlay,
+}
+
+/// One tool. Each shell maps it to its own icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum ToolKind {
+    Edit,
+    Audio,
+    Text,
+    Effects,
+    Overlay,
+    Captions,
+    Filters,
+    Adjust,
+    Stickers,
+    AspectRatio,
+    Background,
+    Split,
+    Volume,
+    Speed,
+    Animations,
+    Delete,
+    Duplicate,
+    Replace,
+    Crop,
+    Mirror,
+    Rotate,
+    Reverse,
+    Freeze,
+    ExtractAudio,
+    Fade,
+    Beats,
+    Unlink,
+    Splice,
+    AddOverlay,
+    ImportSound,
+    Record,
+    AddText,
+    EditText,
+    Draw,
+    VideoEffects,
+}
+
+/// A tool as a bar shows it. `ready` says it works on the phone today;
+/// `opens` names the bar it opens instead of acting.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ToolItem {
+    pub kind: ToolKind,
+    pub label: String,
+    pub ready: bool,
+    pub opens: Option<ToolBar>,
+}
+
+/// The tools on `bar`, in order.
+#[uniffi::export]
+#[must_use]
+pub fn tool_bar(bar: ToolBar) -> Vec<ToolItem> {
+    cutlass_ffi::tools(bar_in(bar))
+        .iter()
+        .map(|tool| ToolItem {
+            kind: tool_kind(tool.id),
+            label: tool.label.to_owned(),
+            ready: tool.ready,
+            opens: tool.opens.map(bar_out),
+        })
+        .collect()
+}
+
+fn bar_in(bar: ToolBar) -> cutlass_ffi::Bar {
+    use cutlass_ffi::Bar;
+    match bar {
+        ToolBar::Root => Bar::Root,
+        ToolBar::MainClip => Bar::MainClip,
+        ToolBar::OverlayClip => Bar::OverlayClip,
+        ToolBar::AudioClip => Bar::AudioClip,
+        ToolBar::TextClip => Bar::TextClip,
+        ToolBar::OtherClip => Bar::OtherClip,
+        ToolBar::Audio => Bar::Audio,
+        ToolBar::Text => Bar::Text,
+        ToolBar::Effects => Bar::Effects,
+        ToolBar::Overlay => Bar::Overlay,
+    }
+}
+
+fn bar_out(bar: cutlass_ffi::Bar) -> ToolBar {
+    use cutlass_ffi::Bar;
+    match bar {
+        Bar::Root => ToolBar::Root,
+        Bar::MainClip => ToolBar::MainClip,
+        Bar::OverlayClip => ToolBar::OverlayClip,
+        Bar::AudioClip => ToolBar::AudioClip,
+        Bar::TextClip => ToolBar::TextClip,
+        Bar::OtherClip => ToolBar::OtherClip,
+        Bar::Audio => ToolBar::Audio,
+        Bar::Text => ToolBar::Text,
+        Bar::Effects => ToolBar::Effects,
+        Bar::Overlay => ToolBar::Overlay,
+    }
+}
+
+fn tool_kind(id: cutlass_ffi::ToolId) -> ToolKind {
+    use cutlass_ffi::ToolId as T;
+    match id {
+        T::Edit => ToolKind::Edit,
+        T::Audio => ToolKind::Audio,
+        T::Text => ToolKind::Text,
+        T::Effects => ToolKind::Effects,
+        T::Overlay => ToolKind::Overlay,
+        T::Captions => ToolKind::Captions,
+        T::Filters => ToolKind::Filters,
+        T::Adjust => ToolKind::Adjust,
+        T::Stickers => ToolKind::Stickers,
+        T::AspectRatio => ToolKind::AspectRatio,
+        T::Background => ToolKind::Background,
+        T::Split => ToolKind::Split,
+        T::Volume => ToolKind::Volume,
+        T::Speed => ToolKind::Speed,
+        T::Animations => ToolKind::Animations,
+        T::Delete => ToolKind::Delete,
+        T::Duplicate => ToolKind::Duplicate,
+        T::Replace => ToolKind::Replace,
+        T::Crop => ToolKind::Crop,
+        T::Mirror => ToolKind::Mirror,
+        T::Rotate => ToolKind::Rotate,
+        T::Reverse => ToolKind::Reverse,
+        T::Freeze => ToolKind::Freeze,
+        T::ExtractAudio => ToolKind::ExtractAudio,
+        T::Fade => ToolKind::Fade,
+        T::Beats => ToolKind::Beats,
+        T::Unlink => ToolKind::Unlink,
+        T::Splice => ToolKind::Splice,
+        T::AddOverlay => ToolKind::AddOverlay,
+        T::ImportSound => ToolKind::ImportSound,
+        T::Record => ToolKind::Record,
+        T::AddText => ToolKind::AddText,
+        T::EditText => ToolKind::EditText,
+        T::Draw => ToolKind::Draw,
+        T::VideoEffects => ToolKind::VideoEffects,
+    }
+}
+
 /// One saved project in the launch list. `modified_ms` is milliseconds
 /// since 1970.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -320,6 +473,13 @@ impl Editor {
                     .collect(),
             })
             .collect())
+    }
+
+    /// The tool bar for `clip_id` while it is selected, or `None` for an id
+    /// no row holds.
+    pub fn clip_bar(&self, clip_id: String) -> Result<Option<ToolBar>, EditorError> {
+        let bar = self.run(move |host| host.clip_bar(&SegmentId::new(clip_id)))?;
+        Ok(bar.map(bar_out))
     }
 
     /// The end of the last clip, in microseconds.
@@ -663,6 +823,11 @@ mod tests {
             .collect();
         assert_eq!(ids, [second, first.clone()]);
         assert!(editor.reorder("nope".to_owned(), 0).is_err());
+        assert_eq!(
+            editor.clip_bar(first.clone()).unwrap(),
+            Some(super::ToolBar::MainClip)
+        );
+        assert_eq!(editor.clip_bar("nope".to_owned()).unwrap(), None);
 
         let size = 0.000_05;
         let ticks = editor.ruler(size, 0, 1_000_000).unwrap();
@@ -683,6 +848,32 @@ mod tests {
         let frame = editor.thumb(tile.key).unwrap().expect("stored");
         assert_eq!(frame.rgba.len(), (frame.width * frame.height * 4) as usize);
         assert!(editor.thumb("nothing".to_owned()).unwrap().is_none());
+    }
+
+    #[test]
+    fn every_tool_bar_crosses_the_boundary_and_names_its_tools() {
+        use super::{ToolBar, ToolKind, bar_in, bar_out, tool_bar};
+        for bar in [
+            ToolBar::Root,
+            ToolBar::MainClip,
+            ToolBar::OverlayClip,
+            ToolBar::AudioClip,
+            ToolBar::TextClip,
+            ToolBar::OtherClip,
+            ToolBar::Audio,
+            ToolBar::Text,
+            ToolBar::Effects,
+            ToolBar::Overlay,
+        ] {
+            assert_eq!(bar_out(bar_in(bar)), bar);
+            assert!(tool_bar(bar).iter().all(|tool| !tool.label.is_empty()));
+        }
+        let root = tool_bar(ToolBar::Root);
+        assert_eq!(root[0].kind, ToolKind::Edit);
+        assert!(
+            root.iter()
+                .any(|tool| tool.kind == ToolKind::Audio && tool.opens == Some(ToolBar::Audio))
+        );
     }
 
     #[test]

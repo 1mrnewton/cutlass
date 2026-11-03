@@ -417,7 +417,8 @@ final class EditorModel {
                 }
             }
         }
-        if thumbs.count > 600 { thumbs.removeAll() }
+        // About 180 KB a tile at the worker's height.
+        if thumbs.count > 300 { thumbs.removeAll() }
         stripRetry?.cancel()
         if tiles.contains(where: { !$0.ready }) || waves.values.contains(where: { !$0.ready }) {
             stripRetry = Task { [weak self] in

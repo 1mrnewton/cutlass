@@ -6,6 +6,11 @@
 //! most [`THUMB_HEIGHT`] rows, and stores it. The newest ask replaces the
 //! queue, so tiles that scrolled out of view are dropped. While paused the
 //! worker stops between frames, so playback keeps the decoder to itself.
+//!
+//! Seeking costs far more than decoding on, so the worker takes the asks in
+//! runs: from the most wanted one it steps back to the earliest ask of that
+//! file within [`RUN_REACH`], then forward through every ask within reach of
+//! the last picture, so one seek serves a run of tiles.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -21,11 +26,19 @@ use crate::reader::{DecodedFrame, Media, ReaderFactory};
 use crate::source::decoded_picture;
 use cutlass_container::DisplayQuarter;
 
-/// Rows in a stored thumbnail. A shorter picture keeps its own height.
-pub const THUMB_HEIGHT: u32 = 96;
+/// Rows in a stored thumbnail, enough for a filmstrip on a sharp screen.
+/// A shorter picture keeps its own height.
+pub const THUMB_HEIGHT: u32 = 160;
 
 /// Thumbnails kept at once. The oldest is dropped past this.
 pub const MAX_THUMBS: usize = 1200;
+
+/// Bytes of thumbnails kept at once. The oldest is dropped past this.
+pub const MAX_THUMB_BYTES: usize = 96 << 20;
+
+/// How far apart two asks of one file may be and still share a seek: the
+/// decoder steps on rather than seeks within this.
+const RUN_REACH: i64 = 2_000_000;
 
 /// Files the worker keeps open between asks.
 const OPEN_FILES: usize = 4;
@@ -64,6 +77,10 @@ struct State {
     failed: HashSet<ThumbKey>,
     /// Each opened file's picture size, upright.
     shapes: HashMap<PathBuf, (u32, u32)>,
+    /// Bytes of the stored thumbnails.
+    bytes: usize,
+    /// The last picture the worker made, where a run goes on from.
+    last: Option<ThumbKey>,
     paused: bool,
     closed: bool,
 }
@@ -151,8 +168,9 @@ fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
                 if state.closed {
                     return;
                 }
-                if !state.paused
-                    && let Some(key) = state.wanted.pop_front()
+                let held = &mut *state;
+                if !held.paused
+                    && let Some(key) = next_ask(&mut held.wanted, held.last.as_ref())
                 {
                     break key;
                 }
@@ -172,13 +190,20 @@ fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
                     .insert(path.clone(), upright(width, height, info.display));
             }
         }
+        state.last = Some(key.clone());
         match made {
             Ok(thumb) => {
-                state.stored.insert(key.clone(), Arc::new(thumb));
+                state.bytes = state.bytes.saturating_add(thumb.rgba.len());
+                if let Some(old) = state.stored.insert(key.clone(), Arc::new(thumb)) {
+                    state.bytes = state.bytes.saturating_sub(old.rgba.len());
+                }
                 state.order.push_back(key);
-                while state.order.len() > MAX_THUMBS {
-                    if let Some(oldest) = state.order.pop_front() {
-                        state.stored.remove(&oldest);
+                while state.order.len() > MAX_THUMBS || state.bytes > MAX_THUMB_BYTES {
+                    let Some(oldest) = state.order.pop_front() else {
+                        break;
+                    };
+                    if let Some(old) = state.stored.remove(&oldest) {
+                        state.bytes = state.bytes.saturating_sub(old.rgba.len());
                     }
                 }
             }
@@ -189,6 +214,40 @@ fn work(shared: &Shared, factory: &ReaderFactory, ready: &dyn Fn()) {
         drop(state);
         ready();
     }
+}
+
+/// The ask to decode next, taken out of `wanted`: the earliest one of the
+/// file `last` came from at or after it and within [`RUN_REACH`], so the
+/// decoder steps on; else, for the most wanted ask, the earliest ask of its
+/// file at or before it and within reach, so the run that follows covers it.
+fn next_ask(wanted: &mut VecDeque<ThumbKey>, last: Option<&ThumbKey>) -> Option<ThumbKey> {
+    let earliest = |path: &PathBuf, from: i64, to: i64| {
+        wanted
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| &key.path == path && (from..=to).contains(&key.time.0))
+            .min_by_key(|(_, key)| key.time.0)
+            .map(|(index, _)| index)
+    };
+    let on = last.and_then(|last| {
+        earliest(
+            &last.path,
+            last.time.0,
+            last.time.0.saturating_add(RUN_REACH),
+        )
+    });
+    let index = match on {
+        Some(index) => index,
+        None => {
+            let front = wanted.front()?;
+            earliest(
+                &front.path,
+                front.time.0.saturating_sub(RUN_REACH),
+                front.time.0,
+            )?
+        }
+    };
+    wanted.remove(index)
 }
 
 fn thumb_for(
@@ -398,8 +457,8 @@ mod tests {
 
     #[test]
     fn a_tall_picture_shrinks_to_the_thumb_height_and_keeps_its_shape() {
-        assert_eq!(thumb_size(1920, 1080), Some((171, 96)));
-        assert_eq!(thumb_size(720, 1280), Some((54, 96)));
+        assert_eq!(thumb_size(1920, 1080), Some((284, 160)));
+        assert_eq!(thumb_size(720, 1280), Some((90, 160)));
         assert_eq!(thumb_size(40, 20), Some((40, 20)));
         assert_eq!(thumb_size(0, 20), None);
     }
@@ -431,9 +490,9 @@ mod tests {
         let down = turn(flat.clone(), DisplayQuarter::Clockwise270);
         assert_eq!(down.rgba, [0, 0, 255, 255, 255, 0, 0, 255]);
         assert_eq!(turn(flat.clone(), DisplayQuarter::Zero), flat);
-        // A sideways 1280x720 file stands 96 rows tall.
+        // A sideways 1280x720 file stands 160 rows tall.
         let (up_w, up_h) = upright(1280, 720, DisplayQuarter::Clockwise90);
-        assert_eq!(thumb_size(up_w, up_h), Some((54, 96)));
+        assert_eq!(thumb_size(up_w, up_h), Some((90, 160)));
     }
 
     #[test]
@@ -441,6 +500,45 @@ mod tests {
         let plane = [0, 100, 200, 60];
         assert_eq!(average(&plane, (4, 1), 1, 0, (0, 0), (2, 1)), 50);
         assert_eq!(average(&plane, (4, 1), 1, 0, (1, 0), (2, 1)), 130);
+    }
+
+    fn ask(path: &str, time: i64) -> ThumbKey {
+        ThumbKey {
+            path: PathBuf::from(path),
+            time: Micros(time),
+        }
+    }
+
+    #[test]
+    fn asks_are_taken_in_runs_that_share_a_seek() {
+        // Nearest the playhead first, as a timeline asks.
+        let mut wanted: VecDeque<ThumbKey> = [5, 6, 4, 7, 3, 8, 2, 9, 1]
+            .into_iter()
+            .map(|second| ask("a.mp4", second * 500_000))
+            .collect();
+        wanted.push_back(ask("b.mp4", 2_500_000));
+        let mut last = None;
+        let mut order = Vec::new();
+        while let Some(key) = next_ask(&mut wanted, last.as_ref()) {
+            order.push((
+                key.path.to_string_lossy().into_owned(),
+                key.time.0 / 500_000,
+            ));
+            last = Some(key);
+        }
+        let seconds: Vec<i64> = order.iter().map(|(_, time)| *time).collect();
+        // Back a run from the first ask, then on through the rest.
+        assert_eq!(seconds, [1, 2, 3, 4, 5, 6, 7, 8, 9, 5]);
+        assert_eq!(order.last().map(|(path, _)| path.as_str()), Some("b.mp4"));
+        assert!(next_ask(&mut VecDeque::new(), None).is_none());
+    }
+
+    #[test]
+    fn a_far_ask_starts_a_new_run_from_the_most_wanted() {
+        let mut wanted: VecDeque<ThumbKey> = [ask("a.mp4", 10_000_000), ask("a.mp4", 0)].into();
+        let last = ask("a.mp4", 4_000_000);
+        let first = next_ask(&mut wanted, Some(&last)).unwrap();
+        assert_eq!(first.time, Micros(10_000_000));
     }
 
     #[test]

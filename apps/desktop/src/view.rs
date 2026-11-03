@@ -18,6 +18,8 @@ use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError}
 use crate::tokens;
 use crate::widgets;
 
+mod inspector;
+
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
 /// The name row under a card's picture.
@@ -127,20 +129,8 @@ pub struct ViewState {
     export_path: String,
     text_buffer: String,
     text_for: String,
-    text_size_buffer: String,
-    text_color_buffer: String,
-    letter_buffer: String,
-    line_buffer: String,
-    width_buffer: String,
-    x_buffer: String,
-    y_buffer: String,
-    scale_buffer: String,
-    opacity_buffer: String,
-    letterbox_buffer: String,
-    volume_buffer: String,
-    fade_in_buffer: String,
-    fade_out_buffer: String,
-    speed_buffer: String,
+    /// What each inspector field holds while it is typed in, by label.
+    fields: std::collections::HashMap<String, String>,
     background_buffer: String,
     name_buffer: String,
     dialogs: Dialogs,
@@ -169,20 +159,7 @@ impl Default for ViewState {
             export_path: String::new(),
             text_buffer: String::new(),
             text_for: String::new(),
-            text_size_buffer: String::new(),
-            text_color_buffer: String::new(),
-            letter_buffer: String::new(),
-            line_buffer: String::new(),
-            width_buffer: String::new(),
-            x_buffer: String::new(),
-            y_buffer: String::new(),
-            scale_buffer: String::new(),
-            opacity_buffer: String::new(),
-            letterbox_buffer: String::new(),
-            volume_buffer: String::new(),
-            fade_in_buffer: String::new(),
-            fade_out_buffer: String::new(),
-            speed_buffer: String::new(),
+            fields: std::collections::HashMap::new(),
             background_buffer: String::new(),
             name_buffer: String::new(),
             dialogs: Dialogs::new(),
@@ -1388,22 +1365,7 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             ui.set_width(content_width);
             ui.add_space(14.0);
             if let Some(inspection) = shell.inspection() {
-                section_title(ui, "Clip");
-                fact(ui, "Name", &inspection.material, content_width);
-                fact(
-                    ui,
-                    "Start",
-                    &shell.timecode_at(inspection.start),
-                    content_width,
-                );
-                fact(
-                    ui,
-                    "Duration",
-                    &card_meta(inspection.duration.0),
-                    content_width,
-                );
-                ui.add_space(12.0);
-                clip_fields(shell, ui, view, &inspection);
+                inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
                 section_title(ui, "Details");
                 project_facts(shell, ui, view, content_width);
@@ -1561,210 +1523,6 @@ fn ratio_label(ratio: &str) -> String {
     } else {
         ratio.to_owned()
     }
-}
-
-fn clip_fields(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    view: &mut ViewState,
-    inspection: &crate::shell::Inspection,
-) {
-    if shell.place_enabled() {
-        if let Some(x) = number_field(ui, "X", &mut view.x_buffer, inspection.transform_x)
-            && !inspection.locked
-            && let Err(error) = shell.set_position(x, inspection.transform_y)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(y) = number_field(ui, "Y", &mut view.y_buffer, inspection.transform_y)
-            && !inspection.locked
-            && let Err(error) = shell.set_position(inspection.transform_x, y)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(scale) = number_field(ui, "Scale", &mut view.scale_buffer, inspection.scale_x)
-            && !inspection.locked
-            && let Err(error) = shell.set_scale(scale)
-        {
-            shell.set_notice(error.to_string());
-        }
-        let label = if shell.flipped() {
-            "Flipped"
-        } else {
-            "Upright"
-        };
-        let flip = widgets::toolbar_button(ui, label).on_hover_text("Top to bottom");
-        if flip.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.toggle_vertical_flip()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(opacity) =
-            number_field(ui, "Opacity", &mut view.opacity_buffer, inspection.opacity)
-            && !inspection.locked
-            && let Err(error) = shell.set_opacity(opacity)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if shell.crop_enabled()
-        && let Some(color) = color_field(
-            ui,
-            "Letterbox",
-            &mut view.letterbox_buffer,
-            &inspection.letterbox,
-            "Around the picture. Empty uses the project color",
-        )
-        && !inspection.locked
-        && let Err(error) = shell.set_letterbox(&color)
-    {
-        shell.set_notice(error.to_string());
-    }
-    if let Some(text) = inspection.text.clone() {
-        if view.text_for != inspection.segment_id.as_str() {
-            view.text_buffer = text;
-            view.text_for = inspection.segment_id.as_str().to_owned();
-        }
-        let response = widgets::field(ui, &mut view.text_buffer);
-        if response.lost_focus()
-            && !inspection.locked
-            && let Err(error) = shell.set_text(view.text_buffer.clone())
-        {
-            shell.set_notice(error.to_string());
-        }
-        let face_name = if inspection.font.is_empty() {
-            "Face"
-        } else {
-            inspection.font.as_str()
-        };
-        let face = widgets::toolbar_button(ui, face_name).on_hover_text("Installed face");
-        if face.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.cycle_text_font()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(size) =
-            number_field(ui, "Size", &mut view.text_size_buffer, inspection.text_size)
-            && !inspection.locked
-            && let Err(error) = shell.set_text_size(size)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(color) = color_field(
-            ui,
-            "Color",
-            &mut view.text_color_buffer,
-            &inspection.text_color,
-            "Hex color",
-        ) && !inspection.locked
-            && let Err(error) = shell.set_text_color(&color)
-        {
-            shell.set_notice(error.to_string());
-        }
-        let align = widgets::toolbar_button(ui, align_name(inspection.text_align))
-            .on_hover_text("Left, center, or right");
-        if align.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.cycle_text_align()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(spacing) = number_field(
-            ui,
-            "Letters",
-            &mut view.letter_buffer,
-            inspection.letter_spacing,
-        ) && !inspection.locked
-            && let Err(error) = shell.set_letter_spacing(spacing)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(spacing) =
-            number_field(ui, "Lines", &mut view.line_buffer, inspection.line_spacing)
-            && !inspection.locked
-            && let Err(error) = shell.set_line_spacing(spacing)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(width) =
-            number_field(ui, "Width", &mut view.width_buffer, inspection.line_width)
-            && !inspection.locked
-            && let Err(error) = shell.set_line_width(width)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(volume) = number_field(ui, "Volume", &mut view.volume_buffer, inspection.volume)
-        && !inspection.locked
-        && let Err(error) = shell.set_volume(volume)
-    {
-        shell.set_notice(error.to_string());
-    }
-    if shell.fade_enabled() {
-        let fade_in = fade_seconds(inspection.fade_in);
-        let fade_out = fade_seconds(inspection.fade_out);
-        if let Some(seconds) = number_field(ui, "Fade in", &mut view.fade_in_buffer, fade_in)
-            && !inspection.locked
-            && let Err(error) = shell.set_fade_in(seconds)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(seconds) = number_field(ui, "Fade out", &mut view.fade_out_buffer, fade_out)
-            && !inspection.locked
-            && let Err(error) = shell.set_fade_out(seconds)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(speed) = number_field(ui, "Speed", &mut view.speed_buffer, inspection.speed)
-        && !inspection.locked
-        && let Err(error) = shell.set_speed(speed)
-    {
-        shell.set_notice(error.to_string());
-    }
-}
-
-/// A number row. The typed text stays while the field has focus, and the
-/// stored value returns when it does not. `Some` is a new finite parse.
-fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Option<f64> {
-    let mut edited = None;
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
-        let response = widgets::field(ui, text);
-        if response.lost_focus() {
-            edited = text.parse().ok();
-        }
-        if !response.has_focus() {
-            *text = format!("{stored}");
-        }
-        if label == "Y" {
-            response.on_hover_text("Up is positive");
-        } else if label == "Scale" {
-            response.on_hover_text("1 is the fitted picture");
-        } else if label == "Opacity" {
-            response.on_hover_text("1 is solid");
-        } else if label == "Size" {
-            response.on_hover_text("Pixels");
-        } else if label == "Letters" || label == "Lines" {
-            response.on_hover_text("0 is the normal gap");
-        } else if label == "Width" {
-            response.on_hover_text("Pixels. 0 keeps one line");
-        } else if label.starts_with("Fade") {
-            response.on_hover_text("Seconds");
-        }
-    });
-    ui.add_space(4.0);
-    edited.filter(|value| *value != stored)
-}
-
-fn fade_seconds(microseconds: i64) -> f64 {
-    microseconds as f64 / 1_000_000.0
 }
 
 fn color_field(
@@ -4180,6 +3938,113 @@ mod tests {
         output.textures_delta.clear();
         assert!(painted.lines().any(|line| line == "Project"), "{painted}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_kind_of_clip_paints_its_own_inspector_panel() {
+        use cutlass_model::{
+            Draft, MaterialAudio, MaterialEffect, MaterialText, MaterialVideo, RawMaterial,
+            Segment, TimeRange, Track, TrackType,
+        };
+        let temp = std::env::temp_dir().join(format!("cutlass-panels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo::new("movie"));
+        draft.materials.audios.push(MaterialAudio {
+            id: "song".into(),
+            ..MaterialAudio::default()
+        });
+        let mut title = MaterialText::new("title");
+        title.content = "Hello".to_owned();
+        draft.materials.texts.push(title);
+        let mut caption = MaterialText::new("caption");
+        caption.content = "said words".to_owned();
+        caption.words.text = vec!["said".to_owned(), "words".to_owned()];
+        caption.words.start_time = vec![0, 1_500];
+        caption.words.end_time = vec![1_000, 2_000];
+        draft.materials.texts.push(caption);
+        let mut filter = MaterialEffect::new("warm");
+        filter.name = "Warm".to_owned();
+        draft.materials.effects.push(filter);
+        draft.materials.stickers.push(RawMaterial {
+            id: "star".into(),
+            ..RawMaterial::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        for (id, kind, material) in [
+            ("sound", TrackType::Audio, "song"),
+            ("words", TrackType::Text, "title"),
+            ("said", TrackType::Text, "caption"),
+            ("look", TrackType::Filter, "warm"),
+            ("sticker", TrackType::Sticker, "star"),
+        ] {
+            let mut track = Track::main(id);
+            track.kind = kind;
+            track
+                .segments
+                .push(Segment::new(id, material, TimeRange::new(0, 2_000_000)));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        for (id, shown, hidden) in [
+            (
+                "main",
+                ["Video", "Timing", "Transform", "Picture", "Sound", "Speed"].as_slice(),
+                ["Outline"].as_slice(),
+            ),
+            (
+                "sound",
+                &["Audio", "Timing", "Sound", "Speed", "Fade in"],
+                &["Transform", "Picture"],
+            ),
+            (
+                "words",
+                &["Text", "Words", "Style", "Outline", "Shadow"],
+                &["Sound", "Speed"],
+            ),
+            ("said", &["Caption", "1.50 s", "Style"], &["Sound"]),
+            (
+                "look",
+                &["Filter", "Warm", "Timing"],
+                &["Transform", "Sound", "Style"],
+            ),
+            (
+                "sticker",
+                &["Sticker", "Timing", "Transform", "Rotation"],
+                &["Sound", "Style"],
+            ),
+        ] {
+            shell.select(Some(SegmentId::new(id)));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            let lines = galleys(&output);
+            output.textures_delta.clear();
+            for label in shown {
+                assert!(
+                    lines.iter().any(|line| line == label),
+                    "{id} {label}: {lines:?}"
+                );
+            }
+            for label in hidden {
+                assert!(
+                    !lines.iter().any(|line| line == label),
+                    "{id} {label}: {lines:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

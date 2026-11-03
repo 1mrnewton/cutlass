@@ -50,7 +50,7 @@ struct EditorScreen: View {
                     .resizable()
                     .aspectRatio(model.canvasAspect, contentMode: .fit)
             }
-            if model.isImporting {
+            if model.isOpening || model.isImporting {
                 ProgressView().tint(.white)
             }
         }
@@ -92,7 +92,7 @@ struct EditorScreen: View {
             ) {
                 tool("Add", "plus")
             }
-            .disabled(model.isImporting)
+            .disabled(model.isOpening || model.isImporting)
             Button { model.split() } label: { tool("Split", "scissors") }
                 .disabled(!model.hasClips)
             Button { model.deleteClip() } label: { tool("Delete", "trash") }

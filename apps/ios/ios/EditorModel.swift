@@ -18,6 +18,7 @@ final class EditorModel {
     private(set) var picture: CGImage?
     private(set) var canvasAspect: CGFloat = 16 / 9
     private(set) var isPlaying = false
+    private(set) var isOpening = true
     private(set) var isImporting = false
     private(set) var notice: Notice?
     var selectedClip: String?
@@ -28,20 +29,32 @@ final class EditorModel {
     }
 
     private static let log = Logger(subsystem: "cutlass", category: "editor")
-    private let editor: Editor?
+    private var editor: Editor?
     private var drawing = false
     private var waiting: Int64?
     private var playback: Task<Void, Never>?
 
-    /// Open the project folder at `project`.
+    /// Open the project folder at `project`. Rust reads it off the main
+    /// thread; the screen shows a spinner until it is open.
     init(project: String) {
-        do {
-            editor = try Editor.open(root: Places.root, bundle: Places.bundle, project: project)
-        } catch {
-            editor = nil
-            show(error)
+        let root = Places.root
+        let bundle = Places.bundle
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let opened = Result {
+                try Editor.open(root: root, bundle: bundle, project: project)
+            }
+            await MainActor.run {
+                guard let self else { return }
+                switch opened {
+                case let .success(editor):
+                    self.editor = editor
+                    self.reload()
+                case let .failure(error):
+                    self.show(error)
+                }
+                self.isOpening = false
+            }
         }
-        reload()
     }
 
     var hasClips: Bool { lanes.contains { !$0.clips.isEmpty } }

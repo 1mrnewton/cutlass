@@ -127,10 +127,8 @@ pub struct ViewState {
     export_codec: cutlass_decode::CodecId,
     replace_prompt: bool,
     export_path: String,
-    text_buffer: String,
-    text_for: String,
-    /// What each inspector field holds while it is typed in, by label.
-    fields: std::collections::HashMap<String, String>,
+    /// The clip panel's open tab, page, and sections, and what is typed.
+    inspector: inspector::InspectorState,
     background_buffer: String,
     name_buffer: String,
     dialogs: Dialogs,
@@ -157,9 +155,7 @@ impl Default for ViewState {
             export_codec: cutlass_decode::CodecId::Png,
             replace_prompt: false,
             export_path: String::new(),
-            text_buffer: String::new(),
-            text_for: String::new(),
-            fields: std::collections::HashMap::new(),
+            inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
             dialogs: Dialogs::new(),
@@ -1550,14 +1546,6 @@ fn color_field(
     });
     ui.add_space(4.0);
     edited.filter(|value| value != stored)
-}
-
-fn align_name(alignment: i32) -> &'static str {
-    match alignment {
-        1 => "Center",
-        2 => "Right",
-        _ => "Left",
-    }
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -3996,29 +3984,76 @@ mod tests {
         for (id, shown, hidden) in [
             (
                 "main",
-                ["Video", "Timing", "Transform", "Picture", "Sound", "Speed"].as_slice(),
-                ["Outline"].as_slice(),
+                [
+                    "Video",
+                    "Audio",
+                    "Speed",
+                    "Animation",
+                    "Adjust",
+                    "Basic",
+                    "Cutout",
+                    "Mask",
+                    "Enhance",
+                    "Position & Size",
+                    "Scale",
+                    "Uniform scale",
+                    "Position",
+                    "Rotate",
+                    "Blend",
+                    "Mode",
+                    "Opacity",
+                    "Stabilize",
+                    "Motion blur",
+                    "Canvas",
+                    "Later",
+                ]
+                .as_slice(),
+                ["Font size", "Stroke", "Volume"].as_slice(),
             ),
             (
                 "sound",
-                &["Audio", "Timing", "Sound", "Speed", "Fade in"],
-                &["Transform", "Picture"],
+                &["Audio", "Speed", "Volume", "Fade in", "Fade out", "Denoise"],
+                &["Position & Size", "Stroke", "Video"],
             ),
             (
                 "words",
-                &["Text", "Words", "Style", "Outline", "Shadow"],
-                &["Sound", "Speed"],
+                &[
+                    "Text",
+                    "Animation",
+                    "Tracking",
+                    "Text to speech",
+                    "Basic",
+                    "Bubble",
+                    "Effects",
+                    "Font",
+                    "Font size",
+                    "Style",
+                    "Case",
+                    "Color",
+                    "Character",
+                    "Alignment",
+                    "Preset style",
+                    "Position & Size",
+                    "Plane rotation",
+                    "Blend",
+                    "Stroke",
+                    "Background",
+                    "Glow",
+                    "Shadow",
+                    "Hello",
+                ],
+                &["Volume", "Rotate", "Mode"],
             ),
-            ("said", &["Caption", "1.50 s", "Style"], &["Sound"]),
+            ("said", &["Text", "1.50 s", "Font size"], &["Volume"]),
             (
                 "look",
-                &["Filter", "Warm", "Timing", "Amount", "Strength"],
-                &["Transform", "Sound", "Style"],
+                &["Filter", "Warm", "Amount", "Temp"],
+                &["Position & Size", "Volume", "Basic"],
             ),
             (
                 "sticker",
-                &["Sticker", "Timing", "Transform", "Rotation"],
-                &["Sound", "Style"],
+                &["Sticker", "Animation", "Opacity"],
+                &["Position & Size", "Volume"],
             ),
         ] {
             shell.select(Some(SegmentId::new(id)));

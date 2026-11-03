@@ -8,11 +8,13 @@
 #![forbid(unsafe_code)]
 
 mod collection;
+mod faces;
 mod kern;
 mod otf;
 mod strike;
 mod ttf;
 
+pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, single_face};
 pub use strike::{BitmapGlyph, BitmapPixels};
 
 use std::cmp::Ordering;

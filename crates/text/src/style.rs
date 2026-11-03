@@ -229,6 +229,8 @@ pub(crate) struct Layers<'a> {
     /// Premultiplied.
     pub(crate) ink: [u8; 4],
     pub(crate) fill: &'a [f32],
+    /// Each pixel's own ink, premultiplied, in place of `ink`.
+    pub(crate) inks: Option<&'a [[u8; 4]]>,
     pub(crate) grown: Option<&'a [f32]>,
     pub(crate) shape: &'a [f32],
     pub(crate) background: Option<Area>,
@@ -242,6 +244,7 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
         style,
         ink,
         fill,
+        inks,
         grown,
         shape,
         background,
@@ -288,6 +291,10 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
         }
     }
     for (index, cover) in fill.iter().enumerate() {
+        let ink = inks
+            .and_then(|inks| inks.get(index))
+            .copied()
+            .unwrap_or(ink);
         over(rgba, index, ink, *cover);
     }
 }

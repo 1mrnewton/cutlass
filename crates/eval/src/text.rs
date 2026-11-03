@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_font_a_hidden_track_and_rich_text_draw_nothing() {
+    fn a_missing_font_a_hidden_track_and_unreadable_rich_text_draw_nothing() {
         let mut missing = text_segment("A", false);
         missing.materials.texts[0].font_path = "other.ttf".to_owned();
         assert!(!ink(&pixels(&missing, 0)));
@@ -554,6 +554,10 @@ mod tests {
         assert!(!ink(&pixels(&invisible, 0)));
 
         assert!(!ink(&pixels(&text_segment("A", true), 0)));
+        assert!(ink(&pixels(
+            &text_segment(r#"{"text":"A","styles":[]}"#, true),
+            0
+        )));
     }
 
     #[test]

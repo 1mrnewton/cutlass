@@ -15,6 +15,7 @@ use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
 use crate::layout::layout;
 use crate::mesh::{GlyphRecord, TextMesh, build};
+use crate::richtext::{Run, fill_at};
 use crate::style::{Area, Layers, Style, compose, premultiply};
 
 /// A text segment that can be sampled at a timeline microsecond.
@@ -25,6 +26,8 @@ pub struct TextSource {
     atlas: Atlas,
     mesh: TextMesh,
     style: Style,
+    /// Ranges of a rich title that paint their own color.
+    runs: Vec<Run>,
     /// The box behind the letters, in picture pixels.
     background: Option<Area>,
     origin_x: f32,
@@ -85,6 +88,7 @@ impl TextSource {
             let _image = atlas.glyph(font, placed.glyph_id)?;
         }
         let mesh = build(material.id.clone(), &laid, &atlas)?;
+        let runs = crate::richtext::read(material)?.runs;
         let style = Style::of(material, glow, laid.font_size)?;
         let (origin_x, origin_y, width, height, background) =
             picture_bounds(&mesh, &style, laid.font_size)?;
@@ -95,6 +99,7 @@ impl TextSource {
             atlas,
             mesh,
             style,
+            runs,
             background,
             origin_x,
             origin_y,
@@ -136,6 +141,9 @@ impl TextSource {
         let mut fill = vec![0.0_f32; pixels];
         let mut grown = self.style.outline.as_ref().map(|_| vec![0.0_f32; pixels]);
         let mut shape = vec![0.0_f32; pixels];
+        // Each pixel's ink, from the letter covering it most, when ranges
+        // paint their own colors.
+        let mut inks = (!self.runs.is_empty()).then(|| vec![[0_u8; 4]; pixels]);
         let grow = self
             .style
             .outline
@@ -157,7 +165,17 @@ impl TextSource {
                 draw.cover(&mut shape, 0.0);
                 continue;
             }
-            draw.cover(&mut fill, 0.0);
+            if let Some(inks) = &mut inks {
+                let ink = premultiply(fill_at(&self.runs, record.source).unwrap_or(self.fill));
+                draw.each(0.0, |index, cover| {
+                    if cover > fill[index] {
+                        fill[index] = cover;
+                        inks[index] = ink;
+                    }
+                });
+            } else {
+                draw.cover(&mut fill, 0.0);
+            }
             if let Some(grown) = &mut grown {
                 draw.cover(grown, grow);
             }
@@ -171,6 +189,7 @@ impl TextSource {
                 style: &self.style,
                 ink: premultiply(self.fill),
                 fill: &fill,
+                inks: inks.as_deref(),
                 grown: grown.as_deref(),
                 shape: &shape,
                 background: self.background,
@@ -234,6 +253,16 @@ impl Mask<'_> {
     /// Keep the larger coverage of each pixel, with a distance field glyph
     /// grown by `grow` pixels.
     fn cover(&self, mask: &mut [f32], grow: f32) {
+        self.each(grow, |index, cover| {
+            if let Some(slot) = mask.get_mut(index) {
+                *slot = slot.max(cover);
+            }
+        });
+    }
+
+    /// Hand each pixel in the picture the glyph covers, by index, to `put`
+    /// with its coverage.
+    fn each(&self, grow: f32, mut put: impl FnMut(usize, f32)) {
         let Self {
             width,
             height,
@@ -267,13 +296,9 @@ impl Mask<'_> {
                 let Some(cover) = cover_at(image, u, v, texels, grow) else {
                     continue;
                 };
-                let Some(slot) = usize::try_from(y * width + x)
-                    .ok()
-                    .and_then(|index| mask.get_mut(index))
-                else {
-                    continue;
-                };
-                *slot = slot.max(cover);
+                if let Ok(index) = usize::try_from(y * width + x) {
+                    put(index, cover);
+                }
             }
         }
     }
@@ -832,6 +857,35 @@ mod tests {
         assert!(!(0..plain_h / 3).any(row));
         shaded.has_shadow = false;
         assert_eq!(picture(&shaded).0, plain_w);
+    }
+
+    #[test]
+    fn a_rich_title_draws_its_words_and_each_range_in_its_color() {
+        let mut rich = material("A");
+        rich.is_rich_text = true;
+        rich.content = r#"{"text":"AA","styles":[{"range":[0,1],"fill":{"content":{"solid":{"color":[1,0,0]}}}},{"range":[1,2],"bold":true}]}"#.to_owned();
+        let (width, _, rgba) = picture(&rich);
+        let plain = material("AA");
+        assert_eq!(width, picture(&plain).0);
+        // The first letter is red; the second keeps the title's white.
+        let (red, white) = (
+            has(&rgba, [255, 0, 0, 255]),
+            has(&rgba, [255, 255, 255, 255]),
+        );
+        assert!(red && white, "{red} {white}");
+        let column = |x: u32| {
+            (0..rgba.len() as u32 / 4 / width)
+                .map(|y| ((y * width + x) * 4) as usize)
+                .any(|at| rgba[at..at + 4] == [255, 0, 0, 255])
+        };
+        assert!((0..width / 2).any(column));
+        assert!(!(width / 2..width).any(column));
+
+        rich.content = "AA".to_owned();
+        assert!(matches!(
+            TextSource::open(TTF, None, &rich, &segment()),
+            Err(TextError::RichTextCommands)
+        ));
     }
 
     #[test]

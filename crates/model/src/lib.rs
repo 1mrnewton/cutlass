@@ -39,12 +39,12 @@ pub use materials::{
     MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft,
     MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef,
     MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,
-    MaterialVideoEffect, Materials, RawMaterial, SpeedPoint, StickerAnimation, TimeMarkItem,
-    VisibleBeat, VisibleMark, WordColumns, beat_timeline_time, blend_extents, blend_window,
-    clip_mark_time, constant_target_duration, curve_speed_factor, curve_target_duration, new_beats,
-    new_time_mark, referenced_time_marks, segment_beats, segment_bloom, segment_time_mark,
-    set_time_mark_items, set_user_beats, source_time_at, time_mark_items, track_holds_beats,
-    user_beats, visible_beats, visible_marks,
+    MaterialVideoEffect, Materials, RawMaterial, RichFill, RichPaint, RichSolid, RichStyle,
+    RichText, SpeedPoint, StickerAnimation, TimeMarkItem, VisibleBeat, VisibleMark, WordColumns,
+    beat_timeline_time, blend_extents, blend_window, clip_mark_time, constant_target_duration,
+    curve_speed_factor, curve_target_duration, new_beats, new_time_mark, referenced_time_marks,
+    segment_beats, segment_bloom, segment_time_mark, set_time_mark_items, set_user_beats,
+    source_time_at, time_mark_items, track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};

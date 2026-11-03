@@ -65,7 +65,8 @@ pub fn layout(font: &Font<'_>, material: &MaterialText) -> Result<Layout, TextEr
     if material.typesetting != 0 {
         return Err(TextError::Typesetting);
     }
-    let text = crate::richtext::plain(material)?;
+    let words = crate::richtext::read(material)?;
+    let text = words.text.as_ref();
     let alignment = alignment(material.alignment)?;
     let font_size = positive_f32(material.font_size)?;
     let letter_spacing = finite_f32(material.letter_spacing)?;

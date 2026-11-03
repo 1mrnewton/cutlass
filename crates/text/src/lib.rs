@@ -33,7 +33,8 @@ use cutlass_font::FontError;
 pub enum TextError {
     /// The font file could not be read, or a glyph id is not in the face.
     Font(FontError),
-    /// The material is marked as rich text. Commands are not read in this pass.
+    /// The material is marked as rich text and its content does not read as
+    /// rich text.
     RichTextCommands,
     /// Typesetting is not the horizontal run this pass lays out.
     Typesetting,
@@ -53,7 +54,7 @@ impl fmt::Display for TextError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Font(error) => write!(formatter, "{error}"),
-            Self::RichTextCommands => formatter.write_str("rich-text commands are not read"),
+            Self::RichTextCommands => formatter.write_str("rich text content does not read"),
             Self::Typesetting => formatter.write_str("vertical text is not laid out"),
             Self::Alignment => formatter.write_str("text alignment is not left, center, or right"),
             Self::Measure => formatter.write_str("text size, spacing, or width is not usable"),

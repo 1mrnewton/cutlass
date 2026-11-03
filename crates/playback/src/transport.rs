@@ -223,7 +223,7 @@ impl Transport {
         } else if wrapped && self.stream.is_some() {
             self.start(program, playhead, end);
         } else if self.stream.is_some() {
-            if self.mixer.as_ref().and_then(Mixer::revision) != Some(program.revision) {
+            if self.mix_revision() != Some(program.revision) {
                 self.start(program, playhead, end);
             }
         } else {
@@ -236,6 +236,12 @@ impl Transport {
     #[must_use]
     pub fn is_streaming(&self) -> bool {
         self.stream.is_some()
+    }
+
+    /// The draft revision the mixer is playing, if any.
+    #[must_use]
+    pub fn mix_revision(&self) -> Option<u64> {
+        self.mixer.as_ref().and_then(Mixer::revision)
     }
 
     /// Frames of the stream the device has played.

@@ -22,7 +22,7 @@ use cutlass_editor::{
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
-use cutlass_eval::{Heard, ReaderFactory, SceneError, scene_cuts, source_on_timeline};
+use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
     Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
     MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
@@ -30,10 +30,7 @@ use cutlass_model::{
     linkage_from_biz, segment_beats, segment_time_mark, source_time_at, time_mark_items,
     track_holds_beats, user_beats, visible_beats, visible_marks,
 };
-use cutlass_playback::{
-    AudioHost, AudioOutput, FrameCache, MixJob, Mixer, PLAY_FRAMES, PREVIEW_RATE, PreviewMix,
-    preview_frames, queue_mix,
-};
+use cutlass_playback::{AudioHost, FrameCache, PLAY_FRAMES, Program, Transport};
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
@@ -409,52 +406,11 @@ pub struct MovePreview {
 
 /// How far ahead playback opens clips and decodes their first pictures.
 const PREROLL: Micros = Micros(1_000_000);
-/// How far the picture may drift from the heard audio before it jumps to it.
-const AUDIO_SNAP: i64 = 60_000;
-/// The share of the drift corrected each tick. Small enough that the device's
-/// buffer-sized clock steps do not reach the picture.
-const AUDIO_PULL: i64 = 16;
-
-/// The playhead after one tick: moved by the frame's elapsed time, then
-/// pulled a little toward the heard audio, or onto it when far off.
-fn follow_audio(wall: i64, heard: i64) -> i64 {
-    let drift = heard.saturating_sub(wall);
-    if drift.abs() > AUDIO_SNAP {
-        heard
-    } else {
-        wall.saturating_add(drift / AUDIO_PULL)
-    }
-}
-
-/// The audio stream playback follows. The playhead is where its heard
-/// frames reach, so the picture follows the sound. The mixer thread fills it.
-#[derive(Clone, Copy, Debug)]
-struct AudioStream {
-    /// Timeline time of the first streamed frame.
-    start: Micros,
-    /// The device's played count when this stream started.
-    played: u64,
-    /// The device has played this stream's first frame.
-    heard: bool,
-}
-
-impl AudioStream {
-    fn time_at(self, frames: u64) -> Micros {
-        let micros = i128::from(frames) * 1_000_000 / i128::from(PREVIEW_RATE);
-        Micros(
-            self.start
-                .0
-                .saturating_add(i64::try_from(micros).unwrap_or(i64::MAX)),
-        )
-    }
-}
-
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
     readers: ReaderFactory,
-    output: AudioOutput,
-    heard: Heard,
+    transport: Transport,
     preview_cache: RefCell<FrameCache>,
     settings: Settings,
     session: Option<Session>,
@@ -465,10 +421,6 @@ pub struct Shell {
     path: Option<PathBuf>,
     playhead: Micros,
     playing: bool,
-    /// Present while playing on a device with a stream clock.
-    stream: Option<AudioStream>,
-    /// Mixes the stream on its own thread. Started on the first play.
-    mixer: Option<Mixer>,
     pixel_size: f64,
     /// Left edge of the lanes, in microseconds.
     view_origin: i64,
@@ -560,8 +512,7 @@ impl Shell {
             readers: crate::readers::readers_with(
                 crate::register_codecs_with(&settings.hardware).0,
             ),
-            output: AudioOutput::open(AudioHost::Software),
-            heard: Heard::new(),
+            transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
             settings,
             session: None,
@@ -570,8 +521,6 @@ impl Shell {
             path: None,
             playhead: Micros(0),
             playing: false,
-            stream: None,
-            mixer: None,
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
             lane_width: 800.0,
@@ -951,7 +900,7 @@ impl Shell {
         self.cancel_clip_drag();
         self.fitted = false;
         self.notice.clear();
-        self.heard.clear();
+        self.transport.forget_files();
         self.silence();
         Ok(())
     }
@@ -1017,19 +966,17 @@ impl Shell {
     /// Software output and a live device are open. Linux and a missing device
     /// are not. Pictures still advance either way.
     pub fn audio_output_open(&self) -> bool {
-        self.output.gap().is_none()
+        self.transport.gap().is_none()
     }
 
     /// Replace the software buffer with the output for `host`.
     pub fn open_preview_audio(&mut self, host: AudioHost) {
-        self.stream = None;
-        self.mixer = None;
-        self.output = AudioOutput::open(host);
+        self.transport.open(host);
     }
 
     #[cfg(test)]
     pub(crate) fn queued_preview(&self) -> &[u8] {
-        self.output.queued()
+        self.transport.output().queued()
     }
 
     pub fn open_folder(&mut self, path: &Path) -> Result<(), ShellError> {
@@ -1072,7 +1019,7 @@ impl Shell {
         self.pixel_size = opening_pixel_size(rate);
         self.fitted = false;
         self.notice.clear();
-        self.heard.clear();
+        self.transport.forget_files();
         self.silence();
         Ok(())
     }
@@ -1276,87 +1223,27 @@ impl Shell {
 
     /// Stop every sound: the stream and the scrub slice.
     fn silence(&mut self) {
-        self.stream = None;
-        if let Some(mixer) = &self.mixer {
-            mixer.stop();
-        }
-        self.output.clear_stream();
-        self.output.queue(&[]);
+        self.transport.silence();
     }
 
-    /// Stream audio from the playhead on the mixer thread. A host with no
-    /// stream clock queues one slice per tick instead.
+    /// Stream audio from the playhead. A host with no stream clock queues
+    /// one slice per tick instead.
     fn start_stream(&mut self) {
-        self.output.clear_stream();
-        let (Some(clock), Some(session)) = (self.output.clock(), self.session.as_ref()) else {
-            self.stream = None;
-            self.queue_preview(PLAY_FRAMES);
+        let end = self.cut_duration();
+        let Some(session) = self.session.as_ref() else {
+            self.transport.silence();
             return;
         };
-        if self.mixer.is_none() {
-            self.mixer = Mixer::start(&self.output, self.readers.clone());
-        }
-        let Some(mixer) = &self.mixer else {
-            self.stream = None;
-            self.queue_preview(PLAY_FRAMES);
-            return;
-        };
-        mixer.play(MixJob {
-            draft: session.draft().clone(),
-            revision: session.revision(),
-            root: self.path.clone(),
-            start: self.playhead,
-            end: self.cut_duration(),
-        });
-        self.stream = Some(AudioStream {
-            start: self.playhead,
-            played: clock.played,
-            heard: false,
-        });
-    }
-
-    /// Restart the stream from the playhead when the draft changed while
-    /// playing, so the mixer hears the edit.
-    fn follow_edits(&mut self) {
-        let (Some(mixer), Some(session)) = (&self.mixer, self.session.as_ref()) else {
-            return;
-        };
-        if mixer.revision() != Some(session.revision()) {
-            self.start_stream();
-        }
-    }
-
-    /// Where the stream's heard frames reach, or `None` without a stream.
-    #[cfg(test)]
-    fn heard_time(&self) -> Option<Micros> {
-        let stream = self.stream?;
-        Some(stream.time_at(self.heard_frames()?))
-    }
-
-    /// Frames of the stream the device has played.
-    fn heard_frames(&self) -> Option<u64> {
-        let stream = self.stream?;
-        let clock = self.output.clock()?;
-        let mixed = self.mixer.as_ref()?.mixed();
-        Some(clock.heard().saturating_sub(stream.played).min(mixed))
-    }
-
-    /// The playhead after `elapsed` while streaming. Before the device plays
-    /// the stream's first frame the picture holds, so it starts with the
-    /// sound. On that first frame it lands on the heard time, and after that
-    /// it moves by `elapsed` and leans toward the audio.
-    fn streamed_playhead(&mut self, wall: i64) -> Option<i64> {
-        let heard_frames = self.heard_frames()?;
-        let stream = self.stream.as_mut()?;
-        let heard = stream.time_at(heard_frames).0;
-        if heard_frames == 0 {
-            return Some(stream.start.0);
-        }
-        if !stream.heard {
-            stream.heard = true;
-            return Some(heard);
-        }
-        Some(follow_audio(wall, heard))
+        self.transport.start(
+            Program {
+                draft: session.draft(),
+                revision: session.revision(),
+                root: self.path.as_deref(),
+                readers: &self.readers,
+            },
+            self.playhead,
+            end,
+        );
     }
 
     pub fn toggle_play(&mut self) {
@@ -1393,67 +1280,55 @@ impl Shell {
         if !self.playing || elapsed <= 0 {
             return;
         }
-        let end = self.cut_duration().0;
-        if end <= 0 {
+        let end = self.cut_duration();
+        let Some(session) = self.session.as_ref() else {
             self.playing = false;
-            self.playhead = Micros(0);
             self.silence();
             return;
-        }
-        let wall = self.playhead.0.saturating_add(elapsed);
-        let mut next = match self.streamed_playhead(wall) {
-            Some(streamed) => streamed.max(self.playhead.0),
-            None => wall,
         };
-        let mut wrapped = false;
-        if next >= end {
-            if self.settings.playback.loop_playback {
-                next %= end;
-                wrapped = true;
-            } else {
-                next = end;
-                self.playing = false;
-            }
+        let ticked = self.transport.tick(
+            Program {
+                draft: session.draft(),
+                revision: session.revision(),
+                root: self.path.as_deref(),
+                readers: &self.readers,
+            },
+            self.playhead,
+            elapsed,
+            end,
+            self.settings.playback.loop_playback,
+        );
+        self.playhead = ticked.playhead;
+        self.playing = ticked.playing;
+        if end.0 <= 0 {
+            return;
         }
-        self.playhead = Micros(next);
         self.preroll();
-        if !self.playing {
-            self.silence();
-        } else if wrapped && self.stream.is_some() {
-            self.start_stream();
-        } else if self.stream.is_some() {
-            self.follow_edits();
-        } else {
-            self.queue_preview(preview_frames(elapsed));
-        }
         self.reveal_playhead();
     }
 
     #[cfg(test)]
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
-        self.mixer = None;
+        self.transport.forget_mixer();
         self.readers = readers;
         self.preview_cache.borrow_mut().clear();
-        self.heard.clear();
+        self.transport.forget_files();
     }
 
     fn queue_preview(&mut self, frames: u32) {
         let Some(session) = self.session.as_ref() else {
-            self.output.queue(&[]);
+            self.transport.silence();
             return;
         };
-        let root = self.path.clone();
-        queue_mix(
-            &mut self.output,
-            PreviewMix {
+        self.transport.queue(
+            Program {
                 draft: session.draft(),
                 revision: session.revision(),
-                time: self.playhead,
-                frames,
+                root: self.path.as_deref(),
                 readers: &self.readers,
-                heard: &mut self.heard,
-                root: root.as_deref(),
             },
+            self.playhead,
+            frames,
         );
     }
 
@@ -5872,23 +5747,6 @@ mod tests {
     }
 
     #[test]
-    fn the_playhead_moves_by_elapsed_time_and_leans_toward_the_audio() {
-        assert_eq!(super::follow_audio(1_000_000, 1_000_000), 1_000_000);
-        assert_eq!(super::follow_audio(1_000_000, 1_016_000), 1_001_000);
-        assert_eq!(super::follow_audio(1_000_000, 984_000), 999_000);
-        assert_eq!(super::follow_audio(1_000_000, 1_100_000), 1_100_000);
-        let stream = super::AudioStream {
-            start: Micros(2_000_000),
-            played: 0,
-            heard: true,
-        };
-        assert_eq!(
-            stream.time_at(u64::from(cutlass_playback::MIX_WINDOW)),
-            Micros(2_020_000)
-        );
-    }
-
-    #[test]
     fn a_far_jump_shows_the_last_picture_until_the_asked_one_decodes() {
         let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../local-files/12471039-uhd_3840_2160_24fps.mp4");
@@ -5963,13 +5821,13 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop.open_preview_audio(AudioHost::current());
-        if desktop.output.clock().is_none() {
+        if desktop.transport.output().clock().is_none() {
             eprintln!("skipped: no audio device");
             return;
         }
         desktop.seek(Micros(1_000_000));
         desktop.play();
-        assert!(desktop.mixer.is_some());
+        assert!(desktop.transport.is_streaming());
         // Each tick passes the time that really went by, as the window does.
         let mut last = std::time::Instant::now();
         let mut step = |desktop: &mut Shell| {
@@ -5984,7 +5842,7 @@ mod tests {
             assert!(ticks < 120, "the stream never started");
             step(&mut desktop);
             ticks += 1;
-            if desktop.heard_frames() != Some(0) {
+            if desktop.transport.heard_frames() != Some(0) {
                 break;
             }
             // Nothing heard after this tick, so nothing was heard during it.
@@ -5993,7 +5851,7 @@ mod tests {
         for _ in 0..30 {
             step(&mut desktop);
         }
-        let heard = desktop.heard_time().unwrap();
+        let heard = desktop.transport.heard_time().unwrap();
         assert!(desktop.playhead.0 > 1_300_000, "playback moved");
         assert!(
             (desktop.playhead.0 - heard.0).abs() < 10_000,
@@ -6007,15 +5865,9 @@ mod tests {
             .unwrap();
         step(&mut desktop);
         let revision = desktop.session.as_ref().unwrap().revision();
-        assert_eq!(
-            desktop
-                .mixer
-                .as_ref()
-                .and_then(cutlass_playback::Mixer::revision),
-            Some(revision)
-        );
+        assert_eq!(desktop.transport.mix_revision(), Some(revision));
         desktop.pause();
-        assert!(desktop.stream.is_none());
+        assert!(!desktop.transport.is_streaming());
     }
 
     #[test]

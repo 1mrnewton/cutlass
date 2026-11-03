@@ -69,7 +69,8 @@ final class EditorModel {
     private var coasting: Task<Void, Never>?
     /// The window the ticks and tiles cover, and the edit they were read for.
     private var stripWindow: (from: Int64, to: Int64, pixelSize: Double, edit: Int)?
-    private var edits = 0
+    /// Counts the project's changes, so a panel showing a clip rereads it.
+    private(set) var edits = 0
     private var stripRetry: Task<Void, Never>?
     private var fetching: Set<String> = []
 
@@ -310,6 +311,12 @@ final class EditorModel {
         edit { try $0.setTextFont(clipId: clip, face: face) }
     }
 
+    /// Change how `clip` looks. Changes while `live` join one undo step and
+    /// are saved when the last one, not live, arrives.
+    func styleText(_ clip: String, _ change: TextStyleChange, live: Bool) {
+        edit(save: !live) { try $0.styleText(clipId: clip, change: change, live: live) }
+    }
+
     /// What `clip` says, or nil when it is not a text clip.
     func text(of clip: String) -> TextInfo? {
         try? editor?.text(clipId: clip)
@@ -448,11 +455,11 @@ final class EditorModel {
 
     /// Run one edit, save the project, and redraw. A refusal shows its reason
     /// and leaves the project as it was.
-    private func edit(_ change: (Editor) throws -> Void) {
+    private func edit(save: Bool = true, _ change: (Editor) throws -> Void) {
         guard let editor else { return }
         do {
             try change(editor)
-            try editor.save()
+            if save { try editor.save() }
         } catch {
             show(error)
         }

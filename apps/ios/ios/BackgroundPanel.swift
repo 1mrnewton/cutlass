@@ -64,10 +64,12 @@ struct BackgroundPanel: View {
     }
 }
 
-private let tile: CGFloat = 52
+let tile: CGFloat = 52
 
-private struct NoneTile: View {
+/// A tile that takes a color or blur off.
+struct NoneTile: View {
     let chosen: Bool
+    var size: CGFloat = tile
     let tap: () -> Void
 
     var body: some View {
@@ -75,7 +77,7 @@ private struct NoneTile: View {
             Image(systemName: "nosign")
                 .font(.system(size: 22))
                 .foregroundStyle(Palette.muted)
-                .frame(width: tile, height: tile)
+                .frame(width: size, height: size)
                 .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(ChosenRing(chosen: chosen))
         }
@@ -84,16 +86,18 @@ private struct NoneTile: View {
     }
 }
 
-private struct SwatchTile: View {
+/// A tile of one color, ringed when chosen.
+struct SwatchTile: View {
     let color: String
     let chosen: Bool
+    var size: CGFloat = tile
     let tap: () -> Void
 
     var body: some View {
         Button(action: tap) {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(hex: color))
-                .frame(width: tile, height: tile)
+                .frame(width: size, height: size)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.15))
                 )

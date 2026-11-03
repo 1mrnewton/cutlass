@@ -217,7 +217,9 @@ fn walk(folder: &Path, depth: usize, found: &mut Vec<Found>) {
 }
 
 /// The faces of a `.ttf`, `.otf` or `.ttc` file under the size cap. A file
-/// that does not read as fonts adds nothing.
+/// that does not read as fonts adds nothing, and neither does a hidden file
+/// or a face whose name starts with a dot, which systems keep for their own
+/// interface.
 fn faces_in(path: &Path, found: &mut Vec<Found>) {
     let extension = path
         .extension()
@@ -226,7 +228,7 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
     if !matches!(extension.as_deref(), Some("ttf" | "otf" | "ttc")) {
         return;
     }
-    let Some(name) = file_name(path) else {
+    let Some(name) = file_name(path).filter(|name| !name.starts_with('.')) else {
         return;
     };
     let Ok(mut file) = File::open(path) else {
@@ -247,6 +249,13 @@ fn faces_in(path: &Path, found: &mut Vec<Found>) {
         return;
     };
     for face in faces {
+        if face
+            .full_name
+            .as_deref()
+            .is_some_and(|full| full.starts_with('.'))
+        {
+            continue;
+        }
         let (name, label) = match face.index {
             None => (name.clone(), face_label(&name)),
             Some(index) => (
@@ -367,6 +376,29 @@ mod tests {
         // The file name alone or a face past the end names nothing.
         assert!(table.face("Both.ttc").is_none());
         assert!(table.face("Both.ttc#2").is_none());
+    }
+
+    #[test]
+    fn hidden_files_and_dot_named_system_faces_stay_out() {
+        let folder = Folder::new("hidden");
+        std::fs::write(folder.0.join(".Hidden.ttf"), SAMPLE).unwrap();
+        let mut private = SAMPLE_TTC.to_vec();
+        let utf16: Vec<u8> = "Cutlass"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        let dotted: Vec<u8> = ".utlass"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        for (from, to) in [(b"Cutlass".to_vec(), b".utlass".to_vec()), (utf16, dotted)] {
+            while let Some(at) = private.windows(from.len()).position(|w| w == from) {
+                private[at..at + to.len()].copy_from_slice(&to);
+            }
+        }
+        std::fs::write(folder.0.join("System.ttc"), &private).unwrap();
+        std::fs::write(folder.0.join("Shown.ttf"), SAMPLE).unwrap();
+        assert_eq!(FaceTable::scan(&[&folder.0]).names(), ["Shown.ttf"]);
     }
 
     #[test]

@@ -497,6 +497,22 @@ fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
+    typealias FfiType = Double
+    typealias SwiftType = Double
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Double {
+        return try lift(readDouble(&buf))
+    }
+
+    public static func write(_ value: Double, into buf: inout [UInt8]) {
+        writeDouble(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -638,9 +654,6 @@ public protocol EditorProtocol: AnyObject, Sendable {
     
     func redo() throws 
     
-    /**
-     * Remove one clip.
-     */
     func remove(clipId: String) throws 
     
     /**
@@ -653,6 +666,17 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * goes on from there.
      */
     func seek(timeUs: Int64) throws 
+    
+    /**
+     * Play a clip at a constant speed, as one undo step. Its length follows.
+     */
+    func setSpeed(clipId: String, speed: Double) throws 
+    
+    /**
+     * Remove one clip.
+     * Set a clip's linear gain, as one undo step. Below zero is refused.
+     */
+    func setVolume(clipId: String, volume: Double) throws 
     
     /**
      * Cut a clip at `at_us`. Returns the right piece's id.
@@ -869,9 +893,6 @@ open func redo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift
 }
 }
     
-    /**
-     * Remove one clip.
-     */
 open func remove(clipId: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_remove(
@@ -901,6 +922,33 @@ open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEdi
     uniffi_cutlass_ffi_bindings_fn_method_editor_seek(
             self.uniffiCloneHandle(),
         FfiConverterInt64.lower(timeUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Play a clip at a constant speed, as one undo step. Its length follows.
+     */
+open func setSpeed(clipId: String, speed: Double)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_speed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterDouble.lower(speed),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Remove one clip.
+     * Set a clip's linear gain, as one undo step. Below zero is refused.
+     */
+open func setVolume(clipId: String, volume: Double)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterDouble.lower(volume),uniffiCallStatus
     )
 }
 }
@@ -1015,14 +1063,30 @@ public struct Clip: Equatable, Hashable {
     public var name: String
     public var startUs: Int64
     public var durationUs: Int64
+    /**
+     * Linear gain: 1 is unity and 0 is silence.
+     */
+    public var volume: Double
+    /**
+     * Constant speed: 2 plays twice as fast.
+     */
+    public var speed: Double
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, name: String, startUs: Int64, durationUs: Int64) {
+    public init(id: String, name: String, startUs: Int64, durationUs: Int64, 
+        /**
+         * Linear gain: 1 is unity and 0 is silence.
+         */volume: Double, 
+        /**
+         * Constant speed: 2 plays twice as fast.
+         */speed: Double) {
         self.id = id
         self.name = name
         self.startUs = startUs
         self.durationUs = durationUs
+        self.volume = volume
+        self.speed = speed
     }
 
     
@@ -1044,7 +1108,9 @@ public struct FfiConverterTypeClip: FfiConverterRustBuffer {
                 id: FfiConverterString.read(from: &buf), 
                 name: FfiConverterString.read(from: &buf), 
                 startUs: FfiConverterInt64.read(from: &buf), 
-                durationUs: FfiConverterInt64.read(from: &buf)
+                durationUs: FfiConverterInt64.read(from: &buf), 
+                volume: FfiConverterDouble.read(from: &buf), 
+                speed: FfiConverterDouble.read(from: &buf)
         )
     }
 
@@ -1053,6 +1119,8 @@ public struct FfiConverterTypeClip: FfiConverterRustBuffer {
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterInt64.write(value.startUs, into: &buf)
         FfiConverterInt64.write(value.durationUs, into: &buf)
+        FfiConverterDouble.write(value.volume, into: &buf)
+        FfiConverterDouble.write(value.speed, into: &buf)
     }
 }
 
@@ -1620,13 +1688,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_redo() != 49063) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() != 50176) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_remove() != 65039) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_save() != 50350) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed() != 10406) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume() != 9150) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {

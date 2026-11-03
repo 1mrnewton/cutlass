@@ -323,6 +323,16 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_save(uint64_t ptr, RustCallSta
 void uniffi_cutlass_ffi_bindings_fn_method_editor_seek(uint64_t ptr, int64_t time_us, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_SPEED
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_SPEED
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_speed(uint64_t ptr, RustBuffer clip_id, double speed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_VOLUME
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_VOLUME
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(uint64_t ptr, RustBuffer clip_id, double volume, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SPLIT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SPLIT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
@@ -711,6 +721,18 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_save(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SEEK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SEEK
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_seek(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_SPEED
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_SPEED
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_VOLUME
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_VOLUME
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume(void
     
 );
 #endif

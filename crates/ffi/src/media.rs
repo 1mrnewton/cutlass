@@ -143,6 +143,7 @@ pub(crate) fn append_requests(
         track_id,
         segment: Box::new(segment),
     });
+    requests.extend(cutlass_session::follow_first_picture(draft, material_id));
     Ok((requests, segment_id))
 }
 

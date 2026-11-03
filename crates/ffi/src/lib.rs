@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod cache;
+mod canvas;
 mod codecs;
 mod effect;
 mod error;
@@ -23,6 +24,7 @@ mod text;
 mod timeline;
 
 pub use cache::ResourceCache;
+pub use canvas::{PhoneRatio, phone_ratios};
 pub use codecs::{decoders, readers};
 pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
@@ -298,6 +300,30 @@ impl PhoneHost {
         let (requests, segment_id) = media::append_requests(self.draft(), material_id)?;
         self.apply(self.revision(), &requests)?;
         Ok(segment_id)
+    }
+
+    /// The canvas ratios a picker offers, Original first, each with the
+    /// frame it gives this project.
+    pub fn ratios(&self) -> Vec<PhoneRatio> {
+        phone_ratios(self.draft())
+    }
+
+    /// Give the canvas `ratio`, as one undo step. A canvas that already
+    /// has that ratio and frame is not a step.
+    pub fn set_ratio(&mut self, ratio: &str) -> Result<(), FfiError> {
+        let request = cutlass_session::ratio_request(self.draft(), ratio)?;
+        let canvas = &self.draft().canvas_config;
+        if let Request::SetCanvasSize {
+            width,
+            height,
+            ratio,
+        } = &request
+            && (canvas.width, canvas.height, canvas.ratio.as_str()) == (*width, *height, ratio)
+        {
+            return Ok(());
+        }
+        self.apply(self.revision(), &[request])?;
+        Ok(())
     }
 
     /// The composited picture at `time`, reading media from the project folder.
@@ -868,6 +894,48 @@ mod tests {
         host.undo().unwrap();
         assert_eq!(host.draft().tracks[0].segments.len(), 1);
         assert!(host.revision() > revision);
+    }
+
+    #[test]
+    fn the_first_picture_sizes_an_original_canvas_and_a_ratio_is_one_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let tall = crate::Probed::Video {
+            meta: cutlass_model::MetaType::Photo,
+            width: 1_080,
+            height: 1_920,
+            duration: 1_000_000,
+        };
+        let first = host.import_probed(&fixture("pattern.png"), tall).unwrap();
+        host.append(&first).unwrap();
+        let canvas = |host: &PhoneHost| {
+            let canvas = &host.draft().canvas_config;
+            (canvas.width, canvas.height, canvas.ratio.clone())
+        };
+        assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
+        let second = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        host.append(&second).unwrap();
+        assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
+
+        host.set_ratio("16:9").unwrap();
+        assert_eq!(canvas(&host), (1_920, 1_080, "16:9".to_owned()));
+        let revision = host.revision();
+        host.set_ratio("16:9").unwrap();
+        assert_eq!(host.revision(), revision);
+        assert!(
+            host.ratios()
+                .iter()
+                .any(|ratio| ratio.chosen && ratio.ratio == "16:9")
+        );
+        assert!(host.set_ratio("custom").is_err());
+
+        host.set_ratio("original").unwrap();
+        assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
+        host.undo().unwrap();
+        assert_eq!(canvas(&host), (1_920, 1_080, "16:9".to_owned()));
     }
 
     #[test]

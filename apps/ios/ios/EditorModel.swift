@@ -27,10 +27,14 @@ final class EditorModel {
     private(set) var isImporting = false
     private(set) var notice: Notice?
     var selectedClip: String? {
-        didSet { if selectedClip != oldValue { refreshStage() } }
+        didSet { if selectedClip != oldValue { refreshStage(now: true) } }
     }
-    /// The selected picture clip's box on the canvas. Text and sound have none.
+    /// The selected picture clip's box on the canvas, as the picture on
+    /// screen shows it. Text and sound have none.
     private(set) var stage: Stage?
+    /// The box for the draft as it is now. After an edit it waits for the
+    /// picture drawn from that draft, so the box never runs ahead of it.
+    private var placed: (clip: String?, stage: Stage?) = (nil, nil)
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -393,9 +397,10 @@ final class EditorModel {
     func moveStage(shift: CGSize, pinch: Double, turn: Double) {
         guard let editor else { return }
         do {
-            stage = try editor.stageMove(
+            let moved = try editor.stageMove(
                 shiftX: shift.width, shiftY: shift.height, pinch: pinch, turn: turn
             )
+            placed = (selectedClip, moved)
         } catch {
             show(error)
             return
@@ -409,12 +414,12 @@ final class EditorModel {
         edit { _ in try editor.stageEnd() }
     }
 
-    private func refreshStage() {
-        guard let editor, let clip = selectedClip else {
-            stage = nil
-            return
-        }
-        stage = try? editor.stage(clipId: clip)
+    /// Read the selected box again. `now` shows it at once, for a new
+    /// selection; otherwise it waits for the next picture.
+    private func refreshStage(now: Bool = false) {
+        let box = selectedClip.flatMap { clip in try? editor?.stage(clipId: clip) }
+        placed = (selectedClip, box)
+        if now { stage = box }
     }
 
     /// Put a main clip at `place` in the main row's order.
@@ -555,6 +560,7 @@ final class EditorModel {
         guard !drawing, let editor, let time = waiting else { return }
         waiting = nil
         drawing = true
+        let box = placed
         Task.detached(priority: .userInitiated) {
             let result = Result { try editor.frame(timeUs: time) }
             await MainActor.run {
@@ -567,6 +573,7 @@ final class EditorModel {
                 case let .failure(error):
                     self.show(error)
                 }
+                if box.clip == self.selectedClip { self.stage = box.stage }
                 self.drawing = false
                 if self.waiting != nil { self.draw() }
             }

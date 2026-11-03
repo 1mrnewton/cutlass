@@ -973,48 +973,75 @@ fn access_packet(packet: &cutlass_codec::Packet) -> AccessPacket {
     }
 }
 
+/// The first picture and the first sound stream this host can decode. A
+/// stream it cannot, such as the spatial-audio track beside the AAC one in a
+/// recent iPhone movie, is passed over. A file with nothing decodable is the
+/// first stream's error.
 fn open_pipes(
     factory: &DecodeFactory,
     demux: &dyn Demux,
 ) -> Result<(Option<Pipe>, Option<Pipe>), EngineError> {
     let mut picture = None;
     let mut audio = None;
+    let mut first_error = None;
     for stream in demux.streams() {
         let sized = stream.params().size();
         let rate = stream.params().sample_rate();
         if sized.is_none() && rate.is_none() {
             continue;
         }
-        let codec = stream.params().codec();
-        let StreamCodec::Known(id) = codec else {
-            return Err(EngineError::UnknownCodec {
-                tag: unknown_tag(codec),
-            });
+        let wanted = if sized.is_some() {
+            picture.is_none()
+        } else {
+            audio.is_none()
         };
-        let params = params_for(
-            stream.params().extradata(),
-            sized,
-            rate,
-            stream.params().channels(),
-            *id,
-        )?;
-        let decoder = match factory.open(&params) {
-            Ok(decoder) => decoder,
-            Err(CodecError::Unsupported { .. }) => {
-                return Err(EngineError::NoDecoder {
-                    codec: format!("{id:?}"),
-                });
+        if !wanted {
+            continue;
+        }
+        match open_pipe(factory, stream) {
+            Ok(pipe) if sized.is_some() => picture = Some(pipe),
+            Ok(pipe) => audio = Some(pipe),
+            Err(error) => {
+                first_error.get_or_insert(error);
             }
-            Err(error) => return Err(EngineError::Codec(error)),
-        };
-        let pipe = Pipe::new(stream.id().get(), stream.timescale(), decoder);
-        if sized.is_some() && picture.is_none() {
-            picture = Some(pipe);
-        } else if rate.is_some() && audio.is_none() {
-            audio = Some(pipe);
         }
     }
+    if picture.is_none()
+        && audio.is_none()
+        && let Some(error) = first_error
+    {
+        return Err(error);
+    }
     Ok((picture, audio))
+}
+
+fn open_pipe(
+    factory: &DecodeFactory,
+    stream: &cutlass_container::Stream,
+) -> Result<Pipe, EngineError> {
+    let codec = stream.params().codec();
+    let StreamCodec::Known(id) = codec else {
+        return Err(EngineError::UnknownCodec {
+            tag: unknown_tag(codec),
+        });
+    };
+    let params = params_for(
+        stream.params().extradata(),
+        stream.params().size(),
+        stream.params().sample_rate(),
+        stream.params().channels(),
+        *id,
+    )?;
+    let decoder = match factory.open(&params) {
+        Ok(decoder) => decoder,
+        Err(CodecError::Unsupported { .. }) => {
+            return Err(EngineError::NoDecoder {
+                codec: format!("{id:?}"),
+            });
+        }
+        Err(error) => return Err(EngineError::Codec(error)),
+    };
+    Ok(Pipe::new(stream.id().get(), stream.timescale(), decoder))
 }
 
 fn params_for(

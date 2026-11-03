@@ -2776,6 +2776,10 @@ fn paint_film(
 const BAR_PITCH: f32 = 2.0;
 /// The quietest level a bar shows, in decibels below full scale.
 const WAVE_FLOOR_DB: f32 = 48.0;
+/// A bar this high in the band wears an orange cap.
+const WAVE_LOUD: f32 = 0.9;
+/// A level this close to full scale clips, and its bar wears a red tip.
+const WAVE_CLIPPED: f32 = 0.999;
 
 /// How much of the band a level fills: decibels from the floor up to full
 /// scale, the way CapCut's speech sits high in the band.
@@ -2812,13 +2816,23 @@ fn paint_wave(
             continue;
         }
         let left = clip_left + slot as f32 * BAR_PITCH;
+        let top = floor - height;
         mesh.add_colored_rect(
-            Rect::from_min_max(
-                Pos2::new(left, floor - height),
-                Pos2::new(left + 1.0, floor),
-            ),
+            Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 1.0, floor)),
             bar,
         );
+        let cap = |from: f32, color: Color32, mesh: &mut egui::Mesh| {
+            mesh.add_colored_rect(
+                Rect::from_min_max(Pos2::new(left, from), Pos2::new(left + 1.0, from + 1.0)),
+                color,
+            );
+        };
+        if level >= WAVE_CLIPPED {
+            cap(top, tokens::WAVE_CLIPPED, &mut mesh);
+            cap(top + 1.0, tokens::WAVE_LOUD, &mut mesh);
+        } else if wave_height(level) >= WAVE_LOUD {
+            cap(top, tokens::WAVE_LOUD, &mut mesh);
+        }
     }
     painter.add(mesh);
 }

@@ -1,0 +1,19 @@
+# Writes `crates/icons/src/hugeicons.rs` and the phone icon files from
+# `crates/icons/icons.txt`. Run it after editing that list:
+#
+#     cargo run -p icongen
+#
+# It needs `curl` and `tar` on the path and fetches the npm tarball once.
+[package]
+name = "icongen"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Writes the icon table and the phone icon files from the free Hugeicons package."
+
+[dependencies]
+cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
+
+[lints]
+workspace = true

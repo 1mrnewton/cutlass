@@ -16,11 +16,24 @@ mod hugeicons;
 
 use std::fmt::Write as _;
 
-pub use custom::BLADE;
+pub use custom::{BLADE, CUSTOM};
 pub use hugeicons::ICONS;
 
 /// The viewBox edge every mark is drawn in.
 pub const VIEWBOX: f32 = 24.0;
+
+/// The icon list, from the repository root.
+pub const MANIFEST: &str = "crates/icons/icons.txt";
+
+/// The asset catalog folder that holds one image set per icon, from the repository root.
+pub const IOS_ICONS: &str = "apps/ios/ios/Assets.xcassets/Icons";
+
+/// The folder that holds one VectorDrawable per icon, from the repository root.
+pub const ANDROID_DRAWABLES: &str = "apps/android/app/src/main/res/drawable";
+
+/// The `Contents.json` of the `Icons` folder in the asset catalog.
+pub const IOS_FOLDER_CONTENTS: &str =
+    "{\n  \"info\" : {\n    \"author\" : \"xcode\",\n    \"version\" : 1\n  }\n}\n";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IconData {
@@ -36,6 +49,8 @@ pub struct Mark {
     pub shape: Shape,
     /// Fill the shape with the tint.
     pub fill: bool,
+    /// Fill by the even-odd rule instead of nonzero.
+    pub even_odd: bool,
     pub stroke: Option<Stroke>,
 }
 
@@ -106,6 +121,9 @@ pub fn svg(icon: &IconData) -> String {
         };
         if mark.fill {
             out.push_str(" fill=\"#000000\"");
+            if mark.even_odd {
+                out.push_str(" fill-rule=\"evenodd\"");
+            }
         }
         if let Some(stroke) = mark.stroke {
             let _ = write!(out, " stroke=\"#000000\" stroke-width=\"{}\"", stroke.width);
@@ -154,6 +172,9 @@ pub fn vector_drawable(icon: &IconData) -> String {
         let _ = write!(out, "  <path\n      android:pathData=\"{data}\"");
         if mark.fill {
             out.push_str("\n      android:fillColor=\"#FF000000\"");
+            if mark.even_odd {
+                out.push_str("\n      android:fillType=\"evenOdd\"");
+            }
         }
         if let Some(stroke) = mark.stroke {
             let _ = write!(
@@ -208,6 +229,7 @@ mod tests {
                     r: 1.5,
                 },
                 fill: false,
+                even_odd: false,
                 stroke: Some(Stroke {
                     width: 1.5,
                     cap: Cap::Round,

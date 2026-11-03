@@ -73,6 +73,7 @@ members = [
     "crates/store",
     "crates/text",
     "crates/transcription",
+    "tools/icongen",
 ]
 
 [workspace.package]

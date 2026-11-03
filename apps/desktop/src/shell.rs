@@ -6299,7 +6299,9 @@ mod tests {
         assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
         desktop.send_timeline_asks();
         // Wait until the first 20 s, 2000 buckets, have been read.
-        let path = desktop.media_file(Some(&movie.display().to_string())).unwrap();
+        let path = desktop
+            .media_file(Some(&movie.display().to_string()))
+            .unwrap();
         while desktop
             .waveforms
             .as_ref()
@@ -6389,8 +6391,15 @@ mod tests {
         receiver
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("read");
-        let path = desktop.media_file(Some(&movie.display().to_string())).unwrap();
-        let peaks = desktop.waveforms.as_ref().unwrap().get(&path).expect("read");
+        let path = desktop
+            .media_file(Some(&movie.display().to_string()))
+            .unwrap();
+        let peaks = desktop
+            .waveforms
+            .as_ref()
+            .unwrap()
+            .get(&path)
+            .expect("read");
         assert!(peaks.complete && peaks.levels.is_empty());
         assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
     }

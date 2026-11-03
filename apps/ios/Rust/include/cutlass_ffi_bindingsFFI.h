@@ -258,6 +258,11 @@ void uniffi_cutlass_ffi_bindings_fn_free_editor(uint64_t handle, RustCallStatus 
 uint64_t uniffi_cutlass_ffi_bindings_fn_constructor_editor_open(RustBuffer root, RustBuffer bundle, RustBuffer project, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_TEXT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_add_text(uint64_t ptr, RustBuffer content, RustBuffer face, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_APPEND
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_APPEND
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_append(uint64_t ptr, RustBuffer material_id, RustCallStatus *_Nonnull out_status
@@ -276,6 +281,11 @@ int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(uint64_t ptr, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FILM
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FILM
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_film(uint64_t ptr, int64_t from_us, int64_t to_us, double pixel_size, double height, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FONTS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FONTS
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_fonts(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FRAME
@@ -343,9 +353,24 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_save(uint64_t ptr, RustCallSta
 void uniffi_cutlass_ffi_bindings_fn_method_editor_seek(uint64_t ptr, int64_t time_us, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_FONT_FOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_FONT_FOLDERS
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(uint64_t ptr, RustBuffer folders, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_SPEED
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_SPEED
 void uniffi_cutlass_ffi_bindings_fn_method_editor_set_speed(uint64_t ptr, RustBuffer clip_id, double speed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_TEXT
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_text(uint64_t ptr, RustBuffer clip_id, RustBuffer content, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_TEXT_FONT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_TEXT_FONT
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_font(uint64_t ptr, RustBuffer clip_id, RustBuffer face, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_VOLUME
@@ -356,6 +381,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_set_volume(uint64_t ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SPLIT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SPLIT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, RustBuffer clip_id, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_TEXT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_text(uint64_t ptr, RustBuffer clip_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_THUMB
@@ -731,6 +761,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_volume_position(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_APPEND
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_APPEND
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_append(void
@@ -752,6 +788,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_FILM
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_FILM
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_film(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_FONTS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_FONTS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts(void
     
 );
 #endif
@@ -833,9 +875,27 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_seek(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_FONT_FOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_FONT_FOLDERS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_SPEED
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_SPEED
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_TEXT_FONT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_TEXT_FONT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font(void
     
 );
 #endif
@@ -848,6 +908,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SPLIT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SPLIT
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_split(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_TEXT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_text(void
     
 );
 #endif

@@ -607,6 +607,12 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol EditorProtocol: AnyObject, Sendable {
     
     /**
+     * Add `content` at `at_us` in `face`, or in the first face when `face`
+     * is empty, as one undo step. Returns the new clip's id.
+     */
+    func addText(content: String, face: String, atUs: Int64) throws  -> String
+    
+    /**
      * Add a library item at the end of its lane. Returns the clip id.
      */
     func append(materialId: String) throws  -> String
@@ -627,6 +633,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
      */
     func film(fromUs: Int64, toUs: Int64, pixelSize: Double, height: Double) throws  -> [Film]
+    
+    /**
+     * The faces text can be set in, by file name.
+     */
+    func fonts() throws  -> [Font]
     
     /**
      * The picture at `time_us`.
@@ -692,9 +703,25 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func seek(timeUs: Int64) throws 
     
     /**
+     * Look for faces in `folders` and the folders below them, replacing
+     * any found before.
+     */
+    func setFontFolders(folders: [String]) throws 
+    
+    /**
      * Play a clip at a constant speed, as one undo step. Its length follows.
      */
     func setSpeed(clipId: String, speed: Double) throws 
+    
+    /**
+     * Change what a text clip says, as one undo step.
+     */
+    func setText(clipId: String, content: String) throws 
+    
+    /**
+     * Set a text clip in `face`, as one undo step.
+     */
+    func setTextFont(clipId: String, face: String) throws 
     
     /**
      * Remove one clip.
@@ -706,6 +733,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * Cut a clip at `at_us`. Returns the right piece's id.
      */
     func split(clipId: String, atUs: Int64) throws  -> String
+    
+    /**
+     * What a text clip says, or `None` when it is not a text clip.
+     */
+    func text(clipId: String) throws  -> TextInfo?
     
     /**
      * The picture of a tile [`Self::film`] named, once stored.
@@ -806,6 +838,22 @@ public static func `open`(root: String, bundle: String, project: String)throws  
 
     
     /**
+     * Add `content` at `at_us` in `face`, or in the first face when `face`
+     * is empty, as one undo step. Returns the new clip's id.
+     */
+open func addText(content: String, face: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(content),
+        FfiConverterString.lower(face),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Add a library item at the end of its lane. Returns the clip id.
      */
 open func append(materialId: String)throws  -> String  {
@@ -857,6 +905,18 @@ open func film(fromUs: Int64, toUs: Int64, pixelSize: Double, height: Double)thr
         FfiConverterInt64.lower(toUs),
         FfiConverterDouble.lower(pixelSize),
         FfiConverterDouble.lower(height),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The faces text can be set in, by file name.
+     */
+open func fonts()throws  -> [Font]  {
+    return try  FfiConverterSequenceTypeFont.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_fonts(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -1023,6 +1083,19 @@ open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEdi
 }
     
     /**
+     * Look for faces in `folders` and the folders below them, replacing
+     * any found before.
+     */
+open func setFontFolders(folders: [String])throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(folders),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Play a clip at a constant speed, as one undo step. Its length follows.
      */
 open func setSpeed(clipId: String, speed: Double)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
@@ -1031,6 +1104,32 @@ open func setSpeed(clipId: String, speed: Double)throws   {try rustCallWithError
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterDouble.lower(speed),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Change what a text clip says, as one undo step.
+     */
+open func setText(clipId: String, content: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(content),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Set a text clip in `face`, as one undo step.
+     */
+open func setTextFont(clipId: String, face: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_text_font(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterString.lower(face),uniffiCallStatus
     )
 }
 }
@@ -1059,6 +1158,19 @@ open func split(clipId: String, atUs: Int64)throws  -> String  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(clipId),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * What a text clip says, or `None` when it is not a text clip.
+     */
+open func text(clipId: String)throws  -> TextInfo?  {
+    return try  FfiConverterOptionTypeTextInfo.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
     )
 })
 }
@@ -1323,6 +1435,64 @@ public func FfiConverterTypeFilm_lower(_ value: Film) -> RustBuffer {
 
 
 /**
+ * A face text can be set in. `name` is what a clip stores; `label` is for
+ * people.
+ */
+public struct Font: Equatable, Hashable {
+    public var name: String
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, label: String) {
+        self.name = name
+        self.label = label
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Font: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFont: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Font {
+        return
+            try Font(
+                name: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Font, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFont_lift(_ buf: RustBuffer) throws -> Font {
+    return try FfiConverterTypeFont.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFont_lower(_ value: Font) -> RustBuffer {
+    return FfiConverterTypeFont.lower(value)
+}
+
+
+/**
  * A composited picture, eight-bit RGBA, rows top to bottom.
  */
 public struct Frame: Equatable, Hashable {
@@ -1511,6 +1681,63 @@ public func FfiConverterTypeProjectSummary_lift(_ buf: RustBuffer) throws -> Pro
 #endif
 public func FfiConverterTypeProjectSummary_lower(_ value: ProjectSummary) -> RustBuffer {
     return FfiConverterTypeProjectSummary.lower(value)
+}
+
+
+/**
+ * What a text clip says and the face it says it in.
+ */
+public struct TextInfo: Equatable, Hashable {
+    public var content: String
+    public var face: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(content: String, face: String) {
+        self.content = content
+        self.face = face
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TextInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextInfo {
+        return
+            try TextInfo(
+                content: FfiConverterString.read(from: &buf), 
+                face: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TextInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.content, into: &buf)
+        FfiConverterString.write(value.face, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextInfo_lift(_ buf: RustBuffer) throws -> TextInfo {
+    return try FfiConverterTypeTextInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextInfo_lower(_ value: TextInfo) -> RustBuffer {
+    return FfiConverterTypeTextInfo.lower(value)
 }
 
 
@@ -2371,6 +2598,30 @@ fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTextInfo: FfiConverterRustBuffer {
+    typealias SwiftType = TextInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTextInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTextInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeToolBar: FfiConverterRustBuffer {
     typealias SwiftType = ToolBar?
 
@@ -2389,6 +2640,31 @@ fileprivate struct FfiConverterOptionTypeToolBar: FfiConverterRustBuffer {
         case 1: return try FfiConverterTypeToolBar.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -2437,6 +2713,31 @@ fileprivate struct FfiConverterSequenceTypeFilm: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFilm.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFont: FfiConverterRustBuffer {
+    typealias SwiftType = [Font]
+
+    public static func write(_ value: [Font], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFont.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Font] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Font]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFont.read(from: &buf))
         }
         return seq
     }
@@ -2702,6 +3003,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_volume_position() != 27181) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2712,6 +3016,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_film() != 35426) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_fonts() != 7751) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_frame() != 13353) {
@@ -2753,13 +3060,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders() != 41608) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed() != 10406) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text() != 55482) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_text_font() != 34181) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_volume() != 9150) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_split() != 36702) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text() != 30726) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 28776) {

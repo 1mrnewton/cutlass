@@ -16,6 +16,7 @@ mod media;
 mod player;
 mod preview;
 mod project;
+mod strip;
 mod timeline;
 
 pub use cache::ResourceCache;
@@ -32,6 +33,7 @@ pub use host::Commands;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
+pub use strip::{PhoneFilm, PhoneTick, PhoneTile, Strip};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
@@ -70,6 +72,7 @@ pub struct PhoneHost {
     player: PhonePlayer,
     cache: ResourceCache,
     preview: Preview,
+    strip: Strip,
 }
 
 impl PhoneHost {
@@ -107,6 +110,7 @@ impl PhoneHost {
             player: PhonePlayer::new(),
             cache,
             preview: Preview::new(),
+            strip: Strip::default(),
         })
     }
 
@@ -213,11 +217,14 @@ impl PhoneHost {
     pub fn play(&mut self) -> Result<(), FfiError> {
         let end = self.draft().duration;
         let program = program(&self.commands, &self.project, &self.preview);
-        self.player.play(program, end)
+        self.player.play(program, end)?;
+        self.strip.set_paused(self.player.is_playing());
+        Ok(())
     }
 
     pub fn pause(&mut self) {
         self.player.pause();
+        self.strip.set_paused(false);
     }
 
     /// Move the playhead, held inside the cut. Playing goes on from there.
@@ -354,6 +361,70 @@ impl PhoneHost {
         Ok(())
     }
 
+    /// Put `segment_id` at `place` in the main row's order, counted from
+    /// zero without it, as one undo step. Linkage follows as for any move. A
+    /// clip that is not on main is refused.
+    pub fn reorder(&mut self, segment_id: &SegmentId, place: u32) -> Result<(), FfiError> {
+        let refused = || FfiError::Refused {
+            reason: "only a main clip changes places".to_owned(),
+        };
+        let track = self
+            .draft()
+            .tracks
+            .iter()
+            .find(|track| track.is_main())
+            .ok_or_else(refused)?;
+        let start =
+            cutlass_editor::reorder_start(track, segment_id, place as usize).ok_or_else(refused)?;
+        let request = Request::Move {
+            segment_id: segment_id.clone(),
+            track_id: track.id.clone(),
+            start,
+        };
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Ruler ticks from `from` through `to` at `pixel_size` points per
+    /// microsecond.
+    #[must_use]
+    pub fn ruler(&self, pixel_size: f64, from: Micros, to: Micros) -> Vec<PhoneTick> {
+        strip::ruler(self.draft(), pixel_size, from, to)
+    }
+
+    /// `pixel_size` times `factor`, held inside what the cut and a row
+    /// `lane_width` points wide allow.
+    #[must_use]
+    pub fn zoom(&self, pixel_size: f64, factor: f64, lane_width: f64) -> f64 {
+        strip::zoom(self.draft(), pixel_size, factor, lane_width)
+    }
+
+    /// Filmstrip tiles for the picture clips that meet `from` to `to`.
+    pub fn film(
+        &mut self,
+        from: Micros,
+        to: Micros,
+        pixel_size: f64,
+        height: f64,
+    ) -> Vec<PhoneFilm> {
+        let draft = self.commands.draft();
+        self.strip.film(
+            draft,
+            self.project.root(),
+            self.preview.readers(),
+            from,
+            to,
+            pixel_size,
+            height,
+        )
+    }
+
+    /// The picture of a tile [`Self::film`] named, once stored.
+    #[must_use]
+    pub fn thumb(&self, key: &str) -> Option<Picture> {
+        self.strip.thumb(key)
+    }
+
     /// Remove one clip. Its dependents go with it when linkage follow is on.
     pub fn remove(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
         self.apply(
@@ -388,7 +459,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use cutlass_session::{EditError, Request, TrackAttribute, TrackId};
+    use cutlass_session::{EditError, Micros, Request, TrackAttribute, TrackId};
     use cutlass_storage::StorageError;
 
     use super::PhoneHost;
@@ -603,7 +674,7 @@ mod tests {
         assert_eq!(draft.id.as_str(), "D");
         let linkage = cutlass_session::linkage_from_biz(None, draft.id.as_str(), false);
         assert!(!linkage.enabled);
-        assert_eq!(cutlass_session::Micros(5).0, 5);
+        assert_eq!(Micros(5).0, 5);
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -668,13 +739,13 @@ mod tests {
         assert_eq!(host.tick(40_000).0, 40_000);
         host.pause();
         assert_eq!(host.tick(40_000).0, 40_000, "a paused playhead holds");
-        host.seek(cutlass_session::Micros(90_000));
+        host.seek(Micros(90_000));
         host.play().unwrap();
         assert_eq!(host.tick(40_000).0, 100_000);
         assert!(!host.is_playing(), "play stops at the end of the cut");
         host.play().unwrap();
         assert_eq!(host.playhead().0, 0, "play from the end starts over");
-        host.seek(cutlass_session::Micros(5_000_000));
+        host.seek(Micros(5_000_000));
         assert_eq!(host.playhead().0, 100_000, "a seek stays inside the cut");
 
         assert_eq!(host.draft(), &before);
@@ -684,9 +755,9 @@ mod tests {
     fn drag(row: u32, time: i64) -> crate::Drag {
         crate::Drag {
             row,
-            time: cutlass_session::Micros(time),
-            snap: cutlass_session::Micros(0),
-            playhead: cutlass_session::Micros(0),
+            time: Micros(time),
+            snap: Micros(0),
+            playhead: Micros(0),
         }
     }
 
@@ -755,6 +826,90 @@ mod tests {
         // The magnet packs the next clip against the shorter one.
         assert_eq!(clips[1].id, second);
         assert_eq!(clips[1].start.0, 1_000_000);
+    }
+
+    #[test]
+    fn a_main_clip_changes_places_as_one_undo_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, second) = two_stills(&mut host);
+        host.reorder(&first, 1).unwrap();
+        let order: Vec<_> = host.lanes()[0]
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect();
+        assert_eq!(order, [second.clone(), first.clone()]);
+        assert_eq!(host.lanes()[0].clips[0].start.0, 0);
+        host.undo().unwrap();
+        let order: Vec<_> = host.lanes()[0]
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect();
+        assert_eq!(order, [first, second]);
+
+        let before = host.draft().clone();
+        let error = host
+            .reorder(&cutlass_session::SegmentId::new("nope"), 0)
+            .unwrap_err();
+        assert!(matches!(error, FfiError::Refused { .. }), "{error:?}");
+        assert_eq!(host.draft(), &before);
+    }
+
+    #[test]
+    fn the_ruler_labels_seconds_and_zoom_stays_inside_the_cut() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        // 50 points a second.
+        let size = 0.000_05;
+        let ticks = host.ruler(size, Micros(0), Micros(2_000_000));
+        assert_eq!(ticks[0].time, Micros(0));
+        assert_eq!(ticks[0].label.as_deref(), Some("00:00"));
+        assert!(ticks.iter().any(|tick| !tick.major));
+        assert!(host.ruler(-1.0, Micros(0), Micros(1)).is_empty());
+
+        let wider = host.zoom(size, 2.0, 400.0);
+        assert_eq!(wider, size * 2.0);
+        // Far out stops at a quarter of the row for the whole cut.
+        let out = host.zoom(size, 1e-9, 400.0);
+        assert!(out > 0.0 && out < size);
+        assert_eq!(host.zoom(size, f64::NAN, 400.0), size);
+        assert_eq!(host.zoom(size, -2.0, 400.0), size);
+    }
+
+    #[test]
+    fn a_still_filmstrip_fills_from_the_worker() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, _) = two_stills(&mut host);
+        let size = 0.000_05;
+        let mut films = host.film(Micros(0), Micros(3_000_000), size, 40.0);
+        assert_eq!(films.len(), 2);
+        assert_eq!(films[0].id, first);
+        assert!(!films[0].tiles.is_empty());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !films[0].tiles[0].ready && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            films = host.film(Micros(0), Micros(3_000_000), size, 40.0);
+        }
+        let picture = host.thumb(&films[0].tiles[0].key).expect("stored");
+        assert!(picture.width > 0 && picture.height > 0);
+        assert_eq!(
+            picture.rgba.len(),
+            (picture.width * picture.height * 4) as usize
+        );
+        assert!(host.thumb("not a tile").is_none());
+        // Nothing meets a window past the cut, and a bad size draws nothing.
+        assert!(
+            host.film(Micros(9_000_000), Micros(10_000_000), size, 40.0)
+                .is_empty()
+        );
+        assert!(host.film(Micros(0), Micros(1), 0.0, 40.0).is_empty());
     }
 
     #[test]
@@ -883,18 +1038,18 @@ mod tests {
             }],
         )
         .unwrap();
-        let empty = host.frame(cutlass_session::Micros(0)).unwrap();
+        let empty = host.frame(Micros(0)).unwrap();
         assert_eq!((empty.width, empty.height), (16, 16));
         let id = host
             .import_probed(&fixture("pattern.png"), still(1_000_000))
             .unwrap();
         host.append(&id).unwrap();
-        let shown = host.frame(cutlass_session::Micros(500_000)).unwrap();
+        let shown = host.frame(Micros(500_000)).unwrap();
         assert_eq!((shown.width, shown.height), (16, 16));
         assert_eq!(shown.rgba.len(), 16 * 16 * 4);
         assert_ne!(shown.rgba, empty.rgba);
         assert!(matches!(
-            host.frame(cutlass_session::Micros(-1)),
+            host.frame(Micros(-1)),
             Err(FfiError::Frame { .. })
         ));
     }
@@ -913,12 +1068,12 @@ mod tests {
             }],
         )
         .unwrap();
-        let empty = host.frame(cutlass_session::Micros(0)).unwrap();
+        let empty = host.frame(Micros(0)).unwrap();
         let id = host
             .import_probed(&fixture("truncated.jpg"), still(1_000_000))
             .unwrap();
         host.append(&id).unwrap();
-        let shown = host.frame(cutlass_session::Micros(0)).unwrap();
+        let shown = host.frame(Micros(0)).unwrap();
         assert_eq!(shown, empty);
     }
 
@@ -938,18 +1093,15 @@ mod tests {
         assert_eq!(lanes[0].clips[0].duration.0, 1_000_000);
 
         let before = host.draft().clone();
-        let edge = host.split(&left, cutlass_session::Micros(10)).unwrap_err();
+        let edge = host.split(&left, Micros(10)).unwrap_err();
         assert_eq!(edge.to_string(), "split is not available there");
         let missing = host
-            .split(
-                &cutlass_session::SegmentId::new("nope"),
-                cutlass_session::Micros(500_000),
-            )
+            .split(&cutlass_session::SegmentId::new("nope"), Micros(500_000))
             .unwrap_err();
         assert_eq!(missing.to_string(), "the clip is not on the timeline");
         assert_eq!(host.draft(), &before);
 
-        let right = host.split(&left, cutlass_session::Micros(400_000)).unwrap();
+        let right = host.split(&left, Micros(400_000)).unwrap();
         let clips = &host.lanes()[0].clips;
         assert_eq!(clips.len(), 2);
         assert_eq!(clips[0].duration.0, 400_000);
@@ -984,9 +1136,9 @@ mod tests {
             .unwrap();
         let first = host.append(&png).unwrap();
         host.append(&jpeg).unwrap();
-        let at = cutlass_session::Micros(500_000);
+        let at = Micros(500_000);
         let before = host.frame(at).unwrap();
-        let second = host.frame(cutlass_session::Micros(1_500_000)).unwrap();
+        let second = host.frame(Micros(1_500_000)).unwrap();
         assert_ne!(before, second);
 
         host.remove(&first).unwrap();
@@ -1011,12 +1163,12 @@ mod tests {
         assert_eq!((material.width, material.height), (1920, 1080));
         assert!((10_000_000..10_500_000).contains(&material.duration.0));
         let left = host.append(&id).unwrap();
-        let at = cutlass_session::Micros(3_000_000);
+        let at = Micros(3_000_000);
         let whole = host.frame(at).unwrap();
         host.split(&left, at).unwrap();
         let cut = host.frame(at).unwrap();
         assert_eq!(cut, whole);
-        let later = host.frame(cutlass_session::Micros(6_000_000)).unwrap();
+        let later = host.frame(Micros(6_000_000)).unwrap();
         assert_ne!(cut, later);
 
         host.remove(&left).unwrap();

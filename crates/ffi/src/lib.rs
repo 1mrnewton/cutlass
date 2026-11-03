@@ -50,7 +50,10 @@ pub use preview::{Picture, Preview};
 pub use project::Project;
 pub use stage::PhoneStage;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
-pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText, PhoneTextStyle, TextStyleChange};
+pub use text::{
+    NEW_TEXT_LENGTH, PhoneFont, PhoneText, PhoneTextStyle, TEXT_COLORS, TEXT_STYLE_RANGES,
+    TextStyleChange, TextStyleRanges,
+};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};

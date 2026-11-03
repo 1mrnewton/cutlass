@@ -218,6 +218,50 @@ pub fn speed_at(position: f64) -> f64 {
     cutlass_ffi::speed_at(position)
 }
 
+/// The Styles tab's colors, as `#RRGGBB`.
+#[uniffi::export]
+#[must_use]
+pub fn text_colors() -> Vec<String> {
+    cutlass_ffi::TEXT_COLORS
+        .iter()
+        .map(|color| (*color).to_owned())
+        .collect()
+}
+
+/// The Styles tab's slider ends and the values a part starts at. Sizes are
+/// pixels, outlines ems, shadow distances hundredths of an em; the rest are
+/// 0 to 1.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct TextStyleRanges {
+    pub size_min: f64,
+    pub size_max: f64,
+    pub outline_max: f64,
+    pub outline_start: f64,
+    pub shadow_distance_max: f64,
+    pub shadow_distance_start: f64,
+    pub shadow_blur_start: f64,
+    pub background_alpha_start: f64,
+    pub background_round_start: f64,
+}
+
+/// See [`TextStyleRanges`].
+#[uniffi::export]
+#[must_use]
+pub fn text_style_ranges() -> TextStyleRanges {
+    let ranges = cutlass_ffi::TEXT_STYLE_RANGES;
+    TextStyleRanges {
+        size_min: ranges.size.0,
+        size_max: ranges.size.1,
+        outline_max: ranges.outline_max,
+        outline_start: ranges.outline_start,
+        shadow_distance_max: ranges.shadow_distance_max,
+        shadow_distance_start: ranges.shadow_distance_start,
+        shadow_blur_start: ranges.shadow_blur_start,
+        background_alpha_start: ranges.background_alpha_start,
+        background_round_start: ranges.background_round_start,
+    }
+}
+
 /// The background swatches, as `#RRGGBB`.
 #[uniffi::export]
 #[must_use]

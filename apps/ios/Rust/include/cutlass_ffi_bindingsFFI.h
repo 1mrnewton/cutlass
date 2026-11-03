@@ -583,6 +583,18 @@ double uniffi_cutlass_ffi_bindings_fn_func_speed_position(double speed, RustCall
 void uniffi_cutlass_ffi_bindings_fn_func_start(RustBuffer root, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TEXT_COLORS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TEXT_COLORS
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_text_colors(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TEXT_STYLE_RANGES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TEXT_STYLE_RANGES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_text_style_ranges(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TOOL_BAR
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_TOOL_BAR
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_tool_bar(RustBuffer bar, RustCallStatus *_Nonnull out_status
@@ -927,6 +939,18 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_speed_position(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_START
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_START
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_start(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_TEXT_COLORS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_TEXT_COLORS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_text_colors(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_TEXT_STYLE_RANGES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_TEXT_STYLE_RANGES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_text_style_ranges(void
     
 );
 #endif

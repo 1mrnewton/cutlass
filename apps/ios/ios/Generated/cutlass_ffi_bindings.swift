@@ -2739,6 +2739,93 @@ public func FfiConverterTypeTextStyle_lower(_ value: TextStyle) -> RustBuffer {
 
 
 /**
+ * The Styles tab's slider ends and the values a part starts at. Sizes are
+ * pixels, outlines ems, shadow distances hundredths of an em; the rest are
+ * 0 to 1.
+ */
+public struct TextStyleRanges: Equatable, Hashable {
+    public var sizeMin: Double
+    public var sizeMax: Double
+    public var outlineMax: Double
+    public var outlineStart: Double
+    public var shadowDistanceMax: Double
+    public var shadowDistanceStart: Double
+    public var shadowBlurStart: Double
+    public var backgroundAlphaStart: Double
+    public var backgroundRoundStart: Double
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sizeMin: Double, sizeMax: Double, outlineMax: Double, outlineStart: Double, shadowDistanceMax: Double, shadowDistanceStart: Double, shadowBlurStart: Double, backgroundAlphaStart: Double, backgroundRoundStart: Double) {
+        self.sizeMin = sizeMin
+        self.sizeMax = sizeMax
+        self.outlineMax = outlineMax
+        self.outlineStart = outlineStart
+        self.shadowDistanceMax = shadowDistanceMax
+        self.shadowDistanceStart = shadowDistanceStart
+        self.shadowBlurStart = shadowBlurStart
+        self.backgroundAlphaStart = backgroundAlphaStart
+        self.backgroundRoundStart = backgroundRoundStart
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension TextStyleRanges: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTextStyleRanges: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TextStyleRanges {
+        return
+            try TextStyleRanges(
+                sizeMin: FfiConverterDouble.read(from: &buf), 
+                sizeMax: FfiConverterDouble.read(from: &buf), 
+                outlineMax: FfiConverterDouble.read(from: &buf), 
+                outlineStart: FfiConverterDouble.read(from: &buf), 
+                shadowDistanceMax: FfiConverterDouble.read(from: &buf), 
+                shadowDistanceStart: FfiConverterDouble.read(from: &buf), 
+                shadowBlurStart: FfiConverterDouble.read(from: &buf), 
+                backgroundAlphaStart: FfiConverterDouble.read(from: &buf), 
+                backgroundRoundStart: FfiConverterDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TextStyleRanges, into buf: inout [UInt8]) {
+        FfiConverterDouble.write(value.sizeMin, into: &buf)
+        FfiConverterDouble.write(value.sizeMax, into: &buf)
+        FfiConverterDouble.write(value.outlineMax, into: &buf)
+        FfiConverterDouble.write(value.outlineStart, into: &buf)
+        FfiConverterDouble.write(value.shadowDistanceMax, into: &buf)
+        FfiConverterDouble.write(value.shadowDistanceStart, into: &buf)
+        FfiConverterDouble.write(value.shadowBlurStart, into: &buf)
+        FfiConverterDouble.write(value.backgroundAlphaStart, into: &buf)
+        FfiConverterDouble.write(value.backgroundRoundStart, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextStyleRanges_lift(_ buf: RustBuffer) throws -> TextStyleRanges {
+    return try FfiConverterTypeTextStyleRanges.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTextStyleRanges_lower(_ value: TextStyleRanges) -> RustBuffer {
+    return FfiConverterTypeTextStyleRanges.lower(value)
+}
+
+
+/**
  * One ruler tick. A major tick carries its label.
  */
 public struct Tick: Equatable, Hashable {
@@ -4453,6 +4540,26 @@ public func start(root: String)throws   {try rustCallWithError(FfiConverterTypeE
 }
 }
 /**
+ * The Styles tab's colors, as `#RRGGBB`.
+ */
+public func textColors() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_text_colors(uniffiCallStatus
+    )
+})
+}
+/**
+ * See [`TextStyleRanges`].
+ */
+public func textStyleRanges() -> TextStyleRanges  {
+    return try!  FfiConverterTypeTextStyleRanges_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_text_style_ranges(uniffiCallStatus
+    )
+})
+}
+/**
  * The tools on `bar`, in order.
  */
 public func toolBar(bar: ToolBar) -> [ToolItem]  {
@@ -4536,6 +4643,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_start() != 16636) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_text_colors() != 11524) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_text_style_ranges() != 50735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_tool_bar() != 18374) {

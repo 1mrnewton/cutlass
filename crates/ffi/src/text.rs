@@ -71,6 +71,37 @@ pub enum TextStyleChange {
     },
 }
 
+/// The colors the Styles tab offers, as `#RRGGBB`: the background swatches.
+pub const TEXT_COLORS: [&str; 12] = crate::canvas::BACKGROUND_COLORS;
+
+/// The Styles tab's slider ends, and where a part starts when its first
+/// color is picked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyleRanges {
+    /// Pixels.
+    pub size: (f64, f64),
+    /// Ems. Wider outlines draw at the widest the letters allow.
+    pub outline_max: f64,
+    pub outline_start: f64,
+    /// Hundredths of an em.
+    pub shadow_distance_max: f64,
+    pub shadow_distance_start: f64,
+    pub shadow_blur_start: f64,
+    pub background_alpha_start: f64,
+    pub background_round_start: f64,
+}
+
+pub const TEXT_STYLE_RANGES: TextStyleRanges = TextStyleRanges {
+    size: (16.0, 400.0),
+    outline_max: 0.12,
+    outline_start: 0.06,
+    shadow_distance_max: 30.0,
+    shadow_distance_start: 8.0,
+    shadow_blur_start: 0.3,
+    background_alpha_start: 1.0,
+    background_round_start: 0.3,
+};
+
 /// Where a new shadow falls: down and to the right.
 const SHADOW_ANGLE: f64 = -45.0;
 

@@ -21,6 +21,8 @@ mod timeline;
 pub use cache::ResourceCache;
 pub use codecs::{decoders, readers};
 pub use cutlass_logger::InitError as LogError;
+pub use cutlass_model::TrackType;
+pub use cutlass_session::{Micros, SegmentId};
 pub use error::FfiError;
 pub use host::Commands;
 pub use media::Probed;
@@ -31,7 +33,7 @@ pub use timeline::{PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
 
-use cutlass_session::{Draft, LinkageSettings, Micros, Request, SegmentId, Session};
+use cutlass_session::{Draft, LinkageSettings, Request, Session};
 use cutlass_store::RepairNote;
 
 /// Open the process log in `directory`.

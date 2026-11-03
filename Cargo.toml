@@ -51,6 +51,7 @@ members = [
     "crates/eval",
     "crates/export",
     "crates/ffi",
+    "crates/ffi-bindings",
     "crates/font",
     "crates/generated",
     "crates/gpu",

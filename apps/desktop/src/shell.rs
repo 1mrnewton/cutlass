@@ -15,10 +15,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    DropGesture, DropOutcome, FilmTile, GestureError, GestureOutcome, MoveGesture, Pointer,
-    TimelineScale, TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, film_tiles,
-    fit_pixel_size, hit_test, lane_category, lanes, last_accuracy_step, minimum_pixel_size,
-    move_gesture, snap_guides, trim_gesture,
+    Append, AppendLane, DropGesture, DropOutcome, FilmTile, GestureError, GestureOutcome,
+    MoveGesture, Pointer, TimelineScale, TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement,
+    drop_gesture, film_tiles, fit_pixel_size, hit_test, lanes, last_accuracy_step, material_span,
+    minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -2077,7 +2077,7 @@ impl Shell {
         let x = self.time_zero_x(x);
         let (kind, duration, first_clip) = {
             let draft = self.session_draft()?;
-            let span = medium_span(draft, material_id).ok_or_else(|| {
+            let span = material_span(draft, material_id).ok_or_else(|| {
                 ShellError::Unavailable("the media is not in the library".to_owned())
             })?;
             let first_clip = draft.tracks.iter().all(|track| track.segments.is_empty());
@@ -2123,36 +2123,16 @@ impl Shell {
     pub fn add_medium(&mut self, material_id: &str) -> Result<(), ShellError> {
         let (track_id, start, lane, duration, first_clip) = {
             let draft = self.session_draft()?;
-            let (kind, duration) = medium_span(draft, material_id).ok_or_else(|| {
+            let (kind, duration) = material_span(draft, material_id).ok_or_else(|| {
                 ShellError::Unavailable("the media is not in the library".to_owned())
             })?;
             let first_clip = draft.tracks.iter().all(|track| track.segments.is_empty());
-            let open = |track: &&cutlass_model::Track| !bit(track.attribute, TrackAttribute::LOCK);
-            let target = if kind == TrackType::Video {
-                draft.main_track().filter(|track| open(track))
-            } else {
-                None
-            }
-            .or_else(|| {
-                draft
-                    .tracks
-                    .iter()
-                    .filter(open)
-                    .find(|track| track.kind == kind)
-            });
-            match target {
-                Some(track) => {
-                    let end = track
-                        .segments
-                        .iter()
-                        .map(|segment| segment.target.end().0)
-                        .max()
-                        .unwrap_or(0);
-                    (track.id.clone(), Micros(end), None, duration, first_clip)
-                }
-                None => (
+            let Append { lane, start } = append_placement(draft, kind);
+            match lane {
+                AppendLane::Track(track_id) => (track_id, start, None, duration, first_clip),
+                AppendLane::New(kind) => (
                     TrackId::new(String::new()),
-                    Micros(0),
+                    start,
                     Some(kind),
                     duration,
                     first_clip,
@@ -5032,26 +5012,6 @@ fn draft_has_linkage(draft: &Draft) -> bool {
         .relationships
         .iter()
         .any(|item| item.kind == "linkage" && !item.id_to_id.is_empty())
-}
-
-fn medium_span(draft: &Draft, id: &str) -> Option<(TrackType, Micros)> {
-    if let Some(video) = draft
-        .materials
-        .videos
-        .iter()
-        .find(|item| item.id.as_str() == id)
-    {
-        let kind = MetaType::parse(&video.kind)
-            .and_then(lane_category)
-            .unwrap_or(TrackType::Video);
-        return Some((kind, video.duration));
-    }
-    let audio = draft
-        .materials
-        .audios
-        .iter()
-        .find(|item| item.id.as_str() == id)?;
-    Some((TrackType::Audio, audio.duration))
 }
 
 fn held_frame(draft: &Draft, segment: &Segment, playhead: Micros) -> Result<Micros, ShellError> {

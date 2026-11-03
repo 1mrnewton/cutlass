@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod append;
 mod filmstrip;
 mod gesture;
 mod hit;
@@ -13,6 +14,7 @@ mod ruler;
 mod snap;
 mod zoom;
 
+pub use append::{Append, AppendLane, append_placement, material_span};
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,

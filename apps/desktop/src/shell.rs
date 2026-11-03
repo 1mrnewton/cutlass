@@ -710,7 +710,8 @@ impl Shell {
     }
 
     /// The waveform of clip `id`, `clip_width` pixels wide: one level, 0 to
-    /// 1, per pixel column of `visible`, pixels from the clip's left edge. A
+    /// 1, per pixel column of `visible`, pixels from the clip's left edge,
+    /// at the clip's volume. A
     /// file not read yet is asked for when the frame ends, and has no
     /// waveform until its peaks arrive; a video file with no sound has none.
     pub fn wave(
@@ -762,7 +763,9 @@ impl Shell {
                 (Some(from), Some(to)) => peaks.level(from, to),
                 _ => 0.0,
             };
-            levels.push(level);
+            let offset = Micros((x / pixel_size) as i64);
+            let gain = cutlass_engine::clip_volume(segment, offset).max(0.0) as f32;
+            levels.push((level * gain).min(1.0));
             x += 1.0;
         }
         Some(ClipWave {

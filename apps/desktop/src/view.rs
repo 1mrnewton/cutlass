@@ -4085,6 +4085,63 @@ mod tests {
     }
 
     #[test]
+    fn a_main_track_clip_heads_itself_with_name_and_length_chips() {
+        let temp = std::env::temp_dir().join(format!("cutlass-chips-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut video = cutlass_model::MaterialVideo::new("mat");
+        video.path = "Resources/clip.mp4".into();
+        video.duration = Micros(2_500_000);
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "seg",
+            "mat",
+            cutlass_model::TimeRange::new(0, 2_500_000),
+        ));
+        draft.duration = Micros(2_500_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let rects = |fill: Color32| -> Vec<Rect> {
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
+                    _ => None,
+                })
+                .collect()
+        };
+        let clip = rects(tokens::CLIP_VIDEO);
+        assert_eq!(clip.len(), 1, "{clip:?}");
+        let clip = clip[0];
+        assert_eq!(clip.height(), tokens::MAIN_CLIP_HEIGHT);
+        let chips = rects(tokens::CLIP_VIDEO_CHIP);
+        assert_eq!(chips.len(), 2, "{chips:?}");
+        for chip in &chips {
+            assert_eq!(chip.top(), clip.top() + 1.5);
+            assert_eq!(chip.bottom(), clip.top() + tokens::CLIP_HEADER - 1.5);
+        }
+        assert_eq!(chips[0].left(), clip.left() + 4.0);
+        assert_eq!(chips[1].left(), chips[0].right() + 4.0);
+        let lines = galleys(&output);
+        assert!(lines.iter().any(|line| line == "clip.mp4"), "{lines:?}");
+        assert!(lines.iter().any(|line| line == "00:00:02:15"), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn lanes_take_capcut_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);

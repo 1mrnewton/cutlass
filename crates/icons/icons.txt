@@ -72,4 +72,30 @@ zoomOut        ZoomOutAreaIcon
 zoomFit        FitToScreenIcon
 guides         RulerIcon
 lock           SquareLock01Icon
+# The phone editor's bars and panels.
+done           Tick02Icon
+home           Home01Icon
+arrowRight     ArrowRight02Icon
+scissors       ScissorIcon
+overlay        Layers01Icon
+captions       ClosedCaptionIcon
+aspectRatio    AspectRatioIcon
+background     PaintBoardIcon
+volume         VolumeHighIcon
+speed          DashboardSpeed01Icon
+animations     Motion02Icon
+duplicate      Copy01Icon
+replace        ArrowReloadHorizontalIcon
+extractAudio   MusicNoteSquare01Icon
+fade           VolumeLowIcon
+unlink         Unlink01Icon
+splice         ArrowDownToLineIcon
+addOverlay     ImageAdd01Icon
+importSound    FileMusicIcon
+record         Mic01Icon
+addText        TextCreationIcon
+editText       PencilEdit01Icon
+draw           PaintBrush01Icon
+
+# Custom marks.
 blade          custom

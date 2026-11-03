@@ -2406,5 +2406,861 @@ pub static ICONS: &[IconData] = &[
             },
         ],
     },
+    IconData {
+        name: "done",
+        source: Some("Tick02Icon"),
+        marks: &[Mark {
+            shape: Shape::Path("M5 14L8.5 17.5L19 6.5"),
+            fill: false,
+            even_odd: false,
+            stroke: Some(Stroke {
+                width: 1.5,
+                cap: Cap::Round,
+                join: Join::Round,
+            }),
+        }],
+    },
+    IconData {
+        name: "home",
+        source: Some("Home01Icon"),
+        marks: &[Mark {
+            shape: Shape::Path(
+                "M3 11.9896V14.5C3 17.7998 3 19.4497 4.02513 20.4749C5.05025 21.5 6.70017 21.5 10 21.5H14C17.2998 21.5 18.9497 21.5 19.9749 20.4749C21 19.4497 21 17.7998 21 14.5V11.9896C21 10.3083 21 9.46773 20.6441 8.74005C20.2882 8.01237 19.6247 7.49628 18.2976 6.46411L16.2976 4.90855C14.2331 3.30285 13.2009 2.5 12 2.5C10.7991 2.5 9.76689 3.30285 7.70242 4.90855L5.70241 6.46411C4.37533 7.49628 3.71179 8.01237 3.3559 8.74005C3 9.46773 3 10.3083 3 11.9896Z",
+            ),
+            fill: false,
+            even_odd: false,
+            stroke: Some(Stroke {
+                width: 1.5,
+                cap: Cap::Round,
+                join: Join::Round,
+            }),
+        }],
+    },
+    IconData {
+        name: "arrowRight",
+        source: Some("ArrowRight02Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path("M18.5 12L4.99997 12"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M13 18C13 18 19 13.5811 19 12C19 10.4188 13 6 13 6"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "scissors",
+        source: Some("ScissorIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M21 6C21 7.65685 19.6569 9 18 9C16.3431 9 15 7.65685 15 6C15 4.34315 16.3431 3 18 3C19.6569 3 21 4.34315 21 6Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M21 18C21 19.6569 19.6569 21 18 21C16.3431 21 15 19.6569 15 18C15 16.3431 16.3431 15 18 15C19.6569 15 21 16.3431 21 18Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M15 8L3 19"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M15.0003 16L11 12"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M3 5.00011L8.5 10"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "overlay",
+        source: Some("Layers01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M8.64298 3.14559L6.93816 3.93362C4.31272 5.14719 3 5.75397 3 6.75C3 7.74603 4.31272 8.35281 6.93817 9.56638L8.64298 10.3544C10.2952 11.1181 11.1214 11.5 12 11.5C12.8786 11.5 13.7048 11.1181 15.357 10.3544L17.0618 9.56638C19.6873 8.35281 21 7.74603 21 6.75C21 5.75397 19.6873 5.14719 17.0618 3.93362L15.357 3.14559C13.7048 2.38186 12.8786 2 12 2C11.1214 2 10.2952 2.38186 8.64298 3.14559Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M20.788 11.0972C20.9293 11.2959 21 11.5031 21 11.7309C21 12.7127 19.6873 13.3109 17.0618 14.5072L15.357 15.284C13.7048 16.0368 12.8786 16.4133 12 16.4133C11.1214 16.4133 10.2952 16.0368 8.64298 15.284L6.93817 14.5072C4.31272 13.3109 3 12.7127 3 11.7309C3 11.5031 3.07067 11.2959 3.212 11.0972",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M20.3767 16.2661C20.7922 16.5971 21 16.927 21 17.3176C21 18.2995 19.6873 18.8976 17.0618 20.0939L15.357 20.8707C13.7048 21.6236 12.8786 22 12 22C11.1214 22 10.2952 21.6236 8.64298 20.8707L6.93817 20.0939C4.31272 18.8976 3 18.2995 3 17.3176C3 16.927 3.20778 16.5971 3.62334 16.2661",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "captions",
+        source: Some("ClosedCaptionIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M2 12C2 8.02033 2 6.03049 3.0528 4.70201C3.22119 4.48953 3.40678 4.29302 3.60746 4.11473C4.86213 3 6.74142 3 10.5 3H13.5C17.2586 3 19.1379 3 20.3925 4.11473C20.5932 4.29302 20.7788 4.48953 20.9472 4.70201C22 6.03049 22 8.02033 22 12C22 15.9797 22 17.9695 20.9472 19.298C20.7788 19.5105 20.5932 19.707 20.3925 19.8853C19.1379 21 17.2586 21 13.5 21H10.5C6.74142 21 4.86213 21 3.60746 19.8853C3.40678 19.707 3.22119 19.5105 3.0528 19.298C2 17.9695 2 15.9797 2 12Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M10.5 9H10C9.06812 9 8.60218 9 8.23463 9.15224C7.74458 9.35523 7.35523 9.74458 7.15224 10.2346C7 10.6022 7 11.0681 7 12C7 12.9319 7 13.3978 7.15224 13.7654C7.35523 14.2554 7.74458 14.6448 8.23463 14.8478C8.60218 15 9.06812 15 10 15H10.5M17 9H16.5C15.5681 9 15.1022 9 14.7346 9.15224C14.2446 9.35523 13.8552 9.74458 13.6522 10.2346C13.5 10.6022 13.5 11.0681 13.5 12C13.5 12.9319 13.5 13.3978 13.6522 13.7654C13.8552 14.2554 14.2446 14.6448 14.7346 14.8478C15.1022 15 15.5681 15 16.5 15H17",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "aspectRatio",
+        source: Some("AspectRatioIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M2 12C2 7.75736 2 5.63604 3.17157 4.31802C4.34315 3 6.22876 3 10 3H14C17.7712 3 19.6569 3 20.8284 4.31802C22 5.63604 22 7.75736 22 12C22 16.2426 22 18.364 20.8284 19.682C19.6569 21 17.7712 21 14 21H10C6.22876 21 4.34315 21 3.17157 19.682C2 18.364 2 16.2426 2 12Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M2 9H10C12.8284 9 14.2426 9 15.1213 9.87868C16 10.7574 16 12.1716 16 15V21",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M10 21L10 9"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "background",
+        source: Some("PaintBoardIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22C12.8417 22 14 22.1163 14 21C14 20.391 13.6832 19.9212 13.3686 19.4544C12.9082 18.7715 12.4523 18.0953 13 17C13.6667 15.6667 14.7778 15.6667 16.4815 15.6667C17.3334 15.6667 18.3334 15.6667 19.5 15.5C21.601 15.1999 22 13.9084 22 12Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Circle {
+                    cx: 9.5,
+                    cy: 8.5,
+                    r: 1.5,
+                },
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Circle {
+                    cx: 16.5,
+                    cy: 9.5,
+                    r: 1.5,
+                },
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M7.125 15H7M7.25 15C7.25 15.1381 7.13807 15.25 7 15.25C6.86193 15.25 6.75 15.1381 6.75 15C6.75 14.8619 6.86193 14.75 7 14.75C7.13807 14.75 7.25 14.8619 7.25 15Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "volume",
+        source: Some("VolumeHighIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M14 14.8135V9.18646C14 6.04126 14 4.46866 13.0747 4.0773C12.1494 3.68593 11.0603 4.79793 8.88232 7.02192C7.75439 8.17365 7.11085 8.42869 5.50604 8.42869C4.10257 8.42869 3.40084 8.42869 2.89675 8.77262C1.85035 9.48655 2.00852 10.882 2.00852 12C2.00852 13.118 1.85035 14.5134 2.89675 15.2274C3.40084 15.5713 4.10257 15.5713 5.50604 15.5713C7.11085 15.5713 7.75439 15.8264 8.88232 16.9781C11.0603 19.2021 12.1494 20.3141 13.0747 19.9227C14 19.5313 14 17.9587 14 14.8135Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M17 9C17.6254 9.81968 18 10.8634 18 12C18 13.1366 17.6254 14.1803 17 15",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M20 7C21.2508 8.36613 22 10.1057 22 12C22 13.8943 21.2508 15.6339 20 17",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "speed",
+        source: Some("DashboardSpeed01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M13.5 13L17 9M14 15C14 16.1046 13.1046 17 12 17C10.8954 17 10 16.1046 10 15C10 13.8954 10.8954 13 12 13C13.1046 13 14 13.8954 14 15Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M6 12C6 8.68629 8.68629 6 12 6C13.0929 6 14.1175 6.29218 15 6.80269",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M2.50006 12.0001C2.50006 7.52172 2.50006 5.28255 3.8913 3.8913C5.28255 2.50006 7.52172 2.50006 12.0001 2.50006C16.4784 2.50006 18.7176 2.50006 20.1088 3.8913C21.5001 5.28255 21.5001 7.52172 21.5001 12.0001C21.5001 16.4784 21.5001 18.7176 20.1088 20.1088C18.7176 21.5001 16.4784 21.5001 12.0001 21.5001C7.52172 21.5001 5.28255 21.5001 3.8913 20.1088C2.50006 18.7176 2.50006 16.4784 2.50006 12.0001Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "animations",
+        source: Some("Motion02Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M11 16.5C11 14.4438 11 13.4158 11.4421 12.65C11.7318 12.1483 12.1483 11.7318 12.65 11.4421C13.4158 11 14.4438 11 16.5 11C18.5562 11 19.5842 11 20.35 11.4421C20.8517 11.7318 21.2682 12.1483 21.5579 12.65C22 13.4158 22 14.4438 22 16.5C22 18.5562 22 19.5842 21.5579 20.35C21.2682 20.8517 20.8517 21.2682 20.35 21.5579C19.5842 22 18.5562 22 16.5 22C14.4438 22 13.4158 22 12.65 21.5579C12.1483 21.2682 11.7318 20.8517 11.4421 20.35C11 19.5842 11 18.5562 11 16.5Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M8.51338 15C8.02667 14.9537 7.66602 14.8628 7.35723 14.6845C6.94458 14.4463 6.60191 14.1036 6.36367 13.6909C6 13.0611 6 12.2154 6 10.5241C6 8.83277 6 7.98712 6.36367 7.35723C6.60191 6.94458 6.94458 6.60191 7.35723 6.36367C7.98712 6 8.83277 6 10.5241 6C12.2154 6 13.0611 6 13.6909 6.36367C14.1036 6.60191 14.4463 6.94458 14.6845 7.35723C14.8628 7.66602 14.9537 8.02667 15 8.51338",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M3.41611 9C2.93863 8.85544 2.53522 8.4968 2.28817 8.07057C2 7.57339 2 6.9059 2 5.57093C2 4.23595 2 3.56846 2.28817 3.07128C2.47696 2.74557 2.7485 2.4751 3.07548 2.28705C3.57462 2 4.24473 2 5.58495 2C6.92516 2 7.59527 2 8.09441 2.28705C8.49574 2.51785 8.84255 2.88838 9 3.32758",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "duplicate",
+        source: Some("Copy01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M7.5 14.5C7.5 11.2002 7.5 9.55025 8.52513 8.52513C9.55025 7.5 11.2002 7.5 14.5 7.5C17.7998 7.5 19.4497 7.5 20.4749 8.52513C21.5 9.55025 21.5 11.2002 21.5 14.5C21.5 17.7998 21.5 19.4497 20.4749 20.4749C19.4497 21.5 17.7998 21.5 14.5 21.5C11.2002 21.5 9.55025 21.5 8.52513 20.4749C7.5 19.4497 7.5 17.7998 7.5 14.5Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M7.5 16.5C6.10355 16.5 5.40533 16.5 4.84402 16.3036C3.83866 15.9518 3.0482 15.1613 2.69641 14.156C2.5 13.5947 2.5 12.8964 2.5 11.5V9.5C2.5 6.20017 2.5 4.55025 3.52513 3.52513C4.55025 2.5 6.20017 2.5 9.5 2.5H11.5C12.8964 2.5 13.5947 2.5 14.156 2.69641C15.1613 3.0482 15.9518 3.83866 16.3036 4.84402C16.5 5.40533 16.5 6.10355 16.5 7.5",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "replace",
+        source: Some("ArrowReloadHorizontalIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path("M20.5 5.5H9.5C5.78672 5.5 3 8.18503 3 12"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M3.5 18.5H14.5C18.2133 18.5 21 15.815 21 12"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M18.5 3C18.5 3 21 4.84122 21 5.50002C21 6.15882 18.5 8 18.5 8"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M5.49998 16C5.49998 16 3.00001 17.8412 3 18.5C2.99999 19.1588 5.5 21 5.5 21",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "extractAudio",
+        source: Some("MusicNoteSquare01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M2.5 12C2.5 7.52166 2.5 5.28249 3.89124 3.89124C5.28249 2.5 7.52166 2.5 12 2.5C16.4783 2.5 18.7175 2.5 20.1088 3.89124C21.5 5.28249 21.5 7.52166 21.5 12C21.5 16.4783 21.5 18.7175 20.1088 20.1088C18.7175 21.5 16.4783 21.5 12 21.5C7.52166 21.5 5.28249 21.5 3.89124 20.1088C2.5 18.7175 2.5 16.4783 2.5 12Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M13 14.5C13 15.8807 11.8807 17 10.5 17C9.11929 17 8 15.8807 8 14.5C8 13.1193 9.11929 12 10.5 12C11.8807 12 13 13.1193 13 14.5ZM13 14.5V7C13.3333 7.5 13.6 9.6 16 10",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "fade",
+        source: Some("VolumeLowIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M19 9C19.6254 9.81968 20 10.8634 20 12C20 13.1366 19.6254 14.1803 19 15",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M16 14.8135V9.18646C16 6.04126 16 4.46866 15.0747 4.0773C14.1494 3.68593 13.0604 4.79793 10.8823 7.02192C9.7544 8.17365 9.11086 8.42869 7.50605 8.42869C6.10259 8.42869 5.40086 8.42869 4.89677 8.77262C3.85036 9.48655 4.00854 10.882 4.00854 12C4.00854 13.118 3.85036 14.5134 4.89677 15.2274C5.40086 15.5713 6.10259 15.5713 7.50605 15.5713C9.11086 15.5713 9.7544 15.8264 10.8823 16.9781C13.0604 19.2021 14.1494 20.3141 15.0747 19.9227C16 19.5313 16 17.9587 16 14.8135Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "unlink",
+        source: Some("Unlink01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M12.1434 10.691L12.3503 10.4841C14.329 8.50532 17.5372 8.50532 19.5159 10.4841C21.4947 12.4628 21.4947 15.671 19.5159 17.6497L16.6497 20.5159C14.671 22.4947 11.4628 22.4947 9.48405 20.5159C7.50532 18.5372 7.50532 15.329 9.48405 13.3503L9.9484 12.886",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M20.0516 11.114L20.5159 10.6497C22.4947 8.67095 22.4947 5.46279 20.5159 3.48405C18.5372 1.50532 15.329 1.50532 13.3503 3.48405L10.4841 6.35031C8.50532 8.32904 8.50532 11.5372 10.4841 13.5159C12.4628 15.4947 15.671 15.4947 17.6497 13.5159L17.8566 13.309",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M4.5 4L6 6M2 8L5 9M3 13.5L5 12"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "splice",
+        source: Some("ArrowDownToLineIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path("M12 16V3"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M6 21H18"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M7 12C7 12 10.6824 17 12 17C13.3176 17 17 12 17 12"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "addOverlay",
+        source: Some("ImageAdd01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M11.5085 2.9903C7.02567 2.9903 4.78428 2.9903 3.39164 4.38238C1.99902 5.77447 1.99902 8.015 1.99902 12.4961C1.99902 16.9771 1.99902 19.2176 3.39164 20.6098C4.78428 22.0018 7.02567 22.0018 11.5085 22.0018C15.9912 22.0018 18.2326 22.0018 19.6253 20.6098C21.0179 19.2176 21.0179 16.9771 21.0179 12.4961V11.9958",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M4.99902 20.9898C9.209 16.2385 13.9402 9.93727 20.999 14.6632"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M17.9958 1.99829V10.0064M22.0014 5.97728L13.9902 5.99217"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "importSound",
+        source: Some("FileMusicIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M19.9995 11.0039C19.9995 11.0039 19.9995 9.43383 19.8473 9.06613C19.695 8.69843 19.406 8.40927 18.8279 7.83096L14.0914 3.09236C13.5925 2.59325 13.3431 2.3437 13.034 2.19583C12.9698 2.16508 12.9039 2.13778 12.8367 2.11406C12.5137 2 12.1609 2 11.4554 2C8.21033 2 6.58782 2 5.48884 2.88646C5.26683 3.06554 5.06459 3.26787 4.88559 3.48998C3.99951 4.58943 3.99951 6.21265 3.99951 9.45908V14.0052C3.99951 17.7781 3.99951 19.6645 5.17108 20.8366C6.11417 21.7801 7.51994 21.9641 9.99951 22M12.9995 2.50022V3.00043C12.9995 5.83009 12.9995 7.24492 13.8782 8.12398C14.7569 9.00304 16.1711 9.00304 18.9995 9.00304H19.4995",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M17.3966 19.7446C17.3966 20.9885 16.4123 21.9969 15.198 21.9969C13.9838 21.9969 12.9995 20.9885 12.9995 19.7446C12.9995 18.5007 13.9838 17.4923 15.198 17.4923C16.4123 17.4923 17.3966 18.5007 17.3966 19.7446ZM17.3966 19.7446V14C17.6167 14.4963 18.7036 16.6999 20.0005 16.6999",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "record",
+        source: Some("Mic01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M7 6.5C7 4.01472 9.01472 2 11.5 2C13.9853 2 16 4.01472 16 6.5V11.5C16 13.9853 13.9853 16 11.5 16C9.01472 16 7 13.9853 7 11.5V6.5Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M11.5 19H11.0828C7.57267 19 4.57706 16.4623 4 13M11.5 19H11.9172C15.4273 19 18.4229 16.4623 19 13M11.5 19V22",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "addText",
+        source: Some("TextCreationIcon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path("M20 18V6M6 20H18M18 4H6M4 6V18"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M15.9138 10C16.1887 8.30534 14.9534 8.06735 11.9564 8C8.73403 8.05948 7.70512 8.43128 7.99901 10M11.9564 8V16M10.4724 16H13.4405",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M21 2H19C18.4477 2 18 2.44772 18 3V5C18 5.55228 18.4477 6 19 6H21C21.5523 6 22 5.55228 22 5V3C22 2.44772 21.5523 2 21 2Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M5 2H3C2.44772 2 2 2.44772 2 3V5C2 5.55228 2.44772 6 3 6H5C5.55228 6 6 5.55228 6 5V3C6 2.44772 5.55228 2 5 2Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M21 18H19C18.4477 18 18 18.4477 18 19V21C18 21.5523 18.4477 22 19 22H21C21.5523 22 22 21.5523 22 21V19C22 18.4477 21.5523 18 21 18Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+            Mark {
+                shape: Shape::Path(
+                    "M5 18H3C2.44772 18 2 18.4477 2 19V21C2 21.5523 2.44772 22 3 22H5C5.55228 22 6 21.5523 6 21V19C6 18.4477 5.55228 18 5 18Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Butt,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "editText",
+        source: Some("PencilEdit01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M15.2141 5.98239L16.6158 4.58063C17.39 3.80646 18.6452 3.80646 19.4194 4.58063C20.1935 5.3548 20.1935 6.60998 19.4194 7.38415L18.0176 8.78591M15.2141 5.98239L6.98023 14.2163C5.93493 15.2616 5.41226 15.7842 5.05637 16.4211C4.70047 17.058 4.3424 18.5619 4 20C5.43809 19.6576 6.94199 19.2995 7.57889 18.9436C8.21579 18.5877 8.73844 18.0651 9.78375 17.0198L18.0176 8.78591M15.2141 5.98239L18.0176 8.78591",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M11 20H17"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Miter,
+                }),
+            },
+        ],
+    },
+    IconData {
+        name: "draw",
+        source: Some("PaintBrush01Icon"),
+        marks: &[
+            Mark {
+                shape: Shape::Path(
+                    "M3.89089 20.8727L3 21L3.12727 20.1091C3.32086 18.754 3.41765 18.0764 3.71832 17.4751C4.01899 16.8738 4.50296 16.3898 5.47091 15.4218L16.9827 3.91009C17.4062 3.48654 17.618 3.27476 17.8464 3.16155C18.2811 2.94615 18.7914 2.94615 19.2261 3.16155C19.4546 3.27476 19.6663 3.48654 20.0899 3.91009C20.5135 4.33365 20.7252 4.54543 20.8385 4.77389C21.0539 5.20856 21.0539 5.71889 20.8385 6.15356C20.7252 6.38201 20.5135 6.59379 20.0899 7.01735L8.57816 18.5291C7.61022 19.497 7.12625 19.981 6.52491 20.2817C5.92357 20.5823 5.246 20.6791 3.89089 20.8727Z",
+                ),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+            Mark {
+                shape: Shape::Path("M6 15L9 18M8.5 12.5L11.5 15.5"),
+                fill: false,
+                even_odd: false,
+                stroke: Some(Stroke {
+                    width: 1.5,
+                    cap: Cap::Round,
+                    join: Join::Round,
+                }),
+            },
+        ],
+    },
     crate::custom::BLADE,
 ];

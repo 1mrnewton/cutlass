@@ -1,13 +1,11 @@
 //! EXIF orientation, applied to stored samples so the picture is upright.
 //!
-//! ImageIO reports this tag on JPEG, PNG, WebP, HEIC, and AVIF. A missing
-//! tag or a value outside 1 through 8 stays upright. The stored width and
-//! height are the buffer that was decoded. Orientations 5 through 8 swap
-//! those edges.
+//! Every still decoder turns its picture here, so a photo is upright on every
+//! platform. A missing tag or a value outside 1 through 8 stays upright. The
+//! stored width and height are the buffer that was decoded. Orientations 5
+//! through 8 swap those edges.
 
-#![cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
-
-use cutlass_decode::CodecError;
+use crate::CodecError;
 
 /// Tag value 1 through 8. Anything else is stored as upright.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,15 +60,15 @@ impl Orientation {
 
 /// Stored samples moved into an upright buffer.
 ///
-/// `channels` is the byte count of one sample. The stored length must be
-/// `width * height * channels`.
-pub fn upright(
+/// `channels` is the number of values in one pixel. The stored length must
+/// be `width * height * channels`.
+pub fn upright<T: Copy + Default>(
     orientation: Orientation,
     width: u32,
     height: u32,
     channels: usize,
-    src: &[u8],
-) -> Result<(u32, u32, Vec<u8>), CodecError> {
+    src: &[T],
+) -> Result<(u32, u32, Vec<T>), CodecError> {
     if channels == 0 || channels > 8 {
         return Err(CodecError::InvalidApi {
             what: "still channels",
@@ -105,7 +103,7 @@ pub fn upright(
     } else {
         (width, height)
     };
-    let mut dst = vec![0u8; bytes];
+    let mut dst = vec![T::default(); bytes];
     for y in 0..height {
         for x in 0..width {
             let (dx, dy) = orientation.place(x, y, width, height);
@@ -220,6 +218,20 @@ mod tests {
         assert_eq!((w, h), (2, 3));
         assert_eq!(dst.len(), src.len());
         assert_ne!(dst, src);
+    }
+
+    #[test]
+    fn wide_samples_turn_like_bytes() {
+        let src = [1u16, 2, 300, 4, 5, 600];
+        let (w, h, dst) = upright(Orientation::from_tag(6), 3, 2, 1, &src).expect("quarter");
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(dst, [4, 1, 5, 2, 600, 300]);
+    }
+
+    #[test]
+    fn a_zero_or_wide_channel_count_is_refused() {
+        assert!(upright(Orientation::upright(), 1, 1, 0, &[0u8]).is_err());
+        assert!(upright(Orientation::upright(), 1, 1, 9, &[0u8; 9]).is_err());
     }
 
     #[test]

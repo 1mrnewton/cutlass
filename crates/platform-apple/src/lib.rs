@@ -9,7 +9,6 @@
 mod apple;
 mod limits;
 mod nal;
-mod orient;
 #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 mod reorder;
 mod status;

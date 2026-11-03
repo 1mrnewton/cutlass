@@ -561,6 +561,7 @@ dependencies = [
  "cutlass-gif",
  "cutlass-h264",
  "cutlass-hevc",
+ "cutlass-icons",
  "cutlass-isobmff",
  "cutlass-jpeg",
  "cutlass-logger",

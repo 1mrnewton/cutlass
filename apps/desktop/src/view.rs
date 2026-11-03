@@ -4291,6 +4291,48 @@ mod tests {
     }
 
     #[test]
+    fn the_volume_line_sits_at_unity_and_climbs_with_the_gain() {
+        assert_eq!(volume_height(0.0), 0.0);
+        assert_eq!(volume_height(1.0), 0.45);
+        assert_eq!(volume_height(10.0), 1.0);
+        assert_eq!(volume_height(100.0), 1.0);
+        assert!(volume_height(0.5) < 0.45 && volume_height(0.5) > 0.0);
+        let ctx = egui::Context::default();
+        let band = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(4.0, 22.0));
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![0.0; 4],
+            gains: vec![1.0, 1.0, 10.0, 10.0],
+            under_picture: true,
+        };
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(
+                ui,
+                &wave,
+                0.0,
+                band,
+                band,
+                tokens::CLIP_VIDEO_BAR,
+                tokens::CLIP_VIDEO_LINE,
+            );
+        });
+        let tops: Vec<f32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|vertex| vertex.color == tokens::CLIP_VIDEO_LINE)
+            .step_by(4)
+            .map(|vertex| vertex.pos.y)
+            .collect();
+        // Floor 21, reach 20: unity 9 points up, +20 dB at the top.
+        assert_eq!(tops, [12.0, 12.0, 1.0, 1.0]);
+    }
+
+    #[test]
     fn lanes_take_capcut_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);

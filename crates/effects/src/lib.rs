@@ -31,7 +31,7 @@ pub use package::{
     plugin_package_id, segment_package_id, transition_package_id, video_package_id,
 };
 pub use recipe::{
-    Block, Curve, MAX_PASSES, MAX_VALUES, Param, Pass, RECIPE_PREFIX, Recipe, RecipeError, Step,
-    bundled, bundled_recipe,
+    Block, Curve, MAX_PASSES, MAX_VALUES, Param, Pass, RECIPE_PREFIX, RECIPE_VERSION, Recipe,
+    RecipeError, Step, bundled, bundled_recipe,
 };
 pub use source::{AnimSpan, EffectSource, Progress, progress};

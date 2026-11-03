@@ -18,6 +18,9 @@ use std::sync::OnceLock;
 use cutlass_model::Micros;
 use serde::Deserialize;
 
+/// The recipe format this app reads. A recipe with a higher version needs
+/// blocks or fields this app does not have.
+pub const RECIPE_VERSION: u32 = 1;
 /// The most passes one recipe may run.
 pub const MAX_PASSES: usize = 8;
 /// The most keyframes one curve may hold.
@@ -211,6 +214,8 @@ pub struct Pass {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
+    /// The format version, at most [`RECIPE_VERSION`].
+    pub version: u32,
     /// Lowercase letters, digits and dashes.
     pub id: String,
     /// What the picker shows.
@@ -231,6 +236,8 @@ pub struct Step {
 pub enum RecipeError {
     /// Larger than [`MAX_RECIPE_BYTES`].
     TooLarge,
+    /// Written for a newer app: update to use it.
+    Newer(u32),
     /// Not JSON, or not a recipe's shape.
     Shape(String),
     /// The id or name is empty, too long, or has other characters.
@@ -253,6 +260,12 @@ impl fmt::Display for RecipeError {
                 formatter,
                 "the recipe is larger than {MAX_RECIPE_BYTES} bytes"
             ),
+            Self::Newer(version) => {
+                write!(
+                    formatter,
+                    "the recipe needs format {version}; update the app"
+                )
+            }
             Self::Shape(reason) => write!(formatter, "not a recipe: {reason}"),
             Self::Name => write!(formatter, "the recipe's id or name is not usable"),
             Self::Passes => write!(formatter, "a recipe has 1 to {MAX_PASSES} passes"),
@@ -275,6 +288,17 @@ impl Recipe {
         if bytes.len() > MAX_RECIPE_BYTES {
             return Err(RecipeError::TooLarge);
         }
+        // The version first: a newer recipe may use blocks this app cannot
+        // name, and that should read as "update", not as a broken file.
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let Version { version } =
+            serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
+        if version > RECIPE_VERSION {
+            return Err(RecipeError::Newer(version));
+        }
         let recipe: Self =
             serde_json::from_slice(bytes).map_err(|error| RecipeError::Shape(error.to_string()))?;
         recipe.check()?;
@@ -289,6 +313,9 @@ impl Recipe {
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
         let name_ok = !self.name.trim().is_empty() && self.name.chars().count() <= 64;
+        if self.version == 0 {
+            return Err(RecipeError::Shape("version 0".to_owned()));
+        }
         if !id_ok || !name_ok {
             return Err(RecipeError::Name);
         }
@@ -514,7 +541,7 @@ mod tests {
     #[test]
     fn a_left_out_value_is_the_default_and_order_follows_the_block() {
         let recipe =
-            read(r#"{"id":"a","name":"A","passes":[{"block":"grade","params":{"saturation":0}}]}"#)
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"grade","params":{"saturation":0}}]}"#)
                 .unwrap();
         assert_eq!(at(&recipe, 0.0)[..4], [0.0, 1.0, 0.0, 0.0]);
     }
@@ -522,7 +549,7 @@ mod tests {
     #[test]
     fn keys_interpolate_hold_and_repeat() {
         let recipe = read(
-            r#"{"id":"a","name":"A","passes":[{"block":"flash","params":{
+            r#"{"version":1,"id":"a","name":"A","passes":[{"block":"flash","params":{
                 "amount":{"keys":[[0.5,0],[1.5,1]],"repeat":2}}}]}"#,
         )
         .unwrap();
@@ -536,7 +563,7 @@ mod tests {
     #[test]
     fn a_wave_starts_at_from_and_peaks_at_half_its_period() {
         let recipe = read(
-            r#"{"id":"a","name":"A","passes":[{"block":"transform","params":{
+            r#"{"version":1,"id":"a","name":"A","passes":[{"block":"transform","params":{
                 "scale":{"wave":{"period":1,"from":1,"to":1.5}}}}]}"#,
         )
         .unwrap();
@@ -548,7 +575,7 @@ mod tests {
     #[test]
     fn jitter_holds_within_a_step_stays_in_range_and_repeats_exactly() {
         let recipe = read(
-            r#"{"id":"a","name":"A","passes":[{"block":"transform","params":{
+            r#"{"version":1,"id":"a","name":"A","passes":[{"block":"transform","params":{
                 "x":{"jitter":{"rate":10,"from":-0.1,"to":0.1,"seed":7}}}}]}"#,
         )
         .unwrap();
@@ -571,7 +598,7 @@ mod tests {
             r#"{"rotate":{"jitter":{"rate":5,"from":-200,"to":0}}}"#,
         ] {
             let text = format!(
-                r#"{{"id":"a","name":"A","passes":[{{"block":"transform","params":{params}}}]}}"#
+                r#"{{"version":1,"id":"a","name":"A","passes":[{{"block":"transform","params":{params}}}]}}"#
             );
             assert!(
                 matches!(
@@ -597,7 +624,7 @@ mod tests {
             r#"{"x":{"jitter":{"rate":-1,"from":0,"to":0}}}"#,
         ] {
             let text = format!(
-                r#"{{"id":"a","name":"A","passes":[{{"block":"transform","params":{params}}}]}}"#
+                r#"{{"version":1,"id":"a","name":"A","passes":[{{"block":"transform","params":{params}}}]}}"#
             );
             assert!(
                 matches!(read(&text), Err(RecipeError::Curve { .. })),
@@ -606,7 +633,7 @@ mod tests {
         }
         let many: Vec<String> = (0..65).map(|key| format!("[{key},0]")).collect();
         let text = format!(
-            r#"{{"id":"a","name":"A","passes":[{{"block":"transform","params":{{"x":{{"keys":[{}]}}}}}}]}}"#,
+            r#"{{"version":1,"id":"a","name":"A","passes":[{{"block":"transform","params":{{"x":{{"keys":[{}]}}}}}}]}}"#,
             many.join(",")
         );
         assert!(matches!(read(&text), Err(RecipeError::Curve { .. })));
@@ -615,18 +642,20 @@ mod tests {
     #[test]
     fn unknown_blocks_params_and_fields_are_refused() {
         assert!(matches!(
-            read(r#"{"id":"a","name":"A","passes":[{"block":"shader"}]}"#),
+            read(r#"{"version":1,"id":"a","name":"A","passes":[{"block":"shader"}]}"#),
             Err(RecipeError::Shape(_))
         ));
         assert!(matches!(
-            read(r#"{"id":"a","name":"A","passes":[{"block":"blur","params":{"code":1}}]}"#),
+            read(
+                r#"{"version":1,"id":"a","name":"A","passes":[{"block":"blur","params":{"code":1}}]}"#
+            ),
             Err(RecipeError::UnknownParam {
                 block: Block::Blur,
                 ..
             })
         ));
         assert!(matches!(
-            read(r#"{"id":"a","name":"A","wgsl":"x","passes":[{"block":"blur"}]}"#),
+            read(r#"{"version":1,"id":"a","name":"A","wgsl":"x","passes":[{"block":"blur"}]}"#),
             Err(RecipeError::Shape(_))
         ));
         assert!(matches!(read("not json"), Err(RecipeError::Shape(_))));
@@ -635,20 +664,22 @@ mod tests {
     #[test]
     fn names_pass_counts_and_size_are_checked() {
         assert_eq!(
-            read(r#"{"id":"A b","name":"A","passes":[{"block":"blur"}]}"#),
+            read(r#"{"version":1,"id":"A b","name":"A","passes":[{"block":"blur"}]}"#),
             Err(RecipeError::Name)
         );
         assert_eq!(
-            read(r#"{"id":"a","name":" ","passes":[{"block":"blur"}]}"#),
+            read(r#"{"version":1,"id":"a","name":" ","passes":[{"block":"blur"}]}"#),
             Err(RecipeError::Name)
         );
         assert_eq!(
-            read(r#"{"id":"a","name":"A","passes":[]}"#),
+            read(r#"{"version":1,"id":"a","name":"A","passes":[]}"#),
             Err(RecipeError::Passes)
         );
         let passes = [r#"{"block":"blur"}"#; MAX_PASSES + 1].join(",");
         assert_eq!(
-            read(&format!(r#"{{"id":"a","name":"A","passes":[{passes}]}}"#)),
+            read(&format!(
+                r#"{{"version":1,"id":"a","name":"A","passes":[{passes}]}}"#
+            )),
             Err(RecipeError::Passes)
         );
         let padded = format!("{}{}", " ".repeat(MAX_RECIPE_BYTES), "{}");
@@ -656,9 +687,26 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_recipe_asks_for_an_update_even_with_blocks_this_app_lacks() {
+        assert_eq!(
+            read(r#"{"version":2,"id":"a","name":"A","passes":[{"block":"bloom"}]}"#),
+            Err(RecipeError::Newer(2))
+        );
+        assert!(matches!(
+            read(r#"{"id":"a","name":"A","passes":[{"block":"blur"}]}"#),
+            Err(RecipeError::Shape(_))
+        ));
+        assert!(matches!(
+            read(r#"{"version":0,"id":"a","name":"A","passes":[{"block":"blur"}]}"#),
+            Err(RecipeError::Shape(_))
+        ));
+    }
+
+    #[test]
     fn the_effect_id_carries_the_prefix() {
         let recipe =
-            read(r#"{"id":"zoom-pulse","name":"Zoom","passes":[{"block":"blur"}]}"#).unwrap();
+            read(r#"{"version":1,"id":"zoom-pulse","name":"Zoom","passes":[{"block":"blur"}]}"#)
+                .unwrap();
         assert_eq!(recipe.effect_id(), "recipe/zoom-pulse");
     }
 }

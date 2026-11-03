@@ -622,6 +622,13 @@ public protocol EditorProtocol: AnyObject, Sendable {
      */
     func lanes() throws  -> [Lane]
     
+    /**
+     * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
+     * step. It snaps to a cut or the playhead within `snap_us`. Returns the
+     * start it landed on.
+     */
+    func moveClip(clipId: String, row: UInt32, startUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
+    
     func pause() throws 
     
     /**
@@ -657,6 +664,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * return it. Call once per screen frame while playing.
      */
     func tick(elapsedUs: Int64) throws  -> Int64
+    
+    /**
+     * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
+     * step. Returns where the edge landed.
+     */
+    func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, playheadUs: Int64) throws  -> Int64
     
     func undo() throws 
     
@@ -810,6 +823,25 @@ open func lanes()throws  -> [Lane]  {
 })
 }
     
+    /**
+     * Move a clip to `row` (top is 0) starting near `start_us`, as one undo
+     * step. It snaps to a cut or the playhead within `snap_us`. Returns the
+     * start it landed on.
+     */
+open func moveClip(clipId: String, row: UInt32, startUs: Int64, snapUs: Int64, playheadUs: Int64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_move_clip(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterUInt32.lower(row),
+        FfiConverterInt64.lower(startUs),
+        FfiConverterInt64.lower(snapUs),
+        FfiConverterInt64.lower(playheadUs),uniffiCallStatus
+    )
+})
+}
+    
 open func pause()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_pause(
@@ -897,6 +929,24 @@ open func tick(elapsedUs: Int64)throws  -> Int64  {
     uniffi_cutlass_ffi_bindings_fn_method_editor_tick(
             self.uniffiCloneHandle(),
         FfiConverterInt64.lower(elapsedUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Drag a clip's start edge, or its end edge, to `time_us`, as one undo
+     * step. Returns where the edge landed.
+     */
+open func trim(clipId: String, startEdge: Bool, timeUs: Int64, snapUs: Int64, playheadUs: Int64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_trim(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(startEdge),
+        FfiConverterInt64.lower(timeUs),
+        FfiConverterInt64.lower(snapUs),
+        FfiConverterInt64.lower(playheadUs),uniffiCallStatus
     )
 })
 }
@@ -1558,6 +1608,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_lanes() != 20121) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_move_clip() != 64054) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_pause() != 24082) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1580,6 +1633,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_trim() != 7512) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {

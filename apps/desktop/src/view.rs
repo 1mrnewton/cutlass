@@ -3409,7 +3409,7 @@ fn lane_icon(kind: &cutlass_model::TrackType) -> &'static str {
 
 fn lane_color(kind: &cutlass_model::TrackType) -> Color32 {
     match kind {
-        cutlass_model::TrackType::Audio => Color32::from_rgb(0x4e, 0x8f, 0x7c),
+        cutlass_model::TrackType::Audio => tokens::CLIP_AUDIO,
         cutlass_model::TrackType::Text
         | cutlass_model::TrackType::TextToVideoText
         | cutlass_model::TrackType::TextToVideoTextAudio => Color32::from_rgb(0x9a, 0x86, 0xb0),
@@ -3419,7 +3419,7 @@ fn lane_color(kind: &cutlass_model::TrackType) -> Color32 {
         }
         cutlass_model::TrackType::Filter => Color32::from_rgb(0x6a, 0x8f, 0x72),
         cutlass_model::TrackType::Adjust => Color32::from_rgb(0x8a, 0x7e, 0x9a),
-        _ => Color32::from_rgb(0x5b, 0x8a, 0xa3),
+        _ => tokens::CLIP_VIDEO,
     }
 }
 

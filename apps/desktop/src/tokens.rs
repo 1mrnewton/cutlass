@@ -81,6 +81,21 @@ pub const MIN_WINDOW_HEIGHT: f32 = 700.0;
 /// Lane height shared by drawing and hit testing.
 pub const LANE_HEIGHT: f64 = 48.0;
 
+/// A video clip, measured from CapCut 9.6.0: its body, the name and length
+/// chips, the waveform bars, and the volume line across them.
+pub const CLIP_VIDEO: Color32 = Color32::from_rgb(30, 76, 81);
+pub const CLIP_VIDEO_CHIP: Color32 = Color32::from_rgb(47, 94, 99);
+pub const CLIP_VIDEO_BAR: Color32 = Color32::from_rgb(51, 117, 125);
+pub const CLIP_VIDEO_LINE: Color32 = Color32::from_rgb(80, 122, 126);
+/// An audio clip, the same parts in CapCut's navy.
+pub const CLIP_AUDIO: Color32 = Color32::from_rgb(29, 54, 94);
+pub const CLIP_AUDIO_CHIP: Color32 = Color32::from_rgb(45, 72, 114);
+pub const CLIP_AUDIO_BAR: Color32 = Color32::from_rgb(58, 130, 200);
+pub const CLIP_AUDIO_LINE: Color32 = Color32::from_rgb(100, 138, 186);
+/// The cap on a loud waveform bar, and the tip on one that clips.
+pub const WAVE_LOUD: Color32 = Color32::from_rgb(226, 143, 72);
+pub const WAVE_CLIPPED: Color32 = Color32::from_rgb(215, 68, 50);
+
 /// A main-track clip, CapCut's 76 track height less its border: a header
 /// row, then the filmstrip over the sound band.
 pub const MAIN_CLIP_HEIGHT: f32 = 74.0;

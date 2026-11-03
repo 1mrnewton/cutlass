@@ -131,6 +131,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::Position => "the position is not a finite number".to_owned(),
         EditError::Scale => "the scale must be greater than zero".to_owned(),
         EditError::Fade => "a fade cannot be negative".to_owned(),
+        EditError::Volume => "the volume must be zero or more".to_owned(),
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),

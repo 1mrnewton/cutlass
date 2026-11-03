@@ -168,6 +168,7 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("the scale must be greater than zero")
             }
             Self::Edit(EditError::Fade) => formatter.write_str("a fade cannot be negative"),
+            Self::Edit(EditError::Volume) => formatter.write_str("the volume must be zero or more"),
             Self::Edit(EditError::Opacity) => {
                 formatter.write_str("the opacity must be from zero to one")
             }

@@ -96,6 +96,8 @@ pub enum EditError {
     Scale,
     /// A fade duration is negative.
     Fade,
+    /// Volume is negative or not a finite number.
+    Volume,
     /// Opacity is not finite or is outside zero to one.
     Opacity,
     /// The segment is not a text clip.

@@ -34,7 +34,8 @@ pub use map::{
     micros_to_ticks, placement_of, speed_at, ticks_to_micros, timeline_for_source,
 };
 pub use mix::{
-    AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, mix_inputs, render, volume_at,
+    AudioSample, ClipPcm, ClipRole, Mix, MixClip, MixResult, clip_volume, mix_inputs, render,
+    volume_at,
 };
 pub use reader::{
     DecodedFrame, HeldFrame, Media, MediaInfo, PcmReady, ReaderFactory, Steer, StreamReport,

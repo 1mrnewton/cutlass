@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Bundled resources, the cache, and eviction."
+description = "The Cutlass root folder, bundled resources, the cache, and eviction."
 
 [dependencies]
 cutlass-download = { path = "../download", version = "0.1.0" }

@@ -2,9 +2,15 @@ import PhotosUI
 import SwiftUI
 
 /// The editor: preview on top, the transport, the timeline, then the tools.
-struct ContentView: View {
-    @State private var model = EditorModel()
+struct EditorScreen: View {
+    let name: String
+    @State private var model: EditorModel
     @State private var picked: [PhotosPickerItem] = []
+
+    init(project: ProjectSummary) {
+        name = project.name
+        _model = State(initialValue: EditorModel(project: project.path))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,6 +24,11 @@ struct ContentView: View {
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
+        .onDisappear { model.pause() }
+        .navigationTitle(name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color(white: 0.06), for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
     }
 
     private var preview: some View {
@@ -127,8 +138,4 @@ struct ContentView: View {
     private func clock(_ micros: Int64) -> String {
         TimelineStrip.clock(Double(micros / 100_000) / 10)
     }
-}
-
-#Preview {
-    ContentView()
 }

@@ -33,15 +33,15 @@ final class EditorModel {
     private var waiting: Int64?
     private var playback: Task<Void, Never>?
 
-    init() {
+    /// Open the project folder at `project`.
+    init(project: String) {
         do {
-            let root = URL.documentsDirectory
-            let bundle = root.appending(path: "Bundle")
-            try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: Folders.bundle, withIntermediateDirectories: true)
             editor = try Editor.open(
-                project: root.appending(path: "Projects/Untitled").path(percentEncoded: false),
-                bundle: bundle.path(percentEncoded: false),
-                cache: root.appending(path: "Cache").path(percentEncoded: false)
+                project: project,
+                bundle: Folders.bundle.path(percentEncoded: false),
+                cache: Folders.cache.path(percentEncoded: false)
             )
         } catch {
             editor = nil

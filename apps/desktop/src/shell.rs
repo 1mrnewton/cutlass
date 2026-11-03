@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
@@ -312,14 +312,7 @@ pub struct Chrome {
     pub close_requested: bool,
 }
 
-/// One saved project in the launch list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ListedProject {
-    pub path: PathBuf,
-    pub name: String,
-    pub duration: Micros,
-    pub modified: SystemTime,
-}
+pub use cutlass_store::ListedProject;
 
 struct ClipDrag {
     id: SegmentId,
@@ -923,59 +916,12 @@ impl Shell {
     /// Projects under `root`, newest first. A folder without a draft is skipped.
     #[must_use]
     pub fn list_projects(root: &Path) -> Vec<ListedProject> {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return Vec::new();
-        };
-        let mut projects = Vec::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Ok(folder) = Folder::read(&path) else {
-                continue;
-            };
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(UNIX_EPOCH);
-            let name = if folder.draft.name.is_empty() {
-                entry.file_name().to_string_lossy().into_owned()
-            } else {
-                folder.draft.name
-            };
-            projects.push(ListedProject {
-                path,
-                name,
-                duration: folder.draft.duration,
-                modified,
-            });
-        }
-        projects.sort_by(|left, right| {
-            right
-                .modified
-                .cmp(&left.modified)
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        projects
+        cutlass_store::list_projects(root)
     }
 
     /// Write a new empty project under `root` and return its folder.
     pub fn create_project(root: &Path) -> Result<PathBuf, ShellError> {
-        std::fs::create_dir_all(root).map_err(|error| ShellError::Io(error.to_string()))?;
-        let (name, path, id) = next_project_slot(root);
-        let mut draft = Draft::empty(id);
-        draft.name = name;
-        let now = unix_millis();
-        draft.create_time = now;
-        draft.update_time = now;
-        let mut folder = Folder::new(draft);
-        folder.set_linkage_enabled(true);
-        folder.save(&path).map_err(ShellError::Store)?;
-        Ok(path)
+        cutlass_store::create_project(root).map_err(ShellError::Store)
     }
 
     /// Write the open project, then leave it so the launch list is showing.
@@ -5737,31 +5683,6 @@ fn application_support() -> Option<PathBuf> {
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".local").join("share"))
-}
-
-fn next_project_slot(root: &Path) -> (String, PathBuf, String) {
-    for index in 1..100_000 {
-        let name = if index == 1 {
-            "Project".to_owned()
-        } else {
-            format!("Project {index}")
-        };
-        let path = root.join(&name);
-        if !path.exists() {
-            return (name, path, format!("project-{index}"));
-        }
-    }
-    let stamp = unix_millis();
-    let name = format!("Project {stamp}");
-    let path = root.join(&name);
-    (name, path, format!("project-{stamp}"))
-}
-
-fn unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
 
 /// `peaks` spread over `columns`: the loudest level in each column's share

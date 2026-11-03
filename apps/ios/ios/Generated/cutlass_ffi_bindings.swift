@@ -460,7 +460,13 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 
 
 // Public interface members begin here.
-
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -470,6 +476,22 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias SwiftType = UInt32
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
+    typealias FfiType = UInt64
+    typealias SwiftType = UInt64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt64 {
         return try lift(readInt(&buf))
     }
 
@@ -651,6 +673,15 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func durationUs() throws  -> Int64
     
     /**
+     * Write the whole cut to `path` as an MP4, `long_side` pixels on its
+     * long side: one of [`export_sides`]. Play stops first. `progress`
+     * hears each picture on the editor's own thread and stops the export
+     * by returning false; a stopped or failed export leaves no file. Every
+     * other call waits until it is done.
+     */
+    func export(path: String, longSide: UInt32, progress: ExportProgress) throws  -> Exported
+    
+    /**
      * Filmstrip tiles, `height` points tall, for the picture clips that
      * meet `from_us` to `to_us`. Pictures not stored yet are asked for.
      */
@@ -761,6 +792,9 @@ public protocol EditorProtocol: AnyObject, Sendable {
      */
     func text(clipId: String) throws  -> TextInfo?
     
+    /**
+     * The picture of a tile [`Self::film`] named, once stored.
+     */
     func thumb(key: String) throws  -> Frame?
     
     /**
@@ -778,7 +812,6 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func undo() throws 
     
     /**
-     * The picture of a tile [`Self::film`] named, once stored.
      * The waveforms of the clips with sound from `from_us` to `to_us`.
      */
     func waves(fromUs: Int64, toUs: Int64, pixelSize: Double) throws  -> [Wave]
@@ -928,6 +961,25 @@ open func durationUs()throws  -> Int64  {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Write the whole cut to `path` as an MP4, `long_side` pixels on its
+     * long side: one of [`export_sides`]. Play stops first. `progress`
+     * hears each picture on the editor's own thread and stops the export
+     * by returning false; a stopped or failed export leaves no file. Every
+     * other call waits until it is done.
+     */
+open func export(path: String, longSide: UInt32, progress: ExportProgress)throws  -> Exported  {
+    return try  FfiConverterTypeExported_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_export(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),
+        FfiConverterUInt32.lower(longSide),
+        FfiConverterTypeExportProgress_lower(progress),uniffiCallStatus
     )
 })
 }
@@ -1215,6 +1267,9 @@ open func text(clipId: String)throws  -> TextInfo?  {
 })
 }
     
+    /**
+     * The picture of a tile [`Self::film`] named, once stored.
+     */
 open func thumb(key: String)throws  -> Frame?  {
     return try  FfiConverterOptionTypeFrame.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
@@ -1266,7 +1321,6 @@ open func undo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift
 }
     
     /**
-     * The picture of a tile [`Self::film`] named, once stored.
      * The waveforms of the clips with sound from `from_us` to `to_us`.
      */
 open func waves(fromUs: Int64, toUs: Int64, pixelSize: Double)throws  -> [Wave]  {
@@ -1340,6 +1394,216 @@ public func FfiConverterTypeEditor_lift(_ handle: UInt64) throws -> Editor {
 #endif
 public func FfiConverterTypeEditor_lower(_ value: Editor) -> UInt64 {
     return FfiConverterTypeEditor.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Hears an export's progress: the pictures done and the pictures in all.
+ * Returning false stops it.
+ */
+public protocol ExportProgress: AnyObject, Sendable {
+    
+    func progress(done: UInt64, total: UInt64)  -> Bool
+    
+}
+/**
+ * Hears an export's progress: the pictures done and the pictures in all.
+ * Returning false stops it.
+ */
+open class ExportProgressImpl: ExportProgress, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_cutlass_ffi_bindings_fn_clone_exportprogress(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_cutlass_ffi_bindings_fn_free_exportprogress(handle, $0) }
+    }
+
+    
+
+    
+open func progress(done: UInt64, total: UInt64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_exportprogress_progress(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(done),
+        FfiConverterUInt64.lower(total),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceExportProgress {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceExportProgress = UniffiVTableCallbackInterfaceExportProgress(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeExportProgress.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ExportProgress: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeExportProgress.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ExportProgress: handle missing in uniffiClone")
+            }
+        },
+        progress: { (
+            uniffiHandle: UInt64,
+            done: UInt64,
+            total: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterTypeExportProgress.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.progress(
+                     done: try FfiConverterUInt64.lift(done),
+                     total: try FfiConverterUInt64.lift(total)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceExportProgress> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceExportProgress>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitExportProgress() {
+    uniffi_cutlass_ffi_bindings_fn_init_callback_vtable_exportprogress(UniffiCallbackInterfaceExportProgress.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExportProgress: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<ExportProgress>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = ExportProgress
+
+    public static func lift(_ handle: UInt64) throws -> ExportProgress {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return ExportProgressImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: ExportProgress) -> UInt64 {
+         if let rustImpl = value as? ExportProgressImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportProgress {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ExportProgress, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExportProgress_lift(_ handle: UInt64) throws -> ExportProgress {
+    return try FfiConverterTypeExportProgress.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExportProgress_lower(_ value: ExportProgress) -> UInt64 {
+    return FfiConverterTypeExportProgress.lower(value)
 }
 
 
@@ -1489,6 +1753,71 @@ public func FfiConverterTypeEffectChoice_lift(_ buf: RustBuffer) throws -> Effec
 #endif
 public func FfiConverterTypeEffectChoice_lower(_ value: EffectChoice) -> RustBuffer {
     return FfiConverterTypeEffectChoice.lower(value)
+}
+
+
+/**
+ * A finished export.
+ */
+public struct Exported: Equatable, Hashable {
+    public var path: String
+    public var frames: UInt64
+    public var width: UInt32
+    public var height: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, frames: UInt64, width: UInt32, height: UInt32) {
+        self.path = path
+        self.frames = frames
+        self.width = width
+        self.height = height
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension Exported: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeExported: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Exported {
+        return
+            try Exported(
+                path: FfiConverterString.read(from: &buf), 
+                frames: FfiConverterUInt64.read(from: &buf), 
+                width: FfiConverterUInt32.read(from: &buf), 
+                height: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Exported, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterUInt64.write(value.frames, into: &buf)
+        FfiConverterUInt32.write(value.width, into: &buf)
+        FfiConverterUInt32.write(value.height, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExported_lift(_ buf: RustBuffer) throws -> Exported {
+    return try FfiConverterTypeExported.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeExported_lower(_ value: Exported) -> RustBuffer {
+    return FfiConverterTypeExported.lower(value)
 }
 
 
@@ -2892,6 +3221,31 @@ fileprivate struct FfiConverterOptionTypeToolBar: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
     typealias SwiftType = [Float]
 
@@ -3223,6 +3577,16 @@ public func effectChoices() -> [EffectChoice]  {
 })
 }
 /**
+ * The long sides, in pixels, an export may be, smallest first.
+ */
+public func exportSides() -> [UInt32]  {
+    return try!  FfiConverterSequenceUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_export_sides(uniffiCallStatus
+    )
+})
+}
+/**
  * The speed, in points a second, a timeline let go at `velocity` coasts
  * from: zero for a slow swipe.
  */
@@ -3356,6 +3720,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() != 59474) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_export_sides() != 4458) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_fling_start() != 16462) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3396,6 +3763,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 4799) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_film() != 35426) {
@@ -3464,7 +3834,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_text() != 30726) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 22426) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_thumb() != 28776) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_tick() != 60373) {
@@ -3476,16 +3846,20 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_undo() != 16986) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_waves() != 4586) {
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_waves() != 48452) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_zoom() != 36237) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_exportprogress_progress() != 11274) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_constructor_editor_open() != 960) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitExportProgress()
     return InitializationResult.ok
 }()
 

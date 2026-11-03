@@ -123,6 +123,29 @@ pub struct Film {
     pub tiles: Vec<Tile>,
 }
 
+/// A finished export.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Exported {
+    pub path: String,
+    pub frames: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Hears an export's progress: the pictures done and the pictures in all.
+/// Returning false stops it.
+#[uniffi::export(with_foreign)]
+pub trait ExportProgress: Send + Sync {
+    fn progress(&self, done: u64, total: u64) -> bool;
+}
+
+/// The long sides, in pixels, an export may be, smallest first.
+#[uniffi::export]
+#[must_use]
+pub fn export_sides() -> Vec<u32> {
+    cutlass_ffi::PHONE_EXPORT_SIDES.to_vec()
+}
+
 /// The transport clock at `time_us`: whole seconds as `MM:SS`, or
 /// `HH:MM:SS` from an hour.
 #[uniffi::export]
@@ -795,7 +818,6 @@ impl Editor {
             .collect())
     }
 
-    /// The picture of a tile [`Self::film`] named, once stored.
     /// The waveforms of the clips with sound from `from_us` to `to_us`.
     pub fn waves(
         &self,
@@ -817,6 +839,7 @@ impl Editor {
             .collect())
     }
 
+    /// The picture of a tile [`Self::film`] named, once stored.
     pub fn thumb(&self, key: String) -> Result<Option<Frame>, EditorError> {
         let picture = self.run(move |host| host.thumb(&key))?;
         Ok(picture.map(|picture| Frame {
@@ -824,6 +847,30 @@ impl Editor {
             height: picture.height,
             rgba: picture.rgba,
         }))
+    }
+
+    /// Write the whole cut to `path` as an MP4, `long_side` pixels on its
+    /// long side: one of [`export_sides`]. Play stops first. `progress`
+    /// hears each picture on the editor's own thread and stops the export
+    /// by returning false; a stopped or failed export leaves no file. Every
+    /// other call waits until it is done.
+    pub fn export(
+        &self,
+        path: String,
+        long_side: u32,
+        progress: Arc<dyn ExportProgress>,
+    ) -> Result<Exported, EditorError> {
+        let exported = self.run(move |host| {
+            host.export(&PathBuf::from(path), long_side, &mut |done, total| {
+                progress.progress(done, total)
+            })
+        })??;
+        Ok(Exported {
+            path: exported.path.to_string_lossy().into_owned(),
+            frames: exported.frames,
+            width: exported.width,
+            height: exported.height,
+        })
     }
 
     pub fn remove(&self, clip_id: String) -> Result<(), EditorError> {
@@ -886,6 +933,7 @@ fn lane_kind(kind: cutlass_ffi::TrackType) -> LaneKind {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{Editor, LaneKind, create_project, list_projects, start};
@@ -917,7 +965,7 @@ mod tests {
                 .to_string()
         }
 
-        fn open(&self) -> std::sync::Arc<Editor> {
+        fn open(&self) -> Arc<Editor> {
             Editor::open(self.root(), self.bundle(), self.project()).unwrap()
         }
     }
@@ -1015,6 +1063,58 @@ mod tests {
         let frame = editor.thumb(tile.key).unwrap().expect("stored");
         assert_eq!(frame.rgba.len(), (frame.width * frame.height * 4) as usize);
         assert!(editor.thumb("nothing".to_owned()).unwrap().is_none());
+    }
+
+    /// Counts what an export hears and stops it after `stop_at` pictures.
+    struct Counter {
+        heard: AtomicU64,
+        stop_at: u64,
+    }
+
+    impl super::ExportProgress for Counter {
+        fn progress(&self, done: u64, total: u64) -> bool {
+            assert!(done <= total);
+            self.heard.fetch_add(1, Ordering::Relaxed);
+            done < self.stop_at
+        }
+    }
+
+    #[test]
+    fn the_cut_exports_through_the_binding_and_a_stop_leaves_no_file() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        let movie = temp.0.join("movie.mp4");
+        let path = movie.display().to_string();
+        let counter = || {
+            Arc::new(Counter {
+                heard: AtomicU64::new(0),
+                stop_at: u64::MAX,
+            })
+        };
+        assert!(editor.export(path.clone(), 720, counter()).is_err());
+        editor.append(editor.import(pattern()).unwrap()).unwrap();
+        assert!(editor.export(path.clone(), 333, counter()).is_err());
+
+        let stopping = Arc::new(Counter {
+            heard: AtomicU64::new(0),
+            stop_at: 2,
+        });
+        let super::EditorError::Failed { message } = editor
+            .export(path.clone(), 720, stopping.clone())
+            .unwrap_err();
+        assert!(message.contains("stopped"), "{message}");
+        assert_eq!(stopping.heard.load(Ordering::Relaxed), 2);
+        assert!(!movie.exists());
+
+        let all = counter();
+        let done = editor.export(path.clone(), 720, all.clone()).unwrap();
+        assert_eq!(done.path, path);
+        assert_eq!(all.heard.load(Ordering::Relaxed), done.frames);
+        assert_eq!(done.width.max(done.height), 720);
+        assert!(std::fs::metadata(&movie).unwrap().len() > 0);
+        assert_eq!(super::export_sides(), [720, 1080, 2160]);
+        // The editor still answers afterwards.
+        assert_eq!(editor.lanes().unwrap()[0].clips.len(), 1);
     }
 
     #[test]

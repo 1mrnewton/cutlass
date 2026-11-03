@@ -243,6 +243,22 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_EXPORT_PROGRESS_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_EXPORT_PROGRESS_METHOD0
+typedef void (*UniffiCallbackInterfaceExportProgressMethod0)(uint64_t, uint64_t, uint64_t, int8_t* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_EXPORT_PROGRESS
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_EXPORT_PROGRESS
+typedef struct UniffiVTableCallbackInterfaceExportProgress {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceExportProgressMethod0 _Nonnull progress;
+} UniffiVTableCallbackInterfaceExportProgress;
+
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_CLONE_EDITOR
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_CLONE_EDITOR
 uint64_t uniffi_cutlass_ffi_bindings_fn_clone_editor(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -281,6 +297,11 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_clip_bar(uint64_t ptr, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DURATION_US
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_DURATION_US
 int64_t uniffi_cutlass_ffi_bindings_fn_method_editor_duration_us(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_EXPORT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_export(uint64_t ptr, RustBuffer path, uint32_t long_side, uint64_t progress, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_FILM
@@ -423,6 +444,26 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_waves(uint64_t ptr, int6
 double uniffi_cutlass_ffi_bindings_fn_method_editor_zoom(uint64_t ptr, double pixel_size, double factor, double lane_width, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_CLONE_EXPORTPROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_CLONE_EXPORTPROGRESS
+uint64_t uniffi_cutlass_ffi_bindings_fn_clone_exportprogress(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FREE_EXPORTPROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FREE_EXPORTPROGRESS
+void uniffi_cutlass_ffi_bindings_fn_free_exportprogress(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_INIT_CALLBACK_VTABLE_EXPORTPROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_INIT_CALLBACK_VTABLE_EXPORTPROGRESS
+void uniffi_cutlass_ffi_bindings_fn_init_callback_vtable_exportprogress(const UniffiVTableCallbackInterfaceExportProgress* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EXPORTPROGRESS_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EXPORTPROGRESS_PROGRESS
+int8_t uniffi_cutlass_ffi_bindings_fn_method_exportprogress_progress(uint64_t ptr, uint64_t done, uint64_t total, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CLOCK
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CLOCK
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_clock(int64_t time_us, RustCallStatus *_Nonnull out_status
@@ -436,6 +477,12 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, R
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EFFECT_CHOICES
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EFFECT_CHOICES
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_effect_choices(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EXPORT_SIDES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EXPORT_SIDES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_export_sides(RustCallStatus *_Nonnull out_status
     
 );
 #endif
@@ -762,6 +809,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_effect_choices(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EXPORT_SIDES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EXPORT_SIDES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_export_sides(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_FLING_START
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_FLING_START
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_fling_start(void
@@ -843,6 +896,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DURATION_US
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_DURATION_US
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_EXPORT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_export(void
     
 );
 #endif
@@ -1011,6 +1070,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_waves(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ZOOM
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ZOOM
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_zoom(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EXPORTPROGRESS_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EXPORTPROGRESS_PROGRESS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_exportprogress_progress(void
     
 );
 #endif

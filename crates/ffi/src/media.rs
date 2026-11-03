@@ -1,84 +1,61 @@
 //! Import a file the phone picked, and add a library item to the end of its lane.
 //!
-//! The phone shell probes the file with its own media framework, the way
-//! the desktop probes before import. The file is copied into the project's
-//! `Resources` folder and the draft stores that relative path.
+//! The file is probed by `cutlass-probe`, the same way the desktop probes
+//! before import. It is copied into the project's `Resources` folder and the
+//! draft stores that relative path.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use cutlass_editor::{AppendLane, append_placement, material_span};
 use cutlass_model::{MaterialAudio, MaterialId, MaterialVideo, MetaType, Segment, TimeRange};
+use cutlass_probe::Probed;
 use cutlass_session::{Draft, ImportedMedium, Micros, Request, SegmentId, TrackId};
 
 use crate::error::FfiError;
 
-/// How long a still lasts when it is added, the same as on the desktop.
-pub const STILL_DURATION: Micros = MaterialVideo::MAPPING_DURATION;
-
-/// What the phone read from a file before import.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Probed {
-    /// A movie, or a still when `still` is true. Size in pixels, upright.
-    Picture {
-        still: bool,
-        width: i32,
-        height: i32,
-        duration: Micros,
-    },
-    /// A sound file.
-    Sound { duration: Micros },
-}
-
-impl Probed {
-    fn duration(self) -> Micros {
-        match self {
-            Self::Picture { duration, .. } | Self::Sound { duration } => duration,
-        }
+fn duration(probed: &Probed) -> i64 {
+    match probed {
+        Probed::Video { duration, .. } | Probed::Audio { duration } => *duration,
     }
 }
 
 /// The import request for `probed`, stored at `path` inside the project.
 pub(crate) fn imported(id: &str, path: String, probed: Probed) -> ImportedMedium {
     match probed {
-        Probed::Picture {
-            still,
+        Probed::Video {
+            meta,
             width,
             height,
             duration,
         } => {
             let mut material = MaterialVideo::new(id);
-            let meta = if still {
-                MetaType::Photo
-            } else {
-                MetaType::Video
-            };
             material.kind = meta.as_str().to_owned();
             material.path = path;
-            material.duration = duration;
+            material.duration = Micros(duration);
             material.width = width;
             material.height = height;
             ImportedMedium::Video(Box::new(material))
         }
-        Probed::Sound { duration } => ImportedMedium::Audio(Box::new(MaterialAudio {
+        Probed::Audio { duration } => ImportedMedium::Audio(Box::new(MaterialAudio {
             id: MaterialId::new(id),
             kind: MetaType::Music.as_str().to_owned(),
             path,
-            duration,
+            duration: Micros(duration),
             ..MaterialAudio::default()
         })),
     }
 }
 
 /// Refuse a probe the draft cannot place.
-pub(crate) fn check(probed: Probed) -> Result<(), FfiError> {
-    if probed.duration().0 <= 0 {
+pub(crate) fn check(probed: &Probed) -> Result<(), FfiError> {
+    if duration(probed) <= 0 {
         return Err(FfiError::Refused {
             reason: "the media has no duration".to_owned(),
         });
     }
-    if let Probed::Picture { width, height, .. } = probed
-        && (width <= 0 || height <= 0)
+    if let Probed::Video { width, height, .. } = probed
+        && (*width <= 0 || *height <= 0)
     {
         return Err(FfiError::Refused {
             reason: "the picture has no size".to_owned(),

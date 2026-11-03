@@ -22,12 +22,12 @@ pub use cache::ResourceCache;
 pub use codecs::{decoders, readers};
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
+pub use cutlass_probe::{ProbeError, Probed};
 pub use cutlass_session::{Micros, SegmentId};
 pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use error::FfiError;
 pub use host::Commands;
-pub use media::{Probed, STILL_DURATION};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
@@ -206,12 +206,20 @@ impl PhoneHost {
         self.player.is_playing()
     }
 
-    /// Copy a file the phone picked into the project and add it to the library.
+    /// Probe a file the phone picked, copy it into the project, and add it to
+    /// the library.
     ///
     /// Returns the new material id. A refused probe or a failed request
     /// leaves the draft unchanged and removes the copy.
-    pub fn import(&mut self, source: &Path, probed: Probed) -> Result<String, FfiError> {
-        media::check(probed)?;
+    pub fn import(&mut self, source: &Path) -> Result<String, FfiError> {
+        let probed = cutlass_probe::probe(source).map_err(|error| FfiError::Refused {
+            reason: error.to_string(),
+        })?;
+        self.import_probed(source, probed)
+    }
+
+    fn import_probed(&mut self, source: &Path, probed: Probed) -> Result<String, FfiError> {
+        media::check(&probed)?;
         let id = media::fresh(&media::ids(self.draft()), "mat");
         let (stored, copy) = media::copy_in(self.root(), source)?;
         let request = Request::Import {
@@ -500,11 +508,11 @@ mod tests {
     }
 
     fn still(duration: i64) -> crate::Probed {
-        crate::Probed::Picture {
-            still: true,
+        crate::Probed::Video {
+            meta: cutlass_model::MetaType::Photo,
             width: 16,
             height: 16,
-            duration: cutlass_session::Micros(duration),
+            duration,
         }
     }
 
@@ -514,8 +522,8 @@ mod tests {
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         let source = fixture("pattern.png");
-        let first = host.import(&source, still(2_000_000)).unwrap();
-        let second = host.import(&source, still(1_000_000)).unwrap();
+        let first = host.import_probed(&source, still(2_000_000)).unwrap();
+        let second = host.import_probed(&source, still(1_000_000)).unwrap();
         assert_ne!(first, second);
         let videos = &host.draft().materials.videos;
         assert_eq!(videos[0].path, "Resources/pattern.png");
@@ -539,16 +547,45 @@ mod tests {
     }
 
     #[test]
+    fn a_picked_file_is_probed_here_and_a_file_that_is_not_media_is_refused() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host.import(&fixture("pattern.jpg")).unwrap();
+        let material = &host.draft().materials.videos[0];
+        assert_eq!(material.id.as_str(), id);
+        assert_eq!(material.kind, "photo");
+        assert_eq!((material.width, material.height), (16, 16));
+        assert_eq!(
+            material.duration,
+            cutlass_model::MaterialVideo::MAPPING_DURATION
+        );
+
+        let before = host.draft().clone();
+        let text = temp.path.join("notes.mp4");
+        fs::write(&text, b"not media").unwrap();
+        let error = host.import(&text).unwrap_err();
+        assert!(
+            error.to_string().contains("not a media container"),
+            "{error}"
+        );
+        let empty = temp.path.join("empty.jpg");
+        fs::write(&empty, b"").unwrap();
+        assert!(host.import(&empty).is_err());
+        assert!(host.import(&temp.path).is_err());
+        assert_eq!(host.draft(), &before);
+        assert!(!host.root().join("Resources/notes.mp4").exists());
+    }
+
+    #[test]
     fn a_sound_appends_to_a_new_audio_lane() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         let id = host
-            .import(
+            .import_probed(
                 &fixture("pattern.png"),
-                crate::Probed::Sound {
-                    duration: cutlass_session::Micros(500_000),
-                },
+                crate::Probed::Audio { duration: 500_000 },
             )
             .unwrap();
         host.append(&id).unwrap();
@@ -568,18 +605,22 @@ mod tests {
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         let before = host.draft().clone();
-        let error = host.import(&fixture("pattern.png"), still(0)).unwrap_err();
+        let error = host
+            .import_probed(&fixture("pattern.png"), still(0))
+            .unwrap_err();
         assert_eq!(error.to_string(), "the media has no duration");
-        let flat = crate::Probed::Picture {
-            still: false,
+        let flat = crate::Probed::Video {
+            meta: cutlass_model::MetaType::Video,
             width: 0,
             height: 9,
-            duration: cutlass_session::Micros(1),
+            duration: 1,
         };
-        let error = host.import(&fixture("pattern.png"), flat).unwrap_err();
+        let error = host
+            .import_probed(&fixture("pattern.png"), flat)
+            .unwrap_err();
         assert_eq!(error.to_string(), "the picture has no size");
         let missing = temp.path.join("missing.mov");
-        let error = host.import(&missing, still(1_000)).unwrap_err();
+        let error = host.import_probed(&missing, still(1_000)).unwrap_err();
         assert!(matches!(error, FfiError::Refused { .. }));
         let resources = host.root().join("Resources");
         assert!(!resources.exists() || fs::read_dir(&resources).unwrap().next().is_none());
@@ -606,7 +647,7 @@ mod tests {
         let empty = host.frame(cutlass_session::Micros(0)).unwrap();
         assert_eq!((empty.width, empty.height), (16, 16));
         let id = host
-            .import(&fixture("pattern.png"), still(1_000_000))
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
             .unwrap();
         host.append(&id).unwrap();
         let shown = host.frame(cutlass_session::Micros(500_000)).unwrap();
@@ -635,7 +676,7 @@ mod tests {
         .unwrap();
         let empty = host.frame(cutlass_session::Micros(0)).unwrap();
         let id = host
-            .import(&fixture("truncated.jpg"), still(1_000_000))
+            .import_probed(&fixture("truncated.jpg"), still(1_000_000))
             .unwrap();
         host.append(&id).unwrap();
         let shown = host.frame(cutlass_session::Micros(0)).unwrap();
@@ -648,7 +689,7 @@ mod tests {
         let roots = Roots::new(&temp);
         let mut host = roots.create();
         let id = host
-            .import(&fixture("pattern.png"), still(1_000_000))
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
             .unwrap();
         let left = host.append(&id).unwrap();
         let lanes = host.lanes();
@@ -697,10 +738,10 @@ mod tests {
         )
         .unwrap();
         let png = host
-            .import(&fixture("pattern.png"), still(1_000_000))
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
             .unwrap();
         let jpeg = host
-            .import(&fixture("pattern.jpg"), still(1_000_000))
+            .import_probed(&fixture("pattern.jpg"), still(1_000_000))
             .unwrap();
         let first = host.append(&png).unwrap();
         host.append(&jpeg).unwrap();
@@ -726,17 +767,10 @@ mod tests {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
         let mut host = roots.create();
-        let id = host
-            .import(
-                &movie,
-                crate::Probed::Picture {
-                    still: false,
-                    width: 1920,
-                    height: 1080,
-                    duration: cutlass_session::Micros(10_210_000),
-                },
-            )
-            .unwrap();
+        let id = host.import(&movie).unwrap();
+        let material = &host.draft().materials.videos[0];
+        assert_eq!((material.width, material.height), (1920, 1080));
+        assert!((10_000_000..10_500_000).contains(&material.duration.0));
         let left = host.append(&id).unwrap();
         let at = cutlass_session::Micros(3_000_000);
         let whole = host.frame(at).unwrap();

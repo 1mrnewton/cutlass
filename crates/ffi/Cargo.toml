@@ -26,6 +26,7 @@ cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
 cutlass-aiff = { path = "../containers/aiff", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }
+cutlass-probe = { path = "../probe", version = "0.1.0" }
 cutlass-png = { path = "../codecs/png", version = "0.1.0" }
 cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
 cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }

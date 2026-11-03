@@ -834,6 +834,7 @@ dependencies = [
  "cutlass-platform-apple",
  "cutlass-playback",
  "cutlass-png",
+ "cutlass-probe",
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::UNIX_EPOCH;
 
-use cutlass_ffi::{FfiError, Home, PhoneHost, Probed, STILL_DURATION};
+use cutlass_ffi::{FfiError, Home, PhoneHost};
 use cutlass_ffi::{Micros, SegmentId};
 
 uniffi::setup_scaffolding!();
@@ -39,50 +39,6 @@ impl From<FfiError> for EditorError {
     fn from(error: FfiError) -> Self {
         Self::Failed {
             message: error.to_string(),
-        }
-    }
-}
-
-/// What the phone read from a picked file. A still lasts as long as it
-/// does on the desktop.
-#[derive(Clone, Copy, Debug, uniffi::Enum)]
-pub enum Media {
-    Still {
-        width: i32,
-        height: i32,
-    },
-    Movie {
-        width: i32,
-        height: i32,
-        duration_us: i64,
-    },
-    Sound {
-        duration_us: i64,
-    },
-}
-
-impl From<Media> for Probed {
-    fn from(media: Media) -> Self {
-        match media {
-            Media::Still { width, height } => Self::Picture {
-                still: true,
-                width,
-                height,
-                duration: STILL_DURATION,
-            },
-            Media::Movie {
-                width,
-                height,
-                duration_us,
-            } => Self::Picture {
-                still: false,
-                width,
-                height,
-                duration: Micros(duration_us),
-            },
-            Media::Sound { duration_us } => Self::Sound {
-                duration: Micros(duration_us),
-            },
         }
     }
 }
@@ -255,10 +211,11 @@ impl Editor {
         Ok(Arc::new(Self { jobs }))
     }
 
-    /// Copy a picked file into the project and add it to the library.
+    /// Read a picked file, copy it into the project, and add it to the
+    /// library. Rust probes it; the phone only hands over the path.
     /// Returns the material id.
-    pub fn import(&self, path: String, media: Media) -> Result<String, EditorError> {
-        self.run(move |host| host.import(&PathBuf::from(path), media.into()))?
+    pub fn import(&self, path: String) -> Result<String, EditorError> {
+        self.run(move |host| host.import(&PathBuf::from(path)))?
             .map_err(EditorError::from)
     }
 
@@ -379,7 +336,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Editor, LaneKind, Media, create_project, list_projects, start};
+    use super::{Editor, LaneKind, create_project, list_projects, start};
 
     struct Temp(PathBuf);
 
@@ -426,11 +383,6 @@ mod tests {
             .to_string()
     }
 
-    const STILL: Media = Media::Still {
-        width: 16,
-        height: 16,
-    };
-
     #[test]
     fn a_picked_still_lands_on_main_draws_and_saves() {
         let temp = Temp::new();
@@ -439,7 +391,7 @@ mod tests {
         assert_eq!(lanes.len(), 1);
         assert!(lanes[0].main && lanes[0].clips.is_empty());
 
-        let material = editor.import(pattern(), STILL).unwrap();
+        let material = editor.import(pattern()).unwrap();
         let clip = editor.append(material).unwrap();
         let lanes = editor.lanes().unwrap();
         assert_eq!(lanes[0].kind, LaneKind::Video);
@@ -473,10 +425,13 @@ mod tests {
         let editor = temp.open();
         let error = editor.append("missing".to_owned()).unwrap_err();
         assert_eq!(error.to_string(), "the media is not in the library");
-        let error = editor
-            .import(pattern(), Media::Sound { duration_us: 0 })
-            .unwrap_err();
-        assert_eq!(error.to_string(), "the media has no duration");
+        let notes = temp.0.join("notes.txt");
+        std::fs::write(&notes, b"not media").unwrap();
+        let error = editor.import(notes.display().to_string()).unwrap_err();
+        assert!(
+            error.to_string().contains("not a media container"),
+            "{error}"
+        );
         assert!(editor.frame(-1).is_err());
         assert!(editor.undo().is_err());
         assert_eq!(editor.lanes().unwrap()[0].clips.len(), 0);

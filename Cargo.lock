@@ -915,6 +915,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-icons"
+version = "0.1.0"
+
+[[package]]
 name = "cutlass-isobmff"
 version = "0.1.0"
 dependencies = [

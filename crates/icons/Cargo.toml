@@ -1,0 +1,10 @@
+[package]
+name = "cutlass-icons"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Hugeicons path data, and the SVG and VectorDrawable files the phones draw from it."
+
+[lints]
+workspace = true

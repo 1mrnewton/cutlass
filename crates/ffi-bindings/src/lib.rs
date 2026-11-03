@@ -141,6 +141,16 @@ pub fn create_project(root: String) -> Result<String, EditorError> {
         .map_err(|error| EditorError::from(FfiError::from(error)))
 }
 
+/// The app hears this device. Tests keep the software buffer, so they need
+/// no speaker.
+fn device_audio() -> cutlass_ffi::AudioHost {
+    if cfg!(test) {
+        cutlass_ffi::AudioHost::Software
+    } else {
+        cutlass_ffi::AudioHost::current()
+    }
+}
+
 fn open_home(root: &str) -> Result<Home, EditorError> {
     Home::open(root).map_err(|error| EditorError::from(FfiError::from(error)))
 }
@@ -191,7 +201,8 @@ impl Editor {
                     PhoneHost::create(&project, "draft", &bundle, &cache, 0)
                 };
                 let mut host = match host {
-                    Ok(host) => {
+                    Ok(mut host) => {
+                        host.open_audio(device_audio());
                         let _ = opened.send(Ok(()));
                         host
                     }
@@ -253,6 +264,32 @@ impl Editor {
     /// The end of the last clip, in microseconds.
     pub fn duration_us(&self) -> Result<i64, EditorError> {
         self.run(|host| host.draft().duration.0)
+    }
+
+    /// Play from the playhead with sound. An empty project does not play.
+    pub fn play(&self) -> Result<(), EditorError> {
+        self.run(PhoneHost::play)?.map_err(EditorError::from)
+    }
+
+    pub fn pause(&self) -> Result<(), EditorError> {
+        self.run(PhoneHost::pause)
+    }
+
+    /// Move the playhead to `time_us`, held inside the project. Playing
+    /// goes on from there.
+    pub fn seek(&self, time_us: i64) -> Result<(), EditorError> {
+        self.run(move |host| host.seek(Micros(time_us)))
+    }
+
+    /// Move a playing playhead by `elapsed_us` with the heard sound and
+    /// return it. Call once per screen frame while playing.
+    pub fn tick(&self, elapsed_us: i64) -> Result<i64, EditorError> {
+        self.run(move |host| host.tick(elapsed_us).0)
+    }
+
+    /// Play stopped at the end, or was never started.
+    pub fn is_playing(&self) -> Result<bool, EditorError> {
+        self.run(|host| host.is_playing())
     }
 
     /// The picture at `time_us`.
@@ -382,6 +419,28 @@ mod tests {
             .join("../engine/fixtures/pattern.png")
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn play_ticks_the_playhead_and_pause_holds_it() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        editor.play().unwrap();
+        assert!(!editor.is_playing().unwrap(), "an empty project does not play");
+        let material = editor.import(pattern()).unwrap();
+        editor.append(material).unwrap();
+        let end = editor.duration_us().unwrap();
+        editor.play().unwrap();
+        assert!(editor.is_playing().unwrap());
+        assert_eq!(editor.tick(40_000).unwrap(), 40_000);
+        editor.pause().unwrap();
+        assert_eq!(editor.tick(40_000).unwrap(), 40_000);
+        editor.seek(end + 1).unwrap();
+        editor.play().unwrap();
+        assert_eq!(editor.tick(0).unwrap(), 0, "play from the end starts over");
+        editor.seek(end - 10).unwrap();
+        assert_eq!(editor.tick(20).unwrap(), end);
+        assert!(!editor.is_playing().unwrap());
     }
 
     #[test]

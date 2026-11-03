@@ -3808,9 +3808,15 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::V => "v",
         _ => return None,
     };
-    if matches!(name, "space" | "left" | "right" | "delete" | "s")
-        && (input.modifiers.command || input.modifiers.alt || input.modifiers.shift)
-    {
+    let modifiers = input.modifiers;
+    let plain = !(modifiers.command || modifiers.alt || modifiers.shift);
+    let blocked = match name {
+        "space" | "left" | "right" | "delete" => !plain,
+        // S splits, and Shift-Command-S extracts the audio.
+        "s" => !plain && !(modifiers.command && modifiers.shift && !modifiers.alt),
+        _ => false,
+    };
+    if blocked {
         return None;
     }
     let mut parts = Vec::new();
@@ -4990,6 +4996,39 @@ mod tests {
         output.textures_delta.clear();
         assert!(!shell.playing());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn s_splits_and_shift_command_s_extracts_but_other_s_chords_do_nothing() {
+        let chord = |modifiers: egui::Modifiers| {
+            let ctx = egui::Context::default();
+            let mut chord = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::ModifiersChanged(modifiers),
+                        egui::Event::Key {
+                            key: egui::Key::S,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| chord = ui.input(pressed_chord),
+            );
+            output.textures_delta.clear();
+            chord
+        };
+        assert_eq!(chord(egui::Modifiers::default()).as_deref(), Some("s"));
+        assert_eq!(
+            chord(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT).as_deref(),
+            Some("primary+shift+s")
+        );
+        assert_eq!(chord(egui::Modifiers::COMMAND), None);
+        assert_eq!(chord(egui::Modifiers::SHIFT), None);
     }
 
     #[test]

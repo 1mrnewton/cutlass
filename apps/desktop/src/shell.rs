@@ -546,6 +546,7 @@ impl Shell {
         ensure_shortcut(&mut settings, "copy", "primary+c");
         ensure_shortcut(&mut settings, "cut", "primary+x");
         ensure_shortcut(&mut settings, "paste", "primary+v");
+        ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
         Self {
             decoders,
             encoders,
@@ -1568,6 +1569,7 @@ impl Shell {
             Some("copy") => self.copy_selected(),
             Some("cut") => self.cut_selected(),
             Some("paste") => self.paste(),
+            Some("extract_audio") => self.extract_audio(),
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -9735,6 +9737,17 @@ mod tests {
                 .filter(|segment| segment.target.start == Micros(8_800_000))
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn shift_command_s_extracts_the_audio() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.run_shortcut("primary+shift+s")
+                .unwrap_err()
+                .to_string(),
+            "no project is open"
         );
     }
 

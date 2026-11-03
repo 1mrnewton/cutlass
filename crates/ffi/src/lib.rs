@@ -46,6 +46,18 @@ pub fn start_log(directory: &Path) -> Result<PathBuf, LogError> {
     cutlass_logger::init(directory)
 }
 
+/// Give the calling thread the interface's priority.
+///
+/// A shell runs each [`PhoneHost`] on one thread and its interface waits for
+/// the answers, so that thread must not rank below the interface. Apple
+/// platforms raise it to the main thread's class; elsewhere nothing changes.
+pub fn serve_the_interface() {
+    #[cfg(target_vendor = "apple")]
+    if !cutlass_platform_apple::run_at_interface_priority() {
+        cutlass_logger::warn!("the host thread kept its priority");
+    }
+}
+
 /// The open project, its session, the playhead, and the resource cache.
 ///
 /// Save writes the session draft into the project folder. The undo stack stays

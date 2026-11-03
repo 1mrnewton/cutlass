@@ -1,8 +1,8 @@
 //! The Swift and Kotlin surface over `ffi`.
 //!
 //! One thread owns each open [`cutlass_ffi::PhoneHost`], because its audio
-//! output cannot move between threads. A call sends that thread a job and
-//! waits for the answer, then turns it into plain records. Times are
+//! output cannot move between threads. That thread runs at the interface's
+//! priority. A call sends it a job and waits for the answer, then turns it into plain records. Times are
 //! microseconds. A failure is a message for the phone to show; the draft is
 //! unchanged.
 
@@ -183,6 +183,7 @@ impl Editor {
         std::thread::Builder::new()
             .name("cutlass-editor".to_owned())
             .spawn(move || {
+                cutlass_ffi::serve_the_interface();
                 let bundle = PathBuf::from(bundle);
                 let host = if project.join("draft_info.json").is_file() {
                     PhoneHost::open(&project, &bundle, &cache, 0)

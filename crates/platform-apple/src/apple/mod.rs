@@ -13,6 +13,6 @@ mod imp;
 #[cfg(target_vendor = "apple")]
 pub use imp::{
     OutputQueue, QueueError, StreamSink, decode_file, encode_file, register_decoders,
-    register_decoders_with, register_encoders, register_encoders_with, release_buffer, to_cpu,
-    with_pixel_buffer,
+    register_decoders_with, register_encoders, register_encoders_with, release_buffer,
+    run_at_interface_priority, to_cpu, with_pixel_buffer,
 };

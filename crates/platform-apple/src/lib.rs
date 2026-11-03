@@ -19,6 +19,6 @@ pub use apple::{
 
 #[cfg(target_vendor = "apple")]
 pub use apple::{
-    OutputQueue, QueueError, StreamSink, decode_file, encode_file, release_buffer, to_cpu,
-    with_pixel_buffer,
+    OutputQueue, QueueError, StreamSink, decode_file, encode_file, release_buffer,
+    run_at_interface_priority, to_cpu, with_pixel_buffer,
 };

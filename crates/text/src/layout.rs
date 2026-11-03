@@ -3,7 +3,8 @@
 //! `line_max_width` of zero does not wrap: the run stays on one line unless
 //! the string contains a break. A negative width is refused. Alignment is 0
 //! left, 1 center, and 2 right. `letter_spacing` and `line_spacing` are
-//! fractions of `font_size`.
+//! fractions of `font_size`. A rich title's range may draw its letters at
+//! another size; a line is as tall as its largest letters.
 
 use cutlass_font::Font;
 use cutlass_model::MaterialText;
@@ -28,6 +29,8 @@ pub struct PlacedGlyph {
     pub missing: bool,
     pub x: f32,
     pub advance: f32,
+    /// Times the layout's `font_size`.
+    pub size: f32,
 }
 
 /// One line after wrapping and alignment.
@@ -95,8 +98,20 @@ pub fn layout(font: &Font<'_>, material: &MaterialText) -> Result<Layout, TextEr
         });
     }
     let shaped = shape(font, text)?;
-    let rows = wrap(&shaped.items, width, scale, letter_px)?;
-    place(rows, font_size, scale, letter_px, width, step, alignment)
+    let size = |glyph: &ShapedGlyph| crate::richtext::size_at(&words.runs, glyph.source);
+    let rows = wrap(&shaped.items, width, scale, letter_px, &size)?;
+    place(
+        rows,
+        Metrics {
+            font_size,
+            scale,
+            letter_px,
+            width,
+            step,
+        },
+        alignment,
+        &size,
+    )
 }
 
 fn alignment(value: i32) -> Result<Alignment, TextError> {
@@ -108,11 +123,22 @@ fn alignment(value: i32) -> Result<Alignment, TextError> {
     }
 }
 
+/// Sizes from the material, in pixels; `scale` is pixels per design unit.
+#[derive(Clone, Copy)]
+struct Metrics {
+    font_size: f32,
+    scale: f32,
+    letter_px: f32,
+    width: f32,
+    step: f32,
+}
+
 fn wrap(
     items: &[ShapeItem],
     width: f32,
     scale: f32,
     letter_px: f32,
+    size: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<Vec<Vec<ShapedGlyph>>, TextError> {
     let mut lines: Vec<Vec<ShapedGlyph>> = Vec::new();
     let mut used = 0.0_f32;
@@ -126,6 +152,7 @@ fn wrap(
                 used = 0.0;
             }
             ShapeItem::Glyph(glyph) => {
+                let scale = scale * size(glyph);
                 let advance = f32::from(glyph.advance) * scale;
                 let starting = lines.last().is_none_or(|line| line.is_empty());
                 let kern = if starting {
@@ -160,17 +187,23 @@ fn wrap(
 
 fn place(
     rows: Vec<Vec<ShapedGlyph>>,
-    font_size: f32,
-    scale: f32,
-    letter_px: f32,
-    width: f32,
-    step: f32,
+    metrics: Metrics,
     alignment: Alignment,
+    size: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<Layout, TextError> {
+    let Metrics {
+        font_size,
+        scale,
+        letter_px,
+        width,
+        step,
+    } = metrics;
     let mut lines = Vec::with_capacity(rows.len());
-    let mut baseline = font_size;
-    for row in rows {
-        let (glyphs, line_width) = place_line(&row, scale, letter_px)?;
+    let mut baseline = 0.0_f32;
+    for (index, row) in rows.iter().enumerate() {
+        let tallest = row.iter().map(size).fold(1.0_f32, f32::max);
+        baseline += if index == 0 { font_size } else { step } * tallest;
+        let (glyphs, line_width) = place_line(row, scale, letter_px, size)?;
         if !baseline.is_finite() {
             return Err(TextError::Limit);
         }
@@ -179,7 +212,6 @@ fn place(
             width: line_width,
             baseline,
         });
-        baseline += step;
     }
     let content = lines.iter().map(|line| line.width).fold(0.0_f32, f32::max);
     let box_width = if width > 0.0 { width } else { content };
@@ -214,10 +246,13 @@ fn place_line(
     row: &[ShapedGlyph],
     scale: f32,
     letter_px: f32,
+    size: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<(Vec<PlacedGlyph>, f32), TextError> {
     let mut glyphs = Vec::with_capacity(row.len());
     let mut pen = 0.0_f32;
     for (index, glyph) in row.iter().enumerate() {
+        let times = size(glyph);
+        let scale = scale * times;
         let advance = f32::from(glyph.advance) * scale;
         if index > 0 {
             pen += f32::from(glyph.kerning) * scale + letter_px;
@@ -232,6 +267,7 @@ fn place_line(
             missing: glyph.missing,
             x: pen,
             advance,
+            size: times,
         });
         pen += advance;
     }

@@ -15,8 +15,37 @@ use crate::TextError;
 use crate::atlas::{Atlas, GlyphKind};
 use crate::layout::layout;
 use crate::mesh::{GlyphRecord, TextMesh, build};
-use crate::richtext::{Run, fill_at};
-use crate::style::{Area, Layers, Style, compose, premultiply};
+use crate::richtext::{Run, run_at};
+use crate::style::{Area, Layers, Outline, Shadow, Style, compose, premultiply};
+
+/// How one glyph looks: its range's fill (`None` takes the title's), and
+/// the outline and shadow drawn with it, at its size.
+#[derive(Clone, Debug, PartialEq)]
+struct Look {
+    ink: Option<[u8; 4]>,
+    outline: Option<Outline>,
+    shadow: Option<Shadow>,
+}
+
+impl Look {
+    fn of(style: &Style, runs: &[Run], source: usize, font_size: f32) -> Self {
+        let run = run_at(runs, source);
+        let size = run.map_or(1.0, |run| run.size);
+        let outline = match run.and_then(|run| run.outline.as_ref()) {
+            Some(own) => own.as_ref(),
+            None => style.outline.as_ref(),
+        };
+        let shadow = match run.and_then(|run| run.shadow.as_ref()) {
+            Some(own) => own.as_ref(),
+            None => style.shadow.as_ref(),
+        };
+        Self {
+            ink: run.and_then(|run| run.fill),
+            outline: outline.and_then(|outline| outline.at(size, font_size)),
+            shadow: shadow.map(|shadow| shadow.at(size)),
+        }
+    }
+}
 
 /// A text segment that can be sampled at a timeline microsecond.
 pub struct TextSource {
@@ -26,8 +55,8 @@ pub struct TextSource {
     atlas: Atlas,
     mesh: TextMesh,
     style: Style,
-    /// Ranges of a rich title that paint their own color.
-    runs: Vec<Run>,
+    /// How each glyph in the mesh looks, in its order.
+    looks: Vec<Look>,
     /// The box behind the letters, in picture pixels.
     background: Option<Area>,
     origin_x: f32,
@@ -90,8 +119,19 @@ impl TextSource {
         let mesh = build(material.id.clone(), &laid, &atlas)?;
         let runs = crate::richtext::read(material)?.runs;
         let style = Style::of(material, glow, laid.font_size)?;
+        let looks: Vec<Look> = mesh
+            .glyphs
+            .iter()
+            .map(|record| Look::of(&style, &runs, record.source, laid.font_size))
+            .collect();
+        let mut shadows: Vec<Shadow> = Vec::new();
+        for shadow in looks.iter().filter_map(|look| look.shadow.as_ref()) {
+            if !shadows.contains(shadow) {
+                shadows.push(shadow.clone());
+            }
+        }
         let (origin_x, origin_y, width, height, background) =
-            picture_bounds(&mesh, &style, laid.font_size)?;
+            picture_bounds(&mesh, &style, laid.font_size, &shadows)?;
         Ok(Self {
             range: segment.target.clone(),
             material_id: material.id.clone(),
@@ -99,7 +139,7 @@ impl TextSource {
             atlas,
             mesh,
             style,
-            runs,
+            looks,
             background,
             origin_x,
             origin_y,
@@ -138,18 +178,20 @@ impl TextSource {
         let len = rgba_len(self.width, self.height).ok_or(TextError::Limit)?;
         let mut rgba = vec![0_u8; len];
         let pixels = len / 4;
+        let base = premultiply(self.fill);
         let mut fill = vec![0.0_f32; pixels];
-        let mut grown = self.style.outline.as_ref().map(|_| vec![0.0_f32; pixels]);
+        // Each pixel takes the ink and outline color of the letter covering
+        // it most.
+        let mut inks = vec![base; pixels];
+        let mut grown = self
+            .looks
+            .iter()
+            .any(|look| look.outline.is_some())
+            .then(|| vec![0.0_f32; pixels]);
+        let mut rings = vec![[0_u8; 4]; if grown.is_some() { pixels } else { 0 }];
+        let mut shadows: Vec<(Shadow, Vec<f32>)> = Vec::new();
         let mut shape = vec![0.0_f32; pixels];
-        // Each pixel's ink, from the letter covering it most, when ranges
-        // paint their own colors.
-        let mut inks = (!self.runs.is_empty()).then(|| vec![[0_u8; 4]; pixels]);
-        let grow = self
-            .style
-            .outline
-            .as_ref()
-            .map_or(0.0, |outline| outline.width);
-        for record in &self.mesh.glyphs {
+        for (record, look) in self.mesh.glyphs.iter().zip(&self.looks) {
             let Some(image) = self.atlas.image(record.glyph_id) else {
                 continue;
             };
@@ -161,36 +203,46 @@ impl TextSource {
                 origin_x: self.origin_x,
                 origin_y: self.origin_y,
             };
+            let reach = look.outline.as_ref().map_or(0.0, |outline| outline.width);
+            if let Some(shadow) = &look.shadow {
+                let at = match shadows.iter().position(|(cast, _)| cast == shadow) {
+                    Some(at) => at,
+                    None => {
+                        shadows.push((shadow.clone(), vec![0.0_f32; pixels]));
+                        shadows.len() - 1
+                    }
+                };
+                draw.cover(&mut shadows[at].1, reach);
+            }
+            draw.cover(&mut shape, reach);
             if image.kind == GlyphKind::Color {
-                draw.cover(&mut shape, 0.0);
                 continue;
             }
-            if let Some(inks) = &mut inks {
-                let ink = premultiply(fill_at(&self.runs, record.source).unwrap_or(self.fill));
-                draw.each(0.0, |index, cover| {
-                    if cover > fill[index] {
-                        fill[index] = cover;
-                        inks[index] = ink;
+            let ink = look.ink.map_or(base, premultiply);
+            draw.each(0.0, |index, cover| {
+                if cover > fill[index] {
+                    fill[index] = cover;
+                    inks[index] = ink;
+                }
+            });
+            if let (Some(outline), Some(grown)) = (&look.outline, &mut grown) {
+                draw.each(outline.width, |index, cover| {
+                    if cover > grown[index] {
+                        grown[index] = cover;
+                        rings[index] = outline.color;
                     }
                 });
-            } else {
-                draw.cover(&mut fill, 0.0);
             }
-            if let Some(grown) = &mut grown {
-                draw.cover(grown, grow);
-            }
-        }
-        for (index, cover) in shape.iter_mut().enumerate() {
-            let grown = grown.as_ref().map_or(0.0, |grown| grown[index]);
-            *cover = cover.max(fill[index]).max(grown);
         }
         compose(
             &Layers {
                 style: &self.style,
-                ink: premultiply(self.fill),
+                ink: base,
                 fill: &fill,
-                inks: inks.as_deref(),
+                inks: &inks,
                 grown: grown.as_deref(),
+                rings: &rings,
+                shadows: &shadows,
                 shape: &shape,
                 background: self.background,
                 width: self.width as usize,
@@ -390,6 +442,7 @@ fn picture_bounds(
     mesh: &TextMesh,
     style: &Style,
     font_size: f32,
+    shadows: &[Shadow],
 ) -> Result<(f32, f32, u32, u32, Option<Area>), TextError> {
     let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
@@ -421,7 +474,7 @@ fn picture_bounds(
         right: max_x,
         bottom: max_y,
     };
-    let area = style.bounds(cells, font_size);
+    let area = style.bounds(cells, font_size, shadows);
     if ![area.left, area.top, area.right, area.bottom]
         .iter()
         .all(|value| value.is_finite())
@@ -886,6 +939,72 @@ mod tests {
             TextSource::open(TTF, None, &rich, &segment()),
             Err(TextError::RichTextCommands)
         ));
+    }
+
+    fn rich(styles: &str) -> MaterialText {
+        let mut text = material("AA");
+        text.is_rich_text = true;
+        text.content = format!(r#"{{"text":"AA","styles":[{styles}]}}"#);
+        text
+    }
+
+    /// Whether a pixel of `color` is in the left half, and in the right.
+    fn halves(width: u32, rgba: &[u8], color: [u8; 4]) -> (bool, bool) {
+        let mut found = (false, false);
+        for (index, pixel) in rgba.chunks(4).enumerate() {
+            if pixel == color {
+                if (index as u32 % width) < width / 2 {
+                    found.0 = true;
+                } else {
+                    found.1 = true;
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_range_draws_at_its_own_size() {
+        let (plain_w, plain_h, _) = picture(&material("AA"));
+        let (width, height, _) = picture(&rich(r#"{"range":[1,2],"size":128}"#));
+        // The second letter is twice as large, so the line grows by about
+        // one letter's width and stands about twice as tall.
+        assert!(width > plain_w * 5 / 4, "{plain_w} {width}");
+        assert!(height > plain_h * 3 / 2, "{plain_h} {height}");
+        let source = TextSource::open(
+            TTF,
+            None,
+            &rich(r#"{"range":[1,2],"size":128}"#),
+            &segment(),
+        )
+        .expect("open");
+        let [first, second] = source.records() else {
+            panic!("two letters");
+        };
+        assert!((second.height / first.height - 2.0).abs() < 0.05);
+        // A range sized like the title changes nothing.
+        assert_eq!(picture(&rich(r#"{"range":[0,2],"size":64}"#)).0, plain_w);
+    }
+
+    #[test]
+    fn a_range_rings_and_shades_its_own_letters() {
+        let red = r#"{"content":{"solid":{"color":[1,0,0]}},"width":0.06}"#;
+        let (width, _, rgba) = picture(&rich(&format!(r#"{{"range":[0,1],"strokes":[{red}]}}"#)));
+        assert_eq!(halves(width, &rgba, [255, 0, 0, 255]), (true, false));
+
+        let blue =
+            r#"{"content":{"solid":{"color":[0,0,1]}},"distance":20,"angle":-90,"feather":0}"#;
+        let (width, height, rgba) =
+            picture(&rich(&format!(r#"{{"range":[1,2],"shadows":[{blue}]}}"#)));
+        assert_eq!(halves(width, &rgba, [0, 0, 255, 255]), (false, true));
+        assert!(height > picture(&material("AA")).1);
+
+        // An empty list takes the title's outline off its range.
+        let mut ringed = rich(r#"{"range":[1,2],"strokes":[]}"#);
+        ringed.border_color = "#00FF00".to_owned();
+        ringed.border_width = 0.06;
+        let (width, _, rgba) = picture(&ringed);
+        assert_eq!(halves(width, &rgba, [0, 255, 0, 255]), (true, false));
     }
 
     #[test]

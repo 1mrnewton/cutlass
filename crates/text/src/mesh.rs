@@ -76,6 +76,8 @@ pub(crate) fn glyph_quad(
     scale: f32,
     image: &GlyphImage,
 ) -> Result<(f32, f32, f32, f32), TextError> {
+    let font_size = font_size * placed.size;
+    let scale = scale * placed.size;
     let (x, y, width, height) = if image.width == 0 || image.height == 0 {
         (placed.x, baseline, 0.0, 0.0)
     } else {

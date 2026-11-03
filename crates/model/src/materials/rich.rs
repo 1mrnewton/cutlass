@@ -3,7 +3,11 @@
 //! `{"text": "...", "styles": [{"range": [start, end], "fill": {...}, ...}]}`.
 //! A range counts characters, start included and end left out. A fill's
 //! solid color is three channels from 0 to 1 with an alpha from 0 to 1.
-//! Keys this model does not name stay as they were.
+//! `size` is in the title's `font_size` units. A stroke's `width` is in ems,
+//! like `border_width`; a shadow's `distance`, `angle`, and `feather` read
+//! like `shadow_distance`, `shadow_angle`, and `shadow_smoothing`. A range
+//! with no `strokes` or `shadows` key takes the title's own; an empty list
+//! has none. Keys this model does not name stay as they were.
 
 use std::borrow::Cow;
 
@@ -30,6 +34,42 @@ pub struct RichStyle {
     pub range: [usize; 2],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<RichFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strokes: Option<Vec<RichStroke>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadows: Option<Vec<RichShadow>>,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// An outline around a range's letters.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct RichStroke {
+    #[serde(default = "one")]
+    pub alpha: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<RichPaint>,
+    #[serde(default)]
+    pub width: f64,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+/// A shadow under a range's letters.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+pub struct RichShadow {
+    #[serde(default = "one")]
+    pub alpha: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<RichPaint>,
+    #[serde(default)]
+    pub distance: f64,
+    #[serde(default)]
+    pub angle: f64,
+    #[serde(default)]
+    pub feather: f64,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -68,15 +108,40 @@ const fn one() -> f64 {
     1.0
 }
 
+impl RichPaint {
+    /// The solid color as red, green, blue, and alpha, each from 0 to 1,
+    /// with its alpha times `alpha`.
+    #[must_use]
+    pub fn rgba(&self, alpha: f64) -> Option<[f64; 4]> {
+        let solid = self.solid.as_ref()?;
+        let [red, green, blue] = solid.color.get(..3)?.try_into().ok()?;
+        Some([red, green, blue, solid.alpha * alpha])
+    }
+}
+
+impl RichStroke {
+    /// See [`RichPaint::rgba`].
+    #[must_use]
+    pub fn rgba(&self) -> Option<[f64; 4]> {
+        self.content.as_ref()?.rgba(self.alpha)
+    }
+}
+
+impl RichShadow {
+    /// See [`RichPaint::rgba`].
+    #[must_use]
+    pub fn rgba(&self) -> Option<[f64; 4]> {
+        self.content.as_ref()?.rgba(self.alpha)
+    }
+}
+
 impl RichStyle {
     /// The solid fill as red, green, blue, and alpha, each from 0 to 1; the
     /// fill's alpha and the color's multiply.
     #[must_use]
     pub fn solid(&self) -> Option<[f64; 4]> {
         let fill = self.fill.as_ref()?;
-        let solid = fill.content.as_ref()?.solid.as_ref()?;
-        let [red, green, blue] = solid.color.get(..3)?.try_into().ok()?;
-        Some([red, green, blue, solid.alpha * fill.alpha])
+        fill.content.as_ref()?.rgba(fill.alpha)
     }
 
     /// Paint the range solid `rgb`, each from 0 to 1, keeping its alpha.
@@ -218,6 +283,29 @@ mod tests {
     }
 
     #[test]
+    fn a_range_reads_its_size_strokes_and_shadows() {
+        let style: RichStyle = serde_json::from_str(
+            r#"{"range":[0,1],"size":8,"strokes":[{"content":{"solid":{"color":[0,0,0]}},"width":0.08}],"shadows":[{"alpha":0.5,"content":{"solid":{"alpha":1,"color":[0,0,1]},"render_type":"solid"},"distance":8,"angle":-45,"feather":0.33}]}"#,
+        )
+        .unwrap();
+        assert_eq!(style.size, Some(8.0));
+        let stroke = &style.strokes.as_ref().unwrap()[0];
+        assert_eq!(
+            (stroke.width, stroke.rgba()),
+            (0.08, Some([0.0, 0.0, 0.0, 1.0]))
+        );
+        let shadow = &style.shadows.as_ref().unwrap()[0];
+        assert_eq!(shadow.rgba(), Some([0.0, 0.0, 1.0, 0.5]));
+        assert_eq!(
+            (shadow.distance, shadow.angle, shadow.feather),
+            (8.0, -45.0, 0.33)
+        );
+        let none: RichStyle = serde_json::from_str(r#"{"range":[0,1],"strokes":[]}"#).unwrap();
+        assert_eq!(none.strokes, Some(Vec::new()));
+        assert_eq!(none.shadows, None);
+    }
+
+    #[test]
     fn new_words_keep_the_ranges_and_a_color_paints_them_all() {
         let mut text = rich();
         text.set_words("Hi there friend");
@@ -241,6 +329,6 @@ mod tests {
                 .iter()
                 .all(|style| style.solid() == Some([0.0, 0.0, 1.0, 1.0]))
         );
-        assert_eq!(read.styles[0].rest.get("size"), Some(&Value::from(5.0)));
+        assert_eq!(read.styles[0].size, Some(5.0));
     }
 }

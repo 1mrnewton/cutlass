@@ -122,10 +122,8 @@ impl Style {
         let outline = if material.border_color.trim().is_empty() {
             None
         } else {
-            let width =
-                em(material.border_width, font_size).min((cell_pad(font_size) - 1.0).max(0.0));
             let color = color(&material.border_color, material.border_alpha * global)?;
-            (width > 0.0 && color[3] > 0).then_some(Outline { color, width })
+            Outline::new(color, material.border_width, font_size)
         };
         let shadow = if material.has_shadow {
             let shade = if material.shadow_color.trim().is_empty() {
@@ -134,24 +132,15 @@ impl Style {
                 &material.shadow_color
             };
             let color = color(shade, material.shadow_alpha * global)?;
-            let distance = em(material.shadow_distance / 100.0, font_size);
-            let angle = if material.shadow_angle.is_finite() {
-                material.shadow_angle.to_radians()
-            } else {
-                0.0
-            };
-            #[allow(clippy::cast_possible_truncation)]
-            let (dx, dy) = (
-                distance * angle.cos() as f32,
-                -distance * angle.sin() as f32,
-            );
-            let blur = em(unit(material.shadow_smoothing) * 0.25, font_size);
-            (color[3] > 0).then_some(Shadow {
+            Shadow::new(
                 color,
-                dx,
-                dy,
-                blur,
-            })
+                [
+                    material.shadow_distance,
+                    material.shadow_angle,
+                    material.shadow_smoothing,
+                ],
+                font_size,
+            )
         } else {
             None
         };
@@ -193,10 +182,11 @@ impl Style {
         })
     }
 
-    /// The picture's box for letters whose cells cover `cells`.
-    pub(crate) fn bounds(&self, cells: Area, font_size: f32) -> Area {
+    /// The picture's box for letters whose cells cover `cells`, cast with
+    /// `shadows`.
+    pub(crate) fn bounds(&self, cells: Area, font_size: f32, shadows: &[Shadow]) -> Area {
         let mut area = cells;
-        if let Some(shadow) = &self.shadow {
+        for shadow in shadows {
             let reach = shadow.blur * 2.0 + 1.0;
             area = area.union(cells.shift(shadow.dx, shadow.dy).grow(reach, reach));
         }
@@ -211,6 +201,74 @@ impl Style {
     }
 }
 
+impl Outline {
+    /// An outline in premultiplied `color`, `width` ems wide at `font_size`
+    /// pixels; none when it has no width or no opacity.
+    pub(crate) fn new(color: [u8; 4], width: f64, font_size: f32) -> Option<Self> {
+        let width = em(width, font_size);
+        (width > 0.0 && color[3] > 0).then_some(Self { color, width })
+    }
+
+    /// This outline on letters `size` times the title's, at most what their
+    /// distance field reaches.
+    pub(crate) fn at(&self, size: f32, font_size: f32) -> Option<Self> {
+        let width = (self.width * size).min((cell_pad(font_size * size) - 1.0).max(0.0));
+        (width > 0.0).then_some(Self {
+            color: self.color,
+            width,
+        })
+    }
+}
+
+impl Shadow {
+    /// A shadow in premultiplied `color`. `shape` is the distance in
+    /// hundredths of an em, the angle in degrees, and the blur from 0 to 1;
+    /// none when it has no opacity.
+    pub(crate) fn new(color: [u8; 4], shape: [f64; 3], font_size: f32) -> Option<Self> {
+        let [distance, angle, blur] = shape;
+        let distance = em(distance / 100.0, font_size);
+        let angle = if angle.is_finite() {
+            angle.to_radians()
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let (dx, dy) = (
+            distance * angle.cos() as f32,
+            -distance * angle.sin() as f32,
+        );
+        let blur = em(unit(blur) * 0.25, font_size);
+        (color[3] > 0).then_some(Self {
+            color,
+            dx,
+            dy,
+            blur,
+        })
+    }
+
+    /// This shadow under letters `size` times the title's.
+    pub(crate) fn at(&self, size: f32) -> Self {
+        Self {
+            color: self.color,
+            dx: self.dx * size,
+            dy: self.dy * size,
+            blur: self.blur * size,
+        }
+    }
+}
+
+/// Red, green, blue, and alpha from 0 to 1, times `alpha`, premultiplied.
+pub(crate) fn unit_color(rgba: [f64; 4], alpha: f64) -> [u8; 4] {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = |value: f64| (unit(value) * 255.0).round() as u8;
+    premultiply([
+        byte(rgba[0]),
+        byte(rgba[1]),
+        byte(rgba[2]),
+        byte(rgba[3] * unit(alpha)),
+    ])
+}
+
 impl Background {
     /// The box behind letters whose cells cover `cells`.
     pub(crate) fn area(&self, cells: Area, font_size: f32) -> Area {
@@ -221,17 +279,20 @@ impl Background {
 
 /// What [`compose`] paints into a premultiplied picture `width` pixels
 /// wide. `fill` is how much of each pixel the letters cover, `grown` the
-/// same for the outline, and `shape` everything that casts a shadow, each
-/// from 0 to 1. `background` is the box behind the letters in picture
-/// pixels.
+/// same for their outlines, each shadow's mask what casts it, and `shape`
+/// everything that glows, each from 0 to 1. `background` is the box behind
+/// the letters in picture pixels.
 pub(crate) struct Layers<'a> {
     pub(crate) style: &'a Style,
     /// Premultiplied.
     pub(crate) ink: [u8; 4],
     pub(crate) fill: &'a [f32],
-    /// Each pixel's own ink, premultiplied, in place of `ink`.
-    pub(crate) inks: Option<&'a [[u8; 4]]>,
+    /// Each pixel's ink, premultiplied; `ink` where it has none.
+    pub(crate) inks: &'a [[u8; 4]],
     pub(crate) grown: Option<&'a [f32]>,
+    /// Each pixel's outline color, premultiplied.
+    pub(crate) rings: &'a [[u8; 4]],
+    pub(crate) shadows: &'a [(Shadow, Vec<f32>)],
     pub(crate) shape: &'a [f32],
     pub(crate) background: Option<Area>,
     pub(crate) width: usize,
@@ -246,6 +307,8 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
         fill,
         inks,
         grown,
+        rings,
+        shadows,
         shape,
         background,
         width,
@@ -254,8 +317,8 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
     if let (Some(back), Some(area)) = (&style.background, background) {
         paint_box(rgba, width, height, area, back);
     }
-    if let Some(shadow) = &style.shadow {
-        let blurred = blur(shape, width, height, shadow.blur);
+    for (shadow, mask) in shadows {
+        let blurred = blur(mask, width, height, shadow.blur);
         #[allow(clippy::cast_possible_truncation)]
         let (dx, dy) = (shadow.dx.round() as isize, shadow.dy.round() as isize);
         for y in 0..height {
@@ -285,16 +348,15 @@ pub(crate) fn compose(layers: &Layers<'_>, rgba: &mut [u8]) {
             );
         }
     }
-    if let (Some(outline), Some(grown)) = (&style.outline, grown) {
+    if let Some(grown) = grown {
         for (index, cover) in grown.iter().enumerate() {
-            over(rgba, index, outline.color, *cover);
+            if let Some(ring) = rings.get(index) {
+                over(rgba, index, *ring, *cover);
+            }
         }
     }
     for (index, cover) in fill.iter().enumerate() {
-        let ink = inks
-            .and_then(|inks| inks.get(index))
-            .copied()
-            .unwrap_or(ink);
+        let ink = inks.get(index).copied().unwrap_or(ink);
         over(rgba, index, ink, *cover);
     }
 }

@@ -1100,6 +1100,7 @@ mod tests {
             missing: false,
             x,
             advance: 8.0,
+            size: 1.0,
         }
     }
 

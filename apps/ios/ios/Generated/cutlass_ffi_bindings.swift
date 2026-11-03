@@ -1081,6 +1081,72 @@ public func FfiConverterTypeLane_lower(_ value: Lane) -> RustBuffer {
 
 
 /**
+ * One saved project in the launch list. `modified_ms` is milliseconds
+ * since 1970.
+ */
+public struct ProjectSummary: Equatable, Hashable {
+    public var path: String
+    public var name: String
+    public var durationUs: Int64
+    public var modifiedMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, name: String, durationUs: Int64, modifiedMs: Int64) {
+        self.path = path
+        self.name = name
+        self.durationUs = durationUs
+        self.modifiedMs = modifiedMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProjectSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProjectSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectSummary {
+        return
+            try ProjectSummary(
+                path: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                durationUs: FfiConverterInt64.read(from: &buf), 
+                modifiedMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProjectSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterInt64.write(value.durationUs, into: &buf)
+        FfiConverterInt64.write(value.modifiedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectSummary_lift(_ buf: RustBuffer) throws -> ProjectSummary {
+    return try FfiConverterTypeProjectSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectSummary_lower(_ value: ProjectSummary) -> RustBuffer {
+    return FfiConverterTypeProjectSummary.lower(value)
+}
+
+
+/**
  * Why a call left the project as it was.
  */
 public 
@@ -1407,6 +1473,54 @@ fileprivate struct FfiConverterSequenceTypeLane: FfiConverterRustBuffer {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeProjectSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [ProjectSummary]
+
+    public static func write(_ value: [ProjectSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeProjectSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProjectSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ProjectSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeProjectSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+/**
+ * Write a new empty project under `root`, named like the desktop's, and
+ * return its folder.
+ */
+public func createProject(root: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_create_project(
+        FfiConverterString.lower(root),uniffiCallStatus
+    )
+})
+}
+/**
+ * The projects under `root`, newest first. A missing root lists nothing.
+ */
+public func listProjects(root: String) -> [ProjectSummary]  {
+    return try!  FfiConverterSequenceTypeProjectSummary.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_list_projects(
+        FfiConverterString.lower(root),uniffiCallStatus
+    )
+})
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -1421,6 +1535,12 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_cutlass_ffi_bindings_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_create_project() != 5444) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 40427) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
         return InitializationResult.apiChecksumMismatch

@@ -308,6 +308,16 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_split(uint64_t ptr, Rust
 void uniffi_cutlass_ffi_bindings_fn_method_editor_undo(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_list_projects(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUSTBUFFER_ALLOC
 RustBuffer ffi_cutlass_ffi_bindings_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -566,6 +576,18 @@ void ffi_cutlass_ffi_bindings_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_CUTLASS_FFI_BINDINGS_RUST_FUTURE_COMPLETE_VOID
 void ffi_cutlass_ffi_bindings_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CREATE_PROJECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_CREATE_PROJECT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_create_project(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_APPEND

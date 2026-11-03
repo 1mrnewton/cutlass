@@ -30,8 +30,8 @@ use cutlass_engine::{
 };
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    Clip, CommonKeyframeGroup, Crop, Draft, DraftId, KeyframeCurve, MaterialCanvas, MaterialRef,
-    Micros, Segment, SegmentId, TimeRange, TrackAttribute, UniformScale,
+    Clip, Crop, Draft, DraftId, MaterialCanvas, MaterialRef, Micros, Segment, SegmentId, TimeRange,
+    TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
@@ -560,249 +560,9 @@ fn decode_canvas_image(media: &ReaderFactory, path: &str) -> Option<CpuBytes> {
     orient(bytes, display)
 }
 
-/// The clip at `time`, with keyframes measured from the segment start.
-///
-/// A key before the first sample holds that sample. A key after the last
-/// holds the last. The same offset keeps the later key. A line, an empty
-/// curve, `none`, and an unknown curve are a straight line, and their handles
-/// are ignored. Any other curve is a cubic. The earlier key's right handle
-/// and the later key's left handle are offsets from those samples. The sample
-/// solves that cubic in time, and stops when the time error is under a
-/// thousandth of the span. A handle that is not finite refuses the clip. A
-/// graph id is not sampled. `KFTypeScale` drives both axes through uniform
-/// scale when that switch is on, and through `clip.scale` when it is off.
-/// `KFTypeScaleX` and `KFTypeScaleY` replace one axis only while uniform
-/// scale is off.
+/// The clip at `time`; see [`cutlass_model::clip_at`].
 pub(crate) fn segment_clip(segment: &Segment, time: Micros) -> Option<(Clip, UniformScale)> {
-    let offset = time.0.saturating_sub(segment.target.start.0);
-    let mut clip = segment.clip.clone();
-    let mut uniform = segment.uniform_scale.clone();
-    let groups = &segment.common_keyframes;
-    if let Some(value) = line_at(groups, &["KFTypeAlpha", "alpha"], offset)? {
-        clip.alpha = value;
-    }
-    if let Some(value) = line_at(groups, &["KFTypeRotation", "rotation"], offset)? {
-        clip.rotation = value;
-    }
-    if let Some(value) = line_at(groups, &["KFTypePositionX"], offset)? {
-        clip.transform.x = value;
-    }
-    if let Some(value) = line_at(groups, &["KFTypePositionY"], offset)? {
-        clip.transform.y = value;
-    }
-    if let Some(value) = line_at(groups, &["KFTypeScale"], offset)? {
-        if uniform.on {
-            uniform.value = value;
-        } else {
-            clip.scale.x = value;
-            clip.scale.y = value;
-        }
-    }
-    if !uniform.on {
-        if let Some(value) = line_at(groups, &["KFTypeScaleX"], offset)? {
-            clip.scale.x = value;
-        }
-        if let Some(value) = line_at(groups, &["KFTypeScaleY"], offset)? {
-            clip.scale.y = value;
-        }
-    }
-    Some((clip, uniform))
-}
-
-#[derive(Clone)]
-struct KeySample {
-    time: i64,
-    value: f64,
-    order: usize,
-    bends: bool,
-    left_x: f64,
-    left_y: f64,
-    right_x: f64,
-    right_y: f64,
-}
-
-fn line_at(groups: &[CommonKeyframeGroup], names: &[&str], offset: i64) -> Option<Option<f64>> {
-    let mut keys = Vec::new();
-    for group in groups {
-        if !names.contains(&group.property_type.as_str()) {
-            continue;
-        }
-        for key in &group.keyframe_list {
-            let Some(value) = key.values.first().copied() else {
-                continue;
-            };
-            if !value.is_finite() {
-                return None;
-            }
-            let bends = bends(&key.curve_type);
-            if bends
-                && !(key.left_control.x.is_finite()
-                    && key.left_control.y.is_finite()
-                    && key.right_control.x.is_finite()
-                    && key.right_control.y.is_finite())
-            {
-                return None;
-            }
-            let (left_x, left_y, right_x, right_y) = if bends {
-                (
-                    key.left_control.x,
-                    key.left_control.y,
-                    key.right_control.x,
-                    key.right_control.y,
-                )
-            } else {
-                (0.0, 0.0, 0.0, 0.0)
-            };
-            keys.push(KeySample {
-                time: key.time_offset.0,
-                value,
-                order: keys.len(),
-                bends,
-                left_x,
-                left_y,
-                right_x,
-                right_y,
-            });
-        }
-    }
-    Some(sample_keys(&mut keys, offset))
-}
-
-fn bends(curve_type: &str) -> bool {
-    match KeyframeCurve::parse(curve_type) {
-        Some(
-            KeyframeCurve::CurveOut
-            | KeyframeCurve::CurveIn
-            | KeyframeCurve::CurveInOut
-            | KeyframeCurve::FreeCurveIn
-            | KeyframeCurve::FreeCurveOut
-            | KeyframeCurve::FreeCurveInOut,
-        ) => true,
-        Some(KeyframeCurve::Line | KeyframeCurve::None) | None => false,
-    }
-}
-
-fn sample_keys(keys: &mut [KeySample], at: i64) -> Option<f64> {
-    if keys.is_empty() {
-        return None;
-    }
-    keys.sort_by(|left, right| {
-        left.time
-            .cmp(&right.time)
-            .then(left.order.cmp(&right.order))
-    });
-    let mut collapsed: Vec<KeySample> = Vec::new();
-    for key in keys.iter().cloned() {
-        if let Some(last) = collapsed.last_mut()
-            && last.time == key.time
-        {
-            *last = key;
-            continue;
-        }
-        collapsed.push(key);
-    }
-    let first = collapsed.first()?;
-    if at <= first.time {
-        return Some(first.value);
-    }
-    let last = collapsed.last()?;
-    if at >= last.time {
-        return Some(last.value);
-    }
-    for pair in collapsed.windows(2) {
-        if at >= pair[0].time && at <= pair[1].time {
-            return Some(blend(&pair[0], &pair[1], at));
-        }
-    }
-    Some(last.value)
-}
-
-fn blend(left: &KeySample, right: &KeySample, at: i64) -> f64 {
-    let span = (right.time - left.time) as f64;
-    if span == 0.0 {
-        return right.value;
-    }
-    let along = (at - left.time) as f64 / span;
-    let linear = left.value + (right.value - left.value) * along;
-    if !left.bends && !right.bends {
-        return linear;
-    }
-    let t = parameter(left.right_x / span, 1.0 + right.left_x / span, along);
-    let curved = bezier(
-        left.value,
-        left.value + left.right_y,
-        right.value + right.left_y,
-        right.value,
-        t,
-    );
-    if curved.is_finite() { curved } else { linear }
-}
-
-/// Cubic parameter whose horizontal bezier equals `along`.
-///
-/// Eight Newton steps from `along`, then bisection. A step whose time error
-/// is under a thousandth of the span is kept. A query on either sample
-/// returns that end.
-fn parameter(cx1: f64, cx2: f64, along: f64) -> f64 {
-    if along < 1e-6 {
-        return 0.0;
-    }
-    if along > 1.0 || (1.0 - along) < 1e-6 {
-        return 1.0;
-    }
-    let mut t = along;
-    for _ in 0..8 {
-        let x = horizontal(cx1, cx2, t);
-        if (x - along).abs() < 1e-3 {
-            return t;
-        }
-        let slope = horizontal_slope(cx1, cx2, t);
-        if slope.abs() < 1e-6 {
-            break;
-        }
-        t = (t - (x - along) / slope).clamp(0.0, 1.0);
-    }
-    let mut low = 0.0;
-    let mut high = 1.0;
-    for _ in 0..64 {
-        if low >= high || (high - low) <= 1e-6 {
-            return t.min(1.0);
-        }
-        let mid = low + (high - low) * 0.5;
-        let x = horizontal(cx1, cx2, mid);
-        if x < along {
-            low = mid;
-        } else {
-            high = mid;
-        }
-        if (x - along).abs() < 1e-3 {
-            return mid;
-        }
-    }
-    t.min(1.0)
-}
-
-fn horizontal(cx1: f64, cx2: f64, t: f64) -> f64 {
-    let (cubic, square, linear) = horizontal_terms(cx1, cx2);
-    ((cubic * t + square) * t + linear) * t
-}
-
-fn horizontal_slope(cx1: f64, cx2: f64, t: f64) -> f64 {
-    let (cubic, square, linear) = horizontal_terms(cx1, cx2);
-    (3.0 * cubic * t + 2.0 * square) * t + linear
-}
-
-fn horizontal_terms(cx1: f64, cx2: f64) -> (f64, f64, f64) {
-    (
-        3.0 * cx1 - 3.0 * cx2 + 1.0,
-        3.0 * cx2 - 6.0 * cx1,
-        3.0 * cx1,
-    )
-}
-
-fn bezier(y0: f64, y1: f64, y2: f64, y3: f64, t: f64) -> f64 {
-    let rest = 1.0 - t;
-    rest * rest * rest * y0 + 3.0 * rest * rest * t * y1 + 3.0 * rest * t * t * y2 + t * t * t * y3
+    cutlass_model::clip_at(segment, time)
 }
 
 fn covers(start: i64, duration: i64, time: i64) -> bool {
@@ -2114,9 +1874,18 @@ mod tests {
 
         let broken = keyed(0, vec![line("KFTypeAlpha", &[(0, f64::NAN)])]);
         assert!(segment_clip(&broken, Micros(0)).is_none());
-        let unused = keyed(0, vec![line("KFTypeScaleX", &[(0, f64::NAN)])]);
+        let unused = keyed(0, vec![line("KFTypeScaleY", &[(0, f64::NAN)])]);
         let (_, uniform) = segment_clip(&unused, Micros(0)).expect("clip");
         assert_eq!(uniform.value, 1.0);
+        let axes = keyed(
+            0,
+            vec![
+                line("KFTypeScaleX", &[(0, 3.0)]),
+                line("KFTypeScaleY", &[(0, 3.0)]),
+            ],
+        );
+        let (_, uniform) = segment_clip(&axes, Micros(0)).expect("clip");
+        assert_eq!(uniform.value, 3.0);
         let other = keyed(0, vec![line("KFTypeGlobalAlpha", &[(0, f64::NAN)])]);
         let (clip, _) = segment_clip(&other, Micros(0)).expect("clip");
         assert_eq!(clip.alpha, 1.0);

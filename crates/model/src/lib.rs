@@ -32,7 +32,10 @@ pub use enums::{
     RenderIndexMode, SegmentSource, SpeedMode, TrackAttribute, TrackFlag, TrackType,
 };
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
-pub use keyframe::{CommonKeyframe, CommonKeyframeGroup};
+pub use keyframe::{
+    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, POSE_KEYS, add_keys, clip_at, key_offsets,
+    put_key, remove_keys, sample,
+};
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
     BloomParams, ConstantSpeedError, Crop, CurveSpeed, FreezeInfo, MaterialAnimations,

@@ -133,6 +133,8 @@ fn edit_cause(error: EditError) -> String {
         EditError::Fade => "a fade cannot be negative".to_owned(),
         EditError::Volume => "the volume must be zero or more".to_owned(),
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
+        EditError::KeyTime => "a keyframe must be on its clip".to_owned(),
+        EditError::NoKey => "no keyframe is there".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),

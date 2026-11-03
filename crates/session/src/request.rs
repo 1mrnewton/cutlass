@@ -251,6 +251,27 @@ pub enum Request {
         segment_id: SegmentId,
         keyframes: Vec<CommonKeyframeGroup>,
     },
+    /// Key the clip's place, size, turn, and opacity as they are at
+    /// `offset` from its start. A key there takes those values again.
+    AddKeyframe {
+        segment_id: SegmentId,
+        offset: Micros,
+    },
+    /// Remove every key at `offset` from the clip's start.
+    RemoveKeyframe {
+        segment_id: SegmentId,
+        offset: Micros,
+    },
+    /// Store the picture's place, size, and turn, as the three requests
+    /// above do, and key them at `offset` from the clip's start.
+    KeyPose {
+        segment_id: SegmentId,
+        offset: Micros,
+        x: f64,
+        y: f64,
+        scale: f64,
+        rotation: f64,
+    },
     /// Add a material to the library. This does not place a segment.
     Import { medium: ImportedMedium },
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.

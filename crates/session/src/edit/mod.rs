@@ -102,6 +102,10 @@ pub enum EditError {
     Volume,
     /// Opacity is not finite or is outside zero to one.
     Opacity,
+    /// A key's time is outside its clip, or the clip's keys do not read.
+    KeyTime,
+    /// No key is at that time.
+    NoKey,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -329,6 +333,30 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             segment_id,
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
+        Request::AddKeyframe { segment_id, offset } => {
+            keyframe::add_keyframe(draft, segment_id, *offset)
+        }
+        Request::RemoveKeyframe { segment_id, offset } => {
+            keyframe::remove_keyframe(draft, segment_id, *offset)
+        }
+        Request::KeyPose {
+            segment_id,
+            offset,
+            x,
+            y,
+            scale,
+            rotation,
+        } => keyframe::key_pose(
+            draft,
+            segment_id,
+            *offset,
+            keyframe::Pose {
+                x: *x,
+                y: *y,
+                scale: *scale,
+                rotation: *rotation,
+            },
+        ),
         Request::Import { medium } => import::import(draft, medium.clone()),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
         Request::AddTimeMark {

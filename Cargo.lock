@@ -837,6 +837,7 @@ dependencies = [
  "cutlass-playback",
  "cutlass-png",
  "cutlass-probe",
+ "cutlass-render",
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
@@ -1105,7 +1106,10 @@ dependencies = [
 name = "cutlass-render"
 version = "0.1.0"
 dependencies = [
+ "cutlass-compositor",
+ "cutlass-eval",
  "cutlass-gpu",
+ "cutlass-picture",
  "pollster",
  "wgpu",
 ]

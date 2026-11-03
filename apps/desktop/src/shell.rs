@@ -6394,6 +6394,15 @@ mod tests {
         for (full, half) in full.iter().zip(&half) {
             assert!((full * 0.5 - half).abs() < 1e-6);
         }
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        assert!(!desktop.wave(&id, 400.0, 0.0..400.0).unwrap().muted);
+        desktop
+            .toggle_attribute(track.clone(), TrackAttribute::MUTE)
+            .unwrap();
+        assert!(desktop.wave(&id, 400.0, 0.0..400.0).unwrap().muted);
+        desktop
+            .toggle_attribute(track, TrackAttribute::MUTE)
+            .unwrap();
         desktop.set_volume(0.0).unwrap();
         let muted = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
         assert!(muted.iter().all(|level| *level == 0.0));

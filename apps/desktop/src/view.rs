@@ -4360,6 +4360,35 @@ mod tests {
     }
 
     #[test]
+    fn a_muted_track_fades_its_bars_into_the_clip_and_drops_the_caps() {
+        let ctx = egui::Context::default();
+        let band = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(4.0, 20.0));
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![1.0; 4],
+            gains: Vec::new(),
+            under_picture: true,
+            muted: true,
+        };
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
+        });
+        let colors: Vec<Color32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .map(|vertex| vertex.color)
+            .collect();
+        let faded = lerp(tokens::CLIP_VIDEO, tokens::CLIP_VIDEO_BAR, 0.2);
+        assert_eq!(colors.len(), 8);
+        assert!(colors.iter().all(|color| *color == faded));
+    }
+
+    #[test]
     fn lanes_take_capcut_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
         let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);

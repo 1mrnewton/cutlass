@@ -13,7 +13,7 @@ struct EditorScreen: View {
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
-        case volume, speed
+        case volume, speed, effects
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -53,7 +53,7 @@ struct EditorScreen: View {
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
         .onChange(of: model.selectedClip) { _, id in
-            if id == nil, panel != .text(nil) { panel = nil }
+            if id == nil, panel != .text(nil), panel != .effects { panel = nil }
         }
         .onDisappear { model.pause() }
     }
@@ -107,7 +107,10 @@ struct EditorScreen: View {
     /// root tools opened. Rust lists every bar.
     @ViewBuilder
     private var bottom: some View {
-        if case let .text(clip) = panel {
+        if panel == .effects {
+            EffectsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
                 .transition(.move(edge: .bottom))
@@ -116,7 +119,7 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text: EmptyView()
+                case .text, .effects: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -151,6 +154,7 @@ struct EditorScreen: View {
         case .delete: model.deleteClip()
         case .addText: panel = .text(nil)
         case .editText: panel = .text(model.selectedClip)
+        case .videoEffects: panel = .effects
         default: model.say("\(tool.label) is coming soon")
         }
     }

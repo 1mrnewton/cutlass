@@ -607,6 +607,12 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol EditorProtocol: AnyObject, Sendable {
     
     /**
+     * Add the effect `effect_id` at `at_us` over everything below it, as
+     * one undo step. Returns the new clip's id.
+     */
+    func addEffect(effectId: String, atUs: Int64) throws  -> String
+    
+    /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
      * is empty, as one undo step. Returns the new clip's id.
      */
@@ -836,6 +842,21 @@ public static func `open`(root: String, bundle: String, project: String)throws  
 }
     
 
+    
+    /**
+     * Add the effect `effect_id` at `at_us` over everything below it, as
+     * one undo step. Returns the new clip's id.
+     */
+open func addEffect(effectId: String, atUs: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_add_effect(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(effectId),
+        FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Add `content` at `at_us` in `face`, or in the first face when `face`
@@ -1374,6 +1395,68 @@ public func FfiConverterTypeClip_lift(_ buf: RustBuffer) throws -> Clip {
 #endif
 public func FfiConverterTypeClip_lower(_ value: Clip) -> RustBuffer {
     return FfiConverterTypeClip.lower(value)
+}
+
+
+/**
+ * An effect the picker shows. `id` is what `add_effect` takes; `preview`
+ * is the file name of its looping preview video in the app bundle.
+ */
+public struct EffectChoice: Equatable, Hashable {
+    public var id: String
+    public var name: String
+    public var preview: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, preview: String) {
+        self.id = id
+        self.name = name
+        self.preview = preview
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension EffectChoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEffectChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EffectChoice {
+        return
+            try EffectChoice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                preview: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EffectChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.preview, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEffectChoice_lift(_ buf: RustBuffer) throws -> EffectChoice {
+    return try FfiConverterTypeEffectChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEffectChoice_lower(_ value: EffectChoice) -> RustBuffer {
+    return FfiConverterTypeEffectChoice.lower(value)
 }
 
 
@@ -2696,6 +2779,31 @@ fileprivate struct FfiConverterSequenceTypeClip: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeEffectChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [EffectChoice]
+
+    public static func write(_ value: [EffectChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeEffectChoice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [EffectChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [EffectChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeEffectChoice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFilm: FfiConverterRustBuffer {
     typealias SwiftType = [Film]
 
@@ -2892,6 +3000,16 @@ public func createProject(root: String)throws  -> String  {
 })
 }
 /**
+ * The effects that ship in the app, in picker order.
+ */
+public func effectChoices() -> [EffectChoice]  {
+    return try!  FfiConverterSequenceTypeEffectChoice.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_effect_choices(uniffiCallStatus
+    )
+})
+}
+/**
  * The projects in the Cutlass folder at `root`, newest first. A missing
  * root lists nothing.
  */
@@ -2997,6 +3115,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_func_create_project() != 16508) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_effect_choices() != 59474) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3016,6 +3137,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_volume_position() != 27181) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect() != 55608) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {

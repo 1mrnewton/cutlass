@@ -258,6 +258,11 @@ void uniffi_cutlass_ffi_bindings_fn_free_editor(uint64_t handle, RustCallStatus 
 uint64_t uniffi_cutlass_ffi_bindings_fn_constructor_editor_open(RustBuffer root, RustBuffer bundle, RustBuffer project, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_EFFECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_EFFECT
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_add_effect(uint64_t ptr, RustBuffer effect_id, int64_t at_us, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_TEXT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_ADD_TEXT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_add_text(uint64_t ptr, RustBuffer content, RustBuffer face, int64_t at_us, RustCallStatus *_Nonnull out_status
@@ -421,6 +426,12 @@ RustBuffer uniffi_cutlass_ffi_bindings_fn_func_clock(int64_t time_us, RustCallSt
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_CREATE_PROJECT
 RustBuffer uniffi_cutlass_ffi_bindings_fn_func_create_project(RustBuffer root, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EFFECT_CHOICES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_EFFECT_CHOICES
+RustBuffer uniffi_cutlass_ffi_bindings_fn_func_effect_choices(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_FUNC_LIST_PROJECTS
@@ -730,6 +741,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_create_project(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EFFECT_CHOICES
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_EFFECT_CHOICES
+uint16_t uniffi_cutlass_ffi_bindings_checksum_func_effect_choices(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_LIST_PROJECTS
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_list_projects(void
@@ -769,6 +786,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_func_volume_at(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_VOLUME_POSITION
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_FUNC_VOLUME_POSITION
 uint16_t uniffi_cutlass_ffi_bindings_checksum_func_volume_position(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_EFFECT
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_ADD_EFFECT
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_add_effect(void
     
 );
 #endif

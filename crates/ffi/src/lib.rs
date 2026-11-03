@@ -1066,6 +1066,14 @@ mod tests {
         };
         assert_eq!(row_of(&host, &first), row_of(&host, &after));
         assert_ne!(row_of(&host, &first), row_of(&host, &over));
+        let names: Vec<String> = host
+            .lanes()
+            .into_iter()
+            .flat_map(|lane| lane.clips)
+            .filter(|clip| clip.id == first)
+            .map(|clip| clip.name)
+            .collect();
+        assert_eq!(names, ["White Flash"]);
 
         host.undo().unwrap();
         host.undo().unwrap();

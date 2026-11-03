@@ -122,7 +122,7 @@ pub fn clock(time_us: i64) -> String {
 /// The effects that ship in the app, in picker order.
 #[uniffi::export]
 #[must_use]
-pub fn effects() -> Vec<EffectChoice> {
+pub fn effect_choices() -> Vec<EffectChoice> {
     cutlass_ffi::phone_effects()
         .into_iter()
         .map(|effect| EffectChoice {

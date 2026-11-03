@@ -195,6 +195,18 @@ final class EditorModel {
         edit { _ = try $0.split(clipId: clip.id, atUs: playheadUs) }
     }
 
+    // MARK: Effects
+
+    /// The effects that ship in the app, in picker order.
+    let effects: [EffectChoice] = effectChoices()
+
+    /// Add `effect` at the playhead and select it.
+    func addEffect(_ effect: String) {
+        var added: String?
+        edit { added = try $0.addEffect(effectId: effect, atUs: playheadUs) }
+        if let added { selectedClip = added }
+    }
+
     // MARK: Text
 
     /// Add `content` at the playhead in `face` and select it.

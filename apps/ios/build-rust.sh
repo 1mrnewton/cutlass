@@ -5,13 +5,17 @@
 # The Swift file goes in ios/Generated, which Xcode compiles with the app.
 # The C header and its module map go in Rust/include.
 #
-#   apps/ios/build-rust.sh           debug, simulator and device
-#   apps/ios/build-rust.sh release   release, simulator and device
+# Both Xcode configurations link the release library: an unoptimized one
+# takes seconds to draw a movie frame. To step through Rust, build debug and
+# set CUTLASS_RUST_PROFILE to debug in the target's settings.
+#
+#   apps/ios/build-rust.sh           release, simulator and device
+#   apps/ios/build-rust.sh debug     debug, simulator and device
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-profile=${1:-debug}
+profile=${1:-release}
 case "$profile" in
 debug) flag= ;;
 release) flag=--release ;;

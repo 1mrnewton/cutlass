@@ -70,6 +70,8 @@ impl Stream {
 /// The audio side of play, pause, seek, and tick.
 pub struct Transport {
     output: AudioOutput,
+    /// The host the output was opened for, to open it again.
+    host: AudioHost,
     heard: Heard,
     stream: Option<Stream>,
     mixer: Option<Mixer>,
@@ -87,6 +89,7 @@ impl Transport {
     pub fn new() -> Self {
         Self {
             output: AudioOutput::software(),
+            host: AudioHost::Software,
             heard: Heard::new(),
             stream: None,
             mixer: None,
@@ -97,6 +100,7 @@ impl Transport {
     pub fn open(&mut self, host: AudioHost) {
         self.stream = None;
         self.mixer = None;
+        self.host = host;
         self.output = AudioOutput::open(host);
     }
 
@@ -135,6 +139,10 @@ impl Transport {
     /// Stream `program` from `at` to `end` on the mixer thread. A host with
     /// no stream clock queues one slice instead, and then one per tick.
     pub fn start(&mut self, program: Program<'_>, at: Micros, end: Micros) {
+        if self.output.wake(self.host) {
+            self.stream = None;
+            self.mixer = None;
+        }
         self.output.clear_stream();
         let Some(clock) = self.output.clock() else {
             self.stream = None;

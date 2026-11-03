@@ -228,6 +228,16 @@ impl SampleBuffer {
         None
     }
 
+    /// Start the device again. False when it would not start.
+    fn resume(&self) -> bool {
+        #[cfg(target_vendor = "apple")]
+        if let Some(queue) = &self.live {
+            return queue.resume().is_ok();
+        }
+        let _ = self;
+        true
+    }
+
     fn clear_stream(&mut self) {
         self.queued.clear();
         #[cfg(target_vendor = "apple")]
@@ -378,6 +388,27 @@ impl AudioOutput {
             OutputKind::Buffer(queue) => queue.clock(),
             OutputKind::Silent(_) => None,
         }
+    }
+
+    /// Make sure the device for `host` is playing before a stream starts:
+    /// a stopped device is started again, and one that will not start, or
+    /// never opened, is opened anew. True when the output was replaced, so
+    /// anything holding the old one must let it go.
+    pub fn wake(&mut self, host: AudioHost) -> bool {
+        let reopen = match &self.kind {
+            OutputKind::Buffer(queue) => !queue.resume(),
+            OutputKind::Silent(AudioGap::NoDevice) => {
+                matches!(
+                    host,
+                    AudioHost::Apple | AudioHost::Windows | AudioHost::Android
+                )
+            }
+            OutputKind::Silent(_) => false,
+        };
+        if reopen {
+            *self = Self::open(host);
+        }
+        reopen
     }
 
     /// Drop everything streamed and not yet played.
@@ -635,6 +666,30 @@ mod tests {
         assert_eq!(outcome, CopyOutcome::Silent(AudioGap::Linux));
         assert_eq!(buffer, [9_u8; 8]);
         assert_eq!(player.audio_time(), Micros(0));
+    }
+
+    #[test]
+    fn waking_keeps_a_working_output_and_tries_a_missing_device_again() {
+        // The software buffer and a host with no device stay as they are.
+        let mut software = AudioOutput::software();
+        assert!(!software.wake(AudioHost::Software));
+        let mut linux = AudioOutput::open(AudioHost::Linux);
+        assert!(!linux.wake(AudioHost::Linux));
+        assert_eq!(linux.gap(), Some(AudioGap::Linux));
+        let mut unnamed = AudioOutput::open(AudioHost::Unnamed);
+        assert!(!unnamed.wake(AudioHost::Unnamed));
+        // A device that never opened is opened again on the next play.
+        let mut missing = AudioOutput::open(AudioHost::Unnamed);
+        assert!(missing.wake(AudioHost::current()) || AudioHost::current() == AudioHost::Linux);
+        // A device that is open starts again in place.
+        #[cfg(target_vendor = "apple")]
+        {
+            let mut apple = AudioOutput::open(AudioHost::Apple);
+            if apple.gap().is_none() {
+                assert!(!apple.wake(AudioHost::Apple));
+                assert!(apple.clock().is_some());
+            }
+        }
     }
 
     #[test]

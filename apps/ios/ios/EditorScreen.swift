@@ -4,16 +4,31 @@ import SwiftUI
 /// The editor: preview on top, the transport, the timeline, then the tools.
 struct EditorScreen: View {
     let name: String
+    let home: () -> Void
     @State private var model: EditorModel
     @State private var picked: [PhotosPickerItem] = []
 
-    init(project: ProjectSummary) {
+    init(project: ProjectSummary, home: @escaping () -> Void) {
         name = project.name
+        self.home = home
         _model = State(initialValue: EditorModel(project: project.path))
     }
 
     var body: some View {
         VStack(spacing: 0) {
+            TitleBar(title: name, background: Color(white: 0.06)) {
+                Button {
+                    model.pause()
+                    home()
+                } label: {
+                    Image(systemName: "house")
+                        .font(.title3)
+                        .foregroundStyle(Palette.text)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Home")
+            }
             preview
             transport
             TimelineStrip(model: model)
@@ -25,10 +40,6 @@ struct EditorScreen: View {
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
         .onDisappear { model.pause() }
-        .navigationTitle(name)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color(white: 0.06), for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
     }
 
     private var preview: some View {

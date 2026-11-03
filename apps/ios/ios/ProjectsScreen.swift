@@ -7,18 +7,39 @@ enum Folders {
     static let cache = URL.documentsDirectory.appending(path: "Cache")
 }
 
+/// The whole app: the project list, or one open project in the editor.
+/// There is no stack to go back through; the editor's home button returns
+/// here, and the list is read again.
+struct AppScreen: View {
+    @State private var open: ProjectSummary?
+
+    var body: some View {
+        Group {
+            if let project = open {
+                EditorScreen(project: project) { open = nil }
+                    .id(project.path)
+                    .transition(.opacity)
+            } else {
+                ProjectsScreen { open = $0 }
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: open?.path)
+    }
+}
+
 /// The launch screen: a new-project button and the saved projects, newest
-/// first, as on the desktop. A tap opens the project; coming back lists
-/// again, so the edited project moves to the front.
+/// first, as on the desktop. A tap opens the project.
 struct ProjectsScreen: View {
+    let onOpen: (ProjectSummary) -> Void
     @State private var projects: [ProjectSummary] = []
-    @State private var open: [ProjectSummary] = []
     @State private var failure: String?
 
     private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
 
     var body: some View {
-        NavigationStack(path: $open) {
+        VStack(spacing: 0) {
+            TitleBar(title: "Projects")
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     Button(action: newProject) {
@@ -41,23 +62,16 @@ struct ProjectsScreen: View {
                     }
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(projects, id: \.path) { project in
-                            Button { open = [project] } label: { ProjectCard(project: project) }
+                            Button { onOpen(project) } label: { ProjectCard(project: project) }
                                 .buttonStyle(.plain)
                         }
                     }
                 }
                 .padding(16)
             }
-            .background(Palette.panel)
-            .navigationTitle("Projects")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Palette.bar, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .navigationDestination(for: ProjectSummary.self) { project in
-                EditorScreen(project: project)
-            }
-            .onAppear(perform: reload)
         }
+        .background(Palette.panel)
+        .onAppear(perform: reload)
     }
 
     private func reload() {
@@ -70,13 +84,50 @@ struct ProjectsScreen: View {
             failure = nil
             reload()
             if let made = projects.first(where: { $0.path == path }) {
-                open = [made]
+                onOpen(made)
             }
         } catch let EditorError.Failed(message) {
             failure = message
         } catch {
             failure = error.localizedDescription
         }
+    }
+}
+
+/// A slim bar with a centered title, and an optional button on the left.
+struct TitleBar<Leading: View>: View {
+    let title: String
+    let background: Color
+    @ViewBuilder let leading: Leading
+
+    init(title: String, background: Color = Palette.bar, @ViewBuilder leading: () -> Leading) {
+        self.title = title
+        self.background = background
+        self.leading = leading()
+    }
+
+    var body: some View {
+        ZStack {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(Palette.text)
+                .lineLimit(1)
+                .padding(.horizontal, 60)
+            HStack {
+                leading
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 48)
+        .frame(maxWidth: .infinity)
+        .background(background.ignoresSafeArea(edges: .top))
+    }
+}
+
+extension TitleBar where Leading == EmptyView {
+    init(title: String, background: Color = Palette.bar) {
+        self.init(title: title, background: background) { EmptyView() }
     }
 }
 

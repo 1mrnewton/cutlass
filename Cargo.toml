@@ -51,9 +51,11 @@ members = [
     "crates/eval",
     "crates/export",
     "crates/ffi",
+    "crates/ffi-bindings",
     "crates/font",
     "crates/generated",
     "crates/gpu",
+    "crates/icons",
     "crates/logger",
     "crates/model",
     "crates/picture",
@@ -62,6 +64,7 @@ members = [
     "crates/platform-windows",
     "crates/playback",
     "crates/pool",
+    "crates/probe",
     "crates/render",
     "crates/renderer-software",
     "crates/session",
@@ -70,6 +73,7 @@ members = [
     "crates/store",
     "crates/text",
     "crates/transcription",
+    "tools/icongen",
 ]
 
 [workspace.package]

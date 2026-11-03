@@ -291,9 +291,20 @@ pub fn ruler_ticks(
     ticks
 }
 
+/// The transport clock at `time`: whole seconds, `MM:SS` under an hour and
+/// `HH:MM:SS` from an hour, so the text keeps its width as time runs. A
+/// time before zero reads as zero.
+#[must_use]
+pub fn clock(time: Micros) -> String {
+    clock_text(time.0.max(0) / 1_000_000)
+}
+
 /// `MM:SS` under an hour, `HH:MM:SS` from an hour.
 fn clock_label(frame: i64, nominal: i64) -> String {
-    let whole = frame / nominal;
+    clock_text(frame / nominal)
+}
+
+fn clock_text(whole: i64) -> String {
     let (hours, minutes, seconds) = (whole / 3600, whole / 60 % 60, whole % 60);
     if hours > 0 {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
@@ -305,6 +316,24 @@ fn clock_label(frame: i64, nominal: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clock_is_whole_seconds_and_keeps_its_width() {
+        assert_eq!(clock(Micros(0)), "00:00");
+        assert_eq!(clock(Micros(3_999_999)), "00:03");
+        assert_eq!(clock(Micros(17_100_000)), "00:17");
+        assert_eq!(clock(Micros(3_599_999_999)), "59:59");
+        assert_eq!(clock(Micros(3_600_000_000)), "01:00:00");
+        assert_eq!(clock(Micros(-5)), "00:00");
+        assert_eq!(
+            clock(Micros(i64::MAX)).len(),
+            clock(Micros(i64::MAX - 1)).len()
+        );
+        let widths: std::collections::HashSet<_> = (0..600)
+            .map(|tenth| clock(Micros(tenth * 100_000)).len())
+            .collect();
+        assert_eq!(widths.len(), 1);
+    }
 
     fn labels(ticks: &[Tick]) -> Vec<&str> {
         ticks

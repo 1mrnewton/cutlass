@@ -160,10 +160,12 @@ struct Pipe {
     last_duration: i64,
     /// Audio buffers a packet returned after the first, not handed out yet.
     heard: VecDeque<AudioOutput>,
+    /// Stream ticks before the stream's time zero, from its edit list.
+    lead: i64,
 }
 
 impl Pipe {
-    fn new(track: u32, timescale: Timescale, decoder: Box<dyn Decoder>) -> Self {
+    fn new(track: u32, timescale: Timescale, decoder: Box<dyn Decoder>, lead: i64) -> Self {
         Self {
             track,
             timescale,
@@ -172,7 +174,13 @@ impl Pipe {
             drained: false,
             last_duration: 0,
             heard: VecDeque::new(),
+            lead,
         }
+    }
+
+    /// `lead` in `timescale` ticks per second.
+    fn lead_in(&self, timescale: u32) -> i64 {
+        rescale(self.lead, self.timescale.ticks_per_second(), timescale)
     }
 
     /// Drop references, held pictures, and the end of stream before a seek.
@@ -486,7 +494,8 @@ impl Media {
     ) -> Result<(), EngineError> {
         self.run = None;
         if timescale.is_clock() {
-            let ticks = micros_to_ticks_floor(source, timescale)?;
+            let lead = self.picture.as_ref().map_or(0, |pipe| pipe.lead);
+            let ticks = micros_to_ticks_floor(source, timescale)?.saturating_add(lead);
             self.demux
                 .seek(SeekTo {
                     track,
@@ -520,9 +529,10 @@ impl Media {
                     codec: "picture".to_owned(),
                 });
             };
-            let (track, timescale) = (pipe.track, pipe.timescale);
+            let (track, timescale, lead) = (pipe.track, pipe.timescale, pipe.lead);
             if let Some(ready) = pipe.ready.pop_front() {
-                let (start, end) = coverage(ready.pts, ready.duration, timescale, cover)?;
+                let pts = ready.pts.map(|pts| pts.saturating_sub(lead));
+                let (start, end) = coverage(pts, ready.duration, timescale, cover)?;
                 return Ok(Some(HeldFrame {
                     start,
                     end,
@@ -603,11 +613,11 @@ impl Media {
             return Err(EngineError::Window);
         }
         self.cursor = None;
-        let (track, timescale) = {
+        let (track, timescale, lead) = {
             let Some(pipe) = self.audio.as_ref() else {
                 return Err(EngineError::NotMedia);
             };
-            (pipe.track, pipe.timescale)
+            (pipe.track, pipe.timescale, pipe.lead)
         };
         let rate = self
             .info
@@ -633,7 +643,7 @@ impl Media {
                 pipe.reset();
             }
             let early = Micros(source.0.saturating_sub(AUDIO_PREROLL).max(0));
-            let ticks = micros_to_ticks_floor(early, timescale)?;
+            let ticks = micros_to_ticks_floor(early, timescale)?.saturating_add(lead);
             self.demux
                 .seek(SeekTo {
                     track,
@@ -657,8 +667,13 @@ impl Media {
             let Some(output) = self.next_audio()? else {
                 break;
             };
+            let lead = self
+                .audio
+                .as_ref()
+                .map_or(0, |pipe| pipe.lead_in(output.timescale));
             let start = output
                 .pts
+                .saturating_sub(lead)
                 .checked_mul(i64::from(output.pcm.rate))
                 .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
                 .unwrap_or(0)
@@ -722,15 +737,15 @@ impl Media {
         frames: u32,
     ) -> Result<cutlass_codec::access::Pcm, EngineError> {
         self.run = None;
-        let (track, timescale) = {
+        let (track, timescale, lead) = {
             let Some(pipe) = self.audio.as_mut() else {
                 return Err(EngineError::NotMedia);
             };
             pipe.reset();
-            (pipe.track, pipe.timescale)
+            (pipe.track, pipe.timescale, pipe.lead)
         };
         if timescale.is_clock() {
-            let ticks = micros_to_ticks(source, timescale)?;
+            let ticks = micros_to_ticks(source, timescale)?.saturating_add(lead);
             self.demux
                 .seek(SeekTo {
                     track,
@@ -1041,7 +1056,37 @@ fn open_pipe(
         }
         Err(error) => return Err(EngineError::Codec(error)),
     };
-    Ok(Pipe::new(stream.id().get(), stream.timescale(), decoder))
+    Ok(Pipe::new(
+        stream.id().get(),
+        stream.timescale(),
+        decoder,
+        edit_lead(stream.edits()),
+    ))
+}
+
+/// `ticks` at `from` ticks per second, counted at `to`. Rounds toward zero;
+/// a value out of range is zero.
+fn rescale(ticks: i64, from: u32, to: u32) -> i64 {
+    if from == to {
+        return ticks;
+    }
+    let scaled = i128::from(ticks) * i128::from(to) / i128::from(from.max(1));
+    i64::try_from(scaled).unwrap_or(0)
+}
+
+/// Where the stream's time zero falls, in its own ticks: the first edit's
+/// media time, less the empty edits before it that delay the stream. A
+/// stream with no edits starts at tick zero. Encoders write this to hide an
+/// AAC decoder's warm-up samples or the delay B-frames add to video.
+fn edit_lead(edits: &[cutlass_container::Edit]) -> i64 {
+    let mut empty = 0_i64;
+    for edit in edits {
+        match edit.media_time() {
+            None => empty = empty.saturating_add(edit.duration()),
+            Some(media) => return media.saturating_sub(empty),
+        }
+    }
+    0
 }
 
 fn params_for(
@@ -1310,6 +1355,38 @@ fn from_read(error: ReadError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cutlass_container::Edit;
+
+    fn edit(media_time: Option<i64>, duration: i64) -> Edit {
+        Edit::try_new(media_time, duration, 1, 1).unwrap()
+    }
+
+    #[test]
+    fn the_edit_list_sets_where_a_stream_starts() {
+        assert_eq!(edit_lead(&[]), 0);
+        // An AAC track that hides 5058 warm-up frames.
+        assert_eq!(edit_lead(&[edit(Some(5_058), 1_000_000)]), 5_058);
+        // An empty edit first delays the stream.
+        assert_eq!(edit_lead(&[edit(None, 600), edit(Some(1_024), 9_000)]), 424);
+        assert_eq!(edit_lead(&[edit(None, 600), edit(Some(0), 9_000)]), -600);
+        // Only the first media edit counts.
+        assert_eq!(edit_lead(&[edit(Some(10), 5), edit(Some(99), 5)]), 10);
+        // Edits with nothing to show start at zero; huge values do not wrap.
+        assert_eq!(edit_lead(&[edit(None, 600)]), 0);
+        assert_eq!(
+            edit_lead(&[edit(None, i64::MAX), edit(Some(i64::MIN), 1)]),
+            i64::MIN
+        );
+    }
+
+    #[test]
+    fn a_lead_moves_between_timescales() {
+        assert_eq!(rescale(4_800, 48_000, 48_000), 4_800);
+        assert_eq!(rescale(4_800, 48_000, 1_000), 100);
+        assert_eq!(rescale(-4_800, 48_000, 96_000), -9_600);
+        assert_eq!(rescale(7, 0, 1), 7);
+        assert_eq!(rescale(i64::MAX, 1, u32::MAX), 0);
+    }
 
     #[test]
     fn a_picture_counts_the_memory_it_holds() {

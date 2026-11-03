@@ -2,6 +2,7 @@ mod beat;
 mod canvas;
 mod color;
 mod crop;
+mod effect;
 mod extract;
 mod fade;
 mod freeze;
@@ -27,7 +28,7 @@ mod trim;
 mod volume;
 mod words;
 
-use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TrackAttribute};
+use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TimeRange, TrackAttribute};
 
 use crate::request::Request;
 
@@ -96,6 +97,8 @@ pub enum EditError {
     Scale,
     /// A fade duration is negative.
     Fade,
+    /// Volume is negative or not a finite number.
+    Volume,
     /// Opacity is not finite or is outside zero to one.
     Opacity,
     /// The segment is not a text clip.
@@ -114,6 +117,10 @@ pub enum EditError {
     LineWidth,
     /// The face is empty or is not a file name.
     TextFont,
+    /// A new text clip needs something to say.
+    TextEmpty,
+    /// The effect is not one the app ships.
+    UnknownEffect,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
     /// A canvas side is outside 1 through 7680.
@@ -256,6 +263,38 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
         } => text::set_line_width(draft, segment_id, *width, face),
         Request::SetTextFont { segment_id, face } => text::set_text_font(draft, segment_id, face),
+        Request::AddText {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            content,
+            face,
+        } => text::add_text(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+            content,
+            face,
+        ),
+        Request::AddEffect {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            effect_id,
+        } => effect::add_effect(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+            effect_id,
+        ),
         Request::SetKeyframes {
             segment_id,
             keyframes,

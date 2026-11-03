@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "rgb-split",
+  "name": "RGB Split",
+  "passes": [
+    {
+      "block": "rgb_split",
+      "params": {
+        "x": { "wave": { "period": 1.2, "from": 0.004, "to": 0.025 } },
+        "y": { "wave": { "period": 1.7, "from": 0.0, "to": 0.008 } }
+      }
+    }
+  ]
+}

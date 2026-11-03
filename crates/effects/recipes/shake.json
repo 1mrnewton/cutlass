@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "shake",
+  "name": "Shake",
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": 1.08,
+        "x": { "jitter": { "rate": 14, "from": -0.03, "to": 0.03, "seed": 1 } },
+        "y": { "jitter": { "rate": 14, "from": -0.03, "to": 0.03, "seed": 2 } },
+        "rotate": { "jitter": { "rate": 14, "from": -1.5, "to": 1.5, "seed": 3 } }
+      }
+    }
+  ]
+}

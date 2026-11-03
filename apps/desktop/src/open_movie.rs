@@ -735,7 +735,7 @@ fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
     frame.layers.iter().any(|layer| match &layer.source {
         cutlass_eval::GpuSource::Yuv { .. } => true,
         cutlass_eval::GpuSource::Nested(child) => decodes_on_gpu(child),
-        cutlass_eval::GpuSource::Rgba(_) => false,
+        cutlass_eval::GpuSource::Rgba(_) | cutlass_eval::GpuSource::Effect(_) => false,
     })
 }
 
@@ -747,14 +747,11 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
         return;
     }
-    let renderer = match cutlass_render::Renderer::headless() {
-        Ok(renderer) => renderer,
-        Err(error) => {
-            eprintln!("skipped: {error}");
-            return;
-        }
+    let Some(renderer) = cutlass_render::Renderer::for_test().expect("a GPU is required") else {
+        eprintln!("skipped: no GPU");
+        return;
     };
-    let fonts = crate::face::FaceTable::load();
+    let fonts = crate::face::installed();
     let cases: [(&str, (u32, u32), Edit); 10] = [
         ("same size", (848, 608), |_| {}),
         ("shrunk to fit", (424, 240), |_| {}),
@@ -842,7 +839,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             let mut text = cutlass_model::MaterialText::new("words");
             text.content = "Smooth playback".to_owned();
             text.font_size = 72.0;
-            text.font_path = crate::face::FaceTable::load().name().to_owned();
+            text.font_path = crate::face::installed().name().to_owned();
             text.text_color = "#FFFFFF".to_owned();
             draft.materials.texts.push(text);
             let mut title = Segment::new("title", "words", TimeRange::new(0, 1_000_000));
@@ -897,7 +894,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             );
         }
         let canvas = renderer.canvas(width, height).unwrap();
-        crate::gpu::draw(&renderer, &canvas, &layers).unwrap();
+        renderer.draw_frame(&canvas, &layers).unwrap();
         let gpu = renderer.read(&canvas).unwrap();
         assert_eq!(gpu.len(), cpu.len(), "{name}");
         let pixels = cpu.len() / 4;

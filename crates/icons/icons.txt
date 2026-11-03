@@ -1,0 +1,105 @@
+# Icons every shell draws. One line each: the name the code asks for, then the
+# free Hugeicons glyph it comes from (the component name on hugeicons.com, such
+# as `Undo03Icon`), or `custom` for a mark in `src/custom.rs`.
+#
+# After editing this list, run `cargo run -p icongen`. It rewrites
+# `src/hugeicons.rs`, the iOS image sets, and the Android drawables.
+# Free icons only. Do not add a Pro glyph.
+
+package 4.4.0
+
+media          Image01Icon
+audio          AudioWave01Icon
+text           TextIcon
+stickers       StickerIcon
+effects        SparklesIcon
+transitions    TransitionLeftIcon
+filters        FilterIcon
+folder         Folder01Icon
+adjustments    SlidersHorizontalIcon
+templates      LayoutTemplateIcon
+video          Video01Icon
+textVideo      ImageToVideoIcon
+composition    LayerIcon
+plugin         MagicWand01Icon
+ad             CubeIcon
+mixed          BlendIcon
+play           PlayIcon
+plus           PlusSignIcon
+pause          PauseIcon
+camera         Camera01Icon
+chevron        ArrowRight01Icon
+chevronLeft    ArrowLeft01Icon
+alignLeft      AlignLeftIcon
+alignCenter    AlignHorizontalCenterIcon
+alignRight     AlignRightIcon
+alignTop       AlignTopIcon
+alignMiddle    AlignVerticalCenterIcon
+alignBottom    AlignBottomIcon
+keyframe       KeyframeIcon
+reset          RefreshIcon
+rotate         RotateClockwiseIcon
+search         Search01Icon
+star           StarIcon
+bold           TextBoldIcon
+italic         TextItalicIcon
+underline      TextUnderlineIcon
+textLeft       TextAlignLeftIcon
+textCenter     TextAlignCenterIcon
+textRight      TextAlignRightIcon
+justifyLeft    TextAlignJustifyLeftIcon
+justifyCenter  TextAlignJustifyCenterIcon
+justifyRight   TextAlignJustifyRightIcon
+unavailable    UnavailableIcon
+undo           Undo03Icon
+redo           Redo03Icon
+select         Cursor02Icon
+split          SquareSplitHorizontalIcon
+delete         Delete02Icon
+freeze         SnowflakeIcon
+reverse        RewindIcon
+mirror         FlipHorizontalIcon
+crop           CropIcon
+transcribe     SpeechToTextIcon
+splitScenes    ScissorRectangleIcon
+snap           AlignSelectionIcon
+magnet         MagnetIcon
+linkage        Link01Icon
+marker         Flag01Icon
+beat           MusicNote01Icon
+zoomIn         ZoomInAreaIcon
+zoomOut        ZoomOutAreaIcon
+zoomFit        FitToScreenIcon
+guides         RulerIcon
+lock           SquareLock01Icon
+# The phone editor's bars and panels.
+done           Tick02Icon
+home           Home01Icon
+arrowRight     ArrowRight02Icon
+scissors       ScissorIcon
+overlay        Layers01Icon
+captions       ClosedCaptionIcon
+aspectRatio    AspectRatioIcon
+background     PaintBoardIcon
+volume         VolumeHighIcon
+speed          DashboardSpeed01Icon
+animations     Motion02Icon
+duplicate      Copy01Icon
+replace        ArrowReloadHorizontalIcon
+extractAudio   MusicNoteSquare01Icon
+fade           VolumeLowIcon
+unlink         Unlink01Icon
+splice         ArrowDownToLineIcon
+addOverlay     ImageAdd01Icon
+importSound    FileMusicIcon
+record         Mic01Icon
+addText        TextCreationIcon
+editText       PencilEdit01Icon
+draw           PaintBrush01Icon
+export         Upload04Icon
+close          Cancel01Icon
+saved          CheckmarkCircle02Icon
+share          Share08Icon
+
+# Custom marks.
+blade          custom

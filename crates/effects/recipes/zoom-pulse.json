@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "zoom-pulse",
+  "name": "Zoom Pulse",
+  "passes": [
+    {
+      "block": "transform",
+      "params": {
+        "scale": { "keys": [[0, 1], [0.12, 1.18], [0.6, 1]], "repeat": 0.75 }
+      }
+    },
+    {
+      "block": "blur",
+      "params": {
+        "radius": { "keys": [[0, 0], [0.12, 0.008], [0.4, 0]], "repeat": 0.75 }
+      }
+    }
+  ]
+}

@@ -9,6 +9,10 @@ pub fn run() -> eframe::Result {
         .with_title("Cutlass")
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([tokens::MIN_WINDOW_WIDTH, tokens::MIN_WINDOW_HEIGHT]);
+    match icon(ICON) {
+        Some(icon) => viewport = viewport.with_icon(icon),
+        None => cutlass_logger::error!("the window icon did not decode"),
+    }
     #[cfg(target_os = "macos")]
     {
         viewport = viewport
@@ -45,6 +49,38 @@ pub fn run() -> eframe::Result {
             }))
         }),
     )
+}
+
+/// The app icon. macOS draws it as given, so its file is the rounded tile
+/// with the margin the Dock expects; elsewhere it is the full square.
+#[cfg(target_os = "macos")]
+const ICON: &[u8] = include_bytes!("../icons/macos.png");
+#[cfg(not(target_os = "macos"))]
+const ICON: &[u8] = include_bytes!("../icons/square.png");
+
+/// Decode an 8-bit RGBA PNG into the window's icon.
+fn icon(png: &[u8]) -> Option<egui::IconData> {
+    use cutlass_decode::{BitDepth, CodecId, CodecParams, ColorType, Decoder, Packet};
+
+    let mut decoder =
+        cutlass_png::PngDecoder::open(&CodecParams::video(CodecId::Png, 1, 1)).ok()?;
+    let picture = decoder
+        .decode_picture(&Packet::video(png.to_vec(), 0, 1, 1, true))
+        .ok()?;
+    let image = &picture.first()?.image;
+    if image.color != ColorType::Rgba || image.depth != BitDepth::Eight {
+        return None;
+    }
+    let rgba = image
+        .samples
+        .iter()
+        .map(|&sample| u8::try_from(sample).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    Some(egui::IconData {
+        rgba,
+        width: image.width,
+        height: image.height,
+    })
 }
 
 /// Move the playhead by the time since the previous frame.
@@ -86,5 +122,29 @@ impl eframe::App for DesktopWindow {
         {
             cutlass_logger::error!("save on quit: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icon;
+
+    #[test]
+    fn both_icons_decode_square_and_opaque_in_the_middle() {
+        for (png, side) in [
+            (&include_bytes!("../icons/macos.png")[..], 512),
+            (&include_bytes!("../icons/square.png")[..], 256),
+        ] {
+            let icon = icon(png).expect("icon");
+            assert_eq!((icon.width, icon.height), (side, side));
+            assert_eq!(icon.rgba.len(), (side * side * 4) as usize);
+            let middle = ((side / 2 * side + side / 2) * 4 + 3) as usize;
+            assert_eq!(icon.rgba[middle], 255);
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_png_gives_no_icon() {
+        assert!(icon(b"not a png").is_none());
     }
 }

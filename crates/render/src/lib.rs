@@ -10,22 +10,32 @@
 //! `cutlass-eval` to within rounding: texels are fetched, not filtered, and
 //! each stage of the CPU path floors to a whole pixel before the next.
 //!
-//! The preview shares the device eframe already opened, so the canvas can be
+//! [`Renderer::draw_frame`] draws eval's frame layers, so the desktop and
+//! the phones draw a frame the same way.
+//!
+//! The desktop preview shares the device eframe already opened, so the canvas can be
 //! shown without a copy. Export and the tests open their own device with
 //! [`Renderer::headless`] and read the canvas back.
 
 #![forbid(unsafe_code)]
 
 mod blur;
+mod effect;
+mod frame;
 mod layer;
 mod target;
 
+pub use cutlass_effects::{Block, Recipe, Step};
 pub use cutlass_gpu::{Affine, Placement};
+pub use frame::frame_layers;
 pub use layer::{Layer, Plane, Planes, Rgba};
 pub use target::Canvas;
 pub use wgpu;
 
 use std::fmt;
+
+/// Set in CI so a test that needs a GPU fails instead of skipping.
+pub const REQUIRE_GPU: &str = "CUTLASS_REQUIRE_GPU";
 
 /// The canvas pixel format. Bytes are premultiplied RGBA.
 pub const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -66,6 +76,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     layers: layer::Pipelines,
     blurs: blur::Blurs,
+    effects: effect::Effects,
 }
 
 impl Renderer {
@@ -74,11 +85,13 @@ impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let layers = layer::Pipelines::new(&device);
         let blurs = blur::Blurs::new(&device);
+        let effects = effect::Effects::new(&device);
         Self {
             device,
             queue,
             layers,
             blurs,
+            effects,
         }
     }
 
@@ -90,12 +103,25 @@ impl Renderer {
             ..wgpu::RequestAdapterOptions::default()
         }))
         .map_err(|error| RenderError::NoDevice(error.to_string()))?;
+        // Ask for what this adapter has, not wgpu's desktop defaults: the iOS
+        // simulator, for one, falls short of them and its device would not open.
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("cutlass-render"),
+            required_limits: adapter.limits(),
             ..wgpu::DeviceDescriptor::default()
         }))
         .map_err(|error| RenderError::NoDevice(error.to_string()))?;
         Ok(Self::new(device, queue))
+    }
+
+    /// A headless renderer for a test. `Ok(None)` means this machine has no
+    /// GPU and the test may skip; with [`REQUIRE_GPU`] set that is an error.
+    pub fn for_test() -> Result<Option<Self>, RenderError> {
+        match Self::headless() {
+            Ok(renderer) => Ok(Some(renderer)),
+            Err(error) if std::env::var_os(REQUIRE_GPU).is_some() => Err(error),
+            Err(_) => Ok(None),
+        }
     }
 
     #[must_use]
@@ -183,8 +209,45 @@ impl Renderer {
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
+                Layer::Effect(steps) => {
+                    if steps.is_empty() {
+                        continue;
+                    }
+                    // What is drawn so far becomes one picture the steps
+                    // run over, and that result is the bottom layer again.
+                    let first = blur::scratch(device, size);
+                    let second = blur::scratch(device, size);
+                    Self::paint(&self.layers, encoder, &first, &bound);
+                    let result = self
+                        .effects
+                        .run(device, queue, encoder, &first, &second, size, steps)
+                        .clone();
+                    let uploaded = layer::Uploaded {
+                        views: [result.clone(), result.clone(), result],
+                        size,
+                        yuv: false,
+                    };
+                    bound.clear();
+                    bound.push(self.layers.bind(
+                        device,
+                        queue,
+                        &uploaded,
+                        Placement::canvas(size.0, size.1),
+                    ));
+                }
             }
         }
+        Self::paint(&self.layers, encoder, target, &bound);
+        Ok(())
+    }
+
+    /// Clear `target` and draw `bound` into it in one pass.
+    fn paint(
+        layers: &layer::Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bound: &[layer::Bound],
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("cutlass-render layers"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -201,10 +264,9 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        for layer in &bound {
-            self.layers.draw(&mut pass, layer);
+        for layer in bound {
+            layers.draw(&mut pass, layer);
         }
-        Ok(())
     }
 
     /// Draw `uploaded` through `cover` into a canvas-sized texture and blur
@@ -259,15 +321,12 @@ impl Renderer {
 mod tests {
     use super::{Affine, Layer, Placement, Planes, Renderer, Rgba};
 
-    /// The GPU tests skip on a machine with no adapter.
     fn renderer() -> Option<Renderer> {
-        match Renderer::headless() {
-            Ok(renderer) => Some(renderer),
-            Err(error) => {
-                eprintln!("skipped: {error}");
-                None
-            }
+        let renderer = Renderer::for_test().expect("a GPU is required");
+        if renderer.is_none() {
+            eprintln!("skipped: no GPU");
         }
+        renderer
     }
 
     fn close(got: &[u8], expected: &[u8], tolerance: u8) {

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "mirror",
+  "name": "Mirror",
+  "passes": [
+    { "block": "mirror", "params": { "side": 0 } }
+  ]
+}

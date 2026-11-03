@@ -23,6 +23,7 @@ cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
 cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
 cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
+cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
 cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
 cutlass-logger = { path = "../../crates/logger", version = "0.1.0" }
@@ -37,6 +38,7 @@ cutlass-aiff = { path = "../../crates/containers/aiff", version = "0.1.0" }
 cutlass-still = { path = "../../crates/containers/still", version = "0.1.0" }
 cutlass-mp3-container = { path = "../../crates/containers/mp3", version = "0.1.0" }
 cutlass-adts = { path = "../../crates/containers/adts", version = "0.1.0" }
+cutlass-probe = { path = "../../crates/probe", version = "0.1.0" }
 cutlass-ogg = { path = "../../crates/containers/ogg", version = "0.1.0" }
 cutlass-flac-container = { path = "../../crates/containers/flac", version = "0.1.0" }
 cutlass-caf = { path = "../../crates/containers/caf", version = "0.1.0" }

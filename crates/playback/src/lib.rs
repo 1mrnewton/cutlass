@@ -16,18 +16,27 @@
 #![forbid(unsafe_code)]
 
 mod apple;
+mod faces;
+mod film;
 mod mixer;
 mod playhead;
 mod present;
 mod preview;
+mod transport;
+mod wave;
 
 pub use apple::{
     AudioGap, AudioHost, AudioOutput, AudioSink, CopyOutcome, RATE as PREVIEW_RATE, StreamClock,
 };
+pub use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
+pub use faces::{FaceTable, MAX_FACE_BYTES, MAX_FACES, PREFERRED_FACES, face_label};
+pub use film::{FilmCell, film_cells, media_file};
 pub use mixer::{LEAD as MIX_LEAD, MixJob, Mixer, WINDOW as MIX_WINDOW};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
 pub use present::{FrameCache, PresentError, Presentation};
 pub use preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix};
+pub use transport::{Program, Ticked, Transport};
+pub use wave::{ClipWave, clip_wave};
 
 #[cfg(test)]
 pub(crate) fn color_session(duration_us: i64, segment_us: i64) -> cutlass_session::Session {

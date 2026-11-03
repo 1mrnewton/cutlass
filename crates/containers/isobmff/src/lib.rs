@@ -8,6 +8,7 @@
 
 mod brand;
 mod demux;
+mod file_mux;
 mod fragment;
 mod heif;
 mod index;
@@ -21,6 +22,7 @@ mod stsd;
 
 pub use brand::probe;
 pub use demux::{IsoBmff, IsoBmffFile};
+pub use file_mux::Mp4Mux;
 pub use limits::{MAX_METADATA_BYTES, MAX_PACKET_BYTES, MAX_SAMPLES, PROBE_BYTES};
 pub use mux::{FileBrand, IsoBmffMux, MuxOptions};
 

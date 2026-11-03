@@ -132,6 +132,23 @@ impl<W: Write + Seek> IsoBmffMux<W> {
         Ok(())
     }
 
+    /// Replace a track's codec configuration record. The sample
+    /// description is written at finish, so this holds until then.
+    pub fn set_extradata(&mut self, track_id: u32, extradata: Vec<u8>) -> Result<(), Error> {
+        if self.finished {
+            return Err(Error::Incomplete);
+        }
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.params.track_id == track_id)
+        else {
+            return Err(Error::Missing { what: "track" });
+        };
+        track.params.extradata = extradata;
+        Ok(())
+    }
+
     pub fn finish_into(mut self) -> Result<W, Error> {
         self.finish()?;
         self.writer.take().ok_or(Error::Incomplete)

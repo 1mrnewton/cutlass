@@ -247,6 +247,18 @@ impl OutputQueue {
         self.shared.clear();
     }
 
+    /// Start the device again. iOS stops a queue when another app or the
+    /// system takes the audio, and it stays silent until started. Starting a
+    /// running queue does nothing.
+    pub fn resume(&self) -> Result<(), QueueError> {
+        let started = unsafe { sys::AudioQueueStart(self.queue, ptr::null()) };
+        if started == 0 {
+            Ok(())
+        } else {
+            Err(QueueError::NoDevice)
+        }
+    }
+
     /// A handle another thread can append through while this queue plays.
     #[must_use]
     pub fn sink(&self) -> StreamSink {

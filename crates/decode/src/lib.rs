@@ -28,6 +28,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod orient;
 pub mod video;
 
 pub use cutlass_codec::CodecId;
@@ -37,6 +38,7 @@ pub use cutlass_codec::access::{
     PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
     VideoFrame, Yuv420p,
 };
+pub use orient::Orientation;
 pub use video::VideoDecodeFactory;
 
 /// One decoded still.

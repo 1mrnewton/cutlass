@@ -7,7 +7,6 @@ mod face;
 mod gpu;
 pub mod icons;
 mod menu;
-pub mod probe;
 mod readers;
 
 #[cfg(test)]
@@ -74,12 +73,12 @@ pub fn load_settings(path: &Path) -> cutlass_settings::Settings {
 
 /// Open the process log before the window.
 ///
-/// `None` uses the per-user log directory. A public build writes the file
-/// and does not write stderr.
+/// `None` uses the logs folder of the Cutlass root. A public build writes
+/// the file and does not write stderr.
 pub fn boot(log_directory: Option<&Path>) -> Result<PathBuf, cutlass_logger::InitError> {
     match log_directory {
         Some(directory) => cutlass_logger::init(directory),
-        None => cutlass_logger::init_default(),
+        None => cutlass_logger::init(&shell::Shell::home().logs()),
     }
 }
 

@@ -71,6 +71,8 @@ pub struct AudioDecoder {
     layout: ChannelLayout,
     format: SampleFormat,
     primed: bool,
+    /// Sound has come out since the open or the last reset.
+    sounded: bool,
 }
 
 pub struct AudioEncoder {
@@ -122,6 +124,7 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
         layout,
         format,
         primed: false,
+        sounded: false,
     }))
 }
 
@@ -657,6 +660,24 @@ impl Decoder for AudioDecoder {
             return Ok(Vec::new());
         }
         let pcm = bytes_to_pcm(&bytes, self.rate, self.layout.clone(), self.format)?;
+        let timescale = if packet.timescale == 0 {
+            self.rate
+        } else {
+            packet.timescale
+        };
+        // AudioToolbox drops its own warm-up from the first packet it
+        // decodes, so that packet's sound is the end of the packet, not the
+        // start. HE-AAC loses about a thousand frames this way.
+        let mut pts = packet.pts;
+        if !self.sounded {
+            self.sounded = true;
+            let heard = usize::try_from(pcm.samples).unwrap_or(usize::MAX);
+            let dropped = self.packet_frames.saturating_sub(heard);
+            let dropped = i64::try_from(dropped).unwrap_or(0);
+            pts = pts.saturating_add(
+                dropped.saturating_mul(i64::from(timescale)) / i64::from(self.rate.max(1)),
+            );
+        }
         let skip = packet
             .side
             .iter()
@@ -671,12 +692,8 @@ impl Decoder for AudioDecoder {
             .unwrap_or(0);
         Ok(vec![Output::Audio(AudioOutput {
             pcm,
-            pts: packet.pts,
-            timescale: if packet.timescale == 0 {
-                self.rate
-            } else {
-                packet.timescale
-            },
+            pts,
+            timescale,
             skip_leading: skip,
             skip_trailing: 0,
             concealed: false,
@@ -692,6 +709,7 @@ impl Decoder for AudioDecoder {
             let _ = sys::AudioConverterReset(self.converter.raw);
         }
         self.primed = false;
+        self.sounded = false;
     }
 }
 

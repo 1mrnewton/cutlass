@@ -4299,7 +4299,7 @@ impl Shell {
                 root: root.as_deref(),
                 fonts: &self.face,
             },
-            |_, _, _| Ok(cutlass_eval::ClipPcm::Missing),
+            |_, _, _, _| Ok(cutlass_eval::ClipPcm::Missing),
         )
         .map_err(export_failure)?;
         let Some(bytes) = mux.bytes() else {

@@ -135,7 +135,8 @@ pub fn same_software_pixels(
 /// Evaluates `draft` over the request range, encodes, and muxes.
 ///
 /// The draft is borrowed and not written. `audio` supplies PCM for each
-/// audible segment; mute, volume, and fades are applied by the mix.
+/// audible segment at a timeline time, `count` mix frames at `rate`; mute,
+/// volume, and fades are applied by the mix.
 pub fn export<D, M, F>(
     mut run: ExportRun<'_, D, M>,
     mut audio: F,
@@ -143,7 +144,7 @@ pub fn export<D, M, F>(
 where
     D: Device,
     M: Mux,
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, ExportError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     validate(run.request)?;
     if run.mux.family() != run.request.container {
@@ -450,7 +451,7 @@ fn encode_audio<D, M, F>(
 where
     D: Device,
     M: Mux,
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, ExportError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     let Some(encoder) = audio_encoder.as_mut() else {
         return Ok(());
@@ -536,7 +537,7 @@ fn mix_window<F>(
     audio: &mut F,
 ) -> Result<Pcm, ExportError>
 where
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, ExportError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     let next = request
         .frame_rate
@@ -570,7 +571,7 @@ where
             frames,
         },
         ClockKind::Export,
-        |segment, _when, count, rate| match audio(segment, count, rate) {
+        |segment, when, count, rate| match audio(segment, when, count, rate) {
             Ok(pcm) => Ok(pcm),
             Err(error) => {
                 source_error = Some(error);
@@ -1081,7 +1082,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("export");
         assert_eq!(draft, before);
@@ -1136,7 +1137,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("late");
         assert_eq!(result.finished.packets()[0].bytes(), red(240, 135));
@@ -1165,7 +1166,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("decline");
         assert_eq!(
@@ -1190,7 +1191,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("missing");
         assert_eq!(
@@ -1228,7 +1229,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("side");
         assert_eq!(error, ExportError::SideData);
@@ -1296,7 +1297,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("hostile");
         assert!(matches!(error, ExportError::Mux(_)));
@@ -1321,7 +1322,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("family");
         assert_eq!(error, ExportError::Container);
@@ -1384,7 +1385,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |segment, frames, rate| {
+            |segment, _when, frames, rate| {
                 assert_eq!(frames, 4);
                 assert_eq!(rate, 4_000);
                 let value = if segment.as_str() == "other" {
@@ -1408,6 +1409,47 @@ mod tests {
             .expect("audio packet");
         assert_eq!(audio.timescale().ticks_per_second(), 4_000);
         samples_of(audio)
+    }
+
+    #[test]
+    fn each_clip_is_asked_for_its_sound_at_the_frame_time() {
+        let mut request = gif_request(TimeRange::new(0, 3_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut draft = color_draft(240, 135, 1_000_000);
+        push_sound(&mut draft, "loud", 1.0, 0, false);
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        let mut asked = Vec::new();
+        export(
+            ExportRun {
+                draft: &draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+            },
+            |segment, when, _, _| {
+                asked.push((segment.as_str().to_owned(), when));
+                Ok(ClipPcm::Ready(tone(1.0)))
+            },
+        )
+        .expect("audio");
+        let loud = |time| ("loud".to_owned(), Micros(time));
+        assert_eq!(asked, vec![loud(0), loud(1_000), loud(2_000)]);
     }
 
     #[test]
@@ -1466,7 +1508,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("wait");
         assert_eq!(
@@ -1523,7 +1565,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("sidecar");
         let path = result.sidecar.expect("path");
@@ -1552,7 +1594,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("ass");
         assert_eq!(error, ExportError::Ass);
@@ -1584,7 +1626,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("scale");
         assert_eq!(result.output_width, 240);
@@ -1632,7 +1674,7 @@ mod tests {
                 root: None,
                 fonts: &cutlass_eval::NoFonts,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("limit");
         assert_eq!(error, ExportError::Limit);

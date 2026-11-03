@@ -30,13 +30,20 @@ use crate::sidecars::{file_name, sidecar_text, write_sidecar};
 
 const MAX_SAMPLES_PER_FRAME: u32 = 480_000;
 
-/// One evaluated picture. `rgba` is the software frame at the canvas size.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One evaluated picture: its time and the canvas size it was drawn at.
+/// The pixels go to the encoder and are not kept, so a long export holds
+/// one picture at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExportedFrame {
     pub time: Micros,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+}
+
+/// One evaluated picture with its pixels, on its way to the encoder.
+struct Evaluated {
+    frame: ExportedFrame,
+    rgba: Vec<u8>,
 }
 
 /// The muxed file and the pictures eval returned.
@@ -443,12 +450,13 @@ where
         renderer: run.renderer,
     })?;
     let bytes = scale_rgba(
-        evaluated.width,
-        evaluated.height,
+        evaluated.frame.width,
+        evaluated.frame.height,
         &evaluated.rgba,
         output.0,
         output.1,
     )?;
+    drop(evaluated.rgba);
     let timing = video_time(run.request.frame_rate, index)?;
     let picture = CpuFrame::new(output.0, output.1, PixelFormat::Rgba8, bytes, timing)
         .map_err(ExportError::Encoder)?;
@@ -461,7 +469,7 @@ where
         &packets,
         &mut tracks.video_ticks,
     )?;
-    Ok(evaluated)
+    Ok(evaluated.frame)
 }
 
 fn encode_audio<D, M, F>(
@@ -512,7 +520,7 @@ struct FrameInputs<'a, D> {
     renderer: Option<&'a Renderer>,
 }
 
-fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<ExportedFrame, ExportError> {
+fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<Evaluated, ExportError> {
     let FrameInputs {
         draft,
         device,
@@ -539,10 +547,12 @@ fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<ExportedFrame
     if picture.extent.width != width || picture.extent.height != height {
         return Err(ExportError::Picture("canvas size".to_owned()));
     }
-    Ok(ExportedFrame {
-        time,
-        width,
-        height,
+    Ok(Evaluated {
+        frame: ExportedFrame {
+            time,
+            width,
+            height,
+        },
         rgba: picture.rgba,
     })
 }
@@ -872,7 +882,7 @@ mod tests {
     use cutlass_renderer_software::SoftwareDevice;
     use cutlass_session::Session;
 
-    use super::{ExportRun, export, frame_indexes, same_software_pixels, to_channels};
+    use super::{ExportRun, export, frame_indexes, same_software_pixels, scale_rgba, to_channels};
     use crate::config::{AudioExport, ExportError, ExportRequest, SidecarKind, SidecarRequest};
 
     struct Stamp {
@@ -1226,6 +1236,7 @@ mod tests {
         );
         let mut device = SoftwareDevice::new();
         let factory = factory();
+        // The test encoder passes the scaled pixels through as packets.
         export(
             ExportRun {
                 draft,
@@ -1243,9 +1254,10 @@ mod tests {
             |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("export")
-        .frames
-        .into_iter()
-        .map(|frame| frame.rgba)
+        .finished
+        .packets()
+        .iter()
+        .map(|packet| packet.bytes().to_vec())
         .collect()
     }
 
@@ -1288,7 +1300,7 @@ mod tests {
         assert_eq!(draft, before);
         // The flash starts clear and climbs to 0.9 at 0.08 s, so frame 2 at
         // 30 fps (0.067 s) is three quarters of the way to white.
-        assert_eq!(cpu[2], red(64, 36));
+        assert_eq!(cpu[2], red(240, 135));
         assert!(
             gpu[2]
                 .chunks(4)
@@ -1296,7 +1308,7 @@ mod tests {
             "{:?}",
             &gpu[2][..4]
         );
-        assert_eq!(gpu[0], red(64, 36));
+        assert_eq!(gpu[0], red(240, 135));
     }
 
     #[test]
@@ -1332,8 +1344,11 @@ mod tests {
         assert_eq!(draft, before);
         assert_eq!(draft.duration, Micros(4_000_000));
         assert_eq!(result.frames.len(), 2);
-        assert_eq!(result.frames[0].rgba, red(240, 135));
-        assert_eq!(result.frames[1].rgba, clear(240, 135));
+        assert_eq!(result.frames[1].time, Micros(33_334));
+        assert_eq!(
+            (result.frames[0].width, result.frames[0].height),
+            (240, 135)
+        );
         let packets = result.finished.packets();
         assert_eq!(packets.len(), 2);
         assert_eq!(packets[0].bytes(), red(240, 135));
@@ -1350,8 +1365,8 @@ mod tests {
         let mut playback = SoftwareDevice::new();
         let first = played_rgba(&draft, Micros(0), &mut playback);
         let second = played_rgba(&draft, Micros(33_334), &mut playback);
-        same_software_pixels(&draft, 240, 135, &first, &result.frames[0].rgba).expect("lock");
-        same_software_pixels(&draft, 240, 135, &second, &result.frames[1].rgba).expect("lock");
+        same_software_pixels(&draft, 240, 135, &first, packets[0].bytes()).expect("lock");
+        same_software_pixels(&draft, 240, 135, &second, packets[1].bytes()).expect("lock");
         assert_eq!(first, red(240, 135));
     }
 
@@ -2018,11 +2033,18 @@ mod tests {
         .expect("scale");
         assert_eq!(result.output_width, 240);
         assert_eq!(result.output_height, 120);
-        assert_eq!(result.frames[0].rgba, red(480, 240));
+        assert_eq!(
+            (result.frames[0].width, result.frames[0].height),
+            (480, 240)
+        );
         assert_eq!(result.finished.packets()[0].bytes(), red(240, 120));
         let mut playback = SoftwareDevice::new();
         let played = played_rgba(&draft, Micros(0), &mut playback);
-        assert_eq!(played, result.frames[0].rgba);
+        assert_eq!(played, red(480, 240));
+        assert_eq!(
+            scale_rgba(480, 240, &played, 240, 120).unwrap(),
+            result.finished.packets()[0].bytes()
+        );
     }
 
     #[test]

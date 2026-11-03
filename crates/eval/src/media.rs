@@ -66,8 +66,9 @@ pub struct OpenClips {
     sources: HashMap<SegmentId, VideoSource>,
     nests: HashMap<SegmentId, OpenClips>,
     images: HashMap<String, CpuBytes>,
-    /// Title rasters by segment. A title does not change within a revision.
-    texts: HashMap<SegmentId, CpuBytes>,
+    /// Title rasters by segment, with the density each was drawn at. A
+    /// title does not change within a revision unless its scale is keyed.
+    texts: HashMap<SegmentId, (f64, CpuBytes)>,
     /// Off, a clip whose picture is not decoded yet shows its last one.
     patient: bool,
 }
@@ -125,7 +126,7 @@ impl OpenClips {
     }
 
     /// Title rasters kept for this revision.
-    pub(crate) fn texts(&mut self) -> &mut HashMap<SegmentId, CpuBytes> {
+    pub(crate) fn texts(&mut self) -> &mut HashMap<SegmentId, (f64, CpuBytes)> {
         &mut self.texts
     }
 
@@ -247,6 +248,8 @@ pub(crate) struct PictureTransform {
     geometry_identity: bool,
     /// Keep the picture's own size instead of fitting it to the canvas.
     native: bool,
+    /// Picture pixels to one drawn pixel of a native picture.
+    density: f64,
 }
 
 pub(crate) struct Placed<'a> {
@@ -313,6 +316,7 @@ pub(crate) fn picture_transform(
         opacity,
         geometry_identity,
         native: false,
+        density: 1.0,
     })
 }
 
@@ -1045,12 +1049,27 @@ impl PictureTransform {
         self
     }
 
+    /// A native picture drawn with `density` pixels to each drawn pixel,
+    /// so a title scaled up keeps sharp edges. Below 1 counts as 1.
+    pub(crate) fn dense(mut self, density: f64) -> Self {
+        self.density = if density.is_finite() {
+            density.max(1.0)
+        } else {
+            1.0
+        };
+        self
+    }
+
     /// The size the picture is drawn at scale 1. Media fits inside the
     /// canvas, keeping its shape.
     fn drawn_size(self, picture: (u32, u32), canvas: (u32, u32)) -> Option<(u32, u32)> {
         let (pw, ph) = picture;
-        if self.native && pw > 0 && ph > 0 && pw <= canvas.0 && ph <= canvas.1 {
-            return Some(picture);
+        if self.native && pw > 0 && ph > 0 {
+            let own = |edge: u32| round_edge(f64::from(edge) / self.density).unwrap_or(1);
+            let (w, h) = (own(pw), own(ph));
+            if w <= canvas.0 && h <= canvas.1 {
+                return Some((w, h));
+            }
         }
         contain_size(pw, ph, canvas.0, canvas.1)
     }

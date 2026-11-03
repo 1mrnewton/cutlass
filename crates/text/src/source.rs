@@ -170,6 +170,9 @@ pub(crate) fn blit(draw: Blit<'_>) {
     let Some((y0, y1)) = span(top, top + record.height, picture_h) else {
         return;
     };
+    // Distance field texels across one drawn pixel, so an edge stays one
+    // pixel soft at any size.
+    let texels = pixel(image.width) / record.width;
     for y in y0..y1 {
         for x in x0..x1 {
             let u = (pixel(x) + 0.5 - left) / record.width;
@@ -177,7 +180,7 @@ pub(crate) fn blit(draw: Blit<'_>) {
             if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
                 continue;
             }
-            let Some(ink) = ink_at(image, u, v, fill) else {
+            let Some(ink) = ink_at(image, u, v, texels, fill) else {
                 continue;
             };
             blend_at(rgba, picture_w, x, y, ink);
@@ -283,12 +286,17 @@ fn drawable(image: &crate::GlyphImage) -> bool {
     }
 }
 
-fn ink_at(image: &crate::GlyphImage, u: f32, v: f32, fill: [u8; 4]) -> Option<[u8; 4]> {
+fn ink_at(
+    image: &crate::GlyphImage,
+    u: f32,
+    v: f32,
+    texels: f32,
+    fill: [u8; 4],
+) -> Option<[u8; 4]> {
     let (col, row) = image_texel(image, u, v)?;
     match image.kind {
         GlyphKind::Distance => {
-            let sdf = image.sdf.get(texel_offset(image, col, row)?)?;
-            let covered = coverage(*sdf);
+            let covered = coverage(distance_at(image, u, v)?, texels);
             if covered == 0 {
                 return None;
             }
@@ -346,18 +354,39 @@ fn texel_offset(image: &crate::GlyphImage, col: u32, row: u32) -> Option<usize> 
     usize::try_from(offset).ok()
 }
 
-fn coverage(sdf: u8) -> u8 {
-    let distance = i32::from(sdf);
-    const EDGE: i32 = 128;
-    const HALF: i32 = 16;
-    if distance <= EDGE - HALF {
-        0
-    } else if distance >= EDGE + HALF {
-        255
+/// The distance field at `u`, `v`, mixed from the four nearest texels so a
+/// glyph drawn larger than its cell keeps smooth outlines: 0 far outside,
+/// 255 far inside.
+fn distance_at(image: &crate::GlyphImage, u: f32, v: f32) -> Option<f32> {
+    let x = (u * pixel(image.width) - 0.5).clamp(0.0, pixel(image.width - 1));
+    let y = (v * pixel(image.height) - 0.5).clamp(0.0, pixel(image.height - 1));
+    let (fx, fy) = (x.fract(), y.fract());
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (col, row) = (x as u32, y as u32);
+    let next_col = (col + 1).min(image.width - 1);
+    let next_row = (row + 1).min(image.height - 1);
+    let at = |c: u32, r: u32| -> Option<f32> {
+        Some(f32::from(*image.sdf.get(texel_offset(image, c, r)?)?))
+    };
+    let top = at(col, row)? * (1.0 - fx) + at(next_col, row)? * fx;
+    let bottom = at(col, next_row)? * (1.0 - fx) + at(next_col, next_row)? * fx;
+    Some(top * (1.0 - fy) + bottom * fy)
+}
+
+/// How much of a drawn pixel the glyph covers, with the outline mixed over
+/// one pixel. `texels` is distance field texels per drawn pixel.
+fn coverage(sdf: f32, texels: f32) -> u8 {
+    // The field holds SPREAD texels each side of the outline.
+    let inside = (sdf / 255.0 - 0.5) * 2.0 * crate::atlas::SPREAD;
+    let texels = if texels.is_finite() && texels > 0.0 {
+        texels
     } else {
-        let mixed = (distance - (EDGE - HALF)) * 255 / (HALF * 2);
-        u8::try_from(mixed).unwrap_or(0)
-    }
+        1.0
+    };
+    let covered = (inside / texels + 0.5).clamp(0.0, 1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = (covered * 255.0).round() as u8;
+    byte
 }
 
 fn blend_at(rgba: &mut [u8], width: u32, x: u32, y: u32, source: [u8; 4]) {

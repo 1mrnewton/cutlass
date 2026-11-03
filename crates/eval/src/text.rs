@@ -15,7 +15,8 @@ use std::collections::HashMap;
 
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    Draft, MaterialRef, MaterialText, Micros, Segment, SegmentId, TrackAttribute, WordColumns,
+    Clip, Draft, MaterialRef, MaterialText, Micros, Segment, SegmentId, TrackAttribute,
+    UniformScale, WordColumns,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
@@ -72,17 +73,23 @@ impl PlacedText {
     }
 }
 
-/// Text segments covering `time`, placed. A title's raster is kept in
-/// `rasters` for its segment, so a later frame of the same revision does not
-/// lay it out and draw it again. Captions change with time and are drawn
-/// each frame.
+/// The most picture pixels a title draws to each pixel it is shown at.
+const MAX_DENSITY: f64 = 8.0;
+/// The largest face, in pixels, a title is drawn with to keep it sharp.
+const MAX_FACE_PX: f64 = 1_024.0;
+
+/// Text segments covering `time`, placed. A title is drawn at its scale, so
+/// one scaled up keeps sharp edges; its raster is kept in `rasters` for its
+/// segment with that density, so a later frame of the same revision and
+/// scale does not lay it out and draw it again. Captions change with time
+/// and are drawn each frame.
 pub(crate) fn text_layers(
     draft: &Draft,
     fonts: &dyn Fonts,
     width: u32,
     height: u32,
     time: Micros,
-    rasters: &mut HashMap<SegmentId, CpuBytes>,
+    rasters: &mut HashMap<SegmentId, (f64, CpuBytes)>,
 ) -> Vec<TextLayer> {
     let mut layers = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
@@ -118,23 +125,25 @@ pub(crate) fn text_layers(
             if transform.omitted() {
                 continue;
             }
-            let raster = if words_present(material) {
+            let (raster, transform) = if words_present(material) {
                 let Some(bytes) = caption_picture(face, material, segment.target.start, time)
                 else {
                     continue;
                 };
-                bytes
-            } else if let Some(kept) = rasters.get(&segment.id) {
-                kept.clone()
+                (bytes, transform)
             } else {
-                let Ok(source) = TextSource::open(face, None, material, segment) else {
+                let wanted = density(&clip, &uniform, material.font_size);
+                let kept = rasters
+                    .get(&segment.id)
+                    .filter(|(drawn, _)| *drawn == wanted)
+                    .cloned();
+                let Some((drawn, bytes)) =
+                    kept.or_else(|| title_picture(face, material, segment, time, wanted))
+                else {
                     continue;
                 };
-                let Sample::Ready(Picture::Cpu(bytes)) = source.sample(time) else {
-                    continue;
-                };
-                rasters.insert(segment.id.clone(), bytes.clone());
-                bytes
+                rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
+                (bytes, transform.dense(drawn))
             };
             layers.push(TextLayer {
                 render_index: segment.render_index,
@@ -150,6 +159,52 @@ pub(crate) fn text_layers(
         }
     }
     layers
+}
+
+/// A title drawn with `density` pixels to each shown pixel, and that
+/// density; at 1 when it cannot be drawn larger.
+fn title_picture(
+    face: &[u8],
+    material: &MaterialText,
+    segment: &Segment,
+    time: Micros,
+    density: f64,
+) -> Option<(f64, CpuBytes)> {
+    let draw = |density: f64| {
+        let mut larger = material.clone();
+        larger.font_size *= density;
+        larger.line_max_width *= density;
+        let source = TextSource::open(face, None, &larger, segment).ok()?;
+        match source.sample(time) {
+            Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
+            _ => None,
+        }
+    };
+    if density > 1.0
+        && let Some(drawn) = draw(density)
+    {
+        return Some(drawn);
+    }
+    draw(1.0)
+}
+
+/// Picture pixels per shown pixel for a title at this clip scale: the
+/// larger scale, up in quarter steps so a pinch does not redraw it at every
+/// move, from 1 up to [`MAX_DENSITY`], with the face kept to [`MAX_FACE_PX`].
+fn density(clip: &Clip, uniform: &UniformScale, font_size: f64) -> f64 {
+    let scale = if uniform.on {
+        uniform.value.abs()
+    } else {
+        clip.scale.x.abs().max(clip.scale.y.abs())
+    };
+    if !scale.is_finite() || scale <= 1.0 {
+        return 1.0;
+    }
+    let mut most = MAX_DENSITY;
+    if font_size.is_finite() && font_size > 0.0 {
+        most = most.min((MAX_FACE_PX / font_size).max(1.0));
+    }
+    ((scale * 4.0).ceil() / 4.0).min(most)
 }
 
 /// The size a title's text picture is drawn at, before placement: tight
@@ -401,6 +456,28 @@ mod tests {
         let (width, height) = inked_span(&pixels(&small, 0), 256);
         assert!(width < 128 && height < 128, "{width}x{height}");
         assert_eq!(inked_span(&pixels(&large, 0), 512), (width, height));
+    }
+
+    /// Pixels drawn part covered, at the letters' edges.
+    fn soft_edge(rgba: &[u8]) -> usize {
+        rgba.chunks(4)
+            .filter(|pixel| pixel[3] > 0 && pixel[3] < 255)
+            .count()
+    }
+
+    #[test]
+    fn a_title_scaled_up_is_drawn_at_its_shown_size() {
+        let small = text_segment("A", false);
+        let mut large = small.clone();
+        large.tracks[0].segments[0].uniform_scale.value = 2.0;
+        let (small_w, small_h) = inked_span(&pixels(&small, 0), 256);
+        let (large_w, large_h) = inked_span(&pixels(&large, 0), 256);
+        assert!(large_w.abs_diff(small_w * 2) <= 4, "{large_w} {small_w}");
+        assert!(large_h.abs_diff(small_h * 2) <= 4, "{large_h} {small_h}");
+        // Stretched, the soft edge would widen with the letters, to about
+        // four times; drawn large, it only grows with their outline.
+        let (before, after) = (soft_edge(&pixels(&small, 0)), soft_edge(&pixels(&large, 0)));
+        assert!(after < before * 3, "{before} {after}");
     }
 
     #[test]

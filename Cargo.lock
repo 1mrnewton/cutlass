@@ -1109,9 +1109,13 @@ name = "cutlass-render"
 version = "0.1.0"
 dependencies = [
  "cutlass-compositor",
+ "cutlass-decode",
  "cutlass-effects",
+ "cutlass-encode",
  "cutlass-eval",
  "cutlass-gpu",
+ "cutlass-h264",
+ "cutlass-isobmff",
  "cutlass-model",
  "cutlass-picture",
  "pollster",

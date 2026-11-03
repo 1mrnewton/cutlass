@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::UNIX_EPOCH;
 
-use cutlass_ffi::{FfiError, Home, PhoneHost};
+use cutlass_ffi::{Drag, FfiError, Home, PhoneHost};
 use cutlass_ffi::{Micros, SegmentId};
 
 uniffi::setup_scaffolding!();
@@ -311,6 +311,49 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Move a clip to `row` (top is 0) starting near `start_us`, as one undo
+    /// step. It snaps to a cut or the playhead within `snap_us`. Returns the
+    /// start it landed on.
+    pub fn move_clip(
+        &self,
+        clip_id: String,
+        row: u32,
+        start_us: i64,
+        snap_us: i64,
+        playhead_us: i64,
+    ) -> Result<i64, EditorError> {
+        let drag = Drag {
+            row,
+            time: Micros(start_us),
+            snap: Micros(snap_us),
+            playhead: Micros(playhead_us),
+        };
+        self.run(move |host| host.move_clip(&SegmentId::new(clip_id), drag))?
+            .map(|start| start.0)
+            .map_err(EditorError::from)
+    }
+
+    /// Drag a clip's start edge, or its end edge, to `time_us`, as one undo
+    /// step. Returns where the edge landed.
+    pub fn trim(
+        &self,
+        clip_id: String,
+        start_edge: bool,
+        time_us: i64,
+        snap_us: i64,
+        playhead_us: i64,
+    ) -> Result<i64, EditorError> {
+        let drag = Drag {
+            row: 0,
+            time: Micros(time_us),
+            snap: Micros(snap_us),
+            playhead: Micros(playhead_us),
+        };
+        self.run(move |host| host.trim(&SegmentId::new(clip_id), start_edge, drag))?
+            .map(|time| time.0)
+            .map_err(EditorError::from)
+    }
+
     /// Remove one clip.
     pub fn remove(&self, clip_id: String) -> Result<(), EditorError> {
         self.run(move |host| host.remove(&SegmentId::new(clip_id)))?
@@ -422,11 +465,39 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_trims_and_moves_and_a_bad_drop_says_why() {
+        let temp = Temp::new();
+        let editor = temp.open();
+        let first = editor.append(editor.import(pattern()).unwrap()).unwrap();
+        let second = editor.append(editor.import(pattern()).unwrap()).unwrap();
+        let length = editor.lanes().unwrap()[0].clips[0].duration_us;
+        let edge = editor
+            .trim(second.clone(), false, length + length / 2, 0, 0)
+            .unwrap();
+        assert_eq!(edge, length + length / 2);
+        assert_eq!(editor.duration_us().unwrap(), length + length / 2);
+        let start = editor
+            .move_clip(first.clone(), 0, 10 * length, 0, 0)
+            .unwrap();
+        let clips = &editor.lanes().unwrap()[0].clips;
+        assert_eq!(
+            clips.iter().find(|clip| clip.id == first).unwrap().start_us,
+            start
+        );
+        let super::EditorError::Failed { message } =
+            editor.move_clip(first, 9, 0, 0, 0).unwrap_err();
+        assert!(!message.is_empty());
+    }
+
+    #[test]
     fn play_ticks_the_playhead_and_pause_holds_it() {
         let temp = Temp::new();
         let editor = temp.open();
         editor.play().unwrap();
-        assert!(!editor.is_playing().unwrap(), "an empty project does not play");
+        assert!(
+            !editor.is_playing().unwrap(),
+            "an empty project does not play"
+        );
         let material = editor.import(pattern()).unwrap();
         editor.append(material).unwrap();
         let end = editor.duration_us().unwrap();

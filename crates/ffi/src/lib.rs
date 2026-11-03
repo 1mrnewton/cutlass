@@ -328,6 +328,32 @@ impl PhoneHost {
         Ok(time)
     }
 
+    /// Set the linear gain of `segment_id`, as one undo step. A negative or
+    /// unfinite gain is refused.
+    pub fn set_volume(&mut self, segment_id: &SegmentId, volume: f64) -> Result<(), FfiError> {
+        self.apply(
+            self.revision(),
+            &[Request::SetVolume {
+                segment_id: segment_id.clone(),
+                volume,
+            }],
+        )?;
+        Ok(())
+    }
+
+    /// Play `segment_id` at a constant `speed`, as one undo step. Its length
+    /// follows the speed, and a magnetic row packs behind it.
+    pub fn set_speed(&mut self, segment_id: &SegmentId, speed: f64) -> Result<(), FfiError> {
+        self.apply(
+            self.revision(),
+            &[Request::SetConstantSpeed {
+                segment_id: segment_id.clone(),
+                speed,
+            }],
+        )?;
+        Ok(())
+    }
+
     /// Remove one clip. Its dependents go with it when linkage follow is on.
     pub fn remove(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
         self.apply(
@@ -693,6 +719,42 @@ mod tests {
         );
         let past = host.trim(&second, true, drag(0, 9_000_000)).unwrap();
         assert!(past.0 < 3_000_000, "the start edge stays before the end");
+    }
+
+    #[test]
+    fn volume_and_speed_reach_the_rows_and_a_bad_value_changes_nothing() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let (first, second) = two_stills(&mut host);
+        host.set_volume(&first, 0.5).unwrap();
+        let clip = &host.lanes()[0].clips[0];
+        assert_eq!(clip.volume, 0.5);
+        host.undo().unwrap();
+        assert_eq!(host.lanes()[0].clips[0].volume, 1.0);
+
+        let before = host.draft().clone();
+        let revision = host.revision();
+        for volume in [-1.0, f64::NAN] {
+            assert!(host.set_volume(&first, volume).is_err());
+        }
+        for speed in [0.0, -2.0, f64::NAN] {
+            assert!(host.set_speed(&first, speed).is_err());
+        }
+        assert!(
+            host.set_volume(&cutlass_session::SegmentId::new("nope"), 0.5)
+                .is_err()
+        );
+        assert_eq!(host.draft(), &before);
+        assert_eq!(host.revision(), revision);
+
+        host.set_speed(&first, 2.0).unwrap();
+        let clips = &host.lanes()[0].clips;
+        assert_eq!(clips[0].speed, 2.0);
+        assert_eq!(clips[0].duration.0, 1_000_000);
+        // The magnet packs the next clip against the shorter one.
+        assert_eq!(clips[1].id, second);
+        assert_eq!(clips[1].start.0, 1_000_000);
     }
 
     #[test]

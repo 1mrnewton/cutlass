@@ -16,17 +16,21 @@ use crate::error::FfiError;
 use crate::media::{fresh, ids};
 
 /// One clip on a row.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PhoneClip {
     pub id: SegmentId,
     /// The file name, the text, or the segment id.
     pub name: String,
     pub start: Micros,
     pub duration: Micros,
+    /// Linear gain: 1 is unity and 0 is silence.
+    pub volume: f64,
+    /// Constant speed: 2 plays twice as fast.
+    pub speed: f64,
 }
 
 /// One row, top first.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PhoneLane {
     pub track_id: TrackId,
     pub kind: TrackType,
@@ -55,6 +59,8 @@ pub fn phone_lanes(draft: &Draft) -> Vec<PhoneLane> {
                         name: clip_name(draft, segment),
                         start: segment.target.start,
                         duration: segment.target.duration,
+                        volume: segment.volume,
+                        speed: segment.speed,
                     })
                     .collect(),
             })

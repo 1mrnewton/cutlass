@@ -108,6 +108,17 @@ impl DecodedFrame {
             Self::Still(image) => image.height,
         }
     }
+
+    /// The memory the picture holds: its bytes or samples, or for a platform
+    /// buffer the 4:2:0 picture it stands for.
+    #[must_use]
+    pub fn byte_size(&self) -> usize {
+        match self {
+            Self::Coded { bytes, .. } => bytes.len(),
+            Self::Platform { width, height, .. } => *width as usize * *height as usize * 3 / 2,
+            Self::Still(image) => image.samples.len() * 2,
+        }
+    }
 }
 
 /// What a steered decode does after each picture. See
@@ -1272,6 +1283,25 @@ fn from_read(error: ReadError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_counts_the_memory_it_holds() {
+        let coded = DecodedFrame::Coded {
+            width: 4,
+            height: 2,
+            pixel: PixelFormat::Yuv420p,
+            primaries: ColorPrimaries::Bt709,
+            transfer: Transfer::Bt709,
+            bytes: vec![0; 12],
+        };
+        assert_eq!(coded.byte_size(), 12);
+        let platform = DecodedFrame::Platform {
+            width: 3840,
+            height: 2160,
+            token: 0,
+        };
+        assert_eq!(platform.byte_size(), 3840 * 2160 * 3 / 2);
+    }
 
     #[test]
     fn a_missing_file_and_an_unknown_header_are_named_errors() {

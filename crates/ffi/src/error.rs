@@ -146,6 +146,8 @@ fn edit_cause(error: EditError) -> String {
         EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
         EditError::TextEmpty => "type something to add text".to_owned(),
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
+        EditError::NotEffect => "a strength belongs on an effect, filter, or adjustment".to_owned(),
+        EditError::EffectStrength => "the strength must be from zero to one".to_owned(),
         EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
         EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),

@@ -246,6 +246,14 @@ pub enum Request {
         duration: Micros,
         effect_id: String,
     },
+    /// Store `value`, from 0 to 1, as the strength of the effect, filter,
+    /// or adjustment the clip uses. When another clip uses that material too,
+    /// a copy named `material_id` takes its place on this clip only.
+    SetEffectStrength {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        value: f64,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

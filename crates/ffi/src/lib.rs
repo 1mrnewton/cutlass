@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod animate;
 mod cache;
 mod canvas;
 mod codecs;
@@ -25,6 +26,7 @@ mod strip;
 mod text;
 mod timeline;
 
+pub use animate::{PhoneAnimation, PhoneAnimationPreset, PhoneAnimations, animation_presets};
 pub use cache::ResourceCache;
 pub use canvas::{
     BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
@@ -494,6 +496,53 @@ impl PhoneHost {
         Ok(())
     }
 
+    /// The picture or title clip's in and out animations.
+    #[must_use]
+    pub fn animations(&self, segment_id: &SegmentId) -> Option<PhoneAnimations> {
+        let animations = PhoneAnimations::of(self.draft(), segment_id)?;
+        let start = self
+            .draft()
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter())
+            .find(|segment| &segment.id == segment_id)?
+            .target
+            .start;
+        cutlass_editor::stage_box(self.draft(), segment_id, start, &self.sizes())?;
+        Some(animations)
+    }
+
+    /// Give the clip the in (`enter`) or out animation `resource_id`,
+    /// `duration` long, or clear that side with `None`. One undo step.
+    pub fn set_animation(
+        &mut self,
+        segment_id: &SegmentId,
+        enter: bool,
+        resource_id: Option<String>,
+        duration: Micros,
+    ) -> Result<(), FfiError> {
+        if self.animations(segment_id).is_none() {
+            return Err(FfiError::Refused {
+                reason: "only a picture or title takes animations".to_owned(),
+            });
+        }
+        let kind = if enter {
+            cutlass_model::AnimType::In
+        } else {
+            cutlass_model::AnimType::Out
+        };
+        self.apply(
+            self.revision(),
+            &[Request::SetAnimation {
+                segment_id: segment_id.clone(),
+                kind,
+                animation: resource_id,
+                duration,
+            }],
+        )?;
+        Ok(())
+    }
+
     fn sizes(&self) -> stage::Sizes<'_> {
         stage::Sizes {
             draft: self.draft(),
@@ -880,7 +929,7 @@ mod tests {
     use cutlass_storage::StorageError;
 
     use super::PhoneHost;
-    use crate::{FfiError, start_log};
+    use crate::{FfiError, PhoneAnimation, animation_presets, start_log};
 
     struct Temp {
         path: PathBuf,
@@ -1256,6 +1305,51 @@ mod tests {
         assert!(host.toggle_keyframe(&clip, Micros(2_000_000)).is_err());
         host.undo().unwrap();
         assert_eq!(host.keyframes(&clip, Micros(0)).unwrap().times.len(), 2);
+    }
+
+    #[test]
+    fn a_picture_takes_an_in_and_an_out_animation_from_the_presets() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let none = host.animations(&clip).unwrap();
+        assert_eq!(
+            (none.enter, none.leave, none.length),
+            (None, None, Micros(1_000_000))
+        );
+
+        let presets = animation_presets();
+        let zoom = presets
+            .iter()
+            .find(|preset| !preset.enter && preset.name == "Zoom Out")
+            .unwrap();
+        host.set_animation(
+            &clip,
+            false,
+            Some(zoom.resource_id.clone()),
+            Micros(5_000_000),
+        )
+        .unwrap();
+        let set = host.animations(&clip).unwrap();
+        assert_eq!(
+            set.leave,
+            Some(PhoneAnimation {
+                resource_id: zoom.resource_id.clone(),
+                duration: Micros(1_000_000),
+            })
+        );
+        assert!(
+            host.set_animation(&clip, true, Some(zoom.resource_id.clone()), Micros(1))
+                .is_err()
+        );
+        host.set_animation(&clip, false, None, Micros(0)).unwrap();
+        assert_eq!(host.animations(&clip).unwrap().leave, None);
+        host.undo().unwrap();
+        assert!(host.animations(&clip).unwrap().leave.is_some());
     }
 
     #[test]

@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod animation;
 mod clip;
 mod draft;
 mod enums;
@@ -26,6 +27,9 @@ mod serde_util;
 mod time;
 mod track;
 
+pub use animation::{
+    ANIMATION_PRESETS, AnimationPreset, Motion, animated_at, animation_preset, segment_animations,
+};
 pub use clip::{Clip, Flip, Point, UniformScale};
 pub use draft::{CanvasConfig, Draft, DraftConfig};
 pub use enums::{

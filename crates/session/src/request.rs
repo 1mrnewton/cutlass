@@ -1,5 +1,5 @@
 use cutlass_model::{
-    CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
+    AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
     MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
 };
 
@@ -269,6 +269,14 @@ pub enum Request {
         segment_id: SegmentId,
         offset: Micros,
         graph: Option<String>,
+    },
+    /// Give the clip the in or out animation whose resource id is
+    /// `animation`, lasting `duration`, or clear that side with `None`.
+    SetAnimation {
+        segment_id: SegmentId,
+        kind: AnimType,
+        animation: Option<String>,
+        duration: Micros,
     },
     /// Store the picture's place, size, and turn, as the three requests
     /// above do, and key them at `offset` from the clip's start.

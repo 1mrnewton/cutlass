@@ -1,3 +1,4 @@
+mod animation;
 mod beat;
 mod canvas;
 mod color;
@@ -108,6 +109,8 @@ pub enum EditError {
     NoKey,
     /// The curve is not one the Graphs panel offers.
     Graph,
+    /// The animation is not one the Animations panel offers for that side.
+    Animation,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -346,6 +349,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             offset,
             graph,
         } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref()),
+        Request::SetAnimation {
+            segment_id,
+            kind,
+            animation,
+            duration,
+        } => animation::set_animation(draft, segment_id, *kind, animation.as_deref(), *duration),
         Request::KeyPose {
             segment_id,
             offset,

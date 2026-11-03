@@ -30,8 +30,8 @@ use cutlass_engine::{
 };
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    Clip, Crop, Draft, DraftId, KeyframeGraph, MaterialCanvas, MaterialRef, Micros, Segment,
-    SegmentId, TimeRange, TrackAttribute, UniformScale,
+    Clip, Crop, Draft, DraftId, MaterialCanvas, MaterialRef, Micros, Segment, SegmentId, TimeRange,
+    TrackAttribute, UniformScale,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
@@ -385,8 +385,7 @@ pub(crate) fn video_layers<'a>(
             };
             let crop = video.crop;
             let crop_scale = video.crop_scale;
-            let Some((clip, uniform)) = segment_clip(&draft.keyframe_graph_list, segment, time)
-            else {
+            let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
                 continue;
             };
             let Some(transform) = picture_transform(&clip, &uniform, width, height) else {
@@ -466,7 +465,7 @@ pub(crate) fn video_picture(
     };
     let crop = video.crop;
     let crop_scale = video.crop_scale;
-    let (clip, uniform) = segment_clip(&draft.keyframe_graph_list, segment, time)?;
+    let (clip, uniform) = cutlass_model::animated_at(draft, segment, time)?;
     let transform = picture_transform(&clip, &uniform, width, height)?;
     if transform.omitted() {
         return None;
@@ -563,8 +562,9 @@ fn decode_canvas_image(media: &ReaderFactory, path: &str) -> Option<CpuBytes> {
 
 /// The clip at `time`, eased by the draft's `graphs`; see
 /// [`cutlass_model::clip_at`].
+#[cfg(test)]
 pub(crate) fn segment_clip(
-    graphs: &[KeyframeGraph],
+    graphs: &[cutlass_model::KeyframeGraph],
     segment: &Segment,
     time: Micros,
 ) -> Option<(Clip, UniformScale)> {

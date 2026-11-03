@@ -136,6 +136,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::KeyTime => "a keyframe must be on its clip".to_owned(),
         EditError::NoKey => "no keyframe is there".to_owned(),
         EditError::Graph => "that curve is not one the app offers".to_owned(),
+        EditError::Animation => "that animation is not one the app offers".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),

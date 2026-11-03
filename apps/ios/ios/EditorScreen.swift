@@ -14,7 +14,7 @@ struct EditorScreen: View {
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
-        case volume, speed, effects, ratio, background, graphs
+        case volume, speed, effects, ratio, background, graphs, animations
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -166,6 +166,9 @@ struct EditorScreen: View {
         } else if panel == .background {
             BackgroundPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .animations {
+            AnimationsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if panel == .graphs {
             GraphsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
@@ -178,7 +181,7 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects, .ratio, .background, .graphs: EmptyView()
+                case .text, .effects, .ratio, .background, .graphs, .animations: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -210,6 +213,7 @@ struct EditorScreen: View {
         case .split: model.split()
         case .volume: panel = .volume
         case .speed: panel = .speed
+        case .animations: panel = .animations
         case .delete: model.deleteClip()
         case .addText: panel = .text(nil)
         case .editText: panel = .text(model.selectedClip)

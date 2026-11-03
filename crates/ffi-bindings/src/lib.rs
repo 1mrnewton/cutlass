@@ -382,6 +382,63 @@ impl From<cutlass_ffi::PhoneKeys> for Keyframes {
     }
 }
 
+/// A clip's in and out animations, each a preset's resource id and length
+/// in microseconds; an empty id is none.
+#[derive(uniffi::Record)]
+pub struct ClipAnimations {
+    pub in_id: String,
+    pub in_us: i64,
+    pub out_id: String,
+    pub out_us: i64,
+    /// The clip's length, which the two share.
+    pub length_us: i64,
+}
+
+impl From<cutlass_ffi::PhoneAnimations> for ClipAnimations {
+    fn from(animations: cutlass_ffi::PhoneAnimations) -> Self {
+        let side = |side: Option<cutlass_ffi::PhoneAnimation>| {
+            side.map_or((String::new(), 0), |side| {
+                (side.resource_id, side.duration.0)
+            })
+        };
+        let (in_id, in_us) = side(animations.enter);
+        let (out_id, out_us) = side(animations.leave);
+        Self {
+            in_id,
+            in_us,
+            out_id,
+            out_us,
+            length_us: animations.length.0,
+        }
+    }
+}
+
+/// One animation in the Animations panel.
+#[derive(uniffi::Record)]
+pub struct AnimationPreset {
+    pub name: String,
+    /// On the In tab; otherwise on Out.
+    pub enter: bool,
+    pub id: String,
+    /// The length a new one starts with.
+    pub duration_us: i64,
+}
+
+/// The Animations panel's presets, in its order after None.
+#[uniffi::export]
+#[must_use]
+pub fn animation_presets() -> Vec<AnimationPreset> {
+    cutlass_ffi::animation_presets()
+        .into_iter()
+        .map(|preset| AnimationPreset {
+            name: preset.name,
+            enter: preset.enter,
+            id: preset.resource_id,
+            duration_us: preset.duration.0,
+        })
+        .collect()
+}
+
 /// A Graphs curve: its name and its line through the unit square, x the
 /// share of time and y the share of the change, y up.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -1121,6 +1178,30 @@ impl Editor {
         let graph = (!graph.is_empty()).then_some(graph);
         self.run(move |host| host.ease_keyframes(&SegmentId::new(clip_id), Micros(at_us), graph))?
             .map_err(EditorError::from)
+    }
+
+    /// The picture or title clip's in and out animations, or nil for a clip
+    /// that takes none.
+    pub fn animations(&self, clip_id: String) -> Result<Option<ClipAnimations>, EditorError> {
+        Ok(self
+            .run(move |host| host.animations(&SegmentId::new(clip_id)))?
+            .map(ClipAnimations::from))
+    }
+
+    /// Give the clip the in (`enter`) or out animation `id`, `duration_us`
+    /// long, or clear that side with an empty id. One undo step.
+    pub fn set_animation(
+        &self,
+        clip_id: String,
+        enter: bool,
+        id: String,
+        duration_us: i64,
+    ) -> Result<(), EditorError> {
+        let id = (!id.is_empty()).then_some(id);
+        self.run(move |host| {
+            host.set_animation(&SegmentId::new(clip_id), enter, id, Micros(duration_us))
+        })?
+        .map_err(EditorError::from)
     }
 
     /// The keyframe button: remove the keyframe under `at_us`, else key the

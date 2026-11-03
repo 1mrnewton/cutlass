@@ -23,7 +23,7 @@ use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, te
 
 use crate::Fonts;
 use crate::gpu::{GpuLayer, GpuSource};
-use crate::media::{gpu_place, picture_transform, place_with, segment_clip};
+use crate::media::{gpu_place, picture_transform, place_with};
 
 pub(crate) struct TextLayer {
     pub(crate) render_index: i32,
@@ -114,8 +114,7 @@ pub(crate) fn text_layers(
             let Some(face) = fonts.face(&material.font_path) else {
                 continue;
             };
-            let Some((clip, uniform)) = segment_clip(&draft.keyframe_graph_list, segment, time)
-            else {
+            let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
                 continue;
             };
             let Some(transform) = picture_transform(&clip, &uniform, width, height)

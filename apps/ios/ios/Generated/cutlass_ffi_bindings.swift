@@ -673,6 +673,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func addText(content: String, face: String, atUs: Int64) throws  -> String
     
     /**
+     * The picture or title clip's in and out animations, or nil for a clip
+     * that takes none.
+     */
+    func animations(clipId: String) throws  -> ClipAnimations?
+    
+    /**
      * Add a library item at the end of its lane. Returns the clip id.
      */
     func append(materialId: String) throws  -> String
@@ -792,6 +798,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * goes on from there.
      */
     func seek(timeUs: Int64) throws 
+    
+    /**
+     * Give the clip the in (`enter`) or out animation `id`, `duration_us`
+     * long, or clear that side with an empty id. One undo step.
+     */
+    func setAnimation(clipId: String, enter: Bool, id: String, durationUs: Int64) throws 
     
     /**
      * Fill the canvas around the main pictures, as one undo step.
@@ -1020,6 +1032,20 @@ open func addText(content: String, face: String, atUs: Int64)throws  -> String  
         FfiConverterString.lower(content),
         FfiConverterString.lower(face),
         FfiConverterInt64.lower(atUs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The picture or title clip's in and out animations, or nil for a clip
+     * that takes none.
+     */
+open func animations(clipId: String)throws  -> ClipAnimations?  {
+    return try  FfiConverterOptionTypeClipAnimations.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_animations(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
     )
 })
 }
@@ -1322,6 +1348,22 @@ open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEdi
     uniffi_cutlass_ffi_bindings_fn_method_editor_seek(
             self.uniffiCloneHandle(),
         FfiConverterInt64.lower(timeUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Give the clip the in (`enter`) or out animation `id`, `duration_us`
+     * long, or clear that side with an empty id. One undo step.
+     */
+open func setAnimation(clipId: String, enter: Bool, id: String, durationUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_animation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(enter),
+        FfiConverterString.lower(id),
+        FfiConverterInt64.lower(durationUs),uniffiCallStatus
     )
 }
 }
@@ -1908,6 +1950,83 @@ public func FfiConverterTypeExportProgress_lower(_ value: ExportProgress) -> UIn
 
 
 /**
+ * One animation in the Animations panel.
+ */
+public struct AnimationPreset: Equatable, Hashable {
+    public var name: String
+    /**
+     * On the In tab; otherwise on Out.
+     */
+    public var enter: Bool
+    public var id: String
+    /**
+     * The length a new one starts with.
+     */
+    public var durationUs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, 
+        /**
+         * On the In tab; otherwise on Out.
+         */enter: Bool, id: String, 
+        /**
+         * The length a new one starts with.
+         */durationUs: Int64) {
+        self.name = name
+        self.enter = enter
+        self.id = id
+        self.durationUs = durationUs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AnimationPreset: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAnimationPreset: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AnimationPreset {
+        return
+            try AnimationPreset(
+                name: FfiConverterString.read(from: &buf), 
+                enter: FfiConverterBool.read(from: &buf), 
+                id: FfiConverterString.read(from: &buf), 
+                durationUs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AnimationPreset, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.enter, into: &buf)
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterInt64.write(value.durationUs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnimationPreset_lift(_ buf: RustBuffer) throws -> AnimationPreset {
+    return try FfiConverterTypeAnimationPreset.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnimationPreset_lower(_ value: AnimationPreset) -> RustBuffer {
+    return FfiConverterTypeAnimationPreset.lower(value)
+}
+
+
+/**
  * A canvas ratio the picker shows. `ratio` is what `set_ratio` takes;
  * `width` and `height` are the frame it gives this project.
  */
@@ -2059,6 +2178,82 @@ public func FfiConverterTypeClip_lift(_ buf: RustBuffer) throws -> Clip {
 #endif
 public func FfiConverterTypeClip_lower(_ value: Clip) -> RustBuffer {
     return FfiConverterTypeClip.lower(value)
+}
+
+
+/**
+ * A clip's in and out animations, each a preset's resource id and length
+ * in microseconds; an empty id is none.
+ */
+public struct ClipAnimations: Equatable, Hashable {
+    public var inId: String
+    public var inUs: Int64
+    public var outId: String
+    public var outUs: Int64
+    /**
+     * The clip's length, which the two share.
+     */
+    public var lengthUs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(inId: String, inUs: Int64, outId: String, outUs: Int64, 
+        /**
+         * The clip's length, which the two share.
+         */lengthUs: Int64) {
+        self.inId = inId
+        self.inUs = inUs
+        self.outId = outId
+        self.outUs = outUs
+        self.lengthUs = lengthUs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipAnimations: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClipAnimations: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClipAnimations {
+        return
+            try ClipAnimations(
+                inId: FfiConverterString.read(from: &buf), 
+                inUs: FfiConverterInt64.read(from: &buf), 
+                outId: FfiConverterString.read(from: &buf), 
+                outUs: FfiConverterInt64.read(from: &buf), 
+                lengthUs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClipAnimations, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.inId, into: &buf)
+        FfiConverterInt64.write(value.inUs, into: &buf)
+        FfiConverterString.write(value.outId, into: &buf)
+        FfiConverterInt64.write(value.outUs, into: &buf)
+        FfiConverterInt64.write(value.lengthUs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipAnimations_lift(_ buf: RustBuffer) throws -> ClipAnimations {
+    return try FfiConverterTypeClipAnimations.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipAnimations_lower(_ value: ClipAnimations) -> RustBuffer {
+    return FfiConverterTypeClipAnimations.lower(value)
 }
 
 
@@ -4179,6 +4374,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeClipAnimations: FfiConverterRustBuffer {
+    typealias SwiftType = ClipAnimations?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeClipAnimations.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeClipAnimations.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
     typealias SwiftType = Frame?
 
@@ -4416,6 +4635,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAnimationPreset: FfiConverterRustBuffer {
+    typealias SwiftType = [AnimationPreset]
+
+    public static func write(_ value: [AnimationPreset], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAnimationPreset.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AnimationPreset] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AnimationPreset]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAnimationPreset.read(from: &buf))
         }
         return seq
     }
@@ -4721,6 +4965,16 @@ fileprivate struct FfiConverterSequenceTypeWave: FfiConverterRustBuffer {
     }
 }
 /**
+ * The Animations panel's presets, in its order after None.
+ */
+public func animationPresets() -> [AnimationPreset]  {
+    return try!  FfiConverterSequenceTypeAnimationPreset.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_animation_presets(uniffiCallStatus
+    )
+})
+}
+/**
  * The background blur strengths, weakest first.
  */
 public func backgroundBlurs() -> [Double]  {
@@ -4939,6 +5193,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_animation_presets() != 32729) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_background_blurs() != 26456) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4997,6 +5254,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_animations() != 53700) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
@@ -5066,6 +5326,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_animation() != 15913) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() != 52021) {

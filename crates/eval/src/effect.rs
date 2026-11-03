@@ -382,7 +382,11 @@ fn package_of(material: MaterialRef<'_>) -> Option<&str> {
         MaterialRef::Effect(effect) => package_id(effect),
         MaterialRef::VideoEffect(effect) => video_package_id(effect),
         MaterialRef::Plugin(effect) => plugin_package_id(effect),
-        MaterialRef::Animations(group) => group.animations.iter().find_map(animation_package_id),
+        MaterialRef::Animations(group) => group
+            .animations
+            .iter()
+            .filter(|animation| cutlass_model::animation_preset(animation).is_none())
+            .find_map(animation_package_id),
         MaterialRef::Video(_)
         | MaterialRef::Audio(_)
         | MaterialRef::Text(_)

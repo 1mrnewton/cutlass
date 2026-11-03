@@ -34,7 +34,9 @@ use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
 };
 use cutlass_renderer_software::SoftwareDevice;
-use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
+use cutlass_session::{
+    CANVAS_SHAPES, CanvasShape, EditError, ImportedMedium, Request, Session, TrimEdge,
+};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
@@ -5194,82 +5196,8 @@ fn file_name(path: &str) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
-#[derive(Clone, Copy)]
-struct CanvasShape {
-    ratio: &'static str,
-    width: i32,
-    height: i32,
-}
-
-/// Shapes the preview can show. A new project is 1920×1080, so the next shape is 9:16.
-const CANVAS_SHAPES: [CanvasShape; 13] = [
-    CanvasShape {
-        ratio: "16:9",
-        width: 1920,
-        height: 1080,
-    },
-    CanvasShape {
-        ratio: "9:16",
-        width: 1080,
-        height: 1920,
-    },
-    CanvasShape {
-        ratio: "1:1",
-        width: 1080,
-        height: 1080,
-    },
-    CanvasShape {
-        ratio: "4:3",
-        width: 1440,
-        height: 1080,
-    },
-    CanvasShape {
-        ratio: "3:4",
-        width: 1080,
-        height: 1440,
-    },
-    CanvasShape {
-        ratio: "4:5",
-        width: 1080,
-        height: 1350,
-    },
-    CanvasShape {
-        ratio: "2:1",
-        width: 1920,
-        height: 960,
-    },
-    CanvasShape {
-        ratio: "21:9",
-        width: 2520,
-        height: 1080,
-    },
-    CanvasShape {
-        ratio: "2.35:1",
-        width: 1920,
-        height: 817,
-    },
-    CanvasShape {
-        ratio: "1.85:1",
-        width: 1920,
-        height: 1038,
-    },
-    CanvasShape {
-        ratio: "1:2",
-        width: 960,
-        height: 1920,
-    },
-    CanvasShape {
-        ratio: "128:27",
-        width: 5120,
-        height: 1080,
-    },
-    CanvasShape {
-        ratio: "1.125:2.436",
-        width: 1125,
-        height: 2436,
-    },
-];
-
+/// The shape after the one this frame matches. A new project is 1920×1080,
+/// so the next shape is 9:16.
 fn next_canvas(width: i32, height: i32) -> CanvasShape {
     let index = CANVAS_SHAPES
         .iter()

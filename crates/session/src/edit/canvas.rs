@@ -2,6 +2,7 @@ use cutlass_model::{CanvasRatio, Draft, MaterialCanvas, MaterialId, MaterialRef,
 
 use super::speed::locate;
 use super::{EditError, ensure_unlocked};
+use crate::request::Request;
 
 /// The largest canvas side the preview keeps. A side outside 1 through this is refused.
 const MAX_CANVAS_SIDE: i32 = 7_680;
@@ -39,6 +40,111 @@ pub fn set_size(draft: &mut Draft, width: i32, height: i32, ratio: &str) -> Resu
     draft.canvas_config.height = height;
     draft.canvas_config.ratio = ratio.to_owned();
     Ok(())
+}
+
+/// A ratio the canvas can take and the frame it stores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanvasShape {
+    pub ratio: &'static str,
+    pub width: i32,
+    pub height: i32,
+}
+
+const fn shape(ratio: &'static str, width: i32, height: i32) -> CanvasShape {
+    CanvasShape {
+        ratio,
+        width,
+        height,
+    }
+}
+
+/// The named shapes, in the order a picker lists them. 1920×1080 is 16:9.
+pub const CANVAS_SHAPES: [CanvasShape; 13] = [
+    shape("16:9", 1_920, 1_080),
+    shape("9:16", 1_080, 1_920),
+    shape("1:1", 1_080, 1_080),
+    shape("4:3", 1_440, 1_080),
+    shape("3:4", 1_080, 1_440),
+    shape("4:5", 1_080, 1_350),
+    shape("2:1", 1_920, 960),
+    shape("21:9", 2_520, 1_080),
+    shape("2.35:1", 1_920, 817),
+    shape("1.85:1", 1_920, 1_038),
+    shape("1:2", 960, 1_920),
+    shape("128:27", 5_120, 1_080),
+    shape("1.125:2.436", 1_125, 2_436),
+];
+
+/// The frame `ratio` gives the canvas of `draft`.
+///
+/// `original` is the upright size of the first picture on the main lane,
+/// scaled down to fit 7680 on the long side, or 1920×1080 when the lane
+/// has no picture. A named ratio is its shape. `custom` and an unknown
+/// name are refused.
+pub fn canvas_for(draft: &Draft, ratio: &str) -> Result<CanvasShape, EditError> {
+    if ratio == CanvasRatio::Original.as_str() {
+        let (width, height) = first_picture(draft).unwrap_or((1_920, 1_080));
+        return Ok(shape(CanvasRatio::Original.as_str(), width, height));
+    }
+    CANVAS_SHAPES
+        .iter()
+        .find(|shape| shape.ratio == ratio)
+        .copied()
+        .ok_or(EditError::CanvasRatio)
+}
+
+/// The request that gives the canvas `ratio`, sized by [`canvas_for`].
+pub fn ratio_request(draft: &Draft, ratio: &str) -> Result<Request, EditError> {
+    let shape = canvas_for(draft, ratio)?;
+    Ok(Request::SetCanvasSize {
+        width: shape.width,
+        height: shape.height,
+        ratio: shape.ratio.to_owned(),
+    })
+}
+
+/// The canvas request for putting `material_id` first on an empty main
+/// lane: an `original` canvas takes that picture's size. Any other ratio,
+/// a lane that already has a picture, or a sound is `None`.
+pub fn follow_first_picture(draft: &Draft, material_id: &str) -> Option<Request> {
+    if draft.canvas_config.ratio_kind() != CanvasRatio::Original || first_picture(draft).is_some() {
+        return None;
+    }
+    let (width, height) = picture_size(draft, material_id)?;
+    Some(Request::SetCanvasSize {
+        width,
+        height,
+        ratio: CanvasRatio::Original.as_str().to_owned(),
+    })
+}
+
+fn first_picture(draft: &Draft) -> Option<(i32, i32)> {
+    draft
+        .main_track()?
+        .segments
+        .iter()
+        .find_map(|segment| picture_size(draft, segment.material_id.as_str()))
+}
+
+/// The upright size of a picture material, fitted within 7680.
+fn picture_size(draft: &Draft, material_id: &str) -> Option<(i32, i32)> {
+    let Some(MaterialRef::Video(video)) = draft.materials.get(material_id) else {
+        return None;
+    };
+    let (width, height) = (i64::from(video.width), i64::from(video.height));
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let long = width.max(height);
+    let side = |edge: i64| {
+        let fitted = if long > i64::from(MAX_CANVAS_SIDE) {
+            (edge * i64::from(MAX_CANVAS_SIDE) + long / 2) / long
+        } else {
+            edge
+        };
+        i32::try_from(fitted.max(1)).unwrap_or(MAX_CANVAS_SIDE)
+    };
+    Some((side(width), side(height)))
 }
 
 /// Store the color in the bars around a fitted picture.
@@ -292,6 +398,82 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::CanvasRatio);
         assert_eq!(session.draft(), &before);
+    }
+
+    fn picture(draft: &mut Draft, id: &str, width: i32, height: i32) {
+        let mut video = MaterialVideo::new(id);
+        video.width = width;
+        video.height = height;
+        draft.materials.videos.push(video);
+    }
+
+    #[test]
+    fn a_ratio_names_its_frame_and_original_follows_the_first_picture() {
+        let mut draft = Draft::empty("D");
+        assert_eq!(
+            super::canvas_for(&draft, "9:16").map(|shape| (shape.width, shape.height)),
+            Ok((1_080, 1_920))
+        );
+        assert_eq!(
+            super::canvas_for(&draft, "original").map(|shape| (shape.width, shape.height)),
+            Ok((1_920, 1_080))
+        );
+        assert_eq!(
+            super::canvas_for(&draft, "custom"),
+            Err(EditError::CanvasRatio)
+        );
+        assert_eq!(
+            super::canvas_for(&draft, "wide"),
+            Err(EditError::CanvasRatio)
+        );
+
+        picture(&mut draft, "tall", 1_170, 2_532);
+        picture(&mut draft, "huge", 8_000, 4_000);
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("tall", "tall", TimeRange::new(0, 1_000_000)));
+        assert_eq!(
+            super::canvas_for(&draft, "original").map(|shape| (shape.width, shape.height)),
+            Ok((1_170, 2_532))
+        );
+        draft.tracks[0].segments[0].material_id = MaterialId::new("huge");
+        assert_eq!(
+            super::canvas_for(&draft, "original").map(|shape| (shape.width, shape.height)),
+            Ok((7_680, 3_840))
+        );
+
+        let mut session = Session::open(draft);
+        let request = super::ratio_request(session.draft(), "4:5").unwrap();
+        session.apply(0, &[request]).unwrap();
+        let canvas = &session.draft().canvas_config;
+        assert_eq!(
+            (canvas.width, canvas.height, canvas.ratio.as_str()),
+            (1_080, 1_350, "4:5")
+        );
+    }
+
+    #[test]
+    fn only_an_original_canvas_with_no_picture_yet_follows_the_first_one() {
+        let mut draft = Draft::empty("D");
+        picture(&mut draft, "tall", 1_080, 1_920);
+        assert_eq!(
+            super::follow_first_picture(&draft, "tall"),
+            Some(Request::SetCanvasSize {
+                width: 1_080,
+                height: 1_920,
+                ratio: "original".to_owned(),
+            })
+        );
+        assert_eq!(super::follow_first_picture(&draft, "missing"), None);
+
+        draft.canvas_config.ratio = "16:9".to_owned();
+        assert_eq!(super::follow_first_picture(&draft, "tall"), None);
+
+        draft.canvas_config.ratio = "original".to_owned();
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("tall", "tall", TimeRange::new(0, 1_000_000)));
+        assert_eq!(super::follow_first_picture(&draft, "tall"), None);
     }
 
     #[test]

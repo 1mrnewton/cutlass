@@ -554,7 +554,7 @@ impl Shell {
             film_asks: Vec::new(),
             waveforms: None,
             wave_asks: Vec::new(),
-            face: FaceTable::load(),
+            face: crate::face::installed(),
             gpu: None,
             preview_stale: false,
             chrome: Chrome::default(),

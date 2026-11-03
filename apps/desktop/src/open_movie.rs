@@ -754,7 +754,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             return;
         }
     };
-    let fonts = crate::face::FaceTable::load();
+    let fonts = crate::face::installed();
     let cases: [(&str, (u32, u32), Edit); 10] = [
         ("same size", (848, 608), |_| {}),
         ("shrunk to fit", (424, 240), |_| {}),
@@ -842,7 +842,7 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
             let mut text = cutlass_model::MaterialText::new("words");
             text.content = "Smooth playback".to_owned();
             text.font_size = 72.0;
-            text.font_path = crate::face::FaceTable::load().name().to_owned();
+            text.font_path = crate::face::installed().name().to_owned();
             text.text_color = "#FFFFFF".to_owned();
             draft.materials.texts.push(text);
             let mut title = Segment::new("title", "words", TimeRange::new(0, 1_000_000));

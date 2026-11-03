@@ -1053,6 +1053,7 @@ dependencies = [
  "cutlass-editor",
  "cutlass-engine",
  "cutlass-eval",
+ "cutlass-font",
  "cutlass-gpu",
  "cutlass-model",
  "cutlass-pcm",

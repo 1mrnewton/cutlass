@@ -874,6 +874,12 @@ mod tests {
         // At 50 points a second a label sits on each second.
         let labels: Vec<_> = ticks.iter().filter_map(|tick| tick.label.clone()).collect();
         assert_eq!(labels, ["00:00", "00:01", "00:02"]);
+        // So do 40 and 75, the ends of the usual zoom.
+        for points in [40.0, 75.0] {
+            let ticks = host.ruler(points / 1e6, Micros(0), Micros(1_000_000));
+            let labels: Vec<_> = ticks.iter().filter_map(|tick| tick.label.clone()).collect();
+            assert_eq!(labels, ["00:00", "00:01"], "{points}");
+        }
         assert!(host.ruler(-1.0, Micros(0), Micros(1)).is_empty());
 
         let wider = host.zoom(size, 2.0, 400.0);

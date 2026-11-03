@@ -43,8 +43,8 @@ pub struct PhoneFilm {
 }
 
 /// How much closer a phone's labels sit than the desktop's. The editor
-/// picks its step for a wide window; a phone strip is about a fifth as wide.
-pub const LABEL_DENSITY: f64 = 5.0;
+/// picks its step for a wide window; a phone strip is about a quarter as wide.
+pub const LABEL_DENSITY: f64 = 4.0;
 
 /// The ticks from `from` through `to` at `pixel_size`, at the draft's rate,
 /// with labels [`LABEL_DENSITY`] times closer than the desktop's.

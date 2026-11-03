@@ -456,7 +456,9 @@ fn paint_menu(
         spread: 0,
         color: egui::Color32::from_black_alpha(115),
     };
-    ui.painter()
+    // The shadow spreads past the panel, so it is clipped to the window, not
+    // to the panel.
+    ctx.layer_painter(layer)
         .add(shadow.as_shape(rect, CornerRadius::same(RADIUS)));
     painter.rect_filled(rect, CornerRadius::same(RADIUS), tokens::MENU);
     // The panel takes the clicks between rows, so they do not reach the
@@ -665,6 +667,19 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         };
         vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    #[test]
+    fn the_shadow_is_not_cut_off_at_the_panel_edge() {
+        let ctx = Context::default();
+        let (_, output) = frame(&ctx, 1000.0, Vec::new());
+        // The panel's corner is at (100, 100); the shadow reaches above it.
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|clipped| clipped.clip_rect.contains(Pos2::new(110.0, 90.0)))
+        );
     }
 
     #[test]

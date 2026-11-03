@@ -70,14 +70,14 @@ pub(crate) fn imported(id: &str, path: String, probed: Probed) -> ImportedMedium
 /// Refuse a probe the draft cannot place.
 pub(crate) fn check(probed: Probed) -> Result<(), FfiError> {
     if probed.duration().0 <= 0 {
-        return Err(FfiError::Import {
+        return Err(FfiError::Refused {
             reason: "the media has no duration".to_owned(),
         });
     }
     if let Probed::Picture { width, height, .. } = probed
         && (width <= 0 || height <= 0)
     {
-        return Err(FfiError::Import {
+        return Err(FfiError::Refused {
             reason: "the picture has no size".to_owned(),
         });
     }
@@ -87,11 +87,11 @@ pub(crate) fn check(probed: Probed) -> Result<(), FfiError> {
 /// Copy `source` into `root/Resources` under a name not already taken.
 /// Returns the stored relative path and the copy.
 pub(crate) fn copy_in(root: &Path, source: &Path) -> Result<(String, PathBuf), FfiError> {
-    let io = |error: std::io::Error| FfiError::Import {
+    let io = |error: std::io::Error| FfiError::Refused {
         reason: error.to_string(),
     };
     if !source.is_file() {
-        return Err(FfiError::Import {
+        return Err(FfiError::Refused {
             reason: format!("{} is not a file", source.display()),
         });
     }
@@ -99,7 +99,7 @@ pub(crate) fn copy_in(root: &Path, source: &Path) -> Result<(String, PathBuf), F
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| FfiError::Import {
+        .ok_or_else(|| FfiError::Refused {
             reason: "the file has no name".to_owned(),
         })?;
     let resources = root.join("Resources");
@@ -127,11 +127,11 @@ pub(crate) fn append_requests(
     draft: &Draft,
     material_id: &str,
 ) -> Result<(Vec<Request>, SegmentId), FfiError> {
-    let (kind, duration) = material_span(draft, material_id).ok_or_else(|| FfiError::Import {
+    let (kind, duration) = material_span(draft, material_id).ok_or_else(|| FfiError::Refused {
         reason: "the media is not in the library".to_owned(),
     })?;
     if duration.0 <= 0 {
-        return Err(FfiError::Import {
+        return Err(FfiError::Refused {
             reason: "the media has no duration".to_owned(),
         });
     }

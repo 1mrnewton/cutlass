@@ -16,6 +16,7 @@ mod media;
 mod player;
 mod preview;
 mod project;
+mod timeline;
 
 pub use cache::ResourceCache;
 pub use codecs::{decoders, readers};
@@ -26,6 +27,7 @@ pub use media::Probed;
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
+pub use timeline::{PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
 
@@ -235,6 +237,30 @@ impl PhoneHost {
     pub fn frame(&mut self, time: Micros) -> Result<Picture, FfiError> {
         self.preview
             .frame(self.commands.session(), self.project.root(), time)
+    }
+
+    /// The rows to draw, top first.
+    #[must_use]
+    pub fn lanes(&self) -> Vec<PhoneLane> {
+        phone_lanes(self.draft())
+    }
+
+    /// Cut `segment_id` at `at`. Returns the right piece's id.
+    pub fn split(&mut self, segment_id: &SegmentId, at: Micros) -> Result<SegmentId, FfiError> {
+        let (request, right_id) = timeline::split_request(self.draft(), segment_id, at)?;
+        self.apply(self.revision(), &[request])?;
+        Ok(right_id)
+    }
+
+    /// Remove one clip. Its dependents go with it when linkage follow is on.
+    pub fn remove(&mut self, segment_id: &SegmentId) -> Result<(), FfiError> {
+        self.apply(
+            self.revision(),
+            &[Request::Remove {
+                segment_id: segment_id.clone(),
+            }],
+        )?;
+        Ok(())
     }
 
     /// Published path for a bundled or cached id. A missing id is an error.
@@ -555,7 +581,7 @@ mod tests {
         assert_eq!(error.to_string(), "the picture has no size");
         let missing = temp.path.join("missing.mov");
         let error = host.import(&missing, still(1_000)).unwrap_err();
-        assert!(matches!(error, FfiError::Import { .. }));
+        assert!(matches!(error, FfiError::Refused { .. }));
         let resources = host.root().join("Resources");
         assert!(!resources.exists() || fs::read_dir(&resources).unwrap().next().is_none());
         let error = host.append("nothing").unwrap_err();
@@ -615,5 +641,45 @@ mod tests {
         host.append(&id).unwrap();
         let shown = host.frame(cutlass_session::Micros(0)).unwrap();
         assert_eq!(shown, empty);
+    }
+
+    #[test]
+    fn rows_list_the_clips_and_split_keeps_a_frame_each_side() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let left = host.append(&id).unwrap();
+        let lanes = host.lanes();
+        assert_eq!(lanes.len(), 1);
+        assert!(lanes[0].main);
+        assert_eq!(lanes[0].clips[0].name, "pattern.png");
+        assert_eq!(lanes[0].clips[0].duration.0, 1_000_000);
+
+        let before = host.draft().clone();
+        let edge = host.split(&left, cutlass_session::Micros(10)).unwrap_err();
+        assert_eq!(edge.to_string(), "split is not available there");
+        let missing = host
+            .split(
+                &cutlass_session::SegmentId::new("nope"),
+                cutlass_session::Micros(500_000),
+            )
+            .unwrap_err();
+        assert_eq!(missing.to_string(), "the clip is not on the timeline");
+        assert_eq!(host.draft(), &before);
+
+        let right = host.split(&left, cutlass_session::Micros(400_000)).unwrap();
+        let clips = &host.lanes()[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].duration.0, 400_000);
+        assert_eq!(clips[1].id, right);
+        assert_eq!(clips[1].start.0, 400_000);
+
+        host.remove(&right).unwrap();
+        assert_eq!(host.lanes()[0].clips.len(), 1);
+        assert!(host.remove(&right).is_err());
+        assert_eq!(host.lanes()[0].clips.len(), 1);
     }
 }

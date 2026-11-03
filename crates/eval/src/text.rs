@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    Draft, MaterialRef, MaterialText, Micros, SegmentId, TrackAttribute, WordColumns,
+    Draft, MaterialRef, MaterialText, Micros, Segment, SegmentId, TrackAttribute, WordColumns,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
@@ -150,6 +150,23 @@ pub(crate) fn text_layers(
         }
     }
     layers
+}
+
+/// The size a title's text picture is drawn at, before placement: tight
+/// around its glyphs, as [`text_layers`] draws it. Captions change with time
+/// and have none; neither has a clip whose face is missing.
+#[must_use]
+pub fn text_size(draft: &Draft, fonts: &dyn Fonts, segment: &Segment) -> Option<(u32, u32)> {
+    let Some(MaterialRef::Text(material)) = draft.materials.get(segment.material_id.as_str())
+    else {
+        return None;
+    };
+    if material.font_path.is_empty() || words_present(material) {
+        return None;
+    }
+    let face = fonts.face(&material.font_path)?;
+    let source = TextSource::open(face, None, material, segment).ok()?;
+    Some(source.size())
 }
 
 fn words_present(material: &MaterialText) -> bool {
@@ -384,6 +401,26 @@ mod tests {
         let (width, height) = inked_span(&pixels(&small, 0), 256);
         assert!(width < 128 && height < 128, "{width}x{height}");
         assert_eq!(inked_span(&pixels(&large, 0), 512), (width, height));
+    }
+
+    #[test]
+    fn a_title_reports_the_size_it_is_drawn_at() {
+        let draft = text_segment("A", false);
+        let segment = &draft.tracks[0].segments[0];
+        let (width, height) = super::text_size(&draft, &OneFont, segment).unwrap();
+        // The picture holds the ink, with the glyph cells' margin around it.
+        let (inked_w, inked_h) = inked_span(&pixels(&draft, 0), 256);
+        assert!(
+            (inked_w..inked_w + 32).contains(&(width as usize)),
+            "{width} {inked_w}"
+        );
+        assert!(
+            (inked_h..inked_h + 32).contains(&(height as usize)),
+            "{height} {inked_h}"
+        );
+        let mut missing = draft.clone();
+        missing.materials.texts[0].font_path = "other.ttf".to_owned();
+        assert_eq!(super::text_size(&missing, &OneFont, segment), None);
     }
 
     #[test]

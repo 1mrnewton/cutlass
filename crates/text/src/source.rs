@@ -81,6 +81,12 @@ impl TextSource {
         })
     }
 
+    /// The picture's width and height: tight around the drawn glyphs.
+    #[must_use]
+    pub const fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     #[must_use]
     pub fn material_id(&self) -> &cutlass_model::MaterialId {
         &self.material_id

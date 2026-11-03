@@ -6,7 +6,8 @@ use cutlass_model::{
 use super::speed::locate;
 use super::{EditError, ensure_unlocked};
 
-/// Replace the text material's string. Word columns stay as stored.
+/// Replace the text material's words. A rich title keeps its styled
+/// ranges. Word columns stay as stored.
 pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Result<(), EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
@@ -22,7 +23,7 @@ pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Res
         .iter_mut()
         .find(|text| text.id == material_id)
     {
-        text.content = content.to_owned();
+        text.set_words(content);
         return Ok(());
     }
     if draft.materials.get(material_id.as_str()).is_some() {
@@ -107,7 +108,8 @@ pub fn set_text_size(
     Ok(())
 }
 
-/// Store the text color. An empty string is white. An empty `font_path` takes `face`.
+/// Store the text color, and paint every range of a rich title in it. An
+/// empty string is white. An empty `font_path` takes `face`.
 pub fn set_text_color(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -121,6 +123,7 @@ pub fn set_text_color(
     }
     let text = &mut draft.materials.texts[index];
     text.text_color = color.to_owned();
+    text.paint_rich(unit_rgb(if color.is_empty() { "#FFFFFF" } else { color }));
     fill_face(text, face);
     Ok(())
 }
@@ -438,6 +441,18 @@ fn fill_face(text: &mut MaterialText, face: &str) {
     }
 }
 
+/// The red, green, and blue of a hex color checked by [`hex_color`], each
+/// from 0 to 1.
+fn unit_rgb(color: &str) -> [f64; 3] {
+    let body = color.strip_prefix('#').unwrap_or(color);
+    let channel = |at: usize| {
+        body.get(at..at + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .map_or(1.0, |byte| f64::from(byte) / 255.0)
+    };
+    [channel(0), channel(2), channel(4)]
+}
+
 fn hex_color(text: &str) -> bool {
     let body = text.strip_prefix('#').unwrap_or(text);
     (body.len() == 6 || body.len() == 8) && body.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -634,6 +649,54 @@ mod tests {
         ] {
             assert_eq!(session.apply(6, &[request]).unwrap_err(), error);
         }
+    }
+
+    #[test]
+    fn a_rich_title_keeps_its_ranges_through_new_words_and_a_color() {
+        let mut draft = Draft::empty("D");
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("rich"),
+            is_rich_text: true,
+            content: r#"{"text":"Hi","styles":[{"range":[0,1],"bold":true},{"range":[1,2]}]}"#
+                .to_owned(),
+            ..MaterialText::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "rich", TimeRange::new(0, 1_000_000)));
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[Request::SetTextContent {
+                    segment_id: "a".into(),
+                    content: "Hi you".to_owned(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        let rich = text.rich().unwrap();
+        assert_eq!(rich.text, "Hi you");
+        assert_eq!(rich.styles[1].range, [1, 6]);
+        assert_eq!(text.words().unwrap(), "Hi you");
+
+        session
+            .apply(
+                1,
+                &[Request::SetTextColor {
+                    segment_id: "a".into(),
+                    color: "#FF0000".to_owned(),
+                    face: String::new(),
+                }],
+            )
+            .unwrap();
+        let rich = session.draft().materials.texts[0].rich().unwrap();
+        assert!(
+            rich.styles
+                .iter()
+                .all(|style| style.solid() == Some([1.0, 0.0, 0.0, 1.0]))
+        );
+        assert_eq!(rich.styles[0].rest.get("bold"), Some(&true.into()));
     }
 
     #[test]

@@ -246,7 +246,7 @@ pub fn text_of(draft: &Draft, segment_id: &SegmentId) -> Option<PhoneText> {
         .and_then(MaterialEffect::bloom)
         .unwrap_or_default();
     Some(PhoneText {
-        content: text.content.clone(),
+        content: text.words().unwrap_or_default().into_owned(),
         face: text.font_path.clone(),
         style: PhoneTextStyle {
             size: text.font_size,

@@ -78,7 +78,9 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
     match draft.materials.get(segment.material_id.as_str()) {
         Some(MaterialRef::Video(video)) if !video.path.is_empty() => file(&video.path),
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file(&audio.path),
-        Some(MaterialRef::Text(text)) if !text.content.is_empty() => text.content.clone(),
+        Some(MaterialRef::Text(text)) if text.words().is_some_and(|words| !words.is_empty()) => {
+            text.words().unwrap_or_default().into_owned()
+        }
         Some(MaterialRef::VideoEffect(effect)) if !effect.name.is_empty() => effect.name.clone(),
         _ => segment.id.as_str().to_owned(),
     }

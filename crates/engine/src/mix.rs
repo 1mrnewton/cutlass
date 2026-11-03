@@ -72,7 +72,7 @@ pub fn mix_inputs(draft: &Draft, time: Micros) -> Vec<MixClip> {
     let mut clips = Vec::new();
     for track in &draft.tracks {
         for segment in &track.segments {
-            if map::is_graphic(draft, segment) {
+            if !map::contributes_sound(draft, segment) {
                 continue;
             }
             if !covers(&segment.target, time) {
@@ -285,7 +285,8 @@ fn sum(rate: u32, buffers: &[Pcm]) -> Result<Pcm, EngineError> {
 mod tests {
     use super::*;
     use cutlass_model::{
-        Draft, MaterialAudioFade, MaterialId, Segment, TimeRange, Track, TrackAttribute, TrackType,
+        Draft, LinkPair, MaterialAudio, MaterialAudioFade, MaterialId, MaterialVideo, Relationship,
+        Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
 
     fn mono(rate: u32, samples: Vec<f32>) -> Pcm {
@@ -406,5 +407,48 @@ mod tests {
         assert_eq!(clips[0].fade_in_us, 10);
         assert_eq!(clips[0].fade_curve, 2);
         assert!(matches!(clips[0].pcm, ClipPcm::Missing));
+    }
+
+    #[test]
+    fn a_separated_picture_sound_is_not_mixed_twice() {
+        let mut draft = Draft::empty("D");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("sound"),
+            kind: "video_original_sound".to_owned(),
+            path: "clip.mp4".to_owned(),
+            video_id: MaterialId::new("picture"),
+            ..MaterialAudio::default()
+        });
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "other",
+            "picture",
+            TimeRange::new(2_000_000, 1_000_000),
+        ));
+        let mut lane = Track::main("sound");
+        lane.kind = TrackType::Audio;
+        lane.segments
+            .push(Segment::new("sound", "sound", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(lane);
+        let both = mix_inputs(&draft, Micros(0));
+        assert_eq!(both.len(), 2);
+
+        draft.relationships.push(Relationship {
+            kind: "linkage".to_owned(),
+            id_to_id: vec![LinkPair {
+                owner: SegmentId::new("picture"),
+                dependent: SegmentId::new("sound"),
+            }],
+            ..Relationship::default()
+        });
+        assert_eq!(mix_inputs(&draft, Micros(0)).len(), 1);
+        assert_eq!(mix_inputs(&draft, Micros(2_000_000)).len(), 1);
     }
 }

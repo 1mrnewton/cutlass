@@ -9,7 +9,10 @@ use cutlass_decode::{
     BitDepth, CodecId, CodecParams, ColorType, DecodeFactory, Decoder, Packet, PhysicalPixel, Rgb8,
     StillImage, TextItem, Transparency,
 };
-use cutlass_encode::{EncodeFactory, Encoder, PictureInput};
+use cutlass_encode::{
+    CpuFrame, EncodeFactory, Encoder, FrameInput, FrameTime, PictureInput, PixelFormat,
+    PlatformFrame,
+};
 
 use crate::crc::{crc32, crc32_update};
 use crate::{PngDecoder, PngEncoder, register_decoders, register_encoders};
@@ -329,6 +332,43 @@ fn the_factory_uses_this_codec_and_audio_calls_are_refused() {
             })
             .is_ok()
     );
+}
+
+#[test]
+fn a_cpu_frame_is_a_png_stamped_with_that_frame_clock() {
+    let mut encoders = EncodeFactory::new();
+    register_encoders(&mut encoders);
+    let mut encoder = encoders.open(&png_params(false)).expect("encoder");
+    let time = FrameTime::new(4, 2, 30).expect("time");
+    let frame = CpuFrame::new(1, 1, PixelFormat::Rgba8, vec![9, 8, 7, 6], time).expect("frame");
+    let packets = encoder.push_frame(&FrameInput::Cpu(frame)).expect("png");
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].pts, 4);
+    assert_eq!(packets[0].duration, 2);
+    assert_eq!(packets[0].timescale, 30);
+    assert!(packets[0].keyframe);
+    assert!(packets[0].data.starts_with(&SIGNATURE));
+    let image = decode_bytes(&packets[0].data).expect("round trip");
+    assert_eq!(image.width, 1);
+    assert_eq!(image.height, 1);
+    assert_eq!(image.color, ColorType::Rgba);
+    assert_eq!(image.samples, vec![9, 8, 7, 6]);
+
+    let platform = PlatformFrame::new(1, 1, 1, time).expect("platform");
+    let refused = encoder
+        .push_frame(&FrameInput::Platform(platform))
+        .expect_err("platform");
+    assert!(matches!(
+        refused,
+        cutlass_decode::CodecError::Unsupported { .. }
+    ));
+    let yuv =
+        CpuFrame::new(2, 2, PixelFormat::Yuv420p, vec![0, 0, 0, 0, 128, 128], time).expect("yuv");
+    let refused = encoder.push_frame(&FrameInput::Cpu(yuv)).expect_err("yuv");
+    assert!(matches!(
+        refused,
+        cutlass_decode::CodecError::Unsupported { .. }
+    ));
 }
 
 #[test]

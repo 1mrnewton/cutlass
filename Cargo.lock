@@ -551,6 +551,7 @@ dependencies = [
  "cutlass-hevc",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-logger",
  "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-model",
@@ -625,6 +626,7 @@ dependencies = [
 name = "cutlass-aiff"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 
@@ -754,8 +756,10 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-jpeg",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-picture",
  "cutlass-png",
+ "cutlass-riff",
  "cutlass-still",
  "serde_json",
 ]
@@ -767,12 +771,19 @@ dependencies = [
  "cutlass-captions",
  "cutlass-codec",
  "cutlass-compositor",
+ "cutlass-container",
+ "cutlass-decode",
  "cutlass-effects",
  "cutlass-engine",
  "cutlass-generated",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-picture",
+ "cutlass-png",
  "cutlass-renderer-software",
+ "cutlass-riff",
+ "cutlass-still",
+ "cutlass-storage",
  "cutlass-text",
 ]
 
@@ -794,6 +805,7 @@ dependencies = [
 name = "cutlass-ffi"
 version = "0.1.0"
 dependencies = [
+ "cutlass-logger",
  "cutlass-playback",
  "cutlass-session",
  "cutlass-storage",
@@ -870,6 +882,10 @@ dependencies = [
  "cutlass-decode",
  "cutlass-encode",
 ]
+
+[[package]]
+name = "cutlass-logger"
+version = "0.1.0"
 
 [[package]]
 name = "cutlass-matroska"
@@ -992,11 +1008,16 @@ dependencies = [
 name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
+ "cutlass-container",
  "cutlass-eval",
  "cutlass-gpu",
  "cutlass-model",
+ "cutlass-pcm",
+ "cutlass-platform-android",
  "cutlass-platform-apple",
+ "cutlass-platform-windows",
  "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
 ]
 

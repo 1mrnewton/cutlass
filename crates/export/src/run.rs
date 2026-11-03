@@ -15,8 +15,8 @@ use cutlass_encode::{
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
 };
 use cutlass_eval::{
-    AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, OpenClips, ReaderFactory,
-    Snapshot, audio_slice, frame, wait_export_frame,
+    AudioError, ClipPcm, ClockKind, Device, EvalError, Fonts, MixWindow, OpenClips, ReaderFactory,
+    Snapshot, audio_slice, frame_in, wait_export_frame,
 };
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 
@@ -54,6 +54,10 @@ pub struct ExportRun<'a, D, M> {
     pub readers: &'a ReaderFactory,
     pub mux: &'a mut M,
     pub destination: Option<&'a Path>,
+    /// Project folder for a relative media path.
+    pub root: Option<&'a Path>,
+    /// Faces for text segments. A face this does not supply is not drawn.
+    pub fonts: &'a dyn Fonts,
 }
 
 struct TrackTicks {
@@ -404,7 +408,16 @@ where
             .checked_add(run.request.late_by)
             .ok_or(ExportError::Range)?,
     );
-    let evaluated = evaluated_frame(run.draft, run.device, time, ready, run.readers, clips)?;
+    let evaluated = evaluated_frame(FrameInputs {
+        draft: run.draft,
+        device: run.device,
+        time,
+        ready_at: ready,
+        media: run.readers,
+        clips,
+        root: run.root,
+        fonts: run.fonts,
+    })?;
     let bytes = scale_rgba(
         evaluated.width,
         evaluated.height,
@@ -463,16 +476,30 @@ where
     Ok(())
 }
 
-fn evaluated_frame<D: Device>(
-    draft: &Draft,
-    device: &mut D,
+struct FrameInputs<'a, D> {
+    draft: &'a Draft,
+    device: &'a mut D,
     time: Micros,
     ready_at: Micros,
-    media: &ReaderFactory,
-    clips: &mut OpenClips,
-) -> Result<ExportedFrame, ExportError> {
-    let snapshot = Snapshot::new(draft);
-    let picture = frame(&snapshot, time, device, media, clips, 0).map_err(map_eval)?;
+    media: &'a ReaderFactory,
+    clips: &'a mut OpenClips,
+    root: Option<&'a Path>,
+    fonts: &'a dyn Fonts,
+}
+
+fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<ExportedFrame, ExportError> {
+    let FrameInputs {
+        draft,
+        device,
+        time,
+        ready_at,
+        media,
+        clips,
+        root,
+        fonts,
+    } = input;
+    let snapshot = Snapshot::with_fonts(draft, fonts);
+    let picture = frame_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?;
     let picture = wait_export_frame::<D::Error>(time, ready_at, picture).map_err(map_eval)?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| ExportError::Canvas)?;
@@ -543,7 +570,7 @@ where
             frames,
         },
         ClockKind::Export,
-        |segment, count, rate| match audio(segment, count, rate) {
+        |segment, _when, count, rate| match audio(segment, count, rate) {
             Ok(pcm) => Ok(pcm),
             Err(error) => {
                 source_error = Some(error);
@@ -1051,6 +1078,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1104,6 +1133,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1131,6 +1162,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1154,6 +1187,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1190,6 +1225,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1256,6 +1293,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1279,6 +1318,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1340,6 +1381,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |segment, frames, rate| {
                 assert_eq!(frames, 4);
@@ -1420,6 +1463,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1475,6 +1520,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: Some(&dir),
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1502,6 +1549,8 @@ mod tests {
                     Limits::standard(),
                 ),
                 destination: Some(&dir),
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1532,6 +1581,8 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
@@ -1578,11 +1629,70 @@ mod tests {
                 readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
             },
             |_, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("limit");
         assert_eq!(error, ExportError::Limit);
         assert_eq!(draft, before);
+    }
+
+    const SAMPLE_TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
+
+    struct SampleFace;
+
+    impl cutlass_eval::Fonts for SampleFace {
+        fn face(&self, path: &str) -> Option<&[u8]> {
+            (path == "sample.ttf").then_some(SAMPLE_TTF)
+        }
+    }
+
+    #[test]
+    fn a_text_face_is_drawn_and_a_missing_face_is_not() {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.duration = Micros(1_000_000);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A".to_owned(),
+            font_size: 64.0,
+            font_path: "sample.ttf".to_owned(),
+            text_color: "#FFFFFF".to_owned(),
+            ..MaterialText::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "caption", TimeRange::new(0, 1_000_000)));
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let bare = super::evaluated_frame(super::FrameInputs {
+            draft: &draft,
+            device: &mut device,
+            time: Micros(0),
+            ready_at: Micros(0),
+            media: readers(),
+            clips: &mut clips,
+            root: None,
+            fonts: &cutlass_eval::NoFonts,
+        })
+        .expect("bare");
+        let mut clips = OpenClips::new();
+        let drawn = super::evaluated_frame(super::FrameInputs {
+            draft: &draft,
+            device: &mut device,
+            time: Micros(0),
+            ready_at: Micros(0),
+            media: readers(),
+            clips: &mut clips,
+            root: None,
+            fonts: &SampleFace,
+        })
+        .expect("drawn");
+        assert!(bare.rgba.iter().all(|byte| *byte == 0));
+        assert_ne!(bare.rgba, drawn.rgba);
+        assert!(drawn.rgba.iter().any(|byte| *byte != 0));
     }
 }

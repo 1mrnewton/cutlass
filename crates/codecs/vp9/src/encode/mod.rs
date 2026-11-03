@@ -111,6 +111,13 @@ impl VideoEncoder for Vp9Encoder {
             v: coded.v,
             width: self.width,
             height: self.height,
+            ss_x: 1,
+            ss_y: 1,
+            color_space: 0,
+            color_range: 0,
+            bit_depth: 8,
+            render_width: self.width,
+            render_height: self.height,
         };
         let reference = Reference::from_picture(&picture)?;
         self.reference = Some(reference);
@@ -421,6 +428,238 @@ mod tests {
     }
 
     #[test]
+    fn color_and_render_size_are_on_the_picture() {
+        use cutlass_decode::{ColorPrimaries, ColorRange, MatrixCoefficients, Transfer};
+
+        let frame = solid(16, 16, 40, 90, 140);
+        let mut encoder = Vp9Encoder::with_quantizer(16, 16, 0).expect("encoder");
+        let packets = encoder.push(&input(frame)).expect("encode");
+        let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
+        let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+        let shown = decoder
+            .push(&packets[0])
+            .expect("decode")
+            .pop()
+            .expect("shown")
+            .frame;
+        assert_eq!(shown.width, 16);
+        assert_eq!(shown.height, 16);
+        assert_eq!(shown.y.width, 16);
+        assert_eq!(shown.y.height, 16);
+        assert_eq!(shown.render_width, 16);
+        assert_eq!(shown.render_height, 16);
+        assert_eq!(shown.range, ColorRange::Studio);
+        assert_eq!(shown.primaries, ColorPrimaries::Bt601);
+        assert_eq!(shown.transfer, Transfer::Bt601);
+        assert_eq!(shown.matrix, MatrixCoefficients::Bt601);
+
+        let rewritten = render_size(&packets[0].data, 32, 18);
+        let header = super::parsed_header(&rewritten).expect("header");
+        assert_eq!(header.width, 16);
+        assert_eq!(header.height, 16);
+        assert_eq!(header.render_width, 32);
+        assert_eq!(header.render_height, 18);
+        let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+        let again = decoder
+            .push(&Packet::video(rewritten, 0, 1, 30, true))
+            .expect("decode")
+            .pop()
+            .expect("shown")
+            .frame;
+        assert_eq!(again.width, 16);
+        assert_eq!(again.height, 16);
+        assert_eq!(again.y.samples, shown.y.samples);
+        assert_eq!(again.u.samples, shown.u.samples);
+        assert_eq!(again.v.samples, shown.v.samples);
+        assert_eq!(again.render_width, 32);
+        assert_eq!(again.render_height, 18);
+        assert_eq!(again.range, ColorRange::Studio);
+        assert_eq!(again.primaries, ColorPrimaries::Bt601);
+
+        let mut bt709 = bits_of(&packets[0].data);
+        bt709[32] = 0;
+        bt709[33] = 1;
+        bt709[34] = 0;
+        bt709[35] = 1;
+        let mut decoder = Vp9Decoder::open(&params).expect("decoder");
+        let colored = decoder
+            .push(&Packet::video(bytes_of(&bt709), 0, 1, 30, true))
+            .expect("decode")
+            .pop()
+            .expect("shown")
+            .frame;
+        assert_eq!(colored.primaries, ColorPrimaries::Bt709);
+        assert_eq!(colored.transfer, Transfer::Bt709);
+        assert_eq!(colored.matrix, MatrixCoefficients::Bt709);
+        assert_eq!(colored.range, ColorRange::Full);
+        assert_eq!(colored.y.samples, shown.y.samples);
+
+        assert_color_space(
+            &params,
+            &packets[0].data,
+            &shown.y.samples,
+            3,
+            ColorPrimaries::Bt601,
+            Transfer::Bt601,
+            MatrixCoefficients::Bt601,
+        );
+        assert_color_space(
+            &params,
+            &packets[0].data,
+            &shown.y.samples,
+            5,
+            ColorPrimaries::Bt2020,
+            Transfer::Bt2020,
+            MatrixCoefficients::Bt2020,
+        );
+        for space in [0u8, 4, 6] {
+            assert_color_space(
+                &params,
+                &packets[0].data,
+                &shown.y.samples,
+                space,
+                ColorPrimaries::Unspecified,
+                Transfer::Unspecified,
+                MatrixCoefficients::Unspecified,
+            );
+        }
+        let mut rgb = bits_of(&packets[0].data);
+        rgb[32] = 1;
+        rgb[33] = 1;
+        rgb[34] = 1;
+        let err = Vp9Decoder::open(&params)
+            .expect("decoder")
+            .push(&Packet::video(bytes_of(&rgb), 0, 1, 30, true))
+            .expect_err("profile 0 rgb");
+        assert!(
+            err.to_string().contains("profile 0 rgb"),
+            "profile 0 rgb was {err}"
+        );
+
+        let original = super::parsed_header(&packets[0].data).expect("header");
+        let mut intra = BitWriter::new();
+        intra.write(2, 2);
+        intra.write(0, 2);
+        intra.write_bit(false);
+        intra.write_bit(true);
+        intra.write_bit(false);
+        intra.write_bit(true);
+        intra.write_bit(true);
+        intra.write(0x49, 8);
+        intra.write(0x83, 8);
+        intra.write(0x42, 8);
+        intra.write(0xff, 8);
+        intra.write(15, 16);
+        intra.write(15, 16);
+        intra.write_bit(false);
+        intra.write(0, 2);
+        intra.write(0, 6);
+        intra.write(0, 3);
+        intra.write_bit(false);
+        intra.write(0, 8);
+        intra.write(0, 3);
+        intra.write_bit(false);
+        super::write_tile_bits(&mut intra, 16);
+        intra.write(u32::try_from(original.compressed_bytes).unwrap_or(0), 16);
+        let mut intra_bytes = intra.finish();
+        intra_bytes.extend_from_slice(&packets[0].data[original.header_bytes..]);
+        let hidden = decoder
+            .push(&Packet::video(intra_bytes, 1, 1, 30, false))
+            .expect("intra-only");
+        assert!(hidden.is_empty());
+        let kept = decoder
+            .push(&Packet::video(vec![0x88], 2, 1, 30, false))
+            .expect("show existing")
+            .pop()
+            .expect("shown")
+            .frame;
+        assert_eq!(kept.width, 16);
+        assert_eq!(kept.height, 16);
+        assert_eq!(kept.y.samples, shown.y.samples);
+        assert_eq!(kept.range, ColorRange::Studio);
+        assert_eq!(kept.primaries, ColorPrimaries::Bt601);
+        assert_eq!(kept.transfer, Transfer::Bt601);
+        assert_eq!(kept.matrix, MatrixCoefficients::Bt601);
+    }
+
+    fn assert_color_space(
+        params: &CodecParams,
+        frame: &[u8],
+        samples: &[u8],
+        space: u8,
+        primaries: cutlass_decode::ColorPrimaries,
+        transfer: cutlass_decode::Transfer,
+        matrix: cutlass_decode::MatrixCoefficients,
+    ) {
+        let mut bits = bits_of(frame);
+        bits[32] = (space >> 2) & 1;
+        bits[33] = (space >> 1) & 1;
+        bits[34] = space & 1;
+        let shown = Vp9Decoder::open(params)
+            .expect("decoder")
+            .push(&Packet::video(bytes_of(&bits), 0, 1, 30, true))
+            .unwrap_or_else(|err| panic!("space {space}: {err}"))
+            .pop()
+            .unwrap_or_else(|| panic!("space {space} showed nothing"))
+            .frame;
+        assert_eq!(shown.primaries, primaries, "space {space}");
+        assert_eq!(shown.transfer, transfer, "space {space}");
+        assert_eq!(shown.matrix, matrix, "space {space}");
+        assert_eq!(
+            shown.range,
+            cutlass_decode::ColorRange::Studio,
+            "space {space}"
+        );
+        assert_eq!(shown.y.samples, samples, "space {space}");
+    }
+
+    fn bits_of(frame: &[u8]) -> Vec<u8> {
+        let mut bits = Vec::new();
+        for byte in frame {
+            for shift in (0..8).rev() {
+                bits.push((byte >> shift) & 1);
+            }
+        }
+        bits
+    }
+
+    fn bytes_of(bits: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+        for (index, bit) in bits.iter().enumerate() {
+            if *bit == 1 {
+                bytes[index / 8] |= 1 << (7 - (index % 8));
+            }
+        }
+        bytes
+    }
+
+    fn render_size(frame: &[u8], render_w: u32, render_h: u32) -> Vec<u8> {
+        let mut bits = Vec::new();
+        for byte in frame {
+            for shift in (0..8).rev() {
+                bits.push((byte >> shift) & 1);
+            }
+        }
+        bits[68] = 1;
+        let mut extra = Vec::new();
+        for value in [render_w - 1, render_h - 1] {
+            for shift in (0..16).rev() {
+                extra.push(((value >> shift) & 1) as u8);
+            }
+        }
+        let mut out = bits[..=68].to_vec();
+        out.extend(extra);
+        out.extend_from_slice(&bits[69..]);
+        let mut bytes = vec![0u8; out.len().div_ceil(8)];
+        for (index, bit) in out.iter().enumerate() {
+            if *bit == 1 {
+                bytes[index / 8] |= 1 << (7 - (index % 8));
+            }
+        }
+        bytes
+    }
+
+    #[test]
     fn lossless_ramp_and_odd_blocks_match_the_source() {
         let mut frames = Vec::new();
         frames.push(ramp(8, 8));
@@ -708,24 +947,38 @@ mod tests {
             Vp9Encoder::open(&rgba),
             Err(CodecError::Unsupported { .. })
         ));
-        let huge = CodecParams::with_format(CodecId::Vp9, 4097, 8, PixelFormat::Yuv420p);
+        let wide = CodecParams::with_format(CodecId::Vp9, 4097, 8, PixelFormat::Yuv420p);
+        assert!(Vp9Decoder::open(&wide).is_ok());
+        let past_edge = CodecParams::with_format(CodecId::Vp9, 16_833, 8, PixelFormat::Yuv420p);
         assert!(matches!(
-            Vp9Decoder::open(&huge),
+            Vp9Decoder::open(&past_edge),
+            Err(CodecError::Limit { .. })
+        ));
+        let past_area = CodecParams::with_format(CodecId::Vp9, 16_832, 2_119, PixelFormat::Yuv420p);
+        assert!(matches!(
+            Vp9Decoder::open(&past_area),
             Err(CodecError::Limit { .. })
         ));
         let params = CodecParams::with_format(CodecId::Vp9, 16, 16, PixelFormat::Yuv420p);
         let mut decoder = Vp9Decoder::open(&params).expect("decoder");
         let empty = decoder.push(&Packet::video(Vec::new(), 0, 1, 30, true));
         assert!(matches!(empty, Err(CodecError::InvalidApi { .. })));
-        for marker in [0xa0, 0x90, 0xb0] {
-            let err = decoder
-                .push(&Packet::video(vec![marker], 0, 1, 30, true))
-                .expect_err("profile");
-            assert!(err.to_string().contains("profile"), "{marker:#x} {err}");
-        }
+        let err = decoder
+            .push(&Packet::video(vec![0xb0], 0, 1, 30, true))
+            .expect_err("truncated profile 3");
+        assert!(!err.to_string().contains("vp9 profile"), "{err}");
+        let err = decoder
+            .push(&Packet::video(vec![0x90], 0, 1, 30, true))
+            .expect_err("truncated profile 2");
+        assert!(!err.to_string().contains("vp9 profile"), "{err}");
         let err = match Decoder::new().decode(&oversized_edge()) {
             Err(err) => err,
             Ok(_) => panic!("oversized edge was accepted"),
+        };
+        assert!(matches!(err, CodecError::Limit { .. }), "{err}");
+        let err = match Decoder::new().decode(&oversized_area()) {
+            Err(err) => err,
+            Ok(_) => panic!("oversized area was accepted"),
         };
         assert!(matches!(err, CodecError::Limit { .. }), "{err}");
         assert!(decoder.drain().expect("drain").is_empty());
@@ -897,8 +1150,26 @@ mod tests {
         bits.write(0x42, 8);
         bits.write(1, 3);
         bits.write_bit(false);
-        bits.write(4096, 16);
+        bits.write(16_832, 16);
         bits.write(7, 16);
+        bits.finish()
+    }
+
+    fn oversized_area() -> Vec<u8> {
+        let mut bits = BitWriter::new();
+        bits.write(2, 2);
+        bits.write(0, 2);
+        bits.write_bit(false);
+        bits.write_bit(false);
+        bits.write_bit(true);
+        bits.write_bit(true);
+        bits.write(0x49, 8);
+        bits.write(0x83, 8);
+        bits.write(0x42, 8);
+        bits.write(1, 3);
+        bits.write_bit(false);
+        bits.write(16_831, 16);
+        bits.write(2_118, 16);
         bits.finish()
     }
 

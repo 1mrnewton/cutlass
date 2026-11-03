@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+use std::path::{Path, PathBuf};
+
+mod dialogs;
+mod face;
 pub mod icons;
 pub mod probe;
 mod readers;
@@ -35,6 +39,22 @@ pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::Enco
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
     (decoders, encoders)
+}
+
+/// Open the process log before the window.
+///
+/// `None` uses the per-user log directory. A public build writes the file
+/// and does not write stderr.
+pub fn boot(log_directory: Option<&Path>) -> Result<PathBuf, cutlass_logger::InitError> {
+    match log_directory {
+        Some(directory) => cutlass_logger::init(directory),
+        None => cutlass_logger::init_default(),
+    }
+}
+
+/// Record a failure from process start. The public build keeps it in the file.
+pub fn report_error(message: &str) {
+    cutlass_logger::error!("{message}");
 }
 
 #[cfg(test)]
@@ -116,5 +136,19 @@ mod tests {
         let packets = encoder.push(&AudioInput { pcm }).expect("encode");
         assert_eq!(packets.len(), 1);
         assert!(!packets[0].data.is_empty());
+    }
+
+    #[test]
+    fn boot_writes_the_log_and_an_error() {
+        let path = std::env::temp_dir().join(format!("cutlass-desktop-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let log = super::boot(Some(&path)).unwrap();
+        super::report_error("window failed");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("log file"), "{text}");
+        assert!(text.contains("window failed"), "{text}");
+        assert!(text.contains("ERROR"), "{text}");
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

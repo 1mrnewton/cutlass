@@ -72,8 +72,22 @@ pub const DCT_ADST: u8 = 2;
 pub const ADST_ADST: u8 = 3;
 
 pub const MI_SIZE: usize = 8;
+/// Encoder size cap. The decoder uses the level limits below.
 pub const MAX_EDGE: u32 = 4096;
+/// Level 6.2 maximum side. A larger side is past every defined level.
+pub const LEVEL_MAX_EDGE: u32 = 16_832;
+/// Level 6.2 maximum luma samples. The frame header does not carry a level.
+pub const LEVEL_MAX_LUMA: u32 = 35_651_584;
 pub const BORDER: usize = 32;
+
+/// A coded picture some defined level allows. Eight reference slots stay available.
+pub fn level_picture(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= LEVEL_MAX_EDGE
+        && height <= LEVEL_MAX_EDGE
+        && width.saturating_mul(height) <= LEVEL_MAX_LUMA
+}
 
 const BLOCK_W: [u32; 13] = [4, 4, 8, 8, 8, 16, 16, 16, 32, 32, 32, 64, 64];
 const BLOCK_H: [u32; 13] = [4, 8, 4, 8, 16, 8, 16, 32, 16, 32, 64, 32, 64];
@@ -200,6 +214,42 @@ pub fn uv_tx_420(bsize: u8, tx: u8) -> u8 {
     UV_TX_420[bsize as usize][tx as usize]
 }
 
+/// Chroma transform size. A block smaller than 8×8 stays 4×4.
+pub fn uv_tx(bsize: u8, tx: u8, ss_x: u32, ss_y: u32) -> u8 {
+    if bsize < BLOCK_8X8 {
+        return TX_4X4;
+    }
+    let plane = plane_block_size(bsize, ss_x, ss_y);
+    if plane >= BLOCK_INVALID {
+        return TX_4X4;
+    }
+    tx.min(max_tx(plane))
+}
+
+fn plane_block_size(bsize: u8, ss_x: u32, ss_y: u32) -> u8 {
+    const SS_SIZE: [[[u8; 2]; 2]; 13] = [
+        [[BLOCK_4X4, BLOCK_INVALID], [BLOCK_INVALID, BLOCK_INVALID]],
+        [[BLOCK_4X8, BLOCK_4X4], [BLOCK_INVALID, BLOCK_INVALID]],
+        [[BLOCK_8X4, BLOCK_INVALID], [BLOCK_4X4, BLOCK_INVALID]],
+        [[BLOCK_8X8, BLOCK_8X4], [BLOCK_4X8, BLOCK_4X4]],
+        [[BLOCK_8X16, BLOCK_8X8], [BLOCK_INVALID, BLOCK_4X8]],
+        [[BLOCK_16X8, BLOCK_INVALID], [BLOCK_8X8, BLOCK_8X4]],
+        [[BLOCK_16X16, BLOCK_16X8], [BLOCK_8X16, BLOCK_8X8]],
+        [[BLOCK_16X32, BLOCK_16X16], [BLOCK_INVALID, BLOCK_8X16]],
+        [[BLOCK_32X16, BLOCK_INVALID], [BLOCK_16X16, BLOCK_16X8]],
+        [[BLOCK_32X32, BLOCK_32X16], [BLOCK_16X32, BLOCK_16X16]],
+        [[BLOCK_32X64, BLOCK_32X32], [BLOCK_INVALID, BLOCK_16X32]],
+        [[BLOCK_64X32, BLOCK_INVALID], [BLOCK_32X32, BLOCK_32X16]],
+        [[BLOCK_64X64, BLOCK_64X32], [BLOCK_32X64, BLOCK_32X32]],
+    ];
+    let x = usize::try_from(ss_x).unwrap_or(0).min(1);
+    let y = usize::try_from(ss_y).unwrap_or(0).min(1);
+    SS_SIZE
+        .get(usize::from(bsize))
+        .map(|row| row[x][y])
+        .unwrap_or(BLOCK_INVALID)
+}
+
 pub fn tx_mode_biggest(mode: u8) -> u8 {
     if mode >= ALLOW_32X32 { TX_32X32 } else { mode }
 }
@@ -219,4 +269,19 @@ pub fn align8(value: u32) -> u32 {
 
 pub fn mi_count(edge: u32) -> usize {
     usize::try_from(align8(edge) / 8).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chroma_tx_follows_the_plane_size() {
+        assert_eq!(uv_tx(BLOCK_16X16, TX_16X16, 0, 0), TX_16X16);
+        assert_eq!(uv_tx(BLOCK_16X16, TX_16X16, 1, 0), TX_8X8);
+        assert_eq!(uv_tx(BLOCK_16X16, TX_16X16, 0, 1), TX_8X8);
+        assert_eq!(uv_tx(BLOCK_32X32, TX_32X32, 0, 0), TX_32X32);
+        assert_eq!(uv_tx(BLOCK_4X4, TX_8X8, 0, 0), TX_4X4);
+        assert_eq!(uv_tx(BLOCK_8X8, TX_8X8, 1, 1), TX_4X4);
+    }
 }

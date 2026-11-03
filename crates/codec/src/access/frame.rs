@@ -43,6 +43,38 @@ impl Plane {
         })
     }
 
+    /// A tight plane whose samples are `sample_bytes` each, little-endian.
+    pub fn bytes(
+        width: u32,
+        height: u32,
+        sample_bytes: usize,
+        samples: Vec<u8>,
+    ) -> Result<Self, CodecError> {
+        let columns = usize::try_from(width).map_err(|_| CodecError::Limit {
+            what: "plane width",
+        })?;
+        let rows = usize::try_from(height).map_err(|_| CodecError::Limit {
+            what: "plane height",
+        })?;
+        let stride = columns.checked_mul(sample_bytes).ok_or(CodecError::Limit {
+            what: "plane samples",
+        })?;
+        let need = stride.checked_mul(rows).ok_or(CodecError::Limit {
+            what: "plane samples",
+        })?;
+        if samples.len() != need || sample_bytes == 0 {
+            return Err(CodecError::InvalidApi {
+                what: "plane sample count",
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            stride,
+            samples,
+        })
+    }
+
     /// A zero-filled tight plane.
     pub fn blank(width: u32, height: u32) -> Result<Self, CodecError> {
         let stride = usize::try_from(width).map_err(|_| CodecError::Limit {
@@ -89,6 +121,10 @@ pub struct VideoFrame {
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
     pub matrix: MatrixCoefficients,
+    /// Display width. Equal to [`Self::width`] when the frame names no other size.
+    pub render_width: u32,
+    /// Display height. Equal to [`Self::height`] when the frame names no other size.
+    pub render_height: u32,
 }
 
 impl VideoFrame {
@@ -132,6 +168,57 @@ impl VideoFrame {
             primaries: ColorPrimaries::Unspecified,
             transfer: Transfer::Unspecified,
             matrix: MatrixCoefficients::Unspecified,
+            render_width: width,
+            render_height: height,
+        })
+    }
+
+    /// A planar picture whose chroma size follows `format`.
+    pub fn planar(
+        format: PixelFormat,
+        width: u32,
+        height: u32,
+        y: Plane,
+        u: Plane,
+        v: Plane,
+    ) -> Result<Self, CodecError> {
+        if width == 0 || height == 0 {
+            return Err(CodecError::InvalidApi {
+                what: "empty picture",
+            });
+        }
+        let Some((chroma_w, chroma_h)) = format.chroma_wh(width, height) else {
+            return Err(CodecError::InvalidApi {
+                what: "picture format",
+            });
+        };
+        if y.width != width || y.height != height {
+            return Err(CodecError::InvalidApi {
+                what: "luma plane size",
+            });
+        }
+        if u.width != chroma_w
+            || u.height != chroma_h
+            || v.width != chroma_w
+            || v.height != chroma_h
+        {
+            return Err(CodecError::InvalidApi {
+                what: "chroma plane size",
+            });
+        }
+        Ok(Self {
+            format,
+            width,
+            height,
+            y,
+            u,
+            v,
+            range: ColorRange::Unspecified,
+            primaries: ColorPrimaries::Unspecified,
+            transfer: Transfer::Unspecified,
+            matrix: MatrixCoefficients::Unspecified,
+            render_width: width,
+            render_height: height,
         })
     }
 

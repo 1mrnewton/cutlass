@@ -51,6 +51,15 @@ impl Zoom {
         Self::apply(self.pixel_size * 0.5, bounds)
     }
 
+    /// Multiply the pixel size by `factor`, then clamp it to the lane.
+    #[must_use]
+    pub fn scale(self, factor: f64, bounds: ZoomBounds) -> Option<Self> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return None;
+        }
+        Self::apply(self.pixel_size * factor, bounds)
+    }
+
     /// Fit the cut to three quarters of the lane, then clamp it.
     #[must_use]
     pub fn zoom_to_fit(self, bounds: ZoomBounds) -> Option<Self> {
@@ -197,6 +206,23 @@ mod tests {
         assert_eq!(fitted, 0.75 * 800.0 / 10_000_000.0);
         assert!(fitted > minimum_pixel_size(limits).unwrap());
         assert!(fitted < last_accuracy_step(FrameRate::FPS_30).unwrap());
+    }
+
+    #[test]
+    fn a_pinch_scales_by_its_factor_and_stays_inside_the_lane() {
+        let limits = bounds(800.0, 10_000_000);
+        let start = minimum_pixel_size(limits).unwrap() * 4.0;
+        let zoom = Zoom::new(start).unwrap();
+        assert_eq!(zoom.scale(1.5, limits).unwrap().pixel_size(), start * 1.5);
+        assert_eq!(
+            zoom.scale(1_000.0, limits).unwrap().pixel_size(),
+            last_accuracy_step(FrameRate::FPS_30).unwrap()
+        );
+        assert_eq!(
+            zoom.scale(1.0e-9, limits).unwrap().pixel_size(),
+            minimum_pixel_size(limits).unwrap()
+        );
+        assert!(zoom.scale(0.0, limits).is_none());
     }
 
     #[test]

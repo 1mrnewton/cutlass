@@ -157,7 +157,80 @@ pub fn picture_byte_len(width: u32, height: u32, pixel: PixelFormat) -> Result<u
                     what: "picture bytes",
                 })
         }
+        PixelFormat::Yuv420p10 | PixelFormat::Yuv420p12 => {
+            if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+                return Err(CodecError::InvalidApi { what: "4:2:0 size" });
+            }
+            width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(3))
+                .ok_or(CodecError::Limit {
+                    what: "picture bytes",
+                })
+        }
+        PixelFormat::Yuv422p10
+        | PixelFormat::Yuv422p12
+        | PixelFormat::Yuv440p10
+        | PixelFormat::Yuv440p12
+        | PixelFormat::Yuv444p10
+        | PixelFormat::Yuv444p12
+        | PixelFormat::Gbrp10
+        | PixelFormat::Gbrp12 => wide_planar(width, height, pixel),
+        PixelFormat::Yuv422p | PixelFormat::Yuv440p | PixelFormat::Yuv444p | PixelFormat::Gbrp => {
+            let (chroma_w, chroma_h) =
+                pixel
+                    .chroma_wh(width as u32, height as u32)
+                    .ok_or(CodecError::InvalidApi {
+                        what: "picture format",
+                    })?;
+            let luma = width.checked_mul(height).ok_or(CodecError::Limit {
+                what: "picture bytes",
+            })?;
+            let chroma = usize::try_from(chroma_w)
+                .ok()
+                .and_then(|w| {
+                    usize::try_from(chroma_h)
+                        .ok()
+                        .and_then(|h| w.checked_mul(h))
+                })
+                .and_then(|samples| samples.checked_mul(2))
+                .ok_or(CodecError::Limit {
+                    what: "picture bytes",
+                })?;
+            luma.checked_add(chroma).ok_or(CodecError::Limit {
+                what: "picture bytes",
+            })
+        }
     }
+}
+
+fn wide_planar(width: usize, height: usize, pixel: PixelFormat) -> Result<usize, CodecError> {
+    let (chroma_w, chroma_h) =
+        pixel
+            .chroma_wh(width as u32, height as u32)
+            .ok_or(CodecError::InvalidApi {
+                what: "picture format",
+            })?;
+    let luma = width
+        .checked_mul(height)
+        .and_then(|samples| samples.checked_mul(2))
+        .ok_or(CodecError::Limit {
+            what: "picture bytes",
+        })?;
+    let chroma = usize::try_from(chroma_w)
+        .ok()
+        .and_then(|w| {
+            usize::try_from(chroma_h)
+                .ok()
+                .and_then(|h| w.checked_mul(h))
+        })
+        .and_then(|samples| samples.checked_mul(4))
+        .ok_or(CodecError::Limit {
+            what: "picture bytes",
+        })?;
+    luma.checked_add(chroma).ok_or(CodecError::Limit {
+        what: "picture bytes",
+    })
 }
 
 impl PictureOutput {

@@ -4247,9 +4247,10 @@ mod tests {
             under_picture: true,
             muted: false,
         };
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
         });
+        output.textures_delta.clear();
         let colors: Vec<(f32, Color32)> = output
             .shapes
             .iter()
@@ -4297,9 +4298,10 @@ mod tests {
             under_picture: true,
             muted: false,
         };
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
         });
+        output.textures_delta.clear();
         let tops: Vec<f32> = output
             .shapes
             .iter()
@@ -4327,9 +4329,10 @@ mod tests {
             under_picture: true,
             muted: true,
         };
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             paint_wave(ui, &wave, 0.0, band, band, WaveColors::VIDEO);
         });
+        output.textures_delta.clear();
         let colors: Vec<Color32> = output
             .shapes
             .iter()

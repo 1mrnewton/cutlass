@@ -2726,7 +2726,9 @@ fn paint_film(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visib
 fn paint_wave(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visible: Rect) {
     let span =
         f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
-    let Some((first, levels)) = shell.wave(id, f64::from(clip_rect.width()), span) else {
+    let Some(crate::shell::ClipWave { first, levels, .. }) =
+        shell.wave(id, f64::from(clip_rect.width()), span)
+    else {
         return;
     };
     let middle = clip_rect.center().y;

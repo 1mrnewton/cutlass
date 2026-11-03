@@ -76,6 +76,17 @@ pub const NOTICE_FADE: Duration = Duration::from_millis(160);
 /// The shortest time between two automatic writes of the project.
 pub const AUTOSAVE_GAP: Duration = Duration::from_millis(500);
 
+/// A clip's waveform over its visible pixel columns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipWave {
+    /// The first column, pixels from the clip's left edge.
+    pub first: u32,
+    /// One level, 0 to 1, per column.
+    pub levels: Vec<f32>,
+    /// The sound of a video clip, drawn in a band under its picture.
+    pub under_picture: bool,
+}
+
 /// One filmstrip tile of a clip, and its picture once stored.
 pub struct FilmCell {
     pub tile: FilmTile,
@@ -698,16 +709,16 @@ impl Shell {
         self.waveforms = Some(Waveforms::start(self.readers.clone(), ready));
     }
 
-    /// The waveform of audio clip `id`, `clip_width` pixels wide: one level,
-    /// 0 to 1, per pixel column of `visible`, pixels from the clip's left
-    /// edge, starting at the returned column. A file not read yet is asked
-    /// for when the frame ends, and is silent until its peaks arrive.
+    /// The waveform of clip `id`, `clip_width` pixels wide: one level, 0 to
+    /// 1, per pixel column of `visible`, pixels from the clip's left edge. A
+    /// file not read yet is asked for when the frame ends, and has no
+    /// waveform until its peaks arrive; a video file with no sound has none.
     pub fn wave(
         &mut self,
         id: &SegmentId,
         clip_width: f64,
         visible: std::ops::Range<f64>,
-    ) -> Option<(u32, Vec<f32>)> {
+    ) -> Option<ClipWave> {
         let waveforms = self.waveforms.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
         let segment = draft
@@ -715,8 +726,10 @@ impl Shell {
             .iter()
             .flat_map(|track| &track.segments)
             .find(|segment| &segment.id == id)?;
-        let Some(MaterialRef::Audio(_)) = draft.materials.get(segment.material_id.as_str()) else {
-            return None;
+        let under_picture = match draft.materials.get(segment.material_id.as_str()) {
+            Some(MaterialRef::Audio(_)) => false,
+            Some(MaterialRef::Video(video)) if video.kind != MetaType::Photo.as_str() => true,
+            _ => return None,
         };
         let path = self.media_file(cutlass_engine::media_path(draft, segment))?;
         let map = cutlass_engine::placement_of(draft, segment).ok()?;
@@ -726,6 +739,8 @@ impl Shell {
         };
         if !peaks.complete {
             self.wave_asks.push(path);
+        } else if peaks.levels.is_empty() {
+            return None;
         }
         let pixel_size = self.pixel_size;
         let usable = |value: f64| value.is_finite() && value > 0.0;
@@ -750,7 +765,11 @@ impl Shell {
             levels.push(level);
             x += 1.0;
         }
-        Some((first as u32, levels))
+        Some(ClipWave {
+            first: first as u32,
+            levels,
+            under_picture,
+        })
     }
 
     /// A stored media path as a file: inside the project when relative.
@@ -6242,12 +6261,88 @@ mod tests {
                 break;
             }
         }
-        let (first, levels) = levels.expect("peaks");
+        let wave = levels.expect("peaks");
+        assert!(!wave.under_picture);
+        let (first, levels) = (wave.first, wave.levels);
         assert_eq!(first, 100);
         assert_eq!(levels.len(), 200);
         assert!(levels.iter().all(|level| (0.0..=1.0).contains(level)));
         let loud = levels.iter().filter(|level| **level > 0.05).count();
         assert!(loud > 100, "{loud} of {} columns have sound", levels.len());
+    }
+
+    #[test]
+    fn a_video_clip_with_sound_reads_its_waveform_under_the_picture() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 20_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.duration = Micros(20_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 20_000_000.0;
+        let id = SegmentId::new("movie");
+        assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
+        desktop.send_timeline_asks();
+        // Wait until the first 20 s, 2000 buckets, have been read.
+        let path = desktop.media_file(Some(&movie.display().to_string())).unwrap();
+        while desktop
+            .waveforms
+            .as_ref()
+            .unwrap()
+            .get(&path)
+            .is_none_or(|peaks| peaks.levels.len() < 2_000 && !peaks.complete)
+        {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("peaks");
+        }
+        let wave = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks");
+        assert!(wave.under_picture);
+        assert_eq!(wave.levels.len(), 400);
+        let loud = wave.levels.iter().filter(|level| **level > 0.05).count();
+        assert!(loud > 200, "{loud} of 400 columns have sound");
+    }
+
+    #[test]
+    fn a_video_clip_without_sound_has_no_waveform() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("7150172-hd_720_1280_50fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        let draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 1_000_000.0;
+        let id = SegmentId::new("movie");
+        assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("read");
+        let path = desktop.media_file(Some(&movie.display().to_string())).unwrap();
+        let peaks = desktop.waveforms.as_ref().unwrap().get(&path).expect("read");
+        assert!(peaks.complete && peaks.levels.is_empty());
+        assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
     }
 
     #[test]

@@ -10,6 +10,7 @@ struct EditorScreen: View {
     @State private var panel: Panel?
     /// The bar shown while nothing is selected.
     @State private var openBar: ToolBar = .root
+    @State private var exporting = false
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
@@ -38,6 +39,7 @@ struct EditorScreen: View {
                 }
                 .accessibilityLabel("Home")
             }
+            .overlay(alignment: .trailing) { exportButton }
             preview
             transport
             TimelineStrip(model: model, picked: $picked)
@@ -55,6 +57,29 @@ struct EditorScreen: View {
             if id == nil, panel != .text(nil), panel != .effects { panel = nil }
         }
         .onDisappear { model.pause() }
+        .sheet(isPresented: $exporting) {
+            ExportSheet(model: model, name: name)
+        }
+    }
+
+    /// Export, top right as in the reference phone editor.
+    private var exportButton: some View {
+        Button {
+            model.pause()
+            exporting = true
+        } label: {
+            HStack(spacing: 4) {
+                HugeIcon("export", size: 16)
+                Text("Export").font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(Palette.exportInk)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(Palette.export, in: Capsule())
+            .opacity(model.hasClips ? 1 : 0.4)
+        }
+        .disabled(!model.hasClips || model.isOpening)
+        .padding(.trailing, 12)
     }
 
     private var preview: some View {

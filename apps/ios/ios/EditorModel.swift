@@ -44,7 +44,11 @@ final class EditorModel {
     nonisolated private static let fontFolders = ["/System/Library/Fonts"]
     /// The faces text can be set in, as Rust found them.
     private(set) var fonts: [Font] = []
-    private var editor: Editor?
+    /// The Rust editor once open. Hidden while an export holds its thread,
+    /// so nothing here waits on it.
+    private var editor: Editor? { exporting ? nil : opened }
+    private var opened: Editor?
+    private(set) var exporting = false
     private var drawing = false
     private var waiting: Int64?
     private var playback: Task<Void, Never>?
@@ -71,7 +75,7 @@ final class EditorModel {
                 guard let self else { return }
                 switch opened {
                 case let .success(editor):
-                    self.editor = editor
+                    self.opened = editor
                     self.fonts = (try? editor.fonts()) ?? []
                     self.reload()
                 case let .failure(error):
@@ -201,6 +205,26 @@ final class EditorModel {
         playback?.cancel()
         playback = nil
         isPlaying = false
+    }
+
+    // MARK: Export
+
+    /// Stop playing and hand the editor to an export. Every other call
+    /// waits until [`endExport`] gives it back.
+    func beginExport() -> Editor? {
+        guard let editor, durationUs > 0 else {
+            say("Add a photo or video first")
+            return nil
+        }
+        stopCoast()
+        pause()
+        exporting = true
+        return editor
+    }
+
+    func endExport() {
+        exporting = false
+        reload()
     }
 
     // MARK: Edits

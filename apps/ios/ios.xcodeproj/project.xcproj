@@ -45,6 +45,7 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_KEY_CFBundleDisplayName": "Cutlass",
         "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.productivity",
+        "INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription": "Cutlass saves the movies you export to your photos.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]": "YES",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]": "YES",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]": "YES",

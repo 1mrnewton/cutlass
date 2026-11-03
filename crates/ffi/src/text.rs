@@ -3,7 +3,6 @@
 //! names; the draft keeps a face's file name.
 
 use cutlass_model::{Draft, MaterialId, MaterialRef, TrackAttribute, TrackId, TrackType};
-use cutlass_playback::face_label;
 use cutlass_session::{Micros, Request, SegmentId};
 
 use crate::media::{fresh, ids};
@@ -25,15 +24,12 @@ pub struct PhoneText {
     pub face: String,
 }
 
-/// The faces in `names`, each with a label for people.
+/// The faces in `faces`, each a name and its label for people.
 #[must_use]
-pub fn fonts(names: Vec<String>) -> Vec<PhoneFont> {
-    names
+pub fn fonts(faces: Vec<(String, String)>) -> Vec<PhoneFont> {
+    faces
         .into_iter()
-        .map(|name| PhoneFont {
-            label: face_label(&name),
-            name,
-        })
+        .map(|(name, label)| PhoneFont { name, label })
         .collect()
 }
 

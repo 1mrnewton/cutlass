@@ -5,9 +5,12 @@
 //! shell names the files it trusts ([`FaceTable::load_from`]) or the folders
 //! its system keeps fonts in ([`FaceTable::scan`]). A scanned face is read
 //! the first time a frame asks for it, so a long font folder costs little.
+//!
+//! A face of a collection is named `File.ttc#n`, face `n` of that file, and
+//! labelled with its full name. Frames get it copied out as its own font.
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -18,11 +21,12 @@ pub const MAX_FACES: usize = 400;
 /// The largest face file a scan keeps, in bytes.
 pub const MAX_FACE_BYTES: u64 = 40 * 1024 * 1024;
 /// Faces new text should start in, best first. A scan puts the first of
-/// these it finds ahead of the rest. Helvetica only counts as a single-face
-/// file; the system's collection is left out like every collection.
+/// these it finds ahead of the rest.
 pub const PREFERRED_FACES: &[&str] = &[
     "Helvetica.ttf",
+    "Helvetica.ttc#0",
     "HelveticaNeue.ttf",
+    "HelveticaNeue.ttc#0",
     "Arial.ttf",
     "SFNS.ttf",
 ];
@@ -31,14 +35,29 @@ const MAX_DEPTH: usize = 3;
 
 enum Bytes {
     Read(Vec<u8>),
-    /// Read on the first ask. `None` once it failed to read as one face.
-    Later(PathBuf, OnceLock<Option<Vec<u8>>>),
+    /// Read on the first ask, face `index` copied out of a collection. `None`
+    /// once it failed to read as one face.
+    Later(PathBuf, Option<u32>, OnceLock<Option<Vec<u8>>>),
 }
 
-/// Faces by file name. An empty table supplies nothing.
+struct Face {
+    name: String,
+    label: String,
+    bytes: Bytes,
+}
+
+/// A face found by a scan, before the table keeps it.
+struct Found {
+    name: String,
+    label: String,
+    path: PathBuf,
+    index: Option<u32>,
+}
+
+/// Faces by name. An empty table supplies nothing.
 #[derive(Default)]
 pub struct FaceTable {
-    faces: Vec<(String, Bytes)>,
+    faces: Vec<Face>,
 }
 
 impl FaceTable {
@@ -56,7 +75,7 @@ impl FaceTable {
                 continue;
             }
             if let Some(name) = file_name(path) {
-                table.push(name, Bytes::Read(bytes));
+                table.push(name.clone(), face_label(&name), Bytes::Read(bytes));
             }
         }
         table
@@ -69,7 +88,7 @@ impl FaceTable {
         let mut table = Self::default();
         for (name, bytes) in faces {
             if cutlass_font::read(&bytes).is_ok() {
-                table.push(name, Bytes::Read(bytes));
+                table.push(name.clone(), face_label(&name), Bytes::Read(bytes));
             }
         }
         table
@@ -81,31 +100,37 @@ impl FaceTable {
         Self::from_pairs(vec![(name.into(), bytes)])
     }
 
-    /// The single-face TrueType and OpenType files in `folders` and the
-    /// folders below them, by name. Collections are left out. At most
+    /// The TrueType and OpenType faces in `folders` and the folders below
+    /// them, each face of a collection on its own, by label. At most
     /// [`MAX_FACES`] are kept; a file over [`MAX_FACE_BYTES`] is skipped.
-    /// Only each file's first bytes are read now. The first of
-    /// [`PREFERRED_FACES`] found comes first; the rest go by name.
+    /// Only headers and names are read now. The first of
+    /// [`PREFERRED_FACES`] found comes first.
     #[must_use]
     pub fn scan<P: AsRef<Path>>(folders: &[P]) -> Self {
         let mut found = Vec::new();
         for folder in folders {
             walk(folder.as_ref(), 0, &mut found);
         }
-        found.sort_by(|a: &(String, PathBuf), b| a.0.cmp(&b.0));
+        found.sort_by(|a, b| {
+            a.label
+                .to_lowercase()
+                .cmp(&b.label.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name))
+        });
         if let Some(at) = PREFERRED_FACES
             .iter()
-            .find_map(|preferred| found.iter().position(|(name, _)| name == preferred))
+            .find_map(|preferred| found.iter().position(|face| face.name == *preferred))
         {
             let face = found.remove(at);
             found.insert(0, face);
         }
         let mut table = Self::default();
-        for (name, path) in found {
+        for face in found {
             if table.faces.len() == MAX_FACES {
                 break;
             }
-            table.push(name, Bytes::Later(path, OnceLock::new()));
+            let bytes = Bytes::Later(face.path, face.index, OnceLock::new());
+            table.push(face.name, face.label, bytes);
         }
         table
     }
@@ -114,33 +139,47 @@ impl FaceTable {
     /// empty name.
     #[must_use]
     pub fn name(&self) -> &str {
-        self.faces.first().map_or("", |(name, _)| name.as_str())
+        self.faces.first().map_or("", |face| face.name.as_str())
     }
 
-    /// File names, in order.
+    /// Names, in order.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.faces.iter().map(|(name, _)| name.clone()).collect()
+        self.faces.iter().map(|face| face.name.clone()).collect()
     }
 
-    fn push(&mut self, name: String, bytes: Bytes) {
-        if name.is_empty() || self.faces.iter().any(|(have, _)| have == &name) {
+    /// Names with their labels for people, in order.
+    #[must_use]
+    pub fn labelled(&self) -> Vec<(String, String)> {
+        self.faces
+            .iter()
+            .map(|face| (face.name.clone(), face.label.clone()))
+            .collect()
+    }
+
+    fn push(&mut self, name: String, label: String, bytes: Bytes) {
+        if name.is_empty() || self.faces.iter().any(|face| face.name == name) {
             return;
         }
-        self.faces.push((name, bytes));
+        self.faces.push(Face { name, label, bytes });
     }
 }
 
 impl Fonts for FaceTable {
     fn face(&self, path: &str) -> Option<&[u8]> {
-        let (_, bytes) = self.faces.iter().find(|(name, _)| name == path)?;
-        match bytes {
+        let face = self.faces.iter().find(|face| face.name == path)?;
+        match &face.bytes {
             Bytes::Read(bytes) => Some(bytes),
-            Bytes::Later(path, cell) => cell
+            Bytes::Later(path, index, cell) => cell
                 .get_or_init(|| {
-                    let bytes = std::fs::read(path).ok()?;
-                    cutlass_font::read(&bytes).ok()?;
-                    Some(bytes)
+                    let bytes = read_capped(path)?;
+                    match index {
+                        None => {
+                            cutlass_font::read(&bytes).ok()?;
+                            Some(bytes)
+                        }
+                        Some(index) => cutlass_font::single_face(&bytes, *index).ok(),
+                    }
                 })
                 .as_deref(),
         }
@@ -158,7 +197,7 @@ pub fn face_label(name: &str) -> String {
     stem.replace(['-', '_'], " ")
 }
 
-fn walk(folder: &Path, depth: usize, found: &mut Vec<(String, PathBuf)>) {
+fn walk(folder: &Path, depth: usize, found: &mut Vec<Found>) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;
     };
@@ -171,39 +210,70 @@ fn walk(folder: &Path, depth: usize, found: &mut Vec<(String, PathBuf)>) {
             if depth < MAX_DEPTH {
                 walk(&path, depth + 1, found);
             }
-        } else if kind.is_file()
-            && single_face(&path)
-            && let Some(name) = file_name(&path)
-        {
-            found.push((name, path));
+        } else if kind.is_file() {
+            faces_in(&path, found);
         }
     }
 }
 
-/// A `.ttf` or `.otf` file under the size cap whose first bytes name one
-/// TrueType or OpenType face.
-fn single_face(path: &Path) -> bool {
+/// The faces of a `.ttf`, `.otf` or `.ttc` file under the size cap. A file
+/// that does not read as fonts adds nothing.
+fn faces_in(path: &Path, found: &mut Vec<Found>) {
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
-    if !matches!(extension.as_deref(), Some("ttf" | "otf")) {
-        return false;
+    if !matches!(extension.as_deref(), Some("ttf" | "otf" | "ttc")) {
+        return;
     }
+    let Some(name) = file_name(path) else {
+        return;
+    };
     let Ok(mut file) = File::open(path) else {
-        return false;
+        return;
     };
     if file
         .metadata()
         .map_or(true, |meta| meta.len() > MAX_FACE_BYTES)
     {
-        return false;
+        return;
     }
-    let mut tag = [0_u8; 4];
-    if file.read_exact(&mut tag).is_err() {
-        return false;
+    let Ok(faces) = cutlass_font::list_faces(|offset, len| {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = vec![0; len];
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    }) else {
+        return;
+    };
+    for face in faces {
+        let (name, label) = match face.index {
+            None => (name.clone(), face_label(&name)),
+            Some(index) => (
+                format!("{name}#{index}"),
+                face.full_name
+                    .unwrap_or_else(|| format!("{} {}", face_label(&name), index + 1)),
+            ),
+        };
+        found.push(Found {
+            name,
+            label,
+            path: path.to_owned(),
+            index: face.index,
+        });
     }
-    matches!(&tag, [0, 1, 0, 0] | b"OTTO" | b"true")
+}
+
+/// The whole file when it is under the size cap; it may have grown since the
+/// scan.
+fn read_capped(path: &Path) -> Option<Vec<u8>> {
+    let file = File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_FACE_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FACE_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_FACE_BYTES).then_some(bytes)
 }
 
 fn file_name(path: &Path) -> Option<String> {
@@ -216,6 +286,7 @@ mod tests {
     use super::*;
 
     const SAMPLE: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
+    const SAMPLE_TTC: &[u8] = include_bytes!("../../font/fixtures/sample.ttc");
 
     struct Folder(PathBuf);
 
@@ -267,8 +338,7 @@ mod tests {
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(folder.0.join("Zed.TTF"), SAMPLE).unwrap();
         std::fs::write(deep.join("Alpha.otf"), SAMPLE).unwrap();
-        // A collection, a fake face and another kind of file stay out.
-        std::fs::write(folder.0.join("Both.ttc"), SAMPLE).unwrap();
+        // A fake face and another kind of file stay out.
         std::fs::write(folder.0.join("Fake.ttf"), b"wOFFnope").unwrap();
         std::fs::write(folder.0.join("notes.txt"), SAMPLE).unwrap();
         let too_deep = folder.0.join("1/2/3/4");
@@ -282,6 +352,34 @@ mod tests {
     }
 
     #[test]
+    fn each_face_of_a_collection_is_listed_by_its_full_name_and_draws_alone() {
+        let folder = Folder::new("ttc");
+        std::fs::write(folder.0.join("Zed.ttf"), SAMPLE).unwrap();
+        std::fs::write(folder.0.join("Both.ttc"), SAMPLE_TTC).unwrap();
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.names(), ["Both.ttc#0", "Both.ttc#1", "Zed.ttf"]);
+        assert_eq!(table.labelled()[0].1, "Cutlass Sample");
+        assert_eq!(table.labelled()[2].1, "Zed");
+        for name in ["Both.ttc#0", "Both.ttc#1"] {
+            let bytes = table.face(name).expect("copied out");
+            assert!(cutlass_font::read(bytes).is_ok(), "{name}");
+        }
+        // The file name alone or a face past the end names nothing.
+        assert!(table.face("Both.ttc").is_none());
+        assert!(table.face("Both.ttc#2").is_none());
+    }
+
+    #[test]
+    fn a_collection_that_changes_after_the_scan_supplies_nothing() {
+        let folder = Folder::new("ttc-gone");
+        let path = folder.0.join("Both.ttc");
+        std::fs::write(&path, SAMPLE_TTC).unwrap();
+        let table = FaceTable::scan(&[&folder.0]);
+        std::fs::write(&path, &SAMPLE_TTC[..64]).unwrap();
+        assert!(table.face("Both.ttc#1").is_none());
+    }
+
+    #[test]
     fn a_scan_puts_the_best_preferred_face_first() {
         let folder = Folder::new("preferred");
         for name in ["Zed.ttf", "Arial.ttf", "Alpha.otf"] {
@@ -291,26 +389,30 @@ mod tests {
         assert_eq!(table.names(), ["Arial.ttf", "Alpha.otf", "Zed.ttf"]);
         assert_eq!(table.name(), "Arial.ttf");
 
-        std::fs::write(folder.0.join("Helvetica.ttf"), SAMPLE).unwrap();
-        // A collection never wins, even under a preferred stem.
-        std::fs::write(folder.0.join("HelveticaNeue.ttc"), SAMPLE).unwrap();
-        let table = FaceTable::scan(&[&folder.0]);
-        assert_eq!(
-            table.names(),
-            ["Helvetica.ttf", "Alpha.otf", "Arial.ttf", "Zed.ttf"]
-        );
+        // The first face of a preferred collection beats a later choice.
+        std::fs::write(folder.0.join("HelveticaNeue.ttc"), SAMPLE_TTC).unwrap();
+        assert_eq!(FaceTable::scan(&[&folder.0]).name(), "HelveticaNeue.ttc#0");
 
-        std::fs::remove_file(folder.0.join("Helvetica.ttf")).unwrap();
-        std::fs::remove_file(folder.0.join("Arial.ttf")).unwrap();
+        std::fs::write(folder.0.join("Helvetica.ttf"), SAMPLE).unwrap();
+        let table = FaceTable::scan(&[&folder.0]);
+        assert_eq!(table.name(), "Helvetica.ttf");
+        assert_eq!(table.names().len(), 6);
+
+        for name in ["Helvetica.ttf", "Arial.ttf", "HelveticaNeue.ttc"] {
+            std::fs::remove_file(folder.0.join(name)).unwrap();
+        }
         assert_eq!(FaceTable::scan(&[&folder.0]).name(), "Alpha.otf");
     }
 
     #[test]
     fn a_scanned_face_that_turns_out_bad_supplies_nothing() {
         let folder = Folder::new("bad");
+        // The directory reads, the tables it points at are cut off.
+        std::fs::write(folder.0.join("Broken.ttf"), &SAMPLE[..12 + 11 * 16]).unwrap();
+        // A directory that does not read keeps the file out.
         let mut header = vec![0, 1, 0, 0];
         header.extend_from_slice(b"truncated");
-        std::fs::write(folder.0.join("Broken.ttf"), &header).unwrap();
+        std::fs::write(folder.0.join("Torn.ttf"), &header).unwrap();
         let table = FaceTable::scan(&[&folder.0]);
         assert_eq!(table.names(), ["Broken.ttf"]);
         assert!(table.face("Broken.ttf").is_none());

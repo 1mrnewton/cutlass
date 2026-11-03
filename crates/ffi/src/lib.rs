@@ -314,7 +314,7 @@ impl PhoneHost {
     /// The faces text can be set in, by file name.
     #[must_use]
     pub fn fonts(&self) -> Vec<PhoneFont> {
-        text::fonts(self.faces.names())
+        text::fonts(self.faces.labelled())
     }
 
     /// Add `content` at `at` in `face`, or in the first face (a common one

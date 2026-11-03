@@ -8,12 +8,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::time::UNIX_EPOCH;
 
-use cutlass_ffi::{FfiError, PhoneHost, Probed, STILL_DURATION};
+use cutlass_ffi::{FfiError, Home, PhoneHost, Probed, STILL_DURATION};
 use cutlass_ffi::{Micros, SegmentId};
 
 uniffi::setup_scaffolding!();
@@ -136,11 +136,30 @@ pub struct ProjectSummary {
     pub modified_ms: i64,
 }
 
-/// The projects under `root`, newest first. A missing root lists nothing.
+/// Lay out the Cutlass folder under `root` and open the process log in it.
+///
+/// `root` is the one folder everything Cutlass writes lives under: the
+/// projects, the cache, the downloads, the proxies, the models, and the
+/// logs. A phone passes a folder in its app container, once at launch.
+/// Calling it again with the same root changes nothing.
+#[uniffi::export]
+pub fn start(root: String) -> Result<(), EditorError> {
+    let home = open_home(&root)?;
+    cutlass_ffi::start_log(&home.logs()).map_err(|error| EditorError::Failed {
+        message: error.to_string(),
+    })?;
+    Ok(())
+}
+
+/// The projects in the Cutlass folder at `root`, newest first. A missing
+/// root lists nothing.
 #[uniffi::export]
 #[must_use]
 pub fn list_projects(root: String) -> Vec<ProjectSummary> {
-    cutlass_ffi::list_projects(&PathBuf::from(root))
+    let Ok(home) = Home::at(root) else {
+        return Vec::new();
+    };
+    cutlass_ffi::list_projects(&home.projects())
         .into_iter()
         .map(|project| ProjectSummary {
             path: project.path.display().to_string(),
@@ -156,13 +175,32 @@ pub fn list_projects(root: String) -> Vec<ProjectSummary> {
         .collect()
 }
 
-/// Write a new empty project under `root`, named like the desktop's, and
-/// return its folder.
+/// Write a new empty project in the Cutlass folder at `root`, named like the
+/// desktop's, and return its folder.
 #[uniffi::export]
 pub fn create_project(root: String) -> Result<String, EditorError> {
-    cutlass_ffi::create_project(&PathBuf::from(root))
+    let home = open_home(&root)?;
+    cutlass_ffi::create_project(&home.projects())
         .map(|path| path.display().to_string())
         .map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+fn open_home(root: &str) -> Result<Home, EditorError> {
+    Home::open(root).map_err(|error| EditorError::from(FfiError::from(error)))
+}
+
+/// A project folder must sit directly in the root's projects folder.
+fn project_in(home: &Home, project: &Path) -> Result<(), EditorError> {
+    if project.parent() == Some(home.projects().as_path()) {
+        Ok(())
+    } else {
+        Err(EditorError::Failed {
+            message: format!(
+                "{} is not a project in the Cutlass folder",
+                project.display()
+            ),
+        })
+    }
 }
 
 /// One open project.
@@ -175,20 +213,21 @@ type Job = Box<dyn FnOnce(&mut PhoneHost) + Send>;
 
 #[uniffi::export]
 impl Editor {
-    /// Open the project folder, or create an empty one when it has no draft.
-    /// `bundle` must be a directory. The cache directory is created.
+    /// Open a project folder in the Cutlass folder at `root`, or create an
+    /// empty one when it has no draft. `bundle` is the app's read-only
+    /// resources and must be a directory. The cache is the root's.
     #[uniffi::constructor]
-    pub fn open(project: String, bundle: String, cache: String) -> Result<Arc<Self>, EditorError> {
+    pub fn open(root: String, bundle: String, project: String) -> Result<Arc<Self>, EditorError> {
+        let home = open_home(&root)?;
+        let project = PathBuf::from(project);
+        project_in(&home, &project)?;
+        let cache = home.cache();
         let (jobs, inbox) = mpsc::channel::<Job>();
         let (opened, answer) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("cutlass-editor".to_owned())
             .spawn(move || {
-                let (project, bundle, cache) = (
-                    PathBuf::from(project),
-                    PathBuf::from(bundle),
-                    PathBuf::from(cache),
-                );
+                let bundle = PathBuf::from(bundle);
                 let host = if project.join("draft_info.json").is_file() {
                     PhoneHost::open(&project, &bundle, &cache, 0)
                 } else {
@@ -340,7 +379,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{Editor, LaneKind, Media, create_project, list_projects};
+    use super::{Editor, LaneKind, Media, create_project, list_projects, start};
 
     struct Temp(PathBuf);
 
@@ -354,13 +393,23 @@ mod tests {
             Self(path)
         }
 
+        fn root(&self) -> String {
+            self.0.join("Cutlass").display().to_string()
+        }
+
+        fn bundle(&self) -> String {
+            self.0.join("bundle").display().to_string()
+        }
+
+        fn project(&self) -> String {
+            self.0
+                .join("Cutlass/Projects/project")
+                .display()
+                .to_string()
+        }
+
         fn open(&self) -> std::sync::Arc<Editor> {
-            Editor::open(
-                self.0.join("project").display().to_string(),
-                self.0.join("bundle").display().to_string(),
-                self.0.join("cache").display().to_string(),
-            )
-            .unwrap()
+            Editor::open(self.root(), self.bundle(), self.project()).unwrap()
         }
     }
 
@@ -437,9 +486,9 @@ mod tests {
     fn a_bundle_that_is_not_a_folder_refuses_open() {
         let temp = Temp::new();
         let error = Editor::open(
-            temp.0.join("project").display().to_string(),
+            temp.root(),
             temp.0.join("no-bundle").display().to_string(),
-            temp.0.join("cache").display().to_string(),
+            temp.project(),
         );
         assert!(error.is_err());
     }
@@ -447,7 +496,7 @@ mod tests {
     #[test]
     fn a_created_project_is_listed_and_opens() {
         let temp = Temp::new();
-        let root = temp.0.join("Projects").display().to_string();
+        let root = temp.root();
         assert!(list_projects(root.clone()).is_empty());
         let made = create_project(root.clone()).unwrap();
         assert!(made.ends_with("Project"));
@@ -457,13 +506,53 @@ mod tests {
         assert_eq!(listed[0].path, made);
         assert_eq!(listed[0].duration_us, 0);
         assert!(listed[0].modified_ms > 0);
-        let editor = Editor::open(
-            made,
-            temp.0.join("bundle").display().to_string(),
-            temp.0.join("cache").display().to_string(),
-        )
-        .unwrap();
+        assert!(made.starts_with(&format!("{root}/Projects/")));
+        let editor = Editor::open(root, temp.bundle(), made).unwrap();
         assert_eq!(editor.duration_us().unwrap(), 0);
+        assert!(temp.0.join("Cutlass/Cache/index.json").is_file());
+    }
+
+    #[test]
+    fn start_lays_out_the_root_and_writes_the_log_there() {
+        let temp = Temp::new();
+        start(temp.root()).unwrap();
+        for folder in [
+            "Projects",
+            "Cache",
+            "Downloads",
+            "Proxies",
+            "Models",
+            "Logs",
+        ] {
+            assert!(temp.0.join("Cutlass").join(folder).is_dir(), "{folder}");
+        }
+        assert!(temp.0.join("Cutlass/Logs/cutlass.log").is_file());
+        start(temp.root()).unwrap();
+    }
+
+    #[test]
+    fn a_relative_root_is_refused_and_lists_nothing() {
+        assert!(start("Cutlass".to_owned()).is_err());
+        assert!(create_project("Cutlass".to_owned()).is_err());
+        assert!(list_projects("Cutlass".to_owned()).is_empty());
+        assert!(!std::path::Path::new("Cutlass").exists());
+    }
+
+    #[test]
+    fn a_project_outside_the_root_is_refused_and_not_created() {
+        let temp = Temp::new();
+        for outside in [
+            temp.0.join("elsewhere"),
+            temp.0.join("Cutlass/Projects/a/nested"),
+            temp.0.join("Cutlass/Projects/../escape"),
+        ] {
+            let path = outside.display().to_string();
+            let Err(error) = Editor::open(temp.root(), temp.bundle(), path) else {
+                panic!("{} opened", outside.display());
+            };
+            assert!(error.to_string().contains("not a project"), "{error}");
+            assert!(!outside.exists());
+        }
     }
 
     #[test]

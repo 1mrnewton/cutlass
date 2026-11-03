@@ -2790,8 +2790,24 @@ fn wave_height(level: f32) -> f32 {
     ((20.0 * level.log10() + WAVE_FLOOR_DB) / WAVE_FLOOR_DB).clamp(0.0, 1.0)
 }
 
+/// Where the volume line sits in the band for a gain: 100% at CapCut's 45%,
+/// +20 dB, the most a clip takes, at the top, and quieter gains down the
+/// same decibel scale as the bars.
+fn volume_height(gain: f32) -> f32 {
+    const UNITY: f32 = 0.45;
+    if gain <= 0.0 || !gain.is_finite() {
+        return 0.0;
+    }
+    let db = 20.0 * gain.log10();
+    if db >= 0.0 {
+        UNITY + (1.0 - UNITY) * (db / 20.0).min(1.0)
+    } else {
+        UNITY * (1.0 + db / WAVE_FLOOR_DB).max(0.0)
+    }
+}
+
 /// The waveform as bars rising from the bottom of `band`, each the loudest
-/// of the pixel columns under it. Columns count from `clip_left`.
+/// of the pixel columns under it, crossed by the volume line. Columns count from `clip_left`.
 fn paint_wave(
     ui: &Ui,
     wave: &crate::shell::ClipWave,
@@ -2799,6 +2815,7 @@ fn paint_wave(
     band: Rect,
     visible: Rect,
     bar: Color32,
+    line: Color32,
 ) {
     let painter = ui.painter().with_clip_rect(band.intersect(visible));
     let floor = band.bottom() - 1.0;
@@ -2833,6 +2850,16 @@ fn paint_wave(
         } else if wave_height(level) >= WAVE_LOUD {
             cap(top, tokens::WAVE_LOUD, &mut mesh);
         }
+    }
+    // The volume line, a device pixel thick, at each column's gain.
+    let thick = 1.0 / ui.ctx().pixels_per_point();
+    for (index, gain) in wave.gains.iter().enumerate() {
+        let left = clip_left + (wave.first as usize + index) as f32;
+        let y = (floor - volume_height(*gain) * reach).round();
+        mesh.add_colored_rect(
+            Rect::from_min_max(Pos2::new(left, y), Pos2::new(left + 1.0, y + thick)),
+            line,
+        );
     }
     painter.add(mesh);
 }
@@ -2965,12 +2992,12 @@ fn paint_clip(
             paint_film(shell, ui, &clip.id, clip_rect, film, visible);
         }
         if let (Some(band), Some(wave)) = (parts.band, wave.as_ref()) {
-            let bar = if audio {
-                tokens::CLIP_AUDIO_BAR
+            let (bar, line) = if audio {
+                (tokens::CLIP_AUDIO_BAR, tokens::CLIP_AUDIO_LINE)
             } else {
-                tokens::CLIP_VIDEO_BAR
+                (tokens::CLIP_VIDEO_BAR, tokens::CLIP_VIDEO_LINE)
             };
-            paint_wave(ui, wave, clip_rect.left(), band, visible, bar);
+            paint_wave(ui, wave, clip_rect.left(), band, visible, bar, line);
         }
     }
     if selected {
@@ -4114,7 +4141,13 @@ mod tests {
                 egui::Shape::Mesh(mesh)
                     if mesh.vertices.first().is_some_and(|v| v.color == wave) =>
                 {
-                    Some(mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>())
+                    Some(
+                        mesh.vertices
+                            .iter()
+                            .filter(|v| v.color != tokens::CLIP_VIDEO_LINE)
+                            .map(|v| v.pos)
+                            .collect::<Vec<_>>(),
+                    )
                 }
                 _ => None,
             })
@@ -4216,7 +4249,15 @@ mod tests {
             under_picture: true,
         };
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            paint_wave(ui, &wave, 0.0, band, band, tokens::CLIP_VIDEO_BAR);
+            paint_wave(
+                ui,
+                &wave,
+                0.0,
+                band,
+                band,
+                tokens::CLIP_VIDEO_BAR,
+                tokens::CLIP_VIDEO_LINE,
+            );
         });
         let colors: Vec<(f32, Color32)> = output
             .shapes
@@ -4228,6 +4269,7 @@ mod tests {
             .flatten()
             .step_by(4)
             .map(|vertex| (vertex.pos.x, vertex.color))
+            .filter(|(_, color)| *color != tokens::CLIP_VIDEO_LINE)
             .collect();
         let at = |x: f32| -> Vec<Color32> {
             colors

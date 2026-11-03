@@ -8,6 +8,8 @@ struct EditorScreen: View {
     @State private var model: EditorModel
     @State private var picked: [PhotosPickerItem] = []
     @State private var panel: Panel?
+    /// The bar shown while nothing is selected.
+    @State private var openBar: ToolBar = .root
 
     /// The tool panel open over the tool bar.
     enum Panel { case volume, speed }
@@ -42,6 +44,7 @@ struct EditorScreen: View {
         }
         .animation(.easeOut(duration: 0.2), value: panel)
         .animation(.easeOut(duration: 0.15), value: model.selectedClip == nil)
+        .animation(.easeOut(duration: 0.15), value: openBar)
         .background(Color(white: 0.06))
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
@@ -91,8 +94,8 @@ struct EditorScreen: View {
         .padding(.vertical, 10)
     }
 
-    /// A panel when one is open, the clip tools while a clip is selected,
-    /// else the root tools.
+    /// A panel when one is open, the selected clip's bar, else the bar the
+    /// root tools opened. Rust lists every bar.
     @ViewBuilder
     private var bottom: some View {
         if let panel, let clip = model.selection {
@@ -103,67 +106,37 @@ struct EditorScreen: View {
                 }
             }
             .transition(.move(edge: .bottom))
-        } else if model.selection != nil {
-            clipTools
+        } else if let bar = model.selectionBar {
+            ToolBarView(tools: toolBar(bar: bar), back: { model.selectedClip = nil }, tap: use)
+                .id(bar)
         } else {
-            rootTools
+            ToolBarView(
+                tools: toolBar(bar: openBar),
+                back: openBar == .root ? nil : { openBar = .root },
+                tap: use
+            )
+            .id(openBar)
         }
     }
 
-    private var rootTools: some View {
-        toolBar {
-            Button { model.editUnderPlayhead() } label: { tool("Edit", "scissors") }
-                .disabled(!model.hasClips)
-            PhotosPicker(
-                selection: $picked, matching: .any(of: [.images, .videos]),
-                preferredItemEncoding: .current
-            ) {
-                tool("Add", "plus.rectangle.on.rectangle")
-            }
-            .disabled(model.isOpening || model.isImporting)
+    /// Open a bar, act, or say the tool is not ready yet.
+    private func use(_ tool: ToolItem) {
+        if let bar = tool.opens {
+            openBar = bar
+            return
         }
-    }
-
-    private var clipTools: some View {
-        HStack(spacing: 0) {
-            Button { model.selectedClip = nil } label: {
-                Image(systemName: "chevron.left")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 40, height: 52)
-                    .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 6))
-            }
-            .accessibilityLabel("Back")
-            .padding(.leading, 8)
-            toolBar {
-                Button { model.split() } label: { tool("Split", "square.split.2x1") }
-                Button { panel = .volume } label: { tool("Volume", "speaker.wave.2") }
-                Button { panel = .speed } label: { tool("Speed", "gauge.with.dots.needle.67percent") }
-                Button { model.deleteClip() } label: { tool("Delete", "trash") }
-            }
+        guard tool.ready else {
+            model.say("\(tool.label) is coming soon")
+            return
         }
-        .background(Color(white: 0.11))
-    }
-
-    private func toolBar<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 4) { content() }
-                .padding(.horizontal, 8)
+        switch tool.kind {
+        case .edit: model.editUnderPlayhead()
+        case .split: model.split()
+        case .volume: panel = .volume
+        case .speed: panel = .speed
+        case .delete: model.deleteClip()
+        default: model.say("\(tool.label) is coming soon")
         }
-        .foregroundStyle(.white)
-        .padding(.top, 10)
-        .padding(.bottom, 4)
-        .frame(maxWidth: .infinity)
-        .background(Color(white: 0.11))
-    }
-
-    private func tool(_ title: String, _ symbol: String) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: symbol).font(.title3)
-            Text(title).font(.caption2)
-        }
-        .frame(width: 68, height: 52)
-        .contentShape(Rectangle())
     }
 
     @ViewBuilder

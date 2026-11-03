@@ -90,6 +90,12 @@ final class EditorModel {
         return lanes.lazy.flatMap(\.clips).first { $0.id == id }
     }
 
+    /// The tool bar for the selected clip, as Rust picks it for its row.
+    var selectionBar: ToolBar? {
+        guard let editor, let id = selectedClip else { return nil }
+        return try? editor.clipBar(clipId: id)
+    }
+
     private var clipUnderPlayhead: Clip? {
         lanes.first(where: \.main)?.clips.first { $0.covers(playheadUs) }
     }

@@ -63,6 +63,7 @@ members = [
     "crates/platform-windows",
     "crates/playback",
     "crates/pool",
+    "crates/probe",
     "crates/render",
     "crates/renderer-software",
     "crates/session",

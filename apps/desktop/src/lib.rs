@@ -7,7 +7,6 @@ mod face;
 mod gpu;
 pub mod icons;
 mod menu;
-pub mod probe;
 mod readers;
 
 #[cfg(test)]

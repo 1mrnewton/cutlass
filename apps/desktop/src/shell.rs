@@ -44,8 +44,8 @@ use cutlass_transcription::{
 };
 
 use crate::face::FaceTable;
-use crate::probe::{self, Probed};
 use crate::tokens;
+use cutlass_probe::{self as probe, Probed};
 
 /// Long-side steps the export dialog offers.
 pub const LONG_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];

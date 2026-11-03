@@ -579,6 +579,7 @@ dependencies = [
  "cutlass-platform-windows",
  "cutlass-playback",
  "cutlass-png",
+ "cutlass-probe",
  "cutlass-prores",
  "cutlass-render",
  "cutlass-renderer-software",
@@ -1069,6 +1070,22 @@ dependencies = [
 [[package]]
 name = "cutlass-pool"
 version = "0.1.0"
+
+[[package]]
+name = "cutlass-probe"
+version = "0.1.0"
+dependencies = [
+ "cutlass-adts",
+ "cutlass-aiff",
+ "cutlass-codec",
+ "cutlass-container",
+ "cutlass-isobmff",
+ "cutlass-jpeg",
+ "cutlass-model",
+ "cutlass-mp3-container",
+ "cutlass-riff",
+ "cutlass-still",
+]
 
 [[package]]
 name = "cutlass-prores"

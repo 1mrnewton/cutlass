@@ -83,6 +83,7 @@ final class EditorModel {
 
     func seek(_ time: Int64) {
         playheadUs = min(max(time, 0), durationUs)
+        try? editor?.seek(timeUs: playheadUs)
         draw()
     }
 
@@ -90,29 +91,47 @@ final class EditorModel {
         isPlaying ? pause() : play()
     }
 
+    /// Play with sound. Rust moves the playhead with the heard audio; each
+    /// screen frame asks it where the playhead is, off the main thread, and
+    /// draws that picture.
     func play() {
-        guard durationUs > 0 else { return }
-        if playheadUs >= durationUs { playheadUs = 0 }
+        guard let editor, durationUs > 0 else { return }
+        do {
+            try editor.play()
+        } catch {
+            show(error)
+            return
+        }
         isPlaying = true
-        let from = playheadUs
-        let started = Date.now
-        playback = Task { [weak self] in
+        playback = Task.detached(priority: .userInitiated) { [weak self] in
+            var last = ContinuousClock.now
             while !Task.isCancelled {
-                guard let self else { return }
-                let elapsed = Int64(Date.now.timeIntervalSince(started) * 1_000_000)
-                let time = from + elapsed
-                if time >= durationUs {
-                    seek(durationUs)
-                    pause()
-                    return
-                }
-                seek(time)
                 try? await Task.sleep(for: .milliseconds(16))
+                let now = ContinuousClock.now
+                let elapsed = (now - last).components
+                last = now
+                let micros = elapsed.seconds * 1_000_000 + elapsed.attoseconds / 1_000_000_000_000
+                guard let time = try? editor.tick(elapsedUs: micros),
+                      let playing = try? editor.isPlaying()
+                else { return }
+                let going = await MainActor.run { () -> Bool in
+                    guard let self, self.isPlaying else { return false }
+                    self.playheadUs = time
+                    self.draw()
+                    if !playing { self.stopped() }
+                    return playing
+                }
+                if !going { return }
             }
         }
     }
 
     func pause() {
+        try? editor?.pause()
+        stopped()
+    }
+
+    private func stopped() {
         playback?.cancel()
         playback = nil
         isPlaying = false

@@ -121,7 +121,7 @@ struct TextPanel: View {
     }
 }
 
-/// A title's color and size, outline, background, and shadow. Colors,
+/// A title's color and size, outline, background, shadow, and glow. Colors,
 /// ranges, and the values a part starts at come from Rust.
 private struct StylesTab: View {
     let model: EditorModel
@@ -134,6 +134,7 @@ private struct StylesTab: View {
         case outline = "Outline"
         case background = "Background"
         case shadow = "Shadow"
+        case glow = "Glow"
     }
 
     private static let colors = textColors()
@@ -141,7 +142,7 @@ private struct StylesTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 18) {
+            HStack(spacing: 16) {
                 ForEach(Part.allCases, id: \.self) { part in
                     Button { self.part = part } label: {
                         Text(part.rawValue)
@@ -232,6 +233,19 @@ private struct StylesTab: View {
                     send(shadow(style, blur: blur), live: live)
                 }
             }
+        case .glow:
+            if !style.glowColor.isEmpty {
+                StyleSlider(
+                    label: "Strength", value: style.glowStrength, range: 0...1, shown: percent
+                ) { strength, live in
+                    send(glow(style, strength: strength), live: live)
+                }
+                StyleSlider(
+                    label: "Spread", value: style.glowRange, range: 0...1, shown: percent
+                ) { range, live in
+                    send(glow(style, range: range), live: live)
+                }
+            }
         }
     }
 
@@ -241,6 +255,7 @@ private struct StylesTab: View {
         case .outline: style.outlineColor
         case .background: style.backgroundColor
         case .shadow: style.shadowColor
+        case .glow: style.glowColor
         }
     }
 
@@ -269,6 +284,14 @@ private struct StylesTab: View {
                     distance: fresh ? ranges.shadowDistanceStart : style.shadowDistance,
                     blur: fresh ? ranges.shadowBlurStart : style.shadowBlur),
                 live: false)
+        case .glow:
+            let fresh = style.glowColor.isEmpty
+            send(
+                .glow(
+                    color: color,
+                    strength: fresh ? ranges.glowStrengthStart : style.glowStrength,
+                    range: fresh ? ranges.glowRangeStart : style.glowRange),
+                live: false)
         }
     }
 
@@ -288,6 +311,15 @@ private struct StylesTab: View {
             color: style.shadowColor,
             distance: distance ?? style.shadowDistance,
             blur: blur ?? style.shadowBlur)
+    }
+
+    private func glow(
+        _ style: TextStyle, strength: Double? = nil, range: Double? = nil
+    ) -> TextStyleChange {
+        .glow(
+            color: style.glowColor,
+            strength: strength ?? style.glowStrength,
+            range: range ?? style.glowRange)
     }
 
     private func send(_ change: TextStyleChange, live: Bool) {

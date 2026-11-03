@@ -34,6 +34,10 @@ impl History {
         self.undo.push(draft);
     }
 
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
     pub fn pop_undo(&mut self) -> Option<Draft> {
         self.undo.pop()
     }

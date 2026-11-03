@@ -69,6 +69,31 @@ impl Session {
         Ok(self.revision)
     }
 
+    /// Apply every request into the last undo step instead of a new one, so
+    /// a gesture that changes the draft many times undoes in one go. Redo
+    /// is cleared and the revision advances, as for [`Self::apply`]. With no
+    /// undo step yet this is [`Self::apply`].
+    pub fn fold(&mut self, expected: u64, requests: &[Request]) -> Result<u64, EditError> {
+        if !self.history.can_undo() {
+            return self.apply(expected, requests);
+        }
+        if expected != self.revision {
+            return Err(EditError::RevisionMismatch {
+                expected,
+                actual: self.revision,
+            });
+        }
+        if requests.is_empty() {
+            return Ok(self.revision);
+        }
+        let mut next = self.draft.clone();
+        apply_all(&mut next, requests, &self.linkage)?;
+        self.draft = next;
+        self.history.clear_redo();
+        self.revision = self.revision.saturating_add(1);
+        Ok(self.revision)
+    }
+
     /// Restore the draft from before the last apply. The revision still advances.
     pub fn undo(&mut self) -> Result<u64, EditError> {
         let previous = self.history.pop_undo().ok_or(EditError::EmptyUndo)?;
@@ -159,6 +184,30 @@ mod tests {
             track_id: track_id.clone(),
             segment: Box::new(Segment::new(id, "media", TimeRange::new(start, duration))),
         }
+    }
+
+    #[test]
+    fn a_fold_joins_the_last_undo_step() {
+        let (mut session, track) = session();
+        session.apply(0, &[place(&track, "a", 0, 10)]).unwrap();
+        session.apply(1, &[place(&track, "b", 10, 10)]).unwrap();
+        let revision = session.fold(2, &[place(&track, "c", 20, 10)]).unwrap();
+        assert_eq!(revision, 3);
+        assert_eq!(session.draft().tracks[0].segments.len(), 3);
+        assert!(matches!(
+            session.fold(2, &[]),
+            Err(EditError::RevisionMismatch { .. })
+        ));
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks[0].segments.len(), 1);
+    }
+
+    #[test]
+    fn a_fold_with_nothing_to_undo_is_a_step_of_its_own() {
+        let (mut session, track) = session();
+        session.fold(0, &[place(&track, "a", 0, 10)]).unwrap();
+        session.undo().unwrap();
+        assert!(session.draft().tracks[0].segments.is_empty());
     }
 
     #[test]

@@ -50,6 +50,12 @@ impl Commands {
         Ok(revision)
     }
 
+    /// Apply into the last undo step: a gesture's later changes join its first.
+    pub fn fold(&mut self, expected: u64, requests: &[Request]) -> Result<u64, FfiError> {
+        let revision = self.session.fold(expected, requests)?;
+        Ok(revision)
+    }
+
     /// Restore the draft from before the last apply. The revision still advances.
     pub fn undo(&mut self) -> Result<u64, FfiError> {
         let revision = self.session.undo()?;

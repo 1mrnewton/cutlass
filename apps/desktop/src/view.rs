@@ -3875,6 +3875,80 @@ mod tests {
     }
 
     #[test]
+    fn a_video_clip_paints_its_sound_in_a_band_along_the_bottom() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-band-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = cutlass_model::TimeRange::new(0, 20_000_000);
+        draft.tracks[0].segments[0].source_range =
+            Some(cutlass_model::TimeRange::new(0, 20_000_000));
+        draft.duration = Micros(20_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        shell.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let wave = Color32::from_white_alpha(150);
+        let backdrop = Color32::from_black_alpha(110);
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let _ = frame(&mut shell, &mut view);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("peaks");
+        while receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok()
+        {}
+        let shapes = frame(&mut shell, &mut view);
+        let band = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == backdrop => Some(rect.rect),
+                _ => None,
+            })
+            .expect("a sound band");
+        let bars: Vec<Pos2> = shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh)
+                    if mesh.vertices.first().is_some_and(|v| v.color == wave) =>
+                {
+                    Some(mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(bars.len() / 4 > 100, "{} bars", bars.len() / 4);
+        assert!(bars.iter().all(|pos| pos.y >= band.top() && pos.y <= band.bottom()));
+        let floor = bars.iter().map(|pos| pos.y).fold(f32::MIN, f32::max);
+        assert_eq!(floor, band.bottom() - 2.0);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn a_notice_fades_in_holds_and_fades_out() {
         let at = |ms| notice_alpha(std::time::Duration::from_millis(ms));
         assert_eq!(at(0), 0.0);

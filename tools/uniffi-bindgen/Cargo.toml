@@ -1,0 +1,16 @@
+# Writes the Swift and Kotlin files for `crates/ffi-bindings` on the host.
+#
+# Not a workspace member: the generator's template engine is a build tool
+# the phones never link, so it stays out of the shipped dependency graph.
+# Keep the version equal to the `uniffi` in `crates/ffi-bindings`.
+[package]
+name = "uniffi-bindgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+uniffi = { version = "=0.32.2", features = ["cli"] }
+
+[workspace]

@@ -2772,90 +2772,100 @@ fn paint_film(
     ui.ctx().data_mut(|data| data.insert_temp(store, textures));
 }
 
-/// The clip's waveform inside `clip_rect`, one bar per visible pixel column
-/// as tall as its loudest sample. An audio clip's is mirrored around the
-/// middle; a video clip's rises from the bottom, in a band over its picture.
-fn paint_wave(shell: &mut Shell, ui: &Ui, id: &SegmentId, clip_rect: Rect, visible: Rect) {
-    let span =
-        f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
-    let Some(crate::shell::ClipWave {
-        first,
-        levels,
-        under_picture,
-    }) = shell.wave(id, f64::from(clip_rect.width()), span)
-    else {
-        return;
-    };
-    let painter = ui
-        .painter()
-        .with_clip_rect(clip_rect.shrink(1.0).intersect(visible));
-    let color = Color32::from_white_alpha(150);
+/// Waveform bars are one point wide, one every two points.
+const BAR_PITCH: f32 = 2.0;
+/// The quietest level a bar shows, in decibels below full scale.
+const WAVE_FLOOR_DB: f32 = 48.0;
+
+/// How much of the band a level fills: decibels from the floor up to full
+/// scale, the way CapCut's speech sits high in the band.
+fn wave_height(level: f32) -> f32 {
+    if level <= 0.0 || !level.is_finite() {
+        return 0.0;
+    }
+    ((20.0 * level.log10() + WAVE_FLOOR_DB) / WAVE_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// The waveform as bars rising from the bottom of `band`, each the loudest
+/// of the pixel columns under it. Columns count from `clip_left`.
+fn paint_wave(
+    ui: &Ui,
+    wave: &crate::shell::ClipWave,
+    clip_left: f32,
+    band: Rect,
+    visible: Rect,
+    bar: Color32,
+) {
+    let painter = ui.painter().with_clip_rect(band.intersect(visible));
+    let floor = band.bottom() - 1.0;
+    let reach = (band.height() - 2.0).max(1.0);
     let mut mesh = egui::Mesh::default();
-    let bar = |index: usize| clip_rect.left() + (first as usize + index) as f32;
-    if under_picture {
-        let band = Rect::from_min_max(
-            Pos2::new(
-                clip_rect.left(),
-                clip_rect.bottom() - wave_band(clip_rect.height()),
+    let mut index = 0;
+    while index < wave.levels.len() {
+        let column = wave.first as usize + index;
+        let slot = column / BAR_PITCH as usize;
+        let end = ((slot + 1) * BAR_PITCH as usize - wave.first as usize).min(wave.levels.len());
+        let level = wave.levels[index..end].iter().copied().fold(0.0, f32::max);
+        index = end;
+        let height = wave_height(level) * reach;
+        if height <= 0.0 {
+            continue;
+        }
+        let left = clip_left + slot as f32 * BAR_PITCH;
+        mesh.add_colored_rect(
+            Rect::from_min_max(
+                Pos2::new(left, floor - height),
+                Pos2::new(left + 1.0, floor),
             ),
-            clip_rect.max,
+            bar,
         );
-        painter.rect_filled(band, CornerRadius::ZERO, Color32::from_black_alpha(110));
-        let floor = band.bottom() - 2.0;
-        let reach = (band.height() - 4.0).max(1.0);
-        for (index, level) in levels.iter().enumerate() {
-            let left = bar(index);
-            let top = floor - (level * reach).max(0.5);
-            mesh.add_colored_rect(
-                Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 1.0, floor)),
-                color,
-            );
-        }
-    } else {
-        let middle = clip_rect.center().y;
-        let reach = (clip_rect.height() / 2.0 - 4.0).max(1.0);
-        for (index, level) in levels.iter().enumerate() {
-            let half = (level * reach).max(0.5);
-            let left = bar(index);
-            mesh.add_colored_rect(
-                Rect::from_min_max(
-                    Pos2::new(left, middle - half),
-                    Pos2::new(left + 1.0, middle + half),
-                ),
-                color,
-            );
-        }
     }
     painter.add(mesh);
 }
 
-/// The height of a video clip's sound band: a third of the clip, at least
-/// 10 pixels.
-fn wave_band(clip_height: f32) -> f32 {
-    (clip_height / 3.0).max(10.0).min(clip_height)
-}
-
-/// A clip's header row, when it has one, and the body under it.
+/// A clip's header row, when it has one, its filmstrip, and its sound band.
 struct ClipParts {
     header: Option<Rect>,
-    body: Rect,
+    film: Option<Rect>,
+    band: Option<Rect>,
 }
 
-/// Main-track and audio clips carry a header row; the rest are all body.
-fn clip_parts(clip_rect: Rect, main: bool, audio: bool) -> ClipParts {
+/// Main-track and audio clips carry a header row. Under it a main-track
+/// clip with sound gives CapCut's 30% to the band and the rest to the
+/// filmstrip; an audio clip is all band. Other clips are all filmstrip.
+fn clip_parts(clip_rect: Rect, main: bool, audio: bool, sound: bool) -> ClipParts {
     if !main && !audio {
         return ClipParts {
             header: None,
-            body: clip_rect,
+            film: Some(clip_rect),
+            band: None,
         };
     }
     let split = clip_rect.top() + tokens::CLIP_HEADER.min(clip_rect.height());
+    let header = Some(Rect::from_min_max(
+        clip_rect.min,
+        Pos2::new(clip_rect.right(), split),
+    ));
+    let body = Rect::from_min_max(Pos2::new(clip_rect.left(), split), clip_rect.max);
+    if audio {
+        return ClipParts {
+            header,
+            film: None,
+            band: Some(body),
+        };
+    }
+    if !sound {
+        return ClipParts {
+            header,
+            film: Some(body),
+            band: None,
+        };
+    }
+    let top = body.bottom() - body.height() * tokens::WAVE_RATIO;
     ClipParts {
-        header: Some(Rect::from_min_max(
-            clip_rect.min,
-            Pos2::new(clip_rect.right(), split),
-        )),
-        body: Rect::from_min_max(Pos2::new(clip_rect.left(), split), clip_rect.max),
+        header,
+        film: Some(Rect::from_min_max(body.min, Pos2::new(body.right(), top))),
+        band: Some(Rect::from_min_max(Pos2::new(body.left(), top), body.max)),
     }
 }
 
@@ -2928,10 +2938,26 @@ fn paint_clip(
     };
     painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
     let audio = is_audio(lane);
-    let parts = clip_parts(clip_rect, lane.main, audio);
+    let span =
+        f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
+    let wave = if ghost {
+        None
+    } else {
+        shell.wave(&clip.id, f64::from(clip_rect.width()), span)
+    };
+    let parts = clip_parts(clip_rect, lane.main, audio, wave.is_some());
     if !ghost {
-        paint_film(shell, ui, &clip.id, clip_rect, parts.body, visible);
-        paint_wave(shell, ui, &clip.id, parts.body, visible);
+        if let Some(film) = parts.film {
+            paint_film(shell, ui, &clip.id, clip_rect, film, visible);
+        }
+        if let (Some(band), Some(wave)) = (parts.band, wave.as_ref()) {
+            let bar = if audio {
+                tokens::CLIP_AUDIO_BAR
+            } else {
+                tokens::CLIP_VIDEO_BAR
+            };
+            paint_wave(ui, wave, clip_rect.left(), band, visible, bar);
+        }
     }
     if selected {
         painter.rect_stroke(
@@ -3961,7 +3987,10 @@ mod tests {
             cutlass_model::TimeRange::new(0, 20_000_000),
         );
         segment.source_range = Some(cutlass_model::TimeRange::new(0, 20_000_000));
-        draft.tracks[0].segments.push(segment);
+        let mut track = cutlass_model::Track::main("audio");
+        track.kind = cutlass_model::TrackType::Audio;
+        track.segments.push(segment);
+        draft.tracks.push(track);
         cutlass_store::Folder::new(draft).save(&temp).unwrap();
         let (decoders, encoders) = crate::register_codecs();
         let mut shell = Shell::new(decoders, encoders, Settings::default());
@@ -3972,7 +4001,7 @@ mod tests {
         });
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let wave = Color32::from_white_alpha(150);
+        let wave = tokens::CLIP_AUDIO_BAR;
         let columns = |shell: &mut Shell, view: &mut ViewState| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -4003,7 +4032,8 @@ mod tests {
             .recv_timeout(std::time::Duration::from_millis(500))
             .is_ok()
         {}
-        assert!(columns(&mut shell, &mut view) > 100);
+        // One bar every two points.
+        assert!(columns(&mut shell, &mut view) > 50);
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -4033,8 +4063,7 @@ mod tests {
         });
         let mut view = ViewState::new();
         let ctx = egui::Context::default();
-        let wave = Color32::from_white_alpha(150);
-        let backdrop = Color32::from_black_alpha(110);
+        let wave = tokens::CLIP_VIDEO_BAR;
         let frame = |shell: &mut Shell, view: &mut ViewState| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -4055,13 +4084,16 @@ mod tests {
             .is_ok()
         {}
         let shapes = frame(&mut shell, &mut view);
-        let band = shapes
+        let clip = shapes
             .iter()
             .find_map(|clipped| match &clipped.shape {
-                egui::Shape::Rect(rect) if rect.fill == backdrop => Some(rect.rect),
+                egui::Shape::Rect(rect) if rect.fill == tokens::CLIP_VIDEO => Some(rect.rect),
                 _ => None,
             })
-            .expect("a sound band");
+            .expect("the clip");
+        // The band is the bottom 30% of the body under the header.
+        let body = clip.height() - tokens::CLIP_HEADER;
+        let band_top = clip.bottom() - body * tokens::WAVE_RATIO;
         let bars: Vec<Pos2> = shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
@@ -4077,10 +4109,17 @@ mod tests {
         assert!(bars.len() / 4 > 100, "{} bars", bars.len() / 4);
         assert!(
             bars.iter()
-                .all(|pos| pos.y >= band.top() && pos.y <= band.bottom())
+                .all(|pos| pos.y >= band_top && pos.y <= clip.bottom())
         );
         let floor = bars.iter().map(|pos| pos.y).fold(f32::MIN, f32::max);
-        assert_eq!(floor, band.bottom() - 2.0);
+        assert_eq!(floor, clip.bottom() - 1.0);
+        // Bars are a point wide, one every two points from the clip's edge.
+        for bar in bars.chunks(4) {
+            let left = bar.iter().map(|pos| pos.x).fold(f32::MAX, f32::min);
+            let right = bar.iter().map(|pos| pos.x).fold(f32::MIN, f32::max);
+            assert_eq!(right - left, 1.0);
+            assert_eq!((left - clip.left()) % 2.0, 0.0);
+        }
         let _ = std::fs::remove_dir_all(&temp);
     }
 

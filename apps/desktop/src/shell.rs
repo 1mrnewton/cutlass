@@ -711,9 +711,9 @@ impl Shell {
 
     /// The waveform of clip `id`, `clip_width` pixels wide: one level, 0 to
     /// 1, per pixel column of `visible`, pixels from the clip's left edge,
-    /// at the clip's volume. A
-    /// file not read yet is asked for when the frame ends, and has no
-    /// waveform until its peaks arrive; a video file with no sound has none.
+    /// at the clip's volume. A file not read yet is asked for when the frame
+    /// ends: an audio clip has no waveform until its peaks arrive, a video
+    /// clip an empty one. A video file with no sound has none.
     pub fn wave(
         &mut self,
         id: &SegmentId,
@@ -736,7 +736,13 @@ impl Shell {
         let map = cutlass_engine::placement_of(draft, segment).ok()?;
         let Some(peaks) = waveforms.get(&path) else {
             self.wave_asks.push(path);
-            return None;
+            // Hold a video's band open while it is read, so the filmstrip
+            // does not jump when the sound arrives.
+            return under_picture.then(|| ClipWave {
+                first: 0,
+                levels: Vec::new(),
+                under_picture,
+            });
         };
         if !peaks.complete {
             self.wave_asks.push(path);
@@ -6296,7 +6302,15 @@ mod tests {
         });
         desktop.pixel_size = 400.0 / 20_000_000.0;
         let id = SegmentId::new("movie");
-        assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
+        assert_eq!(
+            desktop.wave(&id, 400.0, 0.0..400.0),
+            Some(super::ClipWave {
+                first: 0,
+                levels: Vec::new(),
+                under_picture: true,
+            }),
+            "a video holds its band open while it is read"
+        );
         desktop.send_timeline_asks();
         // Wait until the first 20 s, 2000 buckets, have been read.
         let path = desktop
@@ -6386,7 +6400,15 @@ mod tests {
         });
         desktop.pixel_size = 400.0 / 1_000_000.0;
         let id = SegmentId::new("movie");
-        assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
+        assert_eq!(
+            desktop.wave(&id, 400.0, 0.0..400.0),
+            Some(super::ClipWave {
+                first: 0,
+                levels: Vec::new(),
+                under_picture: true,
+            }),
+            "a video holds its band open while it is read"
+        );
         desktop.send_timeline_asks();
         receiver
             .recv_timeout(std::time::Duration::from_secs(30))

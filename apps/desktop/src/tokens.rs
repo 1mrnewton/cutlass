@@ -98,6 +98,10 @@ pub const CLIP_TEXT: Color32 = Color32::from_rgb(224, 224, 224);
 /// name chip, and on the main track its length chip.
 pub const CLIP_HEADER: f32 = 18.0;
 
+/// The share of a main-track clip's body under the header that its sound
+/// band takes: CapCut's stored `wave_ratio` fallback, 30.
+pub const WAVE_RATIO: f32 = 0.3;
+
 /// The cap on a loud waveform bar, and the tip on one that clips.
 pub const WAVE_LOUD: Color32 = Color32::from_rgb(226, 143, 72);
 pub const WAVE_CLIPPED: Color32 = Color32::from_rgb(215, 68, 50);

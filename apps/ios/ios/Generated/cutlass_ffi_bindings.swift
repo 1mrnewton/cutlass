@@ -487,6 +487,22 @@ fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
+    typealias FfiType = Int32
+    typealias SwiftType = Int32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int32, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -728,6 +744,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      */
     func play() throws 
     
+    /**
+     * The canvas ratios, Original first.
+     */
+    func ratios() throws  -> [CanvasRatio]
+    
     func redo() throws 
     
     func remove(clipId: String) throws 
@@ -760,6 +781,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * any found before.
      */
     func setFontFolders(folders: [String]) throws 
+    
+    /**
+     * Give the canvas a ratio from [`Self::ratios`], as one undo step.
+     */
+    func setRatio(ratio: String) throws 
     
     /**
      * Play a clip at a constant speed, as one undo step. Its length follows.
@@ -1103,6 +1129,18 @@ open func play()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift
 }
 }
     
+    /**
+     * The canvas ratios, Original first.
+     */
+open func ratios()throws  -> [CanvasRatio]  {
+    return try  FfiConverterSequenceTypeCanvasRatio.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_ratios(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
 open func redo()throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
         uniffiCallStatus in
     uniffi_cutlass_ffi_bindings_fn_method_editor_redo(
@@ -1183,6 +1221,18 @@ open func setFontFolders(folders: [String])throws   {try rustCallWithError(FfiCo
     uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(
             self.uniffiCloneHandle(),
         FfiConverterSequenceString.lower(folders),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Give the canvas a ratio from [`Self::ratios`], as one undo step.
+     */
+open func setRatio(ratio: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_ratio(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(ratio),uniffiCallStatus
     )
 }
 }
@@ -1607,6 +1657,76 @@ public func FfiConverterTypeExportProgress_lower(_ value: ExportProgress) -> UIn
 }
 
 
+
+
+/**
+ * A canvas ratio the picker shows. `ratio` is what `set_ratio` takes;
+ * `width` and `height` are the frame it gives this project.
+ */
+public struct CanvasRatio: Equatable, Hashable {
+    public var ratio: String
+    public var label: String
+    public var width: Int32
+    public var height: Int32
+    public var chosen: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(ratio: String, label: String, width: Int32, height: Int32, chosen: Bool) {
+        self.ratio = ratio
+        self.label = label
+        self.width = width
+        self.height = height
+        self.chosen = chosen
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension CanvasRatio: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCanvasRatio: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CanvasRatio {
+        return
+            try CanvasRatio(
+                ratio: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf), 
+                width: FfiConverterInt32.read(from: &buf), 
+                height: FfiConverterInt32.read(from: &buf), 
+                chosen: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CanvasRatio, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.ratio, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterInt32.write(value.width, into: &buf)
+        FfiConverterInt32.write(value.height, into: &buf)
+        FfiConverterBool.write(value.chosen, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCanvasRatio_lift(_ buf: RustBuffer) throws -> CanvasRatio {
+    return try FfiConverterTypeCanvasRatio.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCanvasRatio_lower(_ value: CanvasRatio) -> RustBuffer {
+    return FfiConverterTypeCanvasRatio.lower(value)
+}
 
 
 /**
@@ -3296,6 +3416,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeCanvasRatio: FfiConverterRustBuffer {
+    typealias SwiftType = [CanvasRatio]
+
+    public static func write(_ value: [CanvasRatio], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCanvasRatio.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CanvasRatio] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CanvasRatio]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeCanvasRatio.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeClip: FfiConverterRustBuffer {
     typealias SwiftType = [Clip]
 
@@ -3795,6 +3940,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_play() != 7672) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ratios() != 56006) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_redo() != 49063) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3814,6 +3962,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders() != 41608) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_ratio() != 52174) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_speed() != 10406) {

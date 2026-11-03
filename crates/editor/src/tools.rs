@@ -118,7 +118,7 @@ const ROOT: &[Tool] = &[
     later(T::Filters, "Filters"),
     later(T::Adjust, "Adjust"),
     later(T::Stickers, "Stickers"),
-    later(T::AspectRatio, "Ratio"),
+    ready(T::AspectRatio, "Ratio"),
     later(T::Background, "Background"),
 ];
 

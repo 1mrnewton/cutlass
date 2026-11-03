@@ -349,6 +349,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_pause(uint64_t ptr, RustCallSt
 void uniffi_cutlass_ffi_bindings_fn_method_editor_play(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_RATIOS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_RATIOS
+RustBuffer uniffi_cutlass_ffi_bindings_fn_method_editor_ratios(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REDO
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_REDO
 void uniffi_cutlass_ffi_bindings_fn_method_editor_redo(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -382,6 +387,11 @@ void uniffi_cutlass_ffi_bindings_fn_method_editor_seek(uint64_t ptr, int64_t tim
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_FONT_FOLDERS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_FONT_FOLDERS
 void uniffi_cutlass_ffi_bindings_fn_method_editor_set_font_folders(uint64_t ptr, RustBuffer folders, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_RATIO
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_RATIO
+void uniffi_cutlass_ffi_bindings_fn_method_editor_set_ratio(uint64_t ptr, RustBuffer ratio, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_FN_METHOD_EDITOR_SET_SPEED
@@ -959,6 +969,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_play(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_RATIOS
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_RATIOS
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_ratios(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REDO
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_REDO
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_redo(void
@@ -998,6 +1014,12 @@ uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_seek(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_FONT_FOLDERS
 #define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_FONT_FOLDERS
 uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_RATIO
+#define UNIFFI_FFIDEF_UNIFFI_CUTLASS_FFI_BINDINGS_CHECKSUM_METHOD_EDITOR_SET_RATIO
+uint16_t uniffi_cutlass_ffi_bindings_checksum_method_editor_set_ratio(void
     
 );
 #endif

@@ -233,6 +233,17 @@ pub struct Font {
     pub label: String,
 }
 
+/// A canvas ratio the picker shows. `ratio` is what `set_ratio` takes;
+/// `width` and `height` are the frame it gives this project.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct CanvasRatio {
+    pub ratio: String,
+    pub label: String,
+    pub width: i32,
+    pub height: i32,
+    pub chosen: bool,
+}
+
 /// An effect the picker shows. `id` is what `add_effect` takes; `preview`
 /// is the file name of its looping preview video in the app bundle.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -748,6 +759,27 @@ impl Editor {
     /// Set a clip's linear gain, as one undo step. Below zero is refused.
     pub fn set_volume(&self, clip_id: String, volume: f64) -> Result<(), EditorError> {
         self.run(move |host| host.set_volume(&SegmentId::new(clip_id), volume))?
+            .map_err(EditorError::from)
+    }
+
+    /// The canvas ratios, Original first.
+    pub fn ratios(&self) -> Result<Vec<CanvasRatio>, EditorError> {
+        let ratios = self.run(|host| host.ratios())?;
+        Ok(ratios
+            .into_iter()
+            .map(|ratio| CanvasRatio {
+                ratio: ratio.ratio,
+                label: ratio.label,
+                width: ratio.width,
+                height: ratio.height,
+                chosen: ratio.chosen,
+            })
+            .collect())
+    }
+
+    /// Give the canvas a ratio from [`Self::ratios`], as one undo step.
+    pub fn set_ratio(&self, ratio: String) -> Result<(), EditorError> {
+        self.run(move |host| host.set_ratio(&ratio))?
             .map_err(EditorError::from)
     }
 

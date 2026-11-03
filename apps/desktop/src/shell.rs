@@ -46,7 +46,7 @@ use cutlass_transcription::{
 
 mod inspector;
 
-pub use inspector::{Panel, TextLook};
+pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
 
 use crate::face::FaceTable;
 use crate::tokens;

@@ -6,7 +6,7 @@ use cutlass_model::{
     Draft, MaterialEffect, MaterialId, MaterialRef, MaterialText, Micros, Segment, SegmentId,
     Track, TrackFlag, TrackType, WordColumns, segment_bloom,
 };
-use cutlass_session::{Request, TrimEdge};
+use cutlass_session::Request;
 
 use super::{Shell, ShellError};
 
@@ -51,24 +51,6 @@ impl Panel {
             Self::Other => "Clip",
         }
     }
-
-    /// The clip is drawn as a picture, so it can be placed on the canvas.
-    #[must_use]
-    pub fn placed(self) -> bool {
-        matches!(
-            self,
-            Self::Main { .. } | Self::Overlay { .. } | Self::Text | Self::Caption | Self::Sticker
-        )
-    }
-
-    /// The clip carries sound: a video, or a sound on its own.
-    #[must_use]
-    pub fn heard(self) -> bool {
-        matches!(
-            self,
-            Self::Main { still: false } | Self::Overlay { still: false } | Self::Audio
-        )
-    }
 }
 
 /// How a title's outline, shadow, box, and glow look. A part with an empty
@@ -83,6 +65,8 @@ pub struct TextLook {
     pub shadow_distance: f64,
     /// 0 to 1.
     pub shadow_blur: f64,
+    /// Degrees. A title with no shadow reads the angle a first one takes.
+    pub shadow_angle: f64,
     pub background_color: String,
     /// 0 to 1.
     pub background_alpha: f64,
@@ -105,7 +89,7 @@ pub const BACKGROUND_ROUND_START: f64 = 0.3;
 pub const GLOW_STRENGTH_START: f64 = 0.6;
 pub const GLOW_RANGE_START: f64 = 0.5;
 /// Where a new shadow falls: down and to the right.
-const SHADOW_ANGLE: f64 = -45.0;
+pub const SHADOW_ANGLE: f64 = -45.0;
 
 /// The panel for `segment` on `track`. The material decides first; the row
 /// decides for materials that only say what they are through their row.
@@ -175,6 +159,11 @@ fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
         shadow_color: on(text.has_shadow, &text.shadow_color),
         shadow_distance: text.shadow_distance,
         shadow_blur: text.shadow_smoothing,
+        shadow_angle: if text.has_shadow && text.shadow_angle.is_finite() {
+            text.shadow_angle
+        } else {
+            SHADOW_ANGLE
+        },
         background_color: on(text.background_style != 0, &text.background_color),
         background_alpha: text.background_alpha,
         background_round: text.background_round_radius,
@@ -182,6 +171,63 @@ fn text_look(draft: &Draft, segment: &Segment) -> Option<TextLook> {
         glow_strength,
         glow_range,
     })
+}
+
+/// The quietest level the volume slider shows; it and below are silence.
+pub const SILENT_DB: f64 = -60.0;
+
+/// A gain in decibels, [`SILENT_DB`] for silence.
+#[must_use]
+pub fn volume_db(gain: f64) -> f64 {
+    if gain <= 0.0 || !gain.is_finite() {
+        return SILENT_DB;
+    }
+    (20.0 * gain.log10()).max(SILENT_DB)
+}
+
+/// The gain for `db` decibels; [`SILENT_DB`] and below is zero.
+#[must_use]
+pub fn gain_of_db(db: f64) -> f64 {
+    if db <= SILENT_DB {
+        0.0
+    } else {
+        10f64.powf(db / 20.0)
+    }
+}
+
+/// How the Case buttons rewrite a title's words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LetterCase {
+    Upper,
+    Lower,
+    /// The first letter of each word up, the rest down.
+    Title,
+}
+
+impl LetterCase {
+    #[must_use]
+    pub fn apply(self, words: &str) -> String {
+        match self {
+            Self::Upper => words.to_uppercase(),
+            Self::Lower => words.to_lowercase(),
+            Self::Title => {
+                let mut out = String::with_capacity(words.len());
+                let mut start = true;
+                for letter in words.chars() {
+                    if letter.is_whitespace() {
+                        start = true;
+                        out.push(letter);
+                    } else if start {
+                        start = false;
+                        out.extend(letter.to_uppercase());
+                    } else {
+                        out.extend(letter.to_lowercase());
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 /// `value`, or `start` when a part is being turned on with nothing set.
@@ -277,34 +323,6 @@ impl Shell {
         })
     }
 
-    /// Start the selected clip at `seconds` on its own row. The length
-    /// stays. One undo restores the previous start.
-    pub fn set_start_seconds(&mut self, seconds: f64) -> Result<(), ShellError> {
-        self.set_range_start(seconds_micros(seconds, "the start")?)
-    }
-
-    /// Make the selected clip `seconds` long by moving its end. One undo
-    /// restores the previous length.
-    pub fn set_duration_seconds(&mut self, seconds: f64) -> Result<(), ShellError> {
-        let length = seconds_micros(seconds, "the length")?;
-        if length.0 <= 0 {
-            return Err(ShellError::Unavailable(
-                "the length must be more than zero".to_owned(),
-            ));
-        }
-        let segment_id = self.selected_or_refuse()?;
-        self.refuse_locked(&segment_id)?;
-        let start = self
-            .selected_segment()
-            .map(|segment| segment.target.start)
-            .unwrap_or_default();
-        self.apply(Request::Trim {
-            segment_id,
-            edge: TrimEdge::End,
-            time: Micros(start.0.saturating_add(length.0)),
-        })
-    }
-
     /// Ring the selected title's letters in `color`, `width` ems wide. An
     /// empty color takes the outline off. One undo restores it.
     pub fn set_text_outline(&mut self, color: &str, width: f64) -> Result<(), ShellError> {
@@ -318,28 +336,17 @@ impl Shell {
     }
 
     /// Cast the selected title's shadow in `color`, `distance` hundredths of
-    /// an em away and blurred by `blur`. The angle stays, and a first shadow
-    /// falls down and right. One undo restores it.
+    /// an em away toward `angle` degrees and blurred by `blur`. An empty
+    /// color takes it off. One undo restores it.
     pub fn set_text_shadow(
         &mut self,
         color: &str,
         distance: f64,
+        angle: f64,
         blur: f64,
     ) -> Result<(), ShellError> {
         let segment_id = self.text_segment()?;
         self.refuse_locked(&segment_id)?;
-        let angle = self
-            .selected_segment()
-            .and_then(|segment| {
-                let draft = self.draft()?;
-                match draft.materials.get(segment.material_id.as_str())? {
-                    MaterialRef::Text(text) if text.has_shadow && text.shadow_angle.is_finite() => {
-                        Some(text.shadow_angle)
-                    }
-                    _ => None,
-                }
-            })
-            .unwrap_or(SHADOW_ANGLE);
         self.apply(Request::SetTextShadow {
             segment_id,
             color: color.to_owned(),
@@ -386,6 +393,125 @@ impl Shell {
             strength: starting(color, strength, GLOW_STRENGTH_START),
             range: starting(color, range, GLOW_RANGE_START),
         })
+    }
+
+    /// The selected title's words without any rich styling.
+    #[must_use]
+    pub fn text_words(&self) -> Option<String> {
+        let draft = self.draft()?;
+        let segment = self.selected_segment()?;
+        match draft.materials.get(segment.material_id.as_str())? {
+            MaterialRef::Text(text) => Some(text.words().unwrap_or_default().into_owned()),
+            _ => None,
+        }
+    }
+
+    /// The faces a title can be set in, by the name the draft stores.
+    #[must_use]
+    pub fn text_faces(&self) -> Vec<String> {
+        self.face.names()
+    }
+
+    /// Set the selected title in `face`. The same face is not an undo step.
+    pub fn set_text_face(&mut self, face: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        if !self.face.names().iter().any(|name| name == face) {
+            return Err(ShellError::Unavailable(
+                "that face is not installed".to_owned(),
+            ));
+        }
+        let current = super::text_font(self.session_draft()?, &segment_id);
+        if current == face {
+            return Ok(());
+        }
+        self.apply(Request::SetTextFont {
+            segment_id,
+            face: face.to_owned(),
+        })
+    }
+
+    /// Align the selected title left (0), center (1), or right (2). A title
+    /// with no line width takes the canvas width. One undo restores it.
+    pub fn set_text_align(&mut self, alignment: i32) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let line_width = f64::from(
+            self.draft()
+                .map(|draft| draft.canvas_config.width)
+                .unwrap_or(0),
+        );
+        let face = self.face.name().to_owned();
+        self.apply(Request::SetTextAlign {
+            segment_id,
+            alignment,
+            face,
+            line_width,
+        })
+    }
+
+    /// Rewrite the selected title's words in `case`. A rich title keeps its
+    /// ranges. Words already in that case are not an undo step.
+    pub fn set_text_case(&mut self, case: LetterCase) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let words = self.text_words().unwrap_or_default();
+        let content = case.apply(&words);
+        if content == words {
+            return Ok(());
+        }
+        self.apply(Request::SetTextContent {
+            segment_id,
+            content,
+        })
+    }
+
+    /// Put the selected picture back in the middle at its fitted size,
+    /// upright, as one undo step.
+    pub fn reset_placement(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        self.apply_requests(&[
+            Request::SetPosition {
+                segment_id: segment_id.clone(),
+                x: 0.0,
+                y: 0.0,
+            },
+            Request::SetScale {
+                segment_id: segment_id.clone(),
+                scale: 1.0,
+            },
+            Request::SetRotation {
+                segment_id,
+                degrees: 0.0,
+            },
+        ])
+    }
+
+    /// Put the selected clip's sound back to its recorded level with no
+    /// fades, as one undo step.
+    pub fn reset_sound(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.sound_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let fade_id = MaterialId::new(self.fresh("fade"));
+        self.apply_requests(&[
+            Request::SetVolume {
+                segment_id: segment_id.clone(),
+                volume: 1.0,
+            },
+            Request::SetFade {
+                segment_id,
+                fade_id,
+                fade_in: Micros(0),
+                fade_out: Micros(0),
+            },
+        ])
+    }
+
+    /// Set the selected clip's gain in decibels. [`SILENT_DB`] and below is
+    /// silence. One undo restores it.
+    pub fn set_volume_db(&mut self, db: f64) -> Result<(), ShellError> {
+        self.set_volume(gain_of_db(db))
     }
 
     /// Replace word `index` of the selected caption. The word keeps its
@@ -438,24 +564,12 @@ impl Shell {
     }
 }
 
-fn seconds_micros(seconds: f64, what: &str) -> Result<Micros, ShellError> {
-    let micros = (seconds * 1_000_000.0).round();
-    if !micros.is_finite() || micros < 0.0 || micros > 1e15 {
-        return Err(ShellError::Unavailable(format!(
-            "{what} must be zero or more seconds"
-        )));
-    }
-    // Checked against a bound far inside the i64 range above.
-    #[expect(clippy::cast_possible_truncation, reason = "bounded above")]
-    Ok(Micros(micros as i64))
-}
-
 #[cfg(test)]
 mod tests {
     use cutlass_model::{
         Draft, MaterialAudio, MaterialColorConfig, MaterialEffect, MaterialText, MaterialVideo,
-        MaterialVideoEffect, Micros, RawMaterial, Segment, SegmentId, TimeRange, Track,
-        TrackAttribute, TrackFlag, TrackType,
+        MaterialVideoEffect, RawMaterial, Segment, SegmentId, TimeRange, Track, TrackAttribute,
+        TrackFlag, TrackType,
     };
     use cutlass_store::Folder;
 
@@ -639,10 +753,6 @@ mod tests {
             pick(&mut desktop, id);
             assert_eq!(desktop.panel(), Some(panel), "{id}");
         }
-        assert!(Panel::Main { still: false }.heard());
-        assert!(!Panel::Overlay { still: true }.heard());
-        assert!(Panel::Sticker.placed());
-        assert!(!Panel::Filter.placed());
         pick(&mut desktop, "fx");
         assert_eq!(desktop.effect_name().as_deref(), Some("Shake"));
         pick(&mut desktop, "look");
@@ -654,46 +764,127 @@ mod tests {
     }
 
     #[test]
-    fn timing_moves_and_trims_any_clip_as_one_step_each() {
+    fn a_placement_reset_is_one_step_and_a_sound_reset_is_one_step() {
         let temp = Temp::new();
         let mut desktop = every_kind(&temp);
-        for id in ["overlay", "sound", "words", "fx", "look", "tone", "sticker"] {
-            pick(&mut desktop, id);
-            let before = desktop.draft().unwrap().clone();
-            desktop.set_start_seconds(0.5).unwrap();
-            let inspection = desktop.inspection().unwrap();
-            assert_eq!(inspection.start, Micros(500_000), "{id}");
-            assert_eq!(inspection.duration, Micros(2_000_000), "{id}");
-            desktop.set_duration_seconds(1.25).unwrap();
-            let inspection = desktop.inspection().unwrap();
-            assert_eq!(inspection.start, Micros(500_000), "{id}");
-            assert_eq!(inspection.duration, Micros(1_250_000), "{id}");
-            desktop.undo().unwrap();
-            assert_eq!(desktop.inspection().unwrap().duration, Micros(2_000_000));
-            desktop.undo().unwrap();
-            assert_eq!(desktop.draft().unwrap(), &before, "{id}");
-        }
-        pick(&mut desktop, "fx");
+        pick(&mut desktop, "overlay");
         let before = desktop.draft().unwrap().clone();
-        for refused in [
-            desktop.set_duration_seconds(0.0),
-            desktop.set_duration_seconds(-1.0),
-            desktop.set_duration_seconds(f64::NAN),
-            desktop.set_start_seconds(-0.5),
-            desktop.set_start_seconds(f64::INFINITY),
-        ] {
-            assert!(refused.is_err());
+        desktop.set_position(0.5, 0.25).unwrap();
+        desktop.set_scale(2.0).unwrap();
+        desktop.set_rotation(45.0).unwrap();
+        let moved = desktop.draft().unwrap().clone();
+        desktop.reset_placement().unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!((inspection.transform_x, inspection.transform_y), (0.0, 0.0));
+        assert_eq!((inspection.scale_x, inspection.rotation), (1.0, 0.0));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &moved);
+        for _ in 0..3 {
+            desktop.undo().unwrap();
         }
         assert_eq!(desktop.draft().unwrap(), &before);
-        lock(&mut desktop, "e");
+
+        pick(&mut desktop, "sound");
+        desktop.set_volume_db(-6.0).unwrap();
+        desktop.set_fade_in(0.5).unwrap();
+        let faded = desktop.draft().unwrap().clone();
+        desktop.reset_sound().unwrap();
+        let inspection = desktop.inspection().unwrap();
+        assert_eq!(inspection.volume, 1.0);
+        assert_eq!((inspection.fade_in, inspection.fade_out), (0, 0));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap(), &faded);
+
+        pick(&mut desktop, "words");
+        assert!(desktop.reset_sound().is_err());
+        pick(&mut desktop, "sound");
+        assert!(desktop.reset_placement().is_err());
+        lock(&mut desktop, "o1");
+        pick(&mut desktop, "overlay");
         assert_eq!(
-            desktop.set_start_seconds(0.0).unwrap_err().to_string(),
+            desktop.reset_placement().unwrap_err().to_string(),
             "the track is locked"
         );
+    }
+
+    #[test]
+    fn volume_reads_and_writes_in_decibels_with_a_silent_floor() {
+        assert_eq!(super::volume_db(1.0), 0.0);
+        assert!((super::volume_db(0.5) + 6.0206).abs() < 1e-3);
+        assert_eq!(super::volume_db(0.0), super::SILENT_DB);
+        assert_eq!(super::volume_db(f64::NAN), super::SILENT_DB);
+        assert_eq!(super::volume_db(1e-9), super::SILENT_DB);
+        assert_eq!(super::gain_of_db(super::SILENT_DB), 0.0);
+        assert_eq!(super::gain_of_db(-90.0), 0.0);
+        assert!((super::gain_of_db(12.0) - 3.981).abs() < 1e-3);
+        for db in [-48.0, -6.0, 0.0, 6.0, 12.0] {
+            assert!((super::volume_db(super::gain_of_db(db)) - db).abs() < 1e-9);
+        }
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        pick(&mut desktop, "sound");
+        desktop.set_volume_db(super::SILENT_DB).unwrap();
+        assert_eq!(desktop.inspection().unwrap().volume, 0.0);
+        desktop.set_volume_db(6.0).unwrap();
+        assert!((desktop.inspection().unwrap().volume - 1.9953).abs() < 1e-3);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().volume, 0.0);
+    }
+
+    #[test]
+    fn a_title_face_alignment_and_case_are_one_step_each() {
+        let temp = Temp::new();
+        let mut desktop = every_kind(&temp);
+        let sample: &[u8] = include_bytes!("../../../../crates/font/fixtures/sample.ttf");
+        desktop.use_faces(vec![("A.ttf", sample.to_vec()), ("B.ttf", sample.to_vec())]);
+        assert_eq!(desktop.text_faces(), ["A.ttf", "B.ttf"]);
+        pick(&mut desktop, "words");
+        let before = desktop.draft().unwrap().clone();
+        assert_eq!(desktop.text_words().as_deref(), Some("Title"));
+
+        desktop.set_text_face("B.ttf").unwrap();
+        assert_eq!(desktop.inspection().unwrap().font, "B.ttf");
+        let revision = desktop.revision();
+        desktop.set_text_face("B.ttf").unwrap();
+        assert_eq!(desktop.revision(), revision);
         assert_eq!(
-            desktop.set_duration_seconds(1.0).unwrap_err().to_string(),
-            "the track is locked"
+            desktop.set_text_face("C.ttf").unwrap_err().to_string(),
+            "that face is not installed"
         );
+
+        desktop.set_text_align(2).unwrap();
+        assert_eq!(desktop.inspection().unwrap().text_align, 2);
+        assert!(desktop.set_text_align(7).is_err());
+
+        desktop.set_text_case(super::LetterCase::Upper).unwrap();
+        assert_eq!(desktop.text_words().as_deref(), Some("TITLE"));
+        let revision = desktop.revision();
+        desktop.set_text_case(super::LetterCase::Upper).unwrap();
+        assert_eq!(desktop.revision(), revision);
+        desktop.set_text_case(super::LetterCase::Lower).unwrap();
+        assert_eq!(desktop.text_words().as_deref(), Some("title"));
+
+        for _ in 0..4 {
+            desktop.undo().unwrap();
+        }
+        assert_eq!(desktop.draft().unwrap(), &before);
+        pick(&mut desktop, "main");
+        assert_eq!(desktop.text_words(), None);
+        assert!(desktop.set_text_face("A.ttf").is_err());
+        assert!(desktop.set_text_case(super::LetterCase::Title).is_err());
+    }
+
+    #[test]
+    fn title_case_raises_each_word_and_keeps_the_gaps() {
+        use super::LetterCase;
+        assert_eq!(
+            LetterCase::Title.apply("hELLO  wide\nworld"),
+            "Hello  Wide\nWorld"
+        );
+        assert_eq!(LetterCase::Title.apply("one\ttwo"), "One\tTwo");
+        assert_eq!(LetterCase::Title.apply(""), "");
+        assert_eq!(LetterCase::Upper.apply("straße"), "STRASSE");
+        assert_eq!(LetterCase::Lower.apply("ÉCOLE"), "école");
     }
 
     #[test]
@@ -804,12 +995,15 @@ mod tests {
             desktop.text_look(),
             Some(TextLook {
                 background_alpha: 1.0,
+                shadow_angle: super::SHADOW_ANGLE,
                 ..TextLook::default()
             })
         );
 
         desktop.set_text_outline("#FF0000", 0.0).unwrap();
-        desktop.set_text_shadow("#000000", 0.0, 0.0).unwrap();
+        desktop
+            .set_text_shadow("#000000", 0.0, super::SHADOW_ANGLE, 0.0)
+            .unwrap();
         desktop.set_text_background("#FFFFFF", 0.0, 0.0).unwrap();
         desktop.set_text_glow("#00FF00", 0.0, 0.0).unwrap();
         let look = desktop.text_look().unwrap();
@@ -825,7 +1019,9 @@ mod tests {
         assert_eq!(look.glow_strength, super::GLOW_STRENGTH_START);
         assert_eq!(look.glow_range, super::GLOW_RANGE_START);
 
-        desktop.set_text_shadow("#000000", 20.0, 0.5).unwrap();
+        desktop
+            .set_text_shadow("#000000", 20.0, -45.0, 0.5)
+            .unwrap();
         let text = desktop.draft().unwrap().materials.texts[0].clone();
         assert_eq!(text.shadow_angle, -45.0);
         assert_eq!(text.shadow_distance, 20.0);

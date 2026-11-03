@@ -2,6 +2,7 @@ mod beat;
 mod canvas;
 mod color;
 mod crop;
+mod effect;
 mod extract;
 mod fade;
 mod freeze;
@@ -118,6 +119,8 @@ pub enum EditError {
     TextFont,
     /// A new text clip needs something to say.
     TextEmpty,
+    /// The effect is not one the app ships.
+    UnknownEffect,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
     /// A canvas side is outside 1 through 7680.
@@ -276,6 +279,21 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             TimeRange::new(start.0, duration.0),
             content,
             face,
+        ),
+        Request::AddEffect {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            effect_id,
+        } => effect::add_effect(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+            effect_id,
         ),
         Request::SetKeyframes {
             segment_id,

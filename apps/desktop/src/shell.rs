@@ -188,6 +188,9 @@ impl std::fmt::Display for ShellError {
             }
             Self::Edit(EditError::TextFont) => formatter.write_str("the face is not a file name"),
             Self::Edit(EditError::TextEmpty) => formatter.write_str("type something to add text"),
+            Self::Edit(EditError::UnknownEffect) => {
+                formatter.write_str("that effect is not in this version")
+            }
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
             }

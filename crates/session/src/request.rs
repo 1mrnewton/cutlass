@@ -200,6 +200,17 @@ pub enum Request {
         content: String,
         face: String,
     },
+    /// Place the bundled effect `effect_id`, such as `recipe/shake`, from
+    /// `start` for `duration`. `track_id` is created as an effect row when
+    /// it is missing.
+    AddEffect {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        effect_id: String,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,

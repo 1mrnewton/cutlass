@@ -24,7 +24,10 @@ mod text;
 mod timeline;
 
 pub use cache::ResourceCache;
-pub use canvas::{PhoneRatio, phone_ratios};
+pub use canvas::{
+    BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
+    phone_ratios,
+};
 pub use codecs::{decoders, readers};
 pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
@@ -323,6 +326,28 @@ impl PhoneHost {
             return Ok(());
         }
         self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// What fills the canvas around the main pictures.
+    pub fn background(&self) -> PhoneBackground {
+        phone_background(self.draft())
+    }
+
+    /// Fill the canvas around the main pictures, as one undo step. A blur
+    /// needs a picture on the main lane.
+    pub fn set_background(&mut self, background: &PhoneBackground) -> Result<(), FfiError> {
+        if *background == self.background() {
+            return Ok(());
+        }
+        let taken = media::ids(self.draft());
+        let requests =
+            canvas::background_requests(self.draft(), background, &taken).ok_or_else(|| {
+                FfiError::Refused {
+                    reason: "add a clip to blur behind".to_owned(),
+                }
+            })?;
+        self.apply(self.revision(), &requests)?;
         Ok(())
     }
 
@@ -936,6 +961,46 @@ mod tests {
         assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
         host.undo().unwrap();
         assert_eq!(canvas(&host), (1_920, 1_080, "16:9".to_owned()));
+    }
+
+    #[test]
+    fn a_blur_goes_behind_every_main_picture_and_a_color_takes_its_place() {
+        use crate::PhoneBackground;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        assert!(host.set_background(&PhoneBackground::Blur(0.05)).is_err());
+        for _ in 0..2 {
+            let id = host
+                .import_probed(&fixture("pattern.png"), still(1_000_000))
+                .unwrap();
+            host.append(&id).unwrap();
+        }
+        assert_eq!(host.background(), PhoneBackground::None);
+
+        host.set_background(&PhoneBackground::Blur(0.05)).unwrap();
+        assert_eq!(host.background(), PhoneBackground::Blur(0.05));
+        let canvases = &host.draft().materials.canvases;
+        assert_eq!(canvases.len(), 2);
+        assert_ne!(canvases[0].id, canvases[1].id);
+        let revision = host.revision();
+        host.set_background(&PhoneBackground::Blur(0.05)).unwrap();
+        assert_eq!(host.revision(), revision);
+
+        host.set_background(&PhoneBackground::Color("#E5484D".to_owned()))
+            .unwrap();
+        assert_eq!(
+            host.background(),
+            PhoneBackground::Color("#E5484D".to_owned())
+        );
+        assert!(host.draft().materials.canvases.is_empty());
+        host.undo().unwrap();
+        assert_eq!(host.background(), PhoneBackground::Blur(0.05));
+
+        host.set_background(&PhoneBackground::None).unwrap();
+        assert_eq!(host.background(), PhoneBackground::None);
+        assert_eq!(host.draft().canvas_config.background, None);
     }
 
     #[test]

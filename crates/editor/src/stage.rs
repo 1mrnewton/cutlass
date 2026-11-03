@@ -5,14 +5,15 @@
 //! Points are canvas pixels, x to the right and y down, as a screen draws.
 //! A turn is degrees clockwise on screen. The draft stores the position as
 //! fractions of half the canvas with y up, and rotation counter-clockwise;
-//! this module converts both ways. Keyframes are not read yet: the box is
-//! the clip's stored placement.
+//! this module converts both ways. The box is where the clip's keyframes put
+//! it at the time asked; a gesture on a keyed clip keys its new pose at that
+//! time, as the reference editor does, and on any other clip stores it.
 //!
 //! A video or photo fits inside the canvas. A title keeps the size its text
 //! is drawn at, which only a host with the faces knows: it answers through
 //! [`TextSizes`].
 
-use cutlass_model::{Crop, Draft, MaterialRef, Segment, TrackAttribute};
+use cutlass_model::{Crop, Draft, MaterialRef, Segment, TrackAttribute, clip_at, key_offsets};
 use cutlass_session::{Micros, Request, SegmentId};
 
 /// A centre or an edge snaps within this share of the canvas's short side.
@@ -103,6 +104,9 @@ pub struct StageGesture {
     /// The picture fitted in the canvas at scale 1.
     fitted: (f64, f64),
     start: Pose,
+    /// The offset from the clip's start to key the pose at, when the clip
+    /// has keys.
+    keyed: Option<Micros>,
 }
 
 /// The size a title's text picture is drawn at, before placement.
@@ -130,10 +134,15 @@ pub fn canvas_size(draft: &Draft) -> (f64, f64) {
     }
 }
 
-/// The box of the picture or title clip `segment_id`. Other clips, and
-/// ones with no size, have none.
+/// The box of the picture or title clip `segment_id` at `time`. Other
+/// clips, and ones with no size, have none.
 #[must_use]
-pub fn stage_box(draft: &Draft, segment_id: &SegmentId, sizes: &dyn TextSizes) -> Option<StageBox> {
+pub fn stage_box(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    time: Micros,
+    sizes: &dyn TextSizes,
+) -> Option<StageBox> {
     let segment = draft
         .tracks
         .iter()
@@ -141,7 +150,7 @@ pub fn stage_box(draft: &Draft, segment_id: &SegmentId, sizes: &dyn TextSizes) -
         .find(|segment| segment.id == *segment_id)?;
     let canvas = canvas_size(draft);
     let fitted = fitted(draft, segment, canvas, sizes)?;
-    Some(box_at(segment_id, canvas, fitted, pose_of(segment)))
+    Some(box_at(segment_id, canvas, fitted, pose_of(segment, time)))
 }
 
 /// The topmost picture or title clip under the canvas point `(x, y)` at
@@ -164,14 +173,19 @@ pub fn stage_pick(
         for (segment_index, segment) in track.segments.iter().enumerate() {
             let start = segment.target.start.0;
             let end = start.saturating_add(segment.target.duration.0);
-            if !segment.visible || segment.clip.alpha <= 0.0 || !(start..end).contains(&time.0) {
+            if !segment.visible || !(start..end).contains(&time.0) {
+                continue;
+            }
+            let alpha = clip_at(segment, time).map_or(segment.clip.alpha, |(clip, _)| clip.alpha);
+            if alpha <= 0.0 {
                 continue;
             }
             let key = (segment.render_index, track_index, segment_index);
             if found.as_ref().is_some_and(|(top, _)| *top > key) {
                 continue;
             }
-            if stage_box(draft, &segment.id, sizes).is_some_and(|stage| stage.contains(x, y)) {
+            if stage_box(draft, &segment.id, time, sizes).is_some_and(|stage| stage.contains(x, y))
+            {
                 found = Some((key, segment.id.clone()));
             }
         }
@@ -179,12 +193,13 @@ pub fn stage_pick(
     found.map(|(_, id)| id)
 }
 
-/// Start a gesture on the picture or title clip `segment_id`. Other clips,
-/// and ones on a locked row, have none.
+/// Start a gesture on the picture or title clip `segment_id` at `time`.
+/// Other clips, and ones on a locked row, have none.
 #[must_use]
 pub fn stage_gesture(
     draft: &Draft,
     segment_id: &SegmentId,
+    time: Micros,
     sizes: &dyn TextSizes,
 ) -> Option<StageGesture> {
     let (track, segment) = draft.tracks.iter().find_map(|track| {
@@ -199,7 +214,8 @@ pub fn stage_gesture(
         segment_id: segment_id.clone(),
         canvas,
         fitted: fitted(draft, segment, canvas, sizes)?,
-        start: pose_of(segment),
+        start: pose_of(segment, time),
+        keyed: key_at(segment, time),
     })
 }
 
@@ -271,9 +287,19 @@ impl StageGesture {
         }
     }
 
-    /// The requests that store `pose` on the clip.
+    /// The requests that store `pose` on the clip, keyed when it has keys.
     #[must_use]
     pub fn requests(&self, pose: Pose) -> Vec<Request> {
+        if let Some(offset) = self.keyed {
+            return vec![Request::KeyPose {
+                segment_id: self.segment_id.clone(),
+                offset,
+                x: pose.x,
+                y: pose.y,
+                scale: pose.scale,
+                rotation: pose.rotation,
+            }];
+        }
         vec![
             Request::SetPosition {
                 segment_id: self.segment_id.clone(),
@@ -308,10 +334,20 @@ fn snap_axis(center: f64, length: f64, half: f64, square: bool, reach: f64) -> O
         .map(|(target, _)| target)
 }
 
-fn pose_of(segment: &Segment) -> Pose {
-    let clip = &segment.clip;
-    let scale = if segment.uniform_scale.on {
-        segment.uniform_scale.value
+/// The offset from the clip's start that `time` is at, when the clip has
+/// keys and `time` is on it.
+fn key_at(segment: &Segment, time: Micros) -> Option<Micros> {
+    let offset = time.0.checked_sub(segment.target.start.0)?;
+    let on = (0..=segment.target.duration.0).contains(&offset);
+    (on && !key_offsets(segment).is_empty()).then_some(Micros(offset))
+}
+
+/// The clip's placement at `time`. Keys that do not read leave the stored one.
+fn pose_of(segment: &Segment, time: Micros) -> Pose {
+    let (clip, uniform) = clip_at(segment, time)
+        .unwrap_or_else(|| (segment.clip.clone(), segment.uniform_scale.clone()));
+    let scale = if uniform.on {
+        uniform.value
     } else {
         clip.scale.x
     };
@@ -447,7 +483,7 @@ mod tests {
     fn a_picture_fits_the_canvas_and_its_box_follows_the_placement() {
         let mut draft = draft();
         let main = SegmentId::new("main");
-        let stage = stage_box(&draft, &main, &NoText).unwrap();
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
         assert!(near(stage.center_x, 960.0) && near(stage.center_y, 540.0));
         assert!(near(stage.width, 607.5) && near(stage.height, 1080.0));
         let segment = &mut draft.tracks[0].segments[0];
@@ -455,7 +491,7 @@ mod tests {
         segment.clip.transform.y = 0.5;
         segment.clip.rotation = 90.0;
         segment.uniform_scale.value = 0.5;
-        let stage = stage_box(&draft, &main, &NoText).unwrap();
+        let stage = stage_box(&draft, &main, Micros(0), &NoText).unwrap();
         assert!(near(stage.center_x, 1440.0) && near(stage.center_y, 270.0));
         assert!(near(stage.width, 303.75) && near(stage.turn, 270.0));
         // A quarter turn counter-clockwise lays the tall box on its side.
@@ -488,16 +524,16 @@ mod tests {
             .push(Segment::new("title", "words", TimeRange::new(0, 10)));
         draft.tracks.push(words);
         let title = SegmentId::new("title");
-        assert_eq!(stage_box(&draft, &title, &NoText), None);
-        let stage = stage_box(&draft, &title, &Sized(300.0, 80.0)).unwrap();
+        assert_eq!(stage_box(&draft, &title, Micros(0), &NoText), None);
+        let stage = stage_box(&draft, &title, Micros(0), &Sized(300.0, 80.0)).unwrap();
         assert!(near(stage.width, 300.0) && near(stage.height, 80.0));
-        let huge = stage_box(&draft, &title, &Sized(3840.0, 80.0)).unwrap();
+        let huge = stage_box(&draft, &title, Micros(0), &Sized(3840.0, 80.0)).unwrap();
         assert!(near(huge.width, 1920.0) && near(huge.height, 40.0));
         let picked = stage_pick(&draft, Micros(5), (960.0, 540.0), &Sized(300.0, 80.0));
         assert_eq!(picked, Some(title.clone()));
         let beside = stage_pick(&draft, Micros(5), (960.0, 300.0), &Sized(300.0, 80.0));
         assert_eq!(beside, Some(SegmentId::new("over")));
-        assert!(stage_gesture(&draft, &title, &Sized(300.0, 80.0)).is_some());
+        assert!(stage_gesture(&draft, &title, Micros(0), &Sized(300.0, 80.0)).is_some());
     }
 
     #[test]
@@ -513,7 +549,7 @@ mod tests {
             lower_right_x: 0.5,
             lower_right_y: 1.0,
         };
-        let stage = stage_box(&draft, &SegmentId::new("over"), &NoText).unwrap();
+        let stage = stage_box(&draft, &SegmentId::new("over"), Micros(0), &NoText).unwrap();
         assert!(near(stage.width, 960.0) && near(stage.height, 1080.0));
     }
 
@@ -537,7 +573,7 @@ mod tests {
     #[test]
     fn a_drag_moves_the_centre_and_snaps_to_the_middle() {
         let draft = draft();
-        let gesture = stage_gesture(&draft, &SegmentId::new("main"), &NoText).unwrap();
+        let gesture = stage_gesture(&draft, &SegmentId::new("main"), Micros(0), &NoText).unwrap();
         let step = gesture.step(480.0, -270.0, 1.0, 0.0);
         assert!(near(step.pose.x, 0.5) && near(step.pose.y, 0.5));
         assert_eq!(step.guides, StageGuides::default());
@@ -551,7 +587,7 @@ mod tests {
     #[test]
     fn a_square_edge_snaps_to_the_canvas_edge() {
         let draft = draft();
-        let gesture = stage_gesture(&draft, &SegmentId::new("main"), &NoText).unwrap();
+        let gesture = stage_gesture(&draft, &SegmentId::new("main"), Micros(0), &NoText).unwrap();
         // The tall box is 607.5 wide; its left edge lands near 0.
         let step = gesture.step(-960.0 + 303.75 + 10.0, 0.0, 1.0, 0.0);
         assert!(near(step.stage.center_x, 303.75));
@@ -565,7 +601,7 @@ mod tests {
     fn a_pinch_scales_and_a_twist_turns_with_snaps() {
         let mut draft = draft();
         draft.tracks[0].segments[0].clip.rotation = 10.0;
-        let gesture = stage_gesture(&draft, &SegmentId::new("main"), &NoText).unwrap();
+        let gesture = stage_gesture(&draft, &SegmentId::new("main"), Micros(0), &NoText).unwrap();
         let step = gesture.step(0.0, 0.0, 2.0, 30.0);
         assert!(near(step.pose.scale, 2.0) && near(step.pose.rotation, 340.0));
         assert!(near(step.stage.turn, 20.0));
@@ -581,11 +617,39 @@ mod tests {
     #[test]
     fn a_step_becomes_the_three_placement_requests() {
         let draft = draft();
-        let gesture = stage_gesture(&draft, &SegmentId::new("main"), &NoText).unwrap();
+        let gesture = stage_gesture(&draft, &SegmentId::new("main"), Micros(0), &NoText).unwrap();
         let mut session = cutlass_session::Session::open(draft);
         let step = gesture.step(480.0, -270.0, 0.5, 45.0);
         session.apply(0, &gesture.requests(step.pose)).unwrap();
-        let after = stage_box(session.draft(), gesture.segment_id(), &NoText).unwrap();
+        let after = stage_box(session.draft(), gesture.segment_id(), Micros(0), &NoText).unwrap();
         assert_eq!(after, step.stage);
+    }
+
+    #[test]
+    fn a_keyed_clip_shows_and_keys_its_pose_at_the_playhead() {
+        let mut draft = draft();
+        let main = SegmentId::new("main");
+        let segment = &mut draft.tracks[0].segments[0];
+        cutlass_model::add_keys(segment, Micros(0)).unwrap();
+        cutlass_model::put_key(segment, "KFTypePositionX", Micros(10), 1.0);
+        let middle = stage_box(&draft, &main, Micros(5), &NoText).unwrap();
+        assert!(near(middle.center_x, 960.0 + 480.0), "{middle:?}");
+
+        let gesture = stage_gesture(&draft, &main, Micros(5), &NoText).unwrap();
+        let step = gesture.step(0.0, -270.0, 1.0, 0.0);
+        let requests = gesture.requests(step.pose);
+        assert!(matches!(
+            requests.as_slice(),
+            [Request::KeyPose {
+                offset: Micros(5),
+                ..
+            }]
+        ));
+        let mut session = cutlass_session::Session::open(draft);
+        session.apply(0, &requests).unwrap();
+        let after = stage_box(session.draft(), &main, Micros(5), &NoText).unwrap();
+        assert_eq!(after, step.stage);
+        let start = stage_box(session.draft(), &main, Micros(0), &NoText).unwrap();
+        assert!(near(start.center_y, 540.0), "{start:?}");
     }
 }

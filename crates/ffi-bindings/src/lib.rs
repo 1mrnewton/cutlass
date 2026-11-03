@@ -218,6 +218,54 @@ pub fn speed_at(position: f64) -> f64 {
     cutlass_ffi::speed_at(position)
 }
 
+/// The background swatches, as `#RRGGBB`.
+#[uniffi::export]
+#[must_use]
+pub fn background_colors() -> Vec<String> {
+    cutlass_ffi::BACKGROUND_COLORS
+        .iter()
+        .map(|color| (*color).to_owned())
+        .collect()
+}
+
+/// The background blur strengths, weakest first.
+#[uniffi::export]
+#[must_use]
+pub fn background_blurs() -> Vec<f64> {
+    cutlass_ffi::BACKGROUND_BLURS.to_vec()
+}
+
+/// What fills the canvas around the main pictures.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum Background {
+    /// Clear: black shows.
+    None,
+    /// The project color, `#RRGGBB`.
+    Color { color: String },
+    /// Every main picture over a blurred copy of itself.
+    Blur { blur: f64 },
+}
+
+impl From<cutlass_ffi::PhoneBackground> for Background {
+    fn from(background: cutlass_ffi::PhoneBackground) -> Self {
+        match background {
+            cutlass_ffi::PhoneBackground::None => Self::None,
+            cutlass_ffi::PhoneBackground::Color(color) => Self::Color { color },
+            cutlass_ffi::PhoneBackground::Blur(blur) => Self::Blur { blur },
+        }
+    }
+}
+
+impl From<Background> for cutlass_ffi::PhoneBackground {
+    fn from(background: Background) -> Self {
+        match background {
+            Background::None => Self::None,
+            Background::Color { color } => Self::Color(color),
+            Background::Blur { blur } => Self::Blur(blur),
+        }
+    }
+}
+
 /// Where `speed` sits on the speed scale, 0 to 1.
 #[uniffi::export]
 #[must_use]
@@ -775,6 +823,18 @@ impl Editor {
                 chosen: ratio.chosen,
             })
             .collect())
+    }
+
+    /// What fills the canvas around the main pictures.
+    pub fn background(&self) -> Result<Background, EditorError> {
+        Ok(self.run(|host| host.background())?.into())
+    }
+
+    /// Fill the canvas around the main pictures, as one undo step.
+    pub fn set_background(&self, background: Background) -> Result<(), EditorError> {
+        let background = cutlass_ffi::PhoneBackground::from(background);
+        self.run(move |host| host.set_background(&background))?
+            .map_err(EditorError::from)
     }
 
     /// Give the canvas a ratio from [`Self::ratios`], as one undo step.

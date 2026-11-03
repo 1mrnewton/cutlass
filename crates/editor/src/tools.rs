@@ -119,7 +119,7 @@ const ROOT: &[Tool] = &[
     later(T::Adjust, "Adjust"),
     later(T::Stickers, "Stickers"),
     ready(T::AspectRatio, "Ratio"),
-    later(T::Background, "Background"),
+    ready(T::Background, "Background"),
 ];
 
 const MAIN_CLIP: &[Tool] = &[

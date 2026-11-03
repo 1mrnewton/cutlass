@@ -678,6 +678,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func append(materialId: String) throws  -> String
     
     /**
+     * What fills the canvas around the main pictures.
+     */
+    func background() throws  -> Background
+    
+    /**
      * The tool bar for `clip_id` while it is selected, or `None` for an id
      * no row holds.
      */
@@ -775,6 +780,11 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * goes on from there.
      */
     func seek(timeUs: Int64) throws 
+    
+    /**
+     * Fill the canvas around the main pictures, as one undo step.
+     */
+    func setBackground(background: Background) throws 
     
     /**
      * Look for faces in `folders` and the folders below them, replacing
@@ -961,6 +971,18 @@ open func append(materialId: String)throws  -> String  {
     uniffi_cutlass_ffi_bindings_fn_method_editor_append(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(materialId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * What fills the canvas around the main pictures.
+     */
+open func background()throws  -> Background  {
+    return try  FfiConverterTypeBackground_lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_background(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -1208,6 +1230,18 @@ open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEdi
     uniffi_cutlass_ffi_bindings_fn_method_editor_seek(
             self.uniffiCloneHandle(),
         FfiConverterInt64.lower(timeUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Fill the canvas around the main pictures, as one undo step.
+     */
+open func setBackground(background: Background)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_background(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeBackground_lower(background),uniffiCallStatus
     )
 }
 }
@@ -2630,6 +2664,97 @@ public func FfiConverterTypeWave_lower(_ value: Wave) -> RustBuffer {
 
 
 /**
+ * What fills the canvas around the main pictures.
+ */
+
+public enum Background: Equatable, Hashable {
+    
+    /**
+     * Clear: black shows.
+     */
+    case none
+    /**
+     * The project color, `#RRGGBB`.
+     */
+    case color(color: String
+    )
+    /**
+     * Every main picture over a blurred copy of itself.
+     */
+    case blur(blur: Double
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension Background: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBackground: FfiConverterRustBuffer {
+    typealias SwiftType = Background
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Background {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .none
+        
+        case 2: return .color(color: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .blur(blur: try FfiConverterDouble.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: Background, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .none:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .color(color):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(color, into: &buf)
+            
+        
+        case let .blur(blur):
+            writeInt(&buf, Int32(3))
+            FfiConverterDouble.write(blur, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackground_lift(_ buf: RustBuffer) throws -> Background {
+    return try FfiConverterTypeBackground.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackground_lower(_ value: Background) -> RustBuffer {
+    return FfiConverterTypeBackground.lower(value)
+}
+
+
+
+/**
  * Why a call left the project as it was.
  */
 public 
@@ -3391,6 +3516,31 @@ fileprivate struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceDouble: FfiConverterRustBuffer {
+    typealias SwiftType = [Double]
+
+    public static func write(_ value: [Double], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterDouble.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Double] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Double]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterDouble.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -3688,6 +3838,26 @@ fileprivate struct FfiConverterSequenceTypeWave: FfiConverterRustBuffer {
     }
 }
 /**
+ * The background blur strengths, weakest first.
+ */
+public func backgroundBlurs() -> [Double]  {
+    return try!  FfiConverterSequenceDouble.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_background_blurs(uniffiCallStatus
+    )
+})
+}
+/**
+ * The background swatches, as `#RRGGBB`.
+ */
+public func backgroundColors() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_background_colors(uniffiCallStatus
+    )
+})
+}
+/**
  * The transport clock at `time_us`: whole seconds as `MM:SS`, or
  * `HH:MM:SS` from an hour.
  */
@@ -3856,6 +4026,12 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_background_blurs() != 26456) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_background_colors() != 63200) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_clock() != 41822) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3902,6 +4078,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_background() != 32988) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_clip_bar() != 29840) {
@@ -3959,6 +4138,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() != 52021) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_font_folders() != 41608) {

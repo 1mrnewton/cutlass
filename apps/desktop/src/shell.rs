@@ -8600,6 +8600,57 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_key_moves_to_the_nearest_frame_and_not_onto_another_key() {
+        let temp = Temp::new();
+        let mut desktop = gappy_shell(&temp);
+        let b = SegmentId::new("b");
+        assert!(desktop.clip_key_times(&b).is_empty());
+        desktop.select(Some(b.clone()));
+        let picture = desktop.draft().unwrap().tracks[0].segments[1].clone();
+        let mut keyed = picture.clone();
+        for offset in [0, 500_000] {
+            cutlass_model::put_key(&mut keyed, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        desktop
+            .apply(super::Request::SetKeyframes {
+                segment_id: b.clone(),
+                keyframes: keyed.common_keyframes,
+            })
+            .unwrap();
+        assert_eq!(
+            desktop.clip_key_times(&b),
+            [Micros(2_000_000), Micros(2_500_000)]
+        );
+        // 2.71 s lands on the frame at 2.7 s, at 30 frames a second.
+        desktop
+            .move_clip_key(&b, Micros(2_500_000), Micros(2_710_000))
+            .unwrap();
+        assert_eq!(
+            desktop.clip_key_times(&b),
+            [Micros(2_000_000), Micros(2_700_000)]
+        );
+        assert_eq!(
+            desktop
+                .move_clip_key(&b, Micros(2_700_000), Micros(2_000_000))
+                .unwrap_err()
+                .to_string(),
+            "a key is already there"
+        );
+        // Past the clip's end it stops at the end.
+        desktop
+            .move_clip_key(&b, Micros(2_700_000), Micros(9_000_000))
+            .unwrap();
+        assert_eq!(desktop.clip_key_times(&b)[1], Micros(3_000_000));
+        let revision = desktop.revision();
+        desktop
+            .move_clip_key(&b, Micros(3_000_000), Micros(3_000_000))
+            .unwrap();
+        assert_eq!(desktop.revision(), revision);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.clip_key_times(&b)[1], Micros(2_700_000));
+    }
+
+    #[test]
     fn ripple_delete_and_close_gap_pull_the_later_clips_left() {
         let temp = Temp::new();
         let mut desktop = gappy_shell(&temp);

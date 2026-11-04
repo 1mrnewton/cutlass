@@ -3836,6 +3836,70 @@ fn paint_clip(
     );
     paint_clip_markers(shell, ui, clip, lanes_left, row);
     paint_clip_beats(shell, ui, clip, lanes_left, row);
+    if shell.is_selected(&clip.id) {
+        paint_clip_keys(shell, ui, clip, clip_rect, row);
+    }
+}
+
+/// The selected clip's keys as diamonds along its foot. A click puts the
+/// playhead on the key; a drag moves it, landing on the nearest frame.
+fn paint_clip_keys(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    clip_rect: Rect,
+    row: Rect,
+) {
+    let painter = ui.painter().with_clip_rect(clip_rect.intersect(row));
+    let pixel_size = shell.pixel_size() as f32;
+    let y = clip_rect.bottom() - 8.0;
+    for time in shell.clip_key_times(&clip.id) {
+        let x = clip_rect.left() + (time.0 - clip.start.0) as f32 * pixel_size;
+        let hit = Rect::from_center_size(Pos2::new(x, y), Vec2::new(12.0, 14.0));
+        if !row.intersects(hit) {
+            continue;
+        }
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with(("key", clip.id.as_str(), time.0)),
+            Sense::click_and_drag(),
+        );
+        let dragged_to = response
+            .dragged()
+            .then(|| ui.input(|input| input.pointer.interact_pos()))
+            .flatten();
+        let at = dragged_to.map_or(x, |pos| pos.x.clamp(clip_rect.left(), clip_rect.right()));
+        let on = shell.playhead() == time;
+        let color = if response.hovered() || response.dragged() || on {
+            tokens::EXPORT
+        } else {
+            Color32::WHITE
+        };
+        let c = Pos2::new(at, y);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(0.0, -5.0),
+                c + Vec2::new(5.0, 0.0),
+                c + Vec2::new(0.0, 5.0),
+                c + Vec2::new(-5.0, 0.0),
+            ],
+            color,
+            egui::Stroke::new(1.0, Color32::BLACK),
+        ));
+        if response.drag_stopped()
+            && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
+        {
+            let x = pos.x.clamp(clip_rect.left(), clip_rect.right());
+            let to = clip.start.0
+                + (f64::from(x - clip_rect.left()) / shell.pixel_size()).round() as i64;
+            if let Err(error) = shell.move_clip_key(&clip.id, time, Micros(to)) {
+                shell.set_notice(error.to_string());
+            }
+        } else if response.clicked() {
+            shell.seek(time);
+        }
+        response.on_hover_text("Keyframe: click to go to it, drag to move it");
+    }
 }
 
 fn drag_clip_edge(
@@ -6254,23 +6318,33 @@ mod tests {
 
     /// The centre of the first keyframe diamond painted in `output`.
     fn diamond_pos(output: &egui::FullOutput) -> Option<Pos2> {
-        fn find(shape: &egui::Shape) -> Option<Pos2> {
+        diamonds(output, 12.0).first().copied()
+    }
+
+    /// The centres of the diamonds `width` wide painted in `output`.
+    fn diamonds(output: &egui::FullOutput, width: f32) -> Vec<Pos2> {
+        fn find(shape: &egui::Shape, width: f32, found: &mut Vec<Pos2>) {
             match shape {
                 egui::Shape::Path(path) if path.points.len() == 4 && path.closed => {
                     let [top, right, bottom, left] = [0, 1, 2, 3].map(|i| path.points[i]);
                     let diamond = (top.x - bottom.x).abs() < 0.01
                         && (left.y - right.y).abs() < 0.01
-                        && (right.x - left.x - 12.0).abs() < 0.01;
-                    diamond.then(|| Pos2::new(top.x, left.y))
+                        && (right.x - left.x - width).abs() < 0.01;
+                    if diamond {
+                        found.push(Pos2::new(top.x, left.y));
+                    }
                 }
-                egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
-                _ => None,
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|shape| find(shape, width, found));
+                }
+                _ => {}
             }
         }
-        output
-            .shapes
-            .iter()
-            .find_map(|clipped| find(&clipped.shape))
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            find(&clipped.shape, width, &mut found);
+        }
+        found
     }
 
     #[test]
@@ -6700,6 +6774,86 @@ mod tests {
         let mut shell = Shell::new(decoders, encoders, Settings::default());
         shell.open_folder(&temp).unwrap();
         (shell, temp)
+    }
+
+    #[test]
+    fn a_clip_key_diamond_seeks_on_a_click_and_moves_on_a_drag() {
+        let temp = std::env::temp_dir().join(format!("cutlass-keydrag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut clip =
+            cutlass_model::Segment::new("a", "color", cutlass_model::TimeRange::new(0, 4_000_000));
+        for offset in [0, 1_000_000] {
+            cutlass_model::put_key(&mut clip, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        draft.tracks[0].segments.push(clip);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let id = SegmentId::new("a");
+        shell.select(Some(id.clone()));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let keys = diamonds(&output, 10.0);
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        let second = keys[1];
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::PointerMoved(second),
+                press(second, true),
+                press(second, false),
+            ],
+        );
+        assert_eq!(shell.playhead(), Micros(1_000_000));
+        let step = (1_000_000.0 * shell.pixel_size()) as f32;
+        let to = second + Vec2::new(step, 0.0);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(second), press(second, true)],
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(
+                second + Vec2::new(step / 2.0, 0.0),
+            )],
+        );
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(to)]);
+        frame(&mut shell, &mut view, vec![press(to, false)]);
+        let times = shell.clip_key_times(&id);
+        assert_eq!(times.len(), 2);
+        assert!(
+            (times[1].0 - 2_000_000).abs() <= 34_000,
+            "the key landed at {times:?}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

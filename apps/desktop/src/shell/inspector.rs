@@ -324,6 +324,70 @@ impl Shell {
         }))
     }
 
+    /// The timeline times of clip `segment_id`'s keys that lie on it.
+    #[must_use]
+    pub fn clip_key_times(&self, segment_id: &SegmentId) -> Vec<Micros> {
+        let Some(draft) = self.draft() else {
+            return Vec::new();
+        };
+        let Some(segment) = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == *segment_id)
+        else {
+            return Vec::new();
+        };
+        let start = segment.target.start.0;
+        cutlass_model::key_offsets(segment)
+            .into_iter()
+            .filter(|offset| (0..=segment.target.duration.0).contains(&offset.0))
+            .map(|offset| Micros(start.saturating_add(offset.0)))
+            .collect()
+    }
+
+    /// Move clip `segment_id`'s keys at timeline time `from` to the frame
+    /// nearest `to`, kept on the clip. One undo step.
+    pub fn move_clip_key(
+        &mut self,
+        segment_id: &SegmentId,
+        from: Micros,
+        to: Micros,
+    ) -> Result<(), ShellError> {
+        self.refuse_locked(segment_id)?;
+        let draft = self.session_draft()?;
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == *segment_id)
+            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
+        let (start, length) = (segment.target.start.0, segment.target.duration.0);
+        let rate = draft
+            .frame_rate()
+            .unwrap_or(cutlass_model::FrameRate::FPS_30);
+        let snapped = rate
+            .frame_index(Micros(to.0.max(0)))
+            .and_then(|index| {
+                let below = rate.frame_start(index)?;
+                let above = rate.frame_start(index + 1)?;
+                Some(if to.0 - below.0 <= above.0 - to.0 {
+                    below
+                } else {
+                    above
+                })
+            })
+            .unwrap_or(to);
+        let offset = Micros((snapped.0 - start).clamp(0, length));
+        if offset.0 == from.0 - start {
+            return Ok(());
+        }
+        let request =
+            cutlass_editor::move_key(draft, segment_id, Micros(from.0 - start), offset)
+                .ok_or_else(|| ShellError::Unavailable("a key is already there".to_owned()))?;
+        self.apply(request)
+    }
+
     /// The selected picture or title's keyframes, read at the playhead.
     #[must_use]
     pub fn keys(&self) -> Option<cutlass_editor::ClipKeys> {

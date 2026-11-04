@@ -14,6 +14,7 @@ mod gesture;
 mod hit;
 mod keys;
 mod lane;
+mod library;
 mod reorder;
 mod ripple;
 mod ruler;
@@ -38,6 +39,11 @@ pub use gesture::{
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key};
 pub use lane::{Lane, lane_category, lanes, lanes_for};
+pub use library::{
+    LIBRARY_TOP, LibraryFile, LibraryShelf, LibrarySort, NEW_FOLDER_NAME, add_folder,
+    delete_folder, folder_trail, hide_file, library_files, library_folders, next_folder_name,
+    parent_of, place, rename_folder,
+};
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};

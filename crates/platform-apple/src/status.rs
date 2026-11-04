@@ -29,9 +29,11 @@ pub const PROPERTY_UNSUPPORTED: i32 = -12_900;
 
 /// The session was invalidated. iOS does this to a hardware session when
 /// the app leaves the foreground.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 pub const INVALID_SESSION: i32 = -12_903;
 
 /// The hardware decoder stopped working.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 pub const DECODER_MALFUNCTION: i32 = -12_911;
 
 /// AudioConverter four-character code `fmt?`.
@@ -50,6 +52,7 @@ pub fn open_status(code: i32, what: &'static str) -> Result<(), CodecError> {
 }
 
 /// The session can decode nothing more and has to be opened again.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 pub fn session_lost(code: i32) -> bool {
     matches!(code, INVALID_SESSION | DECODER_MALFUNCTION)
 }

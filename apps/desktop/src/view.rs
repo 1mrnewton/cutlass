@@ -1379,6 +1379,12 @@ fn duration_label(shell: &Shell) -> String {
 }
 
 fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    let inspected = shell
+        .selected()
+        .map(|id| id.as_str().to_owned())
+        .unwrap_or_default();
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
     let padded = rect.shrink2(Vec2::new(16.0, 0.0));
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
@@ -1508,6 +1514,31 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     }
 }
 
+/// Where the inspector keeps the id of the clip it is showing this frame.
+const INSPECTED: &str = "inspector-clip";
+
+/// Whether a field's typing lands: it lost focus on the clip it was typed
+/// for, and not because Escape was pressed. A click on another clip moves
+/// the selection before the field reports losing focus, so the clip is
+/// remembered while the field has focus.
+fn commits(ui: &Ui, response: &egui::Response) -> bool {
+    let clip: String = ui
+        .ctx()
+        .data(|data| data.get_temp(egui::Id::unique(INSPECTED)))
+        .unwrap_or_default();
+    let owner = response.id.with("clip");
+    if response.has_focus() {
+        ui.ctx().data_mut(|data| data.insert_temp(owner, clip));
+        return false;
+    }
+    if !response.lost_focus() {
+        return false;
+    }
+    let typed_for: Option<String> = ui.ctx().data_mut(|data| data.remove_temp(owner));
+    let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    !escaped && typed_for.is_none_or(|typed_for| typed_for == clip)
+}
+
 fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
@@ -1517,7 +1548,7 @@ fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
             egui::Label::new(RichText::new("Name").size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text).on_hover_text("Empty shows Untitled");
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = Some(text.clone());
         }
         if !response.has_focus() {
@@ -1628,7 +1659,7 @@ fn clip_fields(
             view.text_for = inspection.segment_id.as_str().to_owned();
         }
         let response = widgets::field(ui, &mut view.text_buffer);
-        if response.lost_focus()
+        if commits(ui, &response)
             && !inspection.locked
             && let Err(error) = shell.set_text(view.text_buffer.clone())
         {
@@ -1738,7 +1769,7 @@ fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Opt
             egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text);
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = text.parse().ok();
         }
         if !response.has_focus() {
@@ -1783,7 +1814,7 @@ fn color_field(
             egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text);
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = Some(text.clone());
         }
         if !response.has_focus() {

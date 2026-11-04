@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    Append, AppendLane, DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture,
-    Pointer, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
-    append_placement, drop_gesture, fit_pixel_size, free_row, hit_test, last_accuracy_step,
+    Append, AppendLane, DropGesture, DropOutcome, EFFECT_LENGTH, EffectPlace, GestureError,
+    GestureOutcome, MoveGesture, Pointer, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture,
+    TrimPlan, Zoom, ZoomBounds, append_placement, drop_gesture, effect_of_card, effect_requests,
+    effect_row_for, effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step,
     material_span, minimum_pixel_size, move_gesture, snap_guides, title_requests, title_style,
     trim_gesture,
 };
@@ -2611,6 +2612,89 @@ impl Shell {
             face: self.face.name().to_owned(),
         };
         self.apply_requests(&title_requests(style, &place))?;
+        self.select(Some(place.segment_id));
+        Ok(())
+    }
+
+    /// Add the effects shelf's `card_id` at the playhead, on the first effect
+    /// row with room, else on a new one. It runs over every picture below.
+    pub fn add_effect(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Effect,
+            start,
+            EFFECT_LENGTH,
+        )
+        .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_effect(card_id, track_id, start, EFFECT_LENGTH, None)
+    }
+
+    /// Place the effects shelf's `card_id` where it was dropped. On a picture
+    /// clip it takes the clip's span and runs over that clip alone; anywhere
+    /// else on the lanes it goes on an effect row.
+    pub fn drop_effect(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
+        let on_clip = {
+            let draft = self.session_draft()?;
+            hit_test(draft, self.scale(), Pointer { x, y })
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+                .and_then(|hit| hit.segment_id)
+                .and_then(|clip| {
+                    let (start, duration) = effect_target(draft, &clip)?;
+                    Some((clip, start, duration))
+                })
+        };
+        if let Some((clip, start, duration)) = on_clip {
+            let track_id = effect_row_for(self.session_draft()?, &clip)
+                .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+            return self.place_effect(card_id, track_id, start, duration, Some(clip));
+        }
+        let outcome = {
+            let gesture = DropGesture {
+                kind: TrackType::Effect,
+                duration: EFFECT_LENGTH,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        let (track_id, start) = match outcome {
+            DropOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            DropOutcome::Place { track_id, start } => (track_id, start),
+            DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
+        };
+        self.place_effect(card_id, track_id, start, EFFECT_LENGTH, None)
+    }
+
+    fn place_effect(
+        &mut self,
+        card_id: &str,
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+        on: Option<SegmentId>,
+    ) -> Result<(), ShellError> {
+        let effect_id =
+            effect_of_card(card_id).ok_or(ShellError::Edit(EditError::UnknownEffect))?;
+        let place = EffectPlace {
+            track_id,
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id: MaterialId::new(self.fresh("effect")),
+            start,
+            duration,
+            on,
+        };
+        let requests = effect_requests(self.session_draft()?, &effect_id, &place);
+        self.apply_requests(&requests)?;
         self.select(Some(place.segment_id));
         Ok(())
     }
@@ -8615,6 +8699,52 @@ mod tests {
             TimeRange::new(1_000_000, 1_000_000),
         ));
         Folder::new(draft).save(dir).unwrap();
+    }
+
+    #[test]
+    fn an_effect_dropped_on_a_clip_runs_over_it_alone_and_one_at_the_playhead_over_all() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        let card = cutlass_editor::effect_cards()[0].id.clone();
+        let main_row = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_effect(&card, lane_time(&desktop, 1_500_000.0), main_row)
+            .unwrap();
+        let effects = |desktop: &Shell| -> Vec<Segment> {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackType::Effect)
+                .flat_map(|track| track.segments.clone())
+                .collect()
+        };
+        let bound = effects(&desktop);
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].target, TimeRange::new(1_000_000, 1_000_000));
+        assert_eq!(bound[0].bound_clip(), Some(SegmentId::new("right")));
+        assert_eq!(desktop.selected(), Some(&bound[0].id));
+
+        desktop.seek(Micros(0));
+        desktop.add_effect(&card).unwrap();
+        let all = effects(&desktop);
+        assert_eq!(all.len(), 2);
+        let free = all
+            .iter()
+            .find(|segment| segment.id != bound[0].id)
+            .unwrap();
+        assert_eq!(free.bound_clip(), None);
+        assert_eq!(
+            free.target,
+            TimeRange::new(0, cutlass_editor::EFFECT_LENGTH.0)
+        );
+        desktop.undo().unwrap();
+        assert_eq!(effects(&desktop).len(), 1);
+        assert!(desktop.add_effect("effect:recipe/none").is_err());
     }
 
     #[test]

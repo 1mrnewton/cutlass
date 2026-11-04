@@ -103,7 +103,7 @@ impl Shelf {
             Self::Audio => "No audio yet. Use File → Import.",
             Self::Text => "No title matches the search.",
             Self::Stickers => "No stickers in this project.",
-            Self::Effects => "No effects in this project.",
+            Self::Effects => "No effect matches the search.",
             Self::Transitions => "No transitions in this project.",
             Self::Filters => "No filters in this project.",
             Self::Adjustments => "No adjustments in this project.",
@@ -985,6 +985,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
             } else if let Some(id) = card_grid(shell, ui, view, &cards, bin) {
                 let added = if id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
                     shell.add_title(&id)
+                } else if id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+                    shell.add_effect(&id)
                 } else {
                     shell.add_medium(&id)
                 };
@@ -1636,13 +1638,27 @@ fn bin_cards(
                 cards.push(title_card(style));
             }
         }
-        Shelf::Stickers
-        | Shelf::Effects
-        | Shelf::Filters
-        | Shelf::Adjustments
-        | Shelf::Templates => {}
+        Shelf::Effects => {
+            for effect in cutlass_editor::effect_cards() {
+                if !query.is_empty() && !effect.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(effect_card(effect));
+            }
+        }
+        Shelf::Stickers | Shelf::Filters | Shelf::Adjustments | Shelf::Templates => {}
     }
     cards
+}
+
+fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
+    BinCard {
+        id: effect.id,
+        name: effect.name,
+        meta: card_meta(cutlass_editor::EFFECT_LENGTH.0),
+        on_timeline: false,
+        look: CardLook::Swatch,
+    }
 }
 
 fn title_card(style: &cutlass_editor::TitleStyle) -> BinCard {
@@ -3249,6 +3265,8 @@ fn release_library_drop(
         shell.drop_transition(&material_id, x, y)
     } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
         shell.drop_title(&material_id, x, y)
+    } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+        shell.drop_effect(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };
@@ -3291,6 +3309,12 @@ fn paint_library_ghost(shell: &mut Shell, ui: &Ui) {
 fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
     if let Some(style) = cutlass_editor::title_style(material_id) {
         return Some(title_card(style));
+    }
+    if let Some(effect) = cutlass_editor::effect_cards()
+        .into_iter()
+        .find(|effect| effect.id == material_id)
+    {
+        return Some(effect_card(effect));
     }
     if let Some(offer) = crate::shell::TRANSITION_OFFERS
         .iter()

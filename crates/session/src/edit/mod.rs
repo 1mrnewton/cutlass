@@ -9,6 +9,7 @@ mod fade;
 mod freeze;
 mod import;
 mod keyframe;
+mod lane;
 mod linkage;
 mod magnet;
 mod mark;
@@ -74,6 +75,11 @@ pub enum EditError {
     MissingMaterial,
     /// A trim reaches before the media's first frame or past its last.
     SourceBounds,
+    /// A clip would start before the timeline does.
+    BeforeZero,
+    /// The lane holds another kind of clip: sound on a picture lane, a
+    /// title on a sound lane, and so on.
+    LaneKind,
     /// The material id is already in a pool.
     DuplicateMaterial,
     /// The split time falls inside a blend window.

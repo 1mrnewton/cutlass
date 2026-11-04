@@ -117,6 +117,7 @@ fn edit_cause(error: EditError) -> String {
             "the track attribute is not mute, hide, lock, solo, or muted-by-solo".to_owned()
         }
         EditError::MissingMaterial => "the material is not on the draft".to_owned(),
+        EditError::SourceBounds => "the clip cannot reach past the start or end of its media".to_owned(),
         EditError::DuplicateMaterial => "the material id is already in a pool".to_owned(),
         EditError::TransitionWindow => "the split falls inside a transition window".to_owned(),
         EditError::AlreadyLinked => "the segment is already linked".to_owned(),

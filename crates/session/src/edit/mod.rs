@@ -72,6 +72,8 @@ pub enum EditError {
     /// The bit is not mute, hide, lock, solo, or muted-by-solo.
     UnknownAttribute,
     MissingMaterial,
+    /// A trim reaches before the media's first frame or past its last.
+    SourceBounds,
     /// The material id is already in a pool.
     DuplicateMaterial,
     /// The split time falls inside a blend window.

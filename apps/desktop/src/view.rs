@@ -5895,6 +5895,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    /// The centre of the first keyframe diamond painted in `output`.
+    fn diamond_pos(output: &egui::FullOutput) -> Option<Pos2> {
+        fn find(shape: &egui::Shape) -> Option<Pos2> {
+            match shape {
+                egui::Shape::Path(path) if path.points.len() == 4 && path.closed => {
+                    let [top, right, bottom, left] = [0, 1, 2, 3].map(|i| path.points[i]);
+                    let diamond = (top.x - bottom.x).abs() < 0.01
+                        && (left.y - right.y).abs() < 0.01
+                        && (right.x - left.x - 12.0).abs() < 0.01;
+                    diamond.then(|| Pos2::new(top.x, left.y))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+                _ => None,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| find(&clipped.shape))
+    }
+
+    #[test]
+    fn the_diamond_keys_the_picture_and_the_graphs_show_between_keys() {
+        let temp = std::env::temp_dir().join(format!("cutlass-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.width = 640;
+        movie.height = 360;
+        draft.materials.videos.push(movie);
+        let mut main = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        main.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(main);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "Graphs").is_none());
+        let diamond = diamond_pos(&output).expect("a keyframe diamond");
+        frame(&mut shell, click(diamond));
+        assert_eq!(shell.keys().unwrap().times, vec![Micros(0)]);
+        shell.seek(Micros(2_000_000));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        frame(
+            &mut shell,
+            click(diamond_pos(&output).expect("the diamond")),
+        );
+        assert_eq!(shell.keys().unwrap().times.len(), 2);
+        shell.seek(Micros(1_000_000));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "Graphs").is_some(), "the Graphs row");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     #[test]
     fn dragging_the_ruler_moves_the_playhead() {
         let temp = std::env::temp_dir().join(format!("cutlass-scrub-{}", std::process::id()));

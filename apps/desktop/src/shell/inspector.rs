@@ -317,10 +317,68 @@ impl Shell {
     pub fn set_rotation(&mut self, degrees: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a turn belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetRotation {
+        let request = self.keyed_request(&segment_id, |pose| pose.rotation = degrees);
+        self.apply(request.unwrap_or(Request::SetRotation {
             segment_id,
             degrees,
-        })
+        }))
+    }
+
+    /// The selected picture or title's keyframes, read at the playhead.
+    #[must_use]
+    pub fn keys(&self) -> Option<cutlass_editor::ClipKeys> {
+        let segment_id = self.selected()?;
+        let draft = self.draft()?;
+        let sizes = super::FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        cutlass_editor::clip_keys(draft, segment_id, self.playhead, &sizes)
+    }
+
+    /// Remove the selected clip's key under the playhead, or key its pose
+    /// and opacity there. One undo step.
+    pub fn toggle_keyframe(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("keyframes belong on a picture or title")?;
+        self.refuse_locked(&segment_id)?;
+        let keys = self.keys().ok_or_else(|| {
+            ShellError::Unavailable("keyframes belong on a picture or title".to_owned())
+        })?;
+        let request = keys.toggle(&segment_id, self.playhead).ok_or_else(|| {
+            ShellError::Unavailable("move the playhead onto the clip to key it".to_owned())
+        })?;
+        self.apply(request)
+    }
+
+    /// Move the playhead to the selected clip's key before it, or after it
+    /// when `forward`. Nothing moves past the first or last key.
+    pub fn step_keyframe(&mut self, forward: bool) {
+        let target = self.keys().and_then(|keys| {
+            if forward {
+                keys.after(self.playhead)
+            } else {
+                keys.before(self.playhead)
+            }
+        });
+        if let Some(time) = target {
+            self.seek(time);
+        }
+    }
+
+    /// Ease the span of keys the playhead is in along the Graphs curve
+    /// `graph`, or make it straight with `None`. One undo step.
+    pub fn ease_keyframes(&mut self, graph: Option<String>) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("keyframes belong on a picture or title")?;
+        self.refuse_locked(&segment_id)?;
+        let request = self
+            .keys()
+            .and_then(|keys| keys.ease(&segment_id, graph))
+            .ok_or_else(|| {
+                ShellError::Unavailable(
+                    "move the playhead between two keyframes to ease them".to_owned(),
+                )
+            })?;
+        self.apply(request)
     }
 
     /// Ring the selected title's letters in `color`, `width` ems wide. An

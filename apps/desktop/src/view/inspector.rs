@@ -330,18 +330,26 @@ fn position_size(
             )
         })
         .unwrap_or((960.0, 540.0));
+    let keys = shell.keys();
+    let playhead = shell.playhead();
+    let mut step = None;
     body(ui, |ui| {
         let scale = (inspection.scale_x * 100.0).round();
-        if let Some(value) = slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
-            format!("{v:.0}%")
-        }) {
+        let scaled = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+            slider(ui, state, "scale", "Scale", scale, 1.0..=500.0, |v| {
+                format!("{v:.0}%")
+            })
+        });
+        if let Some(value) = scaled {
             send(shell, |shell| shell.set_scale(value / 100.0));
         }
         switch_row(ui, "Uniform scale", true, false).on_disabled_hover_text(LATER);
         // The prototype counts canvas pixels from the middle, with Y down.
         let x = (inspection.transform_x * half_width).round();
         let y = (-inspection.transform_y * half_height).round();
-        let (new_x, new_y) = pair_row(ui, state, "Position", ("X", x), ("Y", y));
+        let (new_x, new_y) = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+            pair_row(ui, state, "Position", ("X", x), ("Y", y))
+        });
         if let Some(value) = new_x {
             send(shell, |shell| {
                 shell.set_position(value / half_width, inspection.transform_y)
@@ -353,9 +361,22 @@ fn position_size(
             });
         }
         let rotation = inspection.rotation;
-        if let (Some(value), _) = pair_row(ui, state, rotate_label, ("°", rotation), ("", f64::NAN))
-        {
+        let turned = keyed_row(ui, keys.as_ref(), playhead, &mut step, |ui| {
+            pair_row(ui, state, rotate_label, ("°", rotation), ("", f64::NAN))
+        });
+        match step {
+            Some(KeyStep::Back) => shell.step_keyframe(false),
+            Some(KeyStep::Toggle) => send(shell, Shell::toggle_keyframe),
+            Some(KeyStep::Forward) => shell.step_keyframe(true),
+            None => {}
+        }
+        if let (Some(value), _) = turned {
             send(shell, |shell| shell.set_rotation(value));
+        }
+        if let Some(keys) = keys.as_ref().filter(|keys| keys.span.is_some())
+            && let Some(graph) = graph_row(ui, keys)
+        {
+            send(shell, |shell| shell.ease_keyframes(graph));
         }
         if rotate_label == "Rotate" {
             use cutlass_editor::StageAlign;
@@ -581,6 +602,172 @@ fn animation_tab(
     names.extend_from_slice(motions.get(state.page).copied().unwrap_or_default());
     later_tiles(ui, &names);
     later_slider(ui, "Duration", 2.0, "2.0s");
+}
+
+/// A press on a row's keyframe buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyStep {
+    Back,
+    Toggle,
+    Forward,
+}
+
+/// The room the ◀ ◆ ▶ buttons take at a row's end.
+const KEYS_WIDTH: f32 = 66.0;
+
+/// `row` with the clip's keyframe buttons at its end, when the clip takes
+/// keys. The model keys a clip's whole pose at once, so each row's buttons
+/// step through and toggle the same keys.
+fn keyed_row<R>(
+    ui: &mut Ui,
+    keys: Option<&cutlass_editor::ClipKeys>,
+    playhead: Micros,
+    step: &mut Option<KeyStep>,
+    row: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let Some(keys) = keys else {
+        return row(ui);
+    };
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - KEYS_WIDTH).max(80.0);
+        let inner = ui
+            .allocate_ui(Vec2::new(width, 30.0), |ui| ui.vertical(row).inner)
+            .inner;
+        if let Some(pressed) = key_buttons(ui, keys, playhead) {
+            *step = Some(pressed);
+        }
+        inner
+    })
+    .inner
+}
+
+/// ◀ to the key before the playhead, ◆ to key here or unkey, ▶ to the key
+/// after. The diamond is filled on a key; an arrow is faint with no key
+/// that way.
+fn key_buttons(ui: &mut Ui, keys: &cutlass_editor::ClipKeys, playhead: Micros) -> Option<KeyStep> {
+    let mut pressed = None;
+    let on = keys.here.is_some();
+    let buttons = [
+        (
+            KeyStep::Back,
+            keys.before(playhead).is_some(),
+            "Previous keyframe",
+        ),
+        (
+            KeyStep::Toggle,
+            true,
+            if on {
+                "Remove keyframe"
+            } else {
+                "Add keyframe"
+            },
+        ),
+        (
+            KeyStep::Forward,
+            keys.after(playhead).is_some(),
+            "Next keyframe",
+        ),
+    ];
+    ui.spacing_mut().item_spacing.x = 2.0;
+    for (which, live, tip) in buttons {
+        let sense = if live { Sense::click() } else { Sense::hover() };
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(20.0, 24.0), sense);
+        let color = if !live {
+            tokens::FAINT
+        } else if response.hovered() {
+            tokens::TEXT
+        } else {
+            tokens::MUTED
+        };
+        let c = rect.center();
+        let painter = ui.painter();
+        match which {
+            KeyStep::Back | KeyStep::Forward => {
+                let toward = if which == KeyStep::Back { -1.0 } else { 1.0 };
+                let points = vec![
+                    c + Vec2::new(4.0 * toward, 0.0),
+                    c + Vec2::new(-3.0 * toward, -4.5),
+                    c + Vec2::new(-3.0 * toward, 4.5),
+                ];
+                painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+            }
+            KeyStep::Toggle => {
+                let points = vec![
+                    c + Vec2::new(0.0, -6.0),
+                    c + Vec2::new(6.0, 0.0),
+                    c + Vec2::new(0.0, 6.0),
+                    c + Vec2::new(-6.0, 0.0),
+                ];
+                let (fill, edge) = if on {
+                    (tokens::EXPORT, tokens::EXPORT)
+                } else {
+                    (Color32::TRANSPARENT, color)
+                };
+                painter.add(egui::Shape::convex_polygon(
+                    points,
+                    fill,
+                    Stroke::new(1.2, edge),
+                ));
+            }
+        }
+        if response.on_hover_text(tip).clicked() {
+            pressed = Some(which);
+        }
+    }
+    pressed
+}
+
+/// The Graphs row for the span of keys the playhead is in: None, then
+/// each curve drawn in its tile, the one easing the span outlined. A
+/// press answers the curve to ease along, or `None` inside for none.
+fn graph_row(ui: &mut Ui, keys: &cutlass_editor::ClipKeys) -> Option<Option<String>> {
+    let mut picked = None;
+    ui.add_space(4.0);
+    row_label(ui, "Graphs");
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let straight = cutlass_editor::KeyGraph {
+            name: String::new(),
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+        };
+        let curves = std::iter::once((None, straight)).chain(
+            cutlass_editor::key_graphs()
+                .into_iter()
+                .map(|graph| (Some(graph.name.clone()), graph)),
+        );
+        for (name, graph) in curves {
+            let on = name == keys.graph;
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(48.0, 40.0), Sense::click());
+            let painter = ui.painter();
+            painter.rect_filled(rect, CornerRadius::same(6), BOX);
+            if on {
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(6),
+                    Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let inner = rect.shrink(9.0);
+            let line: Vec<egui::Pos2> = graph
+                .points
+                .iter()
+                .map(|&(x, y)| {
+                    egui::pos2(
+                        inner.left() + inner.width() * x as f32,
+                        inner.bottom() - inner.height() * y as f32,
+                    )
+                })
+                .collect();
+            painter.add(egui::Shape::line(line, Stroke::new(1.5, tokens::TEXT)));
+            let tip = name.as_deref().unwrap_or("None");
+            if response.on_hover_text(tip).clicked() && !on {
+                picked = Some(name);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    picked
 }
 
 /// One side's grid: None, then each preset of that side, the chosen one

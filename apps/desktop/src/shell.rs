@@ -2712,17 +2712,21 @@ impl Shell {
         let (material, text, words) = material_label(draft, &segment.material_id);
         let (text_size, text_color, text_align, letter_spacing, line_spacing, line_width, font) =
             text_style(draft, &segment.material_id);
+        // A keyed clip shows its pose where the playhead is.
+        let keyed = cutlass_editor::keyed_pose(draft, id, self.playhead).map(|(_, pose)| pose);
+        let (scale_x, scale_y) =
+            keyed.map_or(picture_scale(segment), |pose| (pose.scale, pose.scale));
         Some(Inspection {
             segment_id: segment.id.clone(),
             start: segment.target.start,
             duration: segment.target.duration,
             speed: segment.speed,
             volume: segment.volume,
-            scale_x: picture_scale(segment).0,
-            scale_y: picture_scale(segment).1,
-            rotation: segment.clip.rotation,
-            transform_x: segment.clip.transform.x,
-            transform_y: segment.clip.transform.y,
+            scale_x,
+            scale_y,
+            rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
+            transform_x: keyed.map_or(segment.clip.transform.x, |pose| pose.x),
+            transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
             opacity: segment.clip.alpha,
             text_size,
             text_color,
@@ -3649,7 +3653,8 @@ impl Shell {
     pub fn set_position(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a placement belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetPosition { segment_id, x, y })
+        let request = self.keyed_request(&segment_id, |pose| (pose.x, pose.y) = (x, y));
+        self.apply(request.unwrap_or(Request::SetPosition { segment_id, x, y }))
     }
 
     /// Put the selected picture or title where an align button says: an
@@ -3665,7 +3670,8 @@ impl Shell {
         };
         let (x, y) = cutlass_editor::stage_align(draft, &segment_id, self.playhead, &sizes, align)
             .ok_or_else(|| ShellError::Unavailable("the clip has no size to align".to_owned()))?;
-        self.apply(Request::SetPosition { segment_id, x, y })
+        let request = self.keyed_request(&segment_id, |pose| (pose.x, pose.y) = (x, y));
+        self.apply(request.unwrap_or(Request::SetPosition { segment_id, x, y }))
     }
 
     /// The selected clip's in and out animations, when it is a picture or
@@ -3720,7 +3726,29 @@ impl Shell {
     pub fn set_scale(&mut self, scale: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a placement belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetScale { segment_id, scale })
+        let request = self.keyed_request(&segment_id, |pose| pose.scale = scale);
+        self.apply(request.unwrap_or(Request::SetScale { segment_id, scale }))
+    }
+
+    /// On a clip with keys, with the playhead on it, the request that keys
+    /// its pose there after `edit`, as a stage drag does. Elsewhere `None`,
+    /// and the edit changes the stored pose.
+    fn keyed_request(
+        &self,
+        segment_id: &SegmentId,
+        edit: impl FnOnce(&mut cutlass_editor::Pose),
+    ) -> Option<Request> {
+        let (offset, mut pose) =
+            cutlass_editor::keyed_pose(self.draft()?, segment_id, self.playhead)?;
+        edit(&mut pose);
+        Some(Request::KeyPose {
+            segment_id: segment_id.clone(),
+            offset,
+            x: pose.x,
+            y: pose.y,
+            scale: pose.scale,
+            rotation: pose.rotation,
+        })
     }
 
     /// Set how solid the selected picture is. `1` is solid and `0` is clear.
@@ -9092,6 +9120,62 @@ mod tests {
         assert_eq!(desktop.animations().unwrap().leave, None);
         desktop.set_animation(true, None, Micros(0)).unwrap();
         assert_eq!(desktop.animations().unwrap().enter, None);
+    }
+
+    #[test]
+    fn keys_toggle_step_and_ease_and_a_keyed_clip_keys_its_pose() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.width = 640;
+        video.height = 360;
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(picture);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+
+        // With no keys a scale is the stored one.
+        desktop.set_scale(0.5).unwrap();
+        assert!(desktop.keys().unwrap().times.is_empty());
+        desktop.toggle_keyframe().unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.set_scale(1.5).unwrap();
+        // A pose edit on a keyed clip keys it at the playhead.
+        let keys = desktop.keys().unwrap();
+        assert_eq!(keys.times, vec![Micros(0), Micros(2_000_000)]);
+        assert_eq!(keys.here, Some(Micros(2_000_000)));
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.5);
+        desktop.seek(Micros(1_000_000));
+        let halfway = desktop.inspection().unwrap().scale_x;
+        assert!(halfway > 0.5 && halfway < 1.5, "halfway {halfway}");
+
+        desktop.step_keyframe(true);
+        assert_eq!(desktop.playhead(), Micros(2_000_000));
+        desktop.step_keyframe(true);
+        assert_eq!(desktop.playhead(), Micros(2_000_000));
+        desktop.step_keyframe(false);
+        assert_eq!(desktop.playhead(), Micros(0));
+
+        desktop.seek(Micros(1_000_000));
+        let curve = cutlass_editor::key_graphs()[0].name.clone();
+        desktop.ease_keyframes(Some(curve.clone())).unwrap();
+        assert_eq!(desktop.keys().unwrap().graph, Some(curve));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.keys().unwrap().graph, None);
+
+        desktop.seek(Micros(2_000_000));
+        desktop.toggle_keyframe().unwrap();
+        assert_eq!(desktop.keys().unwrap().times, vec![Micros(0)]);
+        desktop.seek(Micros(5_000_000));
+        assert_eq!(
+            desktop.toggle_keyframe().unwrap_err().to_string(),
+            "move the playhead onto the clip to key it"
+        );
     }
 
     #[test]

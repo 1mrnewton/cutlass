@@ -49,6 +49,7 @@ pub fn split(
     left.target.duration = Micros(left_duration);
     right.target.start = at;
     right.target.duration = Micros(right_duration);
+    cutlass_model::shift_keys(&mut right, -left_duration);
     split_source(&mut left, &mut right, &current, speed)?;
     super::mark::split_time_marks(draft, &mut left, &mut right, left_duration, right_id)?;
     super::beat::split_beats(draft, &mut left, &mut right, right_id)?;

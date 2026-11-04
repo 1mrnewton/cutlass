@@ -525,6 +525,20 @@ pub fn remove_keys(segment: &mut Segment, offset: Micros) -> bool {
     removed
 }
 
+/// Move every key `by` along the clip, as when the clip's start moves
+/// `-by` over the same footage. Keys that end up before the start or past
+/// the end stay, so the clip between still samples as it did and a trim
+/// back out finds them again.
+pub fn shift_keys(segment: &mut Segment, by: i64) {
+    for key in segment
+        .common_keyframes
+        .iter_mut()
+        .flat_map(|group| &mut group.keyframe_list)
+    {
+        key.time_offset = Micros(key.time_offset.0.saturating_add(by));
+    }
+}
+
 fn id_field(id: &str) -> Map<String, Value> {
     let mut rest = Map::new();
     rest.insert("id".to_owned(), Value::String(id.to_owned()));

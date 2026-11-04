@@ -54,6 +54,8 @@ fn apply_edge(
                 .ok_or(EditError::Range(cutlass_model::RangeError::EndOverflow))?;
             segment.target.start = time;
             segment.target.duration = Micros(duration);
+            // A key stays on the moment of footage it was set on.
+            cutlass_model::shift_keys(segment, -delta);
             if let Some(source) = segment.source_range.as_mut() {
                 let source_delta = map_timeline_to_source(delta, speed)?;
                 let source_duration = map_timeline_to_source(duration, speed)?;

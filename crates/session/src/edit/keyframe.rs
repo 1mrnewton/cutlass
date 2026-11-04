@@ -245,6 +245,55 @@ mod tests {
     }
 
     #[test]
+    fn a_split_or_a_start_trim_keeps_each_key_on_its_moment() {
+        let mut session = open();
+        let revision = session
+            .apply(1, &[pose(0, 0.0), pose(800_000, 1.0)])
+            .unwrap();
+        let x_at = |session: &Session, id: &str, time: i64| {
+            let segment = session.draft().tracks[0]
+                .segments
+                .iter()
+                .find(|segment| segment.id.as_str() == id)
+                .unwrap();
+            cutlass_model::clip_at(segment, &[], Micros(time))
+                .unwrap()
+                .0
+                .transform
+                .x
+        };
+        let before = x_at(&session, "a", 600_000);
+        let revision = session
+            .apply(
+                revision,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(400_000),
+                    right_id: "b".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(x_at(&session, "b", 600_000), before);
+        assert_eq!(x_at(&session, "a", 200_000), 0.25);
+        session
+            .apply(
+                revision,
+                &[Request::Trim {
+                    segment_id: "b".into(),
+                    edge: crate::request::TrimEdge::Start,
+                    time: Micros(500_000),
+                }],
+            )
+            .unwrap();
+        // Main packs, so the trimmed clip slides back to the cut; the
+        // footage a tenth of a second in is still the old 0.6 s.
+        let right = &session.draft().tracks[0].segments[1];
+        assert_eq!(key_offsets(right), [Micros(-500_000), Micros(300_000)]);
+        let start = right.target.start.0;
+        assert_eq!(x_at(&session, "b", start + 100_000), before);
+    }
+
+    #[test]
     fn a_key_off_the_clip_or_missing_is_refused() {
         let mut session = open();
         assert_eq!(

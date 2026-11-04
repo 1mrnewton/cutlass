@@ -61,6 +61,13 @@ impl PhoneKeys {
                 .map(|graph| graph.resource_name.clone())
                 .filter(|name| !name.is_empty())
         });
+        // Keys a split or trim left outside the clip still shape it, but
+        // only those on it are marked.
+        let end = start.0.saturating_add(segment.target.duration.0);
+        let times = times
+            .into_iter()
+            .filter(|key| (start.0..=end).contains(&key.0))
+            .collect();
         Some(Self {
             times,
             here,

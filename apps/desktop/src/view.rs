@@ -296,12 +296,27 @@ fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
                     });
                 });
                 let bar = egui::ProgressBar::new(job.fraction.unwrap_or(0.0));
-                ui.add(match job.fraction {
-                    Some(_) => bar.show_percentage(),
-                    None => bar.animate(true),
+                ui.add(match (job.fraction, job.left) {
+                    (Some(_), Some(left)) => bar.text(format!(
+                        "{:.0}%, about {} left",
+                        job.fraction.unwrap_or(0.0) * 100.0,
+                        spoken_duration(left)
+                    )),
+                    (Some(_), None) => bar.show_percentage(),
+                    (None, _) => bar.animate(true),
                 });
             });
         });
+}
+
+/// A wait as people say it: seconds under two minutes, then minutes.
+fn spoken_duration(left: std::time::Duration) -> String {
+    let seconds = left.as_secs().max(1);
+    if seconds < 120 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min", seconds.div_ceil(60))
+    }
 }
 
 /// The movie the last export wrote, with a way to its folder.

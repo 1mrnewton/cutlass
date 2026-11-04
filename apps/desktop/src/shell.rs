@@ -3064,6 +3064,7 @@ impl Shell {
             if running.stopping {
                 "Stopping".clone_into(&mut view.stage);
                 view.fraction = None;
+                view.left = None;
             }
             view
         })

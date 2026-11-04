@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::time::{Duration, Instant};
 
 /// What a running job shows in the window.
 #[derive(Clone, Debug, PartialEq)]
@@ -12,23 +13,61 @@ pub struct JobView {
     pub stage: String,
     /// 0 to 1, or `None` while the job cannot tell.
     pub fraction: Option<f32>,
+    /// About how long the stage has to go, once it has run long enough to
+    /// tell.
+    pub left: Option<Duration>,
+}
+
+/// What a worker last reported: its stage, when the stage began, and how
+/// far along it is.
+struct State {
+    stage: String,
+    began: Instant,
+    fraction: Option<f32>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            stage: String::new(),
+            began: Instant::now(),
+            fraction: None,
+        }
+    }
+}
+
+/// The time a stage `fraction` done after `elapsed` has left, at the pace
+/// so far. Nothing until a second has passed and a fiftieth is done.
+#[must_use]
+pub fn time_left(elapsed: Duration, fraction: f32) -> Option<Duration> {
+    if elapsed < Duration::from_secs(1) || !(0.02..1.0).contains(&fraction) {
+        return None;
+    }
+    Some(elapsed.mul_f32((1.0 - fraction) / fraction))
 }
 
 /// The worker's side: report where it is, and look for a cancel.
 #[derive(Default)]
 pub struct Progress {
-    state: Mutex<(String, Option<f32>)>,
+    state: Mutex<State>,
     cancel: AtomicBool,
 }
 
 impl Progress {
     /// A new step, with no fraction until the step reports one.
     pub fn stage(&self, text: &str) {
-        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = (text.to_owned(), None);
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = State {
+            stage: text.to_owned(),
+            began: Instant::now(),
+            fraction: None,
+        };
     }
 
     pub fn fraction(&self, done: f32) {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner).1 = Some(done.clamp(0.0, 1.0));
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .fraction = Some(done.clamp(0.0, 1.0));
     }
 
     /// The window asked the job to stop.
@@ -75,16 +114,18 @@ impl<L: Send + 'static> Job<L> {
     }
 
     pub fn view(&self) -> JobView {
-        let (stage, fraction) = self
+        let state = self
             .progress
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+            .unwrap_or_else(PoisonError::into_inner);
         JobView {
             label: self.label.clone(),
-            stage,
-            fraction,
+            stage: state.stage.clone(),
+            fraction: state.fraction,
+            left: state
+                .fraction
+                .and_then(|fraction| time_left(state.began.elapsed(), fraction)),
         }
     }
 
@@ -104,8 +145,18 @@ impl<L: Send + 'static> Job<L> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Job, Poll};
+    use super::{Job, Poll, time_left};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn time_left_follows_the_pace_so_far_once_it_can_tell() {
+        let ten = Duration::from_secs(10);
+        assert_eq!(time_left(ten, 0.25), Some(Duration::from_secs(30)));
+        assert_eq!(time_left(ten, 0.5), Some(ten));
+        assert_eq!(time_left(Duration::from_millis(500), 0.5), None);
+        assert_eq!(time_left(ten, 0.01), None);
+        assert_eq!(time_left(ten, 1.0), None);
+    }
 
     fn wait<L: Send + 'static>(job: &Job<L>) -> Poll<L> {
         let until = Instant::now() + Duration::from_secs(10);

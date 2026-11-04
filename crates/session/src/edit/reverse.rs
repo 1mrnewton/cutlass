@@ -17,6 +17,7 @@ pub fn set_reverse(
     let material_id = draft.tracks[track_index].segments[segment_index]
         .material_id
         .clone();
+    let material_id = super::own::own(draft, track_index, segment_index, &material_id)?;
     let exists = draft
         .materials
         .videos

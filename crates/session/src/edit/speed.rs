@@ -167,6 +167,15 @@ pub fn set_constant_speed(
     let refs = next.extra_material_refs.clone();
     draft.tracks[track_index].segments[segment_index] = next;
     for material_id in refs {
+        if !draft
+            .materials
+            .speeds
+            .iter()
+            .any(|kept| kept.id == material_id)
+        {
+            continue;
+        }
+        let material_id = super::own::own(draft, track_index, segment_index, &material_id)?;
         if let Some(material) = draft
             .materials
             .speeds

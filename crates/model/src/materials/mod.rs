@@ -201,6 +201,70 @@ pub enum MaterialRef<'a> {
     Extra(&'a Value),
 }
 
+/// Calls `$then!` with every typed pool field and how `get` wraps its items.
+macro_rules! each_pool {
+    ($then:ident) => {
+        $then!(
+                videos, MaterialRef::Video;
+                audios, MaterialRef::Audio;
+                texts, MaterialRef::Text;
+                speeds, MaterialRef::Speed;
+                audio_fades, MaterialRef::Fade;
+                transitions, MaterialRef::Transition;
+                material_animations, MaterialRef::Animations;
+                canvases, MaterialRef::Canvas;
+                drafts, MaterialRef::Draft;
+                plugin_effects, MaterialRef::Plugin;
+                flowers, MaterialRef::Other;
+                tail_leaders, MaterialRef::Other;
+                images, MaterialRef::Other;
+                effects, MaterialRef::Effect;
+                stickers, MaterialRef::Other;
+                audio_effects, MaterialRef::Other;
+                beats, MaterialRef::Other;
+                placeholders, MaterialRef::Other;
+                placeholder_infos, MaterialRef::Other;
+                common_mask, MaterialRef::Other;
+                chromas, MaterialRef::Other;
+                text_templates, MaterialRef::Other;
+                realtime_denoises, MaterialRef::Other;
+                audio_pannings, MaterialRef::Other;
+                audio_pitch_shifts, MaterialRef::Other;
+                video_trackings, MaterialRef::Other;
+                hsl, MaterialRef::Hsl;
+                color_curves, MaterialRef::Other;
+                hsl_curves, MaterialRef::Other;
+                primary_color_wheels, MaterialRef::Other;
+                log_color_wheels, MaterialRef::Other;
+                video_effects, MaterialRef::VideoEffect;
+                ai_text_effects, MaterialRef::Other;
+                ai_generate_holders, MaterialRef::Other;
+                audio_balances, MaterialRef::Other;
+                handwrites, MaterialRef::Other;
+                manual_deformations, MaterialRef::Other;
+                manual_beautys, MaterialRef::Other;
+                sound_channel_mappings, MaterialRef::Other;
+                green_screens, MaterialRef::Other;
+                shapes, MaterialRef::Shape;
+                material_colors, MaterialRef::Color;
+                digital_humans, MaterialRef::Other;
+                digital_human_model_dressing, MaterialRef::Other;
+                smart_crops, MaterialRef::Other;
+                ai_translates, MaterialRef::Other;
+                audio_track_indexes, MaterialRef::Other;
+                loudnesses, MaterialRef::Other;
+                vocal_beautifys, MaterialRef::Other;
+                vocal_separations, MaterialRef::Other;
+                smart_relights, MaterialRef::Other;
+                time_marks, MaterialRef::Other;
+                multi_language_refs, MaterialRef::Other;
+                video_shadows, MaterialRef::Other;
+                video_strokes, MaterialRef::Other;
+                video_radius, MaterialRef::Other
+        )
+    };
+}
+
 impl Materials {
     /// The material with this id, searching this draft's pools. Child drafts are separate.
     #[must_use]
@@ -217,64 +281,7 @@ impl Materials {
                 )*
             };
         }
-        take!(
-            videos, MaterialRef::Video;
-            audios, MaterialRef::Audio;
-            texts, MaterialRef::Text;
-            speeds, MaterialRef::Speed;
-            audio_fades, MaterialRef::Fade;
-            transitions, MaterialRef::Transition;
-            material_animations, MaterialRef::Animations;
-            canvases, MaterialRef::Canvas;
-            drafts, MaterialRef::Draft;
-            plugin_effects, MaterialRef::Plugin;
-            flowers, MaterialRef::Other;
-            tail_leaders, MaterialRef::Other;
-            images, MaterialRef::Other;
-            effects, MaterialRef::Effect;
-            stickers, MaterialRef::Other;
-            audio_effects, MaterialRef::Other;
-            beats, MaterialRef::Other;
-            placeholders, MaterialRef::Other;
-            placeholder_infos, MaterialRef::Other;
-            common_mask, MaterialRef::Other;
-            chromas, MaterialRef::Other;
-            text_templates, MaterialRef::Other;
-            realtime_denoises, MaterialRef::Other;
-            audio_pannings, MaterialRef::Other;
-            audio_pitch_shifts, MaterialRef::Other;
-            video_trackings, MaterialRef::Other;
-            hsl, MaterialRef::Hsl;
-            color_curves, MaterialRef::Other;
-            hsl_curves, MaterialRef::Other;
-            primary_color_wheels, MaterialRef::Other;
-            log_color_wheels, MaterialRef::Other;
-            video_effects, MaterialRef::VideoEffect;
-            ai_text_effects, MaterialRef::Other;
-            ai_generate_holders, MaterialRef::Other;
-            audio_balances, MaterialRef::Other;
-            handwrites, MaterialRef::Other;
-            manual_deformations, MaterialRef::Other;
-            manual_beautys, MaterialRef::Other;
-            sound_channel_mappings, MaterialRef::Other;
-            green_screens, MaterialRef::Other;
-            shapes, MaterialRef::Shape;
-            material_colors, MaterialRef::Color;
-            digital_humans, MaterialRef::Other;
-            digital_human_model_dressing, MaterialRef::Other;
-            smart_crops, MaterialRef::Other;
-            ai_translates, MaterialRef::Other;
-            audio_track_indexes, MaterialRef::Other;
-            loudnesses, MaterialRef::Other;
-            vocal_beautifys, MaterialRef::Other;
-            vocal_separations, MaterialRef::Other;
-            smart_relights, MaterialRef::Other;
-            time_marks, MaterialRef::Other;
-            multi_language_refs, MaterialRef::Other;
-            video_shadows, MaterialRef::Other;
-            video_strokes, MaterialRef::Other;
-            video_radius, MaterialRef::Other
-        );
+        each_pool!(take);
         for pool in self.extra_pools.values() {
             let Some(items) = pool.as_array() else {
                 continue;
@@ -287,11 +294,67 @@ impl Materials {
         }
         None
     }
+
+    /// Add a copy of the material `id` under `new_id`, in the same pool.
+    /// Returns `false` when there is no material `id`, or `new_id` is
+    /// empty or taken.
+    pub fn copy_as(&mut self, id: &str, new_id: &MaterialId) -> bool {
+        if id.is_empty() || new_id.is_empty() || self.get(new_id.as_str()).is_some() {
+            return false;
+        }
+        macro_rules! copy {
+            ($($field:ident, $wrap:path);* $(;)?) => {
+                $(
+                    if let Some(item) = self.$field.iter().find(|item| item.id.as_str() == id) {
+                        let mut item = item.clone();
+                        item.id = new_id.clone();
+                        self.$field.push(item);
+                        return true;
+                    }
+                )*
+            };
+        }
+        each_pool!(copy);
+        for pool in self.extra_pools.values_mut() {
+            let Some(items) = pool.as_array_mut() else {
+                continue;
+            };
+            if let Some(item) = items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
+            {
+                let mut item = item.clone();
+                if let Some(fields) = item.as_object_mut() {
+                    fields.insert("id".to_owned(), Value::String(new_id.as_str().to_owned()));
+                }
+                items.push(item);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_lands_in_its_pool_under_the_new_id_and_a_taken_id_is_refused() {
+        let mut materials: Materials = serde_json::from_str(
+            r#"{"audio_fades":[{"id":"f","fade_in_duration":5}],"future_pool":[{"id":"z","n":1}]}"#,
+        )
+        .unwrap();
+        assert!(materials.copy_as("f", &"g".into()));
+        assert!(
+            matches!(materials.get("g"), Some(MaterialRef::Fade(fade)) if fade.fade_in_duration.0 == 5)
+        );
+        assert!(materials.copy_as("z", &"y".into()));
+        assert!(matches!(materials.get("y"), Some(MaterialRef::Extra(item)) if item["n"] == 1));
+        assert!(!materials.copy_as("f", &"y".into()));
+        assert!(!materials.copy_as("missing", &"w".into()));
+        assert!(!materials.copy_as("f", &"".into()));
+    }
 
     #[test]
     fn lookup_finds_typed_pools_and_keeps_unnamed_keys() {

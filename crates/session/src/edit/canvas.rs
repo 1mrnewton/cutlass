@@ -186,6 +186,7 @@ pub fn set_letterbox(
         })
         .cloned();
     if let Some(existing_id) = existing {
+        let existing_id = super::own::own(draft, track_index, segment_index, &existing_id)?;
         let Some(canvas) = draft
             .materials
             .canvases
@@ -264,6 +265,7 @@ pub fn set_letterbox_blur(
         return Ok(());
     };
     if let Some(existing_id) = existing {
+        let existing_id = super::own::own(draft, track_index, segment_index, &existing_id)?;
         let Some(canvas) = draft
             .materials
             .canvases

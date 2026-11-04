@@ -10,6 +10,7 @@ pub fn set_crop(draft: &mut Draft, segment_id: &SegmentId, crop: Crop) -> Result
     let material_id = draft.tracks[track_index].segments[segment_index]
         .material_id
         .clone();
+    let material_id = super::own::own(draft, track_index, segment_index, &material_id)?;
     if material_id.is_empty() {
         return Err(EditError::MissingMaterial);
     }

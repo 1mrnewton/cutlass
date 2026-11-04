@@ -19,9 +19,9 @@ pub const HOLD: i64 = 1_000_000;
 #[must_use]
 pub fn window_peak(bytes: &[u8]) -> [f32; 2] {
     let mut peak = [0.0_f32; 2];
-    for frame in bytes.chunks_exact(FRAME_BYTES) {
-        for (channel, sample) in frame.chunks_exact(4).enumerate().take(2) {
-            let value = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]).abs();
+    for frame in bytes.as_chunks::<FRAME_BYTES>().0 {
+        for (channel, sample) in frame.as_chunks::<4>().0.iter().enumerate().take(2) {
+            let value = f32::from_le_bytes(*sample).abs();
             if value.is_finite() && value > peak[channel] {
                 peak[channel] = value;
             }

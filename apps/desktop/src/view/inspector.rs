@@ -356,27 +356,17 @@ fn position_size(
             send(shell, |shell| shell.set_rotation(value));
         }
         if rotate_label == "Rotate" {
-            let edge = |x: f64, y: f64| (x, y);
+            use cutlass_editor::StageAlign;
             let aims = [
-                ("alignLeft", "Align left", Some(edge(-1.0, f64::NAN))),
-                ("alignCenter", "Align center", Some(edge(0.0, f64::NAN))),
-                ("alignRight", "Align right", Some(edge(1.0, f64::NAN))),
-                ("alignTop", "Align top", Some(edge(f64::NAN, 1.0))),
-                ("alignMiddle", "Align middle", Some(edge(f64::NAN, 0.0))),
-                ("alignBottom", "Align bottom", Some(edge(f64::NAN, -1.0))),
+                ("alignLeft", "Align left", Some(StageAlign::Left)),
+                ("alignCenter", "Align center", Some(StageAlign::Center)),
+                ("alignRight", "Align right", Some(StageAlign::Right)),
+                ("alignTop", "Align top", Some(StageAlign::Top)),
+                ("alignMiddle", "Align middle", Some(StageAlign::Middle)),
+                ("alignBottom", "Align bottom", Some(StageAlign::Bottom)),
             ];
-            if let Some((aim_x, aim_y)) = icon_bar(ui, &aims) {
-                let x = if aim_x.is_nan() {
-                    inspection.transform_x
-                } else {
-                    aim_x
-                };
-                let y = if aim_y.is_nan() {
-                    inspection.transform_y
-                } else {
-                    aim_y
-                };
-                send(shell, |shell| shell.set_position(x, y));
+            if let Some(align) = icon_bar(ui, &aims) {
+                send(shell, |shell| shell.align_selected(align));
             }
         }
     });

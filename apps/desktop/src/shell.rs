@@ -3646,6 +3646,22 @@ impl Shell {
         self.apply(Request::SetPosition { segment_id, x, y })
     }
 
+    /// Put the selected picture or title where an align button says: an
+    /// edge on the canvas edge, or its centre on a centre line, as it sits
+    /// at the playhead. One undo restores the previous place.
+    pub fn align_selected(&mut self, align: cutlass_editor::StageAlign) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        let (x, y) = cutlass_editor::stage_align(draft, &segment_id, self.playhead, &sizes, align)
+            .ok_or_else(|| ShellError::Unavailable("the clip has no size to align".to_owned()))?;
+        self.apply(Request::SetPosition { segment_id, x, y })
+    }
+
     /// Scale the selected picture. One undo restores the previous scale.
     pub fn set_scale(&mut self, scale: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a placement belongs on a picture")?;
@@ -5848,6 +5864,19 @@ struct Saving {
     handle: std::thread::JoinHandle<Result<(), StoreError>>,
 }
 
+/// Title sizes from the installed faces, for the shared stage rules.
+struct FaceSizes<'a> {
+    draft: &'a Draft,
+    fonts: &'a dyn cutlass_eval::Fonts,
+}
+
+impl cutlass_editor::TextSizes for FaceSizes<'_> {
+    fn text_size(&self, segment: &Segment) -> Option<(f64, f64)> {
+        let (width, height) = cutlass_eval::text_size(self.draft, self.fonts, segment)?;
+        Some((f64::from(width), f64::from(height)))
+    }
+}
+
 /// A file copied into the project for an import, removed unless the import
 /// keeps it.
 struct CopyGuard(Option<PathBuf>);
@@ -7321,6 +7350,51 @@ mod tests {
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
         desktop.redo().unwrap();
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn align_puts_the_pictures_edge_on_the_canvas_edge() {
+        use cutlass_editor::{NoText, StageAlign, stage_box};
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        desktop.set_scale(0.5).unwrap();
+        let clip = desktop.selected().cloned().unwrap();
+        let (width, height) = cutlass_editor::canvas_size(desktop.draft().unwrap());
+        let edges = |desktop: &Shell| {
+            let stage = stage_box(desktop.draft().unwrap(), &clip, Micros(0), &NoText).unwrap();
+            let corners = stage.corners();
+            let xs = corners.map(|corner| corner.0);
+            let ys = corners.map(|corner| corner.1);
+            (
+                xs.iter().copied().fold(f64::INFINITY, f64::min),
+                xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ys.iter().copied().fold(f64::INFINITY, f64::min),
+                ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        desktop.align_selected(StageAlign::Left).unwrap();
+        assert!(near(edges(&desktop).0, 0.0));
+        desktop.align_selected(StageAlign::Bottom).unwrap();
+        let (left, _, _, bottom) = edges(&desktop);
+        assert!(near(left, 0.0) && near(bottom, height));
+        desktop.align_selected(StageAlign::Right).unwrap();
+        assert!(near(edges(&desktop).1, width));
+        desktop.undo().unwrap();
+        assert!(near(edges(&desktop).0, 0.0));
     }
 
     #[test]

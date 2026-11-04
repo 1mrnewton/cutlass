@@ -549,6 +549,8 @@ pub struct Shell {
     job: Option<RunningJob>,
     /// The movie the last export wrote.
     exported: Option<PathBuf>,
+    /// What the last import that landed added, until the window looks.
+    imported: Option<ImportedKind>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -645,6 +647,7 @@ impl Shell {
             speech: RefCell::new(None),
             job: None,
             exported: None,
+            imported: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
@@ -1127,7 +1130,7 @@ impl Shell {
     fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let (stored, copied) = place_in_project(&project, path)?;
+        let (stored, copied) = place_in_project(&project, path, None)?;
         let imported = self.import_medium(probed, stored);
         if imported.is_err()
             && let Some(copied) = copied
@@ -1135,6 +1138,51 @@ impl Shell {
             let _ = std::fs::remove_file(copied);
         }
         imported
+    }
+
+    /// Import `path` as a job: read it, copy it into the project with a
+    /// progress bar, then add it to the library when the job lands. A
+    /// cancelled import leaves no copy behind.
+    pub fn start_import(&mut self, path: &Path) -> Result<(), ShellError> {
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        self.refuse_busy()?;
+        let source = path.to_path_buf();
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        self.start_job("Import", move |progress| {
+            progress.stage(&format!("Reading {name}"));
+            let placed = probe::probe(&source)
+                .map_err(|error| ShellError::Probe(error.to_string()))
+                .and_then(|probed| {
+                    progress.stage(&format!("Copying {name}"));
+                    let (stored, copied) = place_in_project(&project, &source, Some(progress))?;
+                    Ok((probed, stored, CopyGuard(copied)))
+                });
+            Box::new(move |shell: &mut Shell| {
+                let (probed, stored, mut copy) = placed.inspect_err(|error| {
+                    cutlass_logger::error!("import {name}: {error}");
+                })?;
+                let before = shell.draft().map(|draft| draft.materials.videos.len());
+                shell.import_medium(probed, stored)?;
+                copy.keep();
+                let video = shell.draft().map(|draft| draft.materials.videos.len()) != before;
+                shell.imported = Some(if video {
+                    ImportedKind::Video
+                } else {
+                    ImportedKind::Audio
+                });
+                shell.set_notice(format!("Imported {name}"));
+                Ok(())
+            })
+        })
+    }
+
+    /// What the last import that landed added, once: the window opens that
+    /// shelf.
+    pub fn take_imported(&mut self) -> Option<ImportedKind> {
+        self.imported.take()
     }
 
     /// The lanes to draw, built again only when the revision moves.
@@ -5716,9 +5764,71 @@ fn format_timecode(label: TimecodeLabel) -> String {
     )
 }
 
+/// A file copied into the project for an import, removed unless the import
+/// keeps it.
+struct CopyGuard(Option<PathBuf>);
+
+impl CopyGuard {
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CopyGuard {
+    fn drop(&mut self) {
+        if let Some(copied) = self.0.take() {
+            let _ = std::fs::remove_file(copied);
+        }
+    }
+}
+
+/// What an import added to the library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportedKind {
+    Video,
+    Audio,
+}
+
+/// Copy `source` to `destination` a piece at a time, telling `progress`
+/// how far it is and stopping when asked. A stopped copy is removed.
+fn copy_reporting(
+    source: &Path,
+    destination: &Path,
+    progress: &crate::jobs::Progress,
+) -> Result<(), ShellError> {
+    use std::io::{Read, Write};
+    const PIECE: usize = 4 << 20;
+    let io = |error: std::io::Error| ShellError::Io(error.to_string());
+    let copied = (|| {
+        let mut from = std::fs::File::open(source).map_err(io)?;
+        let total = from.metadata().map_err(io)?.len().max(1);
+        let mut to = std::fs::File::create(destination).map_err(io)?;
+        let mut piece = vec![0; PIECE];
+        let mut done = 0_u64;
+        loop {
+            if progress.cancelled() {
+                return Err(ShellError::Unavailable("the import was stopped".to_owned()));
+            }
+            let read = from.read(&mut piece).map_err(io)?;
+            let Some(bytes) = piece.get(..read).filter(|bytes| !bytes.is_empty()) else {
+                break;
+            };
+            to.write_all(bytes).map_err(io)?;
+            done += read as u64;
+            progress.fraction(done as f32 / total as f32);
+        }
+        to.sync_all().map_err(io)
+    })();
+    if copied.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    copied
+}
+
 fn place_in_project(
     project: &Path,
     source: &Path,
+    progress: Option<&crate::jobs::Progress>,
 ) -> Result<(String, Option<PathBuf>), ShellError> {
     let project = project
         .canonicalize()
@@ -5738,7 +5848,13 @@ fn place_in_project(
         .file_name()
         .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
     let destination = unique_file(&resources, name)?;
-    std::fs::copy(source, &destination).map_err(|error| ShellError::Io(error.to_string()))?;
+    match progress {
+        Some(progress) => copy_reporting(source, &destination, progress)?,
+        None => {
+            std::fs::copy(source, &destination)
+                .map_err(|error| ShellError::Io(error.to_string()))?;
+        }
+    }
     let stored = destination
         .file_name()
         .map(|file| format!("Resources/{}", file.to_string_lossy()))
@@ -9533,6 +9649,55 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(desktop.job().is_none(), "the job did not finish");
+    }
+
+    #[test]
+    fn an_import_job_copies_the_file_and_lands_it_in_the_library() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.start_import(&picture).unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Import".to_owned())
+        );
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Imported pattern.png");
+        assert!(temp.path.join("Resources/pattern.png").is_file());
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+        assert_eq!(desktop.take_imported(), Some(super::ImportedKind::Video));
+        assert_eq!(desktop.take_imported(), None);
+    }
+
+    #[test]
+    fn a_cancelled_import_leaves_no_copy_in_the_project() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.start_import(&picture).unwrap();
+        desktop.cancel_job();
+        land_job(&mut desktop);
+        assert!(!temp.path.join("Resources/pattern.png").exists());
+        assert!(desktop.draft().unwrap().materials.videos.is_empty());
+        assert_eq!(desktop.take_imported(), None);
+
+        // A file that is not media is refused when the job lands, and
+        // nothing is copied.
+        let text = temp.path.join("notes.txt");
+        std::fs::write(&text, "not a picture").unwrap();
+        let outside = Temp::new();
+        let moved = outside.path.join("notes.txt");
+        std::fs::rename(&text, &moved).unwrap();
+        desktop.start_import(&moved).unwrap();
+        land_job(&mut desktop);
+        assert!(!desktop.notice().is_empty());
+        assert!(!temp.path.join("Resources/notes.txt").exists());
     }
 
     #[test]

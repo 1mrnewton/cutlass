@@ -232,6 +232,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
+    show_imported(shell, view);
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
@@ -4336,7 +4337,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     };
     let result = match finished.picker {
         Picker::OpenProject => shell.open_folder(&path),
-        Picker::Import => import_chosen(shell, view, &path),
+        Picker::Import => shell.start_import(&path),
         Picker::SaveExport => {
             view.export_path = path.display().to_string();
             write_export(shell, view)
@@ -4352,33 +4353,16 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     }
 }
 
-fn import_chosen(
-    shell: &mut Shell,
-    view: &mut ViewState,
-    path: &std::path::Path,
-) -> Result<(), ShellError> {
-    let (videos, audios) = shell.draft().map_or((0, 0), |draft| {
-        (draft.materials.videos.len(), draft.materials.audios.len())
-    });
-    shell.import_file(path)?;
-    let added_video = shell
-        .draft()
-        .is_some_and(|draft| draft.materials.videos.len() > videos);
-    let added_audio = shell
-        .draft()
-        .is_some_and(|draft| draft.materials.audios.len() > audios);
-    if added_video {
-        view.library_shelf = Shelf::Media;
-    } else if added_audio {
-        view.library_shelf = Shelf::Audio;
-    }
+/// Open the shelf an import that just landed filled.
+fn show_imported(shell: &mut Shell, view: &mut ViewState) {
+    let Some(kind) = shell.take_imported() else {
+        return;
+    };
+    view.library_shelf = match kind {
+        crate::shell::ImportedKind::Video => Shelf::Media,
+        crate::shell::ImportedKind::Audio => Shelf::Audio,
+    };
     view.library_query.clear();
-    let label = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_owned());
-    shell.set_notice(format!("Imported {label}"));
-    Ok(())
 }
 
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
@@ -5311,6 +5295,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -5383,6 +5368,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -5451,6 +5437,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -5500,6 +5487,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -6380,6 +6368,26 @@ mod tests {
         assert!(beats[0].source < 2_000_000);
         assert_eq!(beats[0].time.0, beats[0].source);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Draw frames until the chosen import has been copied and landed.
+    fn land_import(shell: &mut Shell, view: &mut ViewState) {
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            if shell.job().is_none() || std::time::Instant::now() > until {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     /// The last place `wanted` is painted, so a dialog's button wins over

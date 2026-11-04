@@ -67,6 +67,42 @@ pub fn insert_track(
     Ok(())
 }
 
+/// Take a lane off the draft with its clips.
+///
+/// The main track and a locked track are refused. Each clip leaves the way
+/// a delete takes it, so its marks, beats and attachments go too; linkage
+/// then removes dependents on other lanes.
+pub fn remove_track(draft: &mut Draft, track_id: &TrackId) -> Result<(), EditError> {
+    let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) else {
+        return Err(EditError::MissingTrack);
+    };
+    if track.is_main() {
+        return Err(EditError::MainTrack);
+    }
+    super::ensure_unlocked(track.attribute)?;
+    let ids: Vec<_> = track
+        .segments
+        .iter()
+        .map(|segment| segment.id.clone())
+        .collect();
+    for id in &ids {
+        super::linkage::remove(draft, id)?;
+    }
+    draft.tracks.retain(|track| &track.id != track_id);
+    Ok(())
+}
+
+/// Name a lane. A blank name gives the lane back its default name.
+pub fn rename_track(draft: &mut Draft, track_id: &TrackId, name: &str) -> Result<(), EditError> {
+    let Some(track) = draft.tracks.iter_mut().find(|track| &track.id == track_id) else {
+        return Err(EditError::MissingTrack);
+    };
+    let name = name.trim();
+    track.name = name.to_owned();
+    track.is_default_name = name.is_empty();
+    Ok(())
+}
+
 /// Video overlays sit just above the main track. Audio sits just under it.
 /// Other lanes sit above the first video track.
 fn lane_index(tracks: &[Track], kind: &TrackType) -> usize {
@@ -112,6 +148,7 @@ mod tests {
     use super::{EditError, insert_track};
     use crate::Session;
     use crate::request::Request;
+    use cutlass_model::TrackAttribute;
 
     fn open() -> (Session, TrackId) {
         let mut draft = cutlass_model::Draft::empty("D");
@@ -215,5 +252,101 @@ mod tests {
         assert_eq!(draft.tracks[0].kind, TrackType::Text);
         assert!(draft.tracks[1].is_main());
         assert_eq!(draft.tracks[0].flag, cutlass_model::TrackFlag::None);
+    }
+
+    fn with_sound() -> Session {
+        let (mut session, _) = open();
+        session
+            .apply(
+                0,
+                &[
+                    Request::InsertTrack {
+                        track_id: TrackId::new("sound"),
+                        kind: TrackType::Audio,
+                    },
+                    Request::Place {
+                        track_id: TrackId::new("sound"),
+                        segment: Box::new(Segment::new(
+                            "clip",
+                            "song",
+                            TimeRange::new(0, 1_000_000),
+                        )),
+                    },
+                ],
+            )
+            .unwrap();
+        session
+    }
+
+    #[test]
+    fn a_removed_lane_takes_its_clips_and_one_undo_brings_them_back() {
+        let mut session = with_sound();
+        session
+            .apply(
+                1,
+                &[Request::RemoveTrack {
+                    track_id: TrackId::new("sound"),
+                }],
+            )
+            .unwrap();
+        assert_eq!(session.draft().tracks.len(), 1);
+        assert_eq!(session.draft().duration, Micros(0));
+        session.undo().unwrap();
+        assert_eq!(session.draft().tracks.len(), 2);
+        assert_eq!(session.draft().tracks[1].segments.len(), 1);
+    }
+
+    #[test]
+    fn the_main_lane_a_locked_lane_and_a_missing_lane_stay() {
+        let mut session = with_sound();
+        let main = session.draft().tracks[0].id.clone();
+        let remove = |id: &TrackId| Request::RemoveTrack {
+            track_id: id.clone(),
+        };
+        assert_eq!(
+            session.apply(1, &[remove(&main)]).unwrap_err(),
+            EditError::MainTrack
+        );
+        assert_eq!(
+            session
+                .apply(1, &[remove(&TrackId::new("gone"))])
+                .unwrap_err(),
+            EditError::MissingTrack
+        );
+        session
+            .apply(
+                1,
+                &[Request::SetTrackAttribute {
+                    track_id: TrackId::new("sound"),
+                    bit: TrackAttribute::LOCK,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .apply(2, &[remove(&TrackId::new("sound"))])
+                .unwrap_err(),
+            EditError::LockedTrack
+        );
+        assert_eq!(session.draft().tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_named_lane_keeps_its_name_and_a_blank_one_goes_back_to_the_default() {
+        let mut session = with_sound();
+        let rename = |name: &str| Request::RenameTrack {
+            track_id: TrackId::new("sound"),
+            name: name.to_owned(),
+        };
+        session.apply(1, &[rename("  Voice ")]).unwrap();
+        let track = &session.draft().tracks[1];
+        assert_eq!(
+            (track.name.as_str(), track.is_default_name),
+            ("Voice", false)
+        );
+        session.apply(2, &[rename("   ")]).unwrap();
+        let track = &session.draft().tracks[1];
+        assert_eq!((track.name.as_str(), track.is_default_name), ("", true));
     }
 }

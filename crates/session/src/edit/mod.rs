@@ -100,6 +100,8 @@ pub enum EditError {
     AlreadyExtracted,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
+    /// The main track cannot be removed.
+    MainTrack,
     /// The rotation is not a finite number of degrees.
     Angle,
     /// Position is not a finite number.
@@ -393,6 +395,8 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         ),
         Request::Import { medium } => import::import(draft, medium.clone()),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
+        Request::RemoveTrack { track_id } => track::remove_track(draft, track_id),
+        Request::RenameTrack { track_id, name } => track::rename_track(draft, track_id, name),
         Request::AddTimeMark {
             segment_id,
             at,

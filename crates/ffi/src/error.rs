@@ -126,6 +126,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::TransitionWindow => "the split falls inside a transition window".to_owned(),
         EditError::AlreadyLinked => "the segment is already linked".to_owned(),
         EditError::TrackKind => "the track could not be added".to_owned(),
+        EditError::MainTrack => "the main track cannot be removed".to_owned(),
         EditError::DuplicateMark => "a marker is already there".to_owned(),
         EditError::DuplicateBeat => "a beat is already there".to_owned(),
         EditError::NotAudio => "a beat belongs on audio".to_owned(),

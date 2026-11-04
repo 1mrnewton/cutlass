@@ -301,6 +301,11 @@ pub enum Request {
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
+    /// Take a lane and its clips off the draft. The main track and a locked
+    /// track stay. Each clip leaves as a delete would take it.
+    RemoveTrack { track_id: TrackId },
+    /// Name a lane. An empty or blank name goes back to the default name.
+    RenameTrack { track_id: TrackId, name: String },
     /// Store a marker. `None` is the ruler, at a timeline time. `Some` is a clip,
     /// and the mark is an offset from that clip's target start.
     AddTimeMark {

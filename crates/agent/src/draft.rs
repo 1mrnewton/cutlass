@@ -468,6 +468,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::KeyPose { .. } => "key_pose",
         Request::Import { .. } => "import",
         Request::InsertTrack { .. } => "insert_track",
+        Request::RemoveTrack { .. } => "remove_track",
+        Request::RenameTrack { .. } => "rename_track",
         Request::AddTimeMark { .. } => "add_time_mark",
         Request::RemoveTimeMark { .. } => "remove_time_mark",
         Request::AddBeat { .. } => "add_beat",

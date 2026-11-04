@@ -160,6 +160,62 @@ pub fn stage_box(
     ))
 }
 
+/// Where an align button puts a clip on the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageAlign {
+    /// The clip's left edge on the canvas's left edge.
+    Left,
+    /// The clip's centre on the canvas's upright centre line.
+    Center,
+    Right,
+    /// The clip's top edge on the canvas's top edge.
+    Top,
+    /// The clip's centre on the canvas's level centre line.
+    Middle,
+    Bottom,
+}
+
+/// The stored position, fractions of half the canvas with y up, that puts
+/// clip `segment_id` where `align` says at `time`. A turned clip's outer
+/// bounds are what meet the edge. The other axis keeps its place.
+#[must_use]
+pub fn stage_align(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    time: Micros,
+    sizes: &dyn TextSizes,
+    align: StageAlign,
+) -> Option<(f64, f64)> {
+    let stage = stage_box(draft, segment_id, time, sizes)?;
+    let (width, height) = canvas_size(draft);
+    let corners = stage.corners();
+    let reach = |pick: fn(&(f64, f64)) -> f64, low: bool| {
+        corners.iter().map(pick).fold(
+            if low {
+                f64::INFINITY
+            } else {
+                f64::NEG_INFINITY
+            },
+            |a, b| {
+                if low { a.min(b) } else { a.max(b) }
+            },
+        )
+    };
+    let (mut center_x, mut center_y) = (stage.center_x, stage.center_y);
+    match align {
+        StageAlign::Left => center_x -= reach(|c| c.0, true),
+        StageAlign::Center => center_x = width / 2.0,
+        StageAlign::Right => center_x += width - reach(|c| c.0, false),
+        StageAlign::Top => center_y -= reach(|c| c.1, true),
+        StageAlign::Middle => center_y = height / 2.0,
+        StageAlign::Bottom => center_y += height - reach(|c| c.1, false),
+    }
+    Some((
+        (center_x - width / 2.0) / (width / 2.0),
+        -(center_y - height / 2.0) / (height / 2.0),
+    ))
+}
+
 /// The topmost picture or title clip under the canvas point `(x, y)` at
 /// `time`. Hidden rows and clips, locked rows, and clear or empty pictures
 /// are passed over.
@@ -507,6 +563,37 @@ mod tests {
         assert!(near(top_left.0, 1440.0 - 270.0) && near(top_left.1, 270.0 + 151.875));
         assert!(stage.contains(1440.0 + 260.0, 270.0));
         assert!(!stage.contains(1440.0, 270.0 + 200.0));
+    }
+
+    #[test]
+    fn align_puts_the_clips_edge_on_the_canvas_edge_not_its_centre() {
+        let mut draft = draft();
+        let main = SegmentId::new("main");
+        let at =
+            |draft: &Draft, align| stage_align(draft, &main, Micros(0), &NoText, align).unwrap();
+        // The tall picture is 607.5 wide on a 1920 canvas: its left edge on
+        // the canvas's puts its centre 303.75 in.
+        let (x, y) = at(&draft, StageAlign::Left);
+        assert!(near(x, (303.75 - 960.0) / 960.0) && near(y, 0.0));
+        let (x, _) = at(&draft, StageAlign::Right);
+        assert!(near(x, (1920.0 - 303.75 - 960.0) / 960.0));
+        // It is as tall as the canvas, so top and bottom leave it centred.
+        let (_, y) = at(&draft, StageAlign::Top);
+        assert!(near(y, 0.0));
+        // Half size and moved, its top sits on the top, x kept.
+        let segment = &mut draft.tracks[0].segments[0];
+        segment.uniform_scale.value = 0.5;
+        segment.clip.transform.x = 0.25;
+        let (x, y) = at(&draft, StageAlign::Top);
+        assert!(near(x, 0.25) && near(y, (540.0 - 270.0) / 540.0));
+        let (x, y) = at(&draft, StageAlign::Bottom);
+        assert!(near(x, 0.25) && near(y, -(540.0 - 270.0) / 540.0));
+        let (x, _) = at(&draft, StageAlign::Center);
+        assert!(near(x, 0.0));
+        // Turned a quarter, its long side lies along x.
+        draft.tracks[0].segments[0].clip.rotation = 90.0;
+        let (x, _) = at(&draft, StageAlign::Left);
+        assert!(near(x, (540.0 / 2.0 - 960.0) / 960.0));
     }
 
     struct Sized(f64, f64);

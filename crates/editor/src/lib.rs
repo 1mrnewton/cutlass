@@ -35,9 +35,9 @@ pub use reorder::{place_of, reorder_start};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
 pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
 pub use stage::{
-    MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageBox, StageGesture,
-    StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, stage_box, stage_gesture,
-    stage_pick,
+    MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
+    StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, stage_align,
+    stage_box, stage_gesture, stage_pick,
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use zoom::{

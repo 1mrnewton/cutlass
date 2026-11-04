@@ -964,16 +964,18 @@ impl Shell {
         if !self.unsaved() {
             return None;
         }
-        let (_, at) = self.saved?;
-        let revision = self.session.as_ref()?.revision();
+        let (saved, at) = self.saved?;
         let wait = AUTOSAVE_GAP.saturating_sub(at.elapsed());
         if !wait.is_zero() {
             return Some(wait);
         }
         if let Err(error) = self.save() {
             cutlass_logger::error!("autosave: {error}");
-            self.saved = Some((revision, Instant::now()));
+            // The edits stay unsaved, so quitting still writes them; the
+            // clock restarts so a failing disk is tried once per gap.
+            self.saved = Some((saved, Instant::now()));
             self.set_notice(format!("Could not save: {error}"));
+            return Some(AUTOSAVE_GAP);
         }
         None
     }
@@ -6258,6 +6260,22 @@ mod tests {
             videos[0].path
         );
         assert_eq!(reopened.autosave(), None);
+    }
+
+    #[test]
+    fn a_failed_autosave_keeps_the_edits_unsaved_for_quit() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        std::fs::remove_dir_all(&temp.path).unwrap();
+        let wait = desktop.autosave().expect("the write waits for the gap");
+        std::thread::sleep(wait);
+        assert_eq!(desktop.autosave(), Some(super::AUTOSAVE_GAP));
+        assert!(desktop.unsaved());
     }
 
     #[test]

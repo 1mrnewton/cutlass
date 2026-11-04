@@ -214,13 +214,13 @@ fn on_split(
         let Some(track) = track_of(draft, &dependent_id) else {
             continue;
         };
-        if !settings.cut.allows(&draft.tracks[track]) {
-            continue;
-        }
         let Some(dependent) = segment(draft, &dependent_id).cloned() else {
             continue;
         };
         if time_inside(&dependent.target, cut)? {
+            if !settings.cut.allows(&draft.tracks[track]) {
+                continue;
+            }
             let right_id = SegmentId::new(format!(
                 "{}+{}",
                 dependent_id.as_str(),
@@ -228,11 +228,23 @@ fn on_split(
             ));
             super::split::split(draft, &dependent_id, cut, &right_id)?;
             link(draft, right_owner, &right_id)?;
-        } else if settings.follow.allows(&draft.tracks[track])
-            && owner_excludes(draft, owner_id, &dependent_id)?
-        {
-            remove_segment(draft, &dependent_id)?;
-            drop_pair(draft, owner_id, &dependent_id);
+        } else if owner_excludes(draft, owner_id, &dependent_id)? {
+            // A dependent wholly after the cut belongs to the right piece.
+            if owner_excludes(draft, right_owner, &dependent_id)? {
+                if settings.follow.allows(&draft.tracks[track]) {
+                    remove_segment(draft, &dependent_id)?;
+                    drop_pair(draft, owner_id, &dependent_id);
+                }
+            } else {
+                drop_pair(draft, owner_id, &dependent_id);
+                push_pair(
+                    draft,
+                    LinkPair {
+                        owner: right_owner.clone(),
+                        dependent: dependent_id.clone(),
+                    },
+                );
+            }
         }
     }
     Ok(())
@@ -901,6 +913,49 @@ mod tests {
         assert!(session.draft().tracks[0].segments.is_empty());
         assert!(session.draft().tracks[1].segments.is_empty());
         assert!(session.draft().relationships[0].id_to_id.is_empty());
+    }
+
+    #[test]
+    fn a_dependent_after_the_cut_goes_with_the_right_piece() {
+        let (mut session, main, over) = open();
+        session
+            .apply(
+                0,
+                &[
+                    place(&main, "a", 0, 1_000_000),
+                    place(&over, "t", 600_000, 300_000),
+                    place(&over, "u", 100_000, 200_000),
+                    Request::Link {
+                        owner: "a".into(),
+                        dependent: "t".into(),
+                    },
+                    Request::Link {
+                        owner: "a".into(),
+                        dependent: "u".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        session
+            .apply(
+                1,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(400_000),
+                    right_id: "a-right".into(),
+                }],
+            )
+            .unwrap();
+        let ids: Vec<&str> = session.draft().tracks[1]
+            .segments
+            .iter()
+            .map(|segment| segment.id.as_str())
+            .collect();
+        assert_eq!(ids, ["u", "t"]);
+        assert_eq!(
+            session.draft().relationships[0].id_to_id,
+            vec![pair("a", "u"), pair("a-right", "t")]
+        );
     }
 
     #[test]

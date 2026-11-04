@@ -200,6 +200,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         apply_dialog(shell, view, finished);
     }
     style(ui);
+    shell.hold_edits(ui.input(|input| input.pointer.any_down()));
     shell.chrome = crate::shell::Chrome::default();
     if shell.poll_job() {
         ui.ctx()
@@ -5762,6 +5763,75 @@ mod tests {
         );
         assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
         assert_eq!(chord(egui::Key::Space, control), None);
+    }
+
+    #[test]
+    fn dragging_a_slider_previews_each_value_and_undoes_in_one_step() {
+        let temp = std::env::temp_dir().join(format!("cutlass-slide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let label = text_pos(&output, "Scale").expect("the scale row");
+        // The track starts just past the row's name.
+        let start = label + Vec2::new(90.0, 6.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &mut shell,
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+        );
+        let mut seen = Vec::new();
+        for step in 1..=3 {
+            let at = start + Vec2::new(30.0 * step as f32, 0.0);
+            frame(&mut shell, vec![egui::Event::PointerMoved(at)]);
+            seen.push(shell.inspection().unwrap().scale_x);
+        }
+        let end = start + Vec2::new(90.0, 0.0);
+        frame(&mut shell, vec![press(end, false)]);
+        frame(&mut shell, Vec::new());
+        assert!(
+            seen.windows(2).all(|pair| pair[1] > pair[0]),
+            "the preview did not follow the drag: {seen:?}"
+        );
+        assert!(shell.inspection().unwrap().scale_x > 1.0);
+        shell.undo().unwrap();
+        assert_eq!(shell.inspection().unwrap().scale_x, 1.0);
+        assert!(!shell.can_undo());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

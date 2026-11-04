@@ -563,6 +563,10 @@ pub struct Shell {
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
     saving: Option<Saving>,
+    /// The pointer is held down, so like edits join one undo step.
+    holding: bool,
+    /// The kind, clip and revision of the last edit made while holding.
+    held_edit: Option<(HeldEdit, u64)>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -661,6 +665,8 @@ impl Shell {
             exported: None,
             imported: None,
             saving: None,
+            holding: false,
+            held_edit: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
@@ -4794,12 +4800,39 @@ impl Shell {
     }
 
     fn apply_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {
+        let kind = requests
+            .first()
+            .map(|request| (std::mem::discriminant(request), self.selected().cloned()));
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         let revision = session.revision();
-        session
-            .apply(revision, requests)
-            .map_err(ShellError::Edit)?;
+        let joins = self.holding
+            && kind.is_some()
+            && self
+                .held_edit
+                .as_ref()
+                .is_some_and(|(held, at)| Some(held) == kind.as_ref() && *at == revision);
+        let next = if joins {
+            session.fold(revision, requests)
+        } else {
+            session.apply(revision, requests)
+        }
+        .map_err(ShellError::Edit)?;
+        self.held_edit = if self.holding {
+            kind.map(|kind| (kind, next))
+        } else {
+            None
+        };
         Ok(())
+    }
+
+    /// Whether the pointer is held down this frame. While it is, edits of
+    /// one kind to one clip in a row join one undo step, so a slider drag
+    /// shows each value and undoes in one go. Letting go ends the step.
+    pub fn hold_edits(&mut self, holding: bool) {
+        self.holding = holding;
+        if !holding {
+            self.held_edit = None;
+        }
     }
 
     fn session_draft(&self) -> Result<&Draft, ShellError> {
@@ -5855,6 +5888,9 @@ fn format_timecode(label: TimecodeLabel) -> String {
         label.hours, label.minutes, label.seconds, label.frames
     )
 }
+
+/// Which request an edit was, and the clip selected for it.
+type HeldEdit = (std::mem::Discriminant<Request>, Option<SegmentId>);
 
 /// An autosave in flight and the revision it writes.
 struct Saving {
@@ -8937,6 +8973,69 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().fade_out, 1_000_000);
+    }
+
+    #[test]
+    fn a_held_drag_shows_each_value_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.set_scale(1.5).unwrap();
+
+        desktop.hold_edits(true);
+        for opacity in [0.9, 0.6, 0.3] {
+            desktop.set_opacity(opacity).unwrap();
+            assert_eq!(desktop.inspection().unwrap().opacity, opacity);
+        }
+        // Another kind of edit in the same hold is its own step.
+        desktop.set_scale(2.0).unwrap();
+        desktop.hold_edits(false);
+        // A new hold starts a new step, though it is the same kind.
+        desktop.hold_edits(true);
+        desktop.set_scale(2.5).unwrap();
+        desktop.hold_edits(false);
+
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().scale_x, 2.0);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.5);
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.3);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 1.0);
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.5);
+    }
+
+    #[test]
+    fn edits_made_without_a_hold_each_undo_on_their_own() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.set_opacity(0.5).unwrap();
+        desktop.set_opacity(0.25).unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.5);
     }
 
     #[test]

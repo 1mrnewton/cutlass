@@ -1374,8 +1374,9 @@ fn label_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
 }
 
-/// A slider row: name, track, value box. The value is sent once, when the
-/// pointer lets go, so a drag is one undo step.
+/// A slider row: name, track, value box. Each new value is sent as the
+/// track moves, so the preview follows; the shell joins a held drag into
+/// one undo step.
 fn slider(
     ui: &mut Ui,
     state: &mut InspectorState,
@@ -1386,6 +1387,7 @@ fn slider(
     show: impl Fn(f64) -> String,
 ) -> Option<f64> {
     let mut value = state.live.get(key).copied().unwrap_or(stored);
+    let mut moved = None;
     ui.horizontal(|ui| {
         row_label(ui, label);
         let track = (ui.available_width() - VALUE_WIDTH - 8.0).max(40.0);
@@ -1393,15 +1395,16 @@ fn slider(
         let response = ui.add(Slider::new(&mut value, range).show_value(false));
         if response.changed() {
             state.live.insert(key.to_owned(), value);
+            moved = Some(value).filter(|value| *value != stored);
         }
         value_box(ui, &show(value));
     });
     ui.add_space(4.0);
-    let held = ui.input(|input| input.pointer.any_down());
-    if held {
-        return None;
+    // The value shown follows the track while held, then the stored one.
+    if !ui.input(|input| input.pointer.any_down()) {
+        state.live.remove(key);
     }
-    state.live.remove(key).filter(|value| *value != stored)
+    moved
 }
 
 fn later_slider(ui: &mut Ui, label: &str, value: f64, shown: &str) {

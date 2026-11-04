@@ -486,6 +486,8 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// Work running off the window thread, and the project it was started in.
+    job: Option<(crate::jobs::Job<Landing>, Option<PathBuf>)>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -579,6 +581,7 @@ impl Shell {
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
+            job: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
@@ -2906,22 +2909,124 @@ impl Shell {
     }
 
     /// Hear the selected clip and place the words on a text track, lined up
-    /// with that clip. One undo removes the caption. The window waits while
-    /// the local speech model runs.
+    /// with that clip. One undo removes the caption. The local speech model
+    /// runs as a job; the caption lands when it finishes, unless the clip
+    /// changed meanwhile.
     pub fn transcribe(&mut self) -> Result<(), ShellError> {
         let clip = self.selected_speech()?;
-        self.ensure_speech()?;
-        let mut source = FileSource::new(&clip.path);
-        let words = {
-            let cell = self.speech.borrow();
-            let Some(recognizer) = cell.as_ref() else {
-                return Err(ShellError::Unavailable(
-                    "the speech model is not on this machine".to_owned(),
-                ));
+        self.refuse_busy()?;
+        let loaded = self.speech.borrow_mut().take();
+        if loaded.is_none() && !speech_model_dir().join(SPEECH_MODEL).is_file() {
+            return Err(ShellError::Unavailable(
+                "the speech model is not on this machine".to_owned(),
+            ));
+        }
+        self.start_job("Transcribe", move |progress| {
+            let recognizer = match loaded {
+                Some(recognizer) => Ok(recognizer),
+                None => {
+                    progress.stage("Loading the speech model");
+                    load_speech()
+                }
             };
-            heard_words(recognizer, &mut source, &clip)?
+            let (recognizer, words) = match recognizer {
+                Ok(recognizer) => {
+                    progress.stage("Listening");
+                    let words = heard_words(&recognizer, &mut FileSource::new(&clip.path), &clip);
+                    (Some(recognizer), words)
+                }
+                Err(error) => (None, Err(error)),
+            };
+            Box::new(move |shell: &mut Shell| {
+                if recognizer.is_some() {
+                    shell.speech.replace(recognizer);
+                }
+                let words = words?;
+                shell.still_heard(&clip)?;
+                shell.write_caption(&clip, words)
+            })
+        })
+    }
+
+    /// The clip a transcript was heard from is still the same length and
+    /// speed, so the words still line up with it.
+    fn still_heard(&self, heard: &HeardClip) -> Result<(), ShellError> {
+        let now = self.heard_clip(&heard.source_id)?;
+        if now.range != heard.range
+            || now.target.duration != heard.target.duration
+            || now.reverse != heard.reverse
+            || now.path != heard.path
+        {
+            return Err(ShellError::Unavailable(
+                "the clip changed while it was heard".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse a second job while one runs.
+    fn refuse_busy(&self) -> Result<(), ShellError> {
+        match &self.job {
+            Some((job, _)) => Err(ShellError::Unavailable(format!(
+                "{} is still running",
+                job.view().label
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Run `work` on its own thread. Its landing runs at a later
+    /// [`Self::poll_job`], in the project it was started in.
+    pub(crate) fn start_job(
+        &mut self,
+        label: &str,
+        work: impl FnOnce(&crate::jobs::Progress) -> Landing + Send + 'static,
+    ) -> Result<(), ShellError> {
+        self.refuse_busy()?;
+        let job = crate::jobs::Job::start(label, work)
+            .map_err(|_| ShellError::Unavailable(format!("{label} could not start")))?;
+        self.job = Some((job, self.path.clone()));
+        Ok(())
+    }
+
+    /// The job running now, for the window to show.
+    pub fn job(&self) -> Option<crate::jobs::JobView> {
+        self.job.as_ref().map(|(job, _)| job.view())
+    }
+
+    /// Stop the running job. Whatever it was making is dropped.
+    pub fn cancel_job(&mut self) {
+        if let Some((job, _)) = self.job.take() {
+            job.cancel();
+        }
+    }
+
+    /// Land the job if it finished. True while one still runs.
+    pub fn poll_job(&mut self) -> bool {
+        let Some((job, project)) = self.job.as_ref() else {
+            return false;
         };
-        self.write_caption(&clip, words)
+        let landing = match job.poll() {
+            crate::jobs::Poll::Running => return true,
+            crate::jobs::Poll::Finished(landing) => Some(landing),
+            crate::jobs::Poll::Lost => None,
+        };
+        let label = job.view().label;
+        let same_project = *project == self.path;
+        self.job = None;
+        let result = match landing {
+            Some(_) if !same_project => Err(ShellError::Unavailable(format!(
+                "{label} finished after its project closed"
+            ))),
+            Some(landing) => landing(self),
+            None => Err(ShellError::Unavailable(format!(
+                "{label} stopped unexpectedly"
+            ))),
+        };
+        if let Err(error) = result {
+            self.set_notice(error.to_string());
+        }
+        false
     }
 
     /// Hear `source` with `recognizer` and place the caption. Tests pass a
@@ -2946,6 +3051,12 @@ impl Shell {
             });
         };
         self.refuse_locked(&segment_id)?;
+        self.heard_clip(&segment_id)
+    }
+
+    /// The sound of clip `segment_id`, and how it maps onto the timeline.
+    fn heard_clip(&self, segment_id: &SegmentId) -> Result<HeardClip, ShellError> {
+        let segment_id = segment_id.clone();
         let draft = self.session_draft()?;
         let Some((segment, _)) = locate(draft, &segment_id) else {
             return Err(ShellError::Unavailable(
@@ -2984,23 +3095,6 @@ impl Shell {
             speed_holds: segment.speed.is_finite() && segment.speed > 0.0,
             target: segment.target.clone(),
         })
-    }
-
-    fn ensure_speech(&self) -> Result<(), ShellError> {
-        if self.speech.borrow().is_some() {
-            return Ok(());
-        }
-        let dir = speech_model_dir();
-        if !dir.join("parakeet-unified-en-0.6b.nemo").is_file() {
-            return Err(ShellError::Unavailable(
-                "the speech model is not on this machine".to_owned(),
-            ));
-        }
-        let model = ParakeetUnified::cpu(&dir).map_err(|_| {
-            ShellError::Unavailable("the speech model could not be loaded".to_owned())
-        })?;
-        *self.speech.borrow_mut() = Some(model);
-        Ok(())
     }
 
     fn write_caption(&mut self, clip: &HeardClip, words: WordColumns) -> Result<(), ShellError> {
@@ -4929,6 +5023,9 @@ fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId
         .map(|segment| segment.id.clone())
 }
 
+/// What a finished job does on the window thread.
+pub(crate) type Landing = Box<dyn FnOnce(&mut Shell) -> Result<(), ShellError> + Send>;
+
 struct HeardClip {
     source_id: SegmentId,
     path: String,
@@ -4938,6 +5035,15 @@ struct HeardClip {
     reverse: bool,
     speed_holds: bool,
     target: TimeRange,
+}
+
+/// The speech model's file inside [`speech_model_dir`].
+const SPEECH_MODEL: &str = "parakeet-unified-en-0.6b.nemo";
+
+/// Load the speech model; slow, so a job does it.
+fn load_speech() -> Result<ParakeetUnified, ShellError> {
+    ParakeetUnified::cpu(&speech_model_dir())
+        .map_err(|_| ShellError::Unavailable("the speech model could not be loaded".to_owned()))
 }
 
 fn speech_model_dir() -> PathBuf {
@@ -5825,6 +5931,140 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// Poll until the job lands, or ten seconds pass.
+    fn land(desktop: &mut Shell) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_job_lands_on_the_window_thread_and_one_runs_at_a_time() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        desktop
+            .start_job("Wait", move |progress| {
+                progress.stage("Waiting");
+                let _ = gate.recv();
+                Box::new(|shell: &mut Shell| {
+                    shell.set_notice("landed");
+                    Ok(())
+                })
+            })
+            .unwrap();
+        assert_eq!(desktop.job().map(|job| job.label), Some("Wait".to_owned()));
+        assert!(desktop.poll_job(), "still waiting");
+        assert_eq!(
+            desktop
+                .start_job("Second", |_| Box::new(|_: &mut Shell| Ok(())))
+                .unwrap_err()
+                .to_string(),
+            "Wait is still running"
+        );
+        go.send(()).unwrap();
+        land(&mut desktop);
+        assert!(desktop.job().is_none());
+        assert_eq!(desktop.notice(), "landed");
+    }
+
+    #[test]
+    fn a_cancelled_job_or_one_from_a_closed_project_does_not_land() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let landing = || -> super::Landing {
+            Box::new(|shell: &mut Shell| {
+                shell.set_notice("landed");
+                Ok(())
+            })
+        };
+        desktop
+            .start_job("Cancel me", move |progress| {
+                while !progress.cancelled() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                landing()
+            })
+            .unwrap();
+        desktop.cancel_job();
+        assert!(desktop.job().is_none());
+        assert!(!desktop.poll_job());
+        assert_ne!(desktop.notice(), "landed");
+
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        desktop
+            .start_job("Late", move |_| {
+                let _ = gate.recv();
+                landing()
+            })
+            .unwrap();
+        desktop.close_project().unwrap();
+        go.send(()).unwrap();
+        land(&mut desktop);
+        assert_eq!(desktop.notice(), "Late finished after its project closed");
+    }
+
+    #[test]
+    fn transcribe_runs_as_a_job_and_the_caption_lands_when_it_finishes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file()
+            || !super::speech_model_dir()
+                .join(super::SPEECH_MODEL)
+                .is_file()
+        {
+            eprintln!("skipped: the sound or the speech model is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            path: sound.display().to_string(),
+            duration: Micros(6_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        let mut segment = Segment::new("talk", "talk", TimeRange::new(0, 6_000_000));
+        segment.source_range = Some(TimeRange::new(0, 6_000_000));
+        track.segments.push(segment);
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        let revision = desktop.revision();
+        desktop.transcribe().unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Transcribe".to_owned())
+        );
+        // The window is free while the model runs: nothing has landed yet.
+        assert_eq!(desktop.revision(), revision);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the transcript took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        let draft = desktop.draft().unwrap();
+        assert!(
+            draft
+                .tracks
+                .iter()
+                .any(|track| track.kind == TrackType::Text && !track.segments.is_empty()),
+            "no caption landed"
+        );
+        // The model stays loaded for the next transcript.
+        assert!(desktop.speech.borrow().is_some());
     }
 
     fn empty_project(dir: &Path) {

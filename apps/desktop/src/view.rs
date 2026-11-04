@@ -219,6 +219,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     style(ui);
     shell.chrome = crate::shell::Chrome::default();
+    if shell.poll_job() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
@@ -243,6 +247,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         if view.export_open {
             export_dialog(shell, ui, view, parent);
         }
+        job_strip(shell, ui, full);
         shortcuts(shell, ui);
         if shell.playing() || shell.preview_pending() {
             ui.ctx().request_repaint();
@@ -251,6 +256,42 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
     }
+}
+
+/// The running job above the foot of the window: what it is, where it has
+/// got to, and Cancel.
+fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
+    const WIDTH: f32 = 340.0;
+    let Some(job) = shell.job() else {
+        return;
+    };
+    let top_left = Pos2::new(full.center().x - WIDTH / 2.0, full.bottom() - 72.0);
+    egui::Area::new(ui.scope_id().with("job"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(WIDTH);
+                ui.horizontal(|ui| {
+                    let line = if job.stage.is_empty() {
+                        job.label.clone()
+                    } else {
+                        format!("{}: {}", job.label, job.stage)
+                    };
+                    ui.label(line);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            shell.cancel_job();
+                        }
+                    });
+                });
+                let bar = egui::ProgressBar::new(job.fraction.unwrap_or(0.0));
+                ui.add(match job.fraction {
+                    Some(_) => bar.show_percentage(),
+                    None => bar.animate(true),
+                });
+            });
+        });
 }
 
 fn projects_root(view: &ViewState) -> std::path::PathBuf {
@@ -6176,6 +6217,69 @@ mod tests {
         assert!(beats[0].source > 0);
         assert!(beats[0].source < 2_000_000);
         assert_eq!(beats[0].time.0, beats[0].source);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_running_job_shows_its_stage_and_cancel_stops_it() {
+        let (mut shell, temp) = open_span("job", 2_000_000);
+        let (_keep, gate) = std::sync::mpsc::channel::<()>();
+        shell
+            .start_job("Transcribe", move |progress| {
+                progress.stage("Listening");
+                let _ = gate.recv();
+                Box::new(|_: &mut Shell| Ok(()))
+            })
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while shell.job().is_some_and(|job| job.stage.is_empty())
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // A new area is measured on its first frame and drawn on the next.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(painted_text(&output).contains("Transcribe: Listening"));
+        let cancel = text_pos(&output, "Cancel").expect("a Cancel button");
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: cancel,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(cancel), press(true)],
+            vec![press(false)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(shell.job().is_none(), "Cancel did not stop the job");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

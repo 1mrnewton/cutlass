@@ -449,8 +449,7 @@ impl PhoneHost {
     /// within a frame of `time`. Other clips have none to show.
     #[must_use]
     pub fn keyframes(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneKeys> {
-        cutlass_editor::stage_box(self.draft(), segment_id, time, &self.sizes())?;
-        PhoneKeys::of(self.draft(), segment_id, time)
+        cutlass_editor::clip_keys(self.draft(), segment_id, time, &self.sizes())
     }
 
     /// Ease the span of the clip's keyframes that `time` is in along the

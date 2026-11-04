@@ -400,6 +400,20 @@ fn snap_axis(center: f64, length: f64, half: f64, square: bool, reach: f64) -> O
 
 /// The offset from the clip's start that `time` is at, when the clip has
 /// keys and `time` is on it.
+/// The clip's pose at `time` and the offset to key it at, when the clip
+/// has keys and `time` is on it. A pose edit on such a clip keys the pose
+/// there, as a stage drag does, rather than changing the stored one.
+#[must_use]
+pub fn keyed_pose(draft: &Draft, segment_id: &SegmentId, time: Micros) -> Option<(Micros, Pose)> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id == *segment_id)?;
+    let offset = key_at(segment, time)?;
+    Some((offset, pose_of(segment, &draft.keyframe_graph_list, time)))
+}
+
 fn key_at(segment: &Segment, time: Micros) -> Option<Micros> {
     let offset = time.0.checked_sub(segment.target.start.0)?;
     let on = (0..=segment.target.duration.0).contains(&offset);
@@ -541,6 +555,21 @@ mod tests {
 
     fn near(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn a_pose_is_keyed_only_on_a_keyed_clip_and_reads_the_keys() {
+        let mut draft = draft();
+        let main = SegmentId::new("main");
+        assert_eq!(keyed_pose(&draft, &main, Micros(5)), None);
+        let segment = &mut draft.tracks[0].segments[0];
+        cutlass_model::put_key(segment, "KFTypePositionX", Micros(0), 0.0);
+        cutlass_model::put_key(segment, "KFTypePositionX", Micros(10), 1.0);
+        let (offset, pose) = keyed_pose(&draft, &main, Micros(5)).unwrap();
+        assert_eq!(offset, Micros(5));
+        assert!(near(pose.x, 0.5), "x {}", pose.x);
+        // Off the clip there is nothing to key.
+        assert_eq!(keyed_pose(&draft, &main, Micros(11)), None);
     }
 
     #[test]

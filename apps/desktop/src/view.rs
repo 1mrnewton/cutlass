@@ -123,6 +123,11 @@ pub struct ViewState {
     export_open: bool,
     export_side: i32,
     export_codec: cutlass_decode::CodecId,
+    export_span: crate::shell::ExportSpan,
+    /// `None` keeps the project's rate.
+    export_rate: Option<FrameRate>,
+    export_quality: crate::shell::ExportQuality,
+    export_sound: bool,
     replace_prompt: bool,
     export_path: String,
     text_buffer: String,
@@ -169,7 +174,11 @@ impl Default for ViewState {
             preview: None,
             export_open: false,
             export_side: 1080,
-            export_codec: cutlass_decode::CodecId::Png,
+            export_codec: cutlass_decode::CodecId::H264,
+            export_span: crate::shell::ExportSpan::Whole,
+            export_rate: None,
+            export_quality: crate::shell::ExportQuality::Recommended,
+            export_sound: true,
             replace_prompt: false,
             export_path: String::new(),
             text_buffer: String::new(),
@@ -263,6 +272,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
 fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
     const WIDTH: f32 = 340.0;
     let Some(job) = shell.job() else {
+        exported_strip(shell, ui, full, WIDTH);
         return;
     };
     let top_left = Pos2::new(full.center().x - WIDTH / 2.0, full.bottom() - 72.0);
@@ -289,6 +299,40 @@ fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
                 ui.add(match job.fraction {
                     Some(_) => bar.show_percentage(),
                     None => bar.animate(true),
+                });
+            });
+        });
+}
+
+/// The movie the last export wrote, with a way to its folder.
+fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
+    let Some(path) = shell.exported().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let top_left = Pos2::new(full.center().x - width / 2.0, full.bottom() - 72.0);
+    egui::Area::new(ui.scope_id().with("exported"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Exported {name}"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            shell.forget_export();
+                        }
+                        if ui.button(crate::shell::REVEAL_LABEL).clicked() {
+                            if let Err(error) = crate::shell::reveal(&path) {
+                                shell.set_notice(error.to_string());
+                            }
+                            shell.forget_export();
+                        }
+                    });
                 });
             });
         });
@@ -4141,35 +4185,134 @@ fn export_dialog(
     view: &mut ViewState,
     parent: Option<&eframe::Frame>,
 ) {
+    use crate::shell::{ExportQuality, ExportSpan};
+    use cutlass_decode::CodecId;
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
-        ui.label(RichText::new("Short side").color(tokens::MUTED));
-        for side in crate::shell::SHORT_SIDES {
-            if ui
-                .selectable_label(view.export_side == side, side.to_string())
-                .clicked()
-            {
-                view.export_side = side;
-            }
-        }
-        if view.replace_prompt {
-            ui.label("Replace the existing file?");
-        }
-        if ui.button("Export").clicked() {
-            if view.export_path.is_empty() {
-                view.dialogs.save_export(parent);
-            } else {
-                match write_export(shell, view) {
-                    Ok(()) => view.export_open = false,
-                    Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
-                    Err(error) => shell.set_notice(error.to_string()),
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                let movie = view.export_codec != CodecId::Png;
+                choice_row(ui, "Format", |ui| {
+                    if ui.selectable_label(movie, "Movie (MP4)").clicked() && !movie {
+                        view.export_codec = CodecId::H264;
+                    }
+                    if ui.selectable_label(!movie, "Still frame (PNG)").clicked() {
+                        view.export_codec = CodecId::Png;
+                    }
+                });
+                if movie {
+                    choice_row(ui, "Codec", |ui| {
+                        for (codec, name) in [(CodecId::H264, "H.264"), (CodecId::Hevc, "HEVC")] {
+                            let offered = shell.encodes(codec);
+                            let label = egui::Button::selectable(view.export_codec == codec, name);
+                            if ui.add_enabled(offered, label).clicked() {
+                                view.export_codec = codec;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Range", |ui| {
+                        let picked = !shell.selection().is_empty();
+                        if !picked {
+                            view.export_span = ExportSpan::Whole;
+                        }
+                        for (span, name) in [
+                            (ExportSpan::Whole, "Whole timeline"),
+                            (ExportSpan::Selected, "Selected clips"),
+                        ] {
+                            let offered = span == ExportSpan::Whole || picked;
+                            let label = egui::Button::selectable(view.export_span == span, name);
+                            if ui.add_enabled(offered, label).clicked() {
+                                view.export_span = span;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Frame rate", |ui| {
+                        for (rate, name) in [
+                            (None, "Project"),
+                            (Some(FrameRate::FPS_24), "24"),
+                            (Some(FrameRate::FPS_25), "25"),
+                            (Some(FrameRate::FPS_30), "30"),
+                            (Some(FrameRate::FPS_50), "50"),
+                            (Some(FrameRate::FPS_60), "60"),
+                        ] {
+                            if ui
+                                .selectable_label(view.export_rate == rate, name)
+                                .clicked()
+                            {
+                                view.export_rate = rate;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Quality", |ui| {
+                        for (quality, name) in [
+                            (ExportQuality::Lower, "Lower"),
+                            (ExportQuality::Recommended, "Recommended"),
+                            (ExportQuality::Higher, "Higher"),
+                        ] {
+                            if ui
+                                .selectable_label(view.export_quality == quality, name)
+                                .clicked()
+                            {
+                                view.export_quality = quality;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Sound", |ui| {
+                        ui.checkbox(&mut view.export_sound, "Include the timeline's sound");
+                    });
                 }
-            }
-        }
+                choice_row(ui, "Short side", |ui| {
+                    for side in crate::shell::SHORT_SIDES {
+                        if ui
+                            .selectable_label(view.export_side == side, side.to_string())
+                            .clicked()
+                        {
+                            view.export_side = side;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                if view.replace_prompt {
+                    ui.label("Replace the existing file?");
+                }
+                let busy = shell.job().is_some();
+                if ui.add_enabled(!busy, egui::Button::new("Export")).clicked() {
+                    if view.export_path.is_empty() {
+                        let extension = if movie { "mp4" } else { "png" };
+                        let name = shell
+                            .draft()
+                            .map_or_else(String::new, |draft| draft.name.clone());
+                        view.dialogs.save_export(parent, &name, extension);
+                    } else {
+                        match write_export(shell, view) {
+                            Ok(()) => view.export_open = false,
+                            Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
+                            Err(error) => shell.set_notice(error.to_string()),
+                        }
+                    }
+                }
+            });
+        });
     });
     if closed {
         view.export_open = false;
         view.replace_prompt = false;
     }
+}
+
+/// A dim label and its choices on one line.
+fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, 20.0), Sense::hover());
+        ui.painter().text(
+            rect.left_center(),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(12.0),
+            tokens::MUTED,
+        );
+        add(ui);
+    });
 }
 
 fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
@@ -4229,7 +4372,10 @@ fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
         short_side: view.export_side,
         codec: view.export_codec,
         replace: view.replace_prompt,
-        ..ExportRequest::default()
+        span: view.export_span,
+        frame_rate: view.export_rate,
+        quality: view.export_quality,
+        sound: view.export_sound,
     })
 }
 
@@ -6218,6 +6364,98 @@ mod tests {
         assert!(beats[0].source > 0);
         assert!(beats[0].source < 2_000_000);
         assert_eq!(beats[0].time.0, beats[0].source);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The last place `wanted` is painted, so a dialog's button wins over
+    /// the same word in the bar beneath it.
+    fn last_text_pos(output: &egui::FullOutput, wanted: &str) -> Option<Pos2> {
+        output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|clipped| shape_pos(&clipped.shape, wanted))
+            .map(|pos| pos + Vec2::new(4.0, 4.0))
+    }
+
+    #[test]
+    fn the_export_dialog_writes_a_movie_as_a_job_and_offers_its_folder() {
+        let (mut shell, temp) = open_span("movie", 1_000_000);
+        let destination = temp.join("cut.mp4");
+        let mut view = ViewState::new();
+        view.export_open = true;
+        view.export_side = 480;
+        view.export_path = destination.display().to_string();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            vec![
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            ]
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        for label in [
+            "Movie (MP4)",
+            "H.264",
+            "Whole timeline",
+            "Recommended",
+            "Frame rate",
+        ] {
+            assert!(text.contains(label), "the dialog has no {label}");
+        }
+        let export = last_text_pos(&output, "Export").expect("an Export button");
+        for events in click(export) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(
+            !view.export_open,
+            "the dialog stays open: {} at {export:?}",
+            shell.notice()
+        );
+        assert_eq!(shell.job().map(|job| job.label), Some("Export".to_owned()));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while shell.job().is_some() && std::time::Instant::now() < until {
+            frame(&mut shell, &mut view, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(destination.is_file(), "{}", shell.notice());
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(text.contains("Exported cut.mp4"), "{text}");
+        assert!(text.contains(crate::shell::REVEAL_LABEL));
+        let close = last_text_pos(&output, "Close").expect("a Close button");
+        for events in click(close) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(shell.exported().is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

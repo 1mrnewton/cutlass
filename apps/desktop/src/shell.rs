@@ -4531,7 +4531,9 @@ impl Shell {
     /// The stretch of the timeline `span` names.
     fn export_range(&self, draft: &Draft, span: ExportSpan) -> Result<TimeRange, ShellError> {
         let range = match span {
-            ExportSpan::Whole => TimeRange::new(0, draft.duration.0),
+            // The stored length can lag the clips, so the end is where the
+            // timeline shows the cut ending.
+            ExportSpan::Whole => TimeRange::new(0, self.cut_duration().0),
             ExportSpan::Selected => {
                 let picked = draft
                     .tracks
@@ -4557,6 +4559,13 @@ impl Shell {
             ));
         }
         Ok(range)
+    }
+
+    /// An encoder for `codec` opens on this machine.
+    pub fn encodes(&self, codec: CodecId) -> bool {
+        self.encoders
+            .open(&CodecParams::video(codec, 1280, 720))
+            .is_ok()
     }
 
     /// The movie the last export wrote, until the next export starts.
@@ -5243,6 +5252,38 @@ fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId
         .iter()
         .find(|segment| covers(segment, time))
         .map(|segment| segment.id.clone())
+}
+
+/// What the button that opens a file's folder says on this system.
+#[cfg(target_os = "macos")]
+pub const REVEAL_LABEL: &str = "Show in Finder";
+#[cfg(target_os = "windows")]
+pub const REVEAL_LABEL: &str = "Show in Explorer";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const REVEAL_LABEL: &str = "Show in folder";
+
+/// Open `path`'s folder in the system's file manager, with the file picked
+/// where the system can do that.
+pub fn reveal(path: &Path) -> Result<(), ShellError> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-R").arg(path);
+        open
+    } else if cfg!(target_os = "windows") {
+        let mut explorer = std::process::Command::new("explorer");
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(path);
+        explorer.arg(select);
+        explorer
+    } else {
+        let mut open = std::process::Command::new("xdg-open");
+        open.arg(path.parent().unwrap_or(path));
+        open
+    };
+    command
+        .spawn()
+        .map(drop)
+        .map_err(|error| ShellError::Io(format!("the folder could not be shown: {error}")))
 }
 
 /// A job in flight, the project it started in, and whether it was asked

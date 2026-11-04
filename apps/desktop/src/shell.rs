@@ -9305,7 +9305,15 @@ mod tests {
         assert!(!desktop.cropped());
         desktop.toggle_crop().unwrap();
         assert!(desktop.cropped());
-        let video = &desktop.draft().unwrap().materials.videos[0];
+        // "again" shows the same video; the crop is this clip's alone.
+        let draft = desktop.draft().unwrap();
+        let own = &draft.tracks[0].segments[0].material_id;
+        let video = draft
+            .materials
+            .videos
+            .iter()
+            .find(|video| &video.id == own)
+            .unwrap();
         assert_eq!(video.crop, super::center_crop());
         assert_eq!(video.crop_ratio, "16:9");
         assert_eq!(video.crop_scale, 2.0);
@@ -9314,10 +9322,12 @@ mod tests {
             TimeRange::new(0, 2_000_000)
         );
         desktop.select(Some(SegmentId::new("again")));
-        assert!(desktop.cropped());
+        assert!(!desktop.cropped());
+        desktop.select(Some(SegmentId::new("picture")));
         desktop.undo().unwrap();
         assert!(!desktop.cropped());
         desktop.redo().unwrap();
+        assert!(desktop.cropped());
         desktop.toggle_crop().unwrap();
         assert!(!desktop.cropped());
         assert_eq!(
@@ -9343,7 +9353,8 @@ mod tests {
             desktop.draft().unwrap().materials.drafts[0].crop,
             super::center_crop()
         );
-        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+        // The shared video and the picture's own copy; a compound adds none.
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 2);
         desktop.toggle_crop().unwrap();
         assert_eq!(
             desktop.draft().unwrap().materials.drafts[0].crop,

@@ -19,6 +19,7 @@ mod ruler;
 mod snap;
 mod stage;
 mod tools;
+mod transport;
 mod zoom;
 
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
@@ -44,6 +45,7 @@ pub use stage::{
     stage_align, stage_box, stage_gesture, stage_pick,
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
+pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
 pub use zoom::{
     Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,
 };

@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod animation;
+mod bin;
 mod clip;
 mod draft;
 mod enums;
@@ -30,6 +31,7 @@ mod track;
 pub use animation::{
     ANIMATION_PRESETS, AnimationPreset, Motion, animated_at, animation_preset, segment_animations,
 };
+pub use bin::{BinFolder, BinLink, BinPath, VirtualStore};
 pub use clip::{Clip, Flip, Point, UniformScale};
 pub use draft::{CanvasConfig, Draft, DraftConfig};
 pub use enums::{

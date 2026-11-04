@@ -34,6 +34,7 @@ const ATTACHMENT_DIR: &str = "common_attachment";
 const ID_MAP_FILE: &str = "attachment_id_mapping.json";
 const RESOURCES_DIR: &str = "Resources";
 const BIZ_CONFIG_FILE: &str = "draft_biz_config.json";
+const VIRTUAL_STORE_FILE: &str = "draft_virtual_store.json";
 const DESKTOP_OS: &[&str] = &["windows", "mac", "macOS"];
 
 fn default_next_index() -> i64 {
@@ -80,6 +81,9 @@ pub struct Folder {
     pub sidecars: BTreeMap<String, Value>,
     /// `draft_biz_config.json`, when the folder has one. Linkage is not applied.
     pub biz_config: Option<Value>,
+    /// `draft_virtual_store.json`: the library's folders. `None` when the
+    /// file is absent and nothing has made one, so none is written.
+    pub virtual_store: Option<cutlass_model::VirtualStore>,
     /// One draft per timeline folder. The main id is also [`Self::draft`].
     pub timelines: BTreeMap<String, Draft>,
 }
@@ -235,6 +239,7 @@ impl Folder {
             id_map_rest: Map::new(),
             sidecars: BTreeMap::new(),
             biz_config: None,
+            virtual_store: None,
             timelines,
             draft,
         }
@@ -251,6 +256,7 @@ impl Folder {
         let (id_map, id_map_rest) = read_id_map(&root)?;
         let sidecars = read_sidecars(&root)?;
         let biz_config = read_biz_config(&root)?;
+        let virtual_store = read_virtual_store(&root)?;
         let timelines = read_timelines(&root)?;
         Ok(Self {
             draft,
@@ -261,6 +267,7 @@ impl Folder {
             id_map_rest,
             sidecars,
             biz_config,
+            virtual_store,
             timelines,
         })
     }
@@ -307,6 +314,9 @@ impl Folder {
         write_struct(&root, &root.join(META_FILE), &self.meta)?;
         write_id_map(&root, self)?;
         write_sidecars(&root, self)?;
+        if let Some(store) = &self.virtual_store {
+            write_struct(&root, &root.join(VIRTUAL_STORE_FILE), store)?;
+        }
         if let Some(biz_config) = &self.biz_config {
             let path = root.join(BIZ_CONFIG_FILE);
             let bytes = write_value(biz_config, &path)?;
@@ -397,6 +407,19 @@ where
         path,
         message: error.to_string(),
     })
+}
+
+fn read_virtual_store(root: &Path) -> Result<Option<cutlass_model::VirtualStore>, StoreError> {
+    let path = root.join(VIRTUAL_STORE_FILE);
+    let Some(bytes) = read_optional(&path)? else {
+        return Ok(None);
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| StoreError::Json {
+            path,
+            message: error.to_string(),
+        })
 }
 
 fn read_id_map(root: &Path) -> Result<(IdMap, Map<String, Value>), StoreError> {
@@ -824,6 +847,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(id_map["id_mapping"]["next_index"], 1000);
+    }
+
+    #[test]
+    fn the_library_folders_are_written_only_once_there_are_some_and_read_back() {
+        let temp = Temp::new();
+        let root = temp.path.join("project");
+        let mut folder = Folder::new(Draft::empty("D"));
+        folder.save(&root).unwrap();
+        assert!(!root.join("draft_virtual_store.json").exists());
+        assert_eq!(Folder::read(&root).unwrap().virtual_store, None);
+        let mut store = cutlass_model::VirtualStore::default();
+        store
+            .folders
+            .push(cutlass_model::BinFolder::new("f", "Shots", 1));
+        store.links.push(cutlass_model::BinLink {
+            child_id: "clip".to_owned(),
+            parent_id: "f".to_owned(),
+            ..cutlass_model::BinLink::default()
+        });
+        folder.virtual_store = Some(store.clone());
+        folder.save(&root).unwrap();
+        assert_eq!(Folder::read(&root).unwrap().virtual_store, Some(store));
     }
 
     #[test]

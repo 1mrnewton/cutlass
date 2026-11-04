@@ -67,6 +67,9 @@ pub struct Av1Core {
     lr_scratch: LrScratch,
     /// Apply film grain to shown pictures.
     pub apply_grain: bool,
+    /// Largest picture (upscaled width x height) accepted; larger is `Limit`.
+    /// The default is the largest picture any AV1 level allows.
+    pub max_pixels: u64,
 }
 
 struct Pending {
@@ -89,13 +92,17 @@ impl Av1Core {
             pending: None,
             lr_scratch: LrScratch::new(),
             apply_grain: true,
+            max_pixels: 35_651_584,
         }
     }
 
     pub fn reset(&mut self) {
         let seq = self.seq.take();
+        let (grain, max) = (self.apply_grain, self.max_pixels);
         *self = Self::new();
         self.seq = seq;
+        self.apply_grain = grain;
+        self.max_pixels = max;
     }
 
     pub fn sequence(&self) -> Option<&SequenceHeader> {
@@ -160,7 +167,8 @@ impl Av1Core {
                         }
                         continue;
                     }
-                    if u64::from(hdr.upscaled_width) * u64::from(hdr.frame_height) > 8192 * 8192 {
+                    if u64::from(hdr.upscaled_width) * u64::from(hdr.frame_height) > self.max_pixels
+                    {
                         return Err(CodecError::Limit { what: "frame size" });
                     }
                     let mut p = Pending {
@@ -342,6 +350,27 @@ impl Av1Core {
             // already initialized with defaults
         } else {
             // load_cdfs keeps coefficient CDFs from the reference.
+        }
+        if !hdr.frame_is_intra {
+            // Every reference must share the sequence format and obey the
+            // scaling limits of 7.11.3.3.
+            for i in 0..7 {
+                let s = hdr.ref_frame_idx[i] as usize;
+                let rh = &self.ref_hdr[s];
+                let fw = hdr.frame_width;
+                let fh = hdr.frame_height;
+                if self.slots[s].is_none()
+                    || rh.bit_depth != seq.bit_depth
+                    || rh.subsampling_x != seq.subsampling_x
+                    || rh.subsampling_y != seq.subsampling_y
+                    || 2 * fw < rh.upscaled_width
+                    || 2 * fh < rh.frame_height
+                    || fw > 16 * rh.upscaled_width
+                    || fh > 16 * rh.frame_height
+                {
+                    return Err(malformed("reference frame format"));
+                }
+            }
         }
         let refs_data: [Option<Arc<RefData>>; 8] =
             std::array::from_fn(|i| self.slots[i].as_ref().map(|s| s.data.clone()));

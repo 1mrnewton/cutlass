@@ -731,6 +731,12 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             } else {
                 self.num_planes > 1
             };
+        if b.has_chroma
+            && plane_residual_size(bsize, self.sub_x, self.sub_y) == super::types::BLOCK_INVALID
+        {
+            self.b = b;
+            return Err(malformed("block size for this subsampling"));
+        }
         b.avail_u = self.is_inside(r as isize - 1, c as isize);
         b.avail_l = self.is_inside(r as isize, c as isize - 1);
         b.avail_u_chroma = b.avail_u;

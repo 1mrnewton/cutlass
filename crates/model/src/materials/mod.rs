@@ -295,6 +295,23 @@ impl Materials {
         None
     }
 
+    /// Whether the videos `a` and `b` show the same file: the same id, or
+    /// one a clip's own copy of the other.
+    #[must_use]
+    pub fn same_video(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        let path = |id: &str| {
+            self.videos
+                .iter()
+                .find(|video| video.id.as_str() == id)
+                .map(|video| video.path.as_str())
+                .filter(|path| !path.is_empty())
+        };
+        path(a).is_some_and(|left| path(b) == Some(left))
+    }
+
     /// Take the material `id` out of whichever pool holds it. Whether one did.
     pub fn remove(&mut self, id: &str) -> bool {
         if id.is_empty() {

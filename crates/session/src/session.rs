@@ -528,7 +528,9 @@ mod tests {
     fn undo_and_redo_say_when_they_have_a_step() {
         let (mut session, track) = session();
         assert!(!session.can_undo() && !session.can_redo());
-        session.apply(0, &[place(&track, "a", 0, 1_000_000)]).unwrap();
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
         assert!(session.can_undo() && !session.can_redo());
         session.undo().unwrap();
         assert!(!session.can_undo() && session.can_redo());

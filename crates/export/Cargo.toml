@@ -16,6 +16,7 @@ cutlass-gpu = { path = "../gpu", version = "0.1.0" }
 cutlass-render = { path = "../render", version = "0.1.0" }
 cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }

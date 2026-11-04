@@ -15,6 +15,7 @@ mod movie;
 mod run;
 mod sidecars;
 mod sound;
+mod still;
 
 pub use config::{
     AudioExport, ExportError, ExportRequest, GIF_SHORT_SIDES, MAX_EDGE, MAX_FRAMES, SidecarKind,
@@ -26,3 +27,4 @@ pub use run::{
 };
 pub use sidecars::{sidecar_text, write_sidecar};
 pub use sound::file_audio;
+pub use still::{StillFormat, write_still};

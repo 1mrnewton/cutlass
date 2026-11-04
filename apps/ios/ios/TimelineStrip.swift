@@ -195,6 +195,17 @@ struct TimelineStrip: View {
                 }
             }
         }
+        .overlay(alignment: .leading) {
+            if selected, let keys = model.keys {
+                ZStack(alignment: .leading) {
+                    ForEach(keys.timesUs, id: \.self) { time in
+                        KeyDiamond()
+                            .offset(x: x(time - clip.startUs) - 1 - KeyDiamond.side / 2)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
         .scaleEffect(moving?.id == clip.id ? 1.04 : 1)
         .shadow(radius: moving?.id == clip.id ? 6 : 0)
         .offset(x: left + 1 + moved.width, y: moved.height)
@@ -515,5 +526,19 @@ struct SquareClip: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// A keyframe's mark on the selected clip.
+struct KeyDiamond: View {
+    static let side: CGFloat = 11
+
+    var body: some View {
+        Rectangle()
+            .fill(Color(red: 1, green: 0.3, blue: 0.45))
+            .overlay(Rectangle().strokeBorder(.white, lineWidth: 1.5))
+            .frame(width: Self.side / 1.414, height: Self.side / 1.414)
+            .rotationEffect(.degrees(45))
+            .frame(width: Self.side, height: Self.side)
     }
 }

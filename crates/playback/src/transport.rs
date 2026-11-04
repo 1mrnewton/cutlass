@@ -13,7 +13,7 @@ use cutlass_model::{Draft, Micros};
 
 use crate::apple::{AudioGap, AudioHost, AudioOutput, RATE};
 use crate::mixer::{MixJob, Mixer};
-use crate::preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix};
+use crate::preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix_peak};
 
 /// How far the picture may drift from the heard audio before it jumps to it.
 const AUDIO_SNAP: i64 = 60_000;
@@ -75,6 +75,8 @@ pub struct Transport {
     heard: Heard,
     stream: Option<Stream>,
     mixer: Option<Mixer>,
+    /// The peaks of the last slice queued without a stream.
+    queued_peak: Option<[f32; 2]>,
 }
 
 impl Default for Transport {
@@ -93,6 +95,7 @@ impl Transport {
             heard: Heard::new(),
             stream: None,
             mixer: None,
+            queued_peak: None,
         }
     }
 
@@ -129,6 +132,7 @@ impl Transport {
     /// Stop every sound: the stream and the scrub slice.
     pub fn silence(&mut self) {
         self.stream = None;
+        self.queued_peak = None;
         if let Some(mixer) = &self.mixer {
             mixer.stop();
         }
@@ -176,7 +180,7 @@ impl Transport {
     /// Queue `frames` of the mix at `at`, for a scrub or a host with no
     /// stream.
     pub fn queue(&mut self, program: Program<'_>, at: Micros, frames: u32) {
-        queue_mix(
+        self.queued_peak = queue_mix_peak(
             &mut self.output,
             PreviewMix {
                 draft: program.draft,
@@ -274,6 +278,18 @@ impl Transport {
     #[must_use]
     pub fn heard_time(&self) -> Option<Micros> {
         Some(self.stream?.time_at(self.heard_frames()?))
+    }
+
+    /// The left and right peaks of what is heard now: the streamed window
+    /// the device is playing, or the last slice queued without a stream.
+    /// `None` while nothing plays.
+    #[must_use]
+    pub fn heard_peak(&self) -> Option<[f32; 2]> {
+        if self.stream.is_some() {
+            let frames = self.heard_frames()?;
+            return self.mixer.as_ref()?.peak_at(frames);
+        }
+        self.queued_peak
     }
 
     /// The playhead the heard audio gives, or `None` to follow the wall.
@@ -421,8 +437,11 @@ mod tests {
                 playing: true
             }
         );
-        // A draft with no sound mixes to silence.
+        // A draft with no sound mixes to silence, and the meter hears it.
         assert!(transport.output().queued().iter().all(|byte| *byte == 0));
+        assert_eq!(transport.heard_peak(), Some([0.0, 0.0]));
+        transport.silence();
+        assert_eq!(transport.heard_peak(), None);
     }
 
     #[test]

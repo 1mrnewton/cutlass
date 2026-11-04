@@ -14,7 +14,7 @@ struct EditorScreen: View {
 
     /// The tool panel open over the tool bar.
     enum Panel: Equatable {
-        case volume, speed, effects
+        case volume, speed, effects, ratio, background, graphs, animations
         /// Add text, or change the text clip with this id.
         case text(String?)
     }
@@ -54,7 +54,7 @@ struct EditorScreen: View {
         .overlay(alignment: .top) { notice }
         .onChange(of: picked) { _, items in importPicked(items) }
         .onChange(of: model.selectedClip) { _, id in
-            if id == nil, panel != .text(nil), panel != .effects { panel = nil }
+            if id == nil, panel != .text(nil), panel != .effects, panel != .ratio, panel != .background { panel = nil }
         }
         .onDisappear { model.pause() }
         .sheet(isPresented: $exporting) {
@@ -84,11 +84,17 @@ struct EditorScreen: View {
 
     private var preview: some View {
         ZStack {
+            // Lighter than the canvas, so the canvas shows its ratio.
+            Color(white: 0.06)
             Color.black
+                .aspectRatio(model.canvasAspect, contentMode: .fit)
             if let picture = model.picture {
                 Image(decorative: picture, scale: 1)
                     .resizable()
                     .aspectRatio(model.canvasAspect, contentMode: .fit)
+            }
+            if !model.isPlaying {
+                StageOverlay(model: model) { panel = .text($0) }
             }
             if model.isOpening || model.isImporting {
                 ProgressView().tint(.white)
@@ -96,16 +102,37 @@ struct EditorScreen: View {
         }
         .frame(maxWidth: .infinity)
         .aspectRatio(16 / 10, contentMode: .fit)
+        // A box larger than the preview stays inside it.
+        .clipped()
     }
 
     /// The clock on the left, play pinned to the middle so it never moves
-    /// with the clock, undo and redo on the right.
+    /// with the clock, undo and redo on the right. A selected picture or
+    /// title adds the keyframe button before undo, and the Graphs button
+    /// when the playhead is between two of its keyframes.
     private var transport: some View {
         HStack {
             Text(clock(timeUs: model.playheadUs) + " / " + clock(timeUs: model.durationUs))
                 .font(.footnote.monospacedDigit())
                 .foregroundStyle(.white.opacity(0.7))
             Spacer()
+            if let keys = model.keys, keys.inSpan {
+                Button { panel = .graphs } label: { HugeIcon("graphs") }
+                    .accessibilityLabel("Graphs")
+                    .padding(.trailing, 16)
+            }
+            if let keys = model.keys {
+                Button { model.toggleKeyframe() } label: {
+                    HugeIcon("keyframe")
+                        .overlay(alignment: .topTrailing) {
+                            Text(keys.here ? "−" : "+")
+                                .font(.system(size: 11, weight: .bold))
+                                .offset(x: 5, y: -5)
+                        }
+                }
+                .accessibilityLabel(keys.here ? "Remove keyframe" : "Add keyframe")
+                .padding(.trailing, 16)
+            }
             Button { model.undo() } label: { HugeIcon("undo") }
                 .accessibilityLabel("Undo")
             Button { model.redo() } label: { HugeIcon("redo") }
@@ -133,6 +160,18 @@ struct EditorScreen: View {
         if panel == .effects {
             EffectsPanel(model: model) { self.panel = nil }
                 .transition(.move(edge: .bottom))
+        } else if panel == .ratio {
+            RatioPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .background {
+            BackgroundPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .animations {
+            AnimationsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
+        } else if panel == .graphs {
+            GraphsPanel(model: model) { self.panel = nil }
+                .transition(.move(edge: .bottom))
         } else if case let .text(clip) = panel {
             TextPanel(model: model, clip: clip) { self.panel = nil }
                 .id(clip ?? "new")
@@ -142,7 +181,7 @@ struct EditorScreen: View {
                 switch panel {
                 case .volume: VolumePanel(model: model, clip: clip) { self.panel = nil }
                 case .speed: SpeedPanel(model: model, clip: clip) { self.panel = nil }
-                case .text, .effects: EmptyView()
+                case .text, .effects, .ratio, .background, .graphs, .animations: EmptyView()
                 }
             }
             .transition(.move(edge: .bottom))
@@ -174,10 +213,17 @@ struct EditorScreen: View {
         case .split: model.split()
         case .volume: panel = .volume
         case .speed: panel = .speed
+        case .animations: panel = .animations
         case .delete: model.deleteClip()
         case .addText: panel = .text(nil)
         case .editText: panel = .text(model.selectedClip)
         case .videoEffects: panel = .effects
+        case .aspectRatio:
+            model.selectedClip = nil
+            panel = .ratio
+        case .background:
+            model.selectedClip = nil
+            panel = .background
         default: model.say("\(tool.label) is coming soon")
         }
     }

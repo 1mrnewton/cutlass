@@ -33,6 +33,23 @@ pub(crate) fn timeline_speed(draft: &Draft, segment: &Segment) -> f64 {
     curve_equivalent(draft, segment).unwrap_or(segment.speed)
 }
 
+/// The curve-speed material in force on `segment`, and its points.
+pub(crate) fn curve_points(
+    draft: &Draft,
+    segment: &Segment,
+) -> Option<(MaterialId, Vec<SpeedPoint>)> {
+    let material = segment.extra_material_refs.iter().find_map(|material_id| {
+        draft
+            .materials
+            .speeds
+            .iter()
+            .find(|speed| &speed.id == material_id && speed.mode == SpeedMode::Curve)
+    })?;
+    let points = material.curve_speed.as_ref()?.speed_points.clone();
+    cutlass_model::curve_speed_factor(&points).ok()?;
+    Some((material.id.clone(), points))
+}
+
 fn curve_equivalent(draft: &Draft, segment: &Segment) -> Option<f64> {
     let material = segment.extra_material_refs.iter().find_map(|material_id| {
         draft
@@ -167,6 +184,15 @@ pub fn set_constant_speed(
     let refs = next.extra_material_refs.clone();
     draft.tracks[track_index].segments[segment_index] = next;
     for material_id in refs {
+        if !draft
+            .materials
+            .speeds
+            .iter()
+            .any(|kept| kept.id == material_id)
+        {
+            continue;
+        }
+        let material_id = super::own::own(draft, track_index, segment_index, &material_id)?;
         if let Some(material) = draft
             .materials
             .speeds

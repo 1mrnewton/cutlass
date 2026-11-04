@@ -218,6 +218,102 @@ pub fn speed_at(position: f64) -> f64 {
     cutlass_ffi::speed_at(position)
 }
 
+/// The Styles tab's colors, as `#RRGGBB`.
+#[uniffi::export]
+#[must_use]
+pub fn text_colors() -> Vec<String> {
+    cutlass_ffi::TEXT_COLORS
+        .iter()
+        .map(|color| (*color).to_owned())
+        .collect()
+}
+
+/// The Styles tab's slider ends and the values a part starts at. Sizes are
+/// pixels, outlines ems, shadow distances hundredths of an em; the rest are
+/// 0 to 1.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct TextStyleRanges {
+    pub size_min: f64,
+    pub size_max: f64,
+    pub outline_max: f64,
+    pub outline_start: f64,
+    pub shadow_distance_max: f64,
+    pub shadow_distance_start: f64,
+    pub shadow_blur_start: f64,
+    pub background_alpha_start: f64,
+    pub background_round_start: f64,
+    pub glow_strength_start: f64,
+    pub glow_range_start: f64,
+}
+
+/// See [`TextStyleRanges`].
+#[uniffi::export]
+#[must_use]
+pub fn text_style_ranges() -> TextStyleRanges {
+    let ranges = cutlass_ffi::TEXT_STYLE_RANGES;
+    TextStyleRanges {
+        size_min: ranges.size.0,
+        size_max: ranges.size.1,
+        outline_max: ranges.outline_max,
+        outline_start: ranges.outline_start,
+        shadow_distance_max: ranges.shadow_distance_max,
+        shadow_distance_start: ranges.shadow_distance_start,
+        shadow_blur_start: ranges.shadow_blur_start,
+        background_alpha_start: ranges.background_alpha_start,
+        background_round_start: ranges.background_round_start,
+        glow_strength_start: ranges.glow_strength_start,
+        glow_range_start: ranges.glow_range_start,
+    }
+}
+
+/// The background swatches, as `#RRGGBB`.
+#[uniffi::export]
+#[must_use]
+pub fn background_colors() -> Vec<String> {
+    cutlass_ffi::BACKGROUND_COLORS
+        .iter()
+        .map(|color| (*color).to_owned())
+        .collect()
+}
+
+/// The background blur strengths, weakest first.
+#[uniffi::export]
+#[must_use]
+pub fn background_blurs() -> Vec<f64> {
+    cutlass_ffi::BACKGROUND_BLURS.to_vec()
+}
+
+/// What fills the canvas around the main pictures.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum Background {
+    /// Clear: black shows.
+    None,
+    /// The project color, `#RRGGBB`.
+    Color { color: String },
+    /// Every main picture over a blurred copy of itself.
+    Blur { blur: f64 },
+}
+
+impl From<cutlass_ffi::PhoneBackground> for Background {
+    fn from(background: cutlass_ffi::PhoneBackground) -> Self {
+        match background {
+            cutlass_ffi::PhoneBackground::None => Self::None,
+            cutlass_ffi::PhoneBackground::Color(color) => Self::Color { color },
+            cutlass_ffi::PhoneBackground::Blur(blur) => Self::Blur { blur },
+        }
+    }
+}
+
+impl From<Background> for cutlass_ffi::PhoneBackground {
+    fn from(background: Background) -> Self {
+        match background {
+            Background::None => Self::None,
+            Background::Color { color } => Self::Color(color),
+            Background::Blur { blur } => Self::Blur(blur),
+        }
+    }
+}
+
 /// Where `speed` sits on the speed scale, 0 to 1.
 #[uniffi::export]
 #[must_use]
@@ -233,6 +329,156 @@ pub struct Font {
     pub label: String,
 }
 
+/// A canvas ratio the picker shows. `ratio` is what `set_ratio` takes;
+/// `width` and `height` are the frame it gives this project.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct CanvasRatio {
+    pub ratio: String,
+    pub label: String,
+    pub width: i32,
+    pub height: i32,
+    pub chosen: bool,
+}
+
+/// A picture clip's box on the canvas, in canvas pixels with y down. The
+/// guides say the clip's centre sits on a canvas centre line.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Stage {
+    pub canvas_width: f64,
+    pub canvas_height: f64,
+    pub center_x: f64,
+    pub center_y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Degrees clockwise on screen.
+    pub turn: f64,
+    pub vertical_guide: bool,
+    pub horizontal_guide: bool,
+    /// The clip is a title, not a picture.
+    pub text: bool,
+}
+
+/// A clip's keyframes as timeline times, earliest first, the one under the
+/// playhead, and the span between two of them the playhead is in.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct Keyframes {
+    pub times_us: Vec<i64>,
+    /// A keyframe is within a frame of the playhead.
+    pub here: bool,
+    /// The playhead is in a span between two keyframes, which Graphs eases.
+    pub in_span: bool,
+    /// The Graphs curve easing that span, or empty for a straight one.
+    pub graph: String,
+}
+
+impl From<cutlass_ffi::PhoneKeys> for Keyframes {
+    fn from(keys: cutlass_ffi::PhoneKeys) -> Self {
+        Self {
+            times_us: keys.times.iter().map(|time| time.0).collect(),
+            here: keys.here.is_some(),
+            in_span: keys.span.is_some(),
+            graph: keys.graph.unwrap_or_default(),
+        }
+    }
+}
+
+/// A clip's in and out animations, each a preset's resource id and length
+/// in microseconds; an empty id is none.
+#[derive(uniffi::Record)]
+pub struct ClipAnimations {
+    pub in_id: String,
+    pub in_us: i64,
+    pub out_id: String,
+    pub out_us: i64,
+    /// The clip's length, which the two share.
+    pub length_us: i64,
+}
+
+impl From<cutlass_ffi::PhoneAnimations> for ClipAnimations {
+    fn from(animations: cutlass_ffi::PhoneAnimations) -> Self {
+        let side = |side: Option<cutlass_ffi::PhoneAnimation>| {
+            side.map_or((String::new(), 0), |side| {
+                (side.resource_id, side.duration.0)
+            })
+        };
+        let (in_id, in_us) = side(animations.enter);
+        let (out_id, out_us) = side(animations.leave);
+        Self {
+            in_id,
+            in_us,
+            out_id,
+            out_us,
+            length_us: animations.length.0,
+        }
+    }
+}
+
+/// One animation in the Animations panel.
+#[derive(uniffi::Record)]
+pub struct AnimationPreset {
+    pub name: String,
+    /// On the In tab; otherwise on Out.
+    pub enter: bool,
+    pub id: String,
+    /// The length a new one starts with.
+    pub duration_us: i64,
+}
+
+/// The Animations panel's presets, in its order after None.
+#[uniffi::export]
+#[must_use]
+pub fn animation_presets() -> Vec<AnimationPreset> {
+    cutlass_ffi::animation_presets()
+        .into_iter()
+        .map(|preset| AnimationPreset {
+            name: preset.name,
+            enter: preset.enter,
+            id: preset.resource_id,
+            duration_us: preset.duration.0,
+        })
+        .collect()
+}
+
+/// A Graphs curve: its name and its line through the unit square, x the
+/// share of time and y the share of the change, y up.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GraphCurve {
+    pub name: String,
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+}
+
+/// The Graphs panel's curves, in its order after None.
+#[uniffi::export]
+#[must_use]
+pub fn graph_curves() -> Vec<GraphCurve> {
+    cutlass_ffi::graphs()
+        .into_iter()
+        .map(|graph| GraphCurve {
+            name: graph.name,
+            xs: graph.points.iter().map(|point| point.0).collect(),
+            ys: graph.points.iter().map(|point| point.1).collect(),
+        })
+        .collect()
+}
+
+impl From<cutlass_ffi::PhoneStage> for Stage {
+    fn from(stage: cutlass_ffi::PhoneStage) -> Self {
+        Self {
+            canvas_width: stage.canvas_width,
+            canvas_height: stage.canvas_height,
+            center_x: stage.center_x,
+            center_y: stage.center_y,
+            width: stage.width,
+            height: stage.height,
+            turn: stage.turn,
+            vertical_guide: stage.vertical_guide,
+            horizontal_guide: stage.horizontal_guide,
+            text: stage.text,
+        }
+    }
+}
+
 /// An effect the picker shows. `id` is what `add_effect` takes; `preview`
 /// is the file name of its looping preview video in the app bundle.
 #[derive(Clone, Debug, uniffi::Record)]
@@ -242,11 +488,118 @@ pub struct EffectChoice {
     pub preview: String,
 }
 
-/// What a text clip says and the face it says it in.
+/// What a text clip says, the face it says it in, and how it looks.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct TextInfo {
     pub content: String,
     pub face: String,
+    pub style: TextStyle,
+}
+
+/// How a title looks. A part with an empty color is off. Widths and
+/// distances are in ems and hundredths of an em; the rest are 0 to 1.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TextStyle {
+    pub size: f64,
+    pub color: String,
+    pub outline_color: String,
+    pub outline_width: f64,
+    pub shadow_color: String,
+    pub shadow_distance: f64,
+    pub shadow_blur: f64,
+    pub background_color: String,
+    pub background_alpha: f64,
+    pub background_round: f64,
+    pub glow_color: String,
+    pub glow_strength: f64,
+    pub glow_range: f64,
+}
+
+impl From<cutlass_ffi::PhoneTextStyle> for TextStyle {
+    fn from(style: cutlass_ffi::PhoneTextStyle) -> Self {
+        Self {
+            size: style.size,
+            color: style.color,
+            outline_color: style.outline_color,
+            outline_width: style.outline_width,
+            shadow_color: style.shadow_color,
+            shadow_distance: style.shadow_distance,
+            shadow_blur: style.shadow_blur,
+            background_color: style.background_color,
+            background_alpha: style.background_alpha,
+            background_round: style.background_round,
+            glow_color: style.glow_color,
+            glow_strength: style.glow_strength,
+            glow_range: style.glow_range,
+        }
+    }
+}
+
+/// One change to a title's look. See [`TextStyle`] for the units.
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum TextStyleChange {
+    Size {
+        size: f64,
+    },
+    Color {
+        color: String,
+    },
+    Outline {
+        color: String,
+        width: f64,
+    },
+    Shadow {
+        color: String,
+        distance: f64,
+        blur: f64,
+    },
+    Background {
+        color: String,
+        alpha: f64,
+        round: f64,
+    },
+    Glow {
+        color: String,
+        strength: f64,
+        range: f64,
+    },
+}
+
+impl From<TextStyleChange> for cutlass_ffi::TextStyleChange {
+    fn from(change: TextStyleChange) -> Self {
+        match change {
+            TextStyleChange::Size { size } => Self::Size(size),
+            TextStyleChange::Color { color } => Self::Color(color),
+            TextStyleChange::Outline { color, width } => Self::Outline { color, width },
+            TextStyleChange::Shadow {
+                color,
+                distance,
+                blur,
+            } => Self::Shadow {
+                color,
+                distance,
+                blur,
+            },
+            TextStyleChange::Background {
+                color,
+                alpha,
+                round,
+            } => Self::Background {
+                color,
+                alpha,
+                round,
+            },
+            TextStyleChange::Glow {
+                color,
+                strength,
+                range,
+            } => Self::Glow {
+                color,
+                strength,
+                range,
+            },
+        }
+    }
 }
 
 /// A phone tool bar. See [`tool_bar`].
@@ -590,6 +943,25 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Type into a title as the words change. With no `clip_id`, the first
+    /// words that are not blank add one at `at_us` in `face`. The whole
+    /// typing is one undo step; blank words change nothing. Returns the
+    /// clip, or nothing when none has been added yet.
+    pub fn type_text(
+        &self,
+        clip_id: Option<String>,
+        content: String,
+        face: String,
+        at_us: i64,
+    ) -> Result<Option<String>, EditorError> {
+        self.run(move |host| {
+            let clip = clip_id.map(SegmentId::new);
+            host.type_text(clip.as_ref(), &content, &face, Micros(at_us))
+        })?
+        .map(|id| id.map(|id| id.as_str().to_owned()))
+        .map_err(EditorError::from)
+    }
+
     /// Add the effect `effect_id` at `at_us` over everything below it, as
     /// one undo step. Returns the new clip's id.
     pub fn add_effect(&self, effect_id: String, at_us: i64) -> Result<String, EditorError> {
@@ -610,12 +982,26 @@ impl Editor {
             .map_err(EditorError::from)
     }
 
+    /// Change how a title looks. Changes made while `live` join one undo
+    /// step, so a slider drag is one step; its last change passes `live`
+    /// false, and so does a single tap.
+    pub fn style_text(
+        &self,
+        clip_id: String,
+        change: TextStyleChange,
+        live: bool,
+    ) -> Result<(), EditorError> {
+        self.run(move |host| host.style_text(&SegmentId::new(clip_id), change.into(), live))?
+            .map_err(EditorError::from)
+    }
+
     /// What a text clip says, or `None` when it is not a text clip.
     pub fn text(&self, clip_id: String) -> Result<Option<TextInfo>, EditorError> {
         let text = self.run(move |host| host.text(&SegmentId::new(clip_id)))?;
         Ok(text.map(|text| TextInfo {
             content: text.content,
             face: text.face,
+            style: text.style.into(),
         }))
     }
 
@@ -748,6 +1134,133 @@ impl Editor {
     /// Set a clip's linear gain, as one undo step. Below zero is refused.
     pub fn set_volume(&self, clip_id: String, volume: f64) -> Result<(), EditorError> {
         self.run(move |host| host.set_volume(&SegmentId::new(clip_id), volume))?
+            .map_err(EditorError::from)
+    }
+
+    /// The box of a picture clip on the canvas at `at_us`, where its
+    /// keyframes put it. Other clips have none.
+    pub fn stage(&self, clip_id: String, at_us: i64) -> Result<Option<Stage>, EditorError> {
+        Ok(self
+            .run(move |host| host.stage(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map(Stage::from))
+    }
+
+    /// The topmost picture clip under the canvas point `(x, y)` at `at_us`.
+    pub fn stage_pick(&self, at_us: i64, x: f64, y: f64) -> Result<Option<String>, EditorError> {
+        Ok(self
+            .run(move |host| host.stage_pick(Micros(at_us), x, y))?
+            .map(|id| id.as_str().to_owned()))
+    }
+
+    /// Start moving a picture clip on the preview at `at_us`. A clip with
+    /// keyframes keys its new pose there.
+    pub fn stage_begin(&self, clip_id: String, at_us: i64) -> Result<(), EditorError> {
+        self.run(move |host| host.stage_begin(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map_err(EditorError::from)
+    }
+
+    /// A picture or title clip's keyframes, and whether one is under
+    /// `at_us`. Other clips have none.
+    pub fn keyframes(&self, clip_id: String, at_us: i64) -> Result<Option<Keyframes>, EditorError> {
+        Ok(self
+            .run(move |host| host.keyframes(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map(Keyframes::from))
+    }
+
+    /// Ease the span between keyframes that `at_us` is in along the Graphs
+    /// curve `graph`, or make it straight with an empty name. One undo step.
+    pub fn ease_keyframes(
+        &self,
+        clip_id: String,
+        at_us: i64,
+        graph: String,
+    ) -> Result<(), EditorError> {
+        let graph = (!graph.is_empty()).then_some(graph);
+        self.run(move |host| host.ease_keyframes(&SegmentId::new(clip_id), Micros(at_us), graph))?
+            .map_err(EditorError::from)
+    }
+
+    /// The picture or title clip's in and out animations, or nil for a clip
+    /// that takes none.
+    pub fn animations(&self, clip_id: String) -> Result<Option<ClipAnimations>, EditorError> {
+        Ok(self
+            .run(move |host| host.animations(&SegmentId::new(clip_id)))?
+            .map(ClipAnimations::from))
+    }
+
+    /// Give the clip the in (`enter`) or out animation `id`, `duration_us`
+    /// long, or clear that side with an empty id. One undo step.
+    pub fn set_animation(
+        &self,
+        clip_id: String,
+        enter: bool,
+        id: String,
+        duration_us: i64,
+    ) -> Result<(), EditorError> {
+        let id = (!id.is_empty()).then_some(id);
+        self.run(move |host| {
+            host.set_animation(&SegmentId::new(clip_id), enter, id, Micros(duration_us))
+        })?
+        .map_err(EditorError::from)
+    }
+
+    /// The keyframe button: remove the keyframe under `at_us`, else key the
+    /// clip there. One undo step.
+    pub fn toggle_keyframe(&self, clip_id: String, at_us: i64) -> Result<(), EditorError> {
+        self.run(move |host| host.toggle_keyframe(&SegmentId::new(clip_id), Micros(at_us)))?
+            .map_err(EditorError::from)
+    }
+
+    /// Place the clip `(shift_x, shift_y)` canvas pixels from where the
+    /// gesture started, `pinch` times its size, turned `turn` degrees
+    /// clockwise. The whole gesture is one undo step.
+    pub fn stage_move(
+        &self,
+        shift_x: f64,
+        shift_y: f64,
+        pinch: f64,
+        turn: f64,
+    ) -> Result<Stage, EditorError> {
+        self.run(move |host| host.stage_move(shift_x, shift_y, pinch, turn))?
+            .map(Stage::from)
+            .map_err(EditorError::from)
+    }
+
+    /// End the preview gesture.
+    pub fn stage_end(&self) -> Result<(), EditorError> {
+        self.run(PhoneHost::stage_end)
+    }
+
+    /// The canvas ratios, Original first.
+    pub fn ratios(&self) -> Result<Vec<CanvasRatio>, EditorError> {
+        let ratios = self.run(|host| host.ratios())?;
+        Ok(ratios
+            .into_iter()
+            .map(|ratio| CanvasRatio {
+                ratio: ratio.ratio,
+                label: ratio.label,
+                width: ratio.width,
+                height: ratio.height,
+                chosen: ratio.chosen,
+            })
+            .collect())
+    }
+
+    /// What fills the canvas around the main pictures.
+    pub fn background(&self) -> Result<Background, EditorError> {
+        Ok(self.run(|host| host.background())?.into())
+    }
+
+    /// Fill the canvas around the main pictures, as one undo step.
+    pub fn set_background(&self, background: Background) -> Result<(), EditorError> {
+        let background = cutlass_ffi::PhoneBackground::from(background);
+        self.run(move |host| host.set_background(&background))?
+            .map_err(EditorError::from)
+    }
+
+    /// Give the canvas a ratio from [`Self::ratios`], as one undo step.
+    pub fn set_ratio(&self, ratio: String) -> Result<(), EditorError> {
+        self.run(move |host| host.set_ratio(&ratio))?
             .map_err(EditorError::from)
     }
 

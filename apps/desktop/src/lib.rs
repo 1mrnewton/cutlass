@@ -6,6 +6,7 @@ mod dialogs;
 mod face;
 mod gpu;
 pub mod icons;
+pub mod jobs;
 mod menu;
 mod readers;
 

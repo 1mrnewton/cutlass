@@ -62,6 +62,7 @@ pub fn paint_glyphs(
                 missing: glyph.placed.missing,
                 source: glyph.placed.source,
                 line: 0,
+                face: 0,
                 x,
                 y,
                 width,

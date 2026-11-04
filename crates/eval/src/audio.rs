@@ -276,8 +276,16 @@ mod tests {
     }
 
     #[test]
-    fn a_muted_track_contributes_no_samples() {
-        let (draft, _) = draft_with(1.0, TrackAttribute(TrackAttribute::MUTE));
+    fn a_muted_track_or_a_deactivated_clip_contributes_no_samples() {
+        let (muted, _) = draft_with(1.0, TrackAttribute(TrackAttribute::MUTE));
+        let (mut off, _) = draft_with(1.0, TrackAttribute::default());
+        off.tracks[0].segments[0].visible = false;
+        for draft in [muted, off] {
+            silent(&draft);
+        }
+    }
+
+    fn silent(draft: &Draft) {
         let window = MixWindow {
             rate: 4_000,
             limiter: 0,
@@ -285,7 +293,7 @@ mod tests {
         };
         let mut asked = false;
         let mixed = audio_slice(
-            &Snapshot::new(&draft),
+            &Snapshot::new(draft),
             Micros(0),
             window,
             ClockKind::Export,

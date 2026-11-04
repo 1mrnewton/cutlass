@@ -16,6 +16,7 @@ pub(crate) enum Picker {
     OpenProject,
     Import,
     SaveExport,
+    SaveStill,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -58,13 +59,57 @@ impl Dialogs {
         });
     }
 
-    pub(crate) fn save_export(&mut self, parent: Option<&eframe::Frame>) {
-        let dialog = dialog(parent);
+    /// Ask where to write the export, offering `name` with `extension`. A
+    /// chosen name without the extension gets it.
+    pub(crate) fn save_export(
+        &mut self,
+        parent: Option<&eframe::Frame>,
+        name: &str,
+        extension: &str,
+    ) {
+        let stem = if name.trim().is_empty() {
+            "Export"
+        } else {
+            name.trim()
+        };
+        let dialog = dialog(parent)
+            .set_file_name(format!("{stem}.{extension}"))
+            .add_filter(extension.to_uppercase(), &[extension]);
+        let extension = extension.to_owned();
         self.start(Picker::SaveExport, async move {
             dialog
                 .save_file()
                 .await
-                .map(|file| file.path().to_path_buf())
+                .map(|file| with_extension(file.path(), &extension))
+        });
+    }
+
+    /// Ask where to save a still, as PNG or JPEG. A name with neither
+    /// ending is saved as PNG.
+    pub(crate) fn save_still(&mut self, parent: Option<&eframe::Frame>, name: &str) {
+        let stem = if name.trim().is_empty() {
+            "Still"
+        } else {
+            name.trim()
+        };
+        let dialog = dialog(parent)
+            .set_file_name(format!("{stem}.png"))
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"]);
+        self.start(Picker::SaveStill, async move {
+            dialog.save_file().await.map(|file| {
+                let path = file.path();
+                let known = path.extension().is_some_and(|typed| {
+                    ["png", "jpg", "jpeg"]
+                        .iter()
+                        .any(|known| typed.eq_ignore_ascii_case(known))
+                });
+                if known {
+                    path.to_path_buf()
+                } else {
+                    with_extension(path, "png")
+                }
+            })
         });
     }
 
@@ -101,6 +146,21 @@ impl Dialogs {
     }
 }
 
+/// `path`, ending in `.extension` whatever case it was typed in.
+fn with_extension(path: &std::path::Path, extension: &str) -> PathBuf {
+    let has = path
+        .extension()
+        .is_some_and(|typed| typed.eq_ignore_ascii_case(extension));
+    if has {
+        path.to_path_buf()
+    } else {
+        let mut named = path.as_os_str().to_owned();
+        named.push(".");
+        named.push(extension);
+        named.into()
+    }
+}
+
 fn dialog(parent: Option<&eframe::Frame>) -> rfd::AsyncFileDialog {
     match parent {
         Some(parent) => rfd::AsyncFileDialog::new().set_parent(parent),
@@ -111,6 +171,22 @@ fn dialog(parent: Option<&eframe::Frame>) -> rfd::AsyncFileDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_export_name_gets_its_extension_once() {
+        assert_eq!(
+            with_extension(std::path::Path::new("/films/cut"), "mp4"),
+            PathBuf::from("/films/cut.mp4")
+        );
+        assert_eq!(
+            with_extension(std::path::Path::new("/films/cut.MP4"), "mp4"),
+            PathBuf::from("/films/cut.MP4")
+        );
+        assert_eq!(
+            with_extension(std::path::Path::new("/films/cut.v2"), "mp4"),
+            PathBuf::from("/films/cut.v2.mp4")
+        );
+    }
 
     #[test]
     fn a_ready_picker_returns_its_path_once() {

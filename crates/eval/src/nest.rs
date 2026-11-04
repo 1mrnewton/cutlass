@@ -24,7 +24,7 @@ use crate::frame::{EvalError, Fonts, Snapshot, compose, compose_layers};
 use crate::gpu::{Composed, GpuLayer, GpuSource};
 use crate::media::{
     OpenClips, PictureTransform, apply_crop, backdrop_for, gpu_crop, gpu_place, picture_transform,
-    place_with, segment_clip,
+    place_with,
 };
 
 /// Compound drafts above this many ancestors are not drawn.
@@ -213,7 +213,7 @@ fn place_child<D: Device>(
     if skips_child(draft, child, pass.ancestors) {
         return Ok(None);
     }
-    let Some((clip, uniform)) = segment_clip(segment, time) else {
+    let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {
         return Ok(None);
     };
     let Some(transform) = picture_transform(&clip, &uniform, pass.width, pass.height) else {

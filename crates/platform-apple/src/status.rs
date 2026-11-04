@@ -27,6 +27,15 @@ pub const BAD_VIDEO_DATA: i32 = -12_908;
 /// The property is not on this session.
 pub const PROPERTY_UNSUPPORTED: i32 = -12_900;
 
+/// The session was invalidated. iOS does this to a hardware session when
+/// the app leaves the foreground.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+pub const INVALID_SESSION: i32 = -12_903;
+
+/// The hardware decoder stopped working.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+pub const DECODER_MALFUNCTION: i32 = -12_911;
+
 /// AudioConverter four-character code `fmt?`.
 pub const AUDIO_FORMAT: i32 = i32::from_be_bytes(*b"fmt?");
 
@@ -40,6 +49,12 @@ pub fn open_status(code: i32, what: &'static str) -> Result<(), CodecError> {
     } else {
         Err(CodecError::Unsupported { what })
     }
+}
+
+/// The session can decode nothing more and has to be opened again.
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
+pub fn session_lost(code: i32) -> bool {
+    matches!(code, INVALID_SESSION | DECODER_MALFUNCTION)
 }
 
 /// A status from decoding or encoding one unit that was already accepted.
@@ -56,6 +71,14 @@ pub fn unit_status(code: i32, what: &'static str) -> Result<(), CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_invalidated_or_broken_session_is_lost() {
+        assert!(session_lost(INVALID_SESSION));
+        assert!(session_lost(DECODER_MALFUNCTION));
+        assert!(!session_lost(OK));
+        assert!(!session_lost(BAD_VIDEO_DATA));
+    }
 
     #[test]
     fn success_opens_and_completes_a_unit() {

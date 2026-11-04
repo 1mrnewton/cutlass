@@ -87,5 +87,6 @@ workspace = true
 
 [dev-dependencies]
 pollster = "1.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 cutlass-color = { path = "../../crates/color", version = "0.1.0" }
 serde_json = "1.0.154"

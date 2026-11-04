@@ -18,6 +18,7 @@
 mod apple;
 mod faces;
 mod film;
+mod meter;
 mod mixer;
 mod playhead;
 mod present;
@@ -31,6 +32,10 @@ pub use apple::{
 pub use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 pub use faces::{FaceTable, MAX_FACE_BYTES, MAX_FACES, PREFERRED_FACES, face_label};
 pub use film::{FilmCell, film_cells, media_file};
+pub use meter::{
+    ChannelReading, FALL_DB_PER_SECOND, HOLD as METER_HOLD, LevelMeter, METER_FLOOR_DB, level_db,
+    meter_fraction, window_peak,
+};
 pub use mixer::{LEAD as MIX_LEAD, MixJob, Mixer, WINDOW as MIX_WINDOW};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
 pub use present::{FrameCache, PresentError, Presentation};

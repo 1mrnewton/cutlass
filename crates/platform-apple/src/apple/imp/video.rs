@@ -14,6 +14,8 @@
 //! hardware rejects later is an error on the push that collects it. `drain`
 //! waits for every picture still held. A session the hardware will not open is
 //! [`CodecError::Unsupported`], so the factory can try a software codec.
+//! A session the system invalidates, as iOS does when the app leaves the
+//! foreground, is opened again on the same format by the next push or reset.
 //! VP8 has no framework format id.
 
 use std::collections::{HashMap, VecDeque};
@@ -32,7 +34,7 @@ use super::sys::{self, CMSampleTimingInfo};
 use crate::limits::{self, even_picture};
 use crate::nal::{self, AvcConfig, Nal};
 use crate::reorder::{self, Reorder};
-use crate::status::{open_status, unit_status};
+use crate::status::{open_status, session_lost, unit_status};
 
 const H264: u32 = u32::from_be_bytes(*b"avc1");
 const HEVC: u32 = u32::from_be_bytes(*b"hvc1");
@@ -86,6 +88,8 @@ struct FrameMeta {
 /// What the output callback writes into. The session's refcon points here.
 struct Finished {
     planar: bool,
+    /// The session reported it can decode nothing more.
+    lost: AtomicBool,
     pictures: Mutex<VecDeque<Result<PictureOutput, CodecError>>>,
 }
 
@@ -116,6 +120,10 @@ pub struct VideoEncoder {
 unsafe impl Send for VideoEncoder {}
 
 pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(video_decoder(params)?))
+}
+
+fn video_decoder(params: &CodecParams) -> Result<VideoDecoder, CodecError> {
     let _ = codec_type(params.codec)?;
     let (width, height) = video_size(params.width, params.height)?;
     let mut decoder = VideoDecoder {
@@ -127,6 +135,7 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
         session: None,
         finished: Box::new(Finished {
             planar: params.pixel == PixelFormat::Yuv420p,
+            lost: AtomicBool::new(false),
             pictures: Mutex::new(VecDeque::new()),
         }),
         reorder: Reorder::new(reorder::MAX_DEPTH),
@@ -134,7 +143,7 @@ pub fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError
     if !params.extra.is_empty() || needs_sized_format(params.codec) {
         decoder.open_format(&params.extra)?;
     }
-    Ok(Box::new(decoder))
+    Ok(decoder)
 }
 
 pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
@@ -184,6 +193,9 @@ impl Decoder for VideoDecoder {
 
     fn push(&mut self, packet: &Packet) -> Result<Vec<Output>, CodecError> {
         limits::packet_ok(packet.data.len())?;
+        if self.finished.lost.swap(false, Ordering::AcqRel) {
+            self.reopen()?;
+        }
         if self.session.is_none() {
             if let Some(extra) = config_of(packet) {
                 self.open_format(extra)?;
@@ -191,32 +203,13 @@ impl Decoder for VideoDecoder {
                 self.open_format(&extra)?;
             }
         }
-        let Some(session) = self.session.as_ref() else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "parameter sets",
-            });
-        };
-        let Some(format) = self.format.as_ref() else {
-            return Err(CodecError::Malformed {
-                at_bit: 0,
-                what: "parameter sets",
-            });
-        };
         let access = access_unit(self.codec, &packet.data)?;
-        if !access.is_empty() {
-            decode_access(
-                session.raw,
-                format,
-                &access,
-                packet.pts,
-                if packet.timescale == 0 {
-                    30
-                } else {
-                    packet.timescale
-                },
-            )?;
+        let mut status = self.submit(&access, packet)?;
+        if session_lost(status) {
+            self.reopen()?;
+            status = self.submit(&access, packet)?;
         }
+        unit_status(status, "videotoolbox")?;
         self.collect()
     }
 
@@ -232,17 +225,13 @@ impl Decoder for VideoDecoder {
     }
 
     fn reset(&mut self) {
+        if self.finished.lost.swap(false, Ordering::AcqRel) {
+            let _ = self.reopen();
+            return;
+        }
         if let Some(session) = self.session.as_ref() {
             let _ = session.flush();
-            let finished: Vec<PictureOutput> = lock_pictures(&self.finished)
-                .drain(..)
-                .filter_map(Result::ok)
-                .collect();
-            for picture in finished.iter().chain(self.reorder.clear().iter()) {
-                if let PictureSamples::Platform { token } = picture.samples() {
-                    let _ = release_buffer(token);
-                }
-            }
+            self.drop_in_flight();
             return;
         }
         self.format = None;
@@ -263,19 +252,86 @@ impl VideoDecoder {
         } else {
             parameter_format(self.codec, extra)?
         };
-        let surface = if self.finished.planar {
+        let session = create_decompress(&format, self.surface(), self.refcon())?;
+        self.reorder = Reorder::new(reorder_depth(self.codec, extra));
+        self.format = Some(format);
+        self.session = Some(session);
+        Ok(())
+    }
+
+    /// Replace a session the system invalidated with a new one on the same
+    /// format. The pictures in flight go with the old one. A session that
+    /// will not open is tried again on the next push.
+    fn reopen(&mut self) -> Result<(), CodecError> {
+        // Dropping the old session waits for its callbacks first.
+        self.session = None;
+        self.drop_in_flight();
+        let Some(format) = self.format.as_ref() else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "parameter sets",
+            });
+        };
+        match create_decompress(format, self.surface(), self.refcon()) {
+            Ok(session) => {
+                self.session = Some(session);
+                Ok(())
+            }
+            Err(error) => {
+                self.finished.lost.store(true, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    /// Hand `access` to the session. The status is the session's own, so a
+    /// lost session can be told apart from a bad unit.
+    fn submit(&self, access: &[u8], packet: &Packet) -> Result<sys::OSStatus, CodecError> {
+        let (Some(session), Some(format)) = (self.session.as_ref(), self.format.as_ref()) else {
+            return Err(CodecError::Malformed {
+                at_bit: 0,
+                what: "parameter sets",
+            });
+        };
+        if access.is_empty() {
+            return Ok(0);
+        }
+        let timescale = if packet.timescale == 0 {
+            30
+        } else {
+            packet.timescale
+        };
+        decode_access(session.raw, format, access, packet.pts, timescale)
+    }
+
+    /// Drop the finished pictures and the ones held for display order.
+    fn drop_in_flight(&mut self) {
+        let finished: Vec<PictureOutput> = lock_pictures(&self.finished)
+            .drain(..)
+            .filter_map(Result::ok)
+            .collect();
+        for picture in finished.iter().chain(self.reorder.clear().iter()) {
+            if let PictureSamples::Platform { token } = picture.samples() {
+                let _ = release_buffer(token);
+            }
+        }
+    }
+
+    /// The pixel format VideoToolbox writes.
+    fn surface(&self) -> Option<u32> {
+        if self.finished.planar {
             Some(sys::NV12)
         } else if needs_sized_format(self.codec) {
             None
         } else {
             Some(sys::BGRA)
-        };
+        }
+    }
+
+    /// The session's refcon: the [`Finished`] its callback writes into.
+    fn refcon(&self) -> *mut std::ffi::c_void {
         let refcon: *const Finished = &raw const *self.finished;
-        let session = create_decompress(&format, surface, refcon.cast_mut().cast())?;
-        self.reorder = Reorder::new(reorder_depth(self.codec, extra));
-        self.format = Some(format);
-        self.session = Some(session);
-        Ok(())
+        refcon.cast_mut().cast()
     }
 }
 
@@ -732,13 +788,14 @@ fn create_decompress(
     Ok(Decompress { raw })
 }
 
+/// The status of the decode call. A unit that could not be built is the error.
 fn decode_access(
     session: *mut std::ffi::c_void,
     format: &Cf,
     bytes: &[u8],
     pts: i64,
     timescale: u32,
-) -> Result<(), CodecError> {
+) -> Result<sys::OSStatus, CodecError> {
     let block = block_from(bytes)?;
     let scale = i32::try_from(timescale).unwrap_or(30);
     let timing = CMSampleTimingInfo {
@@ -775,7 +832,7 @@ fn decode_access(
             ptr::null_mut(),
         )
     };
-    unit_status(status, "videotoolbox")
+    Ok(status)
 }
 
 fn block_from(bytes: &[u8]) -> Result<Cf, CodecError> {
@@ -818,6 +875,9 @@ unsafe extern "C" fn decode_output(
     // SAFETY: the session's refcon is the decoder's boxed `Finished`, and the
     // session is flushed and invalidated before that box is dropped.
     let finished = unsafe { &*refcon.cast::<Finished>() };
+    if session_lost(status) {
+        finished.lost.store(true, Ordering::Release);
+    }
     let timescale = u32::try_from(pts.timescale).unwrap_or(30);
     let picture = if status != 0 {
         Err(CodecError::Malformed {
@@ -1703,6 +1763,21 @@ mod tests {
         decoder.reset();
         assert!(decoder.drain().expect("drain").is_empty());
         let again = decode_all(decoder.as_mut(), &packets).expect("decode after reset");
+        assert_eq!(again.len(), 6);
+    }
+
+    #[test]
+    fn a_session_the_system_invalidates_is_opened_again() {
+        let (packets, config) = encoded(CodecId::H264, 6).expect("h264");
+        let mut params = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
+        params.extra = config;
+        let mut decoder = video_decoder(&params).expect("decode open");
+        assert_eq!(decode_all(&mut decoder, &packets).expect("decode").len(), 6);
+        // What iOS does to a hardware session when the app leaves the foreground.
+        let raw = decoder.session.as_ref().expect("session").raw;
+        unsafe { sys::VTDecompressionSessionInvalidate(raw) };
+        decoder.reset();
+        let again = decode_all(&mut decoder, &packets).expect("decode after invalidate");
         assert_eq!(again.len(), 6);
     }
 

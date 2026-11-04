@@ -355,16 +355,19 @@ pub trait VideoEncoder: Send {
     fn extradata(&self) -> &[u8];
 }
 
+#[derive(Clone)]
 pub struct EncodeFactory {
     openers: Vec<Opener>,
     video_openers: Vec<VideoOpener>,
 }
 
+#[derive(Clone)]
 struct Opener {
     id: CodecId,
     open: fn(&CodecParams) -> Result<Box<dyn Encoder>, CodecError>,
 }
 
+#[derive(Clone)]
 struct VideoOpener {
     id: CodecId,
     open: fn(&CodecParams) -> Result<Box<dyn VideoEncoder>, CodecError>,

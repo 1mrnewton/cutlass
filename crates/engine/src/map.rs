@@ -187,11 +187,12 @@ pub fn media_path<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a str> {
 
 /// Whether the mix should read this segment.
 ///
-/// A graphic is silent. A picture whose own sound has been placed on a linked
-/// clip is silent too, so that sound is not played twice.
+/// A graphic is silent, and so is a deactivated clip. A picture whose own
+/// sound has been placed on a linked clip is silent too, so that sound is
+/// not played twice.
 #[must_use]
 pub fn contributes_sound(draft: &Draft, segment: &Segment) -> bool {
-    if is_graphic(draft, segment) {
+    if !segment.visible || is_graphic(draft, segment) {
         return false;
     }
     !original_sound_is_separate(draft, segment)

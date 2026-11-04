@@ -112,6 +112,9 @@ pub enum Request {
         segment_id: SegmentId,
         freeze: Option<FreezeInfo>,
     },
+    /// Activate or deactivate a clip. A deactivated clip stays on its row
+    /// and keeps its edits, but is not drawn and not heard.
+    SetActive { segment_id: SegmentId, active: bool },
     /// Store a horizontal mirror on the segment. The clip stays where it is.
     SetMirror {
         segment_id: SegmentId,

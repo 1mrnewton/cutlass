@@ -231,6 +231,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetFreeze { segment_id, freeze } => {
             freeze::set_freeze(draft, segment_id, freeze.clone())
         }
+        Request::SetActive { segment_id, active } => mirror::set_active(draft, segment_id, *active),
         Request::SetMirror {
             segment_id,
             horizontal,

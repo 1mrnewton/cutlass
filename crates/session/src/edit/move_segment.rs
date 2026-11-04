@@ -22,6 +22,7 @@ pub fn move_segment(
         .ok_or(EditError::MissingTrack)?;
     ensure_unlocked(draft.tracks[from_index].attribute)?;
     ensure_unlocked(draft.tracks[to_index].attribute)?;
+    super::lane::check(draft, &draft.tracks[to_index], &segment, start)?;
 
     let mut moved = segment;
     moved.target.start = start;

@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, Micros, SegmentId, TimeRange};
 
-use crate::lane::{Lane, lanes};
+use crate::lane::{Lane, lanes_for};
 
 /// A point on the timeline. `x` is pixels from time zero. `y` is pixels from the top lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,6 +16,8 @@ pub struct TimelineScale {
     pub lane_height: f64,
     /// Pixels per microsecond.
     pub pixel_size: f64,
+    /// An empty track keeps its row, as [`crate::lanes_for`] says.
+    pub empty_lanes: bool,
 }
 
 /// The lane and time under a pointer.
@@ -41,7 +43,7 @@ pub fn hit_test(
 ) -> Result<Option<Hit>, BadScale> {
     let time = time_at(scale.pixel_size, pointer.x).ok_or(BadScale)?;
     let row = row_at(scale.lane_height, pointer.y)?;
-    let rows = lanes(draft);
+    let rows = lanes_for(draft, scale.empty_lanes);
     let Some(row) = row else {
         return Ok(None);
     };
@@ -116,6 +118,7 @@ mod tests {
         TimelineScale {
             lane_height: 40.0,
             pixel_size: 1.0,
+            empty_lanes: false,
         }
     }
 
@@ -198,10 +201,12 @@ mod tests {
         let bad_height = TimelineScale {
             lane_height: 0.0,
             pixel_size: 1.0,
+            empty_lanes: false,
         };
         let bad_zoom = TimelineScale {
             lane_height: 40.0,
             pixel_size: 0.0,
+            empty_lanes: false,
         };
         assert_eq!(
             hit_test(&draft, bad_height, Pointer { x: 0.0, y: 0.0 }),

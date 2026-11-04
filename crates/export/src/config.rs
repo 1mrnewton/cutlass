@@ -121,6 +121,8 @@ pub enum ExportError {
     PixelMismatch,
     /// The progress callback asked export to stop.
     Cancelled,
+    /// The movie file could not be written or moved into place.
+    File(String),
 }
 
 impl fmt::Display for ExportError {
@@ -150,6 +152,7 @@ impl fmt::Display for ExportError {
             Self::NotSoftwareRgba => formatter.write_str("the bytes are not software RGBA"),
             Self::PixelMismatch => formatter.write_str("playback and export pixels differ"),
             Self::Cancelled => formatter.write_str("export was stopped"),
+            Self::File(message) => write!(formatter, "the movie could not be written: {message}"),
         }
     }
 }

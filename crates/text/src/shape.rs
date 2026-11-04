@@ -3,6 +3,8 @@
 //! This step does not draw. Advances and kerning come from the font. A
 //! character with no glyph is recorded as missing and uses glyph 0, whose
 //! outline is the font's missing glyph. A newline is a break, not a glyph.
+//! A run may take each character from one of several faces; kerning only
+//! joins letters of the same face.
 
 use cutlass_font::Font;
 
@@ -25,6 +27,8 @@ pub struct ShapedGlyph {
     pub kerning: i16,
     pub x: i32,
     pub y: i32,
+    /// Which of the faces it was shaped in; 0 is the title's own.
+    pub face: usize,
 }
 
 /// A glyph or a line break from the source string.
@@ -48,12 +52,22 @@ pub fn shape_text(bytes: &[u8], text: &str) -> Result<Shaped, TextError> {
 
 /// Shape `text` with a face that has already been read.
 pub fn shape(font: &Font<'_>, text: &str) -> Result<Shaped, TextError> {
+    shape_faces(std::slice::from_ref(font), text, &|_| 0)
+}
+
+/// Shape `text`, each character in the face `pick` names for its byte
+/// index; a face that is not in `fonts` is the first.
+pub(crate) fn shape_faces(
+    fonts: &[Font<'_>],
+    text: &str,
+    pick: &dyn Fn(usize) -> usize,
+) -> Result<Shaped, TextError> {
     if text.chars().count() > MAX_CHARS {
         return Err(TextError::Limit);
     }
     let mut items = Vec::new();
     let mut pen = 0_i32;
-    let mut previous: Option<u16> = None;
+    let mut previous: Option<(usize, u16)> = None;
     let mut chars = text.char_indices().peekable();
     while let Some((source, character)) = chars.next() {
         if character == '\n' || character == '\r' {
@@ -65,12 +79,20 @@ pub fn shape(font: &Font<'_>, text: &str) -> Result<Shaped, TextError> {
             pen = 0;
             continue;
         }
+        let face = Some(pick(source))
+            .filter(|face| *face < fonts.len())
+            .unwrap_or(0);
+        let Some(font) = fonts.get(face) else {
+            return Err(TextError::Limit);
+        };
         let (glyph_id, missing) = match font.glyph_id(character).map_err(TextError::Font)? {
             Some(glyph_id) => (glyph_id, false),
             None => (font.missing_glyph(), true),
         };
         let advance = font.advance(glyph_id).map_err(TextError::Font)?;
-        let kerning = previous.map_or(0, |left| font.kerning(left, glyph_id));
+        let kerning = previous
+            .filter(|(before, _)| *before == face)
+            .map_or(0, |(_, left)| font.kerning(left, glyph_id));
         let x = pen
             .checked_add(i32::from(kerning))
             .ok_or(TextError::Limit)?;
@@ -84,8 +106,9 @@ pub fn shape(font: &Font<'_>, text: &str) -> Result<Shaped, TextError> {
             kerning,
             x,
             y: 0,
+            face,
         }));
-        previous = Some(glyph_id);
+        previous = Some((face, glyph_id));
     }
     Ok(Shaped { items })
 }

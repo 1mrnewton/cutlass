@@ -19,7 +19,7 @@ use cutlass_effects::{
     EffectSource, PackageKind, PackageStore, Step, animation_package_id, bundled_recipe, entry,
     package_id, plugin_package_id, segment_package_id, video_package_id,
 };
-use cutlass_model::{Draft, MaterialRef, Micros, Segment, TrackAttribute};
+use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::EvalError;
@@ -287,15 +287,18 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
     marks
 }
 
-/// A recipe effect at one frame: where it sits among the layers, and its
-/// steps at that time.
+/// A recipe effect at one frame: where it sits among the layers, its steps
+/// at that time, and the clip it runs over alone, as track and segment
+/// index, when it is bound to one.
 pub(crate) struct RecipeMark {
     pub(crate) key: (i32, usize, usize),
     pub(crate) steps: Vec<Step>,
+    pub(crate) bound: Option<(usize, usize)>,
 }
 
 /// The bundled recipe effects covering `time`, back to front. Their steps
-/// are worked out at `time` less the segment's start.
+/// are worked out at `time` less the segment's start. An effect bound to a
+/// clip the draft no longer has is not run.
 pub(crate) fn recipe_marks(
     draft: &Draft,
     time: Micros,
@@ -304,10 +307,15 @@ pub(crate) fn recipe_marks(
     let mut marks: Vec<RecipeMark> = effect_segments(draft, time, stack)
         .filter_map(|(track_index, segment_index, segment, id)| {
             let recipe = bundled_recipe(id)?;
+            let bound = match segment.bound_clip() {
+                Some(clip) => Some(find_segment(draft, &clip)?),
+                None => None,
+            };
             let offset = Micros(time.0.saturating_sub(segment.target.start.0));
             Some(RecipeMark {
                 key: (segment.render_index, track_index, segment_index),
                 steps: recipe.steps_at(offset),
+                bound,
             })
         })
         .collect();
@@ -349,6 +357,20 @@ fn effect_segments<'a>(
         })
 }
 
+fn find_segment(draft: &Draft, id: &SegmentId) -> Option<(usize, usize)> {
+    draft
+        .tracks
+        .iter()
+        .enumerate()
+        .find_map(|(track_index, track)| {
+            track
+                .segments
+                .iter()
+                .position(|segment| &segment.id == id)
+                .map(|segment_index| (track_index, segment_index))
+        })
+}
+
 fn is_effect_material(draft: &Draft, segment: &Segment) -> bool {
     matches!(
         draft.materials.get(segment.material_id.as_str()),
@@ -382,7 +404,11 @@ fn package_of(material: MaterialRef<'_>) -> Option<&str> {
         MaterialRef::Effect(effect) => package_id(effect),
         MaterialRef::VideoEffect(effect) => video_package_id(effect),
         MaterialRef::Plugin(effect) => plugin_package_id(effect),
-        MaterialRef::Animations(group) => group.animations.iter().find_map(animation_package_id),
+        MaterialRef::Animations(group) => group
+            .animations
+            .iter()
+            .filter(|animation| cutlass_model::animation_preset(animation).is_none())
+            .find_map(animation_package_id),
         MaterialRef::Video(_)
         | MaterialRef::Audio(_)
         | MaterialRef::Text(_)

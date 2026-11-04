@@ -20,9 +20,17 @@ pub struct Lane {
 /// it holds nothing. The draft's track list is not changed.
 #[must_use]
 pub fn lanes(draft: &Draft) -> Vec<Lane> {
+    lanes_for(draft, false)
+}
+
+/// Rows for the tracks, with an empty one kept as a row when `empty` is on.
+/// A screen that lets people add and remove tracks keeps them; one that
+/// does not leaves them out, as [`lanes`] does.
+#[must_use]
+pub fn lanes_for(draft: &Draft, empty: bool) -> Vec<Lane> {
     let mut rows = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
-        if track.segments.is_empty() && !track.is_main() {
+        if !empty && track.segments.is_empty() && !track.is_main() {
             continue;
         }
         let row = rows.len();
@@ -200,5 +208,9 @@ mod tests {
             draft.tracks.push(track);
         }
         assert_eq!(lanes(&draft).len(), 1);
+        // A screen that keeps empty tracks gives each its own row.
+        let kept = lanes_for(&draft, true);
+        assert_eq!(kept.len(), 65);
+        assert_eq!((kept[64].row, kept[64].track_index), (64, 64));
     }
 }

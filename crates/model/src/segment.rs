@@ -229,6 +229,42 @@ impl Segment {
     }
 }
 
+/// `apply_type` on an effect clip that runs over one clip, named by
+/// `apply_segment_id`. 0 is the main track and 2 every picture below.
+pub const APPLY_ONE_CLIP: i64 = 1;
+
+impl Segment {
+    /// The clip an effect clip runs over alone, when it is bound to one.
+    #[must_use]
+    pub fn bound_clip(&self) -> Option<SegmentId> {
+        if self.rest.get("apply_type").and_then(Value::as_i64) != Some(APPLY_ONE_CLIP) {
+            return None;
+        }
+        let id = self.rest.get("apply_segment_id")?.as_str()?;
+        (!id.is_empty()).then(|| SegmentId::new(id))
+    }
+
+    /// Bind an effect clip to `clip`, or with `None` let it run over every
+    /// picture below it again.
+    pub fn bind_to(&mut self, clip: Option<&SegmentId>) {
+        match clip {
+            Some(clip) => {
+                self.rest
+                    .insert("apply_type".to_owned(), Value::from(APPLY_ONE_CLIP));
+                self.rest.insert(
+                    "apply_segment_id".to_owned(),
+                    Value::from(clip.as_str().to_owned()),
+                );
+            }
+            None => {
+                self.rest.insert("apply_type".to_owned(), Value::from(0));
+                self.rest
+                    .insert("apply_segment_id".to_owned(), Value::from(String::new()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +290,17 @@ mod tests {
     fn responsive_layout_keeps_unnamed_keys() {
         let layout: ResponsiveLayout = serde_json::from_str(r#"{"future_layout":1}"#).unwrap();
         assert_eq!(serde_json::to_value(layout).unwrap()["future_layout"], 1);
+    }
+
+    #[test]
+    fn an_effect_binds_to_one_clip_and_back() {
+        let mut effect = Segment::new("fx", "m", TimeRange::new(0, 1));
+        assert_eq!(effect.bound_clip(), None);
+        effect.bind_to(Some(&SegmentId::new("clip")));
+        assert_eq!(effect.bound_clip(), Some(SegmentId::new("clip")));
+        let read: Segment = serde_json::from_value(serde_json::to_value(&effect).unwrap()).unwrap();
+        assert_eq!(read.bound_clip(), Some(SegmentId::new("clip")));
+        effect.bind_to(None);
+        assert_eq!(effect.bound_clip(), None);
     }
 }

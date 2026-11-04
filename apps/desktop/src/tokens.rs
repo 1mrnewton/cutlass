@@ -42,6 +42,8 @@ pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
 pub const MAXIMIZE: Color32 = Color32::from_rgb(0x28, 0xc8, 0x40);
 /// The scrim behind a dialog.
 pub const SCRIM: Color32 = Color32::from_black_alpha(140);
+/// The ruler's band between the in and out marks.
+pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
 pub const TYPE_SIZE: f32 = 13.0;
 pub const TIMECODE_SIZE: f32 = 12.0;
@@ -117,6 +119,18 @@ pub const CLIP_HEIGHT: f32 = 28.0;
 pub const MAIN_CLIP_INSET: f32 = 8.0;
 /// The gap above and below any other clip.
 pub const CLIP_INSET: f32 = 6.0;
+/// The level meter's column at the timeline's right edge.
+pub const METER_WIDTH: f32 = 40.0;
+/// The meter's bars: quiet, loud (from -12 dB), and near full scale (from
+/// -3 dB), and the mark a clipped channel shows.
+pub const METER_LOW: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
+pub const METER_LOUD: Color32 = Color32::from_rgb(0xf5, 0xc5, 0x42);
+pub const METER_HOT: Color32 = Color32::from_rgb(0xff, 0x5f, 0x57);
+/// The shortest a clip gets in a row dragged short.
+pub const MIN_CLIP_HEIGHT: f32 = 12.0;
+/// How short and how tall a track row can be dragged.
+pub const MIN_LANE_HEIGHT: f32 = 24.0;
+pub const MAX_LANE_HEIGHT: f32 = 240.0;
 
 /// A right-click menu.
 pub const MENU: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c);

@@ -3,6 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::enums::AnimType;
 use crate::id::MaterialId;
+use crate::materials::Materials;
+use crate::segment::Segment;
 use crate::time::{Micros, TimeRange};
 
 /// An effect package. The mapping fallback for `value` is 0.5 and is not applied
@@ -82,6 +84,8 @@ pub struct MaterialEffect {
 impl MaterialEffect {
     pub const MAPPING_VALUE: f64 = 0.5;
     pub const MAPPING_SOURCE_PLATFORM: i32 = 1;
+    /// The `type` of a title's glow.
+    pub const BLOOM: &'static str = "bloom";
 
     pub fn new(id: impl Into<MaterialId>) -> Self {
         Self {
@@ -89,6 +93,74 @@ impl MaterialEffect {
             ..Self::default()
         }
     }
+
+    /// A title's glow effect storing `bloom`.
+    pub fn glow(id: impl Into<MaterialId>, bloom: &BloomParams) -> Self {
+        let mut effect = Self::new(id);
+        effect.kind = Self::BLOOM.to_owned();
+        effect.set_bloom(bloom);
+        effect
+    }
+
+    /// Store `bloom` as this effect's `bloom_params`.
+    pub fn set_bloom(&mut self, bloom: &BloomParams) {
+        self.bloom_params = serde_json::to_value(bloom).ok();
+    }
+
+    /// The glow this effect stores, when its `bloom_params` read as one.
+    #[must_use]
+    pub fn bloom(&self) -> Option<BloomParams> {
+        serde_json::from_value(self.bloom_params.clone()?).ok()
+    }
+}
+
+/// A title's glow, as `bloom_params` stores it. `strength` and `range` are
+/// read from 0 to 1; the direction is kept but not drawn.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BloomParams {
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub strength: f64,
+    #[serde(default = "full_range")]
+    pub range: f64,
+    #[serde(default)]
+    pub dir_x: f64,
+    #[serde(default)]
+    pub dir_y: f64,
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl Default for BloomParams {
+    fn default() -> Self {
+        Self {
+            color: String::new(),
+            strength: 0.0,
+            range: full_range(),
+            dir_x: 0.0,
+            dir_y: 0.0,
+            rest: Map::new(),
+        }
+    }
+}
+
+const fn full_range() -> f64 {
+    1.0
+}
+
+/// The glow effect among `segment`'s sidecars.
+#[must_use]
+pub fn segment_bloom<'a>(
+    materials: &'a Materials,
+    segment: &Segment,
+) -> Option<&'a MaterialEffect> {
+    segment.extra_material_refs.iter().find_map(|id| {
+        materials
+            .effects
+            .iter()
+            .find(|effect| &effect.id == id && effect.kind == MaterialEffect::BLOOM)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -262,6 +334,41 @@ pub struct MaterialPluginEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_glow_reads_its_params_and_is_found_on_its_clip() {
+        let mut effect = MaterialEffect::new("glow");
+        effect.kind = MaterialEffect::BLOOM.to_owned();
+        effect.bloom_params = Some(serde_json::json!({"color":"#FFCC00","strength":0.6,"extra":1}));
+        let bloom = effect.bloom().unwrap();
+        assert_eq!(bloom.color, "#FFCC00");
+        assert_eq!(bloom.strength, 0.6);
+        assert_eq!(bloom.range, 1.0);
+        assert_eq!(bloom.rest.get("extra"), Some(&serde_json::json!(1)));
+
+        let mut other = MaterialEffect::new("other");
+        other.kind = "video_effect".to_owned();
+        let materials = Materials {
+            effects: vec![other, effect],
+            ..Materials::default()
+        };
+        let mut segment = Segment::new("s", "t", TimeRange::new(0, 1));
+        segment.extra_material_refs = vec![MaterialId::new("other")];
+        assert!(segment_bloom(&materials, &segment).is_none());
+        segment.extra_material_refs.push(MaterialId::new("glow"));
+        assert_eq!(
+            segment_bloom(&materials, &segment).unwrap().id.as_str(),
+            "glow"
+        );
+
+        let made = MaterialEffect::glow("g", &bloom);
+        assert_eq!(made.kind, MaterialEffect::BLOOM);
+        assert_eq!(made.bloom(), Some(bloom));
+
+        let mut broken = MaterialEffect::new("b");
+        broken.bloom_params = Some(serde_json::json!({"strength":"high"}));
+        assert!(broken.bloom().is_none());
+    }
 
     #[test]
     fn a_missing_effect_value_is_not_the_mapping_fallback() {

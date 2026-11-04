@@ -109,7 +109,8 @@ fn sound_for(draft: &Draft, id: &SegmentId, video_id: &MaterialId) -> bool {
     matches!(
         draft.materials.get(segment.material_id.as_str()),
         Some(MaterialRef::Audio(audio))
-            if &audio.video_id == video_id && audio.kind == "video_original_sound"
+            if audio.kind == "video_original_sound"
+                && draft.materials.same_video(audio.video_id.as_str(), video_id.as_str())
     )
 }
 
@@ -172,6 +173,37 @@ mod tests {
             segment_id: "sound-clip".into(),
             material_id: "sound-material".into(),
         }
+    }
+
+    #[test]
+    fn a_picture_with_its_own_copy_of_the_video_keeps_its_sound_extracted() {
+        let (mut draft, segment) = picture();
+        draft.tracks[0].segments.push(segment);
+        let mut session = Session::open(draft);
+        session.apply(0, &[request()]).unwrap();
+        // Split, so both halves show one video, then crop the left half so
+        // it takes its own copy.
+        session
+            .apply(
+                1,
+                &[
+                    Request::Split {
+                        segment_id: "picture".into(),
+                        at: Micros(500_000),
+                        right_id: "right".into(),
+                    },
+                    Request::SetCrop {
+                        segment_id: "picture".into(),
+                        crop: cutlass_model::Crop::default(),
+                    },
+                ],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let left = &draft.tracks[0].segments[0];
+        assert_ne!(left.material_id.as_str(), "picture");
+        assert!(sound_is_separate(draft, left));
+        assert!(sound_is_separate(draft, &draft.tracks[0].segments[1]));
     }
 
     #[test]

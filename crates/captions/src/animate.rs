@@ -1086,6 +1086,7 @@ mod tests {
                 }],
                 font_size: 16.0,
                 scale: 1.0,
+                scales: vec![1.0],
                 alignment: Alignment::Left,
             },
             letters,
@@ -1100,6 +1101,8 @@ mod tests {
             missing: false,
             x,
             advance: 8.0,
+            size: 1.0,
+            face: 0,
         }
     }
 

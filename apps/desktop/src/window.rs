@@ -83,18 +83,21 @@ fn icon(png: &[u8]) -> Option<egui::IconData> {
     })
 }
 
-/// Move the playhead by the time since the previous frame.
+/// Move the playhead and the level meter by the time since the previous
+/// frame.
 ///
 /// The clock is sampled before the widgets run, so the frame that starts
 /// playback does not add the idle gap from before the click. `show` asks
 /// for the next frame once playback is running.
 pub(crate) fn advance_if_playing(shell: &mut Shell, last_time: &mut Option<f64>, now: f64) {
-    if shell.playing()
-        && let Some(last) = *last_time
-    {
+    if let Some(last) = *last_time {
         let elapsed = ((now - last) * 1_000_000.0).round();
         if elapsed.is_finite() && elapsed > 0.0 {
-            shell.advance(elapsed as i64);
+            if shell.playing() {
+                shell.advance(elapsed as i64);
+            }
+            // The meter moves after the playhead, so it reads the frame heard now.
+            shell.update_meter(elapsed as i64);
         }
     }
     *last_time = Some(now);

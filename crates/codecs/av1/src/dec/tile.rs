@@ -1,0 +1,3065 @@
+//! Tile decoding: partition, mode info, transform sizes, palette and coefficients
+//! (spec 5.11 with the CDF selection of 8.3.2).
+
+use cutlass_decode::CodecError;
+
+use crate::dsp::Pixel;
+use crate::spec::tables::{
+    ADJUSTED_TX_SIZE, COEFF_BASE_CTX_OFFSET, COEFF_BASE_POS_CTX_OFFSET, COMPOUND_MODE_CTX_MAP,
+    DEFAULT_SCAN_4X4, DEFAULT_SCAN_4X8, DEFAULT_SCAN_4X16, DEFAULT_SCAN_8X4, DEFAULT_SCAN_8X8,
+    DEFAULT_SCAN_8X16, DEFAULT_SCAN_8X32, DEFAULT_SCAN_16X4, DEFAULT_SCAN_16X8,
+    DEFAULT_SCAN_16X16, DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16,
+    DEFAULT_SCAN_32X32, FILTER_INTRA_MODE_TO_INTRA_DIR, INTRA_MODE_CONTEXT,
+    MAG_REF_OFFSET_WITH_TX_CLASS, MAX_TX_DEPTH_TABLE, MAX_TX_SIZE_RECT, MCOL_SCAN_4X4,
+    MCOL_SCAN_4X8, MCOL_SCAN_4X16, MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4,
+    MCOL_SCAN_16X8, MCOL_SCAN_16X16, MODE_TO_TXFM, MROW_SCAN_4X4, MROW_SCAN_4X8, MROW_SCAN_4X16,
+    MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16, MROW_SCAN_16X4, MROW_SCAN_16X8, MROW_SCAN_16X16,
+    PALETTE_COLOR_CONTEXT, PALETTE_COLOR_HASH_MULTIPLIERS, PARTITION_SUBSIZE, SGR_PARAMS,
+    SIG_REF_DIFF_OFFSET, SIZE_GROUP, SPLIT_TX_SIZE, TX_SIZE_SQR, TX_SIZE_SQR_UP,
+    TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA, TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2,
+    TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1, TX_TYPE_INTRA_INV_SET2, WEDGE_BITS,
+};
+
+use super::cdf::CdfContext;
+use super::frame::{FrameState, Picture};
+use super::msac::Msac;
+use super::obu::{
+    FrameHeader, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
+    SEG_LVL_GLOBALMV, SEG_LVL_REF_FRAME, SEG_LVL_SKIP, SWITCHABLE, SequenceHeader, TX_MODE_SELECT,
+};
+use super::types::{
+    ALTREF_FRAME, ALTREF2_FRAME, BLOCK_4X4, BLOCK_8X8, BLOCK_32X32, BLOCK_64X64, BLOCK_128X128,
+    BWDREF_FRAME, COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA,
+    COMPOUND_WEDGE, DC_PRED, GLOBAL_GLOBALMV, GLOBALMV, GOLDEN_FRAME, H_ADST, H_DCT, H_FLIPADST,
+    IDTX, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, LOCALWARP, MiInfo, Mv, NEAR_NEARMV,
+    NEAR_NEWMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV, NEW_NEARESTMV, NEW_NEARMV,
+    NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32,
+    TX_64X16, TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height, block_width,
+    bw4, find_tx_size, is_directional, mi_height_log2, mi_width_log2, plane_residual_size, tx_h,
+    tx_h_log2, tx_w, tx_w_log2,
+};
+
+pub type R<T> = Result<T, CodecError>;
+
+pub fn malformed(what: &'static str) -> CodecError {
+    CodecError::Malformed { at_bit: 0, what }
+}
+
+/// Syntax values of the block being decoded.
+#[derive(Clone)]
+pub struct Block {
+    pub mi_row: usize,
+    pub mi_col: usize,
+    pub bsize: u8,
+    pub has_chroma: bool,
+    pub avail_u: bool,
+    pub avail_l: bool,
+    pub avail_u_chroma: bool,
+    pub avail_l_chroma: bool,
+    pub skip: bool,
+    pub skip_mode: bool,
+    pub segment_id: u8,
+    pub lossless: bool,
+    pub is_inter: bool,
+    pub use_intrabc: bool,
+    pub y_mode: u8,
+    pub uv_mode: u8,
+    pub angle_delta_y: i8,
+    pub angle_delta_uv: i8,
+    pub cfl_alpha_u: i8,
+    pub cfl_alpha_v: i8,
+    pub use_filter_intra: bool,
+    pub filter_intra_mode: u8,
+    pub palette_size_y: u8,
+    pub palette_size_uv: u8,
+    pub palette_y: [u16; 8],
+    pub palette_u: [u16; 8],
+    pub palette_v: [u16; 8],
+    pub tx_size: u8,
+    pub ref_frame: [i8; 2],
+    pub mv: [Mv; 2],
+    pub interp_filter: [u8; 2],
+    pub motion_mode: u8,
+    pub interintra: bool,
+    pub interintra_mode: u8,
+    pub wedge_interintra: bool,
+    pub wedge_index: u8,
+    pub wedge_sign: u8,
+    pub mask_type: u8,
+    pub compound_type: u8,
+    pub comp_group_idx: u8,
+    pub compound_idx: u8,
+    pub ref_mv_idx: usize,
+    // MV prediction outputs.
+    pub num_mv_found: usize,
+    pub new_mv_count: usize,
+    pub ref_stack_mv: [[Mv; 2]; 9],
+    pub weight_stack: [u32; 9],
+    pub global_mvs: [Mv; 2],
+    pub drl_ctx_stack: [u8; 9],
+    pub new_mv_ctx: usize,
+    pub ref_mv_ctx: usize,
+    pub zero_mv_ctx: usize,
+    pub num_samples: usize,
+    pub num_samples_scanned: usize,
+    pub cand_list: [[i32; 4]; 8],
+    pub local_warp: [i32; 6],
+    pub local_valid: bool,
+    pub max_luma_w: usize,
+    pub max_luma_h: usize,
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            mi_row: 0,
+            mi_col: 0,
+            bsize: 0,
+            has_chroma: false,
+            avail_u: false,
+            avail_l: false,
+            avail_u_chroma: false,
+            avail_l_chroma: false,
+            skip: false,
+            skip_mode: false,
+            segment_id: 0,
+            lossless: false,
+            is_inter: false,
+            use_intrabc: false,
+            y_mode: 0,
+            uv_mode: 0,
+            angle_delta_y: 0,
+            angle_delta_uv: 0,
+            cfl_alpha_u: 0,
+            cfl_alpha_v: 0,
+            use_filter_intra: false,
+            filter_intra_mode: 0,
+            palette_size_y: 0,
+            palette_size_uv: 0,
+            palette_y: [0; 8],
+            palette_u: [0; 8],
+            palette_v: [0; 8],
+            tx_size: 0,
+            ref_frame: [INTRA_FRAME, NONE],
+            mv: [Mv::ZERO; 2],
+            interp_filter: [0; 2],
+            motion_mode: 0,
+            interintra: false,
+            interintra_mode: 0,
+            wedge_interintra: false,
+            wedge_index: 0,
+            wedge_sign: 0,
+            mask_type: 0,
+            compound_type: COMPOUND_AVERAGE,
+            comp_group_idx: 0,
+            compound_idx: 0,
+            ref_mv_idx: 0,
+            num_mv_found: 0,
+            new_mv_count: 0,
+            ref_stack_mv: [[Mv::ZERO; 2]; 9],
+            weight_stack: [0; 9],
+            global_mvs: [Mv::ZERO; 2],
+            drl_ctx_stack: [0; 9],
+            new_mv_ctx: 0,
+            ref_mv_ctx: 0,
+            zero_mv_ctx: 0,
+            num_samples: 0,
+            num_samples_scanned: 0,
+            cand_list: [[0; 4]; 8],
+            local_warp: [0; 6],
+            local_valid: false,
+            max_luma_w: 0,
+            max_luma_h: 0,
+        }
+    }
+}
+
+/// A reference frame as the tile decoder sees it.
+pub struct RefView<'a, P> {
+    pub pic: &'a Picture<P>,
+    pub upscaled_width: usize,
+    pub frame_height: usize,
+    pub frame_width: usize,
+}
+
+pub struct TileDec<'a, P: Pixel> {
+    pub seq: &'a SequenceHeader,
+    pub hdr: &'a FrameHeader,
+    pub fs: &'a mut FrameState,
+    pub cur: &'a mut Picture<P>,
+    /// Indexed by reference frame type 1..=7.
+    pub refs: [Option<RefView<'a, P>>; 8],
+    pub msac: Msac<'a>,
+    pub cdf: &'a mut CdfContext,
+    pub mi_row_start: usize,
+    pub mi_row_end: usize,
+    pub mi_col_start: usize,
+    pub mi_col_end: usize,
+    pub sb_size: u8,
+    pub sb_size4: usize,
+    pub bd: u32,
+    pub sub_x: bool,
+    pub sub_y: bool,
+    pub num_planes: usize,
+    // Above context, indexed by plane 4x4 column (frame-wide).
+    pub above_level: [Vec<u8>; 3],
+    pub above_dc: [Vec<u8>; 3],
+    pub above_seg_pred: Vec<u8>,
+    // Left context, indexed by plane 4x4 row inside the superblock row.
+    pub left_level: [[u8; 32]; 3],
+    pub left_dc: [[u8; 32]; 3],
+    pub left_seg_pred: [u8; 32],
+    // Palette colors of the neighbors.
+    pub above_palette: [Vec<[u16; 8]>; 2],
+    pub left_palette: [[[u16; 8]; 32]; 2],
+    pub delta_lf: [i8; 4],
+    pub current_q_index: i32,
+    pub read_deltas: bool,
+    pub ref_lr_wiener: [[[i8; 3]; 2]; 3],
+    pub ref_sgr_xqd: [[i8; 2]; 3],
+    /// BlockDecoded[plane][y + 1][x + 1].
+    pub block_decoded: [[[bool; 35]; 35]; 3],
+    pub b: Block,
+    pub color_map_y: Vec<u8>,
+    pub color_map_uv: Vec<u8>,
+    pub scratch: super::recon::Scratch<P>,
+}
+
+#[inline]
+fn neg_deinterleave(diff: i32, r: i32, max: i32) -> i32 {
+    if r == 0 {
+        return diff;
+    }
+    if r >= max - 1 {
+        return max - diff - 1;
+    }
+    if 2 * r < max {
+        if diff <= 2 * r {
+            if diff & 1 != 0 {
+                return r + ((diff + 1) >> 1);
+            }
+            return r - (diff >> 1);
+        }
+        diff
+    } else {
+        if diff <= 2 * (max - r - 1) {
+            if diff & 1 != 0 {
+                return r + ((diff + 1) >> 1);
+            }
+            return r - (diff >> 1);
+        }
+        max - (diff + 1)
+    }
+}
+
+pub fn get_tx_class(tx_type: u8) -> usize {
+    match tx_type {
+        V_DCT | V_ADST | V_FLIPADST => 2,
+        H_DCT | H_ADST | H_FLIPADST => 1,
+        _ => 0,
+    }
+}
+
+fn get_scan(tx: u8, tx_type: u8) -> &'static [u16] {
+    if tx == TX_16X64 {
+        return &DEFAULT_SCAN_16X32;
+    }
+    if tx == TX_64X16 {
+        return &DEFAULT_SCAN_32X16;
+    }
+    if TX_SIZE_SQR_UP[tx as usize] == TX_64X64 {
+        return &DEFAULT_SCAN_32X32;
+    }
+    let default = |t: u8| -> &'static [u16] {
+        match t {
+            0 => &DEFAULT_SCAN_4X4,
+            5 => &DEFAULT_SCAN_4X8,
+            6 => &DEFAULT_SCAN_8X4,
+            1 => &DEFAULT_SCAN_8X8,
+            7 => &DEFAULT_SCAN_8X16,
+            8 => &DEFAULT_SCAN_16X8,
+            2 => &DEFAULT_SCAN_16X16,
+            9 => &DEFAULT_SCAN_16X32,
+            10 => &DEFAULT_SCAN_32X16,
+            13 => &DEFAULT_SCAN_4X16,
+            14 => &DEFAULT_SCAN_16X4,
+            15 => &DEFAULT_SCAN_8X32,
+            16 => &DEFAULT_SCAN_32X8,
+            _ => &DEFAULT_SCAN_32X32,
+        }
+    };
+    if tx_type == IDTX {
+        return default(tx);
+    }
+    let prefer_row = matches!(tx_type, V_DCT | V_ADST | V_FLIPADST);
+    let prefer_col = matches!(tx_type, H_DCT | H_ADST | H_FLIPADST);
+    if prefer_row {
+        match tx {
+            0 => &MROW_SCAN_4X4,
+            5 => &MROW_SCAN_4X8,
+            6 => &MROW_SCAN_8X4,
+            1 => &MROW_SCAN_8X8,
+            7 => &MROW_SCAN_8X16,
+            8 => &MROW_SCAN_16X8,
+            2 => &MROW_SCAN_16X16,
+            13 => &MROW_SCAN_4X16,
+            _ => &MROW_SCAN_16X4,
+        }
+    } else if prefer_col {
+        match tx {
+            0 => &MCOL_SCAN_4X4,
+            5 => &MCOL_SCAN_4X8,
+            6 => &MCOL_SCAN_8X4,
+            1 => &MCOL_SCAN_8X8,
+            7 => &MCOL_SCAN_8X16,
+            8 => &MCOL_SCAN_16X8,
+            2 => &MCOL_SCAN_16X16,
+            13 => &MCOL_SCAN_4X16,
+            _ => &MCOL_SCAN_16X4,
+        }
+    } else {
+        default(tx)
+    }
+}
+
+impl<'a, P: Pixel> TileDec<'a, P> {
+    #[inline]
+    fn is_inside(&self, r: isize, c: isize) -> bool {
+        c >= self.mi_col_start as isize
+            && c < self.mi_col_end as isize
+            && r >= self.mi_row_start as isize
+            && r < self.mi_row_end as isize
+    }
+
+    #[inline]
+    pub fn mi(&self, r: usize, c: usize) -> &MiInfo {
+        &self.fs.mi[r * self.fs.mi_stride + c]
+    }
+
+    fn seg_feature_active(&self, feature: usize) -> bool {
+        self.hdr.seg_feature_active(self.b.segment_id as usize, feature)
+    }
+
+    // ------------------------------------------------------------------
+    // Tile entry point.
+
+    pub fn decode_tile(&mut self) -> R<()> {
+        // clear_above_context
+        let s = self.mi_col_start;
+        let e = (self.mi_col_end + 32).min(self.above_seg_pred.len());
+        for p in 0..3 {
+            for v in &mut self.above_level[p][s..e] {
+                *v = 0;
+            }
+            for v in &mut self.above_dc[p][s..e] {
+                *v = 0;
+            }
+        }
+        for v in &mut self.above_seg_pred[s..e] {
+            *v = 0;
+        }
+        self.delta_lf = [0; 4];
+        for p in 0..self.num_planes {
+            self.ref_sgr_xqd[p] = [-32, 31];
+            self.ref_lr_wiener[p] = [[3, -7, 15]; 2];
+        }
+        let sb4 = self.sb_size4;
+        let mut r = self.mi_row_start;
+        while r < self.mi_row_end {
+            // clear_left_context
+            self.left_level = [[0; 32]; 3];
+            self.left_dc = [[0; 32]; 3];
+            self.left_seg_pred = [0; 32];
+            let mut c = self.mi_col_start;
+            while c < self.mi_col_end {
+                self.read_deltas = self.hdr.delta_q_present;
+                self.clear_cdef(r, c);
+                self.clear_block_decoded_flags(r, c);
+                self.read_lr(r, c, self.sb_size)?;
+                self.decode_partition(r, c, self.sb_size)?;
+                c += sb4;
+            }
+            r += sb4;
+        }
+        Ok(())
+    }
+
+    fn clear_cdef(&mut self, r: usize, c: usize) {
+        let st = self.fs.cdef_stride;
+        self.fs.cdef_idx[(r >> 4) * st + (c >> 4)] = -1;
+        if self.seq.use_128x128_superblock {
+            self.fs.cdef_idx[(r >> 4) * st + (c >> 4) + 1] = -1;
+            self.fs.cdef_idx[((r >> 4) + 1) * st + (c >> 4)] = -1;
+            self.fs.cdef_idx[((r >> 4) + 1) * st + (c >> 4) + 1] = -1;
+        }
+    }
+
+    fn clear_block_decoded_flags(&mut self, r: usize, c: usize) {
+        let sb4 = self.sb_size4 as isize;
+        for plane in 0..self.num_planes {
+            let (sx, sy) = self.plane_sub(plane);
+            let sbw4 = ((self.mi_col_end - c) >> sx) as isize;
+            let sbh4 = ((self.mi_row_end - r) >> sy) as isize;
+            let bd = &mut self.block_decoded[plane];
+            for y in -1..=(sb4 >> sy) {
+                for x in -1..=(sb4 >> sx) {
+                    let v = if y < 0 && x < sbw4 {
+                        true
+                    } else {
+                        x < 0 && y < sbh4
+                    };
+                    bd[(y + 1) as usize][(x + 1) as usize] = v;
+                }
+            }
+            bd[((sb4 >> sy) + 1) as usize][0] = false;
+        }
+    }
+
+    #[inline]
+    pub fn plane_sub(&self, plane: usize) -> (u32, u32) {
+        if plane > 0 {
+            (u32::from(self.sub_x), u32::from(self.sub_y))
+        } else {
+            (0, 0)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Loop restoration syntax (5.11.57, 5.11.58).
+
+    fn read_lr(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
+        if self.hdr.allow_intrabc {
+            return Ok(());
+        }
+        let w = bw4(bsize);
+        let h = bh4(bsize);
+        for plane in 0..self.num_planes {
+            let ftype = self.hdr.lr.frame_type[plane];
+            if ftype == RESTORE_NONE {
+                continue;
+            }
+            let (sx, sy) = self.plane_sub(plane);
+            let unit_size = self.hdr.lr.unit_size[plane] as usize;
+            let unit_rows = self.fs.lr_rows[plane];
+            let unit_cols = self.fs.lr_cols[plane];
+            let row_start = (r * (4 >> sy) + unit_size - 1) / unit_size;
+            let row_end = unit_rows.min(((r + h) * (4 >> sy) + unit_size - 1) / unit_size);
+            let (num, den) = if self.hdr.use_superres {
+                (
+                    (4 >> sx) * self.hdr.superres_denom as usize,
+                    unit_size * 8,
+                )
+            } else {
+                (4 >> sx, unit_size)
+            };
+            let col_start = (c * num + den - 1) / den;
+            let col_end = unit_cols.min(((c + w) * num + den - 1) / den);
+            for ur in row_start..row_end {
+                for uc in col_start..col_end {
+                    self.read_lr_unit(plane, ur, uc, ftype)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn subexp_bool(&mut self, num_syms: u32, k: u32) -> u32 {
+        let mut i = 0u32;
+        let mut mk = 0u32;
+        loop {
+            let b2 = if i != 0 { k + i - 1 } else { k };
+            let a = 1u32 << b2;
+            if num_syms <= mk + 3 * a {
+                return self.msac.ns(num_syms - mk) + mk;
+            }
+            if self.msac.literal(1) != 0 {
+                i += 1;
+                mk += a;
+            } else {
+                return self.msac.literal(b2) + mk;
+            }
+        }
+    }
+
+    fn signed_subexp_with_ref_bool(&mut self, low: i32, high: i32, k: u32, r: i32) -> i32 {
+        let mx = high - low;
+        let r = r - low;
+        let v = self.subexp_bool(mx as u32, k) as i32;
+        let inv = |r: i32, v: i32| {
+            if v > 2 * r {
+                v
+            } else if v & 1 != 0 {
+                r - ((v + 1) >> 1)
+            } else {
+                r + (v >> 1)
+            }
+        };
+        let x = if (r << 1) <= mx {
+            inv(r, v)
+        } else {
+            mx - 1 - inv(mx - 1 - r, v)
+        };
+        x + low
+    }
+
+    fn read_lr_unit(&mut self, plane: usize, ur: usize, uc: usize, ftype: u8) -> R<()> {
+        let rtype = if ftype == RESTORE_WIENER {
+            if self.msac.bool_adapt(&mut self.cdf.use_wiener) {
+                RESTORE_WIENER
+            } else {
+                RESTORE_NONE
+            }
+        } else if ftype == RESTORE_SGRPROJ {
+            if self.msac.bool_adapt(&mut self.cdf.use_sgrproj) {
+                RESTORE_SGRPROJ
+            } else {
+                RESTORE_NONE
+            }
+        } else {
+            debug_assert_eq!(ftype, RESTORE_SWITCHABLE);
+            self.msac.symbol(&mut self.cdf.restoration_type) as u8
+        };
+        let idx = ur * self.fs.lr_cols[plane] + uc;
+        let mut unit = self.fs.lr[plane][idx];
+        unit.kind = rtype;
+        const WMIN: [i32; 3] = [-5, -23, -17];
+        const WMAX: [i32; 3] = [10, 8, 46];
+        const WK: [u32; 3] = [1, 2, 3];
+        if rtype == RESTORE_WIENER {
+            for pass in 0..2 {
+                let first = if plane > 0 {
+                    unit.wiener[pass][0] = 0;
+                    1
+                } else {
+                    0
+                };
+                for j in first..3 {
+                    let v = self.signed_subexp_with_ref_bool(
+                        WMIN[j],
+                        WMAX[j] + 1,
+                        WK[j],
+                        i32::from(self.ref_lr_wiener[plane][pass][j]),
+                    );
+                    unit.wiener[pass][j] = v as i8;
+                    self.ref_lr_wiener[plane][pass][j] = v as i8;
+                }
+            }
+        } else if rtype == RESTORE_SGRPROJ {
+            let set = self.msac.literal(4) as usize;
+            unit.sgr_set = set as u8;
+            const XMIN: [i32; 2] = [-96, -32];
+            const XMAX: [i32; 2] = [31, 95];
+            for i in 0..2 {
+                let radius = SGR_PARAMS[set][i * 2];
+                let v = if radius != 0 {
+                    self.signed_subexp_with_ref_bool(
+                        XMIN[i],
+                        XMAX[i] + 1,
+                        4,
+                        i32::from(self.ref_sgr_xqd[plane][i]),
+                    )
+                } else if i == 1 {
+                    ((1 << 7) - i32::from(self.ref_sgr_xqd[plane][0])).clamp(XMIN[i], XMAX[i])
+                } else {
+                    0
+                };
+                unit.sgr_xqd[i] = v as i8;
+                self.ref_sgr_xqd[plane][i] = v as i8;
+            }
+        }
+        self.fs.lr[plane][idx] = unit;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Partition (5.11.4).
+
+    fn partition_ctx(&self, r: usize, c: usize, bsize: u8, avail_u: bool, avail_l: bool) -> usize {
+        let bsl = mi_width_log2(bsize);
+        let above = avail_u && mi_width_log2(self.mi(r - 1, c).bsize) < bsl;
+        let left = avail_l && mi_height_log2(self.mi(r, c - 1).bsize) < bsl;
+        usize::from(left) * 2 + usize::from(above)
+    }
+
+    /// Partition CDF in spec (non-inverted, cumulative) form, 10 or 8 entries.
+    fn partition_spec_cdf(&self, bsl: u32, ctx: usize) -> [u32; 10] {
+        let mut out = [32768u32; 10];
+        let mut fill = |inv: &[u16]| {
+            let n = inv.len() - 1;
+            for i in 0..n {
+                out[i] = 32768 - u32::from(inv[i]);
+            }
+        };
+        match bsl {
+            1 => fill(&self.cdf.partition_w8[ctx]),
+            2 => fill(&self.cdf.partition_w16[ctx]),
+            3 => fill(&self.cdf.partition_w32[ctx]),
+            4 => fill(&self.cdf.partition_w64[ctx]),
+            _ => fill(&self.cdf.partition_w128[ctx]),
+        }
+        out
+    }
+
+    fn decode_partition(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
+        if r >= self.fs.mi_rows || c >= self.fs.mi_cols {
+            return Ok(());
+        }
+        let avail_u = self.is_inside(r as isize - 1, c as isize);
+        let avail_l = self.is_inside(r as isize, c as isize - 1);
+        let num4x4 = bw4(bsize);
+        let half = num4x4 >> 1;
+        let quarter = half >> 1;
+        let has_rows = (r + half) < self.fs.mi_rows;
+        let has_cols = (c + half) < self.fs.mi_cols;
+        let partition: usize = if bsize < BLOCK_8X8 {
+            0
+        } else {
+            let ctx = self.partition_ctx(r, c, bsize, avail_u, avail_l);
+            let bsl = mi_width_log2(bsize);
+            if has_rows && has_cols {
+                match bsl {
+                    1 => self.msac.symbol(&mut self.cdf.partition_w8[ctx]),
+                    2 => self.msac.symbol(&mut self.cdf.partition_w16[ctx]),
+                    3 => self.msac.symbol(&mut self.cdf.partition_w32[ctx]),
+                    4 => self.msac.symbol(&mut self.cdf.partition_w64[ctx]),
+                    _ => self.msac.symbol(&mut self.cdf.partition_w128[ctx]),
+                }
+            } else if has_cols || has_rows {
+                let pc = self.partition_spec_cdf(bsl, ctx);
+                let p = |i: usize| pc[i] - if i == 0 { 0 } else { pc[i - 1] };
+                let psum = if has_cols {
+                    // split_or_horz
+                    let mut s = p(2) + p(3) + p(4) + p(6) + p(7);
+                    if bsize != BLOCK_128X128 {
+                        s += p(9);
+                    }
+                    s
+                } else {
+                    let mut s = p(1) + p(3) + p(4) + p(5) + p(6);
+                    if bsize != BLOCK_128X128 {
+                        s += p(8);
+                    }
+                    s
+                };
+                // cdf[0] = 32768 - psum, inverted form = psum.
+                let bit = self.msac.bool_prob(psum);
+                if has_cols {
+                    if bit { 3 } else { 1 }
+                } else if bit {
+                    3
+                } else {
+                    2
+                }
+            } else {
+                3
+            }
+        };
+        let sub = PARTITION_SUBSIZE[partition][bsize as usize];
+        let split = PARTITION_SUBSIZE[3][bsize as usize];
+        if sub == super::types::BLOCK_INVALID {
+            return Err(malformed("partition"));
+        }
+        match partition {
+            0 => self.decode_block(r, c, sub)?,
+            1 => {
+                self.decode_block(r, c, sub)?;
+                if has_rows {
+                    self.decode_block(r + half, c, sub)?;
+                }
+            }
+            2 => {
+                self.decode_block(r, c, sub)?;
+                if has_cols {
+                    self.decode_block(r, c + half, sub)?;
+                }
+            }
+            3 => {
+                self.decode_partition(r, c, sub)?;
+                self.decode_partition(r, c + half, sub)?;
+                self.decode_partition(r + half, c, sub)?;
+                self.decode_partition(r + half, c + half, sub)?;
+            }
+            4 => {
+                self.decode_block(r, c, split)?;
+                self.decode_block(r, c + half, split)?;
+                self.decode_block(r + half, c, sub)?;
+            }
+            5 => {
+                self.decode_block(r, c, sub)?;
+                self.decode_block(r + half, c, split)?;
+                self.decode_block(r + half, c + half, split)?;
+            }
+            6 => {
+                self.decode_block(r, c, split)?;
+                self.decode_block(r + half, c, split)?;
+                self.decode_block(r, c + half, sub)?;
+            }
+            7 => {
+                self.decode_block(r, c, sub)?;
+                self.decode_block(r, c + half, split)?;
+                self.decode_block(r + half, c + half, split)?;
+            }
+            8 => {
+                for i in 0..4 {
+                    if i < 3 || r + quarter * 3 < self.fs.mi_rows {
+                        self.decode_block(r + quarter * i, c, sub)?;
+                    }
+                }
+            }
+            _ => {
+                for i in 0..4 {
+                    if i < 3 || c + quarter * 3 < self.fs.mi_cols {
+                        self.decode_block(r, c + quarter * i, sub)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Block (5.11.5).
+
+    fn decode_block(&mut self, r: usize, c: usize, bsize: u8) -> R<()> {
+        let mut b = std::mem::take(&mut self.b);
+        b.mi_row = r;
+        b.mi_col = c;
+        b.bsize = bsize;
+        let w4 = bw4(bsize);
+        let h4 = bh4(bsize);
+        b.has_chroma = if (h4 == 1 && self.sub_y && (r & 1) == 0)
+            || (w4 == 1 && self.sub_x && (c & 1) == 0)
+        {
+            false
+        } else {
+            self.num_planes > 1
+        };
+        b.avail_u = self.is_inside(r as isize - 1, c as isize);
+        b.avail_l = self.is_inside(r as isize, c as isize - 1);
+        b.avail_u_chroma = b.avail_u;
+        b.avail_l_chroma = b.avail_l;
+        if b.has_chroma {
+            if self.sub_y && h4 == 1 {
+                b.avail_u_chroma = self.is_inside(r as isize - 2, c as isize);
+            }
+            if self.sub_x && w4 == 1 {
+                b.avail_l_chroma = self.is_inside(r as isize, c as isize - 2);
+            }
+        } else {
+            b.avail_u_chroma = false;
+            b.avail_l_chroma = false;
+        }
+        self.b = b;
+        if self.hdr.frame_is_intra {
+            self.intra_frame_mode_info()?;
+        } else {
+            self.inter_frame_mode_info()?;
+        }
+        self.palette_tokens()?;
+        self.read_block_tx_size()?;
+        if self.b.skip {
+            self.reset_block_context();
+        }
+        self.store_mode_info_pre();
+        self.compute_prediction()?;
+        self.residual()?;
+        self.store_mode_info_post();
+        Ok(())
+    }
+
+    fn reset_block_context(&mut self) {
+        let b = &self.b;
+        let planes = if b.has_chroma { 3 } else { 1 };
+        let sb_mask = self.sb_size4 - 1;
+        for plane in 0..planes {
+            let (sx, sy) = self.plane_sub(plane);
+            let x0 = b.mi_col >> sx;
+            let x1 = (b.mi_col + bw4(b.bsize)) >> sx;
+            for i in x0..x1 {
+                self.above_level[plane][i] = 0;
+                self.above_dc[plane][i] = 0;
+            }
+            let y0 = (b.mi_row & sb_mask) >> sy;
+            let y1 = ((b.mi_row & sb_mask) + bh4(b.bsize)) >> sy;
+            for i in y0..y1.min(32) {
+                self.left_level[plane][i] = 0;
+                self.left_dc[plane][i] = 0;
+            }
+        }
+    }
+
+    /// The part of the block's mode info that prediction needs (spec stores it before compute_prediction).
+    fn store_mode_info_pre(&mut self) {
+        let b = &self.b;
+        let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
+        let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
+        let info = MiInfo {
+            ref_frame: b.ref_frame,
+            mv: if b.ref_frame[1] > INTRA_FRAME {
+                b.mv
+            } else {
+                [b.mv[0], Mv::ZERO]
+            },
+            bsize: b.bsize,
+            y_mode: b.y_mode,
+            uv_mode: b.uv_mode,
+            is_inter: b.is_inter,
+            skip: b.skip,
+            skip_mode: b.skip_mode,
+            segment_id: b.segment_id,
+            tx_size: b.tx_size,
+            palette_size: [b.palette_size_y, b.palette_size_uv],
+            comp_group_idx: b.comp_group_idx,
+            compound_idx: b.compound_idx,
+            interp_filter: b.interp_filter,
+            motion_mode: b.motion_mode,
+            delta_lf: self.delta_lf,
+        };
+        let stride = self.fs.mi_stride;
+        for y in 0..h4 {
+            let row = &mut self.fs.mi[(b.mi_row + y) * stride + b.mi_col..][..w4];
+            for m in row.iter_mut() {
+                let uv = m.uv_mode;
+                *m = info;
+                if !(b.ref_frame[0] == INTRA_FRAME && b.has_chroma) {
+                    m.uv_mode = uv;
+                }
+            }
+        }
+        for y in 0..h4 {
+            let s = &mut self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4];
+            for v in s.iter_mut() {
+                *v = b.segment_id;
+            }
+        }
+        // Palette colors for later palette caches.
+        if self.hdr.allow_screen_content_tools {
+            let sb_mask = self.sb_size4 - 1;
+            for x in 0..bw4(b.bsize) {
+                if b.mi_col + x < self.above_palette[0].len() {
+                    self.above_palette[0][b.mi_col + x] = b.palette_y;
+                    self.above_palette[1][b.mi_col + x] = b.palette_u;
+                }
+            }
+            for y in 0..bh4(b.bsize) {
+                let ly = ((b.mi_row & sb_mask) + y) & 31;
+                self.left_palette[0][ly] = b.palette_y;
+                self.left_palette[1][ly] = b.palette_u;
+            }
+        }
+    }
+
+    fn store_mode_info_post(&mut self) {}
+
+    // ------------------------------------------------------------------
+    // Intra frame mode info (5.11.7).
+
+    fn intra_frame_mode_info(&mut self) -> R<()> {
+        self.b.skip = false;
+        let pre_skip = self.hdr.segmentation.seg_id_pre_skip;
+        if pre_skip {
+            self.intra_segment_id()?;
+        }
+        self.b.skip_mode = false;
+        self.read_skip();
+        if !pre_skip {
+            self.intra_segment_id()?;
+        }
+        self.read_cdef();
+        self.read_delta_qindex();
+        self.read_delta_lf();
+        self.read_deltas = false;
+        self.b.ref_frame = [INTRA_FRAME, NONE];
+        self.b.use_intrabc = if self.hdr.allow_intrabc {
+            self.msac.bool_adapt(&mut self.cdf.intrabc)
+        } else {
+            false
+        };
+        self.b.palette_size_y = 0;
+        self.b.palette_size_uv = 0;
+        self.b.use_filter_intra = false;
+        self.b.interintra = false;
+        self.b.motion_mode = SIMPLE;
+        self.b.compound_type = COMPOUND_AVERAGE;
+        self.b.mv = [Mv::ZERO; 2];
+        self.b.angle_delta_y = 0;
+        self.b.angle_delta_uv = 0;
+        if self.b.use_intrabc {
+            self.b.is_inter = true;
+            self.b.y_mode = DC_PRED;
+            self.b.uv_mode = DC_PRED;
+            self.b.interp_filter = [3, 3];
+            self.find_mv_stack(false);
+            self.assign_mv(false)?;
+        } else {
+            self.b.is_inter = false;
+            let above = if self.b.avail_u {
+                self.mi(self.b.mi_row - 1, self.b.mi_col).y_mode
+            } else {
+                DC_PRED
+            };
+            let left = if self.b.avail_l {
+                self.mi(self.b.mi_row, self.b.mi_col - 1).y_mode
+            } else {
+                DC_PRED
+            };
+            let a = INTRA_MODE_CONTEXT[above as usize] as usize;
+            let l = INTRA_MODE_CONTEXT[left as usize] as usize;
+            self.b.y_mode = self.msac.symbol(&mut self.cdf.intra_frame_y_mode[a][l]) as u8;
+            self.intra_mode_info_common()?;
+        }
+        Ok(())
+    }
+
+    fn intra_mode_info_common(&mut self) -> R<()> {
+        self.intra_angle_info_y();
+        if self.b.has_chroma {
+            self.read_uv_mode();
+            if self.b.uv_mode == UV_CFL_PRED {
+                self.read_cfl_alphas();
+            }
+            self.intra_angle_info_uv();
+        } else {
+            self.b.uv_mode = DC_PRED;
+        }
+        self.b.palette_size_y = 0;
+        self.b.palette_size_uv = 0;
+        let bs = self.b.bsize;
+        if bs >= BLOCK_8X8
+            && block_width(bs) <= 64
+            && block_height(bs) <= 64
+            && self.hdr.allow_screen_content_tools
+        {
+            self.palette_mode_info()?;
+        }
+        self.filter_intra_mode_info();
+        Ok(())
+    }
+
+    fn intra_segment_id(&mut self) -> R<()> {
+        if self.hdr.segmentation.enabled {
+            self.read_segment_id()?;
+        } else {
+            self.b.segment_id = 0;
+        }
+        self.b.lossless = self.hdr.lossless_array[self.b.segment_id as usize];
+        Ok(())
+    }
+
+    fn read_segment_id(&mut self) -> R<()> {
+        let (r, c) = (self.b.mi_row, self.b.mi_col);
+        let st = self.fs.mi_stride;
+        let prev_ul = if self.b.avail_u && self.b.avail_l {
+            i32::from(self.fs.segment_ids[(r - 1) * st + c - 1])
+        } else {
+            -1
+        };
+        let prev_u = if self.b.avail_u {
+            i32::from(self.fs.segment_ids[(r - 1) * st + c])
+        } else {
+            -1
+        };
+        let prev_l = if self.b.avail_l {
+            i32::from(self.fs.segment_ids[r * st + c - 1])
+        } else {
+            -1
+        };
+        let pred = if prev_u == -1 {
+            if prev_l == -1 { 0 } else { prev_l }
+        } else if prev_l == -1 {
+            prev_u
+        } else if prev_ul == prev_u {
+            prev_u
+        } else {
+            prev_l
+        };
+        if self.b.skip {
+            self.b.segment_id = pred as u8;
+        } else {
+            let ctx = if prev_ul < 0 {
+                0
+            } else if prev_ul == prev_u && prev_ul == prev_l {
+                2
+            } else if prev_ul == prev_u || prev_ul == prev_l || prev_u == prev_l {
+                1
+            } else {
+                0
+            };
+            let v = self.msac.symbol(&mut self.cdf.segment_id[ctx]) as i32;
+            let max = i32::from(self.hdr.segmentation.last_active_seg_id) + 1;
+            let s = neg_deinterleave(v, pred, max);
+            if !(0..8).contains(&s) {
+                return Err(malformed("segment_id"));
+            }
+            self.b.segment_id = s as u8;
+        }
+        Ok(())
+    }
+
+    fn read_skip(&mut self) {
+        if self.hdr.segmentation.seg_id_pre_skip && self.seg_feature_active(SEG_LVL_SKIP) {
+            self.b.skip = true;
+            return;
+        }
+        let mut ctx = 0;
+        if self.b.avail_u {
+            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip);
+        }
+        if self.b.avail_l {
+            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip);
+        }
+        self.b.skip = self.msac.bool_adapt(&mut self.cdf.skip[ctx]);
+    }
+
+    fn read_skip_mode(&mut self) {
+        let bs = self.b.bsize;
+        if self.seg_feature_active(SEG_LVL_SKIP)
+            || self.seg_feature_active(SEG_LVL_REF_FRAME)
+            || self.seg_feature_active(SEG_LVL_GLOBALMV)
+            || !self.hdr.skip_mode_present
+            || block_width(bs) < 8
+            || block_height(bs) < 8
+        {
+            self.b.skip_mode = false;
+            return;
+        }
+        let mut ctx = 0;
+        if self.b.avail_u {
+            ctx += usize::from(self.mi(self.b.mi_row - 1, self.b.mi_col).skip_mode);
+        }
+        if self.b.avail_l {
+            ctx += usize::from(self.mi(self.b.mi_row, self.b.mi_col - 1).skip_mode);
+        }
+        self.b.skip_mode = self.msac.bool_adapt(&mut self.cdf.skip_mode[ctx]);
+    }
+
+    fn read_cdef(&mut self) {
+        if self.b.skip || self.hdr.coded_lossless || !self.seq.enable_cdef || self.hdr.allow_intrabc
+        {
+            return;
+        }
+        let st = self.fs.cdef_stride;
+        let r = self.b.mi_row & !15;
+        let c = self.b.mi_col & !15;
+        let idx = (r >> 4) * st + (c >> 4);
+        if self.fs.cdef_idx[idx] == -1 {
+            let v = self.msac.literal(u32::from(self.hdr.cdef.bits)) as i8;
+            self.fs.cdef_idx[idx] = v;
+            let w4 = bw4(self.b.bsize);
+            let h4 = bh4(self.b.bsize);
+            let mut i = r;
+            while i < r + h4 {
+                let mut j = c;
+                while j < c + w4 {
+                    self.fs.cdef_idx[(i >> 4) * st + (j >> 4)] = v;
+                    j += 16;
+                }
+                i += 16;
+            }
+        }
+    }
+
+    fn read_delta_qindex(&mut self) {
+        if self.b.bsize == self.sb_size && self.b.skip {
+            return;
+        }
+        if self.read_deltas {
+            let mut abs = self.msac.symbol(&mut self.cdf.delta_q) as i32;
+            if abs == 3 {
+                let rem = self.msac.literal(3) + 1;
+                let bits = self.msac.literal(rem) as i32;
+                abs = bits + (1 << rem) + 1;
+            }
+            if abs != 0 {
+                let sign = self.msac.literal(1) != 0;
+                let red = if sign { -abs } else { abs };
+                self.current_q_index =
+                    (self.current_q_index + (red << self.hdr.delta_q_res)).clamp(1, 255);
+            }
+        }
+    }
+
+    fn read_delta_lf(&mut self) {
+        if self.b.bsize == self.sb_size && self.b.skip {
+            return;
+        }
+        if self.read_deltas && self.hdr.delta_lf_present {
+            let count = if self.hdr.delta_lf_multi {
+                if self.num_planes > 1 { 4 } else { 2 }
+            } else {
+                1
+            };
+            for i in 0..count {
+                let mut abs = if self.hdr.delta_lf_multi {
+                    self.msac.symbol(&mut self.cdf.delta_lf_multi[i]) as i32
+                } else {
+                    self.msac.symbol(&mut self.cdf.delta_lf) as i32
+                };
+                if abs == 3 {
+                    let n = self.msac.literal(3) + 1;
+                    let bits = self.msac.literal(n) as i32;
+                    abs = bits + (1 << n) + 1;
+                }
+                if abs != 0 {
+                    let sign = self.msac.literal(1) != 0;
+                    let red = if sign { -abs } else { abs };
+                    self.delta_lf[i] = (i32::from(self.delta_lf[i])
+                        + (red << self.hdr.delta_lf_res))
+                        .clamp(-63, 63) as i8;
+                }
+            }
+        }
+    }
+
+    fn intra_angle_info_y(&mut self) {
+        self.b.angle_delta_y = 0;
+        if self.b.bsize >= BLOCK_8X8 && is_directional(self.b.y_mode) {
+            let v = self.msac.symbol(&mut self.cdf.angle_delta[self.b.y_mode as usize - 1]);
+            self.b.angle_delta_y = v as i8 - 3;
+        }
+    }
+
+    fn intra_angle_info_uv(&mut self) {
+        self.b.angle_delta_uv = 0;
+        if self.b.bsize >= BLOCK_8X8 && is_directional(self.b.uv_mode) {
+            let v = self.msac.symbol(&mut self.cdf.angle_delta[self.b.uv_mode as usize - 1]);
+            self.b.angle_delta_uv = v as i8 - 3;
+        }
+    }
+
+    fn read_uv_mode(&mut self) {
+        let bs = self.b.bsize;
+        let cfl_allowed = if self.b.lossless
+            && plane_residual_size(bs, self.sub_x, self.sub_y) == BLOCK_4X4
+        {
+            true
+        } else {
+            !self.b.lossless && block_width(bs).max(block_height(bs)) <= 32
+        };
+        let y = self.b.y_mode as usize;
+        self.b.uv_mode = if cfl_allowed {
+            self.msac.symbol(&mut self.cdf.uv_mode_cfl_allowed[y]) as u8
+        } else {
+            self.msac.symbol(&mut self.cdf.uv_mode_cfl_not_allowed[y]) as u8
+        };
+    }
+
+    fn read_cfl_alphas(&mut self) {
+        let signs = self.msac.symbol(&mut self.cdf.cfl_sign) as i32;
+        let sign_u = (signs + 1) / 3;
+        let sign_v = (signs + 1) % 3;
+        self.b.cfl_alpha_u = if sign_u != 0 {
+            let ctx = ((sign_u - 1) * 3 + sign_v) as usize;
+            let a = self.msac.symbol(&mut self.cdf.cfl_alpha[ctx]) as i8 + 1;
+            if sign_u == 1 { -a } else { a }
+        } else {
+            0
+        };
+        self.b.cfl_alpha_v = if sign_v != 0 {
+            let ctx = ((sign_v - 1) * 3 + sign_u) as usize;
+            let a = self.msac.symbol(&mut self.cdf.cfl_alpha[ctx]) as i8 + 1;
+            if sign_v == 1 { -a } else { a }
+        } else {
+            0
+        };
+    }
+
+    fn filter_intra_mode_info(&mut self) {
+        self.b.use_filter_intra = false;
+        let bs = self.b.bsize;
+        if self.seq.enable_filter_intra
+            && self.b.y_mode == DC_PRED
+            && self.b.palette_size_y == 0
+            && block_width(bs).max(block_height(bs)) <= 32
+        {
+            self.b.use_filter_intra = self.msac.bool_adapt(&mut self.cdf.filter_intra[bs as usize]);
+            if self.b.use_filter_intra {
+                self.b.filter_intra_mode = self.msac.symbol(&mut self.cdf.filter_intra_mode) as u8;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Palette (5.11.46, 5.11.49).
+
+    fn palette_cache(&self, plane_type: usize) -> ([u16; 16], usize) {
+        let b = &self.b;
+        let above_n = if (b.mi_row * 4) % 64 != 0 {
+            self.mi(b.mi_row - 1, b.mi_col).palette_size[plane_type] as usize
+        } else {
+            0
+        };
+        let left_n = if b.avail_l {
+            self.mi(b.mi_row, b.mi_col - 1).palette_size[plane_type] as usize
+        } else {
+            0
+        };
+        let above = &self.above_palette[plane_type][b.mi_col];
+        let ly = ((b.mi_row & (self.sb_size4 - 1)) & 31) as isize;
+        let left = &self.left_palette[plane_type][ly as usize];
+        let mut cache = [0u16; 16];
+        let (mut ai, mut li, mut n) = (0, 0, 0);
+        while ai < above_n && li < left_n {
+            let ac = above[ai];
+            let lc = left[li];
+            if lc < ac {
+                if n == 0 || lc != cache[n - 1] {
+                    cache[n] = lc;
+                    n += 1;
+                }
+                li += 1;
+            } else {
+                if n == 0 || ac != cache[n - 1] {
+                    cache[n] = ac;
+                    n += 1;
+                }
+                ai += 1;
+                if lc == ac {
+                    li += 1;
+                }
+            }
+        }
+        while ai < above_n {
+            let v = above[ai];
+            ai += 1;
+            if n == 0 || v != cache[n - 1] {
+                cache[n] = v;
+                n += 1;
+            }
+        }
+        while li < left_n {
+            let v = left[li];
+            li += 1;
+            if n == 0 || v != cache[n - 1] {
+                cache[n] = v;
+                n += 1;
+            }
+        }
+        (cache, n)
+    }
+
+    fn read_palette_colors(&mut self, plane_type: usize, n: usize, uv: bool) -> [u16; 8] {
+        let bd = self.bd;
+        let (cache, cache_n) = self.palette_cache(plane_type);
+        let mut colors = [0u16; 8];
+        let mut idx = 0;
+        let mut i = 0;
+        while i < cache_n && idx < n {
+            if self.msac.literal(1) != 0 {
+                colors[idx] = cache[i];
+                idx += 1;
+            }
+            i += 1;
+        }
+        if idx < n {
+            colors[idx] = self.msac.literal(bd) as u16;
+            idx += 1;
+        }
+        let mut bits = 0u32;
+        if idx < n {
+            let min_bits = bd - 3;
+            bits = min_bits + self.msac.literal(2);
+        }
+        let maxv = (1i32 << bd) - 1;
+        while idx < n {
+            let mut delta = self.msac.literal(bits) as i32;
+            if !uv {
+                delta += 1;
+            }
+            let v = (i32::from(colors[idx - 1]) + delta).clamp(0, maxv);
+            colors[idx] = v as u16;
+            let range = (1i32 << bd) - v - i32::from(!uv);
+            bits = bits.min(ceil_log2(range.max(0) as u32));
+            idx += 1;
+        }
+        colors[..n].sort_unstable();
+        colors
+    }
+
+    fn palette_mode_info(&mut self) -> R<()> {
+        let bs = self.b.bsize;
+        let bsize_ctx = (mi_width_log2(bs) + mi_height_log2(bs) - 2) as usize;
+        if self.b.y_mode == DC_PRED {
+            let mut ctx = 0;
+            if self.b.avail_u && self.mi(self.b.mi_row - 1, self.b.mi_col).palette_size[0] > 0 {
+                ctx += 1;
+            }
+            if self.b.avail_l && self.mi(self.b.mi_row, self.b.mi_col - 1).palette_size[0] > 0 {
+                ctx += 1;
+            }
+            if self.msac.bool_adapt(&mut self.cdf.palette_y_mode[bsize_ctx][ctx]) {
+                let n = self.msac.symbol(&mut self.cdf.palette_y_size[bsize_ctx]) + 2;
+                self.b.palette_size_y = n as u8;
+                self.b.palette_y = self.read_palette_colors(0, n, false);
+            }
+        }
+        if self.b.has_chroma && self.b.uv_mode == DC_PRED {
+            let ctx = usize::from(self.b.palette_size_y > 0);
+            if self.msac.bool_adapt(&mut self.cdf.palette_uv_mode[ctx]) {
+                let n = self.msac.symbol(&mut self.cdf.palette_uv_size[bsize_ctx]) + 2;
+                self.b.palette_size_uv = n as u8;
+                self.b.palette_u = self.read_palette_colors(1, n, true);
+                let bd = self.bd;
+                if self.msac.literal(1) != 0 {
+                    let min_bits = bd - 4;
+                    let max_val = 1i32 << bd;
+                    let bits = min_bits + self.msac.literal(2);
+                    self.b.palette_v[0] = self.msac.literal(bd) as u16;
+                    for idx in 1..n {
+                        let mut delta = self.msac.literal(bits) as i32;
+                        if delta != 0 && self.msac.literal(1) != 0 {
+                            delta = -delta;
+                        }
+                        let mut val = i32::from(self.b.palette_v[idx - 1]) + delta;
+                        if val < 0 {
+                            val += max_val;
+                        }
+                        if val >= max_val {
+                            val -= max_val;
+                        }
+                        self.b.palette_v[idx] = val.clamp(0, max_val - 1) as u16;
+                    }
+                } else {
+                    for idx in 0..n {
+                        self.b.palette_v[idx] = self.msac.literal(bd) as u16;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn palette_tokens(&mut self) -> R<()> {
+        let b = &self.b;
+        let bh = block_height(b.bsize);
+        let bw = block_width(b.bsize);
+        let on_h = bh.min((self.fs.mi_rows - b.mi_row) * 4);
+        let on_w = bw.min((self.fs.mi_cols - b.mi_col) * 4);
+        if b.palette_size_y != 0 {
+            let n = b.palette_size_y as usize;
+            let mut map = std::mem::take(&mut self.color_map_y);
+            self.read_color_map(&mut map, n, bw, bh, on_w, on_h, false);
+            self.color_map_y = map;
+        }
+        let b = &self.b;
+        if b.palette_size_uv != 0 {
+            let n = b.palette_size_uv as usize;
+            let (sx, sy) = (usize::from(self.sub_x), usize::from(self.sub_y));
+            let mut bw = bw >> sx;
+            let mut bh = bh >> sy;
+            let mut on_w = on_w >> sx;
+            let mut on_h = on_h >> sy;
+            if bw < 4 {
+                bw += 2;
+                on_w += 2;
+            }
+            if bh < 4 {
+                bh += 2;
+                on_h += 2;
+            }
+            let mut map = std::mem::take(&mut self.color_map_uv);
+            self.read_color_map(&mut map, n, bw, bh, on_w, on_h, true);
+            self.color_map_uv = map;
+        }
+        Ok(())
+    }
+
+    fn read_color_map(
+        &mut self,
+        map: &mut [u8],
+        n: usize,
+        bw: usize,
+        bh: usize,
+        on_w: usize,
+        on_h: usize,
+        uv: bool,
+    ) {
+        // stride is bw
+        map[0] = self.msac.ns(n as u32) as u8;
+        for i in 1..(on_h + on_w - 1) {
+            let jmax = i.min(on_w - 1);
+            let jmin = i.saturating_sub(on_h - 1);
+            let mut j = jmax as isize;
+            while j >= jmin as isize {
+                let (r, c) = (i - j as usize, j as usize);
+                // get_palette_color_context
+                let mut scores = [0u32; 8];
+                let mut order = [0u8, 1, 2, 3, 4, 5, 6, 7];
+                if c > 0 {
+                    scores[map[r * bw + c - 1] as usize] += 2;
+                }
+                if r > 0 && c > 0 {
+                    scores[map[(r - 1) * bw + c - 1] as usize] += 1;
+                }
+                if r > 0 {
+                    scores[map[(r - 1) * bw + c] as usize] += 2;
+                }
+                for i2 in 0..3 {
+                    let mut max_score = scores[i2];
+                    let mut max_idx = i2;
+                    for j2 in i2 + 1..n {
+                        if scores[j2] > max_score {
+                            max_score = scores[j2];
+                            max_idx = j2;
+                        }
+                    }
+                    if max_idx != i2 {
+                        let ms = scores[max_idx];
+                        let mo = order[max_idx];
+                        let mut k = max_idx;
+                        while k > i2 {
+                            scores[k] = scores[k - 1];
+                            order[k] = order[k - 1];
+                            k -= 1;
+                        }
+                        scores[i2] = ms;
+                        order[i2] = mo;
+                    }
+                }
+                let mut hash = 0u32;
+                for i2 in 0..3 {
+                    hash += scores[i2] * PALETTE_COLOR_HASH_MULTIPLIERS[i2] as u32;
+                }
+                let ctx = PALETTE_COLOR_CONTEXT[hash as usize].max(0) as usize;
+                let cdf = &mut self.cdf;
+                let sym = if uv {
+                    match n {
+                        2 => self.msac.symbol(&mut cdf.palette_size_2_uv_color[ctx]),
+                        3 => self.msac.symbol(&mut cdf.palette_size_3_uv_color[ctx]),
+                        4 => self.msac.symbol(&mut cdf.palette_size_4_uv_color[ctx]),
+                        5 => self.msac.symbol(&mut cdf.palette_size_5_uv_color[ctx]),
+                        6 => self.msac.symbol(&mut cdf.palette_size_6_uv_color[ctx]),
+                        7 => self.msac.symbol(&mut cdf.palette_size_7_uv_color[ctx]),
+                        _ => self.msac.symbol(&mut cdf.palette_size_8_uv_color[ctx]),
+                    }
+                } else {
+                    match n {
+                        2 => self.msac.symbol(&mut cdf.palette_size_2_y_color[ctx]),
+                        3 => self.msac.symbol(&mut cdf.palette_size_3_y_color[ctx]),
+                        4 => self.msac.symbol(&mut cdf.palette_size_4_y_color[ctx]),
+                        5 => self.msac.symbol(&mut cdf.palette_size_5_y_color[ctx]),
+                        6 => self.msac.symbol(&mut cdf.palette_size_6_y_color[ctx]),
+                        7 => self.msac.symbol(&mut cdf.palette_size_7_y_color[ctx]),
+                        _ => self.msac.symbol(&mut cdf.palette_size_8_y_color[ctx]),
+                    }
+                };
+                map[r * bw + c] = order[sym];
+                j -= 1;
+            }
+        }
+        for i in 0..on_h {
+            let v = map[i * bw + on_w - 1];
+            for j in on_w..bw {
+                map[i * bw + j] = v;
+            }
+        }
+        for i in on_h..bh {
+            for j in 0..bw {
+                map[i * bw + j] = map[(on_h - 1) * bw + j];
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Transform size (5.11.15 – 5.11.17).
+
+    fn above_tx_width(&self, row: usize, col: usize) -> usize {
+        if row == self.b.mi_row {
+            if !self.b.avail_u {
+                return 64;
+            }
+            let m = self.mi(row - 1, col);
+            if m.skip && m.is_inter {
+                return block_width(m.bsize);
+            }
+        }
+        tx_w(self.fs.inter_tx_sizes[(row - 1) * self.fs.mi_stride + col])
+    }
+
+    fn left_tx_height(&self, row: usize, col: usize) -> usize {
+        if col == self.b.mi_col {
+            if !self.b.avail_l {
+                return 64;
+            }
+            let m = self.mi(row, col - 1);
+            if m.skip && m.is_inter {
+                return block_height(m.bsize);
+            }
+        }
+        tx_h(self.fs.inter_tx_sizes[row * self.fs.mi_stride + col - 1])
+    }
+
+    fn read_tx_size(&mut self, allow_select: bool) {
+        if self.b.lossless {
+            self.b.tx_size = TX_4X4;
+            return;
+        }
+        let bs = self.b.bsize;
+        let max_rect = MAX_TX_SIZE_RECT[bs as usize];
+        let max_depth = MAX_TX_DEPTH_TABLE[bs as usize];
+        self.b.tx_size = max_rect;
+        if bs > BLOCK_4X4 && allow_select && self.hdr.tx_mode == TX_MODE_SELECT {
+            let (r, c) = (self.b.mi_row, self.b.mi_col);
+            let above_w = if self.b.avail_u && self.mi(r - 1, c).is_inter {
+                block_width(self.mi(r - 1, c).bsize)
+            } else if self.b.avail_u {
+                self.above_tx_width(r, c)
+            } else {
+                0
+            };
+            let left_h = if self.b.avail_l && self.mi(r, c - 1).is_inter {
+                block_height(self.mi(r, c - 1).bsize)
+            } else if self.b.avail_l {
+                self.left_tx_height(r, c)
+            } else {
+                0
+            };
+            let ctx = usize::from(above_w >= tx_w(max_rect)) + usize::from(left_h >= tx_h(max_rect));
+            let depth = match max_depth {
+                4 => self.msac.symbol(&mut self.cdf.tx_64x64[ctx]),
+                3 => self.msac.symbol(&mut self.cdf.tx_32x32[ctx]),
+                2 => self.msac.symbol(&mut self.cdf.tx_16x16[ctx]),
+                _ => self.msac.symbol(&mut self.cdf.tx_8x8[ctx]),
+            };
+            for _ in 0..depth {
+                self.b.tx_size = SPLIT_TX_SIZE[self.b.tx_size as usize];
+            }
+        }
+    }
+
+    fn read_block_tx_size(&mut self) -> R<()> {
+        let bs = self.b.bsize;
+        let w4 = bw4(bs);
+        let h4 = bh4(bs);
+        let st = self.fs.mi_stride;
+        if self.hdr.tx_mode == TX_MODE_SELECT
+            && bs > BLOCK_4X4
+            && self.b.is_inter
+            && !self.b.skip
+            && !self.b.lossless
+        {
+            let max_tx = MAX_TX_SIZE_RECT[bs as usize];
+            let tw4 = tx_w(max_tx) / 4;
+            let th4 = tx_h(max_tx) / 4;
+            let mut row = self.b.mi_row;
+            while row < self.b.mi_row + h4 {
+                let mut col = self.b.mi_col;
+                while col < self.b.mi_col + w4 {
+                    self.read_var_tx_size(row, col, max_tx, 0);
+                    col += tw4;
+                }
+                row += th4;
+            }
+        } else {
+            self.read_tx_size(!self.b.skip || !self.b.is_inter);
+            let t = self.b.tx_size;
+            for row in self.b.mi_row..self.b.mi_row + h4 {
+                for v in &mut self.fs.inter_tx_sizes[row * st + self.b.mi_col..][..w4] {
+                    *v = t;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_var_tx_size(&mut self, row: usize, col: usize, tx: u8, depth: u32) {
+        if row >= self.fs.mi_rows || col >= self.fs.mi_cols {
+            return;
+        }
+        let split = if tx == TX_4X4 || depth == 2 {
+            false
+        } else {
+            let above = self.above_tx_width(row, col) < tx_w(tx);
+            let left = self.left_tx_height(row, col) < tx_h(tx);
+            let bs = self.b.bsize;
+            let size = 64.min(block_width(bs).max(block_height(bs)));
+            let max_tx = find_tx_size(size, size);
+            let sqr_up = TX_SIZE_SQR_UP[tx as usize];
+            let ctx = usize::from(sqr_up != max_tx) * 3
+                + (4 - max_tx as usize) * 6
+                + usize::from(above)
+                + usize::from(left);
+            self.msac.bool_adapt(&mut self.cdf.txfm_split[ctx])
+        };
+        let w4 = tx_w(tx) / 4;
+        let h4 = tx_h(tx) / 4;
+        if split {
+            let sub = SPLIT_TX_SIZE[tx as usize];
+            let sw = tx_w(sub) / 4;
+            let sh = tx_h(sub) / 4;
+            let mut i = 0;
+            while i < h4 {
+                let mut j = 0;
+                while j < w4 {
+                    self.read_var_tx_size(row + i, col + j, sub, depth + 1);
+                    j += sw;
+                }
+                i += sh;
+            }
+        } else {
+            let st = self.fs.mi_stride;
+            for i in 0..h4 {
+                for v in &mut self.fs.inter_tx_sizes[(row + i) * st + col..][..w4] {
+                    *v = tx;
+                }
+            }
+            self.b.tx_size = tx;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Inter frame mode info (5.11.18 onward).
+
+    fn inter_frame_mode_info(&mut self) -> R<()> {
+        self.b.use_intrabc = false;
+        self.b.skip = false;
+        self.b.palette_size_y = 0;
+        self.b.palette_size_uv = 0;
+        self.b.use_filter_intra = false;
+        self.b.interintra = false;
+        self.b.angle_delta_y = 0;
+        self.b.angle_delta_uv = 0;
+        self.b.motion_mode = SIMPLE;
+        self.b.compound_type = COMPOUND_AVERAGE;
+        self.b.comp_group_idx = 0;
+        self.b.compound_idx = 1;
+        self.b.mv = [Mv::ZERO; 2];
+        self.inter_segment_id(true)?;
+        self.read_skip_mode();
+        if self.b.skip_mode {
+            self.b.skip = true;
+        } else {
+            self.read_skip();
+        }
+        if !self.hdr.segmentation.seg_id_pre_skip {
+            self.inter_segment_id(false)?;
+        }
+        self.b.lossless = self.hdr.lossless_array[self.b.segment_id as usize];
+        self.read_cdef();
+        self.read_delta_qindex();
+        self.read_delta_lf();
+        self.read_deltas = false;
+        self.read_is_inter();
+        if self.b.is_inter {
+            self.inter_block_mode_info()?;
+        } else {
+            self.b.ref_frame = [INTRA_FRAME, NONE];
+            let ctx = SIZE_GROUP[self.b.bsize as usize] as usize;
+            self.b.y_mode = self.msac.symbol(&mut self.cdf.y_mode[ctx]) as u8;
+            self.intra_mode_info_common()?;
+        }
+        Ok(())
+    }
+
+    fn get_segment_id_pred(&self) -> u8 {
+        let b = &self.b;
+        let Some(prev) = &self.fs.prev_segment_ids else {
+            return 0;
+        };
+        let xm = (self.fs.mi_cols - b.mi_col).min(bw4(b.bsize));
+        let ym = (self.fs.mi_rows - b.mi_row).min(bh4(b.bsize));
+        let mut seg = 7;
+        for y in 0..ym {
+            for x in 0..xm {
+                seg = seg.min(prev[(b.mi_row + y) * self.fs.mi_stride + b.mi_col + x]);
+            }
+        }
+        seg
+    }
+
+    fn set_seg_pred_ctx(&mut self, v: u8) {
+        let b = &self.b;
+        for i in 0..bw4(b.bsize) {
+            if b.mi_col + i < self.above_seg_pred.len() {
+                self.above_seg_pred[b.mi_col + i] = v;
+            }
+        }
+        let ly = b.mi_row & (self.sb_size4 - 1);
+        for i in 0..bh4(b.bsize) {
+            if ly + i < 32 {
+                self.left_seg_pred[ly + i] = v;
+            }
+        }
+    }
+
+    fn inter_segment_id(&mut self, pre_skip: bool) -> R<()> {
+        let seg = &self.hdr.segmentation;
+        if seg.enabled {
+            let predicted = self.get_segment_id_pred();
+            if seg.update_map {
+                if pre_skip && !seg.seg_id_pre_skip {
+                    self.b.segment_id = 0;
+                    return Ok(());
+                }
+                if !pre_skip && self.b.skip {
+                    self.set_seg_pred_ctx(0);
+                    self.read_segment_id()?;
+                    return Ok(());
+                }
+                if seg.temporal_update {
+                    let ly = self.b.mi_row & (self.sb_size4 - 1);
+                    let ctx = usize::from(self.left_seg_pred[ly & 31])
+                        + usize::from(self.above_seg_pred[self.b.mi_col]);
+                    let p = self.msac.bool_adapt(&mut self.cdf.segment_id_predicted[ctx]);
+                    if p {
+                        self.b.segment_id = predicted;
+                    } else {
+                        self.read_segment_id()?;
+                    }
+                    self.set_seg_pred_ctx(u8::from(p));
+                } else {
+                    self.read_segment_id()?;
+                }
+            } else {
+                self.b.segment_id = predicted;
+            }
+        } else {
+            self.b.segment_id = 0;
+        }
+        Ok(())
+    }
+
+    fn read_is_inter(&mut self) {
+        if self.b.skip_mode {
+            self.b.is_inter = true;
+        } else if self.seg_feature_active(SEG_LVL_REF_FRAME) {
+            self.b.is_inter = self.hdr.segmentation.feature_data[self.b.segment_id as usize]
+                [SEG_LVL_REF_FRAME]
+                != i16::from(INTRA_FRAME);
+        } else if self.seg_feature_active(SEG_LVL_GLOBALMV) {
+            self.b.is_inter = true;
+        } else {
+            let (au, al) = (self.b.avail_u, self.b.avail_l);
+            let ai = au && self.mi(self.b.mi_row - 1, self.b.mi_col).ref_frame[0] <= INTRA_FRAME;
+            let li = al && self.mi(self.b.mi_row, self.b.mi_col - 1).ref_frame[0] <= INTRA_FRAME;
+            let ctx = if au && al {
+                if li && ai { 3 } else { usize::from(li || ai) }
+            } else if au || al {
+                2 * usize::from(if au { ai } else { li })
+            } else {
+                0
+            };
+            self.b.is_inter = self.msac.bool_adapt(&mut self.cdf.is_inter[ctx]);
+        }
+    }
+
+    fn neighbor_refs(&self) -> ([i8; 2], [i8; 2]) {
+        let b = &self.b;
+        let above = if b.avail_u {
+            self.mi(b.mi_row - 1, b.mi_col).ref_frame
+        } else {
+            [INTRA_FRAME, NONE]
+        };
+        let left = if b.avail_l {
+            self.mi(b.mi_row, b.mi_col - 1).ref_frame
+        } else {
+            [INTRA_FRAME, NONE]
+        };
+        (above, left)
+    }
+
+    fn count_refs(&self, f: i8, above: [i8; 2], left: [i8; 2]) -> u32 {
+        let mut c = 0;
+        if self.b.avail_u {
+            c += u32::from(above[0] == f) + u32::from(above[1] == f);
+        }
+        if self.b.avail_l {
+            c += u32::from(left[0] == f) + u32::from(left[1] == f);
+        }
+        c
+    }
+
+    fn ref_ctx(&self, a: &[i8], b2: &[i8], above: [i8; 2], left: [i8; 2]) -> usize {
+        let c0: u32 = a.iter().map(|&f| self.count_refs(f, above, left)).sum();
+        let c1: u32 = b2.iter().map(|&f| self.count_refs(f, above, left)).sum();
+        match c0.cmp(&c1) {
+            std::cmp::Ordering::Less => 0,
+            std::cmp::Ordering::Equal => 1,
+            std::cmp::Ordering::Greater => 2,
+        }
+    }
+
+    fn read_ref_frames(&mut self) -> R<()> {
+        if self.b.skip_mode {
+            self.b.ref_frame = [
+                self.hdr.skip_mode_frame[0] as i8,
+                self.hdr.skip_mode_frame[1] as i8,
+            ];
+            return Ok(());
+        }
+        if self.seg_feature_active(SEG_LVL_REF_FRAME) {
+            let v = self.hdr.segmentation.feature_data[self.b.segment_id as usize]
+                [SEG_LVL_REF_FRAME];
+            self.b.ref_frame = [v as i8, NONE];
+            return Ok(());
+        }
+        if self.seg_feature_active(SEG_LVL_SKIP) || self.seg_feature_active(SEG_LVL_GLOBALMV) {
+            self.b.ref_frame = [LAST_FRAME, NONE];
+            return Ok(());
+        }
+        let (above, left) = self.neighbor_refs();
+        let (au, al) = (self.b.avail_u, self.b.avail_l);
+        let above_intra = above[0] <= INTRA_FRAME;
+        let left_intra = left[0] <= INTRA_FRAME;
+        let above_single = above[1] <= INTRA_FRAME;
+        let left_single = left[1] <= INTRA_FRAME;
+        let bwd = |f: i8| f >= BWDREF_FRAME && f <= ALTREF_FRAME;
+        let comp = if self.hdr.reference_select && bw4(self.b.bsize).min(bh4(self.b.bsize)) >= 2 {
+            let ctx = if au && al {
+                if above_single && left_single {
+                    usize::from(bwd(above[0]) ^ bwd(left[0]))
+                } else if above_single {
+                    2 + usize::from(bwd(above[0]) || above_intra)
+                } else if left_single {
+                    2 + usize::from(bwd(left[0]) || left_intra)
+                } else {
+                    4
+                }
+            } else if au {
+                if above_single { usize::from(bwd(above[0])) } else { 3 }
+            } else if al {
+                if left_single { usize::from(bwd(left[0])) } else { 3 }
+            } else {
+                1
+            };
+            self.msac.bool_adapt(&mut self.cdf.comp_mode[ctx])
+        } else {
+            false
+        };
+        const FWD: [i8; 4] = [LAST_FRAME, LAST2_FRAME, LAST3_FRAME, GOLDEN_FRAME];
+        const BWD: [i8; 3] = [BWDREF_FRAME, ALTREF2_FRAME, ALTREF_FRAME];
+        if comp {
+            // comp_ref_type
+            let samedir = |a: i8, b: i8| (a >= BWDREF_FRAME) == (b >= BWDREF_FRAME);
+            let above_comp = au && !above_intra && !above_single;
+            let left_comp = al && !left_intra && !left_single;
+            let above_uni = above_comp && samedir(above[0], above[1]);
+            let left_uni = left_comp && samedir(left[0], left[1]);
+            let ctx = if au && !above_intra && al && !left_intra {
+                let sd = usize::from(samedir(above[0], left[0]));
+                if !above_comp && !left_comp {
+                    1 + 2 * sd
+                } else if !above_comp {
+                    if !left_uni { 1 } else { 3 + sd }
+                } else if !left_comp {
+                    if !above_uni { 1 } else { 3 + sd }
+                } else if !above_uni && !left_uni {
+                    0
+                } else if !above_uni || !left_uni {
+                    2
+                } else {
+                    3 + usize::from((above[0] == BWDREF_FRAME) == (left[0] == BWDREF_FRAME))
+                }
+            } else if au && al {
+                if above_comp {
+                    1 + 2 * usize::from(above_uni)
+                } else if left_comp {
+                    1 + 2 * usize::from(left_uni)
+                } else {
+                    2
+                }
+            } else if above_comp {
+                4 * usize::from(above_uni)
+            } else if left_comp {
+                4 * usize::from(left_uni)
+            } else {
+                2
+            };
+            let uni = !self.msac.bool_adapt(&mut self.cdf.comp_ref_type[ctx]);
+            if uni {
+                let ctx = self.ref_ctx(&FWD, &BWD, above, left);
+                if self.msac.bool_adapt(&mut self.cdf.uni_comp_ref[ctx][0]) {
+                    self.b.ref_frame = [BWDREF_FRAME, ALTREF_FRAME];
+                } else {
+                    let ctx1 = self.ref_ctx(&[LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
+                    if self.msac.bool_adapt(&mut self.cdf.uni_comp_ref[ctx1][1]) {
+                        let ctx2 = self.ref_ctx(&[LAST3_FRAME], &[GOLDEN_FRAME], above, left);
+                        if self.msac.bool_adapt(&mut self.cdf.uni_comp_ref[ctx2][2]) {
+                            self.b.ref_frame = [LAST_FRAME, GOLDEN_FRAME];
+                        } else {
+                            self.b.ref_frame = [LAST_FRAME, LAST3_FRAME];
+                        }
+                    } else {
+                        self.b.ref_frame = [LAST_FRAME, LAST2_FRAME];
+                    }
+                }
+            } else {
+                let ctx = self.ref_ctx(&[LAST_FRAME, LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
+                if !self.msac.bool_adapt(&mut self.cdf.comp_ref[ctx][0]) {
+                    let ctx1 = self.ref_ctx(&[LAST_FRAME], &[LAST2_FRAME], above, left);
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.comp_ref[ctx1][1]) {
+                        LAST2_FRAME
+                    } else {
+                        LAST_FRAME
+                    };
+                } else {
+                    let ctx2 = self.ref_ctx(&[LAST3_FRAME], &[GOLDEN_FRAME], above, left);
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.comp_ref[ctx2][2]) {
+                        GOLDEN_FRAME
+                    } else {
+                        LAST3_FRAME
+                    };
+                }
+                let ctx = self.ref_ctx(&[BWDREF_FRAME, ALTREF2_FRAME], &[ALTREF_FRAME], above, left);
+                if !self.msac.bool_adapt(&mut self.cdf.comp_bwd_ref[ctx][0]) {
+                    let ctx1 = self.ref_ctx(&[BWDREF_FRAME], &[ALTREF2_FRAME], above, left);
+                    self.b.ref_frame[1] = if self.msac.bool_adapt(&mut self.cdf.comp_bwd_ref[ctx1][1]) {
+                        ALTREF2_FRAME
+                    } else {
+                        BWDREF_FRAME
+                    };
+                } else {
+                    self.b.ref_frame[1] = ALTREF_FRAME;
+                }
+            }
+        } else {
+            let ctx = self.ref_ctx(&FWD, &BWD, above, left);
+            if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx][0]) {
+                let ctx2 = self.ref_ctx(&[BWDREF_FRAME, ALTREF2_FRAME], &[ALTREF_FRAME], above, left);
+                if !self.msac.bool_adapt(&mut self.cdf.single_ref[ctx2][1]) {
+                    let ctx6 = self.ref_ctx(&[BWDREF_FRAME], &[ALTREF2_FRAME], above, left);
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx6][5]) {
+                        ALTREF2_FRAME
+                    } else {
+                        BWDREF_FRAME
+                    };
+                } else {
+                    self.b.ref_frame[0] = ALTREF_FRAME;
+                }
+            } else {
+                let ctx3 = self.ref_ctx(&[LAST_FRAME, LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
+                if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx3][2]) {
+                    let ctx5 = self.ref_ctx(&[LAST3_FRAME], &[GOLDEN_FRAME], above, left);
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx5][4]) {
+                        GOLDEN_FRAME
+                    } else {
+                        LAST3_FRAME
+                    };
+                } else {
+                    let ctx4 = self.ref_ctx(&[LAST_FRAME], &[LAST2_FRAME], above, left);
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx4][3]) {
+                        LAST2_FRAME
+                    } else {
+                        LAST_FRAME
+                    };
+                }
+            }
+            self.b.ref_frame[1] = NONE;
+        }
+        Ok(())
+    }
+
+    fn inter_block_mode_info(&mut self) -> R<()> {
+        self.b.palette_size_y = 0;
+        self.b.palette_size_uv = 0;
+        self.read_ref_frames()?;
+        for r in self.b.ref_frame {
+            if r > INTRA_FRAME && self.refs[r as usize].is_none() {
+                return Err(malformed("missing reference"));
+            }
+        }
+        let is_compound = self.b.ref_frame[1] > INTRA_FRAME;
+        self.find_mv_stack(is_compound);
+        if self.b.skip_mode {
+            self.b.y_mode = NEAREST_NEARESTMV;
+        } else if self.seg_feature_active(SEG_LVL_SKIP) || self.seg_feature_active(SEG_LVL_GLOBALMV)
+        {
+            self.b.y_mode = GLOBALMV;
+        } else if is_compound {
+            let ctx = COMPOUND_MODE_CTX_MAP[self.b.ref_mv_ctx >> 1][self.b.new_mv_ctx.min(4)] as usize;
+            self.b.y_mode = NEAREST_NEARESTMV + self.msac.symbol(&mut self.cdf.compound_mode[ctx]) as u8;
+        } else {
+            let new_mv = self.msac.bool_adapt(&mut self.cdf.new_mv[self.b.new_mv_ctx]);
+            if !new_mv {
+                self.b.y_mode = NEWMV;
+            } else {
+                let zero = self.msac.bool_adapt(&mut self.cdf.zero_mv[self.b.zero_mv_ctx]);
+                if !zero {
+                    self.b.y_mode = GLOBALMV;
+                } else {
+                    let rm = self.msac.bool_adapt(&mut self.cdf.ref_mv[self.b.ref_mv_ctx]);
+                    self.b.y_mode = if !rm { NEARESTMV } else { NEARMV };
+                }
+            }
+        }
+        self.b.ref_mv_idx = 0;
+        let ym = self.b.y_mode;
+        if ym == NEWMV || ym == NEW_NEWMV {
+            for idx in 0..2 {
+                if self.b.num_mv_found > idx + 1 {
+                    let ctx = self.b.drl_ctx_stack[idx] as usize;
+                    let drl = self.msac.bool_adapt(&mut self.cdf.drl_mode[ctx]);
+                    if !drl {
+                        self.b.ref_mv_idx = idx;
+                        break;
+                    }
+                    self.b.ref_mv_idx = idx + 1;
+                }
+            }
+        } else if matches!(ym, NEARMV | NEAR_NEARMV | NEAR_NEWMV | NEW_NEARMV) {
+            self.b.ref_mv_idx = 1;
+            for idx in 1..3 {
+                if self.b.num_mv_found > idx + 1 {
+                    let ctx = self.b.drl_ctx_stack[idx] as usize;
+                    let drl = self.msac.bool_adapt(&mut self.cdf.drl_mode[ctx]);
+                    if !drl {
+                        self.b.ref_mv_idx = idx;
+                        break;
+                    }
+                    self.b.ref_mv_idx = idx + 1;
+                }
+            }
+        }
+        self.assign_mv(is_compound)?;
+        self.read_interintra_mode(is_compound);
+        self.read_motion_mode(is_compound);
+        self.read_compound_type(is_compound);
+        if self.hdr.interpolation_filter == SWITCHABLE {
+            let dirs = if self.seq.enable_dual_filter { 2 } else { 1 };
+            for dir in 0..dirs {
+                if self.needs_interp_filter() {
+                    let ctx = self.interp_filter_ctx(dir);
+                    self.b.interp_filter[dir] = self.msac.symbol(&mut self.cdf.interp_filter[ctx]) as u8;
+                } else {
+                    self.b.interp_filter[dir] = 0;
+                }
+            }
+            if !self.seq.enable_dual_filter {
+                self.b.interp_filter[1] = self.b.interp_filter[0];
+            }
+        } else {
+            self.b.interp_filter = [self.hdr.interpolation_filter; 2];
+        }
+        Ok(())
+    }
+
+    fn needs_interp_filter(&self) -> bool {
+        let bs = self.b.bsize;
+        let large = block_width(bs).min(block_height(bs)) >= 8;
+        if self.b.skip_mode || self.b.motion_mode == LOCALWARP {
+            false
+        } else if large && self.b.y_mode == GLOBALMV {
+            self.hdr.gm_type[self.b.ref_frame[0] as usize] == super::obu::TRANSLATION
+        } else if large && self.b.y_mode == GLOBAL_GLOBALMV {
+            self.hdr.gm_type[self.b.ref_frame[0] as usize] == super::obu::TRANSLATION
+                || self.hdr.gm_type[self.b.ref_frame[1] as usize] == super::obu::TRANSLATION
+        } else {
+            true
+        }
+    }
+
+    fn interp_filter_ctx(&self, dir: usize) -> usize {
+        let b = &self.b;
+        let mut ctx = ((dir & 1) * 2 + usize::from(b.ref_frame[1] > INTRA_FRAME)) * 4;
+        let mut left_type = 3u8;
+        let mut above_type = 3u8;
+        if b.avail_l {
+            let m = self.mi(b.mi_row, b.mi_col - 1);
+            if m.ref_frame[0] == b.ref_frame[0] || m.ref_frame[1] == b.ref_frame[0] {
+                left_type = m.interp_filter[dir];
+            }
+        }
+        if b.avail_u {
+            let m = self.mi(b.mi_row - 1, b.mi_col);
+            if m.ref_frame[0] == b.ref_frame[0] || m.ref_frame[1] == b.ref_frame[0] {
+                above_type = m.interp_filter[dir];
+            }
+        }
+        ctx += if left_type == above_type {
+            left_type as usize
+        } else if left_type == 3 {
+            above_type as usize
+        } else if above_type == 3 {
+            left_type as usize
+        } else {
+            3
+        };
+        ctx
+    }
+
+    fn read_interintra_mode(&mut self, is_compound: bool) {
+        let bs = self.b.bsize;
+        if !self.b.skip_mode
+            && self.seq.enable_interintra_compound
+            && !is_compound
+            && bs >= BLOCK_8X8
+            && bs <= BLOCK_32X32
+        {
+            let ctx = SIZE_GROUP[bs as usize] as usize - 1;
+            self.b.interintra = self.msac.bool_adapt(&mut self.cdf.inter_intra[ctx]);
+            if self.b.interintra {
+                self.b.interintra_mode = self.msac.symbol(&mut self.cdf.inter_intra_mode[ctx]) as u8;
+                self.b.ref_frame[1] = INTRA_FRAME;
+                self.b.angle_delta_y = 0;
+                self.b.angle_delta_uv = 0;
+                self.b.use_filter_intra = false;
+                self.b.wedge_interintra =
+                    self.msac.bool_adapt(&mut self.cdf.wedge_inter_intra[bs as usize]);
+                if self.b.wedge_interintra {
+                    self.b.wedge_index = self.msac.symbol(&mut self.cdf.wedge_index[bs as usize]) as u8;
+                    self.b.wedge_sign = 0;
+                }
+            }
+        } else {
+            self.b.interintra = false;
+        }
+    }
+
+    fn has_overlappable_candidates(&self) -> bool {
+        let b = &self.b;
+        if b.avail_u {
+            let w4 = bw4(b.bsize);
+            let mut x4 = b.mi_col;
+            while x4 < self.fs.mi_cols.min(b.mi_col + w4) {
+                let x = (x4 | 1).min(self.fs.mi_cols - 1);
+                if self.mi(b.mi_row - 1, x).ref_frame[0] > INTRA_FRAME {
+                    return true;
+                }
+                x4 += 2;
+            }
+        }
+        if b.avail_l {
+            let h4 = bh4(b.bsize);
+            let mut y4 = b.mi_row;
+            while y4 < self.fs.mi_rows.min(b.mi_row + h4) {
+                let y = (y4 | 1).min(self.fs.mi_rows - 1);
+                if self.mi(y, b.mi_col - 1).ref_frame[0] > INTRA_FRAME {
+                    return true;
+                }
+                y4 += 2;
+            }
+        }
+        false
+    }
+
+    pub fn is_scaled(&self, ref_frame: i8) -> bool {
+        let Some(rv) = &self.refs[ref_frame as usize] else {
+            return false;
+        };
+        let fw = self.hdr.frame_width as usize;
+        let fh = self.hdr.frame_height as usize;
+        let xs = ((rv.upscaled_width << 14) + fw / 2) / fw;
+        let ys = ((rv.frame_height << 14) + fh / 2) / fh;
+        xs != 1 << 14 || ys != 1 << 14
+    }
+
+    fn read_motion_mode(&mut self, is_compound: bool) {
+        self.b.motion_mode = SIMPLE;
+        let b = &self.b;
+        let bs = b.bsize;
+        if b.skip_mode || !self.hdr.is_motion_mode_switchable {
+            return;
+        }
+        if block_width(bs).min(block_height(bs)) < 8 {
+            return;
+        }
+        if !self.hdr.force_integer_mv
+            && (b.y_mode == GLOBALMV || b.y_mode == GLOBAL_GLOBALMV)
+            && self.hdr.gm_type[b.ref_frame[0] as usize] > super::obu::TRANSLATION
+        {
+            return;
+        }
+        if is_compound || b.ref_frame[1] == INTRA_FRAME || !self.has_overlappable_candidates() {
+            return;
+        }
+        self.find_warp_samples();
+        let b = &self.b;
+        if self.hdr.force_integer_mv
+            || b.num_samples == 0
+            || !self.hdr.allow_warped_motion
+            || self.is_scaled(b.ref_frame[0])
+        {
+            let obmc = self.msac.bool_adapt(&mut self.cdf.use_obmc[bs as usize]);
+            self.b.motion_mode = if obmc { OBMC } else { SIMPLE };
+        } else {
+            self.b.motion_mode = self.msac.symbol(&mut self.cdf.motion_mode[bs as usize]) as u8;
+        }
+    }
+
+    fn read_compound_type(&mut self, is_compound: bool) {
+        self.b.comp_group_idx = 0;
+        self.b.compound_idx = 1;
+        if self.b.skip_mode {
+            self.b.compound_type = COMPOUND_AVERAGE;
+            return;
+        }
+        if is_compound {
+            let bs = self.b.bsize;
+            let n = WEDGE_BITS[bs as usize];
+            let (above, left) = self.neighbor_refs();
+            let (au, al) = (self.b.avail_u, self.b.avail_l);
+            let (r, c) = (self.b.mi_row, self.b.mi_col);
+            if self.seq.enable_masked_compound {
+                let mut ctx = 0;
+                if au {
+                    if above[1] > INTRA_FRAME {
+                        ctx += self.mi(r - 1, c).comp_group_idx as usize;
+                    } else if above[0] == ALTREF_FRAME {
+                        ctx += 3;
+                    }
+                }
+                if al {
+                    if left[1] > INTRA_FRAME {
+                        ctx += self.mi(r, c - 1).comp_group_idx as usize;
+                    } else if left[0] == ALTREF_FRAME {
+                        ctx += 3;
+                    }
+                }
+                self.b.comp_group_idx =
+                    u8::from(self.msac.bool_adapt(&mut self.cdf.comp_group_idx[ctx.min(5)]));
+            }
+            if self.b.comp_group_idx == 0 {
+                if self.seq.enable_jnt_comp {
+                    let h = self.hdr;
+                    let fwd = h
+                        .get_relative_dist(self.seq, h.order_hints[self.b.ref_frame[0] as usize], h.order_hint)
+                        .abs();
+                    let bck = h
+                        .get_relative_dist(self.seq, h.order_hints[self.b.ref_frame[1] as usize], h.order_hint)
+                        .abs();
+                    let mut ctx = if fwd == bck { 3 } else { 0 };
+                    if au {
+                        if above[1] > INTRA_FRAME {
+                            ctx += self.mi(r - 1, c).compound_idx as usize;
+                        } else if above[0] == ALTREF_FRAME {
+                            ctx += 1;
+                        }
+                    }
+                    if al {
+                        if left[1] > INTRA_FRAME {
+                            ctx += self.mi(r, c - 1).compound_idx as usize;
+                        } else if left[0] == ALTREF_FRAME {
+                            ctx += 1;
+                        }
+                    }
+                    self.b.compound_idx = u8::from(self.msac.bool_adapt(&mut self.cdf.compound_idx[ctx]));
+                    self.b.compound_type = if self.b.compound_idx != 0 {
+                        COMPOUND_AVERAGE
+                    } else {
+                        COMPOUND_DISTANCE
+                    };
+                } else {
+                    self.b.compound_type = COMPOUND_AVERAGE;
+                }
+            } else if n == 0 {
+                self.b.compound_type = COMPOUND_DIFFWTD;
+            } else {
+                self.b.compound_type =
+                    if self.msac.bool_adapt(&mut self.cdf.compound_type[bs as usize]) {
+                        COMPOUND_DIFFWTD
+                    } else {
+                        COMPOUND_WEDGE
+                    };
+            }
+            if self.b.compound_type == COMPOUND_WEDGE {
+                self.b.wedge_index = self.msac.symbol(&mut self.cdf.wedge_index[bs as usize]) as u8;
+                self.b.wedge_sign = self.msac.literal(1) as u8;
+            } else if self.b.compound_type == COMPOUND_DIFFWTD {
+                self.b.mask_type = self.msac.literal(1) as u8;
+            }
+        } else if self.b.interintra {
+            self.b.compound_type = if self.b.wedge_interintra {
+                COMPOUND_WEDGE
+            } else {
+                COMPOUND_INTRA
+            };
+        } else {
+            self.b.compound_type = COMPOUND_AVERAGE;
+        }
+    }
+
+    fn get_mode(&self, ref_list: usize) -> u8 {
+        let ym = self.b.y_mode;
+        if ref_list == 0 {
+            if ym < NEAREST_NEARESTMV {
+                ym
+            } else if matches!(ym, NEW_NEWMV | NEW_NEARESTMV | NEW_NEARMV) {
+                NEWMV
+            } else if matches!(ym, NEAREST_NEARESTMV | NEAREST_NEWMV) {
+                NEARESTMV
+            } else if matches!(ym, NEAR_NEARMV | NEAR_NEWMV) {
+                NEARMV
+            } else {
+                GLOBALMV
+            }
+        } else if matches!(ym, NEW_NEWMV | NEAREST_NEWMV | NEAR_NEWMV) {
+            NEWMV
+        } else if matches!(ym, NEAREST_NEARESTMV | NEW_NEARESTMV) {
+            NEARESTMV
+        } else if matches!(ym, NEAR_NEARMV | NEW_NEARMV) {
+            NEARMV
+        } else {
+            GLOBALMV
+        }
+    }
+
+    fn assign_mv(&mut self, is_compound: bool) -> R<()> {
+        for i in 0..1 + usize::from(is_compound) {
+            let comp_mode = if self.b.use_intrabc { NEWMV } else { self.get_mode(i) };
+            let pred = if self.b.use_intrabc {
+                let mut p = self.b.ref_stack_mv[0][0];
+                if p == Mv::ZERO {
+                    p = self.b.ref_stack_mv[1][0];
+                }
+                if p == Mv::ZERO {
+                    let sb4 = self.sb_size4 as i32;
+                    if (self.b.mi_row as i32) - sb4 < self.mi_row_start as i32 {
+                        p = Mv::new(0, -(sb4 * 4 + 256) * 8);
+                    } else {
+                        p = Mv::new(-(sb4 * 4 * 8), 0);
+                    }
+                }
+                p
+            } else if comp_mode == GLOBALMV {
+                self.b.global_mvs[i]
+            } else {
+                let mut pos = if comp_mode == NEARESTMV { 0 } else { self.b.ref_mv_idx };
+                if comp_mode == NEWMV && self.b.num_mv_found <= 1 {
+                    pos = 0;
+                }
+                self.b.ref_stack_mv[pos][i]
+            };
+            if comp_mode == NEWMV {
+                let d = self.read_mv(i);
+                self.b.mv[i] = Mv::new(
+                    i32::from(pred.row) + d.0,
+                    i32::from(pred.col) + d.1,
+                );
+            } else {
+                self.b.mv[i] = pred;
+            }
+        }
+        if self.b.use_intrabc && !self.is_mv_valid_intrabc() {
+            return Err(malformed("intrabc motion vector"));
+        }
+        if !self.b.use_intrabc {
+            for i in 0..1 + usize::from(is_compound) {
+                let mv = self.b.mv[i];
+                if !(-(1 << 14) + 1..(1 << 14)).contains(&i32::from(mv.row))
+                    || !(-(1 << 14) + 1..(1 << 14)).contains(&i32::from(mv.col))
+                {
+                    return Err(malformed("motion vector range"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_mv_valid_intrabc(&self) -> bool {
+        let b = &self.b;
+        let mv = b.mv[0];
+        if (mv.row & 7) != 0 || (mv.col & 7) != 0 {
+            return false;
+        }
+        let bw = block_width(b.bsize) as i32;
+        let bh = block_height(b.bsize) as i32;
+        let delta_row = i32::from(mv.row) >> 3;
+        let delta_col = i32::from(mv.col) >> 3;
+        let src_top = b.mi_row as i32 * 4 + delta_row;
+        let src_left = b.mi_col as i32 * 4 + delta_col;
+        let src_bottom = src_top + bh;
+        let src_right = src_left + bw;
+        if b.has_chroma {
+            if bw < 8 && self.sub_x && src_left - 4 < self.mi_col_start as i32 * 4 {
+                return false;
+            }
+            if bh < 8 && self.sub_y && src_top - 4 < self.mi_row_start as i32 * 4 {
+                return false;
+            }
+        }
+        if src_top < self.mi_row_start as i32 * 4
+            || src_left < self.mi_col_start as i32 * 4
+            || src_bottom > self.mi_row_end as i32 * 4
+            || src_right > self.mi_col_end as i32 * 4
+        {
+            return false;
+        }
+        let sb_size = self.sb_size4 as i32 * 4;
+        let sb_h = sb_size;
+        let active_sb_row = (b.mi_row as i32 * 4) / sb_size;
+        let active_sb64_col = (b.mi_col as i32 * 4) >> 6;
+        let src_sb_row = (src_bottom - 1) / sb_h;
+        let src_sb64_col = (src_right - 1) >> 6;
+        let total_sb64_per_row = (((self.mi_col_end - self.mi_col_start) as i32 - 1) >> 4) + 1;
+        let active_sb64 = active_sb_row * total_sb64_per_row + active_sb64_col;
+        let src_sb64 = src_sb_row * total_sb64_per_row + src_sb64_col;
+        if src_sb64 >= active_sb64 - 4 {
+            return false;
+        }
+        let gradient = 1 + 4 + i32::from(sb_size > 64);
+        let wf_offset = gradient * (active_sb_row - src_sb_row);
+        if src_sb_row > active_sb_row || src_sb64_col >= active_sb64_col - 4 + wf_offset {
+            return false;
+        }
+        true
+    }
+
+    fn read_mv_component(&mut self, ctx: usize, comp: usize) -> i32 {
+        let cdf = &mut self.cdf;
+        let sign = self.msac.bool_adapt(&mut cdf.mv_sign[ctx][comp]);
+        let class = self.msac.symbol(&mut cdf.mv_class[ctx][comp]);
+        let mag;
+        if class == 0 {
+            let bit = usize::from(self.msac.bool_adapt(&mut cdf.mv_class0_bit[ctx][comp]));
+            let fr = if self.hdr.force_integer_mv {
+                3
+            } else {
+                self.msac.symbol(&mut cdf.mv_class0_fr[ctx][comp][bit])
+            };
+            let hp = if self.hdr.allow_high_precision_mv {
+                usize::from(self.msac.bool_adapt(&mut cdf.mv_class0_hp[ctx][comp]))
+            } else {
+                1
+            };
+            mag = ((bit << 3) | (fr << 1) | hp) + 1;
+        } else {
+            let mut d = 0usize;
+            for i in 0..class {
+                d |= usize::from(self.msac.bool_adapt(&mut cdf.mv_bit[ctx][comp][i])) << i;
+            }
+            let mut m = 2usize << (class + 2);
+            let fr = if self.hdr.force_integer_mv {
+                3
+            } else {
+                self.msac.symbol(&mut cdf.mv_fr[ctx][comp])
+            };
+            let hp = if self.hdr.allow_high_precision_mv {
+                usize::from(self.msac.bool_adapt(&mut cdf.mv_hp[ctx][comp]))
+            } else {
+                1
+            };
+            m += ((d << 3) | (fr << 1) | hp) + 1;
+            mag = m;
+        }
+        if sign { -(mag as i32) } else { mag as i32 }
+    }
+
+    fn read_mv(&mut self, _r: usize) -> (i32, i32) {
+        let ctx = usize::from(self.b.use_intrabc);
+        let joint = self.msac.symbol(&mut self.cdf.mv_joint[ctx]);
+        let mut d = (0, 0);
+        if joint == 2 || joint == 3 {
+            d.0 = self.read_mv_component(ctx, 0);
+        }
+        if joint == 1 || joint == 3 {
+            d.1 = self.read_mv_component(ctx, 1);
+        }
+        d
+    }
+
+    // ------------------------------------------------------------------
+    // Residual (5.11.34 onward).
+
+    fn residual(&mut self) -> R<()> {
+        let b = self.b.clone();
+        let bw = block_width(b.bsize);
+        let bh = block_height(b.bsize);
+        let width_chunks = (bw >> 6).max(1);
+        let height_chunks = (bh >> 6).max(1);
+        let chunk_size = if width_chunks > 1 || height_chunks > 1 {
+            BLOCK_64X64
+        } else {
+            b.bsize
+        };
+        for cy in 0..height_chunks {
+            for cx in 0..width_chunks {
+                let row_chunk = b.mi_row + (cy << 4);
+                let col_chunk = b.mi_col + (cx << 4);
+                let planes = 1 + 2 * usize::from(b.has_chroma);
+                for plane in 0..planes {
+                    let tx = if b.lossless {
+                        TX_4X4
+                    } else {
+                        self.get_tx_size(plane, b.tx_size)
+                    };
+                    let step_x = tx_w(tx) >> 2;
+                    let step_y = tx_h(tx) >> 2;
+                    let (sx, sy) = self.plane_sub(plane);
+                    let psz = plane_residual_size(chunk_size, sx != 0, sy != 0);
+                    let n4w = bw4(psz);
+                    let n4h = bh4(psz);
+                    let base_x = (col_chunk >> sx) * 4;
+                    let base_y = (row_chunk >> sy) * 4;
+                    if b.is_inter && !b.lossless && plane == 0 {
+                        self.transform_tree(base_x, base_y, n4w * 4, n4h * 4)?;
+                    } else {
+                        let bxb = (b.mi_col >> sx) * 4;
+                        let byb = (b.mi_row >> sy) * 4;
+                        let mut y = 0;
+                        while y < n4h {
+                            let mut x = 0;
+                            while x < n4w {
+                                self.transform_block(
+                                    plane,
+                                    bxb,
+                                    byb,
+                                    tx,
+                                    x + ((cx << 4) >> sx),
+                                    y + ((cy << 4) >> sy),
+                                )?;
+                                x += step_x;
+                            }
+                            y += step_y;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_tx_size(&self, plane: usize, tx: u8) -> u8 {
+        if plane == 0 {
+            return tx;
+        }
+        let uv_tx =
+            MAX_TX_SIZE_RECT[plane_residual_size(self.b.bsize, self.sub_x, self.sub_y) as usize];
+        if tx_w(uv_tx) == 64 || tx_h(uv_tx) == 64 {
+            if tx_w(uv_tx) == 16 {
+                return TX_16X32;
+            }
+            if tx_h(uv_tx) == 16 {
+                return TX_32X16;
+            }
+            return TX_32X32;
+        }
+        uv_tx
+    }
+
+    fn transform_tree(&mut self, sx: usize, sy: usize, w: usize, h: usize) -> R<()> {
+        let max_x = self.fs.mi_cols * 4;
+        let max_y = self.fs.mi_rows * 4;
+        if sx >= max_x || sy >= max_y {
+            return Ok(());
+        }
+        let row = sy >> 2;
+        let col = sx >> 2;
+        let luma_tx = self.fs.inter_tx_sizes[row * self.fs.mi_stride + col];
+        if w <= tx_w(luma_tx) && h <= tx_h(luma_tx) {
+            let tx = find_tx_size(w, h);
+            self.transform_block(0, sx, sy, tx, 0, 0)?;
+        } else if w > h {
+            self.transform_tree(sx, sy, w / 2, h)?;
+            self.transform_tree(sx + w / 2, sy, w / 2, h)?;
+        } else if w < h {
+            self.transform_tree(sx, sy, w, h / 2)?;
+            self.transform_tree(sx, sy + h / 2, w, h / 2)?;
+        } else {
+            self.transform_tree(sx, sy, w / 2, h / 2)?;
+            self.transform_tree(sx + w / 2, sy, w / 2, h / 2)?;
+            self.transform_tree(sx, sy + h / 2, w / 2, h / 2)?;
+            self.transform_tree(sx + w / 2, sy + h / 2, w / 2, h / 2)?;
+        }
+        Ok(())
+    }
+
+    fn transform_block(
+        &mut self,
+        plane: usize,
+        base_x: usize,
+        base_y: usize,
+        tx: u8,
+        x: usize,
+        y: usize,
+    ) -> R<()> {
+        let start_x = base_x + 4 * x;
+        let start_y = base_y + 4 * y;
+        let (sx, sy) = self.plane_sub(plane);
+        let row = (start_y << sy) >> 2;
+        let col = (start_x << sx) >> 2;
+        let sb_mask = self.sb_size4 - 1;
+        let sub_row = row & sb_mask;
+        let sub_col = col & sb_mask;
+        let step_x = tx_w(tx) >> 2;
+        let step_y = tx_h(tx) >> 2;
+        let max_x = (self.fs.mi_cols * 4) >> sx;
+        let max_y = (self.fs.mi_rows * 4) >> sy;
+        if start_x >= max_x || start_y >= max_y {
+            return Ok(());
+        }
+        if !self.b.is_inter {
+            let palette = if plane == 0 {
+                self.b.palette_size_y
+            } else {
+                self.b.palette_size_uv
+            };
+            if palette != 0 {
+                self.predict_palette(plane, start_x, start_y, x, y, tx);
+            } else {
+                let is_cfl = plane > 0 && self.b.uv_mode == UV_CFL_PRED;
+                let mode = if plane == 0 {
+                    self.b.y_mode
+                } else if is_cfl {
+                    DC_PRED
+                } else {
+                    self.b.uv_mode
+                };
+                let have_left = (if plane == 0 {
+                    self.b.avail_l
+                } else {
+                    self.b.avail_l_chroma
+                }) || x > 0;
+                let have_above = (if plane == 0 {
+                    self.b.avail_u
+                } else {
+                    self.b.avail_u_chroma
+                }) || y > 0;
+                let bdf = &self.block_decoded[plane];
+                let have_above_right =
+                    bdf[sub_row >> sy][(sub_col >> sx) + step_x + 1];
+                let have_below_left =
+                    bdf[(sub_row >> sy) + step_y + 1][(sub_col >> sx)];
+                self.predict_intra(
+                    plane,
+                    start_x,
+                    start_y,
+                    have_left,
+                    have_above,
+                    have_above_right,
+                    have_below_left,
+                    mode,
+                    tx_w_log2(tx),
+                    tx_h_log2(tx),
+                );
+                if is_cfl {
+                    self.predict_cfl(plane, start_x, start_y, tx);
+                }
+            }
+            if plane == 0 {
+                self.b.max_luma_w = start_x + step_x * 4;
+                self.b.max_luma_h = start_y + step_y * 4;
+            }
+        }
+        if !self.b.skip {
+            let eob = self.coeffs(plane, start_x, start_y, tx)?;
+            if eob > 0 {
+                self.reconstruct(plane, start_x, start_y, tx);
+            }
+        }
+        let st = self.fs.mi_stride;
+        for i in 0..step_y {
+            let r = (row >> sy) + i;
+            for j in 0..step_x {
+                self.fs.lf_tx[plane][r * st + (col >> sx) + j] = tx;
+            }
+        }
+        let bdf = &mut self.block_decoded[plane];
+        for i in 0..step_y {
+            for j in 0..step_x {
+                let yy = (sub_row >> sy) + i + 1;
+                let xx = (sub_col >> sx) + j + 1;
+                if yy < 35 && xx < 35 {
+                    bdf[yy][xx] = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn get_tx_set(&self, tx: u8) -> usize {
+        let sqr = TX_SIZE_SQR[tx as usize];
+        let sqr_up = TX_SIZE_SQR_UP[tx as usize];
+        if sqr_up > TX_32X32 {
+            return 0;
+        }
+        if self.b.is_inter {
+            if self.hdr.reduced_tx_set || sqr_up == TX_32X32 {
+                3
+            } else if sqr == 2 {
+                2
+            } else {
+                1
+            }
+        } else if sqr_up == TX_32X32 {
+            0
+        } else if self.hdr.reduced_tx_set || sqr == 2 {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn is_tx_type_in_set(&self, set: usize, t: u8) -> bool {
+        if self.b.is_inter {
+            TX_TYPE_IN_SET_INTER[set][t as usize] != 0
+        } else {
+            TX_TYPE_IN_SET_INTRA[set][t as usize] != 0
+        }
+    }
+
+    pub fn compute_tx_type(&self, plane: usize, tx: u8, bx: usize, by: usize) -> u8 {
+        let sqr_up = TX_SIZE_SQR_UP[tx as usize];
+        if self.b.lossless || sqr_up > TX_32X32 {
+            return 0;
+        }
+        let set = self.get_tx_set(tx);
+        let st = self.fs.mi_stride;
+        if plane == 0 {
+            return self.fs.tx_types[by * st + bx];
+        }
+        if self.b.is_inter {
+            let x4 = self.b.mi_col.max(bx << u32::from(self.sub_x));
+            let y4 = self.b.mi_row.max(by << u32::from(self.sub_y));
+            let t = self.fs.tx_types[y4 * st + x4];
+            if !self.is_tx_type_in_set(set, t) {
+                return 0;
+            }
+            return t;
+        }
+        let t = MODE_TO_TXFM[self.b.uv_mode as usize];
+        if !self.is_tx_type_in_set(set, t) {
+            return 0;
+        }
+        t
+    }
+
+    fn read_tx_type(&mut self, x4: usize, y4: usize, tx: u8) {
+        let set = self.get_tx_set(tx);
+        let q = if self.hdr.segmentation.enabled {
+            i32::from(self.hdr.qindex(self.b.segment_id as usize))
+        } else {
+            i32::from(self.hdr.quant.base_q_idx)
+        };
+        let mut t = 0u8;
+        if set > 0 && q > 0 {
+            let sqr = TX_SIZE_SQR[tx as usize] as usize;
+            if self.b.is_inter {
+                t = match set {
+                    1 => TX_TYPE_INTER_INV_SET1[self.msac.symbol(&mut self.cdf.inter_tx_type_set1[sqr])],
+                    2 => TX_TYPE_INTER_INV_SET2[self.msac.symbol(&mut self.cdf.inter_tx_type_set2)],
+                    _ => TX_TYPE_INTER_INV_SET3[usize::from(self.msac.bool_adapt(&mut self.cdf.inter_tx_type_set3[sqr]))],
+                };
+            } else {
+                let dir = if self.b.use_filter_intra {
+                    FILTER_INTRA_MODE_TO_INTRA_DIR[self.b.filter_intra_mode as usize] as usize
+                } else {
+                    self.b.y_mode as usize
+                };
+                t = if set == 1 {
+                    TX_TYPE_INTRA_INV_SET1[self.msac.symbol(&mut self.cdf.intra_tx_type_set1[sqr][dir])]
+                } else {
+                    TX_TYPE_INTRA_INV_SET2[self.msac.symbol(&mut self.cdf.intra_tx_type_set2[sqr][dir])]
+                };
+            }
+        }
+        let st = self.fs.mi_stride;
+        for j in 0..(tx_h(tx) >> 2) {
+            for v in &mut self.fs.tx_types[(y4 + j) * st + x4..][..tx_w(tx) >> 2] {
+                *v = t;
+            }
+        }
+    }
+
+    /// coeffs() — reads one transform block's coefficients into the
+    /// dequantized buffer and returns eob.
+    fn coeffs(&mut self, plane: usize, start_x: usize, start_y: usize, tx: u8) -> R<usize> {
+        let x4 = start_x >> 2;
+        let y4 = start_y >> 2;
+        let w4 = tx_w(tx) >> 2;
+        let h4 = tx_h(tx) >> 2;
+        let tx_sz_ctx = ((TX_SIZE_SQR[tx as usize] + TX_SIZE_SQR_UP[tx as usize] + 1) >> 1) as usize;
+        let ptype = usize::from(plane > 0);
+        let (sx, sy) = self.plane_sub(plane);
+        let max_x4 = self.fs.mi_cols >> sx;
+        let max_y4 = self.fs.mi_rows >> sy;
+        let sb_mask = (self.sb_size4 - 1) >> sy;
+        // all_zero context
+        let bsize = plane_residual_size(self.b.bsize, sx != 0, sy != 0);
+        let bw = block_width(bsize);
+        let bh = block_height(bsize);
+        let w = tx_w(tx);
+        let h = tx_h(tx);
+        let ly0 = y4 & sb_mask;
+        let ctx = if plane == 0 {
+            let mut top = 0u8;
+            let mut left = 0u8;
+            for k in 0..w4 {
+                if x4 + k < max_x4 {
+                    top = top.max(self.above_level[plane][x4 + k]);
+                }
+            }
+            for k in 0..h4 {
+                if y4 + k < max_y4 {
+                    left = left.max(self.left_level[plane][(ly0 + k) & 31]);
+                }
+            }
+            if bw == w && bh == h {
+                0
+            } else if top == 0 && left == 0 {
+                1
+            } else if top == 0 || left == 0 {
+                2 + usize::from(top.max(left) > 3)
+            } else if top.max(left) <= 3 {
+                4
+            } else if top.min(left) <= 3 {
+                5
+            } else {
+                6
+            }
+        } else {
+            let mut above = 0u8;
+            let mut left = 0u8;
+            for i in 0..w4 {
+                if x4 + i < max_x4 {
+                    above |= self.above_level[plane][x4 + i] | self.above_dc[plane][x4 + i];
+                }
+            }
+            for i in 0..h4 {
+                if y4 + i < max_y4 {
+                    left |= self.left_level[plane][(ly0 + i) & 31] | self.left_dc[plane][(ly0 + i) & 31];
+                }
+            }
+            let mut c = usize::from(above != 0) + usize::from(left != 0) + 7;
+            if bw * bh > w * h {
+                c += 3;
+            }
+            c
+        };
+        let all_zero = self.msac.bool_adapt(&mut self.cdf.txb_skip[tx_sz_ctx][ctx]);
+        let mut eob = 0usize;
+        let mut cul_level = 0u32;
+        let mut dc_category = 0u8;
+        if all_zero {
+            if plane == 0 {
+                let st = self.fs.mi_stride;
+                for j in 0..h4 {
+                    for v in &mut self.fs.tx_types[(y4 + j) * st + x4..][..w4] {
+                        *v = 0;
+                    }
+                }
+            }
+        } else {
+            if plane == 0 {
+                self.read_tx_type(x4, y4, tx);
+            }
+            let tx_type = self.compute_tx_type(plane, tx, x4, y4);
+            self.scratch.tx_type = tx_type;
+            let scan = get_scan(tx, tx_type);
+            let qinfo = self.dequant_info(plane, tx_type, tx);
+            let tx_class = get_tx_class(tx_type);
+            let eob_multisize = tx_w_log2(tx).min(5) + tx_h_log2(tx).min(5) - 4;
+            let ectx = usize::from(tx_class != 0);
+            let cdf = &mut self.cdf;
+            let eob_pt = 1 + match eob_multisize {
+                0 => self.msac.symbol(&mut cdf.eob_pt_16[ptype][ectx]),
+                1 => self.msac.symbol(&mut cdf.eob_pt_32[ptype][ectx]),
+                2 => self.msac.symbol(&mut cdf.eob_pt_64[ptype][ectx]),
+                3 => self.msac.symbol(&mut cdf.eob_pt_128[ptype][ectx]),
+                4 => self.msac.symbol(&mut cdf.eob_pt_256[ptype][ectx]),
+                5 => self.msac.symbol(&mut cdf.eob_pt_512[ptype]),
+                _ => self.msac.symbol(&mut cdf.eob_pt_1024[ptype]),
+            };
+            eob = if eob_pt < 2 {
+                eob_pt
+            } else {
+                (1 << (eob_pt - 2)) + 1
+            };
+            let eob_shift = eob_pt as i32 - 3;
+            if eob_shift >= 0 {
+                if self.msac.bool_adapt(&mut cdf.eob_extra[tx_sz_ctx][ptype][eob_pt - 3]) {
+                    eob += 1 << eob_shift;
+                }
+                for i in 1..(eob_pt as i32 - 2).max(0) {
+                    let sh = (eob_pt as i32 - 2).max(0) - 1 - i;
+                    if self.msac.literal(1) != 0 {
+                        eob += 1 << sh;
+                    }
+                }
+            }
+            // Level decoding on a padded levels buffer.
+            let adj = ADJUSTED_TX_SIZE[tx as usize];
+            let bwl = tx_w_log2(adj);
+            let width = 1usize << bwl;
+            let height = tx_h(adj);
+            let lstride = width + 4;
+            let levels = &mut self.scratch.levels;
+            for v in levels[..lstride * (height + 4)].iter_mut() {
+                *v = 0;
+            }
+            let quant = &mut self.scratch.quant;
+            let coeff_base_cdf = &mut cdf.coeff_base[tx_sz_ctx][ptype];
+            let coeff_br_cdf = &mut cdf.coeff_br[tx_sz_ctx.min(3)][ptype];
+            let mut c = eob;
+            while c > 0 {
+                c -= 1;
+                let pos = scan[c] as usize;
+                let row = pos >> bwl;
+                let col = pos - (row << bwl);
+                let mut level: u32;
+                if c == eob - 1 {
+                    let n = height << bwl;
+                    let ctx = if c == 0 {
+                        0
+                    } else if c <= n / 8 {
+                        1
+                    } else if c <= n / 4 {
+                        2
+                    } else {
+                        3
+                    };
+                    level = self.msac.symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx]) as u32 + 1;
+                } else {
+                    let mut mag = 0u32;
+                    for idx in 0..5 {
+                        let rr = row as i32 + SIG_REF_DIFF_OFFSET[tx_class][idx][0] as i32;
+                        let cc = col as i32 + SIG_REF_DIFF_OFFSET[tx_class][idx][1] as i32;
+                        // Offsets are non-negative; the padding holds zeros.
+                        mag += u32::from(levels[rr as usize * lstride + cc as usize]).min(3);
+                    }
+                    let mut ctx = ((mag + 1) >> 1).min(4) as usize;
+                    if tx_class == 0 {
+                        if row == 0 && col == 0 {
+                            ctx = 0;
+                        } else {
+                            ctx += COEFF_BASE_CTX_OFFSET[tx as usize][row.min(4)][col.min(4)] as usize;
+                        }
+                    } else {
+                        let idx = if tx_class == 2 { row } else { col };
+                        ctx += COEFF_BASE_POS_CTX_OFFSET[idx.min(2)] as usize;
+                    }
+                    level = self.msac.symbol(&mut coeff_base_cdf[ctx]) as u32;
+                }
+                if level > 2 {
+                    // coeff_br context
+                    let mut mag = 0u32;
+                    for idx in 0..3 {
+                        let rr = row + MAG_REF_OFFSET_WITH_TX_CLASS[tx_class][idx][0] as usize;
+                        let cc = col + MAG_REF_OFFSET_WITH_TX_CLASS[tx_class][idx][1] as usize;
+                        mag += u32::from(levels[rr * lstride + cc]).min(15);
+                    }
+                    let mag = ((mag + 1) >> 1).min(6) as usize;
+                    let ctx = if pos == 0 {
+                        mag
+                    } else if tx_class == 0 {
+                        if row < 2 && col < 2 { mag + 7 } else { mag + 14 }
+                    } else if tx_class == 1 {
+                        if col == 0 { mag + 7 } else { mag + 14 }
+                    } else if row == 0 {
+                        mag + 7
+                    } else {
+                        mag + 14
+                    };
+                    for _ in 0..4 {
+                        let br = self.msac.symbol(&mut coeff_br_cdf[ctx]) as u32;
+                        level += br;
+                        if br < 3 {
+                            break;
+                        }
+                    }
+                }
+                levels[row * lstride + col] = level.min(255) as u8;
+                quant[pos] = level as i32;
+            }
+            // Signs and Golomb remainder.
+            let tw = w.min(32);
+            let th = h.min(32);
+            let dq = &mut self.scratch.coefs;
+            let mut nz_rows = 0usize;
+            let mut nz_cols = 0usize;
+            let bd = self.bd;
+            for c in 0..eob {
+                let pos = scan[c] as usize;
+                let mut q = quant[pos];
+                if q == 0 {
+                    continue;
+                }
+                let sign = if c == 0 {
+                    // dc_sign ctx
+                    let mut dc_sign = 0i32;
+                    for k in 0..w4 {
+                        if x4 + k < max_x4 {
+                            match self.above_dc[plane][x4 + k] {
+                                1 => dc_sign -= 1,
+                                2 => dc_sign += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    for k in 0..h4 {
+                        if y4 + k < max_y4 {
+                            match self.left_dc[plane][(ly0 + k) & 31] {
+                                1 => dc_sign -= 1,
+                                2 => dc_sign += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    let ctx = match dc_sign.cmp(&0) {
+                        std::cmp::Ordering::Less => 1,
+                        std::cmp::Ordering::Greater => 2,
+                        std::cmp::Ordering::Equal => 0,
+                    };
+                    self.msac.bool_adapt(&mut self.cdf.dc_sign[ptype][ctx])
+                } else {
+                    self.msac.literal(1) != 0
+                };
+                if q > 14 {
+                    let g = self.msac.golomb();
+                    q = (g as i32).wrapping_add(15);
+                }
+                if pos == 0 {
+                    dc_category = if sign { 1 } else { 2 };
+                }
+                let q = q & 0xFFFFF;
+                cul_level += q as u32;
+                // Dequantize (7.12.3 step 1).
+                let i = pos >> bwl.min(5);
+                let j = pos - (i << bwl.min(5));
+                let _ = tw;
+                let qv = if pos == 0 { qinfo.dc } else { qinfo.ac };
+                let q2 = match qinfo.qm {
+                    Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
+                    None => qv,
+                };
+                let mut dqv = (i64::from(q) * i64::from(q2)) & 0xFFFFFF;
+                dqv /= i64::from(qinfo.denom);
+                let lim = 1i64 << (7 + bd);
+                let v = if sign { -dqv } else { dqv };
+                dq[pos] = v.clamp(-lim, lim - 1) as i32;
+                nz_rows = nz_rows.max(i + 1);
+                nz_cols = nz_cols.max(j + 1);
+                let _ = th;
+            }
+            // Reset quant at the scan positions read.
+            for c in 0..eob {
+                quant[scan[c] as usize] = 0;
+            }
+            self.scratch.nz_rows = nz_rows.max(1);
+            self.scratch.nz_cols = nz_cols.max(1);
+            cul_level = cul_level.min(63);
+        }
+        for i in 0..w4 {
+            if x4 + i < self.above_level[plane].len() {
+                self.above_level[plane][x4 + i] = cul_level as u8;
+                self.above_dc[plane][x4 + i] = dc_category;
+            }
+        }
+        for i in 0..h4 {
+            let ly = (ly0 + i) & 31;
+            self.left_level[plane][ly] = cul_level as u8;
+            self.left_dc[plane][ly] = dc_category;
+        }
+        Ok(eob)
+    }
+}
+
+fn ceil_log2(x: u32) -> u32 {
+    if x < 2 {
+        return 0;
+    }
+    let mut i = 1;
+    let mut p = 2;
+    while p < x {
+        i += 1;
+        p <<= 1;
+    }
+    i
+}
+
+/// Quantizer values for one transform block.
+pub struct DequantInfo {
+    pub dc: i32,
+    pub ac: i32,
+    pub denom: i32,
+    pub qm: Option<&'static [u8]>,
+}

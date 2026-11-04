@@ -22,7 +22,7 @@
 mod bits;
 mod cdef;
 mod deblock;
-mod dec;
+pub mod dec;
 mod decode;
 mod dims;
 pub mod dsp;

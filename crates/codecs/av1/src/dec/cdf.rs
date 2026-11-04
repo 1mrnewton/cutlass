@@ -3,38 +3,7 @@
 
 use crate::dec::msac::invert;
 use crate::spec::tables::{
-    DEFAULT_ANGLE_DELTA_CDF, DEFAULT_CFL_ALPHA_CDF, DEFAULT_CFL_SIGN_CDF, DEFAULT_COEFF_BASE_CDF,
-    DEFAULT_COEFF_BASE_EOB_CDF, DEFAULT_COEFF_BR_CDF, DEFAULT_COMP_BWD_REF_CDF,
-    DEFAULT_COMP_GROUP_IDX_CDF, DEFAULT_COMP_MODE_CDF, DEFAULT_COMP_REF_CDF,
-    DEFAULT_COMP_REF_TYPE_CDF, DEFAULT_COMPOUND_IDX_CDF, DEFAULT_COMPOUND_MODE_CDF,
-    DEFAULT_COMPOUND_TYPE_CDF, DEFAULT_DC_SIGN_CDF, DEFAULT_DELTA_LF_CDF, DEFAULT_DELTA_Q_CDF,
-    DEFAULT_DRL_MODE_CDF, DEFAULT_EOB_EXTRA_CDF, DEFAULT_EOB_PT_16_CDF, DEFAULT_EOB_PT_32_CDF,
-    DEFAULT_EOB_PT_64_CDF, DEFAULT_EOB_PT_128_CDF, DEFAULT_EOB_PT_256_CDF, DEFAULT_EOB_PT_512_CDF,
-    DEFAULT_EOB_PT_1024_CDF, DEFAULT_FILTER_INTRA_CDF, DEFAULT_FILTER_INTRA_MODE_CDF,
-    DEFAULT_INTER_INTRA_CDF, DEFAULT_INTER_INTRA_MODE_CDF, DEFAULT_INTER_TX_TYPE_SET1_CDF,
-    DEFAULT_INTER_TX_TYPE_SET2_CDF, DEFAULT_INTER_TX_TYPE_SET3_CDF, DEFAULT_INTERP_FILTER_CDF,
-    DEFAULT_INTRA_FRAME_Y_MODE_CDF, DEFAULT_INTRA_TX_TYPE_SET1_CDF, DEFAULT_INTRA_TX_TYPE_SET2_CDF,
-    DEFAULT_INTRABC_CDF, DEFAULT_IS_INTER_CDF, DEFAULT_MOTION_MODE_CDF, DEFAULT_MV_BIT_CDF,
-    DEFAULT_MV_CLASS_CDF, DEFAULT_MV_CLASS0_BIT_CDF, DEFAULT_MV_CLASS0_FR_CDF,
-    DEFAULT_MV_CLASS0_HP_CDF, DEFAULT_MV_FR_CDF, DEFAULT_MV_HP_CDF, DEFAULT_MV_JOINT_CDF,
-    DEFAULT_MV_SIGN_CDF, DEFAULT_NEW_MV_CDF, DEFAULT_PALETTE_SIZE_2_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_2_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_3_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_3_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_4_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_4_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_5_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_5_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_6_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_6_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_7_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_7_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_8_UV_COLOR_CDF,
-    DEFAULT_PALETTE_SIZE_8_Y_COLOR_CDF, DEFAULT_PALETTE_UV_MODE_CDF, DEFAULT_PALETTE_UV_SIZE_CDF,
-    DEFAULT_PALETTE_Y_MODE_CDF, DEFAULT_PALETTE_Y_SIZE_CDF, DEFAULT_PARTITION_W8_CDF,
-    DEFAULT_PARTITION_W16_CDF, DEFAULT_PARTITION_W32_CDF, DEFAULT_PARTITION_W64_CDF,
-    DEFAULT_PARTITION_W128_CDF, DEFAULT_REF_MV_CDF, DEFAULT_RESTORATION_TYPE_CDF,
-    DEFAULT_SEGMENT_ID_CDF, DEFAULT_SEGMENT_ID_PREDICTED_CDF, DEFAULT_SINGLE_REF_CDF,
-    DEFAULT_SKIP_CDF, DEFAULT_SKIP_MODE_CDF, DEFAULT_TX_8X8_CDF, DEFAULT_TX_16X16_CDF,
-    DEFAULT_TX_32X32_CDF, DEFAULT_TX_64X64_CDF, DEFAULT_TXB_SKIP_CDF, DEFAULT_TXFM_SPLIT_CDF,
-    DEFAULT_UNI_COMP_REF_CDF, DEFAULT_USE_OBMC_CDF, DEFAULT_USE_SGRPROJ_CDF,
-    DEFAULT_USE_WIENER_CDF, DEFAULT_UV_MODE_CFL_ALLOWED_CDF, DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF,
-    DEFAULT_WEDGE_INDEX_CDF, DEFAULT_WEDGE_INTER_INTRA_CDF, DEFAULT_Y_MODE_CDF,
-    DEFAULT_ZERO_MV_CDF,
+    DEFAULT_ANGLE_DELTA_CDF, DEFAULT_CFL_ALPHA_CDF, DEFAULT_CFL_SIGN_CDF, DEFAULT_COEFF_BASE_CDF, DEFAULT_COEFF_BASE_EOB_CDF, DEFAULT_COEFF_BR_CDF, DEFAULT_COMPOUND_IDX_CDF, DEFAULT_COMPOUND_MODE_CDF, DEFAULT_COMPOUND_TYPE_CDF, DEFAULT_COMP_BWD_REF_CDF, DEFAULT_COMP_GROUP_IDX_CDF, DEFAULT_COMP_MODE_CDF, DEFAULT_COMP_REF_CDF, DEFAULT_COMP_REF_TYPE_CDF, DEFAULT_DC_SIGN_CDF, DEFAULT_DELTA_LF_CDF, DEFAULT_DELTA_Q_CDF, DEFAULT_DRL_MODE_CDF, DEFAULT_EOB_EXTRA_CDF, DEFAULT_EOB_PT_1024_CDF, DEFAULT_EOB_PT_128_CDF, DEFAULT_EOB_PT_16_CDF, DEFAULT_EOB_PT_256_CDF, DEFAULT_EOB_PT_32_CDF, DEFAULT_EOB_PT_512_CDF, DEFAULT_EOB_PT_64_CDF, DEFAULT_FILTER_INTRA_CDF, DEFAULT_FILTER_INTRA_MODE_CDF, DEFAULT_INTERP_FILTER_CDF, DEFAULT_INTER_INTRA_CDF, DEFAULT_INTER_INTRA_MODE_CDF, DEFAULT_INTER_TX_TYPE_SET1_CDF, DEFAULT_INTER_TX_TYPE_SET2_CDF, DEFAULT_INTER_TX_TYPE_SET3_CDF, DEFAULT_INTRABC_CDF, DEFAULT_INTRA_FRAME_Y_MODE_CDF, DEFAULT_INTRA_TX_TYPE_SET1_CDF, DEFAULT_INTRA_TX_TYPE_SET2_CDF, DEFAULT_IS_INTER_CDF, DEFAULT_MOTION_MODE_CDF, DEFAULT_MV_BIT_CDF, DEFAULT_MV_CLASS0_BIT_CDF, DEFAULT_MV_CLASS0_FR_CDF, DEFAULT_MV_CLASS0_HP_CDF, DEFAULT_MV_CLASS_CDF, DEFAULT_MV_FR_CDF, DEFAULT_MV_HP_CDF, DEFAULT_MV_JOINT_CDF, DEFAULT_MV_SIGN_CDF, DEFAULT_NEW_MV_CDF, DEFAULT_PALETTE_SIZE_2_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_2_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_3_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_3_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_4_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_4_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_5_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_5_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_6_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_6_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_7_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_7_Y_COLOR_CDF, DEFAULT_PALETTE_SIZE_8_UV_COLOR_CDF, DEFAULT_PALETTE_SIZE_8_Y_COLOR_CDF, DEFAULT_PALETTE_UV_MODE_CDF, DEFAULT_PALETTE_UV_SIZE_CDF, DEFAULT_PALETTE_Y_MODE_CDF, DEFAULT_PALETTE_Y_SIZE_CDF, DEFAULT_PARTITION_W128_CDF, DEFAULT_PARTITION_W16_CDF, DEFAULT_PARTITION_W32_CDF, DEFAULT_PARTITION_W64_CDF, DEFAULT_PARTITION_W8_CDF, DEFAULT_REF_MV_CDF, DEFAULT_RESTORATION_TYPE_CDF, DEFAULT_SEGMENT_ID_CDF, DEFAULT_SEGMENT_ID_PREDICTED_CDF, DEFAULT_SINGLE_REF_CDF, DEFAULT_SKIP_CDF, DEFAULT_SKIP_MODE_CDF, DEFAULT_TXB_SKIP_CDF, DEFAULT_TXFM_SPLIT_CDF, DEFAULT_TX_16X16_CDF, DEFAULT_TX_32X32_CDF, DEFAULT_TX_64X64_CDF, DEFAULT_TX_8X8_CDF, DEFAULT_UNI_COMP_REF_CDF, DEFAULT_USE_OBMC_CDF, DEFAULT_USE_SGRPROJ_CDF, DEFAULT_USE_WIENER_CDF, DEFAULT_UV_MODE_CFL_ALLOWED_CDF, DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF, DEFAULT_WEDGE_INDEX_CDF, DEFAULT_WEDGE_INTER_INTRA_CDF, DEFAULT_Y_MODE_CDF, DEFAULT_ZERO_MV_CDF,
 };
 
 #[derive(Clone)]
@@ -135,31 +104,18 @@ pub struct CdfContext {
     pub coeff_base_eob: [[[[u16; 3]; 4]; 2]; 5],
     pub coeff_base: [[[[u16; 4]; 42]; 2]; 5],
     pub coeff_br: [[[[u16; 4]; 21]; 2]; 5],
+    pub delta_lf_multi: [[u16; 4]; 4],
 }
 
 impl CdfContext {
     /// init_non_coeff_cdfs() and init_coeff_cdfs() for base_q_idx.
     pub fn new(base_q_idx: u8) -> Box<Self> {
-        let q = if base_q_idx <= 20 {
-            0
-        } else if base_q_idx <= 60 {
-            1
-        } else if base_q_idx <= 120 {
-            2
-        } else {
-            3
-        };
+        let q = if base_q_idx <= 20 { 0 } else if base_q_idx <= 60 { 1 } else if base_q_idx <= 120 { 2 } else { 3 };
         Box::new(Self {
-            intra_frame_y_mode: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_INTRA_FRAME_Y_MODE_CDF[i0][i1]))
-            }),
+            intra_frame_y_mode: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_INTRA_FRAME_Y_MODE_CDF[i0][i1]))),
             y_mode: std::array::from_fn(|i0| invert(&DEFAULT_Y_MODE_CDF[i0])),
-            uv_mode_cfl_not_allowed: std::array::from_fn(|i0| {
-                invert(&DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[i0])
-            }),
-            uv_mode_cfl_allowed: std::array::from_fn(|i0| {
-                invert(&DEFAULT_UV_MODE_CFL_ALLOWED_CDF[i0])
-            }),
+            uv_mode_cfl_not_allowed: std::array::from_fn(|i0| invert(&DEFAULT_UV_MODE_CFL_NOT_ALLOWED_CDF[i0])),
+            uv_mode_cfl_allowed: std::array::from_fn(|i0| invert(&DEFAULT_UV_MODE_CFL_ALLOWED_CDF[i0])),
             angle_delta: std::array::from_fn(|i0| invert(&DEFAULT_ANGLE_DELTA_CDF[i0])),
             intrabc: invert(&DEFAULT_INTRABC_CDF),
             partition_w8: std::array::from_fn(|i0| invert(&DEFAULT_PARTITION_W8_CDF[i0])),
@@ -175,22 +131,12 @@ impl CdfContext {
             filter_intra_mode: invert(&DEFAULT_FILTER_INTRA_MODE_CDF),
             filter_intra: std::array::from_fn(|i0| invert(&DEFAULT_FILTER_INTRA_CDF[i0])),
             segment_id: std::array::from_fn(|i0| invert(&DEFAULT_SEGMENT_ID_CDF[i0])),
-            segment_id_predicted: std::array::from_fn(|i0| {
-                invert(&DEFAULT_SEGMENT_ID_PREDICTED_CDF[i0])
-            }),
-            mv_class0_hp: std::array::from_fn(|_r1| {
-                std::array::from_fn(|_r0| invert(&DEFAULT_MV_CLASS0_HP_CDF))
-            }),
+            segment_id_predicted: std::array::from_fn(|i0| invert(&DEFAULT_SEGMENT_ID_PREDICTED_CDF[i0])),
+            mv_class0_hp: std::array::from_fn(|_r1| std::array::from_fn(|_r0| invert(&DEFAULT_MV_CLASS0_HP_CDF))),
             mv_hp: std::array::from_fn(|_r1| std::array::from_fn(|_r0| invert(&DEFAULT_MV_HP_CDF))),
-            mv_sign: std::array::from_fn(|_r1| {
-                std::array::from_fn(|_r0| invert(&DEFAULT_MV_SIGN_CDF))
-            }),
-            mv_bit: std::array::from_fn(|_r1| {
-                std::array::from_fn(|_r0| std::array::from_fn(|i0| invert(&DEFAULT_MV_BIT_CDF[i0])))
-            }),
-            mv_class0_bit: std::array::from_fn(|_r1| {
-                std::array::from_fn(|_r0| invert(&DEFAULT_MV_CLASS0_BIT_CDF))
-            }),
+            mv_sign: std::array::from_fn(|_r1| std::array::from_fn(|_r0| invert(&DEFAULT_MV_SIGN_CDF))),
+            mv_bit: std::array::from_fn(|_r1| std::array::from_fn(|_r0| std::array::from_fn(|i0| invert(&DEFAULT_MV_BIT_CDF[i0])))),
+            mv_class0_bit: std::array::from_fn(|_r1| std::array::from_fn(|_r0| invert(&DEFAULT_MV_CLASS0_BIT_CDF))),
             new_mv: std::array::from_fn(|i0| invert(&DEFAULT_NEW_MV_CDF[i0])),
             zero_mv: std::array::from_fn(|i0| invert(&DEFAULT_ZERO_MV_CDF[i0])),
             ref_mv: std::array::from_fn(|i0| invert(&DEFAULT_REF_MV_CDF[i0])),
@@ -199,93 +145,41 @@ impl CdfContext {
             comp_mode: std::array::from_fn(|i0| invert(&DEFAULT_COMP_MODE_CDF[i0])),
             skip_mode: std::array::from_fn(|i0| invert(&DEFAULT_SKIP_MODE_CDF[i0])),
             skip: std::array::from_fn(|i0| invert(&DEFAULT_SKIP_CDF[i0])),
-            comp_ref: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_COMP_REF_CDF[i0][i1]))
-            }),
-            comp_bwd_ref: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_COMP_BWD_REF_CDF[i0][i1]))
-            }),
-            single_ref: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_SINGLE_REF_CDF[i0][i1]))
-            }),
+            comp_ref: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_COMP_REF_CDF[i0][i1]))),
+            comp_bwd_ref: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_COMP_BWD_REF_CDF[i0][i1]))),
+            single_ref: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_SINGLE_REF_CDF[i0][i1]))),
             compound_mode: std::array::from_fn(|i0| invert(&DEFAULT_COMPOUND_MODE_CDF[i0])),
             interp_filter: std::array::from_fn(|i0| invert(&DEFAULT_INTERP_FILTER_CDF[i0])),
             motion_mode: std::array::from_fn(|i0| invert(&DEFAULT_MOTION_MODE_CDF[i0])),
             mv_joint: std::array::from_fn(|_r0| invert(&DEFAULT_MV_JOINT_CDF)),
-            mv_class: std::array::from_fn(|_r0| {
-                std::array::from_fn(|i0| invert(&DEFAULT_MV_CLASS_CDF[i0]))
-            }),
-            mv_class0_fr: std::array::from_fn(|_r0| {
-                std::array::from_fn(|i0| {
-                    std::array::from_fn(|i1| invert(&DEFAULT_MV_CLASS0_FR_CDF[i0][i1]))
-                })
-            }),
-            mv_fr: std::array::from_fn(|_r0| {
-                std::array::from_fn(|i0| invert(&DEFAULT_MV_FR_CDF[i0]))
-            }),
+            mv_class: std::array::from_fn(|_r0| std::array::from_fn(|i0| invert(&DEFAULT_MV_CLASS_CDF[i0]))),
+            mv_class0_fr: std::array::from_fn(|_r0| std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_MV_CLASS0_FR_CDF[i0][i1])))),
+            mv_fr: std::array::from_fn(|_r0| std::array::from_fn(|i0| invert(&DEFAULT_MV_FR_CDF[i0]))),
             palette_y_size: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_Y_SIZE_CDF[i0])),
             palette_uv_size: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_UV_SIZE_CDF[i0])),
-            palette_size_2_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_2_Y_COLOR_CDF[i0])
-            }),
-            palette_size_3_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_3_Y_COLOR_CDF[i0])
-            }),
-            palette_size_4_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_4_Y_COLOR_CDF[i0])
-            }),
-            palette_size_5_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_5_Y_COLOR_CDF[i0])
-            }),
-            palette_size_6_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_6_Y_COLOR_CDF[i0])
-            }),
-            palette_size_7_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_7_Y_COLOR_CDF[i0])
-            }),
-            palette_size_8_y_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_8_Y_COLOR_CDF[i0])
-            }),
-            palette_size_2_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_2_UV_COLOR_CDF[i0])
-            }),
-            palette_size_3_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_3_UV_COLOR_CDF[i0])
-            }),
-            palette_size_4_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_4_UV_COLOR_CDF[i0])
-            }),
-            palette_size_5_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_5_UV_COLOR_CDF[i0])
-            }),
-            palette_size_6_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_6_UV_COLOR_CDF[i0])
-            }),
-            palette_size_7_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_7_UV_COLOR_CDF[i0])
-            }),
-            palette_size_8_uv_color: std::array::from_fn(|i0| {
-                invert(&DEFAULT_PALETTE_SIZE_8_UV_COLOR_CDF[i0])
-            }),
-            palette_y_mode: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_PALETTE_Y_MODE_CDF[i0][i1]))
-            }),
+            palette_size_2_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_2_Y_COLOR_CDF[i0])),
+            palette_size_3_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_3_Y_COLOR_CDF[i0])),
+            palette_size_4_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_4_Y_COLOR_CDF[i0])),
+            palette_size_5_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_5_Y_COLOR_CDF[i0])),
+            palette_size_6_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_6_Y_COLOR_CDF[i0])),
+            palette_size_7_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_7_Y_COLOR_CDF[i0])),
+            palette_size_8_y_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_8_Y_COLOR_CDF[i0])),
+            palette_size_2_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_2_UV_COLOR_CDF[i0])),
+            palette_size_3_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_3_UV_COLOR_CDF[i0])),
+            palette_size_4_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_4_UV_COLOR_CDF[i0])),
+            palette_size_5_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_5_UV_COLOR_CDF[i0])),
+            palette_size_6_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_6_UV_COLOR_CDF[i0])),
+            palette_size_7_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_7_UV_COLOR_CDF[i0])),
+            palette_size_8_uv_color: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_SIZE_8_UV_COLOR_CDF[i0])),
+            palette_y_mode: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_PALETTE_Y_MODE_CDF[i0][i1]))),
             palette_uv_mode: std::array::from_fn(|i0| invert(&DEFAULT_PALETTE_UV_MODE_CDF[i0])),
             delta_q: invert(&DEFAULT_DELTA_Q_CDF),
             delta_lf: invert(&DEFAULT_DELTA_LF_CDF),
-            intra_tx_type_set1: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_INTRA_TX_TYPE_SET1_CDF[i0][i1]))
-            }),
-            intra_tx_type_set2: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_INTRA_TX_TYPE_SET2_CDF[i0][i1]))
-            }),
-            inter_tx_type_set1: std::array::from_fn(|i0| {
-                invert(&DEFAULT_INTER_TX_TYPE_SET1_CDF[i0])
-            }),
+            intra_tx_type_set1: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_INTRA_TX_TYPE_SET1_CDF[i0][i1]))),
+            intra_tx_type_set2: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_INTRA_TX_TYPE_SET2_CDF[i0][i1]))),
+            inter_tx_type_set1: std::array::from_fn(|i0| invert(&DEFAULT_INTER_TX_TYPE_SET1_CDF[i0])),
             inter_tx_type_set2: invert(&DEFAULT_INTER_TX_TYPE_SET2_CDF),
-            inter_tx_type_set3: std::array::from_fn(|i0| {
-                invert(&DEFAULT_INTER_TX_TYPE_SET3_CDF[i0])
-            }),
+            inter_tx_type_set3: std::array::from_fn(|i0| invert(&DEFAULT_INTER_TX_TYPE_SET3_CDF[i0])),
             compound_idx: std::array::from_fn(|i0| invert(&DEFAULT_COMPOUND_IDX_CDF[i0])),
             comp_group_idx: std::array::from_fn(|i0| invert(&DEFAULT_COMP_GROUP_IDX_CDF[i0])),
             compound_type: std::array::from_fn(|i0| invert(&DEFAULT_COMPOUND_TYPE_CDF[i0])),
@@ -295,57 +189,26 @@ impl CdfContext {
             wedge_inter_intra: std::array::from_fn(|i0| invert(&DEFAULT_WEDGE_INTER_INTRA_CDF[i0])),
             use_obmc: std::array::from_fn(|i0| invert(&DEFAULT_USE_OBMC_CDF[i0])),
             comp_ref_type: std::array::from_fn(|i0| invert(&DEFAULT_COMP_REF_TYPE_CDF[i0])),
-            uni_comp_ref: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_UNI_COMP_REF_CDF[i0][i1]))
-            }),
+            uni_comp_ref: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_UNI_COMP_REF_CDF[i0][i1]))),
             cfl_sign: invert(&DEFAULT_CFL_SIGN_CDF),
             cfl_alpha: std::array::from_fn(|i0| invert(&DEFAULT_CFL_ALPHA_CDF[i0])),
             use_wiener: invert(&DEFAULT_USE_WIENER_CDF),
             use_sgrproj: invert(&DEFAULT_USE_SGRPROJ_CDF),
             restoration_type: invert(&DEFAULT_RESTORATION_TYPE_CDF),
-            txb_skip: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_TXB_SKIP_CDF[q][i0][i1]))
-            }),
-            eob_pt_16: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_16_CDF[q][i0][i1]))
-            }),
-            eob_pt_32: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_32_CDF[q][i0][i1]))
-            }),
-            eob_pt_64: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_64_CDF[q][i0][i1]))
-            }),
-            eob_pt_128: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_128_CDF[q][i0][i1]))
-            }),
-            eob_pt_256: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_256_CDF[q][i0][i1]))
-            }),
+            txb_skip: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_TXB_SKIP_CDF[q][i0][i1]))),
+            eob_pt_16: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_16_CDF[q][i0][i1]))),
+            eob_pt_32: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_32_CDF[q][i0][i1]))),
+            eob_pt_64: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_64_CDF[q][i0][i1]))),
+            eob_pt_128: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_128_CDF[q][i0][i1]))),
+            eob_pt_256: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_EOB_PT_256_CDF[q][i0][i1]))),
             eob_pt_512: std::array::from_fn(|i0| invert(&DEFAULT_EOB_PT_512_CDF[q][i0])),
             eob_pt_1024: std::array::from_fn(|i0| invert(&DEFAULT_EOB_PT_1024_CDF[q][i0])),
-            eob_extra: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| {
-                    std::array::from_fn(|i2| invert(&DEFAULT_EOB_EXTRA_CDF[q][i0][i1][i2]))
-                })
-            }),
-            dc_sign: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| invert(&DEFAULT_DC_SIGN_CDF[q][i0][i1]))
-            }),
-            coeff_base_eob: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| {
-                    std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BASE_EOB_CDF[q][i0][i1][i2]))
-                })
-            }),
-            coeff_base: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| {
-                    std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BASE_CDF[q][i0][i1][i2]))
-                })
-            }),
-            coeff_br: std::array::from_fn(|i0| {
-                std::array::from_fn(|i1| {
-                    std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BR_CDF[q][i0][i1][i2]))
-                })
-            }),
+            eob_extra: std::array::from_fn(|i0| std::array::from_fn(|i1| std::array::from_fn(|i2| invert(&DEFAULT_EOB_EXTRA_CDF[q][i0][i1][i2])))),
+            dc_sign: std::array::from_fn(|i0| std::array::from_fn(|i1| invert(&DEFAULT_DC_SIGN_CDF[q][i0][i1]))),
+            coeff_base_eob: std::array::from_fn(|i0| std::array::from_fn(|i1| std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BASE_EOB_CDF[q][i0][i1][i2])))),
+            coeff_base: std::array::from_fn(|i0| std::array::from_fn(|i1| std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BASE_CDF[q][i0][i1][i2])))),
+            coeff_br: std::array::from_fn(|i0| std::array::from_fn(|i1| std::array::from_fn(|i2| invert(&DEFAULT_COEFF_BR_CDF[q][i0][i1][i2])))),
+            delta_lf_multi: std::array::from_fn(|_| invert(&DEFAULT_DELTA_LF_CDF)),
         })
     }
 
@@ -704,6 +567,9 @@ impl CdfContext {
                     self.coeff_br[i0][i1][i2][3] = 0;
                 }
             }
+        }
+        for i0 in 0..4 {
+            self.delta_lf_multi[i0][3] = 0;
         }
     }
 }

@@ -117,10 +117,16 @@ fn edit_cause(error: EditError) -> String {
             "the track attribute is not mute, hide, lock, solo, or muted-by-solo".to_owned()
         }
         EditError::MissingMaterial => "the material is not on the draft".to_owned(),
+        EditError::BeforeZero => "a clip cannot start before the timeline does".to_owned(),
+        EditError::LaneKind => "that lane holds another kind of clip".to_owned(),
+        EditError::SourceBounds => {
+            "the clip cannot reach past the start or end of its media".to_owned()
+        }
         EditError::DuplicateMaterial => "the material id is already in a pool".to_owned(),
         EditError::TransitionWindow => "the split falls inside a transition window".to_owned(),
         EditError::AlreadyLinked => "the segment is already linked".to_owned(),
         EditError::TrackKind => "the track could not be added".to_owned(),
+        EditError::MainTrack => "the main track cannot be removed".to_owned(),
         EditError::DuplicateMark => "a marker is already there".to_owned(),
         EditError::DuplicateBeat => "a beat is already there".to_owned(),
         EditError::NotAudio => "a beat belongs on audio".to_owned(),
@@ -133,6 +139,10 @@ fn edit_cause(error: EditError) -> String {
         EditError::Fade => "a fade cannot be negative".to_owned(),
         EditError::Volume => "the volume must be zero or more".to_owned(),
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
+        EditError::KeyTime => "a keyframe must be on its clip".to_owned(),
+        EditError::NoKey => "no keyframe is there".to_owned(),
+        EditError::Graph => "that curve is not one the app offers".to_owned(),
+        EditError::Animation => "that animation is not one the app offers".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),
@@ -141,12 +151,17 @@ fn edit_cause(error: EditError) -> String {
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
         EditError::TextFont => "the face is not a file name".to_owned(),
+        EditError::TextStyle => "that outline, shadow, or background is out of range".to_owned(),
         EditError::TextEmpty => "type something to add text".to_owned(),
         EditError::UnknownEffect => "that effect is not in this version".to_owned(),
+        EditError::NotEffect => "a strength belongs on an effect, filter, or adjustment".to_owned(),
+        EditError::EffectTarget => "an effect goes on a picture clip".to_owned(),
+        EditError::EffectStrength => "the strength must be from zero to one".to_owned(),
         EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
         EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),
         EditError::Letterbox => "a letterbox belongs on a picture".to_owned(),
+        EditError::LetterboxBlur => "the blur is not a fraction from 0 through 1".to_owned(),
         EditError::FrameRate => "the frame rate is not a project rate".to_owned(),
         EditError::ColorSpace => "the color space is not a project color space".to_owned(),
     }

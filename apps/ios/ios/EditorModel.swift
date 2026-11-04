@@ -15,14 +15,36 @@ import os
 final class EditorModel {
     private(set) var lanes: [Lane] = []
     private(set) var durationUs: Int64 = 0
-    private(set) var playheadUs: Int64 = 0
+    private(set) var playheadUs: Int64 = 0 {
+        didSet { if playheadUs != oldValue, selectedClip != nil { refreshStage() } }
+    }
     private(set) var picture: CGImage?
     private(set) var canvasAspect: CGFloat = 16 / 9
+    /// The canvas ratios, Original first, as Rust sizes them for this project.
+    private(set) var ratios: [CanvasRatio] = []
+    /// What fills the canvas around the main clips.
+    private(set) var background: Background = .none
     private(set) var isPlaying = false
     private(set) var isOpening = true
     private(set) var isImporting = false
     private(set) var notice: Notice?
-    var selectedClip: String?
+    var selectedClip: String? {
+        didSet { if selectedClip != oldValue { refreshStage(now: true) } }
+    }
+    /// The selected picture clip's box on the canvas, as the picture on
+    /// screen shows it. Text and sound have none.
+    private(set) var stage: Stage?
+    /// The box for the draft as it is now. After an edit it waits for the
+    /// picture drawn from that draft, so the box never runs ahead of it.
+    private var placed: (clip: String?, stage: Stage?) = (nil, nil)
+    /// The selected clip's keyframes, and whether one is under the
+    /// playhead. Clips that take none have nil.
+    private(set) var keys: Keyframes?
+    /// The selected clip's in and out animations. Clips that take none
+    /// have nil.
+    private(set) var animations: ClipAnimations?
+    /// The Animations panel's presets; they never change.
+    let animationList = animationPresets()
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -57,7 +79,8 @@ final class EditorModel {
     private var coasting: Task<Void, Never>?
     /// The window the ticks and tiles cover, and the edit they were read for.
     private var stripWindow: (from: Int64, to: Int64, pixelSize: Double, edit: Int)?
-    private var edits = 0
+    /// Counts the project's changes, so a panel showing a clip rereads it.
+    private(set) var edits = 0
     private var stripRetry: Task<Void, Never>?
     private var fetching: Set<String> = []
 
@@ -282,19 +305,26 @@ final class EditorModel {
 
     // MARK: Text
 
-    /// Add `content` at the playhead in `face` and select it.
-    func addText(_ content: String, face: String) {
-        var added: String?
-        edit { added = try $0.addText(content: content, face: face, atUs: playheadUs) }
-        if let added { selectedClip = added }
-    }
-
-    func setText(_ clip: String, _ content: String) {
-        edit { try $0.setText(clipId: clip, content: content) }
+    /// Type into `clip` as the words change, or add a title at the playhead
+    /// in `face` once the words are not blank, and select it. The whole
+    /// typing is one undo step. Returns the clip, or nil while none exists.
+    func typeText(into clip: String?, _ content: String, face: String) -> String? {
+        var typed = clip
+        edit {
+            typed = try $0.typeText(clipId: clip, content: content, face: face, atUs: playheadUs)
+        }
+        if let typed { selectedClip = typed }
+        return typed
     }
 
     func setTextFont(_ clip: String, face: String) {
         edit { try $0.setTextFont(clipId: clip, face: face) }
+    }
+
+    /// Change how `clip` looks. Changes while `live` join one undo step and
+    /// are saved when the last one, not live, arrives.
+    func styleText(_ clip: String, _ change: TextStyleChange, live: Bool) {
+        edit(save: !live) { try $0.styleText(clipId: clip, change: change, live: live) }
     }
 
     /// What `clip` says, or nil when it is not a text clip.
@@ -335,9 +365,108 @@ final class EditorModel {
         edit { try $0.setVolume(clipId: clip, volume: volume) }
     }
 
+    /// Give the canvas a ratio. The clips keep their place and fit the new frame.
+    func setRatio(_ ratio: String) {
+        edit { try $0.setRatio(ratio: ratio) }
+    }
+
+    /// Fill the canvas around the main clips.
+    func setBackground(_ background: Background) {
+        edit { try $0.setBackground(background: background) }
+    }
+
     /// Play the clip at a constant speed. Its length follows.
     func setSpeed(_ clip: String, _ speed: Double) {
         edit { try $0.setSpeed(clipId: clip, speed: speed) }
+    }
+
+    // MARK: Stage
+
+    /// The canvas size in pixels, from the chosen ratio.
+    var canvasSize: CGSize? {
+        guard let ratio = ratios.first(where: \.chosen), ratio.width > 0, ratio.height > 0 else {
+            return nil
+        }
+        return CGSize(width: Double(ratio.width), height: Double(ratio.height))
+    }
+
+    /// Select the topmost picture under the canvas point, or clear the
+    /// selection when there is none.
+    func pick(at point: CGPoint) {
+        guard let editor else { return }
+        selectedClip = try? editor.stagePick(atUs: playheadUs, x: point.x, y: point.y)
+    }
+
+    /// Start moving `clip` on the preview, selecting it. False when it
+    /// cannot move there.
+    func beginStage(_ clip: String) -> Bool {
+        guard let editor else { return false }
+        pause()
+        do {
+            try editor.stageBegin(clipId: clip, atUs: playheadUs)
+        } catch {
+            return false
+        }
+        selectedClip = clip
+        return true
+    }
+
+    /// Place the clip being moved. Rust snaps it and keeps one undo step.
+    func moveStage(shift: CGSize, pinch: Double, turn: Double) {
+        guard let editor else { return }
+        do {
+            let moved = try editor.stageMove(
+                shiftX: shift.width, shiftY: shift.height, pinch: pinch, turn: turn
+            )
+            placed = (selectedClip, moved)
+        } catch {
+            show(error)
+            return
+        }
+        draw()
+    }
+
+    /// End the preview gesture and save.
+    func endStage() {
+        guard let editor else { return }
+        edit { _ in try editor.stageEnd() }
+    }
+
+    /// Read the selected box again. `now` shows it at once, for a new
+    /// selection; otherwise it waits for the next picture.
+    private func refreshStage(now: Bool = false) {
+        let at = playheadUs
+        let box = selectedClip.flatMap { clip in try? editor?.stage(clipId: clip, atUs: at) }
+        placed = (selectedClip, box)
+        if now { stage = box }
+        keys = selectedClip.flatMap { clip in try? editor?.keyframes(clipId: clip, atUs: at) }
+        animations = selectedClip.flatMap { clip in try? editor?.animations(clipId: clip) }
+    }
+
+    /// The keyframe button: remove the keyframe under the playhead, else key
+    /// the selected clip there.
+    func toggleKeyframe() {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.toggleKeyframe(clipId: clip, atUs: at) }
+    }
+
+    /// Ease the span the playhead is in along the named curve; an empty
+    /// name makes it straight.
+    func easeKeyframes(_ graph: String) {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.easeKeyframes(clipId: clip, atUs: at, graph: graph) }
+    }
+
+    /// Give the selected clip the in (`enter`) or out animation `id`, or
+    /// clear that side with an empty id, as one undo step.
+    func setAnimation(enter: Bool, id: String, durationUs: Int64) {
+        guard let clip = selectedClip else { return }
+        pause()
+        edit { try $0.setAnimation(clipId: clip, enter: enter, id: id, durationUs: durationUs) }
     }
 
     /// Put a main clip at `place` in the main row's order.
@@ -365,11 +494,11 @@ final class EditorModel {
 
     /// Run one edit, save the project, and redraw. A refusal shows its reason
     /// and leaves the project as it was.
-    private func edit(_ change: (Editor) throws -> Void) {
+    private func edit(save: Bool = true, _ change: (Editor) throws -> Void) {
         guard let editor else { return }
         do {
             try change(editor)
-            try editor.save()
+            if save { try editor.save() }
         } catch {
             show(error)
         }
@@ -382,6 +511,8 @@ final class EditorModel {
         do {
             lanes = try editor.lanes()
             durationUs = try editor.durationUs()
+            ratios = try editor.ratios()
+            background = try editor.background()
         } catch {
             show(error)
         }
@@ -389,6 +520,7 @@ final class EditorModel {
             selectedClip = nil
         }
         playheadUs = min(playheadUs, durationUs)
+        refreshStage()
         draw()
     }
 
@@ -475,6 +607,7 @@ final class EditorModel {
         guard !drawing, let editor, let time = waiting else { return }
         waiting = nil
         drawing = true
+        let box = placed
         Task.detached(priority: .userInitiated) {
             let result = Result { try editor.frame(timeUs: time) }
             await MainActor.run {
@@ -487,6 +620,7 @@ final class EditorModel {
                 case let .failure(error):
                     self.show(error)
                 }
+                if box.clip == self.selectedClip { self.stage = box.stage }
                 self.drawing = false
                 if self.waiting != nil { self.draw() }
             }

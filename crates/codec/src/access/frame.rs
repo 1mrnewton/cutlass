@@ -236,6 +236,9 @@ impl VideoFrame {
     }
 }
 
+/// Longest edge a stored picture allows. H.264 level 6.2's coded edge is 16,880.
+const MAX_EDGE: u32 = 16_880;
+
 /// Why a 4:2:0 picture could not be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameError {
@@ -245,7 +248,7 @@ pub enum FrameError {
     Odd,
     /// A plane length does not match the size.
     Length,
-    /// The picture would pass 8192 on an edge, or the product overflowed.
+    /// The picture would pass 16,880 on an edge, or the product overflowed.
     Limit,
 }
 
@@ -277,7 +280,7 @@ pub struct Yuv420p {
 }
 
 impl Yuv420p {
-    /// Both edges must be even, non-zero, and at most 8192.
+    /// Both edges must be even, non-zero, and at most 16,880.
     pub fn try_new(
         width: u32,
         height: u32,
@@ -288,7 +291,7 @@ impl Yuv420p {
         if width == 0 || height == 0 {
             return Err(FrameError::Empty);
         }
-        if width > 8192 || height > 8192 {
+        if width > MAX_EDGE || height > MAX_EDGE {
             return Err(FrameError::Limit);
         }
         if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
@@ -373,9 +376,455 @@ impl Yuv420p {
     }
 }
 
+/// Tightly packed 10-bit 4:2:0, visible region only.
+///
+/// Each sample is a `u16` in `0..=1023`, stored in the low 10 bits. `y` is
+/// `width * height` samples. `u` and `v` are each `(width / 2) * (height / 2)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv420p10 {
+    width: u32,
+    height: u32,
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+}
+
+impl Yuv420p10 {
+    /// Both edges must be even, non-zero, and at most 16,880.
+    pub fn try_new(
+        width: u32,
+        height: u32,
+        y: Vec<u16>,
+        u: Vec<u16>,
+        v: Vec<u16>,
+    ) -> Result<Self, FrameError> {
+        if width == 0 || height == 0 {
+            return Err(FrameError::Empty);
+        }
+        if width > MAX_EDGE || height > MAX_EDGE {
+            return Err(FrameError::Limit);
+        }
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(FrameError::Odd);
+        }
+        let y_len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(FrameError::Limit)?;
+        let c_len = ((width / 2) as usize)
+            .checked_mul((height / 2) as usize)
+            .ok_or(FrameError::Limit)?;
+        if y.len() != y_len || u.len() != c_len || v.len() != c_len {
+            return Err(FrameError::Length);
+        }
+        Ok(Self {
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u16] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u16] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u16] {
+        &self.v
+    }
+}
+
+/// Tightly packed 4:2:0 at 9 through 14 bits, visible region only.
+///
+/// Each sample is a `u16` in `0..(1 << bit_depth)`, stored in the low
+/// `bit_depth` bits. `y` is `width * height` samples. `u` and `v` are each
+/// `(width / 2) * (height / 2)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv420High {
+    bit_depth: u8,
+    width: u32,
+    height: u32,
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+}
+
+impl Yuv420High {
+    /// `bit_depth` is 9 through 14. Both edges must be even, non-zero, and at most 16,880.
+    pub fn try_new(
+        bit_depth: u8,
+        width: u32,
+        height: u32,
+        y: Vec<u16>,
+        u: Vec<u16>,
+        v: Vec<u16>,
+    ) -> Result<Self, FrameError> {
+        if !(9..=14).contains(&bit_depth) {
+            return Err(FrameError::Limit);
+        }
+        if width == 0 || height == 0 {
+            return Err(FrameError::Empty);
+        }
+        if width > MAX_EDGE || height > MAX_EDGE {
+            return Err(FrameError::Limit);
+        }
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            return Err(FrameError::Odd);
+        }
+        let y_len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(FrameError::Limit)?;
+        let c_len = ((width / 2) as usize)
+            .checked_mul((height / 2) as usize)
+            .ok_or(FrameError::Limit)?;
+        if y.len() != y_len || u.len() != c_len || v.len() != c_len {
+            return Err(FrameError::Length);
+        }
+        Ok(Self {
+            bit_depth,
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u16] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u16] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u16] {
+        &self.v
+    }
+}
+
+fn checked_chroma(
+    width: u32,
+    height: u32,
+    y: usize,
+    u: usize,
+    v: usize,
+    sub_w: u32,
+    sub_h: u32,
+) -> Result<(), FrameError> {
+    if width == 0 || height == 0 {
+        return Err(FrameError::Empty);
+    }
+    if width > MAX_EDGE || height > MAX_EDGE {
+        return Err(FrameError::Limit);
+    }
+    if sub_w == 2 && !width.is_multiple_of(2) {
+        return Err(FrameError::Odd);
+    }
+    if sub_h == 2 && !height.is_multiple_of(2) {
+        return Err(FrameError::Odd);
+    }
+    let y_len = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(FrameError::Limit)?;
+    let c_len = ((width / sub_w) as usize)
+        .checked_mul((height / sub_h) as usize)
+        .ok_or(FrameError::Limit)?;
+    if y != y_len || u != c_len || v != c_len {
+        return Err(FrameError::Length);
+    }
+    Ok(())
+}
+
+/// Tightly packed 4:2:2. `u` and `v` are each `(width / 2) * height`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv422p {
+    width: u32,
+    height: u32,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+impl Yuv422p {
+    /// Width is even, non-zero, and at most 16,880. Height is non-zero and at most 16,880.
+    pub fn try_new(
+        width: u32,
+        height: u32,
+        y: Vec<u8>,
+        u: Vec<u8>,
+        v: Vec<u8>,
+    ) -> Result<Self, FrameError> {
+        checked_chroma(width, height, y.len(), u.len(), v.len(), 2, 1)?;
+        Ok(Self {
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u8] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u8] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u8] {
+        &self.v
+    }
+}
+
+/// Tightly packed 4:4:4. `u` and `v` are each `width * height`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv444p {
+    width: u32,
+    height: u32,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+impl Yuv444p {
+    /// Both edges are non-zero and at most 16,880.
+    pub fn try_new(
+        width: u32,
+        height: u32,
+        y: Vec<u8>,
+        u: Vec<u8>,
+        v: Vec<u8>,
+    ) -> Result<Self, FrameError> {
+        checked_chroma(width, height, y.len(), u.len(), v.len(), 1, 1)?;
+        Ok(Self {
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u8] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u8] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u8] {
+        &self.v
+    }
+}
+
+/// Tightly packed 4:2:2 at 9 through 14 bits.
+///
+/// Each sample is a `u16` in `0..(1 << bit_depth)`. `u` and `v` are each
+/// `(width / 2) * height`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv422High {
+    bit_depth: u8,
+    width: u32,
+    height: u32,
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+}
+
+impl Yuv422High {
+    /// `bit_depth` is 9 through 14. Width is even. Both edges are non-zero and at most 16,880.
+    pub fn try_new(
+        bit_depth: u8,
+        width: u32,
+        height: u32,
+        y: Vec<u16>,
+        u: Vec<u16>,
+        v: Vec<u16>,
+    ) -> Result<Self, FrameError> {
+        if !(9..=14).contains(&bit_depth) {
+            return Err(FrameError::Limit);
+        }
+        checked_chroma(width, height, y.len(), u.len(), v.len(), 2, 1)?;
+        Ok(Self {
+            bit_depth,
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u16] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u16] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u16] {
+        &self.v
+    }
+}
+
+/// Tightly packed 4:4:4 at 9 through 14 bits.
+///
+/// Each sample is a `u16` in `0..(1 << bit_depth)`. `u` and `v` are each
+/// `width * height`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Yuv444High {
+    bit_depth: u8,
+    width: u32,
+    height: u32,
+    y: Vec<u16>,
+    u: Vec<u16>,
+    v: Vec<u16>,
+}
+
+impl Yuv444High {
+    /// `bit_depth` is 9 through 14. Both edges are non-zero and at most 16,880.
+    pub fn try_new(
+        bit_depth: u8,
+        width: u32,
+        height: u32,
+        y: Vec<u16>,
+        u: Vec<u16>,
+        v: Vec<u16>,
+    ) -> Result<Self, FrameError> {
+        if !(9..=14).contains(&bit_depth) {
+            return Err(FrameError::Limit);
+        }
+        checked_chroma(width, height, y.len(), u.len(), v.len(), 1, 1)?;
+        Ok(Self {
+            bit_depth,
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
+    }
+
+    #[must_use]
+    pub const fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn y(&self) -> &[u16] {
+        &self.y
+    }
+
+    #[must_use]
+    pub fn u(&self) -> &[u16] {
+        &self.u
+    }
+
+    #[must_use]
+    pub fn v(&self) -> &[u16] {
+        &self.v
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FrameError, Plane, VideoFrame, Yuv420p};
+    use super::{
+        FrameError, Plane, VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p,
+        Yuv444High, Yuv444p,
+    };
 
     #[test]
     fn a_solid_picture_keeps_even_planes() {
@@ -417,5 +866,65 @@ mod tests {
         assert_eq!(frame.u.width, 2);
         assert_eq!(frame.u.height, 1);
         assert_eq!(frame.y.samples.len(), 6);
+    }
+
+    #[test]
+    fn ten_bit_420_keeps_the_sample_count() {
+        let frame =
+            Yuv420p10::try_new(4, 2, vec![1000; 8], vec![512, 512], vec![0, 4]).expect("frame");
+        assert_eq!(frame.y(), &[1000; 8]);
+        assert_eq!(frame.u(), &[512, 512]);
+        assert_eq!(
+            Yuv420p10::try_new(4, 2, vec![0; 8], vec![0], vec![0, 0]),
+            Err(FrameError::Length)
+        );
+    }
+
+    #[test]
+    fn high_bit_420_records_the_depth() {
+        let frame = Yuv420High::try_new(12, 4, 2, vec![4000; 8], vec![100, 200], vec![0, 4])
+            .expect("frame");
+        assert_eq!(frame.bit_depth(), 12);
+        assert_eq!(frame.y(), &[4000; 8]);
+        assert_eq!(
+            Yuv420High::try_new(8, 4, 2, vec![0; 8], vec![0, 0], vec![0, 0]),
+            Err(FrameError::Limit)
+        );
+        assert_eq!(
+            Yuv420High::try_new(14, 4, 2, vec![0; 8], vec![0], vec![0, 0]),
+            Err(FrameError::Length)
+        );
+    }
+
+    #[test]
+    fn chroma_422_and_444_keep_their_plane_sizes() {
+        let yuv422 = Yuv422p::try_new(4, 2, vec![1; 8], vec![2; 4], vec![3; 4]).expect("422");
+        assert_eq!(yuv422.u().len(), 4);
+        assert_eq!(
+            Yuv422p::try_new(1, 2, vec![0, 0], vec![0, 0], vec![0, 0]),
+            Err(FrameError::Odd)
+        );
+        let yuv444 =
+            Yuv444p::try_new(3, 1, vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]).expect("444");
+        assert_eq!(yuv444.v(), &[7, 8, 9]);
+        let high = Yuv422High::try_new(10, 2, 2, vec![0; 4], vec![1; 2], vec![2; 2]).expect("10");
+        assert_eq!(high.bit_depth(), 10);
+        assert_eq!(
+            Yuv444High::try_new(8, 2, 2, vec![0; 4], vec![0; 4], vec![0; 4]),
+            Err(FrameError::Limit)
+        );
+    }
+
+    #[test]
+    fn the_stored_edge_reaches_the_level_6_picture() {
+        let y = vec![0u8; 16_880 * 16];
+        let chroma = vec![0u8; 8_440 * 8];
+        assert!(Yuv420p::try_new(16_880, 16, y, chroma.clone(), chroma).is_ok());
+        let y = vec![0u8; 16_896 * 16];
+        let chroma = vec![0u8; 8_448 * 8];
+        assert_eq!(
+            Yuv420p::try_new(16_896, 16, y, chroma.clone(), chroma),
+            Err(FrameError::Limit)
+        );
     }
 }

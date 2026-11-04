@@ -31,9 +31,19 @@ impl Curve {
     #[must_use]
     pub fn from_codec(value: Transfer) -> Self {
         match value {
-            Transfer::Unspecified => Self::Unspecified,
+            Transfer::Unspecified
+            | Transfer::Smpte240m
+            | Transfer::Linear
+            | Transfer::Log100
+            | Transfer::LogSqrt
+            | Transfer::Iec61966_2_4
+            | Transfer::Bt1361
+            | Transfer::Srgb
+            | Transfer::Smpte428 => Self::Unspecified,
             Transfer::Bt709 | Transfer::Bt2020 => Self::Rec709,
             Transfer::Bt601 => Self::Rec601,
+            Transfer::Hlg => Self::Hlg,
+            Transfer::Pq => Self::Pq,
         }
     }
 
@@ -144,8 +154,16 @@ fn picture_primaries(picture: &Picture<'_>) -> Primaries {
     match picture.primaries {
         ColorPrimaries::Bt709 => Primaries::Bt709,
         ColorPrimaries::Bt2020 => Primaries::Bt2020,
-        ColorPrimaries::Bt601 => Primaries::Smpte170,
-        ColorPrimaries::Unspecified => match picture.matrix {
+        // SMPTE 240M uses the SMPTE 170M chromaticities.
+        ColorPrimaries::Bt601 | ColorPrimaries::Smpte240m => Primaries::Smpte170,
+        // No chromaticities for these tags. The matrix is the unspecified path.
+        ColorPrimaries::Unspecified
+        | ColorPrimaries::Bt470m
+        | ColorPrimaries::Film
+        | ColorPrimaries::Smpte428
+        | ColorPrimaries::Smpte431
+        | ColorPrimaries::Smpte432
+        | ColorPrimaries::Ebu3213 => match picture.matrix {
             crate::Matrix::Bt601 => Primaries::Smpte170,
             crate::Matrix::Bt2020 => Primaries::Bt2020,
             crate::Matrix::Bt709 => Primaries::Bt709,

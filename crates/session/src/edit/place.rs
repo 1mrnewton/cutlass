@@ -17,12 +17,14 @@ pub fn place(draft: &mut Draft, track_id: &TrackId, segment: Segment) -> Result<
         return Err(EditError::DuplicateSegment);
     }
     let adsorb = draft.config.maintrack_adsorb;
-    let track = draft
+    let index = draft
         .tracks
-        .iter_mut()
-        .find(|track| &track.id == track_id)
+        .iter()
+        .position(|track| &track.id == track_id)
         .ok_or(EditError::MissingTrack)?;
-    ensure_unlocked(track.attribute)?;
+    ensure_unlocked(draft.tracks[index].attribute)?;
+    super::lane::check(draft, &draft.tracks[index], &segment, segment.target.start)?;
+    let track = &mut draft.tracks[index];
     let packed = super::magnet::packs(adsorb, track);
     if !packed {
         for existing in &track.segments {

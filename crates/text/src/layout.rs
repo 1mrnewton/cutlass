@@ -3,13 +3,14 @@
 //! `line_max_width` of zero does not wrap: the run stays on one line unless
 //! the string contains a break. A negative width is refused. Alignment is 0
 //! left, 1 center, and 2 right. `letter_spacing` and `line_spacing` are
-//! fractions of `font_size`.
+//! fractions of `font_size`. A rich title's range may draw its letters at
+//! another size; a line is as tall as its largest letters.
 
 use cutlass_font::Font;
 use cutlass_model::MaterialText;
 
 use crate::TextError;
-use crate::shape::{ShapeItem, ShapedGlyph, shape};
+use crate::shape::{ShapeItem, ShapedGlyph, shape_faces};
 
 /// Horizontal alignment from [`MaterialText::alignment`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +29,10 @@ pub struct PlacedGlyph {
     pub missing: bool,
     pub x: f32,
     pub advance: f32,
+    /// Times the layout's `font_size`.
+    pub size: f32,
+    /// Which of the layout's faces draws it; 0 is the title's own.
+    pub face: usize,
 }
 
 /// One line after wrapping and alignment.
@@ -43,8 +48,10 @@ pub struct Line {
 pub struct Layout {
     pub lines: Vec<Line>,
     pub font_size: f32,
-    /// Pixels per font design unit.
+    /// Pixels per font design unit of the title's own face.
     pub scale: f32,
+    /// Pixels per design unit of each face, the title's own first.
+    pub scales: Vec<f32>,
     pub alignment: Alignment,
 }
 
@@ -62,10 +69,24 @@ pub fn layout_text(bytes: &[u8], material: &MaterialText) -> Result<Layout, Text
 
 /// Lay out `material` with a face that has already been read.
 pub fn layout(font: &Font<'_>, material: &MaterialText) -> Result<Layout, TextError> {
+    layout_faces(std::slice::from_ref(font), material, &|_| 0)
+}
+
+/// Lay out `material` with `fonts`, the title's own face first, each
+/// character in the face `pick` names for its byte index.
+pub(crate) fn layout_faces(
+    fonts: &[Font<'_>],
+    material: &MaterialText,
+    pick: &dyn Fn(usize) -> usize,
+) -> Result<Layout, TextError> {
+    let Some(font) = fonts.first() else {
+        return Err(TextError::Limit);
+    };
     if material.typesetting != 0 {
         return Err(TextError::Typesetting);
     }
-    let text = crate::richtext::plain(material)?;
+    let words = crate::richtext::read(material)?;
+    let text = words.text.as_ref();
     let alignment = alignment(material.alignment)?;
     let font_size = positive_f32(material.font_size)?;
     let letter_spacing = finite_f32(material.letter_spacing)?;
@@ -85,17 +106,46 @@ pub fn layout(font: &Font<'_>, material: &MaterialText) -> Result<Layout, TextEr
     {
         return Err(TextError::Measure);
     }
+    let mut scales = Vec::with_capacity(fonts.len());
+    for face in fonts {
+        let face_scale = font_size / f32::from(face.units_per_em());
+        if !(face_scale.is_finite() && face_scale > 0.0) {
+            return Err(TextError::Measure);
+        }
+        scales.push(face_scale);
+    }
     if text.is_empty() {
         return Ok(Layout {
             lines: Vec::new(),
             font_size,
             scale,
+            scales,
             alignment,
         });
     }
-    let shaped = shape(font, text)?;
-    let rows = wrap(&shaped.items, width, scale, letter_px)?;
-    place(rows, font_size, scale, letter_px, width, step, alignment)
+    let shaped = shape_faces(fonts, text, pick)?;
+    // Pixels per design unit of each glyph: its face's, times its size.
+    let units = |glyph: &ShapedGlyph| {
+        let face = scales.get(glyph.face).copied().unwrap_or(scale);
+        face * crate::richtext::size_at(&words.runs, glyph.source)
+    };
+    let size = |glyph: &ShapedGlyph| crate::richtext::size_at(&words.runs, glyph.source);
+    let rows = wrap(&shaped.items, width, letter_px, &units)?;
+    let mut laid = place(
+        rows,
+        Metrics {
+            font_size,
+            letter_px,
+            width,
+            step,
+        },
+        alignment,
+        &size,
+        &units,
+    )?;
+    laid.scale = scale;
+    laid.scales = scales;
+    Ok(laid)
 }
 
 fn alignment(value: i32) -> Result<Alignment, TextError> {
@@ -107,11 +157,20 @@ fn alignment(value: i32) -> Result<Alignment, TextError> {
     }
 }
 
+/// Sizes from the material, in pixels; `scale` is pixels per design unit.
+#[derive(Clone, Copy)]
+struct Metrics {
+    font_size: f32,
+    letter_px: f32,
+    width: f32,
+    step: f32,
+}
+
 fn wrap(
     items: &[ShapeItem],
     width: f32,
-    scale: f32,
     letter_px: f32,
+    units: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<Vec<Vec<ShapedGlyph>>, TextError> {
     let mut lines: Vec<Vec<ShapedGlyph>> = Vec::new();
     let mut used = 0.0_f32;
@@ -125,6 +184,7 @@ fn wrap(
                 used = 0.0;
             }
             ShapeItem::Glyph(glyph) => {
+                let scale = units(glyph);
                 let advance = f32::from(glyph.advance) * scale;
                 let starting = lines.last().is_none_or(|line| line.is_empty());
                 let kern = if starting {
@@ -159,17 +219,23 @@ fn wrap(
 
 fn place(
     rows: Vec<Vec<ShapedGlyph>>,
-    font_size: f32,
-    scale: f32,
-    letter_px: f32,
-    width: f32,
-    step: f32,
+    metrics: Metrics,
     alignment: Alignment,
+    size: &dyn Fn(&ShapedGlyph) -> f32,
+    units: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<Layout, TextError> {
+    let Metrics {
+        font_size,
+        letter_px,
+        width,
+        step,
+    } = metrics;
     let mut lines = Vec::with_capacity(rows.len());
-    let mut baseline = font_size;
-    for row in rows {
-        let (glyphs, line_width) = place_line(&row, scale, letter_px)?;
+    let mut baseline = 0.0_f32;
+    for (index, row) in rows.iter().enumerate() {
+        let tallest = row.iter().map(size).fold(1.0_f32, f32::max);
+        baseline += if index == 0 { font_size } else { step } * tallest;
+        let (glyphs, line_width) = place_line(row, letter_px, size, units)?;
         if !baseline.is_finite() {
             return Err(TextError::Limit);
         }
@@ -178,7 +244,6 @@ fn place(
             width: line_width,
             baseline,
         });
-        baseline += step;
     }
     let content = lines.iter().map(|line| line.width).fold(0.0_f32, f32::max);
     let box_width = if width > 0.0 { width } else { content };
@@ -204,19 +269,23 @@ fn place(
     Ok(Layout {
         lines,
         font_size,
-        scale,
+        scale: 0.0,
+        scales: Vec::new(),
         alignment,
     })
 }
 
 fn place_line(
     row: &[ShapedGlyph],
-    scale: f32,
     letter_px: f32,
+    size: &dyn Fn(&ShapedGlyph) -> f32,
+    units: &dyn Fn(&ShapedGlyph) -> f32,
 ) -> Result<(Vec<PlacedGlyph>, f32), TextError> {
     let mut glyphs = Vec::with_capacity(row.len());
     let mut pen = 0.0_f32;
     for (index, glyph) in row.iter().enumerate() {
+        let times = size(glyph);
+        let scale = units(glyph);
         let advance = f32::from(glyph.advance) * scale;
         if index > 0 {
             pen += f32::from(glyph.kerning) * scale + letter_px;
@@ -231,6 +300,8 @@ fn place_line(
             missing: glyph.missing,
             x: pen,
             advance,
+            size: times,
+            face: glyph.face,
         });
         pen += advance;
     }

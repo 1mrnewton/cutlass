@@ -1,4 +1,4 @@
-use cutlass_model::{Draft, Micros, Segment, SegmentId, TimeRange};
+use cutlass_model::{Draft, MaterialRef, Micros, Segment, SegmentId, TimeRange};
 
 use crate::request::TrimEdge;
 
@@ -17,6 +17,7 @@ pub fn trim(
     let mut next = current.clone();
     let speed = super::speed::timeline_speed(draft, &current);
     apply_edge(&mut next, edge, time, speed)?;
+    within_media(draft, &next, edge)?;
     if !super::magnet::packs(draft.config.maintrack_adsorb, &draft.tracks[track_index])
         && overlaps_except(&draft.tracks[track_index], &next, segment_id)?
     {
@@ -54,6 +55,8 @@ fn apply_edge(
                 .ok_or(EditError::Range(cutlass_model::RangeError::EndOverflow))?;
             segment.target.start = time;
             segment.target.duration = Micros(duration);
+            // A key stays on the moment of footage it was set on.
+            cutlass_model::shift_keys(segment, -delta);
             if let Some(source) = segment.source_range.as_mut() {
                 let source_delta = map_timeline_to_source(delta, speed)?;
                 let source_duration = map_timeline_to_source(duration, speed)?;
@@ -81,6 +84,27 @@ fn apply_edge(
                 source.duration = Micros(source_duration);
             }
         }
+    }
+    Ok(())
+}
+
+/// The trimmed edge stays on the media: the start at or after its first
+/// frame, the end at or before its length when the material has one.
+fn within_media(draft: &Draft, segment: &Segment, edge: TrimEdge) -> Result<(), EditError> {
+    let Some(source) = segment.source_range.as_ref() else {
+        return Ok(());
+    };
+    let length = match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(video)) => video.duration.0,
+        Some(MaterialRef::Audio(audio)) => audio.duration.0,
+        _ => 0,
+    };
+    let past = match edge {
+        TrimEdge::Start => source.start.0 < 0,
+        TrimEdge::End => length > 0 && source.start.0.saturating_add(source.duration.0) > length,
+    };
+    if past {
+        return Err(EditError::SourceBounds);
     }
     Ok(())
 }
@@ -132,4 +156,65 @@ fn overlaps_except(
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_model::{Draft, MaterialVideo, Micros, Segment, TimeRange};
+
+    use crate::edit::EditError;
+    use crate::request::{Request, TrimEdge};
+    use crate::session::Session;
+
+    /// A clip showing 1 s to 3 s of a 4 s video, at 2 s on the timeline.
+    fn open() -> Session {
+        let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
+        draft.tracks[0].id = "main".into();
+        draft.materials.videos.push(MaterialVideo {
+            id: "v".into(),
+            duration: Micros(4_000_000),
+            ..MaterialVideo::default()
+        });
+        let mut session = Session::open(draft);
+        let mut clip = Segment::new("a", "v", TimeRange::new(2_000_000, 2_000_000));
+        clip.source_range = Some(TimeRange::new(1_000_000, 2_000_000));
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: "main".into(),
+                    segment: Box::new(clip),
+                }],
+            )
+            .unwrap();
+        session
+    }
+
+    fn trim(edge: TrimEdge, time: i64) -> Request {
+        Request::Trim {
+            segment_id: "a".into(),
+            edge,
+            time: Micros(time),
+        }
+    }
+
+    #[test]
+    fn a_trim_reaches_the_media_ends_and_no_further() {
+        let mut session = open();
+        assert_eq!(
+            session.apply(1, &[trim(TrimEdge::Start, 999_999)]),
+            Err(EditError::SourceBounds)
+        );
+        assert_eq!(
+            session.apply(1, &[trim(TrimEdge::End, 5_000_001)]),
+            Err(EditError::SourceBounds)
+        );
+        session
+            .apply(1, &[trim(TrimEdge::Start, 1_000_000)])
+            .unwrap();
+        session.apply(2, &[trim(TrimEdge::End, 5_000_000)]).unwrap();
+        let source = session.draft().tracks[0].segments[0].source_range.clone();
+        assert_eq!(source, Some(TimeRange::new(0, 4_000_000)));
+    }
 }

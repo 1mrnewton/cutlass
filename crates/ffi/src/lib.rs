@@ -8,26 +8,36 @@
 
 #![forbid(unsafe_code)]
 
+mod animate;
 mod cache;
+mod canvas;
 mod codecs;
 mod effect;
 mod error;
 mod export;
 mod host;
+mod keys;
 mod media;
 mod player;
 mod preview;
 mod project;
+mod stage;
 mod strip;
 mod text;
 mod timeline;
 
+pub use animate::{PhoneAnimation, PhoneAnimationPreset, PhoneAnimations, animation_presets};
 pub use cache::ResourceCache;
+pub use canvas::{
+    BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
+    phone_ratios,
+};
 pub use codecs::{decoders, readers};
 pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
     volume_position,
 };
+pub use cutlass_export::video_bitrate;
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
 pub use cutlass_playback::AudioHost;
@@ -37,13 +47,18 @@ pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
-pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders, video_bitrate};
+pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};
 pub use host::Commands;
+pub use keys::{PhoneGraph, PhoneKeys, graphs};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
+pub use stage::PhoneStage;
 pub use strip::{PhoneFilm, PhoneTick, PhoneTile, PhoneWave, Strip};
-pub use text::{NEW_TEXT_LENGTH, PhoneFont, PhoneText};
+pub use text::{
+    NEW_TEXT_LENGTH, PhoneFont, PhoneText, PhoneTextStyle, TEXT_COLORS, TEXT_STYLE_RANGES,
+    TextStyleChange, TextStyleRanges,
+};
 pub use timeline::{Drag, PhoneClip, PhoneLane, phone_lanes};
 
 use std::path::{Path, PathBuf};
@@ -84,6 +99,12 @@ pub struct PhoneHost {
     preview: Preview,
     strip: Strip,
     faces: FaceTable,
+    /// The preview gesture in flight.
+    live: Option<stage::Live>,
+    /// The title being typed into, and the revision of its last change.
+    typing: Option<(SegmentId, u64)>,
+    /// The title a slider is restyling, and the revision of its last change.
+    styling: Option<(SegmentId, u64)>,
 }
 
 impl PhoneHost {
@@ -123,6 +144,9 @@ impl PhoneHost {
             preview: Preview::new(),
             strip: Strip::default(),
             faces: FaceTable::default(),
+            live: None,
+            typing: None,
+            styling: None,
         })
     }
 
@@ -300,6 +324,222 @@ impl PhoneHost {
         Ok(segment_id)
     }
 
+    /// The canvas ratios a picker offers, Original first, each with the
+    /// frame it gives this project.
+    pub fn ratios(&self) -> Vec<PhoneRatio> {
+        phone_ratios(self.draft())
+    }
+
+    /// Give the canvas `ratio`, as one undo step. A canvas that already
+    /// has that ratio and frame is not a step.
+    pub fn set_ratio(&mut self, ratio: &str) -> Result<(), FfiError> {
+        let request = cutlass_session::ratio_request(self.draft(), ratio)?;
+        let canvas = &self.draft().canvas_config;
+        if let Request::SetCanvasSize {
+            width,
+            height,
+            ratio,
+        } = &request
+            && (canvas.width, canvas.height, canvas.ratio.as_str()) == (*width, *height, ratio)
+        {
+            return Ok(());
+        }
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// What fills the canvas around the main pictures.
+    pub fn background(&self) -> PhoneBackground {
+        phone_background(self.draft())
+    }
+
+    /// Fill the canvas around the main pictures, as one undo step. A blur
+    /// needs a picture on the main lane.
+    pub fn set_background(&mut self, background: &PhoneBackground) -> Result<(), FfiError> {
+        if *background == self.background() {
+            return Ok(());
+        }
+        let taken = media::ids(self.draft());
+        let requests =
+            canvas::background_requests(self.draft(), background, &taken).ok_or_else(|| {
+                FfiError::Refused {
+                    reason: "add a clip to blur behind".to_owned(),
+                }
+            })?;
+        self.apply(self.revision(), &requests)?;
+        Ok(())
+    }
+
+    /// The box of the picture clip `segment_id` on the canvas at `time`,
+    /// where its keyframes put it. A clip that is not a picture has none.
+    #[must_use]
+    pub fn stage(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneStage> {
+        let stage = cutlass_editor::stage_box(self.draft(), segment_id, time, &self.sizes())?;
+        let canvas = cutlass_editor::canvas_size(self.draft());
+        Some(PhoneStage::new(
+            self.draft(),
+            canvas,
+            &stage,
+            Default::default(),
+        ))
+    }
+
+    /// The topmost picture clip under the canvas point `(x, y)` at `time`.
+    #[must_use]
+    pub fn stage_pick(&self, time: Micros, x: f64, y: f64) -> Option<SegmentId> {
+        cutlass_editor::stage_pick(self.draft(), time, (x, y), &self.sizes())
+    }
+
+    /// Start moving the picture clip `segment_id` on the preview at `time`.
+    /// A clip with keyframes keys its new pose there. A gesture still open
+    /// is ended first.
+    pub fn stage_begin(&mut self, segment_id: &SegmentId, time: Micros) -> Result<(), FfiError> {
+        let gesture = cutlass_editor::stage_gesture(self.draft(), segment_id, time, &self.sizes())
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only an unlocked picture or title moves on the preview".to_owned(),
+            })?;
+        self.live = Some(stage::Live {
+            gesture,
+            applied: None,
+        });
+        Ok(())
+    }
+
+    /// Place the clip `(shift_x, shift_y)` canvas pixels from where the
+    /// gesture started, `pinch` times its size, and turned `turn` degrees
+    /// clockwise. The first change is an undo step and later ones join it.
+    pub fn stage_move(
+        &mut self,
+        shift_x: f64,
+        shift_y: f64,
+        pinch: f64,
+        turn: f64,
+    ) -> Result<PhoneStage, FfiError> {
+        let live = self.live.as_ref().ok_or_else(|| FfiError::Refused {
+            reason: "no preview gesture is open".to_owned(),
+        })?;
+        let step = live.gesture.step(shift_x, shift_y, pinch, turn);
+        let canvas = cutlass_editor::canvas_size(self.draft());
+        let stage = PhoneStage::new(self.draft(), canvas, &step.stage, step.guides);
+        let revision = self.revision();
+        let joins = match live.applied {
+            Some((_, pose)) if pose == step.pose => return Ok(stage),
+            Some((applied, _)) => applied == revision,
+            None if live.gesture.start() == step.pose => return Ok(stage),
+            None => false,
+        };
+        let requests = live.gesture.requests(step.pose);
+        let revision = if joins {
+            self.commands.fold(revision, &requests)?
+        } else {
+            self.apply(revision, &requests)?
+        };
+        if let Some(live) = self.live.as_mut() {
+            live.applied = Some((revision, step.pose));
+        }
+        Ok(stage)
+    }
+
+    /// End the preview gesture. A gesture that changed nothing leaves no step.
+    pub fn stage_end(&mut self) {
+        self.live = None;
+    }
+
+    /// The keyframes of the picture or title clip `segment_id`, and the one
+    /// within a frame of `time`. Other clips have none to show.
+    #[must_use]
+    pub fn keyframes(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneKeys> {
+        cutlass_editor::clip_keys(self.draft(), segment_id, time, &self.sizes())
+    }
+
+    /// Ease the span of the clip's keyframes that `time` is in along the
+    /// Graphs panel curve `graph`, or make it straight with `None`. One undo
+    /// step.
+    pub fn ease_keyframes(
+        &mut self,
+        segment_id: &SegmentId,
+        time: Micros,
+        graph: Option<String>,
+    ) -> Result<(), FfiError> {
+        let keys = self
+            .keyframes(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only a picture or title takes keyframes".to_owned(),
+            })?;
+        let request = keys
+            .ease(segment_id, graph)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "move the playhead between two keyframes to ease them".to_owned(),
+            })?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// Remove the keyframe within a frame of `time` on the clip, or key the
+    /// clip's pose and opacity at `time`. One undo step.
+    pub fn toggle_keyframe(
+        &mut self,
+        segment_id: &SegmentId,
+        time: Micros,
+    ) -> Result<(), FfiError> {
+        let keys = self
+            .keyframes(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only a picture or title takes keyframes".to_owned(),
+            })?;
+        let request = keys
+            .toggle(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "move the playhead onto the clip to key it".to_owned(),
+            })?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// The picture or title clip's in and out animations.
+    #[must_use]
+    pub fn animations(&self, segment_id: &SegmentId) -> Option<PhoneAnimations> {
+        cutlass_editor::clip_animations(self.draft(), segment_id, &self.sizes())
+    }
+
+    /// Give the clip the in (`enter`) or out animation `resource_id`,
+    /// `duration` long, or clear that side with `None`. One undo step.
+    pub fn set_animation(
+        &mut self,
+        segment_id: &SegmentId,
+        enter: bool,
+        resource_id: Option<String>,
+        duration: Micros,
+    ) -> Result<(), FfiError> {
+        if self.animations(segment_id).is_none() {
+            return Err(FfiError::Refused {
+                reason: "only a picture or title takes animations".to_owned(),
+            });
+        }
+        let kind = if enter {
+            cutlass_model::AnimType::In
+        } else {
+            cutlass_model::AnimType::Out
+        };
+        self.apply(
+            self.revision(),
+            &[Request::SetAnimation {
+                segment_id: segment_id.clone(),
+                kind,
+                animation: resource_id,
+                duration,
+            }],
+        )?;
+        Ok(())
+    }
+
+    fn sizes(&self) -> stage::Sizes<'_> {
+        stage::Sizes {
+            draft: self.draft(),
+            fonts: &self.faces,
+        }
+    }
+
     /// The composited picture at `time`, reading media from the project folder.
     pub fn frame(&mut self, time: Micros) -> Result<Picture, FfiError> {
         self.preview.frame(
@@ -375,6 +615,50 @@ impl PhoneHost {
         Ok(segment_id)
     }
 
+    /// Type into a title as the words change. With no `segment_id`, the
+    /// first words that are not blank add one at `at` in `face`, as
+    /// [`Self::add_text`] does. The first change is an undo step and the
+    /// rest of the typing joins it. Blank words change nothing. Returns the
+    /// clip, or `None` when nothing has been added yet.
+    pub fn type_text(
+        &mut self,
+        segment_id: Option<&SegmentId>,
+        content: &str,
+        face: &str,
+        at: Micros,
+    ) -> Result<Option<SegmentId>, FfiError> {
+        if content.trim().is_empty() {
+            return Ok(segment_id.cloned());
+        }
+        let Some(segment_id) = segment_id else {
+            let added = self.add_text(content, face, at)?;
+            self.typing = Some((added.clone(), self.revision()));
+            return Ok(Some(added));
+        };
+        if self
+            .text(segment_id)
+            .is_some_and(|text| text.content == content)
+        {
+            return Ok(Some(segment_id.clone()));
+        }
+        let requests = [Request::SetTextContent {
+            segment_id: segment_id.clone(),
+            content: content.to_owned(),
+        }];
+        let revision = self.revision();
+        let joins = self
+            .typing
+            .as_ref()
+            .is_some_and(|(typed, at)| typed == segment_id && *at == revision);
+        let revision = if joins {
+            self.commands.fold(revision, &requests)?
+        } else {
+            self.apply(revision, &requests)?
+        };
+        self.typing = Some((segment_id.clone(), revision));
+        Ok(Some(segment_id.clone()))
+    }
+
     /// Add the bundled effect `effect_id` at `at` over everything below it,
     /// as one undo step. Returns the new clip's id.
     pub fn add_effect(&mut self, effect_id: &str, at: Micros) -> Result<SegmentId, FfiError> {
@@ -408,6 +692,30 @@ impl PhoneHost {
                 face: face.to_owned(),
             }],
         )?;
+        Ok(())
+    }
+
+    /// Change how `segment_id` looks. Changes made while `live` join one
+    /// undo step, so a slider drag is one step; its last change passes
+    /// `live` false, and so does a single tap.
+    pub fn style_text(
+        &mut self,
+        segment_id: &SegmentId,
+        change: TextStyleChange,
+        live: bool,
+    ) -> Result<(), FfiError> {
+        let requests = [text::style_request(self.draft(), segment_id, change)];
+        let revision = self.revision();
+        let joins = self
+            .styling
+            .as_ref()
+            .is_some_and(|(styled, at)| styled == segment_id && *at == revision);
+        let revision = if joins {
+            self.commands.fold(revision, &requests)?
+        } else {
+            self.apply(revision, &requests)?
+        };
+        self.styling = live.then(|| (segment_id.clone(), revision));
         Ok(())
     }
 
@@ -611,7 +919,7 @@ mod tests {
     use cutlass_storage::StorageError;
 
     use super::PhoneHost;
-    use crate::{FfiError, start_log};
+    use crate::{FfiError, PhoneAnimation, animation_presets, start_log};
 
     struct Temp {
         path: PathBuf,
@@ -871,6 +1179,254 @@ mod tests {
     }
 
     #[test]
+    fn the_first_picture_sizes_an_original_canvas_and_a_ratio_is_one_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let tall = crate::Probed::Video {
+            meta: cutlass_model::MetaType::Photo,
+            width: 1_080,
+            height: 1_920,
+            duration: 1_000_000,
+        };
+        let first = host.import_probed(&fixture("pattern.png"), tall).unwrap();
+        host.append(&first).unwrap();
+        let canvas = |host: &PhoneHost| {
+            let canvas = &host.draft().canvas_config;
+            (canvas.width, canvas.height, canvas.ratio.clone())
+        };
+        assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
+        let second = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        host.append(&second).unwrap();
+        assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
+
+        host.set_ratio("16:9").unwrap();
+        assert_eq!(canvas(&host), (1_920, 1_080, "16:9".to_owned()));
+        let revision = host.revision();
+        host.set_ratio("16:9").unwrap();
+        assert_eq!(host.revision(), revision);
+        assert!(
+            host.ratios()
+                .iter()
+                .any(|ratio| ratio.chosen && ratio.ratio == "16:9")
+        );
+        assert!(host.set_ratio("custom").is_err());
+
+        host.set_ratio("original").unwrap();
+        assert_eq!(canvas(&host), (1_080, 1_920, "original".to_owned()));
+        host.undo().unwrap();
+        assert_eq!(canvas(&host), (1_920, 1_080, "16:9".to_owned()));
+    }
+
+    #[test]
+    fn a_preview_gesture_moves_a_picture_as_one_undo_step() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let stage = host.stage(&clip, Micros(0)).unwrap();
+        let middle = (stage.canvas_width / 2.0, stage.canvas_height / 2.0);
+        assert_eq!(
+            host.stage_pick(Micros(0), middle.0, middle.1),
+            Some(clip.clone())
+        );
+        assert_eq!(host.stage_pick(Micros(0), -1.0, -1.0), None);
+        assert!(host.stage_move(1.0, 1.0, 1.0, 0.0).is_err());
+
+        let steps = host.revision();
+        host.stage_begin(&clip, Micros(0)).unwrap();
+        host.stage_move(0.0, 0.0, 1.0, 0.0).unwrap();
+        assert_eq!(host.revision(), steps);
+        host.stage_move(100.0, 0.0, 1.0, 0.0).unwrap();
+        let moved = host.stage_move(200.0, 0.0, 0.5, 30.0).unwrap();
+        host.stage_end();
+        assert!(host.revision() > steps);
+        assert_eq!(
+            host.stage(&clip, Micros(0)).unwrap().center_x,
+            moved.center_x
+        );
+        assert!((moved.center_x - middle.0 - 200.0).abs() < 1e-6);
+        assert!((moved.turn - 30.0).abs() < 1e-6);
+        let segment = &host.draft().tracks[0].segments[0];
+        assert!((segment.uniform_scale.value - 0.5).abs() < 1e-9);
+
+        host.undo().unwrap();
+        let back = host.stage(&clip, Micros(0)).unwrap();
+        assert_eq!((back.center_x, back.turn), (middle.0, 0.0));
+    }
+
+    #[test]
+    fn the_keyframe_button_keys_a_clip_and_a_drag_keys_it_again_later() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let none = host.keyframes(&clip, Micros(0)).unwrap();
+        assert!(none.times.is_empty() && none.here.is_none());
+
+        host.toggle_keyframe(&clip, Micros(100_000)).unwrap();
+        let keyed = host.keyframes(&clip, Micros(110_000)).unwrap();
+        assert_eq!(keyed.times, [Micros(100_000)]);
+        assert_eq!(keyed.here, Some(Micros(100_000)));
+        assert_eq!(host.keyframes(&clip, Micros(500_000)).unwrap().here, None);
+
+        let middle = host.stage(&clip, Micros(500_000)).unwrap().center_x;
+        host.stage_begin(&clip, Micros(500_000)).unwrap();
+        host.stage_move(200.0, 0.0, 1.0, 0.0).unwrap();
+        host.stage_end();
+        let keyed = host.keyframes(&clip, Micros(500_000)).unwrap();
+        assert_eq!(keyed.times, [Micros(100_000), Micros(500_000)]);
+        let halfway = host.stage(&clip, Micros(300_000)).unwrap().center_x;
+        assert!((halfway - middle - 100.0).abs() < 1e-6, "{halfway}");
+
+        host.toggle_keyframe(&clip, Micros(495_000)).unwrap();
+        assert_eq!(
+            host.keyframes(&clip, Micros(0)).unwrap().times,
+            [Micros(100_000)]
+        );
+        assert!(host.toggle_keyframe(&clip, Micros(2_000_000)).is_err());
+        host.undo().unwrap();
+        assert_eq!(host.keyframes(&clip, Micros(0)).unwrap().times.len(), 2);
+    }
+
+    #[test]
+    fn a_picture_takes_an_in_and_an_out_animation_from_the_presets() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let none = host.animations(&clip).unwrap();
+        assert_eq!(
+            (none.enter, none.leave, none.length),
+            (None, None, Micros(1_000_000))
+        );
+
+        let presets = animation_presets();
+        let zoom = presets
+            .iter()
+            .find(|preset| !preset.enter && preset.name == "Zoom Out")
+            .unwrap();
+        host.set_animation(
+            &clip,
+            false,
+            Some(zoom.resource_id.clone()),
+            Micros(5_000_000),
+        )
+        .unwrap();
+        let set = host.animations(&clip).unwrap();
+        assert_eq!(
+            set.leave,
+            Some(PhoneAnimation {
+                resource_id: zoom.resource_id.clone(),
+                duration: Micros(1_000_000),
+            })
+        );
+        assert!(
+            host.set_animation(&clip, true, Some(zoom.resource_id.clone()), Micros(1))
+                .is_err()
+        );
+        host.set_animation(&clip, false, None, Micros(0)).unwrap();
+        assert_eq!(host.animations(&clip).unwrap().leave, None);
+        host.undo().unwrap();
+        assert!(host.animations(&clip).unwrap().leave.is_some());
+    }
+
+    #[test]
+    fn a_graph_eases_the_span_the_playhead_is_in() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        host.toggle_keyframe(&clip, Micros(0)).unwrap();
+        let start = host.stage(&clip, Micros(0)).unwrap().center_x;
+        host.stage_begin(&clip, Micros(800_000)).unwrap();
+        host.stage_move(400.0, 0.0, 1.0, 0.0).unwrap();
+        host.stage_end();
+
+        let keys = host.keyframes(&clip, Micros(0)).unwrap();
+        assert_eq!(
+            (keys.span, keys.graph.as_deref()),
+            (Some(Micros(800_000)), None)
+        );
+        assert_eq!(host.keyframes(&clip, Micros(800_000)).unwrap().span, None);
+        assert!(host.ease_keyframes(&clip, Micros(900_000), None).is_err());
+
+        let straight = host.stage(&clip, Micros(400_000)).unwrap().center_x;
+        assert!((straight - start - 200.0).abs() < 1e-6, "{straight}");
+        host.ease_keyframes(&clip, Micros(400_000), Some("Ease In".to_owned()))
+            .unwrap();
+        let keys = host.keyframes(&clip, Micros(400_000)).unwrap();
+        assert_eq!(keys.graph.as_deref(), Some("Ease In"));
+        let eased = host.stage(&clip, Micros(400_000)).unwrap().center_x;
+        assert!(eased < straight - 50.0, "{eased} {straight}");
+        host.undo().unwrap();
+        assert_eq!(host.keyframes(&clip, Micros(400_000)).unwrap().graph, None);
+
+        let graphs = crate::graphs();
+        assert_eq!(graphs.len(), 26);
+        assert_eq!(graphs[0].name, "Linear");
+        for graph in &graphs {
+            let (first, last) = (graph.points[0], graph.points[graph.points.len() - 1]);
+            assert_eq!(first, (0.0, 0.0), "{}", graph.name);
+            assert!((last.0 - 1.0).abs() < 1e-9 && (last.1 - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_blur_goes_behind_every_main_picture_and_a_color_takes_its_place() {
+        use crate::PhoneBackground;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        assert!(host.set_background(&PhoneBackground::Blur(0.05)).is_err());
+        for _ in 0..2 {
+            let id = host
+                .import_probed(&fixture("pattern.png"), still(1_000_000))
+                .unwrap();
+            host.append(&id).unwrap();
+        }
+        assert_eq!(host.background(), PhoneBackground::None);
+
+        host.set_background(&PhoneBackground::Blur(0.05)).unwrap();
+        assert_eq!(host.background(), PhoneBackground::Blur(0.05));
+        let canvases = &host.draft().materials.canvases;
+        assert_eq!(canvases.len(), 2);
+        assert_ne!(canvases[0].id, canvases[1].id);
+        let revision = host.revision();
+        host.set_background(&PhoneBackground::Blur(0.05)).unwrap();
+        assert_eq!(host.revision(), revision);
+
+        host.set_background(&PhoneBackground::Color("#E5484D".to_owned()))
+            .unwrap();
+        assert_eq!(
+            host.background(),
+            PhoneBackground::Color("#E5484D".to_owned())
+        );
+        assert!(host.draft().materials.canvases.is_empty());
+        host.undo().unwrap();
+        assert_eq!(host.background(), PhoneBackground::Blur(0.05));
+
+        host.set_background(&PhoneBackground::None).unwrap();
+        assert_eq!(host.background(), PhoneBackground::None);
+        assert_eq!(host.draft().canvas_config.background, None);
+    }
+
+    #[test]
     fn play_ticks_through_the_cut_and_stops_at_its_end_without_writing_the_draft() {
         let temp = Temp::new();
         let roots = Roots::new(&temp);
@@ -1037,13 +1593,8 @@ mod tests {
             }]
         );
         let first = host.add_text("A", "", Micros(0)).unwrap();
-        assert_eq!(
-            host.text(&first),
-            Some(PhoneText {
-                content: "A".to_owned(),
-                face: "Sample.ttf".to_owned(),
-            })
-        );
+        let PhoneText { content, face, .. } = host.text(&first).unwrap();
+        assert_eq!((content.as_str(), face.as_str()), ("A", "Sample.ttf"));
         // The sample face has one letter, A.
         assert!(host.frame(Micros(500_000)).unwrap() != plain);
 
@@ -1066,6 +1617,126 @@ mod tests {
         assert_eq!(host.text(&first).unwrap().content, "Hello");
         host.undo().unwrap();
         assert_eq!(host.text(&first).unwrap().content, "A");
+    }
+
+    #[test]
+    fn a_slider_drag_restyles_a_title_in_one_step() {
+        use crate::TextStyleChange;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let title = host.add_text("A", "", Micros(0)).unwrap();
+        let outline = |width: f64| TextStyleChange::Outline {
+            color: "#000000".to_owned(),
+            width,
+        };
+        for (width, live) in [(0.02, true), (0.05, true), (0.08, false)] {
+            host.style_text(&title, outline(width), live).unwrap();
+        }
+        let style = host.text(&title).unwrap().style;
+        assert_eq!(
+            (style.outline_color.as_str(), style.outline_width),
+            ("#000000", 0.08)
+        );
+        // A tap after the drag is its own step.
+        host.style_text(&title, TextStyleChange::Color("#FF0000".to_owned()), false)
+            .unwrap();
+        let shadow = TextStyleChange::Shadow {
+            color: "#000000".to_owned(),
+            distance: 10.0,
+            blur: 0.3,
+        };
+        host.style_text(&title, shadow, false).unwrap();
+        assert_eq!(host.text(&title).unwrap().style.shadow_color, "#000000");
+        assert_eq!(host.draft().materials.texts[0].shadow_angle, -45.0);
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.text(&title).unwrap().style.outline_width, 0.08);
+        host.undo().unwrap();
+        assert!(host.text(&title).unwrap().style.outline_color.is_empty());
+    }
+
+    #[test]
+    fn a_glow_goes_on_a_title_and_a_drag_of_it_is_one_step() {
+        use crate::TextStyleChange;
+
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let title = host.add_text("A", "", Micros(0)).unwrap();
+        let glow = |color: &str, strength: f64| TextStyleChange::Glow {
+            color: color.to_owned(),
+            strength,
+            range: 0.5,
+        };
+        host.style_text(&title, glow("#FFCC00", 0.6), false)
+            .unwrap();
+        for (strength, live) in [(0.7, true), (0.8, true), (0.9, false)] {
+            host.style_text(&title, glow("#FFCC00", strength), live)
+                .unwrap();
+        }
+        let style = host.text(&title).unwrap().style;
+        assert_eq!(
+            (
+                style.glow_color.as_str(),
+                style.glow_strength,
+                style.glow_range
+            ),
+            ("#FFCC00", 0.9, 0.5)
+        );
+        assert_eq!(host.draft().materials.effects.len(), 1);
+        host.undo().unwrap();
+        assert_eq!(host.text(&title).unwrap().style.glow_strength, 0.6);
+        host.style_text(&title, glow("", 0.6), false).unwrap();
+        assert!(host.text(&title).unwrap().style.glow_color.is_empty());
+        assert!(host.draft().materials.effects.is_empty());
+    }
+
+    #[test]
+    fn typing_adds_a_title_as_one_step_and_it_moves_on_the_preview() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        host.set_font_folders(&[font_folder(&temp)]);
+        let steps = host.revision();
+        assert_eq!(host.type_text(None, " ", "", Micros(0)).unwrap(), None);
+        assert_eq!(host.revision(), steps);
+
+        let title = host.type_text(None, "A", "", Micros(0)).unwrap().unwrap();
+        for words in ["AA", "AAA", "AAA"] {
+            let typed = host.type_text(Some(&title), words, "", Micros(0)).unwrap();
+            assert_eq!(typed.as_ref(), Some(&title));
+        }
+        host.type_text(Some(&title), "", "", Micros(0)).unwrap();
+        assert_eq!(host.text(&title).unwrap().content, "AAA");
+
+        let stage = host.stage(&title, Micros(0)).unwrap();
+        assert!(stage.text);
+        // The test canvas is 16 pixels, so the title fits it.
+        assert!((stage.width - stage.canvas_width).abs() < 1e-6 && stage.height > 0.0);
+        let middle = (stage.canvas_width / 2.0, stage.canvas_height / 2.0);
+        assert_eq!(
+            host.stage_pick(Micros(0), middle.0, middle.1),
+            Some(title.clone())
+        );
+        let picture = host.draft().main_track().unwrap().segments[0].id.clone();
+        assert!(!host.stage(&picture, Micros(0)).unwrap().text);
+
+        host.stage_begin(&title, Micros(0)).unwrap();
+        host.stage_move(100.0, 0.0, 2.0, 0.0).unwrap();
+        host.stage_end();
+        let moved = host.stage(&title, Micros(0)).unwrap();
+        assert!((moved.width - stage.width * 2.0).abs() < 1e-6, "{moved:?}");
+        assert_eq!(moved.turn, 0.0);
+        host.undo().unwrap();
+        host.undo().unwrap();
+        assert_eq!(host.text(&title), None);
     }
 
     #[test]

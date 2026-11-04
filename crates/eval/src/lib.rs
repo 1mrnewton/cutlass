@@ -41,6 +41,7 @@ pub use frame::{
 pub use gpu::{Composed, FrameLayers, GpuBackdrop, GpuLayer, GpuSource};
 pub use heard::{ClipAsk, Heard};
 pub use media::OpenClips;
+pub use text::text_size;
 
 /// The source timestamp Freeze stores so the clip keeps showing `time`.
 ///

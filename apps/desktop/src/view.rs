@@ -9,7 +9,7 @@ use egui::{
 };
 
 use cutlass_editor::ruler_ticks;
-use cutlass_model::{FrameRate, Micros, SegmentId};
+use cutlass_model::{FrameRate, Micros, SegmentId, TrackId};
 use cutlass_session::TrimEdge;
 
 use crate::dialogs::{Dialogs, Finished, Picker};
@@ -17,6 +17,8 @@ use crate::icons;
 use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError};
 use crate::tokens;
 use crate::widgets;
+
+mod inspector;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
@@ -99,9 +101,9 @@ impl Shelf {
         match self {
             Self::Media => "No media yet. Use File → Import.",
             Self::Audio => "No audio yet. Use File → Import.",
-            Self::Text => "No text in this project.",
+            Self::Text => "No title matches the search.",
             Self::Stickers => "No stickers in this project.",
-            Self::Effects => "No effects in this project.",
+            Self::Effects => "No effect matches the search.",
             Self::Transitions => "No transitions in this project.",
             Self::Filters => "No filters in this project.",
             Self::Adjustments => "No adjustments in this project.",
@@ -112,10 +114,21 @@ impl Shelf {
 
 /// The open library menu: where it opens, and whether it is for the
 /// picked cards or for the space between them.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct LibraryMenu {
     at: Pos2,
-    on_card: bool,
+    target: LibraryTarget,
+}
+
+/// What a library menu is for.
+#[derive(Clone, Debug, PartialEq)]
+enum LibraryTarget {
+    /// The space between the cards.
+    Empty,
+    /// The picked file cards.
+    Files,
+    /// One folder.
+    Folder(String),
 }
 
 pub struct ViewState {
@@ -123,24 +136,36 @@ pub struct ViewState {
     export_open: bool,
     export_side: i32,
     export_codec: cutlass_decode::CodecId,
+    export_span: crate::shell::ExportSpan,
+    /// `None` keeps the project's rate.
+    export_rate: Option<FrameRate>,
+    export_quality: crate::shell::ExportQuality,
+    export_sound: bool,
     replace_prompt: bool,
     export_path: String,
-    text_buffer: String,
-    text_for: String,
-    text_size_buffer: String,
-    text_color_buffer: String,
-    letter_buffer: String,
-    line_buffer: String,
-    width_buffer: String,
-    x_buffer: String,
-    y_buffer: String,
-    scale_buffer: String,
-    opacity_buffer: String,
-    letterbox_buffer: String,
-    volume_buffer: String,
-    fade_in_buffer: String,
-    fade_out_buffer: String,
-    speed_buffer: String,
+    /// The camera button was pressed; ask where to save the still.
+    ask_still: bool,
+    /// Screen pixels per canvas pixel in the preview, or `None` to fit.
+    preview_zoom: Option<f64>,
+    /// How far a zoomed canvas is dragged from the middle of the preview.
+    preview_pan: Vec2,
+    /// The scale the canvas was last drawn at, fitted or not.
+    preview_scale: f64,
+    /// Where the canvas was last drawn.
+    preview_canvas: Option<Rect>,
+    /// The action-safe and title-safe frames are drawn over the canvas.
+    preview_guides: bool,
+    /// The preview fills the screen.
+    preview_full: bool,
+    /// Heights dragged for track rows, by track. Only this window keeps
+    /// them; the project does not save them.
+    lane_heights: std::collections::HashMap<TrackId, f32>,
+    /// The track head's right-click menu, where it opened.
+    track_menu: Option<TrackMenu>,
+    /// A track being named, and what is typed so far.
+    renaming: Option<(TrackId, String)>,
+    /// The clip panel's open tab, page, and sections, and what is typed.
+    inspector: inspector::InspectorState,
     background_buffer: String,
     name_buffer: String,
     dialogs: Dialogs,
@@ -151,11 +176,33 @@ pub struct ViewState {
     library_picked: Vec<String>,
     library_anchor: Option<String>,
     library_menu: Option<LibraryMenu>,
+    /// The library folder shown; empty is the top.
+    library_folder: String,
+    library_sort: cutlass_editor::LibrarySort,
+    /// The media shelf shows free stock instead of the project's files.
+    library_stock: bool,
+    /// A folder being named, and what is typed so far.
+    library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// When the projects folder was last looked at.
+    listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
     marquee: Option<Rect>,
+    /// How far the lanes are moved down from where they center on the main
+    /// lane, in points; negative shows lanes further down.
+    lane_scroll: f32,
+}
+
+/// Where a track head's menu opened, and for which track.
+#[derive(Clone, Debug, PartialEq)]
+struct TrackMenu {
+    track_id: TrackId,
+    /// The main track stays; it cannot be deleted.
+    main: bool,
+    lock: bool,
+    at: Pos2,
 }
 
 impl Default for ViewState {
@@ -164,25 +211,24 @@ impl Default for ViewState {
             preview: None,
             export_open: false,
             export_side: 1080,
-            export_codec: cutlass_decode::CodecId::Png,
+            export_codec: cutlass_decode::CodecId::H264,
+            export_span: crate::shell::ExportSpan::Whole,
+            export_rate: None,
+            export_quality: crate::shell::ExportQuality::Recommended,
+            export_sound: true,
             replace_prompt: false,
             export_path: String::new(),
-            text_buffer: String::new(),
-            text_for: String::new(),
-            text_size_buffer: String::new(),
-            text_color_buffer: String::new(),
-            letter_buffer: String::new(),
-            line_buffer: String::new(),
-            width_buffer: String::new(),
-            x_buffer: String::new(),
-            y_buffer: String::new(),
-            scale_buffer: String::new(),
-            opacity_buffer: String::new(),
-            letterbox_buffer: String::new(),
-            volume_buffer: String::new(),
-            fade_in_buffer: String::new(),
-            fade_out_buffer: String::new(),
-            speed_buffer: String::new(),
+            ask_still: false,
+            preview_zoom: None,
+            preview_pan: Vec2::ZERO,
+            preview_scale: 1.0,
+            preview_canvas: None,
+            preview_guides: false,
+            preview_full: false,
+            lane_heights: std::collections::HashMap::new(),
+            track_menu: None,
+            renaming: None,
+            inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
             dialogs: Dialogs::new(),
@@ -191,11 +237,17 @@ impl Default for ViewState {
             library_picked: Vec::new(),
             library_anchor: None,
             library_menu: None,
+            library_folder: String::new(),
+            library_sort: cutlass_editor::LibrarySort::Name,
+            library_stock: false,
+            library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
+            listed_checked: None,
             marquee_press: None,
             marquee: None,
+            lane_scroll: 0.0,
         }
     }
 }
@@ -211,11 +263,35 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         apply_dialog(shell, view, finished);
     }
     style(ui);
+    shell.hold_edits(ui.input(|input| input.pointer.any_down()));
     shell.chrome = crate::shell::Chrome::default();
+    if shell.poll_job() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    show_imported(shell, view);
+    if std::mem::take(&mut view.ask_still) {
+        let name = shell.project_name();
+        view.dialogs.save_still(parent, &name);
+    }
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
-    if shell.draft().is_none() {
+    if view.preview_full && shell.draft().is_none() {
+        set_full_screen(ui, view, false);
+    }
+    if view.preview_full {
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            set_full_screen(ui, view, false);
+        }
+        panel(ui, full);
+        preview_panel(shell, ui, view, full);
+        job_strip(shell, ui, full);
+        shortcuts(shell, ui);
+        if shell.playing() || shell.preview_pending() {
+            ui.ctx().request_repaint();
+        }
+    } else if shell.draft().is_none() {
         projects_home(shell, ui, view, full, parent);
     } else {
         view.listed.clear();
@@ -236,14 +312,101 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         if view.export_open {
             export_dialog(shell, ui, view, parent);
         }
+        job_strip(shell, ui, full);
         shortcuts(shell, ui);
-        if shell.playing() || shell.preview_pending() {
+        if shell.playing() || shell.preview_pending() || !shell.meter_resting() {
             ui.ctx().request_repaint();
         }
     }
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
     }
+}
+
+/// The running job above the foot of the window: what it is, where it has
+/// got to, and Cancel.
+fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
+    const WIDTH: f32 = 340.0;
+    let Some(job) = shell.job() else {
+        exported_strip(shell, ui, full, WIDTH);
+        return;
+    };
+    let top_left = Pos2::new(full.center().x - WIDTH / 2.0, full.bottom() - 72.0);
+    egui::Area::new(ui.scope_id().with("job"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(WIDTH);
+                ui.horizontal(|ui| {
+                    let line = if job.stage.is_empty() {
+                        job.label.clone()
+                    } else {
+                        format!("{}: {}", job.label, job.stage)
+                    };
+                    ui.label(line);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            shell.cancel_job();
+                        }
+                    });
+                });
+                let bar = egui::ProgressBar::new(job.fraction.unwrap_or(0.0));
+                ui.add(match (job.fraction, job.left) {
+                    (Some(_), Some(left)) => bar.text(format!(
+                        "{:.0}%, about {} left",
+                        job.fraction.unwrap_or(0.0) * 100.0,
+                        spoken_duration(left)
+                    )),
+                    (Some(_), None) => bar.show_percentage(),
+                    (None, _) => bar.animate(true),
+                });
+            });
+        });
+}
+
+/// A wait as people say it: seconds under two minutes, then minutes.
+fn spoken_duration(left: std::time::Duration) -> String {
+    let seconds = left.as_secs().max(1);
+    if seconds < 120 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min", seconds.div_ceil(60))
+    }
+}
+
+/// The movie the last export wrote, with a way to its folder.
+fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
+    let Some(path) = shell.exported().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let top_left = Pos2::new(full.center().x - width / 2.0, full.bottom() - 72.0);
+    egui::Area::new(ui.scope_id().with("exported"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Exported {name}"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            shell.forget_export();
+                        }
+                        if ui.button(crate::shell::REVEAL_LABEL).clicked() {
+                            if let Err(error) = crate::shell::reveal(&path) {
+                                shell.set_notice(error.to_string());
+                            }
+                            shell.forget_export();
+                        }
+                    });
+                });
+            });
+        });
 }
 
 fn projects_root(view: &ViewState) -> std::path::PathBuf {
@@ -320,12 +483,21 @@ fn projects_home(
     paint_notice(shell, ui, bar.center().x, bar.bottom() + 12.0);
 }
 
+/// How often the projects home looks at the folder for changes.
+const PROJECTS_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
-    let root = projects_root(view);
-    let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
-    if view.listed_stamp != stamp {
-        view.listed = Shell::list_projects(&root);
-        view.listed_stamp = stamp;
+    let due = view
+        .listed_checked
+        .is_none_or(|checked| checked.elapsed() >= PROJECTS_CHECK);
+    if due || view.listed_stamp.is_empty() {
+        view.listed_checked = Some(std::time::Instant::now());
+        let root = projects_root(view);
+        let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
+        if view.listed_stamp != stamp {
+            view.listed = Shell::list_projects(&root);
+            view.listed_stamp = stamp;
+        }
     }
     view.listed.clone()
 }
@@ -619,13 +791,14 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
 }
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
-    if ui.button("Undo").clicked() {
+    let (undo, redo) = (shell.can_undo(), shell.can_redo());
+    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
             shell.set_notice(error.to_string());
         }
     }
-    if ui.button("Redo").clicked() {
+    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
             shell.set_notice(error.to_string());
@@ -719,18 +892,35 @@ fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
 
 fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    let shelf = view.library_shelf;
+    let stock = shelf == Shelf::Media && view.library_stock;
     column.add(
         egui::TextEdit::singleline(&mut view.library_query)
-            .hint_text(view.library_shelf.hint())
+            .hint_text(if stock {
+                "Search free stock"
+            } else {
+                shelf.hint()
+            })
             .desired_width(f32::INFINITY)
             .text_color(tokens::TEXT)
             .background_color(tokens::PROJECT_BAR)
             .margin(egui::Margin::symmetric(8, 6)),
     );
+    if shelf == Shelf::Media {
+        column.add_space(8.0);
+        source_switch(&mut column, view);
+    }
+    let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
+    if bin {
+        // A folder that is gone, as after another project opened, is the top.
+        if cutlass_editor::folder_trail(shell.library_store(), &view.library_folder).is_empty() {
+            view.library_folder.clear();
+        }
+        column.add_space(8.0);
+        path_bar(shell, &mut column, view);
+    }
     column.add_space(12.0);
     let grid = column.available_rect_before_wrap();
-    let shelf = view.library_shelf;
-    let bin = matches!(shelf, Shelf::Media | Shelf::Audio);
     // The space between and below the cards. Cards sit above it, so a
     // click here missed every card.
     let back = column.interact(grid, column.scope_id().with("library-back"), Sense::click());
@@ -742,7 +932,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         && back.secondary_clicked()
         && let Some(at) = back.interact_pointer_pos()
     {
-        view.library_menu = Some(LibraryMenu { at, on_card: false });
+        view.library_menu = Some(LibraryMenu {
+            at,
+            target: LibraryTarget::Empty,
+        });
     }
     let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let query = view.library_query.clone();
@@ -750,14 +943,34 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         .id_salt("library-cards")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
-            let mut cards = shell
-                .draft()
-                .map(|draft| bin_cards(draft, shelf, &query))
-                .unwrap_or_default();
+            if stock {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Free stock needs a source. None is set up yet.")
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::MUTED),
+                );
+                return;
+            }
+            let mut cards = if bin {
+                folder_cards(shell.library_store(), &view.library_folder, &query)
+            } else {
+                Vec::new()
+            };
+            cards.extend(shell.draft().map_or_else(Vec::new, |draft| {
+                let place = BinPlace {
+                    store: shell.library_store(),
+                    folder: &view.library_folder,
+                    sort: view.library_sort,
+                };
+                bin_cards(draft, &place, shelf, &query)
+            }));
             fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
                     "No matches."
+                } else if !view.library_folder.is_empty() {
+                    "This folder is empty."
                 } else if shell.draft().is_some() {
                     shelf.empty()
                 } else {
@@ -769,18 +982,101 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                         .size(tokens::TYPE_SIZE)
                         .color(tokens::MUTED),
                 );
-            } else if let Some(id) = card_grid(ui, view, &cards, bin)
-                && let Err(error) = shell.add_medium(&id)
-            {
-                shell.set_notice(error.to_string());
+            } else if let Some(id) = card_grid(shell, ui, view, &cards, bin) {
+                let added = if id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+                    shell.add_title(&id)
+                } else if id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+                    shell.add_effect(&id)
+                } else {
+                    shell.add_medium(&id)
+                };
+                if let Err(error) = added {
+                    shell.set_notice(error.to_string());
+                }
             }
         });
     library_menu(shell, &column, view);
 }
 
-/// The library menu, while open. No row is built yet, so a pick says so.
+/// Project or Free stock, over the media shelf.
+fn source_switch(ui: &mut Ui, view: &mut ViewState) {
+    ui.horizontal(|ui| {
+        for (label, stock) in [("Project", false), ("Free stock", true)] {
+            let on = view.library_stock == stock;
+            let button =
+                egui::Button::new(RichText::new(label).size(tokens::TYPE_SIZE).color(if on {
+                    tokens::TEXT
+                } else {
+                    tokens::FAINT
+                }))
+                .fill(if on {
+                    tokens::ACTIVE
+                } else {
+                    tokens::PROJECT_BAR
+                })
+                .corner_radius(CornerRadius::same(tokens::ICON_RADIUS));
+            if ui.add(button).clicked() && !on {
+                view.library_stock = stock;
+                view.library_picked.clear();
+                view.library_anchor = None;
+            }
+        }
+    });
+}
+
+/// "All", then each folder down to the one shown. A click goes there; a
+/// card dropped on one moves into it.
+fn path_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let trail: Vec<(String, String)> = std::iter::once((String::new(), "All".to_owned()))
+        .chain(
+            cutlass_editor::folder_trail(shell.library_store(), &view.library_folder)
+                .into_iter()
+                .map(|folder| (folder.id.clone(), folder.display_name.clone())),
+        )
+        .collect();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (index, (id, name)) in trail.iter().enumerate() {
+            if index > 0 {
+                ui.label(
+                    RichText::new("/")
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::FAINT),
+                );
+            }
+            let current = *id == view.library_folder;
+            let response = ui.add(
+                egui::Label::new(
+                    RichText::new(name)
+                        .size(tokens::TYPE_SIZE)
+                        .color(if current { tokens::TEXT } else { tokens::MUTED }),
+                )
+                .sense(Sense::click()),
+            );
+            drop_into_folder(shell, &response, id);
+            if response.clicked() {
+                view.library_folder.clone_from(id);
+                view.library_picked.clear();
+                view.library_anchor = None;
+            }
+        }
+    });
+}
+
+/// A card dragged from the library and let go over `response` moves into
+/// the folder `folder`, or to the top when it is empty.
+fn drop_into_folder(shell: &mut Shell, response: &egui::Response, folder: &str) {
+    if let Some(drop) = response.dnd_release_payload::<LibraryDrop>()
+        && drop.material_id != folder
+        && let Err(error) = shell.move_library_item(&drop.material_id, folder)
+    {
+        shell.set_notice(error.to_string());
+    }
+}
+
+/// The library menu for the empty space, the picked files, or a folder.
 fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
-    let Some(menu) = view.library_menu else {
+    let Some(menu) = view.library_menu.clone() else {
         return;
     };
     if let Some(pos) = secondary_click(ui)
@@ -789,24 +1085,108 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         view.library_menu = None;
         return;
     }
-    let entries = if menu.on_card {
-        crate::menu::LIBRARY_CARD
-    } else {
-        crate::menu::LIBRARY_EMPTY
+    let entries = match menu.target {
+        LibraryTarget::Empty => crate::menu::LIBRARY_EMPTY,
+        LibraryTarget::Files => crate::menu::LIBRARY_CARD,
+        LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER,
+    };
+    let off = match menu.target {
+        LibraryTarget::Empty => &[][..],
+        LibraryTarget::Files => crate::menu::LIBRARY_CARD_OFF,
+        LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER_OFF,
     };
     let shown = crate::menu::show(
         ui.ctx(),
         ui.scope_id().with("library-menu"),
         menu.at,
         entries,
-        &|_| true,
+        &|id| !off.contains(&id),
     );
     if let Some(item) = shown.picked {
         view.library_menu = None;
-        shell.set_notice(format!("{} is not built yet", item.label));
+        library_action(shell, view, &menu.target, item);
     } else if shown.dismissed {
         view.library_menu = None;
     }
+}
+
+/// Run a library menu row.
+fn library_action(
+    shell: &mut Shell,
+    view: &mut ViewState,
+    target: &LibraryTarget,
+    item: crate::menu::Item,
+) {
+    let picked = view.library_picked.clone();
+    let result = match (item.id, target) {
+        ("new-folder", _) => shell
+            .new_library_folder(&view.library_folder, &[])
+            .map(|id| start_folder_name(shell, view, id)),
+        ("new-folder-with", LibraryTarget::Files) => shell
+            .new_library_folder(&view.library_folder, &picked)
+            .map(|id| start_folder_name(shell, view, id)),
+        ("sort-name", _) => {
+            view.library_sort = cutlass_editor::LibrarySort::Name;
+            shell.set_notice("Sorted by name");
+            Ok(())
+        }
+        ("sort-duration", _) => {
+            view.library_sort = cutlass_editor::LibrarySort::Duration;
+            shell.set_notice("Sorted by duration");
+            Ok(())
+        }
+        ("open-file", LibraryTarget::Files) => match picked.first() {
+            Some(id) => shell.reveal_library_file(id),
+            None => Ok(()),
+        },
+        ("delete", LibraryTarget::Files) => {
+            let files: Vec<String> = picked
+                .iter()
+                .filter(|id| {
+                    !shell
+                        .library_store()
+                        .folders
+                        .iter()
+                        .any(|folder| &folder.id == *id)
+                })
+                .cloned()
+                .collect();
+            view.library_picked.retain(|id| !files.contains(id));
+            shell.hide_library_files(&files)
+        }
+        ("delete", LibraryTarget::Folder(id)) => shell.delete_library_folder(id).map(|parent| {
+            view.library_picked.retain(|picked| picked != id);
+            let inside = cutlass_editor::folder_trail(shell.library_store(), &view.library_folder);
+            if inside.is_empty() && !view.library_folder.is_empty() {
+                view.library_folder = parent.unwrap_or_default();
+            }
+        }),
+        ("rename", LibraryTarget::Folder(id)) => {
+            start_folder_name(shell, view, id.clone());
+            Ok(())
+        }
+        _ => {
+            shell.set_notice(format!("{} is not built yet", item.label));
+            Ok(())
+        }
+    };
+    if let Err(error) = result {
+        shell.set_notice(error.to_string());
+    }
+}
+
+/// Pick a folder and put its name in a field to type over.
+fn start_folder_name(shell: &Shell, view: &mut ViewState, id: String) {
+    let name = shell
+        .library_store()
+        .folders
+        .iter()
+        .find(|folder| folder.id == id)
+        .map(|folder| folder.display_name.clone())
+        .unwrap_or_default();
+    view.library_picked = vec![id.clone()];
+    view.library_anchor = Some(id.clone());
+    view.library_renaming = Some((id, name));
 }
 
 /// Pick `id` the way a click does: alone, toggled with Command, or the run
@@ -845,7 +1225,13 @@ fn pick_card(view: &mut ViewState, cards: &[BinCard], id: &str, modifiers: egui:
 }
 
 /// Lay out the cards. Returns the card whose plus was pressed.
-fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) -> Option<String> {
+fn card_grid(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    cards: &[BinCard],
+    bin: bool,
+) -> Option<String> {
     let mut added = None;
     let width = ui.available_width().max(CARD_W);
     ui.set_min_width(width);
@@ -862,15 +1248,35 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) ->
                 (index / cols) as f32 * pitch,
             );
         let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H + CARD_LABEL));
+        let folder = card.look == CardLook::Folder;
         paint_bin_card(ui, rect, card, view.library_picked.contains(&card.id));
+        if folder && folder_name_field(shell, ui, view, card, rect) {
+            continue;
+        }
         // A click picks the card. A drag only starts once the pointer moves.
-        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::click_and_drag());
-        response.dnd_set_drag_payload(LibraryDrop {
-            material_id: card.id.clone(),
-        });
+        let sense = if folder {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        };
+        let response = ui.interact(rect, ui.scope_id().with(&card.id), sense);
+        if folder {
+            drop_into_folder(shell, &response, &card.id);
+        } else {
+            response.dnd_set_drag_payload(LibraryDrop {
+                material_id: card.id.clone(),
+            });
+        }
         if response.clicked() {
             let modifiers = ui.input(|input| input.modifiers);
-            pick_card(view, cards, &card.id, modifiers);
+            if folder && !(modifiers.shift || modifiers.command || modifiers.ctrl) {
+                // A plain click on a folder goes into it.
+                view.library_folder.clone_from(&card.id);
+                view.library_picked = vec![card.id.clone()];
+                view.library_anchor = Some(card.id.clone());
+            } else {
+                pick_card(view, cards, &card.id, modifiers);
+            }
         }
         if response.secondary_clicked() {
             if !view.library_picked.contains(&card.id) {
@@ -878,15 +1284,64 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) ->
                 view.library_anchor = Some(card.id.clone());
             }
             if bin && let Some(at) = response.interact_pointer_pos() {
-                view.library_menu = Some(LibraryMenu { at, on_card: true });
+                let target = if folder {
+                    LibraryTarget::Folder(card.id.clone())
+                } else {
+                    LibraryTarget::Files
+                };
+                view.library_menu = Some(LibraryMenu { at, target });
             }
         }
         response.on_hover_text(&card.name);
+        if folder {
+            continue;
+        }
         if bin && ui.rect_contains_pointer(rect) && card_plus(ui, rect, &card.id) {
             added = Some(card.id.clone());
         }
     }
     added
+}
+
+/// While `card` is the folder being named, a field over its name. Enter or
+/// a click away keeps the name; Escape keeps the old one. True while the
+/// field is up.
+fn folder_name_field(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    card: &BinCard,
+    rect: Rect,
+) -> bool {
+    let Some((id, typed)) = view.library_renaming.as_mut() else {
+        return false;
+    };
+    if *id != card.id {
+        return false;
+    }
+    let label = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.top() + CARD_H + 2.0),
+        Vec2::new(rect.width(), CARD_LABEL - 2.0),
+    );
+    let field = ui.put(
+        label,
+        egui::TextEdit::singleline(&mut *typed)
+            .font(FontId::proportional(12.0))
+            .text_color(tokens::TEXT),
+    );
+    if !field.has_focus() && !field.lost_focus() {
+        field.request_focus();
+    }
+    if field.lost_focus() {
+        let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let typed = typed.clone();
+        let id = id.clone();
+        view.library_renaming = None;
+        if !cancel && let Err(error) = shell.rename_library_folder(&id, &typed) {
+            shell.set_notice(error.to_string());
+        }
+    }
+    true
 }
 
 /// The round plus at the bottom right of a hovered card's picture. True when pressed.
@@ -952,21 +1407,30 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
         return text.to_owned();
     }
     let chars: Vec<char> = text.chars().collect();
-    let mut keep = chars.len();
-    while keep > 1 {
-        keep -= 1;
+    let cut = |keep: usize| -> String {
         let head = keep.div_ceil(2);
         let tail = keep / 2;
-        let cut: String = chars[..head]
+        chars[..head]
             .iter()
             .chain(std::iter::once(&'…'))
             .chain(&chars[chars.len() - tail..])
-            .collect();
-        if fits(&cut) {
-            return cut;
+            .collect()
+    };
+    // The most letters that fit, found by halving rather than one letter
+    // at a time: a cut only grows wider as it keeps more.
+    let (mut fitting, mut over) = (0, chars.len());
+    while over - fitting > 1 {
+        let keep = fitting + (over - fitting) / 2;
+        if fits(&cut(keep)) {
+            fitting = keep;
+        } else {
+            over = keep;
         }
     }
-    "…".to_owned()
+    if fitting == 0 {
+        return "…".to_owned();
+    }
+    cut(fitting)
 }
 
 /// Read each card's picture or sound from the shell, asking for what is
@@ -986,7 +1450,7 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         card.look = CardLook::Sound(levels);
                     }
                 }
-                CardLook::Swatch => {}
+                CardLook::Swatch | CardLook::Folder | CardLook::Title(_) => {}
             }
         }
     });
@@ -1000,6 +1464,25 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
     match &card.look {
         CardLook::Swatch => {
             painter.rect_filled(rect, radius, swatch_color(&card.name));
+        }
+        CardLook::Title(color) => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Aa",
+                FontId::proportional(28.0),
+                *color,
+            );
+        }
+        CardLook::Folder => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+            let _ = icons::paint(
+                painter,
+                Rect::from_center_size(rect.center(), Vec2::splat(40.0)),
+                "folder",
+                tokens::MUTED,
+            );
         }
         CardLook::Picture(None) => {
             painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
@@ -1015,7 +1498,7 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
             painter.rect_filled(rect, radius, tokens::CLIP_AUDIO);
             let wave = crate::shell::ClipWave {
                 first: 0,
-                levels: levels.clone(),
+                levels: levels.to_vec(),
                 gains: Vec::new(),
                 under_picture: false,
                 muted: false,
@@ -1078,7 +1561,32 @@ enum CardLook {
     /// A file's first frame, and its size in pixels, once read.
     Picture(Option<(egui::TextureId, [u32; 2])>),
     /// A sound file's levels, one per point across the card, once read.
-    Sound(Vec<f32>),
+    Sound(std::sync::Arc<[f32]>),
+    /// A library folder.
+    Folder,
+    /// A title style: "Aa" in its color.
+    Title(Color32),
+}
+
+/// Where the library is looking: its folders, the one shown, and the order.
+struct BinPlace<'a> {
+    store: &'a cutlass_model::VirtualStore,
+    folder: &'a str,
+    sort: cutlass_editor::LibrarySort,
+}
+
+/// The folder cards in `folder`, by name.
+fn folder_cards(store: &cutlass_model::VirtualStore, folder: &str, query: &str) -> Vec<BinCard> {
+    cutlass_editor::library_folders(store, folder, query)
+        .into_iter()
+        .map(|folder| BinCard {
+            id: folder.id.clone(),
+            name: folder.display_name.clone(),
+            meta: String::new(),
+            on_timeline: false,
+            look: CardLook::Folder,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1086,40 +1594,26 @@ struct LibraryDrop {
     material_id: String,
 }
 
-fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
-    let used: std::collections::HashSet<&str> = draft
-        .tracks
-        .iter()
-        .flat_map(|track| track.segments.iter())
-        .map(|segment| segment.material_id.as_str())
-        .collect();
+fn bin_cards(
+    draft: &cutlass_model::Draft,
+    place: &BinPlace<'_>,
+    shelf: Shelf,
+    query: &str,
+) -> Vec<BinCard> {
     let query = query.trim().to_lowercase();
     let mut cards = Vec::new();
+    let files = |shelf| {
+        cutlass_editor::library_files(draft, place.store, shelf, place.folder, place.sort, &query)
+    };
     match shelf {
         Shelf::Media => {
-            for video in &draft.materials.videos {
-                push_card(
-                    &mut cards,
-                    &used,
-                    &query,
-                    video.id.as_str(),
-                    &video.path,
-                    video.duration.0,
-                    CardLook::Picture(None),
-                );
+            for file in files(cutlass_editor::LibraryShelf::Media) {
+                cards.push(file_card(file, CardLook::Picture(None)));
             }
         }
         Shelf::Audio => {
-            for audio in &draft.materials.audios {
-                push_card(
-                    &mut cards,
-                    &used,
-                    &query,
-                    audio.id.as_str(),
-                    &audio.path,
-                    audio.duration.0,
-                    CardLook::Sound(Vec::new()),
-                );
+            for file in files(cutlass_editor::LibraryShelf::Audio) {
+                cards.push(file_card(file, CardLook::Sound(std::sync::Arc::from([]))));
             }
         }
         Shelf::Transitions => {
@@ -1136,36 +1630,55 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                 });
             }
         }
-        Shelf::Text
-        | Shelf::Stickers
-        | Shelf::Effects
-        | Shelf::Filters
-        | Shelf::Adjustments
-        | Shelf::Templates => {}
+        Shelf::Text => {
+            for style in cutlass_editor::TITLE_STYLES {
+                if !query.is_empty() && !style.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(title_card(style));
+            }
+        }
+        Shelf::Effects => {
+            for effect in cutlass_editor::effect_cards() {
+                if !query.is_empty() && !effect.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(effect_card(effect));
+            }
+        }
+        Shelf::Stickers | Shelf::Filters | Shelf::Adjustments | Shelf::Templates => {}
     }
     cards
 }
 
-fn push_card(
-    cards: &mut Vec<BinCard>,
-    used: &std::collections::HashSet<&str>,
-    query: &str,
-    id: &str,
-    path: &str,
-    duration: i64,
-    look: CardLook,
-) {
-    let name = file_label(path);
-    if !query.is_empty() && !name.to_lowercase().contains(query) {
-        return;
+fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
+    BinCard {
+        id: effect.id,
+        name: effect.name,
+        meta: card_meta(cutlass_editor::EFFECT_LENGTH.0),
+        on_timeline: false,
+        look: CardLook::Swatch,
     }
-    cards.push(BinCard {
-        id: id.to_owned(),
-        name,
-        meta: card_clock(duration),
-        on_timeline: used.contains(id),
+}
+
+fn title_card(style: &cutlass_editor::TitleStyle) -> BinCard {
+    BinCard {
+        id: style.card_id(),
+        name: style.name.to_owned(),
+        meta: style.meta.to_owned(),
+        on_timeline: false,
+        look: CardLook::Title(Color32::from_hex(style.color).unwrap_or(Color32::WHITE)),
+    }
+}
+
+fn file_card(file: cutlass_editor::LibraryFile, look: CardLook) -> BinCard {
+    BinCard {
+        id: file.id,
+        name: file.name,
+        meta: card_clock(file.duration.0),
+        on_timeline: file.on_timeline,
         look,
-    });
+    }
 }
 
 /// A media card's length: minutes and seconds, with hours when it has them.
@@ -1217,10 +1730,30 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         rect.min + Vec2::new(16.0, 16.0),
         Pos2::new(rect.max.x - 16.0, transport.min.y - 8.0),
     );
+    let canvas = shell.draft().map(|draft| {
+        Vec2::new(
+            draft.canvas_config.width.max(1) as f32,
+            draft.canvas_config.height.max(1) as f32,
+        )
+    });
+    if view.preview_zoom.is_some() {
+        let pan = ui.interact(frame, ui.scope_id().with("preview-pan"), Sense::drag());
+        view.preview_pan += pan.drag_delta();
+    } else {
+        view.preview_pan = Vec2::ZERO;
+    }
+    view.preview_canvas = None;
+    let mut place = |size: Vec2| {
+        let size = canvas.unwrap_or(size);
+        let (rect, scale) = placed_canvas(frame, size, view.preview_zoom, &mut view.preview_pan);
+        view.preview_scale = scale;
+        view.preview_canvas = Some(rect);
+        rect
+    };
     let shown = match shell.preview_texture() {
         Ok(Some((id, [width, height]))) => {
-            let fitted = fit_texture(frame, Vec2::new(width as f32, height as f32));
-            paint_canvas(ui, id, fitted, shell.preview_black());
+            let placed = place(Vec2::new(width as f32, height as f32));
+            paint_canvas(ui, frame, id, placed, shell.preview_black());
             Ok(())
         }
         Ok(None) => Err(None),
@@ -1245,8 +1778,8 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                         egui::TextureOptions::LINEAR,
                     ))
                 };
-                let fitted = fit_texture(frame, texture.size_vec2());
-                paint_canvas(ui, texture.id(), fitted, shell.preview_black());
+                let placed = place(texture.size_vec2());
+                paint_canvas(ui, frame, texture.id(), placed, shell.preview_black());
             }
         }
         Some(Err(error)) if shell.draft().is_some() => {
@@ -1260,17 +1793,68 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         }
         Some(Err(_)) => {}
     }
-    transport_bar(shell, ui, transport);
+    if view.preview_guides
+        && let Some(canvas) = view.preview_canvas
+    {
+        paint_safe_areas(ui, frame, canvas);
+    }
+    transport_bar(shell, ui, view, transport);
 }
 
-/// The preview canvas at `rect`, over black when `black` is on. Only the
-/// canvas gets that background; the area around it stays unfilled.
-fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
-    if black {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+/// The action-safe and title-safe frames over the canvas at `canvas`,
+/// with a mark at its middle.
+fn paint_safe_areas(ui: &Ui, frame: Rect, canvas: Rect) {
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    let stroke = egui::Stroke::new(1.0, Color32::from_white_alpha(140));
+    for share in [cutlass_editor::ACTION_SAFE, cutlass_editor::TITLE_SAFE] {
+        let (left, top, width, height) =
+            cutlass_editor::safe_box(f64::from(canvas.width()), f64::from(canvas.height()), share);
+        let inner = Rect::from_min_size(
+            canvas.min + Vec2::new(left as f32, top as f32),
+            Vec2::new(width as f32, height as f32),
+        );
+        painter.rect_stroke(inner, CornerRadius::ZERO, stroke, egui::StrokeKind::Middle);
     }
-    ui.painter().image(
+    let middle = canvas.center();
+    painter.hline((middle.x - 8.0)..=(middle.x + 8.0), middle.y, stroke);
+    painter.vline(middle.x, (middle.y - 8.0)..=(middle.y + 8.0), stroke);
+}
+
+/// Fill the screen with the preview, or go back to the editor.
+fn set_full_screen(ui: &Ui, view: &mut ViewState, full: bool) {
+    view.preview_full = full;
+    ui.ctx()
+        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
+}
+
+/// Where a canvas `size` canvas pixels sits in `frame`: fitted, or at
+/// `zoom` screen pixels per canvas pixel moved by `pan`. A pan is held to
+/// what keeps the canvas over the middle. Answers the rect and its scale.
+fn placed_canvas(frame: Rect, size: Vec2, zoom: Option<f64>, pan: &mut Vec2) -> (Rect, f64) {
+    let Some(zoom) = zoom else {
+        let fitted = fit_texture(frame, size);
+        let scale = if size.x > 0.0 {
+            f64::from(fitted.width() / size.x)
+        } else {
+            1.0
+        };
+        return (fitted, scale);
+    };
+    let shown = size * zoom as f32;
+    let room = ((shown - frame.size()) / 2.0).max(Vec2::ZERO);
+    *pan = pan.clamp(-room, room);
+    (Rect::from_center_size(frame.center() + *pan, shown), zoom)
+}
+
+/// The preview canvas at `rect`, clipped to `frame`, over black when
+/// `black` is on. Only the canvas gets that background; the area around it
+/// stays unfilled.
+fn paint_canvas(ui: &Ui, frame: Rect, texture: egui::TextureId, rect: Rect, black: bool) {
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    if black {
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    }
+    painter.image(
         texture,
         rect,
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -1278,7 +1862,8 @@ fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
     );
 }
 
-fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+/// The timecode, play button, zoom, and preview buttons.
+fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let live = shell.draft().is_some();
     let ink = if live { tokens::TEXT } else { tokens::MUTED };
     ui.painter().text(
@@ -1308,15 +1893,54 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         Color32::from_rgb(0x12, 0x13, 0x0f),
     );
     play_response.on_hover_text(if shell.playing() { "Pause" } else { "Play" });
+    if live {
+        zoom_buttons(ui, view, Pos2::new(play.right() + 20.0, rect.center().y));
+    }
 
     let still = Rect::from_center_size(
         Pos2::new(rect.right() - 28.0, rect.center().y),
         Vec2::splat(32.0),
     );
     background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
+    if live {
+        let guides = still.translate(Vec2::new(-80.0, 0.0));
+        let tip = if view.preview_guides {
+            "Hide safe-area guides"
+        } else {
+            "Show safe-area guides"
+        };
+        if round_button(ui, guides, "guides", tip, view.preview_guides).clicked() {
+            view.preview_guides = !view.preview_guides;
+        }
+        let mark = Rect::from_center_size(guides.center(), Vec2::new(16.0, 11.0));
+        let stroke = egui::Stroke::new(1.2, tokens::MUTED);
+        for inset in [0.0, 3.0] {
+            ui.painter().rect_stroke(
+                mark.shrink(inset),
+                CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        let screen = still.translate(Vec2::new(-120.0, 0.0));
+        let full = view.preview_full;
+        let tip = if full {
+            "Leave full screen"
+        } else {
+            "Full screen"
+        };
+        if round_button(ui, screen, "full-screen", tip, full).clicked() {
+            set_full_screen(ui, view, !full);
+        }
+        paint_corners(
+            ui,
+            Rect::from_center_size(screen.center(), Vec2::splat(13.0)),
+            full,
+        );
+    }
     let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
-    if still_response.clicked() {
-        shell.unavailable("still");
+    if still_response.clicked() && live {
+        view.ask_still = true;
     }
     ui.painter()
         .circle_filled(still.center(), 16.0, tokens::ICON_BUTTON);
@@ -1324,6 +1948,86 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+}
+
+/// A round transport button at `rect`, lit when `on`.
+fn round_button(ui: &Ui, rect: Rect, name: &str, tip: &str, on: bool) -> egui::Response {
+    let response = ui.interact(rect, ui.scope_id().with(name), Sense::click());
+    let fill = if on {
+        tokens::ACTIVE
+    } else {
+        tokens::ICON_BUTTON
+    };
+    ui.painter().circle_filled(rect.center(), 16.0, fill);
+    response.on_hover_text(tip)
+}
+
+/// Four corner brackets in `mark`: pointing out to fill the screen, in to
+/// leave it.
+fn paint_corners(ui: &Ui, mark: Rect, inward: bool) {
+    let stroke = egui::Stroke::new(1.4, tokens::MUTED);
+    let arm = 4.0;
+    for corner in [
+        mark.left_top(),
+        mark.right_top(),
+        mark.left_bottom(),
+        mark.right_bottom(),
+    ] {
+        let toward = (mark.center() - corner).normalized();
+        let (x, y) = (toward.x.signum(), toward.y.signum());
+        let tip = if inward {
+            corner + Vec2::new(x, y) * arm
+        } else {
+            corner
+        };
+        let (sx, sy) = if inward { (-x, -y) } else { (x, y) };
+        ui.painter()
+            .line_segment([tip, tip + Vec2::new(sx * arm, 0.0)], stroke);
+        ui.painter()
+            .line_segment([tip, tip + Vec2::new(0.0, sy * arm)], stroke);
+    }
+}
+
+/// − , the zoom, + from `left`: a step smaller, back to fit, a step bigger.
+fn zoom_buttons(ui: &Ui, view: &mut ViewState, left: Pos2) {
+    let label = match view.preview_zoom {
+        None => "Fit".to_owned(),
+        Some(zoom) => format!("{:.0}%", zoom * 100.0),
+    };
+    let buttons = [
+        ("−", 24.0, "Zoom out"),
+        (label.as_str(), 48.0, "Fit the canvas"),
+        ("+", 24.0, "Zoom in"),
+    ];
+    let mut x = left.x;
+    for (index, (text, width, tip)) in buttons.into_iter().enumerate() {
+        let button = Rect::from_min_size(Pos2::new(x, left.y - 12.0), Vec2::new(width, 24.0));
+        x += width + 2.0;
+        let response = ui.interact(button, ui.scope_id().with(("zoom", index)), Sense::click());
+        let ink = if response.hovered() {
+            tokens::TEXT
+        } else {
+            tokens::MUTED
+        };
+        ui.painter().text(
+            button.center(),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(if index == 1 { 12.0 } else { 16.0 }),
+            ink,
+        );
+        if response.on_hover_text(tip).clicked() {
+            match index {
+                1 => view.preview_zoom = None,
+                _ => {
+                    let up = index == 2;
+                    if let Some(step) = cutlass_editor::preview_zoom_step(view.preview_scale, up) {
+                        view.preview_zoom = Some(step);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The button that shows the preview canvas over black or clear. Its mark
@@ -1378,6 +2082,12 @@ fn duration_label(shell: &Shell) -> String {
 }
 
 fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    let inspected = shell
+        .selected()
+        .map(|id| id.as_str().to_owned())
+        .unwrap_or_default();
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
     let padded = rect.shrink2(Vec2::new(16.0, 0.0));
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
@@ -1388,22 +2098,7 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             ui.set_width(content_width);
             ui.add_space(14.0);
             if let Some(inspection) = shell.inspection() {
-                section_title(ui, "Clip");
-                fact(ui, "Name", &inspection.material, content_width);
-                fact(
-                    ui,
-                    "Start",
-                    &shell.timecode_at(inspection.start),
-                    content_width,
-                );
-                fact(
-                    ui,
-                    "Duration",
-                    &card_meta(inspection.duration.0),
-                    content_width,
-                );
-                ui.add_space(12.0);
-                clip_fields(shell, ui, view, &inspection);
+                inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
                 section_title(ui, "Details");
                 project_facts(shell, ui, view, content_width);
@@ -1507,6 +2202,31 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     }
 }
 
+/// Where the inspector keeps the id of the clip it is showing this frame.
+const INSPECTED: &str = "inspector-clip";
+
+/// Whether a field's typing lands: it lost focus on the clip it was typed
+/// for, and not because Escape was pressed. A click on another clip moves
+/// the selection before the field reports losing focus, so the clip is
+/// remembered while the field has focus.
+fn commits(ui: &Ui, response: &egui::Response) -> bool {
+    let clip: String = ui
+        .ctx()
+        .data(|data| data.get_temp(egui::Id::unique(INSPECTED)))
+        .unwrap_or_default();
+    let owner = response.id.with("clip");
+    if response.has_focus() {
+        ui.ctx().data_mut(|data| data.insert_temp(owner, clip));
+        return false;
+    }
+    if !response.lost_focus() {
+        return false;
+    }
+    let typed_for: Option<String> = ui.ctx().data_mut(|data| data.remove_temp(owner));
+    let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    !escaped && typed_for.is_none_or(|typed_for| typed_for == clip)
+}
+
 fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
@@ -1516,7 +2236,7 @@ fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
             egui::Label::new(RichText::new("Name").size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text).on_hover_text("Empty shows Untitled");
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = Some(text.clone());
         }
         if !response.has_focus() {
@@ -1563,210 +2283,6 @@ fn ratio_label(ratio: &str) -> String {
     }
 }
 
-fn clip_fields(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    view: &mut ViewState,
-    inspection: &crate::shell::Inspection,
-) {
-    if shell.place_enabled() {
-        if let Some(x) = number_field(ui, "X", &mut view.x_buffer, inspection.transform_x)
-            && !inspection.locked
-            && let Err(error) = shell.set_position(x, inspection.transform_y)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(y) = number_field(ui, "Y", &mut view.y_buffer, inspection.transform_y)
-            && !inspection.locked
-            && let Err(error) = shell.set_position(inspection.transform_x, y)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(scale) = number_field(ui, "Scale", &mut view.scale_buffer, inspection.scale_x)
-            && !inspection.locked
-            && let Err(error) = shell.set_scale(scale)
-        {
-            shell.set_notice(error.to_string());
-        }
-        let label = if shell.flipped() {
-            "Flipped"
-        } else {
-            "Upright"
-        };
-        let flip = widgets::toolbar_button(ui, label).on_hover_text("Top to bottom");
-        if flip.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.toggle_vertical_flip()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(opacity) =
-            number_field(ui, "Opacity", &mut view.opacity_buffer, inspection.opacity)
-            && !inspection.locked
-            && let Err(error) = shell.set_opacity(opacity)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if shell.crop_enabled()
-        && let Some(color) = color_field(
-            ui,
-            "Letterbox",
-            &mut view.letterbox_buffer,
-            &inspection.letterbox,
-            "Around the picture. Empty uses the project color",
-        )
-        && !inspection.locked
-        && let Err(error) = shell.set_letterbox(&color)
-    {
-        shell.set_notice(error.to_string());
-    }
-    if let Some(text) = inspection.text.clone() {
-        if view.text_for != inspection.segment_id.as_str() {
-            view.text_buffer = text;
-            view.text_for = inspection.segment_id.as_str().to_owned();
-        }
-        let response = widgets::field(ui, &mut view.text_buffer);
-        if response.lost_focus()
-            && !inspection.locked
-            && let Err(error) = shell.set_text(view.text_buffer.clone())
-        {
-            shell.set_notice(error.to_string());
-        }
-        let face_name = if inspection.font.is_empty() {
-            "Face"
-        } else {
-            inspection.font.as_str()
-        };
-        let face = widgets::toolbar_button(ui, face_name).on_hover_text("Installed face");
-        if face.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.cycle_text_font()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(size) =
-            number_field(ui, "Size", &mut view.text_size_buffer, inspection.text_size)
-            && !inspection.locked
-            && let Err(error) = shell.set_text_size(size)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(color) = color_field(
-            ui,
-            "Color",
-            &mut view.text_color_buffer,
-            &inspection.text_color,
-            "Hex color",
-        ) && !inspection.locked
-            && let Err(error) = shell.set_text_color(&color)
-        {
-            shell.set_notice(error.to_string());
-        }
-        let align = widgets::toolbar_button(ui, align_name(inspection.text_align))
-            .on_hover_text("Left, center, or right");
-        if align.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.cycle_text_align()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(spacing) = number_field(
-            ui,
-            "Letters",
-            &mut view.letter_buffer,
-            inspection.letter_spacing,
-        ) && !inspection.locked
-            && let Err(error) = shell.set_letter_spacing(spacing)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(spacing) =
-            number_field(ui, "Lines", &mut view.line_buffer, inspection.line_spacing)
-            && !inspection.locked
-            && let Err(error) = shell.set_line_spacing(spacing)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(width) =
-            number_field(ui, "Width", &mut view.width_buffer, inspection.line_width)
-            && !inspection.locked
-            && let Err(error) = shell.set_line_width(width)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(volume) = number_field(ui, "Volume", &mut view.volume_buffer, inspection.volume)
-        && !inspection.locked
-        && let Err(error) = shell.set_volume(volume)
-    {
-        shell.set_notice(error.to_string());
-    }
-    if shell.fade_enabled() {
-        let fade_in = fade_seconds(inspection.fade_in);
-        let fade_out = fade_seconds(inspection.fade_out);
-        if let Some(seconds) = number_field(ui, "Fade in", &mut view.fade_in_buffer, fade_in)
-            && !inspection.locked
-            && let Err(error) = shell.set_fade_in(seconds)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(seconds) = number_field(ui, "Fade out", &mut view.fade_out_buffer, fade_out)
-            && !inspection.locked
-            && let Err(error) = shell.set_fade_out(seconds)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(speed) = number_field(ui, "Speed", &mut view.speed_buffer, inspection.speed)
-        && !inspection.locked
-        && let Err(error) = shell.set_speed(speed)
-    {
-        shell.set_notice(error.to_string());
-    }
-}
-
-/// A number row. The typed text stays while the field has focus, and the
-/// stored value returns when it does not. `Some` is a new finite parse.
-fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Option<f64> {
-    let mut edited = None;
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
-        let response = widgets::field(ui, text);
-        if response.lost_focus() {
-            edited = text.parse().ok();
-        }
-        if !response.has_focus() {
-            *text = format!("{stored}");
-        }
-        if label == "Y" {
-            response.on_hover_text("Up is positive");
-        } else if label == "Scale" {
-            response.on_hover_text("1 is the fitted picture");
-        } else if label == "Opacity" {
-            response.on_hover_text("1 is solid");
-        } else if label == "Size" {
-            response.on_hover_text("Pixels");
-        } else if label == "Letters" || label == "Lines" {
-            response.on_hover_text("0 is the normal gap");
-        } else if label == "Width" {
-            response.on_hover_text("Pixels. 0 keeps one line");
-        } else if label.starts_with("Fade") {
-            response.on_hover_text("Seconds");
-        }
-    });
-    ui.add_space(4.0);
-    edited.filter(|value| *value != stored)
-}
-
-fn fade_seconds(microseconds: i64) -> f64 {
-    microseconds as f64 / 1_000_000.0
-}
-
 fn color_field(
     ui: &mut Ui,
     label: &str,
@@ -1782,7 +2298,7 @@ fn color_field(
             egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text);
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = Some(text.clone());
         }
         if !response.has_focus() {
@@ -1792,14 +2308,6 @@ fn color_field(
     });
     ui.add_space(4.0);
     edited.filter(|value| value != stored)
-}
-
-fn align_name(alignment: i32) -> &'static str {
-    match alignment {
-        1 => "Center",
-        2 => "Right",
-        _ => "Left",
-    }
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -1819,8 +2327,16 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
         egui::Stroke::new(1.0, tokens::GAP),
     );
     let body = Rect::from_min_max(toolbar.left_bottom(), rect.max);
+    let meter = Rect::from_min_max(
+        Pos2::new(body.right() - tokens::METER_WIDTH, body.top()),
+        body.max,
+    );
+    let body = Rect::from_min_max(body.min, Pos2::new(meter.left(), body.bottom()));
     ruler_and_lanes(shell, ui, view, body);
-    paint_clip_menu(shell, ui);
+    paint_meter(ui, meter, shell.meter());
+    paint_clip_menu(shell, ui, view);
+    paint_gap_menu(shell, ui);
+    paint_track_menu(shell, ui, view);
     let handle = Rect::from_min_size(
         Pos2::new(rect.min.x, rect.min.y - tokens::SPLIT),
         Vec2::new(rect.width(), tokens::SPLIT),
@@ -1937,8 +2453,10 @@ fn toolbar_button(
 
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
-        "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
-        | "lock" | "linkage" | "magnet" | "snap" => true,
+        "undo" => shell.can_undo(),
+        "redo" => shell.can_redo(),
+        "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides" | "lock" | "linkage"
+        | "magnet" | "snap" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
         "freeze" => shell.freeze_enabled(),
         "reverse" => shell.reverse_enabled(),
@@ -2090,6 +2608,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let lane_area = Rect::from_min_max(Pos2::new(lanes_left, tracks.top()), tracks.max);
     shell.prepare_lane(lane_area.width().max(1.0));
     let (rate, drop_frame) = ruler_rate(shell);
+    paint_marks(ui, shell, ruler, lanes_left);
     paint_ticks(
         ui,
         ruler,
@@ -2101,11 +2620,21 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     );
     let snap_at = shell.snap_line();
     let rows = shell.lanes();
-    let kinds: Vec<(bool, bool)> = rows
+    let kinds: Vec<(bool, f32)> = rows
         .iter()
-        .map(|lane| (lane.main, is_audio(lane)))
+        .map(|lane| (lane.main, lane_height(view, lane)))
         .collect();
-    let boxes = lane_rects(kinds, lane_area);
+    let laid = lane_rects(kinds, lane_area);
+    let (low, high) = lane_scroll_range(&laid, lane_area);
+    let scrolls = low < high;
+    if scrolls {
+        view.lane_scroll += lane_wheel(ui, tracks);
+    }
+    view.lane_scroll = view.lane_scroll.clamp(low, high);
+    let boxes: Vec<Rect> = laid
+        .iter()
+        .map(|rect| rect.translate(Vec2::new(0.0, view.lane_scroll)))
+        .collect();
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -2114,12 +2643,25 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     if rows.is_empty() {
         paint_empty_main(ui, lane_area);
     }
+    // Lanes scrolled past the ruler or the panel's foot are cut there.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.intersect(tracks));
     for (index, lane) in rows.iter().enumerate() {
         let Some(row) = boxes.get(index).copied() else {
             continue;
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
+        lane_head(shell, ui, view, lane, row, index);
+        resize_lane(
+            ui,
+            view,
+            lane,
+            row,
+            index,
+            rows.iter().position(|lane| lane.main),
+        );
     }
+    ui.set_clip_rect(clip);
     shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
@@ -2235,8 +2777,45 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         shell.set_notice(error.to_string());
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
-    pan_timeline(shell, ui, lane_area);
+    pan_timeline(shell, ui, lane_area, scrolls);
     zoom_timeline(shell, ui, lane_area);
+}
+
+/// How far the lanes may move: none while they fit, else far enough to
+/// bring the top lane or the bottom lane in with a little room.
+fn lane_scroll_range(boxes: &[Rect], area: Rect) -> (f32, f32) {
+    const ROOM: f32 = 8.0;
+    let (Some(top), Some(bottom)) = (
+        boxes.iter().map(|rect| rect.top()).reduce(f32::min),
+        boxes.iter().map(|rect| rect.bottom()).reduce(f32::max),
+    ) else {
+        return (0.0, 0.0);
+    };
+    let low = (area.bottom() - ROOM - bottom).min(0.0);
+    let high = (area.top() + ROOM - top).max(0.0);
+    (low, high)
+}
+
+/// This frame's wheel, whether the zoom modifier is held, and the pointer.
+/// egui already turns Shift and an up-and-down wheel sideways.
+fn wheel(ui: &Ui) -> (Vec2, bool, Option<Pos2>) {
+    ui.input(|input| {
+        (
+            input.smooth_scroll_delta,
+            input.modifiers.command || input.modifiers.ctrl,
+            input.pointer.hover_pos(),
+        )
+    })
+}
+
+/// The up-and-down wheel over the track area, in points to move the lanes.
+fn lane_wheel(ui: &Ui, tracks: Rect) -> f32 {
+    let (delta, command, pos) = wheel(ui);
+    let over = pos.is_some_and(|pos| tracks.contains(pos) && !over_menu(ui, pos));
+    if command || !over || delta.y.abs() <= delta.x.abs() {
+        return 0.0;
+    }
+    delta.y
 }
 
 fn secondary_click(ui: &Ui) -> Option<Pos2> {
@@ -2249,7 +2828,7 @@ fn secondary_click(ui: &Ui) -> Option<Pos2> {
     })
 }
 
-fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
+fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let Some(menu) = shell.clip_menu() else {
         return;
     };
@@ -2269,6 +2848,8 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
         "transcript" => shell.transcribe_enabled(),
         "extract-audio" => shell.extract_audio_enabled(),
         "flip" => shell.mirror_enabled(),
+        "open-file" => shell.selected_has_file(),
+        id if crate::menu::CLIP_OFF.contains(&id) => false,
         _ => true,
     };
     let shown = crate::menu::show(
@@ -2293,7 +2874,27 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
             "transcript" => shell.transcribe(),
             "extract-audio" => shell.extract_audio(),
             "flip" => shell.toggle_mirror(),
-            _ => Ok(()),
+            "deactivate" => shell.toggle_active(),
+            "open-file" => shell.reveal_selected_file(),
+            "range-in" => shell.mark_clip_in(),
+            "range-out" => shell.mark_clip_out(),
+            "beat" => {
+                if !shell.beating() {
+                    shell.toggle_beat();
+                }
+                Ok(())
+            }
+            "export" => {
+                view.export_span = crate::shell::ExportSpan::Selected;
+                view.export_open = true;
+                Ok(())
+            }
+            id => {
+                if let Some(focus) = inspector_focus(&kind, id) {
+                    view.inspector.focus(focus);
+                }
+                Ok(())
+            }
         };
         if let Err(error) = result {
             shell.set_notice(error.to_string());
@@ -2303,21 +2904,323 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     }
 }
 
+/// The inspector tab, page, and section a clip menu row opens.
+fn inspector_focus(kind: &cutlass_model::TrackType, id: &str) -> Option<inspector::Focus> {
+    let at = |tab, section| {
+        Some(inspector::Focus {
+            tab,
+            page: 0,
+            section,
+        })
+    };
+    match (kind, id) {
+        (cutlass_model::TrackType::Video, "edit-speed") => at(2, None),
+        (cutlass_model::TrackType::Video, "edit-animation") => at(3, None),
+        (cutlass_model::TrackType::Video, "edit-opacity") => at(0, Some("blend")),
+        (_, "volume" | "fade") => at(0, Some("sound")),
+        (_, "speed") => at(1, None),
+        (_, "style") => at(0, Some("stroke")),
+        (_, "edit-text" | "edit-effect" | "edit-filter" | "edit-adjust") => at(0, None),
+        _ => None,
+    }
+}
+
+/// The Close gap menu over a gap on a row.
+fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
+    let Some(menu) = shell.gap_menu().cloned() else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && (pos.x, pos.y) != (menu.x, menu.y)
+    {
+        shell.close_gap_menu();
+        return;
+    }
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("gap-menu"),
+        Pos2::new(menu.x, menu.y),
+        crate::menu::GAP_ROW,
+        &|_| true,
+    );
+    if shown.picked.is_some() {
+        shell.close_gap_menu();
+        if let Err(error) = shell.close_gap(&menu.track_id, menu.time) {
+            shell.set_notice(error.to_string());
+        }
+    } else if shown.dismissed {
+        shell.close_gap_menu();
+    }
+}
+
+/// The level meter: a bar for each channel from the floor at the bottom to
+/// full scale at the top, its held peak as a line, and a red cap while the
+/// channel has clipped.
+fn paint_meter(ui: &Ui, rect: Rect, channels: [cutlass_playback::ChannelReading; 2]) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    painter.rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    painter.vline(
+        rect.left(),
+        rect.y_range(),
+        egui::Stroke::new(1.0, tokens::GAP),
+    );
+    let span = Rect::from_min_max(
+        Pos2::new(rect.left() + 16.0, rect.top() + tokens::RULER_HEIGHT),
+        Pos2::new(rect.right() - 4.0, rect.bottom() - 8.0),
+    );
+    if span.height() <= 0.0 || span.width() <= 0.0 {
+        return;
+    }
+    let y_at = |db: f32| span.bottom() - cutlass_playback::meter_fraction(db) * span.height();
+    for db in [0.0, -12.0, -24.0, -48.0] {
+        painter.text(
+            Pos2::new(span.left() - 2.0, y_at(db)),
+            Align2::RIGHT_CENTER,
+            format!("{}", -db as i32),
+            FontId::proportional(8.0),
+            tokens::FAINT,
+        );
+    }
+    let bar_width = (span.width() - 2.0) / 2.0;
+    for (index, channel) in channels.iter().enumerate() {
+        let left = span.left() + index as f32 * (bar_width + 2.0);
+        let well = Rect::from_min_max(
+            Pos2::new(left, span.top()),
+            Pos2::new(left + bar_width, span.bottom()),
+        );
+        painter.rect_filled(well, CornerRadius::ZERO, tokens::LANE);
+        // The bar in three bands, each up to where the level reaches.
+        for (from, to, color) in [
+            (cutlass_playback::METER_FLOOR_DB, -12.0, tokens::METER_LOW),
+            (-12.0, -3.0, tokens::METER_LOUD),
+            (-3.0, 0.0, tokens::METER_HOT),
+        ] {
+            if channel.level <= from {
+                continue;
+            }
+            let top = y_at(channel.level.min(to));
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(well.left(), top),
+                    Pos2::new(well.right(), y_at(from)),
+                ),
+                CornerRadius::ZERO,
+                color,
+            );
+        }
+        if channel.hold > cutlass_playback::METER_FLOOR_DB {
+            painter.hline(
+                well.x_range(),
+                y_at(channel.hold),
+                egui::Stroke::new(1.0, tokens::TEXT),
+            );
+        }
+        if channel.clipped {
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(well.left(), span.top() - 5.0),
+                    Vec2::new(bar_width, 3.0),
+                ),
+                CornerRadius::ZERO,
+                tokens::METER_HOT,
+            );
+        }
+    }
+}
+
+fn paint_track_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some(menu) = view.track_menu.clone() else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && pos != menu.at
+    {
+        view.track_menu = None;
+        return;
+    }
+    let removable = !menu.main && !menu.lock;
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("track-menu"),
+        menu.at,
+        crate::menu::TRACK_HEAD,
+        &|id| id != "delete-track" || removable,
+    );
+    if let Some(item) = shown.picked {
+        view.track_menu = None;
+        track_action(shell, view, &menu.track_id, item.id);
+    } else if shown.dismissed {
+        view.track_menu = None;
+    }
+}
+
+/// Run a row of the track head's menu.
+fn track_action(shell: &mut Shell, view: &mut ViewState, track_id: &TrackId, action: &str) {
+    let kind = match action {
+        "add-video" => Some(cutlass_model::TrackType::Video),
+        "add-audio" => Some(cutlass_model::TrackType::Audio),
+        "add-text" => Some(cutlass_model::TrackType::Text),
+        _ => None,
+    };
+    let result = match (action, kind) {
+        (_, Some(kind)) => shell.add_track(kind).map(|_| ()),
+        ("rename-track", None) => {
+            let lanes = shell.lanes();
+            let typed = lanes
+                .iter()
+                .find(|lane| &lane.track_id == track_id)
+                .map(|lane| {
+                    lane.name
+                        .clone()
+                        .unwrap_or_else(|| lane_name(&lane.kind, lane.main))
+                })
+                .unwrap_or_default();
+            view.renaming = Some((track_id.clone(), typed));
+            Ok(())
+        }
+        ("delete-track", None) => {
+            view.lane_heights.remove(track_id);
+            shell.remove_track(track_id)
+        }
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        shell.set_notice(error.to_string());
+    }
+}
+
+/// The track head: a right-click opens its menu, a double-click on the
+/// name names it, and while it is being named a field stands in for it.
+fn lane_head(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    index: usize,
+) {
+    let head = head_rect(row);
+    let label = Rect::from_min_max(
+        Pos2::new(head.left() + 34.0, row.center().y - 11.0),
+        Pos2::new(head.right() - 32.0, row.center().y + 11.0),
+    );
+    if let Some((track_id, typed)) = view.renaming.as_mut()
+        && track_id == &lane.track_id
+    {
+        let field = ui.put(
+            label,
+            egui::TextEdit::singleline(&mut *typed)
+                .font(FontId::proportional(12.0))
+                .text_color(tokens::TEXT),
+        );
+        if !field.has_focus() && !field.lost_focus() {
+            field.request_focus();
+        }
+        if field.lost_focus() {
+            let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+            let typed = typed.clone();
+            view.renaming = None;
+            if !cancel && let Err(error) = shell.rename_track(&lane.track_id, &typed) {
+                shell.set_notice(error.to_string());
+            }
+        }
+        return;
+    }
+    let response = ui
+        .interact(label, ui.scope_id().with(("head", index)), Sense::click())
+        .on_hover_text("Double-click to rename, right-click for more");
+    if response.double_clicked() {
+        track_action(shell, view, &lane.track_id, "rename-track");
+    }
+    if let Some(pos) = secondary_click(ui)
+        && head.contains(pos)
+    {
+        shell.close_gap_menu();
+        view.track_menu = Some(TrackMenu {
+            track_id: lane.track_id.clone(),
+            main: lane.main,
+            lock: lane.lock,
+            at: pos,
+        });
+    }
+}
+
+/// The part of a row left of its switches, where its icon and name are.
+fn head_rect(row: Rect) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH,
+            row.top(),
+        ),
+        Pos2::new(row.left() - tokens::COVER_WIDTH, row.bottom()),
+    )
+}
+
+/// A row's height: the one dragged for it, or its kind's own.
+fn lane_height(view: &ViewState, lane: &crate::shell::LaneView) -> f32 {
+    view.lane_heights
+        .get(&lane.track_id)
+        .copied()
+        .unwrap_or_else(|| row_height(lane.main, is_audio(lane)))
+}
+
+/// Drag a row's outer edge to make it taller or shorter: the top edge for
+/// rows above the main track, the bottom edge for the main track and the
+/// rows under it. A double-click on the edge gives back the usual height.
+fn resize_lane(
+    ui: &mut Ui,
+    view: &mut ViewState,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    index: usize,
+    main: Option<usize>,
+) {
+    let above = main.is_some_and(|main| index < main);
+    let edge_y = if above { row.top() } else { row.bottom() };
+    let edge = Rect::from_min_max(
+        Pos2::new(
+            row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH,
+            edge_y - 3.0,
+        ),
+        Pos2::new(row.right(), edge_y + 3.0),
+    );
+    let response = ui
+        .interact(
+            edge,
+            ui.scope_id().with(("lane-edge", index)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    if response.double_clicked() {
+        view.lane_heights.remove(&lane.track_id);
+        return;
+    }
+    let delta = response.drag_delta().y;
+    if delta != 0.0 {
+        let height = lane_height(view, lane);
+        let grown = if above {
+            height - delta
+        } else {
+            height + delta
+        };
+        view.lane_heights.insert(
+            lane.track_id.clone(),
+            grown.clamp(tokens::MIN_LANE_HEIGHT, tokens::MAX_LANE_HEIGHT),
+        );
+    }
+}
+
 fn scroll_with_drag(shell: &mut Shell, ui: &Ui, x_in_view: f64) {
     if shell.drag_scroll(x_in_view) {
         ui.ctx().request_repaint();
     }
 }
 
-/// A wheel or a sideways swipe over the lanes moves the visible span.
-fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
-    let (delta, command, pos) = ui.input(|input| {
-        (
-            input.smooth_scroll_delta,
-            input.modifiers.command || input.modifiers.ctrl,
-            input.pointer.hover_pos(),
-        )
-    });
+/// A sideways swipe, or Shift and the wheel, over the lanes moves the
+/// visible span. While the lanes are taller than the panel the plain wheel
+/// scrolls them instead; while they fit it moves the span too.
+fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect, lanes_scroll: bool) {
+    let (delta, command, pos) = wheel(ui);
     if command || delta == Vec2::ZERO {
         return;
     }
@@ -2329,6 +3232,8 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     }
     let pixels = if delta.x.abs() >= delta.y.abs() {
         delta.x
+    } else if lanes_scroll {
+        return;
     } else {
         delta.y
     };
@@ -2401,6 +3306,10 @@ fn release_library_drop(
     let y = f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0;
     let landed = if material_id.starts_with("transition:") {
         shell.drop_transition(&material_id, x, y)
+    } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+        shell.drop_title(&material_id, x, y)
+    } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
+        shell.drop_effect(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };
@@ -2441,6 +3350,15 @@ fn paint_library_ghost(shell: &mut Shell, ui: &Ui) {
 }
 
 fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
+    if let Some(style) = cutlass_editor::title_style(material_id) {
+        return Some(title_card(style));
+    }
+    if let Some(effect) = cutlass_editor::effect_cards()
+        .into_iter()
+        .find(|effect| effect.id == material_id)
+    {
+        return Some(effect_card(effect));
+    }
     if let Some(offer) = crate::shell::TRANSITION_OFFERS
         .iter()
         .find(|offer| offer.card_id() == material_id)
@@ -2484,7 +3402,7 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
         name: file_label(&audio.path),
         meta: card_clock(audio.duration.0),
         on_timeline: used.contains(audio.id.as_str()),
-        look: CardLook::Sound(Vec::new()),
+        look: CardLook::Sound(std::sync::Arc::from([])),
     })
 }
 
@@ -2574,6 +3492,36 @@ fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
 fn lane_x(lanes_left: f32, pixel_size: f64, origin: i64, time: i64) -> f32 {
     let delta = (time - origin) as f64 * pixel_size;
     lanes_left + delta as f32
+}
+
+/// The I and O marks on the ruler: a band over the marked span, with an
+/// edge at each mark set.
+fn paint_marks(ui: &Ui, shell: &Shell, ruler: Rect, lanes_left: f32) {
+    let Some((start, end)) = shell.marked_span() else {
+        return;
+    };
+    let (pixel_size, origin) = (shell.pixel_size(), shell.view_origin().0);
+    let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+        Pos2::new(lanes_left, ruler.top()),
+        ruler.max,
+    ));
+    let left = lane_x(lanes_left, pixel_size, origin, start.0);
+    let right = lane_x(lanes_left, pixel_size, origin, end.0);
+    let band = Rect::from_min_max(
+        Pos2::new(left, ruler.top()),
+        Pos2::new(right, ruler.bottom()),
+    );
+    painter.rect_filled(band, CornerRadius::ZERO, tokens::MARKED);
+    let marks = shell.marks();
+    for (mark, x) in [(marks.mark_in, left), (marks.mark_out, right)] {
+        if mark.is_some() {
+            painter.vline(
+                x,
+                ruler.y_range(),
+                egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
+            );
+        }
+    }
 }
 
 /// The ruler's ticks and labels across the lanes. Past the end of the cut,
@@ -2688,7 +3636,10 @@ fn paint_lane(
             tokens::MUTED,
         );
     }
-    let name = lane_name(&lane.kind, lane.main);
+    let name = lane
+        .name
+        .clone()
+        .unwrap_or_else(|| lane_name(&lane.kind, lane.main));
     paint_lane_head(ui, row, lane_icon(&lane.kind), &name);
     let lock = Rect::from_center_size(
         Pos2::new(row.left() - tokens::COVER_WIDTH - 18.0, row.center().y),
@@ -2720,6 +3671,17 @@ fn paint_lane(
         .collect();
     for clip in &lane.clips {
         paint_clip(shell, ui, lane, clip, row, lanes_left, index);
+    }
+    // A right-click on the row but off its clips may be over a gap.
+    if let Some(pos) = secondary_click(ui)
+        && row.contains(pos)
+        && pos.x >= lanes_left
+        && shell
+            .clip_menu()
+            .is_none_or(|menu| (menu.x, menu.y) != (pos.x, pos.y))
+        && let Some(time) = shell.lane_time_at(f64::from(pos.x - lanes_left))
+    {
+        shell.open_gap_menu(&lane.track_id, time, pos.x, pos.y);
     }
     paint_transitions(shell, ui, lane, row, lanes_left);
     for preview in &followers {
@@ -2872,7 +3834,13 @@ fn clip_bounds(
     row: Rect,
     lanes_left: f32,
 ) -> Rect {
-    let height = clip_height(main, audio);
+    // A row dragged taller or shorter takes its clips with it.
+    let inset = clip_inset(main);
+    let height = if (row.height() - row_height(main, audio)).abs() < f32::EPSILON {
+        clip_height(main, audio)
+    } else {
+        (row.height() - 2.0 * inset).max(tokens::MIN_CLIP_HEIGHT)
+    };
     let x = lane_x(
         lanes_left,
         shell.pixel_size(),
@@ -2880,10 +3848,7 @@ fn clip_bounds(
         start.0,
     );
     let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    Rect::from_min_size(
-        Pos2::new(x, row.top() + clip_inset(main)),
-        Vec2::new(width, height),
-    )
+    Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height))
 }
 
 /// A clip's height: the main track is tallest, audio holds its waveform
@@ -2964,25 +3929,45 @@ fn paint_transitions(
     }
 }
 
-/// Thumbnail textures by the picture they show, kept in egui's memory.
-#[derive(Clone, Default)]
-struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::TextureHandle>);
+/// Thumbnail textures by the picture they show, each with the frame it
+/// was last drawn in. egui's memory holds a shared handle, so reaching the
+/// map copies nothing.
+#[derive(Default)]
+struct FilmTextures {
+    shown: std::collections::HashMap<cutlass_engine::ThumbKey, (egui::TextureHandle, u64)>,
+    frame: u64,
+}
 
-/// Textures kept before the oldest are let go.
+type SharedFilm = std::sync::Arc<std::sync::Mutex<FilmTextures>>;
+
+/// Textures kept before the least recently drawn are let go.
 const FILM_TEXTURES: usize = 1500;
 
-/// Run `f` on the thumbnail textures, then keep them for the next frame.
+/// Run `f` on the thumbnail textures, then let go of the least recently
+/// drawn quarter when there are too many.
 fn with_film_textures<R>(ctx: &egui::Context, f: impl FnOnce(&mut FilmTextures) -> R) -> R {
     let store = egui::Id::NULL.with("film textures");
-    let mut textures = ctx
-        .data_mut(|data| data.get_temp::<FilmTextures>(store))
-        .unwrap_or_default();
-    if textures.0.len() > FILM_TEXTURES {
-        textures.0.clear();
-    }
+    let shared = ctx.data_mut(|data| data.get_temp_mut_or_default::<SharedFilm>(store).clone());
+    let mut textures = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    textures.frame = ctx.cumulative_pass_nr();
     let result = f(&mut textures);
-    ctx.data_mut(|data| data.insert_temp(store, textures));
+    evict(&mut textures, FILM_TEXTURES);
     result
+}
+
+/// Keep at most `limit` textures: past it, drop the least recently drawn
+/// until a quarter of the room is free again.
+fn evict(textures: &mut FilmTextures, limit: usize) {
+    if textures.shown.len() <= limit {
+        return;
+    }
+    let keep = limit - limit / 4;
+    let mut ages: Vec<u64> = textures.shown.values().map(|(_, used)| *used).collect();
+    ages.sort_unstable_by(|a, b| b.cmp(a));
+    let cutoff = ages[keep - 1];
+    textures.shown.retain(|_, (_, used)| *used >= cutoff);
 }
 
 /// The texture of `thumb`, loaded the first time it is shown.
@@ -2992,17 +3977,19 @@ fn film_texture(
     key: cutlass_engine::ThumbKey,
     thumb: &cutlass_engine::Thumb,
 ) -> egui::TextureId {
-    textures
-        .0
-        .entry(key)
-        .or_insert_with(|| {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [thumb.width as usize, thumb.height as usize],
-                &thumb.rgba,
-            );
-            ctx.load_texture("film", image, egui::TextureOptions::LINEAR)
-        })
-        .id()
+    let frame = textures.frame;
+    let entry = textures.shown.entry(key).or_insert_with(|| {
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [thumb.width as usize, thumb.height as usize],
+            &thumb.rgba,
+        );
+        (
+            ctx.load_texture("film", image, egui::TextureOptions::LINEAR),
+            frame,
+        )
+    });
+    entry.1 = frame;
+    entry.0.id()
 }
 
 /// The clip's filmstrip in the `film` rows of `clip_rect`, over the tiles
@@ -3370,6 +4357,14 @@ fn paint_clip(
             paint_wave(ui.painter(), wave, clip_rect.left(), band, visible, colors);
         }
     }
+    if !clip.active {
+        // A deactivated clip stays in its place, dimmed.
+        painter.rect_filled(
+            clip_rect,
+            CornerRadius::same(CLIP_RADIUS),
+            Color32::from_black_alpha(150),
+        );
+    }
     if selected {
         painter.rect_stroke(
             clip_rect,
@@ -3527,6 +4522,70 @@ fn paint_clip(
     );
     paint_clip_markers(shell, ui, clip, lanes_left, row);
     paint_clip_beats(shell, ui, clip, lanes_left, row);
+    if shell.is_selected(&clip.id) {
+        paint_clip_keys(shell, ui, clip, clip_rect, row);
+    }
+}
+
+/// The selected clip's keys as diamonds along its foot. A click puts the
+/// playhead on the key; a drag moves it, landing on the nearest frame.
+fn paint_clip_keys(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    clip: &crate::shell::ClipSpan,
+    clip_rect: Rect,
+    row: Rect,
+) {
+    let painter = ui.painter().with_clip_rect(clip_rect.intersect(row));
+    let pixel_size = shell.pixel_size() as f32;
+    let y = clip_rect.bottom() - 8.0;
+    for time in shell.clip_key_times(&clip.id) {
+        let x = clip_rect.left() + (time.0 - clip.start.0) as f32 * pixel_size;
+        let hit = Rect::from_center_size(Pos2::new(x, y), Vec2::new(12.0, 14.0));
+        if !row.intersects(hit) {
+            continue;
+        }
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with(("key", clip.id.as_str(), time.0)),
+            Sense::click_and_drag(),
+        );
+        let dragged_to = response
+            .dragged()
+            .then(|| ui.input(|input| input.pointer.interact_pos()))
+            .flatten();
+        let at = dragged_to.map_or(x, |pos| pos.x.clamp(clip_rect.left(), clip_rect.right()));
+        let on = shell.playhead() == time;
+        let color = if response.hovered() || response.dragged() || on {
+            tokens::EXPORT
+        } else {
+            Color32::WHITE
+        };
+        let c = Pos2::new(at, y);
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(0.0, -5.0),
+                c + Vec2::new(5.0, 0.0),
+                c + Vec2::new(0.0, 5.0),
+                c + Vec2::new(-5.0, 0.0),
+            ],
+            color,
+            egui::Stroke::new(1.0, Color32::BLACK),
+        ));
+        if response.drag_stopped()
+            && let Some(pos) = ui.input(|input| input.pointer.interact_pos())
+        {
+            let x = pos.x.clamp(clip_rect.left(), clip_rect.right());
+            let to = clip.start.0
+                + (f64::from(x - clip_rect.left()) / shell.pixel_size()).round() as i64;
+            if let Err(error) = shell.move_clip_key(&clip.id, time, Micros(to)) {
+                shell.set_notice(error.to_string());
+            }
+        } else if response.clicked() {
+            shell.seek(time);
+        }
+        response.on_hover_text("Keyframe: click to go to it, drag to move it");
+    }
 }
 
 fn drag_clip_edge(
@@ -3843,9 +4902,11 @@ fn edge_strips(visible: Rect) -> (Rect, Rect) {
 
 /// Each lane's row, the main lane centered. `kinds` is each lane's main and
 /// audio flags.
-fn lane_rects(kinds: Vec<(bool, bool)>, area: Rect) -> Vec<Rect> {
+/// Rows for lanes given as (main, height). The main row sits in the middle
+/// of `area`; the rows above it stack up and the rest stack down.
+fn lane_rects(kinds: Vec<(bool, f32)>, area: Rect) -> Vec<Rect> {
     let main_flags: Vec<bool> = kinds.iter().map(|(main, _)| *main).collect();
-    let height = |index: usize| row_height(kinds[index].0, kinds[index].1);
+    let height = |index: usize| kinds[index].1;
     let Some(main) = main_flags.iter().position(|main| *main) else {
         let mut top = area.top();
         return (0..kinds.len())
@@ -3940,35 +5001,141 @@ fn export_dialog(
     view: &mut ViewState,
     parent: Option<&eframe::Frame>,
 ) {
+    use crate::shell::{ExportQuality, ExportSpan};
+    use cutlass_decode::CodecId;
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
-        ui.label(RichText::new("Short side").color(tokens::MUTED));
-        for side in crate::shell::SHORT_SIDES {
-            if ui
-                .selectable_label(view.export_side == side, side.to_string())
-                .clicked()
-            {
-                view.export_side = side;
-            }
-        }
-        if view.replace_prompt {
-            ui.label("Replace the existing file?");
-        }
-        if ui.button("Export").clicked() {
-            if view.export_path.is_empty() {
-                view.dialogs.save_export(parent);
-            } else {
-                match write_export(shell, view) {
-                    Ok(()) => view.export_open = false,
-                    Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
-                    Err(error) => shell.set_notice(error.to_string()),
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                let movie = view.export_codec != CodecId::Png;
+                choice_row(ui, "Format", |ui| {
+                    if ui.selectable_label(movie, "Movie (MP4)").clicked() && !movie {
+                        view.export_codec = CodecId::H264;
+                    }
+                    if ui.selectable_label(!movie, "Still frame (PNG)").clicked() {
+                        view.export_codec = CodecId::Png;
+                    }
+                });
+                if movie {
+                    choice_row(ui, "Codec", |ui| {
+                        for (codec, name) in [(CodecId::H264, "H.264"), (CodecId::Hevc, "HEVC")] {
+                            let offered = shell.encodes(codec);
+                            let label = egui::Button::selectable(view.export_codec == codec, name);
+                            if ui.add_enabled(offered, label).clicked() {
+                                view.export_codec = codec;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Range", |ui| {
+                        let picked = !shell.selection().is_empty();
+                        let marked = shell.marked_span().is_some();
+                        let offered = |span| match span {
+                            ExportSpan::Whole => true,
+                            ExportSpan::Selected => picked,
+                            ExportSpan::Marked => marked,
+                        };
+                        if !offered(view.export_span) {
+                            view.export_span = ExportSpan::Whole;
+                        }
+                        for (span, name) in [
+                            (ExportSpan::Whole, "Whole timeline"),
+                            (ExportSpan::Marked, "In to out"),
+                            (ExportSpan::Selected, "Selected clips"),
+                        ] {
+                            let offered = offered(span);
+                            let label = egui::Button::selectable(view.export_span == span, name);
+                            if ui.add_enabled(offered, label).clicked() {
+                                view.export_span = span;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Frame rate", |ui| {
+                        for (rate, name) in [
+                            (None, "Project"),
+                            (Some(FrameRate::FPS_24), "24"),
+                            (Some(FrameRate::FPS_25), "25"),
+                            (Some(FrameRate::FPS_30), "30"),
+                            (Some(FrameRate::FPS_50), "50"),
+                            (Some(FrameRate::FPS_60), "60"),
+                        ] {
+                            if ui
+                                .selectable_label(view.export_rate == rate, name)
+                                .clicked()
+                            {
+                                view.export_rate = rate;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Quality", |ui| {
+                        for (quality, name) in [
+                            (ExportQuality::Lower, "Lower"),
+                            (ExportQuality::Recommended, "Recommended"),
+                            (ExportQuality::Higher, "Higher"),
+                        ] {
+                            if ui
+                                .selectable_label(view.export_quality == quality, name)
+                                .clicked()
+                            {
+                                view.export_quality = quality;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Sound", |ui| {
+                        ui.checkbox(&mut view.export_sound, "Include the timeline's sound");
+                    });
                 }
-            }
-        }
+                choice_row(ui, "Short side", |ui| {
+                    for side in crate::shell::SHORT_SIDES {
+                        if ui
+                            .selectable_label(view.export_side == side, side.to_string())
+                            .clicked()
+                        {
+                            view.export_side = side;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                if view.replace_prompt {
+                    ui.label("Replace the existing file?");
+                }
+                let busy = shell.job().is_some();
+                if ui.add_enabled(!busy, egui::Button::new("Export")).clicked() {
+                    if view.export_path.is_empty() {
+                        let extension = if movie { "mp4" } else { "png" };
+                        let name = shell
+                            .draft()
+                            .map_or_else(String::new, |draft| draft.name.clone());
+                        view.dialogs.save_export(parent, &name, extension);
+                    } else {
+                        match write_export(shell, view) {
+                            Ok(()) => view.export_open = false,
+                            Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
+                            Err(error) => shell.set_notice(error.to_string()),
+                        }
+                    }
+                }
+            });
+        });
     });
     if closed {
         view.export_open = false;
         view.replace_prompt = false;
     }
+}
+
+/// A dim label and its choices on one line.
+fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, 20.0), Sense::hover());
+        ui.painter().text(
+            rect.left_center(),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(12.0),
+            tokens::MUTED,
+        );
+        add(ui);
+    });
 }
 
 fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
@@ -3977,11 +5144,12 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     };
     let result = match finished.picker {
         Picker::OpenProject => shell.open_folder(&path),
-        Picker::Import => import_chosen(shell, view, &path),
+        Picker::Import => shell.start_import(&path),
         Picker::SaveExport => {
             view.export_path = path.display().to_string();
             write_export(shell, view)
         }
+        Picker::SaveStill => shell.export_still(&path),
     };
     match result {
         Ok(()) if finished.picker == Picker::SaveExport => view.export_open = false,
@@ -3993,33 +5161,16 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     }
 }
 
-fn import_chosen(
-    shell: &mut Shell,
-    view: &mut ViewState,
-    path: &std::path::Path,
-) -> Result<(), ShellError> {
-    let (videos, audios) = shell.draft().map_or((0, 0), |draft| {
-        (draft.materials.videos.len(), draft.materials.audios.len())
-    });
-    shell.import_file(path)?;
-    let added_video = shell
-        .draft()
-        .is_some_and(|draft| draft.materials.videos.len() > videos);
-    let added_audio = shell
-        .draft()
-        .is_some_and(|draft| draft.materials.audios.len() > audios);
-    if added_video {
-        view.library_shelf = Shelf::Media;
-    } else if added_audio {
-        view.library_shelf = Shelf::Audio;
-    }
+/// Open the shelf an import that just landed filled.
+fn show_imported(shell: &mut Shell, view: &mut ViewState) {
+    let Some(kind) = shell.take_imported() else {
+        return;
+    };
+    view.library_shelf = match kind {
+        crate::shell::ImportedKind::Video => Shelf::Media,
+        crate::shell::ImportedKind::Audio => Shelf::Audio,
+    };
     view.library_query.clear();
-    let label = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_owned());
-    shell.set_notice(format!("Imported {label}"));
-    Ok(())
 }
 
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
@@ -4028,6 +5179,10 @@ fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
         short_side: view.export_side,
         codec: view.export_codec,
         replace: view.replace_prompt,
+        span: view.export_span,
+        frame_rate: view.export_rate,
+        quality: view.export_quality,
+        sound: view.export_sound,
     })
 }
 
@@ -4062,6 +5217,11 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::A => "a",
         egui::Key::Q => "q",
         egui::Key::W => "w",
+        egui::Key::J => "j",
+        egui::Key::K => "k",
+        egui::Key::L => "l",
+        egui::Key::I => "i",
+        egui::Key::O => "o",
         _ => return None,
     };
     let modifiers = input.modifiers;
@@ -4069,7 +5229,13 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
     let control = modifiers.ctrl && !modifiers.command;
     let plain = !(modifiers.command || modifiers.alt || modifiers.shift || control);
     let blocked = match name {
-        "space" | "left" | "right" | "delete" | "q" | "w" => !plain,
+        "space" | "left" | "right" | "q" | "w" | "j" | "k" | "l" | "i" | "o" => !plain,
+        // Shift-Delete is the ripple delete.
+        "delete" => {
+            !plain && !(modifiers.shift && !modifiers.command && !modifiers.alt && !control)
+        }
+        // Option-X clears the marks.
+        "x" if modifiers.alt => modifiers.command || modifiers.shift || control,
         // S splits, and Shift-Command-S extracts the audio.
         "s" => !plain && !(modifiers.command && modifiers.shift && !modifiers.alt),
         _ => false,
@@ -4086,6 +5252,9 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
     }
     if input.modifiers.shift {
         parts.push("shift");
+    }
+    if input.modifiers.alt {
+        parts.push("alt");
     }
     parts.push(name);
     Some(parts.join("+"))
@@ -4136,8 +5305,51 @@ fn file_label(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_menu_edit_rows_open_their_inspector_tab() {
+        use cutlass_model::TrackType;
+        let tab = |kind: TrackType, id| inspector_focus(&kind, id).map(|focus| focus.tab);
+        assert_eq!(tab(TrackType::Video, "edit-speed"), Some(2));
+        assert_eq!(tab(TrackType::Video, "edit-animation"), Some(3));
+        assert_eq!(
+            inspector_focus(&TrackType::Video, "edit-opacity").and_then(|focus| focus.section),
+            Some("blend")
+        );
+        assert_eq!(tab(TrackType::Audio, "speed"), Some(1));
+        assert_eq!(tab(TrackType::Audio, "volume"), Some(0));
+        assert_eq!(tab(TrackType::Text, "edit-text"), Some(0));
+        assert_eq!(tab(TrackType::Effect, "edit-effect"), Some(0));
+        assert_eq!(tab(TrackType::Video, "copy"), None);
+    }
     use cutlass_settings::Settings;
     use egui::Color32;
+
+    #[test]
+    fn film_textures_let_go_of_the_least_recently_drawn() {
+        let ctx = egui::Context::default();
+        let thumb = cutlass_engine::Thumb {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        let key = |n: i64| cutlass_engine::ThumbKey {
+            path: "clip.mov".into(),
+            time: Micros(n),
+        };
+        let mut textures = FilmTextures::default();
+        for n in 0..8 {
+            textures.frame = n as u64;
+            film_texture(&ctx, &mut textures, key(n), &thumb);
+        }
+        // Drawing the first again makes it recent.
+        textures.frame = 9;
+        film_texture(&ctx, &mut textures, key(0), &thumb);
+        evict(&mut textures, 4);
+        let mut kept: Vec<i64> = textures.shown.keys().map(|key| key.time.0).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [0, 6, 7]);
+    }
 
     #[test]
     fn the_first_frame_lists_projects_and_does_not_ask_to_close() {
@@ -4169,6 +5381,8 @@ mod tests {
         assert!(!ctx.global_style().interaction.selectable_labels);
         output.textures_delta.clear();
         Shell::create_project(&root).unwrap();
+        // The home looks at the folder once a second; skip the wait.
+        view.listed_checked = None;
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
@@ -4180,6 +5394,170 @@ mod tests {
         output.textures_delta.clear();
         assert!(painted.lines().any(|line| line == "Project"), "{painted}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_kind_of_clip_paints_its_own_inspector_panel() {
+        use cutlass_model::{
+            Draft, MaterialAudio, MaterialEffect, MaterialText, MaterialVideo, RawMaterial,
+            Segment, TimeRange, Track, TrackType,
+        };
+        let temp = std::env::temp_dir().join(format!("cutlass-panels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo::new("movie"));
+        draft.materials.audios.push(MaterialAudio {
+            id: "song".into(),
+            ..MaterialAudio::default()
+        });
+        let mut title = MaterialText::new("title");
+        title.content = "Hello".to_owned();
+        draft.materials.texts.push(title);
+        let mut caption = MaterialText::new("caption");
+        caption.content = "said words".to_owned();
+        caption.words.text = vec!["said".to_owned(), "words".to_owned()];
+        caption.words.start_time = vec![0, 1_500];
+        caption.words.end_time = vec![1_000, 2_000];
+        draft.materials.texts.push(caption);
+        let mut filter = MaterialEffect::new("warm");
+        filter.name = "Warm".to_owned();
+        draft.materials.effects.push(filter);
+        draft.materials.stickers.push(RawMaterial {
+            id: "star".into(),
+            ..RawMaterial::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        for (id, kind, material) in [
+            ("sound", TrackType::Audio, "song"),
+            ("words", TrackType::Text, "title"),
+            ("said", TrackType::Text, "caption"),
+            ("look", TrackType::Filter, "warm"),
+            ("sticker", TrackType::Sticker, "star"),
+        ] {
+            let mut track = Track::main(id);
+            track.kind = kind;
+            track
+                .segments
+                .push(Segment::new(id, material, TimeRange::new(0, 2_000_000)));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        for (id, shown, hidden) in [
+            (
+                "main",
+                [
+                    "Video",
+                    "Audio",
+                    "Speed",
+                    "Animation",
+                    "Adjust",
+                    "Basic",
+                    "Cutout",
+                    "Mask",
+                    "Enhance",
+                    "Position & Size",
+                    "Scale",
+                    "Uniform scale",
+                    "Position",
+                    "Rotate",
+                    "Flip upside down",
+                    "Blend",
+                    "Stabilize",
+                    "Motion blur",
+                    "Canvas",
+                    "Later",
+                ]
+                .as_slice(),
+                // Blend starts shut on a video clip, as in the prototype.
+                [
+                    "Font size",
+                    "Stroke",
+                    "Volume",
+                    "Mode",
+                    "Opacity",
+                    "Line width",
+                ]
+                .as_slice(),
+            ),
+            (
+                "sound",
+                &["Audio", "Speed", "Volume", "Fade in", "Fade out", "Denoise"],
+                &["Position & Size", "Stroke", "Video"],
+            ),
+            (
+                "words",
+                &[
+                    "Text",
+                    "Animation",
+                    "Tracking",
+                    "Text to speech",
+                    "Basic",
+                    "Bubble",
+                    "Effects",
+                    "Font",
+                    "Font size",
+                    "Style",
+                    "Case",
+                    "Color",
+                    "Character",
+                    "Alignment",
+                    "Line width",
+                    "Preset style",
+                    "Position & Size",
+                    "Plane rotation",
+                    "Flip upside down",
+                    "Blend",
+                    "Stroke",
+                    "Background",
+                    "Glow",
+                    "Shadow",
+                    "Hello",
+                ],
+                &["Volume", "Rotate", "Mode"],
+            ),
+            ("said", &["Text", "1.50 s", "Font size"], &["Volume"]),
+            (
+                "look",
+                &["Filter", "Warm", "Amount", "Temp"],
+                &["Position & Size", "Volume", "Basic"],
+            ),
+            (
+                "sticker",
+                &["Sticker", "Animation", "Opacity"],
+                &["Position & Size", "Volume"],
+            ),
+        ] {
+            shell.select(Some(SegmentId::new(id)));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            let lines = galleys(&output);
+            output.textures_delta.clear();
+            for label in shown {
+                assert!(
+                    lines.iter().any(|line| line == label),
+                    "{id} {label}: {lines:?}"
+                );
+            }
+            for label in hidden {
+                assert!(
+                    !lines.iter().any(|line| line == label),
+                    "{id} {label}: {lines:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
@@ -4285,7 +5663,8 @@ mod tests {
                 |ui| show(shell, ui, view, None),
             );
             output.textures_delta.clear();
-            // The round transport buttons, left to right: the toggle, the still.
+            // The round transport buttons, left to right: full screen, the
+            // guides, the toggle, the still.
             let mut buttons: Vec<Pos2> = output
                 .shapes
                 .iter()
@@ -4305,8 +5684,8 @@ mod tests {
         assert_eq!(black.len(), 1, "{black:?}");
         let ratio = black[0].width() / black[0].height();
         assert!((ratio - 16.0 / 9.0).abs() < 0.01, "{:?}", black[0]);
-        assert_eq!(buttons.len(), 2, "{buttons:?}");
-        let toggle = buttons[0];
+        assert_eq!(buttons.len(), 4, "{buttons:?}");
+        let toggle = buttons[2];
         let press = |pressed: bool| egui::Event::PointerButton {
             pos: toggle,
             button: egui::PointerButton::Primary,
@@ -4775,11 +6154,95 @@ mod tests {
     #[test]
     fn lanes_take_their_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
-        let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);
+        let rows = lane_rects(
+            vec![
+                (false, row_height(false, false)),
+                (true, row_height(true, false)),
+                (false, row_height(false, true)),
+            ],
+            area,
+        );
         let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
         assert_eq!(heights, [40.0, 90.0, 58.0]);
         assert_eq!(rows[1].center().y, 200.0);
         assert_eq!(rows[2].top() - rows[1].bottom(), 8.0);
+    }
+
+    #[test]
+    fn a_dragged_row_height_moves_the_rows_around_it_and_its_clips_grow() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let rows = lane_rects(vec![(false, 100.0), (true, 90.0), (false, 30.0)], area);
+        assert_eq!(rows[0].height(), 100.0);
+        assert_eq!(rows[1].top() - rows[0].bottom(), 8.0);
+        assert_eq!(rows[2].height(), 30.0);
+        let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 100.0));
+        let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(false, false)));
+        let (decoders, encoders) = crate::register_codecs();
+        let shell = Shell::new(decoders, encoders, Settings::default());
+        let grown = clip_bounds(&shell, false, false, Micros(0), Micros(1), tall, 0.0);
+        assert_eq!(grown.height(), 100.0 - 2.0 * tokens::CLIP_INSET);
+        let kept = clip_bounds(&shell, false, false, Micros(0), Micros(1), usual, 0.0);
+        assert_eq!(kept.height(), tokens::CLIP_HEIGHT);
+    }
+
+    #[test]
+    fn the_meter_fills_its_bands_up_to_the_level_and_caps_a_clip() {
+        let paint = |channels| {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(40.0, 300.0));
+                paint_meter(ui, rect, channels);
+            });
+            output.textures_delta.clear();
+            let fills: Vec<(Color32, Rect)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) => Some((rect.fill, rect.rect)),
+                    _ => None,
+                })
+                .collect();
+            fills
+        };
+        let quiet = cutlass_playback::ChannelReading {
+            level: -30.0,
+            hold: -20.0,
+            clipped: false,
+        };
+        let fills = paint([quiet, quiet]);
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|(color, _)| *color == tokens::METER_LOW)
+                .count(),
+            2
+        );
+        assert!(!fills.iter().any(|(color, _)| *color == tokens::METER_LOUD));
+        assert!(!fills.iter().any(|(color, _)| *color == tokens::METER_HOT));
+        let hot = cutlass_playback::ChannelReading {
+            level: 0.0,
+            hold: 0.0,
+            clipped: true,
+        };
+        let fills = paint([hot, quiet]);
+        // The left bar runs through all three bands and wears the clip cap.
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|(color, _)| *color == tokens::METER_HOT)
+                .count(),
+            2
+        );
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|(color, _)| *color == tokens::METER_LOUD)
+                .count(),
+            1
+        );
+        let rest = cutlass_playback::LevelMeter::new().reading();
+        let fills = paint(rest);
+        assert!(!fills.iter().any(|(color, _)| *color == tokens::METER_LOW));
     }
 
     #[test]
@@ -4865,6 +6328,17 @@ mod tests {
         );
     }
 
+    /// The cards at the top of the library, by name.
+    fn top_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
+        let store = cutlass_model::VirtualStore::default();
+        let place = BinPlace {
+            store: &store,
+            folder: "",
+            sort: cutlass_editor::LibrarySort::Name,
+        };
+        bin_cards(draft, &place, shelf, query)
+    }
+
     #[test]
     fn a_video_on_the_main_lane_is_a_media_card() {
         let mut draft = cutlass_model::Draft::empty("draft");
@@ -4877,15 +6351,23 @@ mod tests {
             "mat",
             cutlass_model::TimeRange::new(0, 2_500_000),
         ));
-        let cards = bin_cards(&draft, Shelf::Media, "");
+        let cards = top_cards(&draft, Shelf::Media, "");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].name, "clip.mp4");
         assert_eq!(cards[0].meta, "00:02");
         assert_eq!(cards[0].look, CardLook::Picture(None));
         assert!(cards[0].on_timeline);
-        assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
-        assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
-        let blends = bin_cards(&draft, Shelf::Transitions, "");
+        // A clip's own copy of that video is still the one file.
+        let mut copy = draft.materials.videos[0].clone();
+        copy.id = "seg:mat".into();
+        draft.materials.videos.push(copy);
+        draft.tracks[0].segments[0].material_id = "seg:mat".into();
+        let cards = top_cards(&draft, Shelf::Media, "");
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].on_timeline);
+        assert!(top_cards(&draft, Shelf::Audio, "").is_empty());
+        assert!(top_cards(&draft, Shelf::Media, "nope").is_empty());
+        let blends = top_cards(&draft, Shelf::Transitions, "");
         assert_eq!(
             blends
                 .iter()
@@ -4895,7 +6377,7 @@ mod tests {
         );
         assert_eq!(blends[0].meta, "0.5s");
         assert!(!blends[0].on_timeline);
-        assert_eq!(bin_cards(&draft, Shelf::Transitions, "dip").len(), 1);
+        assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 1);
     }
 
     #[test]
@@ -4912,6 +6394,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -4984,6 +6467,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -5025,7 +6509,11 @@ mod tests {
             click(card, egui::PointerButton::Secondary),
         );
         assert_eq!(view.library_picked, picked);
-        assert!(view.library_menu.is_some_and(|menu| menu.on_card));
+        assert!(
+            view.library_menu
+                .as_ref()
+                .is_some_and(|menu| menu.target == LibraryTarget::Files)
+        );
         let row = text_pos(&output, "Delete").expect("the Delete row") + Vec2::new(4.0, 6.0);
         frame(
             &mut shell,
@@ -5033,8 +6521,118 @@ mod tests {
             click(row, egui::PointerButton::Primary),
         );
         assert!(view.library_menu.is_none());
-        assert_eq!(shell.notice(), "Delete is not built yet");
+        // Delete takes the card out of the library; the file stays in the draft.
+        assert_eq!(shell.notice(), "Deleted pattern.png");
         assert!(shell.draft().unwrap().materials.videos.len() == 1);
+        assert!(
+            shell
+                .library_files(
+                    cutlass_editor::LibraryShelf::Media,
+                    "",
+                    cutlass_editor::LibrarySort::Name,
+                    ""
+                )
+                .is_empty()
+        );
+        assert!(shell.unsaved());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_new_folder_is_named_opened_and_left_by_the_path_bar() {
+        let temp = std::env::temp_dir().join(format!("cutlass-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "All").is_some());
+        assert!(text_pos(&output, "Free stock").is_some());
+        let card = text_pos(&output, "pattern.png").expect("library card");
+        // Right-click below the cards for the empty-space menu.
+        let empty = card + Vec2::new(0.0, 60.0);
+        let output = frame(
+            &mut shell,
+            &mut view,
+            click(empty, egui::PointerButton::Secondary),
+        );
+        assert_eq!(
+            view.library_menu.as_ref().map(|menu| menu.target.clone()),
+            Some(LibraryTarget::Empty)
+        );
+        let row = text_pos(&output, "New folder").expect("New folder row") + Vec2::new(4.0, 6.0);
+        frame(
+            &mut shell,
+            &mut view,
+            click(row, egui::PointerButton::Primary),
+        );
+        let (id, typed) = view.library_renaming.clone().expect("a name field");
+        assert_eq!(typed, "Untitled folder");
+        view.library_renaming = Some((id.clone(), "Shots".to_owned()));
+        frame(&mut shell, &mut view, Vec::new());
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(view.library_renaming.is_none());
+        let folder = text_pos(&output, "Shots").expect("the named folder");
+        assert!(shell.unsaved());
+        frame(
+            &mut shell,
+            &mut view,
+            click(folder, egui::PointerButton::Primary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(view.library_folder, id);
+        assert!(text_pos(&output, "pattern.png").is_none());
+        let all = text_pos(&output, "All").expect("the path bar");
+        frame(
+            &mut shell,
+            &mut view,
+            click(all, egui::PointerButton::Primary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(view.library_folder.is_empty());
+        assert!(text_pos(&output, "pattern.png").is_some());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -5052,6 +6650,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -5101,6 +6700,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -5465,6 +7065,412 @@ mod tests {
         );
         assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
         assert_eq!(chord(egui::Key::Space, control), None);
+        for (key, name) in [
+            (egui::Key::J, "j"),
+            (egui::Key::K, "k"),
+            (egui::Key::L, "l"),
+            (egui::Key::I, "i"),
+            (egui::Key::O, "o"),
+        ] {
+            assert_eq!(
+                chord(key, egui::Modifiers::default()).as_deref(),
+                Some(name)
+            );
+            assert_eq!(chord(key, egui::Modifiers::COMMAND), None);
+        }
+        assert_eq!(
+            chord(egui::Key::X, egui::Modifiers::ALT).as_deref(),
+            Some("alt+x")
+        );
+        assert_eq!(
+            chord(egui::Key::Delete, egui::Modifiers::SHIFT).as_deref(),
+            Some("shift+delete")
+        );
+        assert_eq!(chord(egui::Key::Delete, egui::Modifiers::COMMAND), None);
+        assert_eq!(
+            chord(
+                egui::Key::X,
+                egui::Modifiers::ALT | egui::Modifiers::COMMAND
+            ),
+            None
+        );
+        assert_eq!(
+            chord(egui::Key::X, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+x")
+        );
+    }
+
+    #[test]
+    fn dragging_a_slider_previews_each_value_and_undoes_in_one_step() {
+        let temp = std::env::temp_dir().join(format!("cutlass-slide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let label = text_pos(&output, "Scale").expect("the scale row");
+        // The track starts just past the row's name.
+        let start = label + Vec2::new(90.0, 6.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &mut shell,
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+        );
+        let mut seen = Vec::new();
+        for step in 1..=3 {
+            let at = start + Vec2::new(30.0 * step as f32, 0.0);
+            frame(&mut shell, vec![egui::Event::PointerMoved(at)]);
+            seen.push(shell.inspection().unwrap().scale_x);
+        }
+        let end = start + Vec2::new(90.0, 0.0);
+        frame(&mut shell, vec![press(end, false)]);
+        frame(&mut shell, Vec::new());
+        assert!(
+            seen.windows(2).all(|pair| pair[1] > pair[0]),
+            "the preview did not follow the drag: {seen:?}"
+        );
+        assert!(shell.inspection().unwrap().scale_x > 1.0);
+        shell.undo().unwrap();
+        assert_eq!(shell.inspection().unwrap().scale_x, 1.0);
+        assert!(!shell.can_undo());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_animation_tab_stores_a_preset_on_the_picture() {
+        let temp = std::env::temp_dir().join(format!("cutlass-animate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.width = 640;
+        movie.height = 360;
+        draft.materials.videos.push(movie);
+        let mut main = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        main.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(main);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let tab = text_pos(&output, "Animation").expect("the Animation tab");
+        frame(&mut shell, click(tab + Vec2::new(4.0, 4.0)));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let tile = text_pos(&output, "Slide Up").expect("the Slide Up tile");
+        frame(&mut shell, click(tile + Vec2::new(4.0, 4.0)));
+        frame(&mut shell, Vec::new());
+        let enter = shell.animations().unwrap().enter.expect("an in animation");
+        assert_eq!(enter.resource_id, "cutlass-anim-in-slide-up");
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "0.5s").is_some(), "the length row");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The centre of the first keyframe diamond painted in `output`.
+    fn diamond_pos(output: &egui::FullOutput) -> Option<Pos2> {
+        diamonds(output, 12.0).first().copied()
+    }
+
+    /// The centres of the diamonds `width` wide painted in `output`.
+    fn diamonds(output: &egui::FullOutput, width: f32) -> Vec<Pos2> {
+        fn find(shape: &egui::Shape, width: f32, found: &mut Vec<Pos2>) {
+            match shape {
+                egui::Shape::Path(path) if path.points.len() == 4 && path.closed => {
+                    let [top, right, bottom, left] = [0, 1, 2, 3].map(|i| path.points[i]);
+                    let diamond = (top.x - bottom.x).abs() < 0.01
+                        && (left.y - right.y).abs() < 0.01
+                        && (right.x - left.x - width).abs() < 0.01;
+                    if diamond {
+                        found.push(Pos2::new(top.x, left.y));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|shape| find(shape, width, found));
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            find(&clipped.shape, width, &mut found);
+        }
+        found
+    }
+
+    #[test]
+    fn the_diamond_keys_the_picture_and_the_graphs_show_between_keys() {
+        let temp = std::env::temp_dir().join(format!("cutlass-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.width = 640;
+        movie.height = 360;
+        draft.materials.videos.push(movie);
+        let mut main = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        main.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(main);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "Graphs").is_none());
+        let diamond = diamond_pos(&output).expect("a keyframe diamond");
+        frame(&mut shell, click(diamond));
+        assert_eq!(shell.keys().unwrap().times, vec![Micros(0)]);
+        shell.seek(Micros(2_000_000));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        frame(
+            &mut shell,
+            click(diamond_pos(&output).expect("the diamond")),
+        );
+        assert_eq!(shell.keys().unwrap().times.len(), 2);
+        shell.seek(Micros(1_000_000));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "Graphs").is_some(), "the Graphs row");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_zoom_buttons_step_the_canvas_and_fit_brings_it_back() {
+        let (mut shell, temp) = open_span("zoom", 2_000_000);
+        // A canvas bigger than the preview, so it fits below full size.
+        shell.cycle_canvas().unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let fit = text_pos(&output, "Fit").expect("the zoom label");
+        let fitted = view.preview_scale;
+        // The label's box is 48 wide; + is the next box, 24 wide.
+        let plus = fit + Vec2::new(46.0, 6.0);
+        frame(&mut shell, &mut view, click(plus));
+        let zoom = view.preview_zoom.expect("a zoom step");
+        assert!(zoom > fitted, "{zoom} after {fitted}");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let label = format!("{:.0}%", zoom * 100.0);
+        let shown = text_pos(&output, &label).expect("the zoom shown");
+        frame(&mut shell, &mut view, click(shown + Vec2::new(4.0, 4.0)));
+        assert_eq!(view.preview_zoom, None);
+        assert_eq!(view.preview_pan, Vec2::ZERO);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The centres of the round 16-pixel transport buttons, left to right.
+    fn round_buttons(output: &egui::FullOutput) -> Vec<Pos2> {
+        fn find(shape: &egui::Shape, found: &mut Vec<Pos2>) {
+            match shape {
+                egui::Shape::Circle(circle) if circle.radius == 16.0 => found.push(circle.center),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| find(shape, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            find(&clipped.shape, &mut found);
+        }
+        found.sort_by(|a, b| a.x.total_cmp(&b.x));
+        found
+    }
+
+    #[test]
+    fn the_guides_and_full_screen_buttons_toggle_and_escape_leaves() {
+        let (mut shell, temp) = open_span("full", 2_000_000);
+        shell.cycle_canvas().unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        let full_screen = |output: &egui::FullOutput| {
+            output.viewport_output.values().find_map(|viewport| {
+                viewport.commands.iter().find_map(|command| match command {
+                    egui::ViewportCommand::Fullscreen(on) => Some(*on),
+                    _ => None,
+                })
+            })
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let buttons = round_buttons(&output);
+        assert_eq!(buttons.len(), 4, "{buttons:?}");
+        let (full, guides) = (buttons[0], buttons[1]);
+        let editor_width = view.preview_canvas.expect("the canvas").width();
+        frame(&mut shell, &mut view, click(guides));
+        assert!(view.preview_guides);
+        let output = frame(&mut shell, &mut view, click(full));
+        assert!(view.preview_full);
+        assert_eq!(full_screen(&output), Some(true));
+        // Full screen shows the preview alone, so the canvas grows.
+        frame(&mut shell, &mut view, Vec::new());
+        let grown = view.preview_canvas.expect("the canvas").width();
+        assert!(grown > editor_width, "{grown} after {editor_width}");
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let output = frame(&mut shell, &mut view, vec![escape]);
+        assert!(!view.preview_full);
+        assert_eq!(full_screen(&output), Some(false));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_zoomed_canvas_pans_only_as_far_as_it_overhangs() {
+        let frame = Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+        let mut pan = Vec2::new(500.0, -500.0);
+        let (rect, scale) = placed_canvas(frame, Vec2::new(100.0, 50.0), Some(4.0), &mut pan);
+        assert_eq!(scale, 4.0);
+        // 400 by 200 shown in 200 by 100 overhangs 100 and 50 each side.
+        assert_eq!(pan, Vec2::new(100.0, -50.0));
+        assert_eq!(rect.left(), 0.0);
+        assert_eq!(rect.bottom(), 100.0);
+        let mut pan = Vec2::new(30.0, 30.0);
+        let (rect, scale) = placed_canvas(frame, Vec2::new(100.0, 50.0), None, &mut pan);
+        assert_eq!(
+            (rect, scale),
+            (Rect::from_min_size(Pos2::ZERO, frame.size()), 2.0)
+        );
     }
 
     #[test]
@@ -5682,6 +7688,161 @@ mod tests {
         let mut shell = Shell::new(decoders, encoders, Settings::default());
         shell.open_folder(&temp).unwrap();
         (shell, temp)
+    }
+
+    #[test]
+    fn a_clip_key_diamond_seeks_on_a_click_and_moves_on_a_drag() {
+        let temp = std::env::temp_dir().join(format!("cutlass-keydrag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut clip =
+            cutlass_model::Segment::new("a", "color", cutlass_model::TimeRange::new(0, 4_000_000));
+        for offset in [0, 1_000_000] {
+            cutlass_model::put_key(&mut clip, "KFTypePositionX", Micros(offset), 0.0);
+        }
+        draft.tracks[0].segments.push(clip);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let id = SegmentId::new("a");
+        shell.select(Some(id.clone()));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let keys = diamonds(&output, 10.0);
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        let second = keys[1];
+        frame(
+            &mut shell,
+            &mut view,
+            vec![
+                egui::Event::PointerMoved(second),
+                press(second, true),
+                press(second, false),
+            ],
+        );
+        assert_eq!(shell.playhead(), Micros(1_000_000));
+        let step = (1_000_000.0 * shell.pixel_size()) as f32;
+        let to = second + Vec2::new(step, 0.0);
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(second), press(second, true)],
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(
+                second + Vec2::new(step / 2.0, 0.0),
+            )],
+        );
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(to)]);
+        frame(&mut shell, &mut view, vec![press(to, false)]);
+        let times = shell.clip_key_times(&id);
+        assert_eq!(times.len(), 2);
+        assert!(
+            (times[1].0 - 2_000_000).abs() <= 34_000,
+            "the key landed at {times:?}"
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_right_click_in_a_gap_offers_close_gap_and_closes_it() {
+        let temp = std::env::temp_dir().join(format!("cutlass-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, start) in [("a", 0), ("b", 3_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 1_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let label = text_pos(&output, "a").expect("the first clip");
+        // Two seconds in is halfway along the gap.
+        let gap = Pos2::new(
+            label.x - 8.0 + (2_000_000.0 * shell.pixel_size()) as f32,
+            label.y + 4.0,
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            click(gap, egui::PointerButton::Secondary),
+        );
+        assert!(shell.gap_menu().is_some(), "no menu over the gap");
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Close gap").expect("the Close gap row");
+        frame(
+            &mut shell,
+            &mut view,
+            click(row + Vec2::new(4.0, 6.0), egui::PointerButton::Primary),
+        );
+        let starts: Vec<i64> = shell.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.target.start.0)
+            .collect();
+        assert_eq!(starts, [0, 1_000_000]);
+        assert!(shell.gap_menu().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
@@ -5980,6 +8141,275 @@ mod tests {
         assert!(beats[0].source > 0);
         assert!(beats[0].source < 2_000_000);
         assert_eq!(beats[0].time.0, beats[0].source);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Draw frames until the chosen import has been copied and landed.
+    fn land_import(shell: &mut Shell, view: &mut ViewState) {
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            if shell.job().is_none() || std::time::Instant::now() > until {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The last place `wanted` is painted, so a dialog's button wins over
+    /// the same word in the bar beneath it.
+    fn last_text_pos(output: &egui::FullOutput, wanted: &str) -> Option<Pos2> {
+        output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|clipped| shape_pos(&clipped.shape, wanted))
+            .map(|pos| pos + Vec2::new(4.0, 4.0))
+    }
+
+    #[test]
+    fn the_export_dialog_writes_a_movie_as_a_job_and_offers_its_folder() {
+        let (mut shell, temp) = open_span("movie", 1_000_000);
+        let destination = temp.join("cut.mp4");
+        let mut view = ViewState::new();
+        view.export_open = true;
+        view.export_side = 480;
+        view.export_path = destination.display().to_string();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            vec![
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            ]
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        for label in [
+            "Movie (MP4)",
+            "H.264",
+            "Whole timeline",
+            "Recommended",
+            "Frame rate",
+        ] {
+            assert!(text.contains(label), "the dialog has no {label}");
+        }
+        let export = last_text_pos(&output, "Export").expect("an Export button");
+        for events in click(export) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(
+            !view.export_open,
+            "the dialog stays open: {} at {export:?}",
+            shell.notice()
+        );
+        assert_eq!(shell.job().map(|job| job.label), Some("Export".to_owned()));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while shell.job().is_some() && std::time::Instant::now() < until {
+            frame(&mut shell, &mut view, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(destination.is_file(), "{}", shell.notice());
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(text.contains("Exported cut.mp4"), "{text}");
+        assert!(text.contains(crate::shell::REVEAL_LABEL));
+        let close = last_text_pos(&output, "Close").expect("a Close button");
+        for events in click(close) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(shell.exported().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_running_job_shows_its_stage_and_cancel_stops_it() {
+        let (mut shell, temp) = open_span("job", 2_000_000);
+        shell
+            .start_job("Transcribe", move |progress| {
+                progress.stage("Listening");
+                while !progress.cancelled() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Box::new(|_: &mut Shell| Ok(()))
+            })
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while shell.job().is_some_and(|job| job.stage.is_empty())
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // A new area is measured on its first frame and drawn on the next.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(painted_text(&output).contains("Transcribe: Listening"));
+        let cancel = text_pos(&output, "Cancel").expect("a Cancel button");
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: cancel,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(cancel), press(true)],
+            vec![press(false)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(
+            shell.job().map(|job| job.stage),
+            Some("Stopping".to_owned()),
+            "Cancel did not stop the job"
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while shell.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(shell.job().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_lanes_that_overflow_and_shift_wheel_pans_time() {
+        let temp = std::env::temp_dir().join(format!("cutlass-trim-{}-tall", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "segment",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        for index in 0..20 {
+            let mut track = cutlass_model::Track::main(format!("sound-{index}"));
+            track.kind = cutlass_model::TrackType::Audio;
+            track.segments.push(cutlass_model::Segment::new(
+                format!("tone-{index}"),
+                "tone",
+                cutlass_model::TimeRange::new(0, 1_000_000),
+            ));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let over = text_pos(&output, "segment").expect("main clip");
+        output.textures_delta.clear();
+        shell.zoom_in().unwrap();
+        shell.zoom_in().unwrap();
+        let wheel = |delta: Vec2, shift: bool| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers {
+                shift,
+                ..egui::Modifiers::default()
+            },
+        };
+        let mut spin = |delta: Vec2, shift: bool| {
+            for events in [
+                vec![egui::Event::PointerMoved(over), wheel(delta, shift)],
+                Vec::new(),
+            ] {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: screen,
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| show(&mut shell, ui, &mut view, None),
+                );
+                output.textures_delta.clear();
+            }
+            (shell.view_origin().0, view.lane_scroll)
+        };
+        let (before, _) = spin(Vec2::ZERO, false);
+        let (origin, scroll) = spin(Vec2::new(0.0, -120.0), false);
+        assert_eq!(origin, before, "the wheel moved time, not the lanes");
+        assert!(scroll < 0.0, "the lanes did not scroll: {scroll}");
+        let (origin, after) = spin(Vec2::new(0.0, -120.0), true);
+        assert!(origin > before, "shift and the wheel did not pan time");
+        assert_eq!(after, scroll, "shift and the wheel moved the lanes");
+        // However far the wheel goes, the last lane stops inside the panel.
+        for _ in 0..40 {
+            spin(Vec2::new(0.0, -120.0), false);
+        }
+        let (_, deepest) = spin(Vec2::new(0.0, -120.0), false);
+        let (_, still) = spin(Vec2::new(0.0, -120.0), false);
+        assert_eq!(deepest, still);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -68,6 +68,17 @@ impl GpuLayer {
         }
     }
 
+    /// Layers drawn on a canvas of their own, then placed over the whole
+    /// frame.
+    pub(crate) fn nested(child: FrameLayers) -> Self {
+        let placement = Placement::canvas(child.width, child.height);
+        Self {
+            source: GpuSource::Nested(Box::new(child)),
+            placement,
+            backdrop: None,
+        }
+    }
+
     /// One pixel stretched over the whole canvas.
     pub(crate) fn fill(pixel: CpuBytes) -> Self {
         Self {

@@ -336,8 +336,9 @@ pub fn apply_lut(working: &mut Working, lut: &Lut) -> Result<(), Error> {
     lut::apply(working, lut)
 }
 
-/// Codec transfer tags. BT.2020's 10-bit curve is the Rec.709 OETF.
-/// HLG and PQ are not codec tags; they are [`Curve::Hlg`] and [`Curve::Pq`].
+/// Codec transfer tags. BT.2020's 10-bit and 12-bit curves use the Rec.709 OETF.
+/// [`Transfer::Pq`] and [`Transfer::Hlg`] are SMPTE ST 2084 and ARIB STD-B67.
+/// A tag this crate does not convert becomes [`Curve::Unspecified`].
 #[must_use]
 pub fn curve_from_codec(value: Transfer) -> Curve {
     Curve::from_codec(value)

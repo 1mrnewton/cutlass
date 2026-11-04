@@ -74,7 +74,7 @@ const SEP: Entry = Entry::Separator;
 const COPY: Entry = done("copy", "Copy", "⌘C");
 const CUT: Entry = done("cut", "Cut", "⌘X");
 const DELETE: Entry = done("delete", "Delete", "⌫");
-const DEACTIVATE: Entry = todo("deactivate", "Deactivate", "");
+const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
 const REPLACE: Entry = todo("replace", "Replace", "");
 
 const VIDEO: &[Entry] = &[
@@ -86,10 +86,10 @@ const VIDEO: &[Entry] = &[
         "edit",
         "Edit",
         &[
-            todo("edit-speed", "Speed", ""),
-            todo("edit-animation", "Animation", ""),
+            done("edit-speed", "Speed", ""),
+            done("edit-animation", "Animation", ""),
             done("edit-crop", "Crop", ""),
-            todo("edit-opacity", "Opacity", ""),
+            done("edit-opacity", "Opacity", ""),
         ],
     ),
     done("split-scenes", "Split scenes", ""),
@@ -103,28 +103,28 @@ const VIDEO: &[Entry] = &[
         ],
     ),
     done("extract-audio", "Extract audio", "⇧⌘S"),
-    todo("sync", "Sync video and audio", ""),
+    done("sync", "Sync video and audio", ""),
     SEP,
     todo("compound", "Create compound clip", "⌥G"),
-    todo("multicam", "Create multi-camera clip", ""),
-    todo("group", "Group", ""),
-    todo("ungroup", "Ungroup", ""),
+    done("multicam", "Create multi-camera clip", ""),
+    done("group", "Group", ""),
+    done("ungroup", "Ungroup", ""),
     SEP,
-    todo("export", "Export selected clips", ""),
-    todo("deactivate", "Deactivate clip", "V"),
-    todo("trim", "Trim clip", ""),
+    done("export", "Export selected clips", ""),
+    done("deactivate", "Deactivate clip", "V"),
+    done("trim", "Trim clip", ""),
     todo("replace", "Replace clip", ""),
-    todo("link-media", "Link to media", ""),
-    todo("open-file", "Open file location", ""),
+    done("link-media", "Link to media", ""),
+    done("open-file", "Open file location", ""),
     SEP,
-    todo("edit-effects", "Edit effects", ""),
+    done("edit-effects", "Edit effects", ""),
     todo("variable-speed", "Show variable speed animation", "⌥K"),
     sub(
         "range",
         "Range",
         &[
-            todo("range-in", "Set in", ""),
-            todo("range-out", "Set out", ""),
+            done("range-in", "Set in", ""),
+            done("range-out", "Set out", ""),
         ],
     ),
     sub(
@@ -142,10 +142,10 @@ const AUDIO: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("volume", "Volume", ""),
-    todo("speed", "Speed", ""),
-    todo("fade", "Fade", ""),
-    todo("beat", "Beat", ""),
+    done("volume", "Volume", ""),
+    done("speed", "Speed", ""),
+    done("fade", "Fade", ""),
+    done("beat", "Beat", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -156,8 +156,8 @@ const TEXT: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("edit-text", "Edit text", ""),
-    todo("style", "Style", ""),
+    done("edit-text", "Edit text", ""),
+    done("style", "Style", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -179,7 +179,7 @@ const EFFECT: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("edit-effect", "Edit effect", ""),
+    done("edit-effect", "Edit effect", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -190,7 +190,7 @@ const FILTER: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("edit-filter", "Edit filter", ""),
+    done("edit-filter", "Edit filter", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -201,7 +201,7 @@ const ADJUST: &[Entry] = &[
     CUT,
     DELETE,
     SEP,
-    todo("edit-adjust", "Edit adjustment", ""),
+    done("edit-adjust", "Edit adjustment", ""),
     SEP,
     DEACTIVATE,
     REPLACE,
@@ -236,25 +236,68 @@ pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
     }
 }
 
-/// The menu for a media card in the library.
+/// Clip menu rows the prototype greys. They are there but cannot be picked.
+pub const CLIP_OFF: &[&str] = &[
+    "sync",
+    "multicam",
+    "group",
+    "ungroup",
+    "trim",
+    "link-media",
+    "edit-effects",
+];
+
+/// The menu for a gap between clips on a row.
+pub const GAP_ROW: &[Entry] = &[done("close-gap", "Close gap", "")];
+
+/// The menu for a track's head. The prototype has none; these rows add,
+/// name and delete tracks.
+pub const TRACK_HEAD: &[Entry] = &[
+    done("add-video", "Add video track", ""),
+    done("add-audio", "Add audio track", ""),
+    done("add-text", "Add text track", ""),
+    SEP,
+    done("rename-track", "Rename track", ""),
+    done("delete-track", "Delete track", ""),
+];
+
+/// The menu for the picked file cards in the library. The rows in
+/// [`LIBRARY_CARD_OFF`] are there but greyed, as in the prototype.
 pub const LIBRARY_CARD: &[Entry] = &[
-    todo("open-file", "Open file location", ""),
-    todo("delete", "Delete", ""),
-    todo("new-folder-with", "New folder with selected item", ""),
-    todo("link-media", "Link to media", ""),
+    done("open-file", "Open file location", ""),
+    done("delete", "Delete", ""),
+    done("new-folder-with", "New folder with selected item", ""),
+    done("link-media", "Link to media", ""),
     todo("split-scenes", "Split scenes", ""),
     todo("export", "Export selected clips", ""),
 ];
 
+/// The menu for a folder in the library. The rows in
+/// [`LIBRARY_FOLDER_OFF`] are there but greyed, as in the prototype.
+pub const LIBRARY_FOLDER: &[Entry] = &[
+    done("delete", "Delete", ""),
+    done("open-file", "Open file location", ""),
+    done("new-folder-with", "New folder with selected item", ""),
+    done("rename", "Rename", ""),
+    done("link-media", "Link to media", ""),
+    todo("export", "Export selected clips", ""),
+];
+
+/// The card menu's rows the prototype greys.
+pub const LIBRARY_CARD_OFF: &[&str] = &["link-media"];
+
+/// The folder menu's rows that cannot run on a folder.
+pub const LIBRARY_FOLDER_OFF: &[&str] = &["open-file", "new-folder-with", "link-media"];
+
 /// The menu for the empty space between library cards.
 pub const LIBRARY_EMPTY: &[Entry] = &[
-    todo("new-folder", "New folder", ""),
+    done("new-folder", "New folder", ""),
     sub(
         "sort",
         "Sort",
         &[
-            todo("sort-name", "Name", ""),
-            todo("sort-duration", "Duration", ""),
+            done("sort-name", "Name", ""),
+            done("sort-duration", "Duration", ""),
         ],
     ),
 ];
@@ -630,9 +673,11 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(built("edit"), Some(false));
+        assert_eq!(built("edit"), Some(true));
         assert_eq!(built("copy"), Some(true));
-        assert_eq!(built("range"), Some(false));
+        assert_eq!(built("range"), Some(true));
+        assert_eq!(built("render"), Some(false));
+        assert_eq!(built("isolate-voice"), Some(false));
     }
 
     fn frame(ctx: &Context, height: f32, events: Vec<egui::Event>) -> (Shown, egui::FullOutput) {
@@ -730,10 +775,11 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
-        let row = label_at(&output, "Group").expect("the Group row") + Vec2::new(4.0, 6.0);
+        let row =
+            label_at(&output, "Replace clip").expect("the Replace clip row") + Vec2::new(4.0, 6.0);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("group", false));
+        assert_eq!((picked.id, picked.built), ("replace", false));
     }
 
     #[test]

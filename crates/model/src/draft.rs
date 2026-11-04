@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 
 use crate::enums::CanvasRatio;
 use crate::id::DraftId;
+use crate::keyframe::KeyframeGraph;
 use crate::materials::Materials;
 use crate::relationship::Relationship;
 use crate::time::{FrameRate, Micros, TimecodeLabel};
@@ -133,6 +134,9 @@ pub struct Draft {
     pub draft_type: String,
     #[serde(default)]
     pub source: String,
+    /// The easing curves keys point at through `graphID`.
+    #[serde(default, deserialize_with = "crate::serde_util::null_as_default")]
+    pub keyframe_graph_list: Vec<KeyframeGraph>,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -166,6 +170,7 @@ impl Draft {
             mixed_track_mode_on: false,
             draft_type: video_draft(),
             source: "default".to_owned(),
+            keyframe_graph_list: Vec::new(),
             rest: Map::new(),
         }
     }

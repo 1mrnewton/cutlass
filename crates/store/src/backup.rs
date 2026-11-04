@@ -23,7 +23,11 @@ pub fn copy_backup(path: &Path) -> Result<(), StoreError> {
         });
     }
     let bak = path.with_file_name(format!("{name}.bak"));
-    std::fs::copy(path, &bak).map_err(|error| StoreError::Io {
+    let bytes = std::fs::read(path).map_err(|error| StoreError::Io {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    crate::atomic::write_atomic(&bak, &bytes).map_err(|error| StoreError::Io {
         path: bak,
         message: error.to_string(),
     })?;

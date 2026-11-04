@@ -3,6 +3,19 @@ use cutlass_model::{Draft, SegmentId};
 use super::speed::locate;
 use super::{EditError, ensure_unlocked};
 
+/// Store whether the clip is active: drawn and heard. The clip stays where
+/// it is and keeps its edits.
+pub fn set_active(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    active: bool,
+) -> Result<(), EditError> {
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    ensure_unlocked(draft.tracks[track_index].attribute)?;
+    draft.tracks[track_index].segments[segment_index].visible = active;
+    Ok(())
+}
+
 /// Store a horizontal mirror on the segment. The clip stays where it is.
 pub fn set_mirror(
     draft: &mut Draft,
@@ -204,5 +217,24 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LockedTrack);
         assert_eq!(session.draft(), &before);
+    }
+
+    #[test]
+    fn a_deactivated_clip_keeps_its_place_and_undo_brings_it_back() {
+        let mut draft = Draft::empty("draft");
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "m", TimeRange::new(0, 1_000_000)));
+        let mut session = Session::open(draft);
+        let off = Request::SetActive {
+            segment_id: "a".into(),
+            active: false,
+        };
+        session.apply(0, &[off]).unwrap();
+        let segment = &session.draft().tracks[0].segments[0];
+        assert!(!segment.visible);
+        assert_eq!(segment.target, TimeRange::new(0, 1_000_000));
+        session.undo().unwrap();
+        assert!(session.draft().tracks[0].segments[0].visible);
     }
 }

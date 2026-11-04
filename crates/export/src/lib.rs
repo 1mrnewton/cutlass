@@ -11,16 +11,20 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod movie;
 mod run;
 mod sidecars;
 mod sound;
+mod still;
 
 pub use config::{
     AudioExport, ExportError, ExportRequest, GIF_SHORT_SIDES, MAX_EDGE, MAX_FRAMES, SidecarKind,
     SidecarRequest, VIDEO_SHORT_SIDES, coded_size, output_size, validate,
 };
+pub use movie::{MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_movie};
 pub use run::{
     ExportResult, ExportRun, ExportedFrame, export, frame_indexes, same_software_pixels,
 };
 pub use sidecars::{sidecar_text, write_sidecar};
 pub use sound::file_audio;
+pub use still::{StillFormat, write_still};

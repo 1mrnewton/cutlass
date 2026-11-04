@@ -1,5 +1,5 @@
 use cutlass_model::{
-    CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
+    AnimType, CommonKeyframeGroup, Crop, FreezeInfo, MaterialAudio, MaterialId, MaterialTransition,
     MaterialVideo, Micros, Segment, SegmentId, SpeedPoint, TrackId, TrackType, WordColumns,
 };
 
@@ -112,6 +112,9 @@ pub enum Request {
         segment_id: SegmentId,
         freeze: Option<FreezeInfo>,
     },
+    /// Activate or deactivate a clip. A deactivated clip stays on its row
+    /// and keeps its edits, but is not drawn and not heard.
+    SetActive { segment_id: SegmentId, active: bool },
     /// Store a horizontal mirror on the segment. The clip stays where it is.
     SetMirror {
         segment_id: SegmentId,
@@ -189,6 +192,41 @@ pub enum Request {
     },
     /// Store the face file name on a text clip.
     SetTextFont { segment_id: SegmentId, face: String },
+    /// Ring the letters in `color`, `width` ems wide. An empty color
+    /// takes the outline off.
+    SetTextOutline {
+        segment_id: SegmentId,
+        color: String,
+        width: f64,
+    },
+    /// Cast a shadow in `color`, `distance` hundredths of an em toward
+    /// `angle` degrees, blurred by `blur` from 0 to 1. An empty color takes
+    /// the shadow off.
+    SetTextShadow {
+        segment_id: SegmentId,
+        color: String,
+        distance: f64,
+        angle: f64,
+        blur: f64,
+    },
+    /// Make the letters glow in `color`, `strength` and `range` from 0 to 1.
+    /// The glow is a bloom effect the clip points at; `glow_id` names a new
+    /// one when the clip has none of its own. An empty color takes it off.
+    SetTextGlow {
+        segment_id: SegmentId,
+        glow_id: MaterialId,
+        color: String,
+        strength: f64,
+        range: f64,
+    },
+    /// Fill a box behind the letters in `color` at `alpha`, its corners
+    /// rounded by `round` from 0 to 1. An empty color takes the box off.
+    SetTextBackground {
+        segment_id: SegmentId,
+        color: String,
+        alpha: f64,
+        round: f64,
+    },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {
@@ -211,16 +249,72 @@ pub enum Request {
         duration: Micros,
         effect_id: String,
     },
+    /// Run the effect clip `segment_id` over the picture clip `clip` alone,
+    /// or with `None` over every picture below it again.
+    BindEffect {
+        segment_id: SegmentId,
+        clip: Option<SegmentId>,
+    },
+    /// Store `value`, from 0 to 1, as the strength of the effect, filter,
+    /// or adjustment the clip uses. When another clip uses that material too,
+    /// a copy named `material_id` takes its place on this clip only.
+    SetEffectStrength {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        value: f64,
+    },
     /// Replace the segment's keyframe groups.
     SetKeyframes {
         segment_id: SegmentId,
         keyframes: Vec<CommonKeyframeGroup>,
+    },
+    /// Key the clip's place, size, turn, and opacity as they are at
+    /// `offset` from its start. A key there takes those values again.
+    AddKeyframe {
+        segment_id: SegmentId,
+        offset: Micros,
+    },
+    /// Remove every key at `offset` from the clip's start.
+    RemoveKeyframe {
+        segment_id: SegmentId,
+        offset: Micros,
+    },
+    /// Ease the span that ends at the key `offset` from the clip's start
+    /// along the Graphs panel curve named `graph`, or make it straight with
+    /// `None`.
+    SetKeyframeGraph {
+        segment_id: SegmentId,
+        offset: Micros,
+        graph: Option<String>,
+    },
+    /// Give the clip the in or out animation whose resource id is
+    /// `animation`, lasting `duration`, or clear that side with `None`.
+    SetAnimation {
+        segment_id: SegmentId,
+        kind: AnimType,
+        animation: Option<String>,
+        duration: Micros,
+    },
+    /// Store the picture's place, size, and turn, as the three requests
+    /// above do, and key them at `offset` from the clip's start.
+    KeyPose {
+        segment_id: SegmentId,
+        offset: Micros,
+        x: f64,
+        y: f64,
+        scale: f64,
+        rotation: f64,
     },
     /// Add a material to the library. This does not place a segment.
     Import { medium: ImportedMedium },
     /// Add an empty lane. Video and mixed lanes are overlays above the main track.
     /// Audio is inserted under the main track. This does not place a segment.
     InsertTrack { track_id: TrackId, kind: TrackType },
+    /// Take a lane and its clips off the draft. The main track and a locked
+    /// track stay. Each clip leaves as a delete would take it.
+    RemoveTrack { track_id: TrackId },
+    /// Name a lane. An empty or blank name goes back to the default name.
+    RenameTrack { track_id: TrackId, name: String },
     /// Store a marker. `None` is the ruler, at a timeline time. `Some` is a clip,
     /// and the mark is an offset from that clip's target start.
     AddTimeMark {
@@ -260,6 +354,14 @@ pub enum Request {
     SetLetterbox {
         segment_id: SegmentId,
         color: String,
+        canvas_id: MaterialId,
+    },
+    /// Cover the canvas behind a picture with a blurred copy of it, or
+    /// with `None` remove the backdrop and its color, so the project color
+    /// shows. `blur` is a fraction of the short side, from 0 through 1.
+    SetLetterboxBlur {
+        segment_id: SegmentId,
+        blur: Option<f64>,
         canvas_id: MaterialId,
     },
     /// Store the project frame rate. `drop_frame` is a timecode label.

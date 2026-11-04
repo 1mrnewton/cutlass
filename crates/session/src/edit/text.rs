@@ -1,11 +1,13 @@
 use cutlass_model::{
-    Draft, MaterialId, MaterialText, Segment, SegmentId, TimeRange, TrackId, TrackType,
+    Draft, MaterialEffect, MaterialId, MaterialText, Segment, SegmentId, TimeRange, TrackId,
+    TrackType, segment_bloom,
 };
 
 use super::speed::locate;
 use super::{EditError, ensure_unlocked};
 
-/// Replace the text material's string. Word columns stay as stored.
+/// Replace the text material's words. A rich title keeps its styled
+/// ranges. Word columns stay as stored.
 pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Result<(), EditError> {
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
@@ -15,13 +17,14 @@ pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Res
     if material_id.is_empty() {
         return Err(EditError::MissingMaterial);
     }
+    let material_id = super::own::own(draft, track_index, segment_index, &material_id)?;
     if let Some(text) = draft
         .materials
         .texts
         .iter_mut()
         .find(|text| text.id == material_id)
     {
-        text.content = content.to_owned();
+        text.set_words(content);
         return Ok(());
     }
     if draft.materials.get(material_id.as_str()).is_some() {
@@ -96,7 +99,7 @@ pub fn set_text_size(
     size: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !size.is_finite() || size <= 0.0 || size > MAX_TEXT_SIZE {
         return Err(EditError::TextSize);
     }
@@ -106,20 +109,22 @@ pub fn set_text_size(
     Ok(())
 }
 
-/// Store the text color. An empty string is white. An empty `font_path` takes `face`.
+/// Store the text color, and paint every range of a rich title in it. An
+/// empty string is white. An empty `font_path` takes `face`.
 pub fn set_text_color(
     draft: &mut Draft,
     segment_id: &SegmentId,
     color: &str,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let color = color.trim();
     if !color.is_empty() && !hex_color(color) {
         return Err(EditError::TextColor);
     }
     let text = &mut draft.materials.texts[index];
     text.text_color = color.to_owned();
+    text.paint_rich(unit_rgb(if color.is_empty() { "#FFFFFF" } else { color }));
     fill_face(text, face);
     Ok(())
 }
@@ -135,7 +140,7 @@ pub fn set_text_align(
     face: &str,
     line_width: f64,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !(0..=2).contains(&alignment) {
         return Err(EditError::TextAlign);
     }
@@ -156,7 +161,7 @@ pub fn set_letter_spacing(
     spacing: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !spacing.is_finite() || !(-1.0..=4.0).contains(&spacing) {
         return Err(EditError::LetterSpacing);
     }
@@ -174,7 +179,7 @@ pub fn set_line_spacing(
     spacing: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !spacing.is_finite() || spacing <= -1.0 || spacing > 4.0 {
         return Err(EditError::LineSpacing);
     }
@@ -193,7 +198,7 @@ pub fn set_line_width(
     width: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !width.is_finite() || width < 0.0 || width > MAX_LINE_WIDTH {
         return Err(EditError::LineWidth);
     }
@@ -209,7 +214,7 @@ pub fn set_text_font(
     segment_id: &SegmentId,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let face = face.trim();
     if !face_file(face) {
         return Err(EditError::TextFont);
@@ -218,8 +223,213 @@ pub fn set_text_font(
     Ok(())
 }
 
+/// The widest outline, in ems.
+pub const MAX_OUTLINE: f64 = 0.25;
+/// The farthest shadow, in hundredths of an em.
+pub const MAX_SHADOW_DISTANCE: f64 = 100.0;
+/// Room around the letters a new background box gets, in ems.
+const BACKGROUND_PAD: (f64, f64) = (0.2, 0.1);
+
+/// Ring the letters in `color`, `width` ems wide, fully opaque. An empty
+/// color takes the outline off and keeps the width.
+pub fn set_text_outline(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    color: &str,
+    width: f64,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let color = style_color(color)?;
+    if !(0.0..=MAX_OUTLINE).contains(&width) {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.border_color = color.to_owned();
+    text.border_width = width;
+    if !color.is_empty() {
+        text.border_alpha = 1.0;
+    }
+    Ok(())
+}
+
+/// Cast a shadow in `color`. `shape` is the distance in hundredths of an
+/// em, the angle in degrees, and the blur from 0 to 1. An empty color takes
+/// the shadow off and keeps the rest. A shadow with no opacity yet is made
+/// nearly opaque.
+pub fn set_text_shadow(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    color: &str,
+    shape: [f64; 3],
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let color = style_color(color)?;
+    let [distance, angle, blur] = shape;
+    if !(0.0..=MAX_SHADOW_DISTANCE).contains(&distance)
+        || !angle.is_finite()
+        || !(0.0..=1.0).contains(&blur)
+    {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.has_shadow = !color.is_empty();
+    if !color.is_empty() {
+        text.shadow_color = color.to_owned();
+        if text.shadow_alpha <= 0.0 {
+            text.shadow_alpha = 0.9;
+        }
+    }
+    text.shadow_distance = distance;
+    text.shadow_angle = angle;
+    text.shadow_smoothing = blur;
+    Ok(())
+}
+
+/// Fill a box behind the letters in `color` at `alpha` from 0 to 1, its
+/// corners rounded by `round` from 0 to 1. An empty color takes the box
+/// off. A box with no room around the letters yet gets some.
+pub fn set_text_background(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    color: &str,
+    alpha: f64,
+    round: f64,
+) -> Result<(), EditError> {
+    let index = own_text(draft, segment_id)?;
+    let color = style_color(color)?;
+    if !(0.0..=1.0).contains(&alpha) || !(0.0..=1.0).contains(&round) {
+        return Err(EditError::TextStyle);
+    }
+    let text = &mut draft.materials.texts[index];
+    text.background_style = i32::from(!color.is_empty());
+    text.background_color = color.to_owned();
+    text.background_alpha = alpha;
+    text.background_round_radius = round;
+    if !color.is_empty() && text.background_width <= 0.0 && text.background_height <= 0.0 {
+        (text.background_width, text.background_height) = BACKGROUND_PAD;
+    }
+    Ok(())
+}
+
+/// Make the letters glow in `color`. `glow` is the strength and the range,
+/// each from 0 to 1. The glow is a bloom effect among the clip's sidecars:
+/// one only this clip points at is changed in place, and otherwise a new
+/// one named `glow_id` takes its place, so a split clip's halves glow on
+/// their own. An empty color takes the glow off, and drops the effect when
+/// no clip points at it any more.
+pub fn set_text_glow(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    glow_id: &MaterialId,
+    color: &str,
+    glow: [f64; 2],
+) -> Result<(), EditError> {
+    text_index(draft, segment_id)?;
+    let color = style_color(color)?;
+    let [strength, range] = glow;
+    if !(0.0..=1.0).contains(&strength) || !(0.0..=1.0).contains(&range) {
+        return Err(EditError::TextStyle);
+    }
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    let segment = &draft.tracks[track_index].segments[segment_index];
+    let existing = segment_bloom(&draft.materials, segment).map(|effect| effect.id.clone());
+    let shared = existing
+        .as_ref()
+        .is_some_and(|id| pointed_at(draft, id) > 1);
+    if color.is_empty() {
+        let Some(id) = existing else {
+            return Ok(());
+        };
+        draft.tracks[track_index].segments[segment_index]
+            .extra_material_refs
+            .retain(|kept| *kept != id);
+        if !shared {
+            draft.materials.effects.retain(|effect| effect.id != id);
+        }
+        return Ok(());
+    }
+    let mut bloom = existing
+        .as_ref()
+        .and_then(|id| {
+            draft
+                .materials
+                .effects
+                .iter()
+                .find(|effect| &effect.id == id)
+        })
+        .and_then(MaterialEffect::bloom)
+        .unwrap_or_default();
+    bloom.color = color.to_owned();
+    bloom.strength = strength;
+    bloom.range = range;
+    if let Some(id) = existing.as_ref().filter(|_| !shared) {
+        if let Some(effect) = draft
+            .materials
+            .effects
+            .iter_mut()
+            .find(|effect| &effect.id == id)
+        {
+            effect.set_bloom(&bloom);
+        }
+        return Ok(());
+    }
+    if glow_id.is_empty() {
+        return Err(EditError::MissingMaterial);
+    }
+    if draft.materials.get(glow_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    draft
+        .materials
+        .effects
+        .push(MaterialEffect::glow(glow_id.clone(), &bloom));
+    let refs = &mut draft.tracks[track_index].segments[segment_index].extra_material_refs;
+    if let Some(id) = existing {
+        refs.retain(|kept| *kept != id);
+    }
+    refs.push(glow_id.clone());
+    Ok(())
+}
+
+/// How many clips point at material `id`.
+fn pointed_at(draft: &Draft, id: &MaterialId) -> usize {
+    draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .filter(|segment| segment.extra_material_refs.contains(id))
+        .count()
+}
+
+/// A trimmed color that is empty or hex.
+fn style_color(color: &str) -> Result<&str, EditError> {
+    let color = color.trim();
+    if color.is_empty() || hex_color(color) {
+        Ok(color)
+    } else {
+        Err(EditError::TextColor)
+    }
+}
+
 fn face_file(face: &str) -> bool {
     !face.is_empty() && face.len() <= 255 && !face.contains(['/', '\\', '\0'])
+}
+
+/// The index of the segment's own text material, copied first when
+/// another segment shares it.
+fn own_text(draft: &mut Draft, segment_id: &SegmentId) -> Result<usize, EditError> {
+    text_index(draft, segment_id)?;
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    let shared = draft.tracks[track_index].segments[segment_index]
+        .material_id
+        .clone();
+    let id = super::own::own(draft, track_index, segment_index, &shared)?;
+    draft
+        .materials
+        .texts
+        .iter()
+        .position(|text| text.id == id)
+        .ok_or(EditError::MissingMaterial)
 }
 
 fn text_index(draft: &Draft, segment_id: &SegmentId) -> Result<usize, EditError> {
@@ -247,6 +457,18 @@ fn fill_face(text: &mut MaterialText, face: &str) {
     if text.font_path.is_empty() && !face.is_empty() {
         text.font_path = face.to_owned();
     }
+}
+
+/// The red, green, and blue of a hex color checked by [`hex_color`], each
+/// from 0 to 1.
+fn unit_rgb(color: &str) -> [f64; 3] {
+    let body = color.strip_prefix('#').unwrap_or(color);
+    let channel = |at: usize| {
+        body.get(at..at + 2)
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            .map_or(1.0, |byte| f64::from(byte) / 255.0)
+    };
+    [channel(0), channel(2), channel(4)]
 }
 
 fn hex_color(text: &str) -> bool {
@@ -282,6 +504,217 @@ mod tests {
             .segments
             .push(Segment::new("a", "caption", TimeRange::new(0, 1_000_000)));
         Session::open(draft)
+    }
+
+    #[test]
+    fn outline_shadow_and_background_go_on_and_come_off() {
+        let mut session = open();
+        let outline = |color: &str, width: f64| Request::SetTextOutline {
+            segment_id: "a".into(),
+            color: color.to_owned(),
+            width,
+        };
+        let shadow = |color: &str| Request::SetTextShadow {
+            segment_id: "a".into(),
+            color: color.to_owned(),
+            distance: 8.0,
+            angle: -45.0,
+            blur: 0.4,
+        };
+        let background = |color: &str, alpha: f64| Request::SetTextBackground {
+            segment_id: "a".into(),
+            color: color.to_owned(),
+            alpha,
+            round: 0.5,
+        };
+        session
+            .apply(
+                0,
+                &[
+                    outline("#000000", 0.08),
+                    shadow("#000000"),
+                    background("#FFCC00", 0.8),
+                ],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert_eq!(
+            (text.border_color.as_str(), text.border_width),
+            ("#000000", 0.08)
+        );
+        assert_eq!(text.border_alpha, 1.0);
+        assert!(text.has_shadow);
+        assert_eq!(text.shadow_alpha, 0.9);
+        assert_eq!(
+            (
+                text.shadow_distance,
+                text.shadow_angle,
+                text.shadow_smoothing
+            ),
+            (8.0, -45.0, 0.4)
+        );
+        assert_eq!(text.background_style, 1);
+        assert_eq!(text.background_alpha, 0.8);
+        assert_eq!(text.background_round_radius, 0.5);
+        assert!(text.background_width > 0.0 && text.background_height > 0.0);
+        assert_eq!(text.words.text, ["A"]);
+
+        session
+            .apply(1, &[outline("", 0.08), shadow(""), background("", 0.8)])
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        assert!(text.border_color.is_empty());
+        assert!(!text.has_shadow);
+        assert_eq!(text.background_style, 0);
+        assert!(text.background_color.is_empty());
+
+        for (request, error) in [
+            (outline("#000000", 1.0), EditError::TextStyle),
+            (outline("black", 0.1), EditError::TextColor),
+            (background("#000000", 2.0), EditError::TextStyle),
+            (
+                Request::SetTextShadow {
+                    segment_id: "a".into(),
+                    color: "#000000".to_owned(),
+                    distance: 8.0,
+                    angle: f64::NAN,
+                    blur: 0.4,
+                },
+                EditError::TextStyle,
+            ),
+        ] {
+            assert_eq!(session.apply(2, &[request]).unwrap_err(), error);
+        }
+    }
+
+    #[test]
+    fn a_glow_is_a_bloom_effect_each_half_of_a_split_owns() {
+        let mut session = open();
+        let glow = |segment: &str, id: &str, color: &str, strength: f64| Request::SetTextGlow {
+            segment_id: segment.into(),
+            glow_id: MaterialId::new(id),
+            color: color.to_owned(),
+            strength,
+            range: 0.5,
+        };
+        let bloom = |session: &Session, id: &str| {
+            session
+                .draft()
+                .materials
+                .effects
+                .iter()
+                .find(|effect| effect.id.as_str() == id)
+                .and_then(cutlass_model::MaterialEffect::bloom)
+        };
+        session
+            .apply(0, &[glow("a", "g1", "#FFCC00", 0.6)])
+            .unwrap();
+        let first = bloom(&session, "g1").unwrap();
+        assert_eq!(
+            (first.color.as_str(), first.strength, first.range),
+            ("#FFCC00", 0.6, 0.5)
+        );
+        assert_eq!(session.draft().materials.effects[0].kind, "bloom");
+        assert_eq!(
+            session.draft().tracks[0].segments[0].extra_material_refs,
+            [MaterialId::new("g1")]
+        );
+
+        // Its own glow changes in place; the new id goes unused.
+        session
+            .apply(1, &[glow("a", "unused", "#FFCC00", 0.9)])
+            .unwrap();
+        assert_eq!(bloom(&session, "g1").unwrap().strength, 0.9);
+        assert!(bloom(&session, "unused").is_none());
+
+        // After a split, a change to one half gives it a glow of its own.
+        session
+            .apply(
+                2,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: cutlass_model::Micros(500_000),
+                    right_id: "b".into(),
+                }],
+            )
+            .unwrap();
+        session
+            .apply(3, &[glow("b", "g2", "#00FF00", 0.3)])
+            .unwrap();
+        assert_eq!(bloom(&session, "g1").unwrap().color, "#FFCC00");
+        assert_eq!(bloom(&session, "g2").unwrap().color, "#00FF00");
+        let refs = |session: &Session, index: usize| {
+            session.draft().tracks[0].segments[index]
+                .extra_material_refs
+                .clone()
+        };
+        assert_eq!(refs(&session, 1), [MaterialId::new("g2")]);
+
+        // Taking it off drops the effect nobody points at.
+        session.apply(4, &[glow("a", "", "", 0.0)]).unwrap();
+        assert!(refs(&session, 0).is_empty());
+        assert!(bloom(&session, "g1").is_none());
+        session.apply(5, &[glow("a", "", "", 0.0)]).unwrap();
+
+        for (request, error) in [
+            (glow("a", "g3", "#FFFFFF", 1.5), EditError::TextStyle),
+            (glow("a", "g3", "glow", 0.5), EditError::TextColor),
+            (glow("a", "", "#FFFFFF", 0.5), EditError::MissingMaterial),
+            (
+                glow("a", "caption", "#FFFFFF", 0.5),
+                EditError::DuplicateMaterial,
+            ),
+        ] {
+            assert_eq!(session.apply(6, &[request]).unwrap_err(), error);
+        }
+    }
+
+    #[test]
+    fn a_rich_title_keeps_its_ranges_through_new_words_and_a_color() {
+        let mut draft = Draft::empty("D");
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("rich"),
+            is_rich_text: true,
+            content: r#"{"text":"Hi","styles":[{"range":[0,1],"bold":true},{"range":[1,2]}]}"#
+                .to_owned(),
+            ..MaterialText::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "rich", TimeRange::new(0, 1_000_000)));
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[Request::SetTextContent {
+                    segment_id: "a".into(),
+                    content: "Hi you".to_owned(),
+                }],
+            )
+            .unwrap();
+        let text = &session.draft().materials.texts[0];
+        let rich = text.rich().unwrap();
+        assert_eq!(rich.text, "Hi you");
+        assert_eq!(rich.styles[1].range, [1, 6]);
+        assert_eq!(text.words().unwrap(), "Hi you");
+
+        session
+            .apply(
+                1,
+                &[Request::SetTextColor {
+                    segment_id: "a".into(),
+                    color: "#FF0000".to_owned(),
+                    face: String::new(),
+                }],
+            )
+            .unwrap();
+        let rich = session.draft().materials.texts[0].rich().unwrap();
+        assert!(
+            rich.styles
+                .iter()
+                .all(|style| style.solid() == Some([1.0, 0.0, 0.0, 1.0]))
+        );
+        assert_eq!(rich.styles[0].rest.get("bold"), Some(&true.into()));
     }
 
     #[test]

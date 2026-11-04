@@ -557,6 +557,36 @@ fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<Evaluated, Ex
     })
 }
 
+/// The picture at `time` as an export draws it: canvas-sized RGBA, with its
+/// width and height.
+pub(crate) fn still_rgba<D: Device>(
+    draft: &Draft,
+    device: &mut D,
+    time: Micros,
+    media: &ReaderFactory,
+    root: Option<&Path>,
+    fonts: &dyn Fonts,
+    renderer: Option<&Renderer>,
+) -> Result<(u32, u32, Vec<u8>), ExportError> {
+    let mut clips = OpenClips::new();
+    let evaluated = evaluated_frame(FrameInputs {
+        draft,
+        device,
+        time,
+        ready_at: time,
+        media,
+        clips: &mut clips,
+        root,
+        fonts,
+        renderer,
+    })?;
+    Ok((
+        evaluated.frame.width,
+        evaluated.frame.height,
+        evaluated.rgba,
+    ))
+}
+
 /// `composed` drawn on the GPU and read back.
 fn drawn(renderer: &Renderer, composed: cutlass_eval::Composed) -> Result<Frame, ExportError> {
     let layers = frame_layers(composed).map_err(drawing)?;

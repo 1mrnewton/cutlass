@@ -1,3 +1,4 @@
+mod animation;
 mod beat;
 mod canvas;
 mod color;
@@ -8,12 +9,14 @@ mod fade;
 mod freeze;
 mod import;
 mod keyframe;
+mod lane;
 mod linkage;
 mod magnet;
 mod mark;
 mod mirror;
 mod move_segment;
 mod name;
+mod own;
 mod place;
 mod placement;
 mod rate;
@@ -32,8 +35,10 @@ use cutlass_model::{Draft, LinkageSettings, Micros, RangeError, TimeRange, Track
 
 use crate::request::Request;
 
+pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
 pub use move_segment::move_segment;
 pub use place::place;
+pub use text::NEW_TEXT_SIZE;
 pub use trim::trim;
 pub use words::set_words;
 
@@ -69,6 +74,13 @@ pub enum EditError {
     /// The bit is not mute, hide, lock, solo, or muted-by-solo.
     UnknownAttribute,
     MissingMaterial,
+    /// A trim reaches before the media's first frame or past its last.
+    SourceBounds,
+    /// A clip would start before the timeline does.
+    BeforeZero,
+    /// The lane holds another kind of clip: sound on a picture lane, a
+    /// title on a sound lane, and so on.
+    LaneKind,
     /// The material id is already in a pool.
     DuplicateMaterial,
     /// The split time falls inside a blend window.
@@ -89,6 +101,8 @@ pub enum EditError {
     AlreadyExtracted,
     /// A track with this id is already on the draft, or this type cannot be a lane.
     TrackKind,
+    /// The main track cannot be removed.
+    MainTrack,
     /// The rotation is not a finite number of degrees.
     Angle,
     /// Position is not a finite number.
@@ -101,6 +115,14 @@ pub enum EditError {
     Volume,
     /// Opacity is not finite or is outside zero to one.
     Opacity,
+    /// A key's time is outside its clip, or the clip's keys do not read.
+    KeyTime,
+    /// No key is at that time.
+    NoKey,
+    /// The curve is not one the Graphs panel offers.
+    Graph,
+    /// The animation is not one the Animations panel offers for that side.
+    Animation,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -117,10 +139,18 @@ pub enum EditError {
     LineWidth,
     /// The face is empty or is not a file name.
     TextFont,
+    /// An outline, shadow, or background amount is out of its range.
+    TextStyle,
     /// A new text clip needs something to say.
     TextEmpty,
     /// The effect is not one the app ships.
     UnknownEffect,
+    /// The clip is not an effect, a filter, or an adjustment.
+    NotEffect,
+    /// An effect binds to a picture clip, and only an effect clip binds.
+    EffectTarget,
+    /// An effect strength is outside 0 through 1.
+    EffectStrength,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
     /// A canvas side is outside 1 through 7680.
@@ -129,6 +159,8 @@ pub enum EditError {
     CanvasRatio,
     /// A letterbox color belongs on a video or a composition.
     Letterbox,
+    /// A letterbox blur is not a fraction from 0 through 1.
+    LetterboxBlur,
     /// The frame rate is not a clock the draft can step.
     FrameRate,
     /// The color space is not one the player keeps.
@@ -199,6 +231,7 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::SetFreeze { segment_id, freeze } => {
             freeze::set_freeze(draft, segment_id, freeze.clone())
         }
+        Request::SetActive { segment_id, active } => mirror::set_active(draft, segment_id, *active),
         Request::SetMirror {
             segment_id,
             horizontal,
@@ -263,6 +296,31 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             face,
         } => text::set_line_width(draft, segment_id, *width, face),
         Request::SetTextFont { segment_id, face } => text::set_text_font(draft, segment_id, face),
+        Request::SetTextOutline {
+            segment_id,
+            color,
+            width,
+        } => text::set_text_outline(draft, segment_id, color, *width),
+        Request::SetTextShadow {
+            segment_id,
+            color,
+            distance,
+            angle,
+            blur,
+        } => text::set_text_shadow(draft, segment_id, color, [*distance, *angle, *blur]),
+        Request::SetTextBackground {
+            segment_id,
+            color,
+            alpha,
+            round,
+        } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetTextGlow {
+            segment_id,
+            glow_id,
+            color,
+            strength,
+            range,
+        } => text::set_text_glow(draft, segment_id, glow_id, color, [*strength, *range]),
         Request::AddText {
             track_id,
             segment_id,
@@ -295,12 +353,57 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             TimeRange::new(start.0, duration.0),
             effect_id,
         ),
+        Request::BindEffect { segment_id, clip } => {
+            effect::bind_effect(draft, segment_id, clip.as_ref())
+        }
+        Request::SetEffectStrength {
+            segment_id,
+            material_id,
+            value,
+        } => effect::set_effect_strength(draft, segment_id, material_id, *value),
         Request::SetKeyframes {
             segment_id,
             keyframes,
         } => keyframe::set_keyframes(draft, segment_id, keyframes),
+        Request::AddKeyframe { segment_id, offset } => {
+            keyframe::add_keyframe(draft, segment_id, *offset)
+        }
+        Request::RemoveKeyframe { segment_id, offset } => {
+            keyframe::remove_keyframe(draft, segment_id, *offset)
+        }
+        Request::SetKeyframeGraph {
+            segment_id,
+            offset,
+            graph,
+        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref()),
+        Request::SetAnimation {
+            segment_id,
+            kind,
+            animation,
+            duration,
+        } => animation::set_animation(draft, segment_id, *kind, animation.as_deref(), *duration),
+        Request::KeyPose {
+            segment_id,
+            offset,
+            x,
+            y,
+            scale,
+            rotation,
+        } => keyframe::key_pose(
+            draft,
+            segment_id,
+            *offset,
+            keyframe::Pose {
+                x: *x,
+                y: *y,
+                scale: *scale,
+                rotation: *rotation,
+            },
+        ),
         Request::Import { medium } => import::import(draft, medium.clone()),
         Request::InsertTrack { track_id, kind } => track::insert_track(draft, track_id, kind),
+        Request::RemoveTrack { track_id } => track::remove_track(draft, track_id),
+        Request::RenameTrack { track_id, name } => track::rename_track(draft, track_id, name),
         Request::AddTimeMark {
             segment_id,
             at,
@@ -328,6 +431,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             color,
             canvas_id,
         } => canvas::set_letterbox(draft, segment_id, color, canvas_id),
+        Request::SetLetterboxBlur {
+            segment_id,
+            blur,
+            canvas_id,
+        } => canvas::set_letterbox_blur(draft, segment_id, *blur, canvas_id),
         Request::SetFrameRate { fps, drop_frame } => rate::set_frame_rate(draft, *fps, *drop_frame),
         Request::SetDropFrame { on } => rate::set_drop_frame(draft, *on),
         Request::SetColorSpace { space } => color::set_color_space(draft, *space),

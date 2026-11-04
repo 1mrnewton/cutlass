@@ -2501,6 +2501,95 @@ pub static CHROMA_ZEROS_3: &[Vlc] = &[
     },
 ];
 pub static CHROMA_ZEROS: [&[Vlc]; 3] = [CHROMA_ZEROS_1, CHROMA_ZEROS_2, CHROMA_ZEROS_3];
+
+macro_rules! codes {
+    ($(($bits:expr, $len:expr, $a:expr, $b:expr)),* $(,)?) => {
+        &[$(Vlc { bits: $bits, len: $len, a: $a, b: $b },)*]
+    };
+}
+
+/// Table 9-5, chroma DC, 4:2:2. `a` is TotalCoeff and `b` is TrailingOnes.
+pub static COEFF_CHROMA422_DC: &[Vlc] = codes![
+    (1, 1, 0, 0),
+    (15, 7, 1, 0),
+    (1, 2, 1, 1),
+    (14, 7, 2, 0),
+    (13, 7, 2, 1),
+    (1, 3, 2, 2),
+    (7, 9, 3, 0),
+    (12, 7, 3, 1),
+    (11, 7, 3, 2),
+    (1, 5, 3, 3),
+    (6, 9, 4, 0),
+    (5, 9, 4, 1),
+    (10, 7, 4, 2),
+    (1, 6, 4, 3),
+    (7, 10, 5, 0),
+    (6, 10, 5, 1),
+    (4, 9, 5, 2),
+    (9, 7, 5, 3),
+    (7, 11, 6, 0),
+    (6, 11, 6, 1),
+    (5, 10, 6, 2),
+    (8, 7, 6, 3),
+    (7, 12, 7, 0),
+    (6, 12, 7, 1),
+    (5, 11, 7, 2),
+    (4, 10, 7, 3),
+    (7, 13, 8, 0),
+    (5, 12, 8, 1),
+    (4, 12, 8, 2),
+    (4, 11, 8, 3),
+];
+
+/// Table 9-9, chroma DC total_zeros, 4:2:2. One row per TotalCoeff 1..=7.
+pub static CHROMA422_ZEROS_1: &[Vlc] = codes![
+    (1, 1, 0, 0),
+    (2, 3, 1, 0),
+    (3, 3, 2, 0),
+    (2, 4, 3, 0),
+    (3, 4, 4, 0),
+    (1, 4, 5, 0),
+    (1, 5, 6, 0),
+    (0, 5, 7, 0),
+];
+pub static CHROMA422_ZEROS_2: &[Vlc] = codes![
+    (0, 3, 0, 0),
+    (1, 2, 1, 0),
+    (1, 3, 2, 0),
+    (4, 3, 3, 0),
+    (5, 3, 4, 0),
+    (6, 3, 5, 0),
+    (7, 3, 6, 0),
+];
+pub static CHROMA422_ZEROS_3: &[Vlc] = codes![
+    (0, 3, 0, 0),
+    (1, 3, 1, 0),
+    (1, 2, 2, 0),
+    (2, 2, 3, 0),
+    (6, 3, 4, 0),
+    (7, 3, 5, 0),
+];
+pub static CHROMA422_ZEROS_4: &[Vlc] = codes![
+    (6, 3, 0, 0),
+    (0, 2, 1, 0),
+    (1, 2, 2, 0),
+    (2, 2, 3, 0),
+    (7, 3, 4, 0),
+];
+pub static CHROMA422_ZEROS_5: &[Vlc] =
+    codes![(0, 2, 0, 0), (1, 2, 1, 0), (2, 2, 2, 0), (3, 2, 3, 0),];
+pub static CHROMA422_ZEROS_6: &[Vlc] = codes![(0, 2, 0, 0), (1, 2, 1, 0), (1, 1, 2, 0),];
+pub static CHROMA422_ZEROS_7: &[Vlc] = codes![(0, 1, 0, 0), (1, 1, 1, 0),];
+pub static CHROMA422_ZEROS: [&[Vlc]; 7] = [
+    CHROMA422_ZEROS_1,
+    CHROMA422_ZEROS_2,
+    CHROMA422_ZEROS_3,
+    CHROMA422_ZEROS_4,
+    CHROMA422_ZEROS_5,
+    CHROMA422_ZEROS_6,
+    CHROMA422_ZEROS_7,
+];
 pub static RUN_1: &[Vlc] = &[
     Vlc {
         bits: 1,

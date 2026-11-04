@@ -219,11 +219,14 @@ pub(crate) fn compose_layers<D: Device>(
                 return Ok(Composed::Frame(frame));
             }
             // The CPU picture is one layer; the recipe effects run over it.
+            // One bound to a clip cannot reach that clip alone here, so it
+            // is not run.
             let (width, height) = (frame.extent.width, frame.extent.height);
             let mut layers = FrameLayers::pixels(frame).ok_or(EvalError::Canvas)?;
             layers.layers.extend(
                 effects
                     .into_iter()
+                    .filter(|mark| mark.bound.is_none())
                     .map(|mark| GpuLayer::effect(mark.steps, width, height)),
             );
             Ok(Composed::Layers(layers))
@@ -239,6 +242,8 @@ fn gpu_layers(
     effects: Vec<RecipeMark>,
 ) -> FrameLayers {
     let mut out = Vec::new();
+    let (bound, effects): (Vec<RecipeMark>, Vec<RecipeMark>) =
+        effects.into_iter().partition(|mark| mark.bound.is_some());
     let mut effects = effects.into_iter().peekable();
     let effect = |mark: RecipeMark| GpuLayer::effect(mark.steps, extent.width, extent.height);
     if let Some(pixel) = draft
@@ -264,13 +269,34 @@ fn gpu_layers(
             Paint::Text(text) => text.gpu(),
             Paint::Mixed(_) => None,
         };
-        match gpu {
-            Some(gpu) => out.extend(gpu),
-            None => {
-                if let Sample::Ready(Picture::Cpu(picture)) = layer.source().sample(time) {
-                    out.push(GpuLayer::canvas(picture));
-                }
-            }
+        let mut drawn = match gpu {
+            Some(gpu) => gpu,
+            None => match layer.source().sample(time) {
+                Sample::Ready(Picture::Cpu(picture)) => vec![GpuLayer::canvas(picture)],
+                Sample::Ready(Picture::Platform(_)) | Sample::Miss => Vec::new(),
+            },
+        };
+        let own: Vec<GpuLayer> = bound
+            .iter()
+            .filter(|mark| mark.bound == Some((layer.key.1, layer.key.2)))
+            .map(|mark| {
+                effect(RecipeMark {
+                    steps: mark.steps.clone(),
+                    ..*mark
+                })
+            })
+            .collect();
+        if own.is_empty() || drawn.is_empty() {
+            out.extend(drawn);
+        } else {
+            // The clip is drawn on a canvas of its own, its effects run over
+            // that canvas only, and the result lands like any other layer.
+            drawn.extend(own);
+            out.push(GpuLayer::nested(FrameLayers {
+                width: extent.width,
+                height: extent.height,
+                layers: drawn,
+            }));
         }
     }
     out.extend(effects.map(effect));
@@ -1165,6 +1191,51 @@ mod recipe_tests {
             row.segments[0].visible = false;
         }
         assert!(effects(&layers(&invisible, 600_000)).is_empty());
+    }
+
+    #[test]
+    fn a_bound_recipe_runs_inside_its_clip_alone() {
+        let mut draft = with_effect("recipe/vignette");
+        let top = draft.tracks.len() - 1;
+        colour(&mut draft, "above", 20_000, top);
+        if let Some(effect) = draft.tracks[top]
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id.as_str() == "fx")
+        {
+            effect.bind_to(Some(&"below".into()));
+        }
+        let frame = layers(&draft, 600_000);
+        assert!(effects(&frame).is_empty(), "no effect over the whole frame");
+        let nested: Vec<&FrameLayers> = frame
+            .layers
+            .iter()
+            .filter_map(|layer| match &layer.source {
+                GpuSource::Nested(child) => Some(child.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nested.len(), 1);
+        assert_eq!(effects(nested[0]), vec![nested[0].layers.len() - 1]);
+        assert!(nested[0].layers.len() >= 2, "the clip, then its effect");
+        assert!(
+            !matches!(
+                frame.layers.last().map(|layer| &layer.source),
+                Some(GpuSource::Nested(_))
+            ),
+            "the clip above is drawn after, untouched"
+        );
+
+        let mut gone = draft.clone();
+        gone.tracks[0].segments.clear();
+        let frame = layers(&gone, 600_000);
+        assert!(effects(&frame).is_empty());
+        assert!(
+            frame
+                .layers
+                .iter()
+                .all(|layer| !matches!(layer.source, GpuSource::Nested(_)))
+        );
     }
 
     #[test]

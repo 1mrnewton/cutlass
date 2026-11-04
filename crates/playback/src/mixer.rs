@@ -6,6 +6,7 @@
 //! stream and starts a new generation under the same lock the mixer appends
 //! under, so a window mixed for an old position never reaches the device.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -22,6 +23,9 @@ pub const LEAD: usize = 6_144;
 /// One mixed window: 20 ms, a whole number of microseconds, so windows meet
 /// exactly.
 pub const WINDOW: u32 = RATE / 50;
+/// Window peaks kept for the meter: well past [`LEAD`], so the window the
+/// device plays is always among them.
+const PEAKS_KEPT: usize = 32;
 /// How often a full stream is checked for room.
 const POLL: Duration = Duration::from_millis(5);
 
@@ -64,6 +68,8 @@ struct State {
     job: Option<Arc<MixJob>>,
     /// Frames streamed for `job`.
     mixed: u64,
+    /// Each recent window's first frame and its left and right peaks.
+    peaks: VecDeque<(u64, [f32; 2])>,
     /// Changes on every play and stop. A window mixed for another
     /// generation is dropped.
     generation: u64,
@@ -80,6 +86,7 @@ impl Mixer {
             state: Mutex::new(State {
                 job: None,
                 mixed: 0,
+                peaks: VecDeque::new(),
                 generation: 0,
                 stop: false,
             }),
@@ -103,6 +110,7 @@ impl Mixer {
         self.shared.sink.clear();
         state.job = Some(Arc::new(job));
         state.mixed = 0;
+        state.peaks.clear();
         state.generation = state.generation.wrapping_add(1);
         self.shared.wake.notify_all();
     }
@@ -113,6 +121,7 @@ impl Mixer {
         self.shared.sink.clear();
         state.job = None;
         state.mixed = 0;
+        state.peaks.clear();
         state.generation = state.generation.wrapping_add(1);
     }
 
@@ -120,6 +129,17 @@ impl Mixer {
     #[must_use]
     pub fn mixed(&self) -> u64 {
         lock(&self.shared.state).mixed
+    }
+
+    /// The left and right peaks of the window holding stream frame `frame`,
+    /// or `None` when it is not mixed or long gone.
+    #[must_use]
+    pub fn peak_at(&self, frame: u64) -> Option<[f32; 2]> {
+        lock(&self.shared.state)
+            .peaks
+            .iter()
+            .find(|(first, _)| (*first..first.saturating_add(u64::from(WINDOW))).contains(&frame))
+            .map(|(_, peak)| *peak)
     }
 
     /// The draft revision being played, if any.
@@ -192,6 +212,13 @@ fn run(shared: &Shared, readers: &ReaderFactory) {
         );
         state = lock(&shared.state);
         if state.generation == generation {
+            let first = state.mixed;
+            if state.peaks.len() >= PEAKS_KEPT {
+                state.peaks.pop_front();
+            }
+            state
+                .peaks
+                .push_back((first, crate::meter::window_peak(&bytes)));
             shared.sink.append(&bytes);
             state.mixed = state.mixed.saturating_add(u64::from(WINDOW));
         }

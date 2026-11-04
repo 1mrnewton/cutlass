@@ -1,10 +1,14 @@
 //! Throughput against ffmpeg on one thread.
 //!
-//! `cargo bench -p cutlass-h264 --offline`
+//! `cargo bench -p cutlass-h264`
 //!
 //! Decode is the same High annex-B stream. Encode is the same `testsrc2`
 //! pictures. libx264 is ultrafast; this encoder has no preset. The numbers
 //! are wall time, not a quality match.
+//!
+//! Before any speed is printed, decode samples must match ffmpeg with zero
+//! difference, and this encoder's bitstream must reconstruct to the same
+//! samples in this decoder and in ffmpeg. A mismatch fails the process.
 
 #![allow(clippy::print_stdout)]
 
@@ -12,7 +16,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
+use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, VideoOutput, Yuv420p};
 use cutlass_encode::{VideoEncoder, VideoInput};
 use cutlass_h264::{H264Decoder, H264Encoder};
 
@@ -39,6 +43,11 @@ fn main() -> Result<(), String> {
     let bytes = std::fs::read(&coded).map_err(|err| err.to_string())?;
     let units = access_units(&bytes)?;
     let packets = packets(&units)?;
+    let decoded = reconstruct(&packets, DECODE_FRAMES)?;
+    let reference = ffmpeg_yuv(&ffmpeg, &coded, &dir.join("decoded.yuv"), DECODE_FRAMES)?;
+    same_samples("decode", &decoded, &reference)?;
+    drop(decoded);
+    drop(reference);
     let decode_ours = median_seconds(|| time_decode(&packets))?;
     let decode_ffmpeg = median_seconds(|| time_ffmpeg_decode(&ffmpeg, &coded))?;
 
@@ -46,22 +55,163 @@ fn main() -> Result<(), String> {
     generate_yuv(&ffmpeg, &raw_path)?;
     let raw = std::fs::read(&raw_path).map_err(|err| err.to_string())?;
     let inputs = inputs(&raw)?;
-    let _ = time_encode(&inputs)?;
+    drop(raw);
+    let encoded = encode_packets(&inputs)?;
+    let encoded_path = dir.join("encoded.h264");
+    write_annex(&encoded, &encoded_path)?;
+    let encoded_ours = reconstruct(&encoded, ENCODE_FRAMES)?;
+    let encoded_ffmpeg = ffmpeg_yuv(
+        &ffmpeg,
+        &encoded_path,
+        &dir.join("encoded.yuv"),
+        ENCODE_FRAMES,
+    )?;
+    same_samples("encode", &encoded_ours, &encoded_ffmpeg)?;
+    drop(encoded);
+    drop(encoded_ours);
+    drop(encoded_ffmpeg);
     let encode_ours = time_encode(&inputs)?;
     let encode_ffmpeg = time_ffmpeg_encode(&ffmpeg, &raw_path)?;
 
     println!("1280x720, one thread");
     println!("cutlass times the codec loop. ffmpeg times include process startup.");
+    println!("decode pixels match ffmpeg, zero sample difference, {DECODE_FRAMES} frames");
     println!("decode High annex-B, {DECODE_FRAMES} frames, median of 3");
     print_row("cutlass", DECODE_FRAMES, decode_ours);
     print_row("ffmpeg", DECODE_FRAMES, decode_ffmpeg);
     print_ratio(decode_ffmpeg, decode_ours);
+    println!(
+        "encode reconstruction matches ffmpeg, zero sample difference, {ENCODE_FRAMES} frames"
+    );
     println!("encode testsrc2, {ENCODE_FRAMES} frames, one run, {BITRATE} bits/s");
     println!("libx264 preset ultrafast, profile high");
     print_row("cutlass", ENCODE_FRAMES, encode_ours);
     print_row("ffmpeg", ENCODE_FRAMES, encode_ffmpeg);
     print_ratio(encode_ffmpeg, encode_ours);
     Ok(())
+}
+
+fn same_samples(what: &str, got: &[u8], want: &[u8]) -> Result<(), String> {
+    if got.len() != want.len() {
+        return Err(format!(
+            "{what} pixels disagree: {} bytes vs {}",
+            got.len(),
+            want.len()
+        ));
+    }
+    let mut count = 0usize;
+    let mut first = None;
+    let mut max = 0u8;
+    for (index, (left, right)) in got.iter().zip(want.iter()).enumerate() {
+        if left == right {
+            continue;
+        }
+        count += 1;
+        let delta = left.abs_diff(*right);
+        if delta > max {
+            max = delta;
+        }
+        if first.is_none() {
+            first = Some((index, *left, *right));
+        }
+    }
+    let Some((index, got_byte, want_byte)) = first else {
+        return Ok(());
+    };
+    Err(format!(
+        "{what} pixels disagree: {count} samples, first byte {index} (this decoder {got_byte}, ffmpeg {want_byte}), max delta {max}"
+    ))
+}
+
+fn reconstruct(packets: &[Packet], frames: usize) -> Result<Vec<u8>, String> {
+    let mut params = CodecParams::video(CodecId::H264, WIDTH, HEIGHT);
+    params.nal_length_size = 0;
+    let mut decoder = H264Decoder::open(&params).map_err(|err| err.to_string())?;
+    let mut packed = Vec::new();
+    let mut pictures = 0usize;
+    for packet in packets {
+        let produced = decoder.push(packet).map_err(|err| err.to_string())?;
+        pictures += produced.len();
+        append_frames(&produced, &mut packed)?;
+    }
+    let tail = decoder.drain().map_err(|err| err.to_string())?;
+    pictures += tail.len();
+    append_frames(&tail, &mut packed)?;
+    if pictures != frames {
+        return Err(format!(
+            "decoder returned {pictures} pictures, wanted {frames}"
+        ));
+    }
+    Ok(packed)
+}
+
+fn append_frames(frames: &[VideoOutput], packed: &mut Vec<u8>) -> Result<(), String> {
+    for frame in frames {
+        if frame.picture.width() != WIDTH || frame.picture.height() != HEIGHT {
+            return Err(format!(
+                "picture is {}x{}",
+                frame.picture.width(),
+                frame.picture.height()
+            ));
+        }
+        packed.extend_from_slice(frame.picture.y());
+        packed.extend_from_slice(frame.picture.u());
+        packed.extend_from_slice(frame.picture.v());
+    }
+    Ok(())
+}
+
+fn encode_packets(inputs: &[VideoInput]) -> Result<Vec<Packet>, String> {
+    let mut params = CodecParams::video(CodecId::H264, WIDTH, HEIGHT);
+    params.nal_length_size = 0;
+    params.bitrate = BITRATE;
+    let mut encoder = H264Encoder::open(&params).map_err(|err| err.to_string())?;
+    let mut packets = Vec::new();
+    for input in inputs {
+        packets.extend(encoder.push(input).map_err(|err| err.to_string())?);
+    }
+    packets.extend(encoder.drain().map_err(|err| err.to_string())?);
+    if packets.len() != ENCODE_FRAMES {
+        return Err(format!("encoder returned {} packets", packets.len()));
+    }
+    Ok(packets)
+}
+
+fn write_annex(packets: &[Packet], path: &Path) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    for packet in packets {
+        bytes.extend_from_slice(&packet.data);
+    }
+    if bytes.is_empty() {
+        return Err("encoder returned no bytes".to_string());
+    }
+    std::fs::write(path, bytes).map_err(|err| err.to_string())
+}
+
+fn ffmpeg_yuv(ffmpeg: &str, input: &Path, output: &Path, frames: usize) -> Result<Vec<u8>, String> {
+    let count = frames.to_string();
+    let result = Command::new(ffmpeg)
+        .args([
+            "-nostdin",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "1",
+            "-i",
+        ])
+        .arg(input)
+        .args(["-frames:v", &count, "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .arg(output)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !result.status.success() {
+        return Err(tail(&result.stderr));
+    }
+    let bytes = std::fs::read(output).map_err(|err| err.to_string())?;
+    let _ = std::fs::remove_file(output);
+    Ok(bytes)
 }
 
 fn print_row(name: &str, frames: usize, seconds: f64) {
@@ -144,7 +294,15 @@ fn time_encode(inputs: &[VideoInput]) -> Result<f64, String> {
 fn time_ffmpeg_decode(ffmpeg: &str, path: &Path) -> Result<f64, String> {
     let started = Instant::now();
     let output = Command::new(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-threads", "1", "-i"])
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-threads",
+            "1",
+            "-i",
+        ])
         .arg(path)
         .args(["-f", "null", "-"])
         .output()
@@ -159,6 +317,7 @@ fn time_ffmpeg_encode(ffmpeg: &str, yuv: &Path) -> Result<f64, String> {
     let started = Instant::now();
     let output = Command::new(ffmpeg)
         .args([
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -202,6 +361,7 @@ fn generate_stream(ffmpeg: &str, path: &Path) -> Result<(), String> {
     let frames = DECODE_FRAMES.to_string();
     let output = Command::new(ffmpeg)
         .args([
+            "-nostdin",
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -243,6 +403,7 @@ fn generate_yuv(ffmpeg: &str, path: &Path) -> Result<(), String> {
     let frames = ENCODE_FRAMES.to_string();
     let output = Command::new(ffmpeg)
         .args([
+            "-nostdin",
             "-y",
             "-hide_banner",
             "-loglevel",
@@ -336,7 +497,9 @@ fn access_units(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
         }
         let kind = data[body] & 31;
         let vcl = kind == 1 || kind == 5;
-        if (kind == 9 || (vcl && saw_vcl)) && !current.is_empty() {
+        // first_mb_in_slice 0 is one 1 bit, so the next byte's high bit is set.
+        let starts_picture = vcl && data.get(body + 1).is_some_and(|byte| byte & 0x80 != 0);
+        if (kind == 9 || (starts_picture && saw_vcl)) && !current.is_empty() {
             units.push(std::mem::take(&mut current));
             saw_vcl = false;
         }

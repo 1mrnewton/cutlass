@@ -141,6 +141,10 @@ fn a_codec_420_picture_converts_with_the_same_matrix() {
     );
     assert_eq!(curve_from_codec(Transfer::Bt601), Curve::Rec601);
     assert_eq!(curve_from_codec(Transfer::Bt2020), Curve::Rec709);
+    assert_eq!(curve_from_codec(Transfer::Pq), Curve::Pq);
+    assert_eq!(curve_from_codec(Transfer::Hlg), Curve::Hlg);
+    assert_eq!(curve_from_codec(Transfer::Srgb), Curve::Unspecified);
+    assert_eq!(curve_from_codec(Transfer::Linear), Curve::Unspecified);
 }
 
 #[test]
@@ -188,9 +192,17 @@ fn bt601_and_bt2020_matrices_differ_from_bt709() {
     assert_eq!(at(picture, &request, 0, 0), [255, 1, 0, 255]);
     picture.matrix = Matrix::Bt2020;
     assert_eq!(at(picture, &request, 0, 0), [255, 11, 0, 255]);
+    picture.matrix = Matrix::Bt709;
+    picture.primaries = ColorPrimaries::Bt601;
+    let smpte170 = at(picture, &request, 0, 0);
+    picture.primaries = ColorPrimaries::Smpte240m;
+    assert_eq!(at(picture, &request, 0, 0), smpte170);
     picture.primaries = ColorPrimaries::Unspecified;
     picture.matrix = Matrix::Bt601;
     assert_eq!(at(picture, &request, 0, 0), [247, 21, 0, 255]);
+    picture.primaries = ColorPrimaries::Film;
+    assert_eq!(at(picture, &request, 0, 0), [247, 21, 0, 255]);
+    picture.primaries = ColorPrimaries::Unspecified;
     picture.matrix = Matrix::Bt2020;
     assert_eq!(at(picture, &request, 0, 0), [255, 0, 0, 255]);
 }

@@ -2,7 +2,7 @@ use cutlass_model::{
     Draft, MaterialId, MaterialRef, Micros, Segment, SegmentId, TimeRange, blend_window,
 };
 
-use crate::edit::speed::{locate, map_timeline_to_source, timeline_speed};
+use crate::edit::speed::{curve_points, locate, map_timeline_to_source, timeline_speed};
 
 use super::{EditError, ensure_unlocked};
 
@@ -49,7 +49,20 @@ pub fn split(
     left.target.duration = Micros(left_duration);
     right.target.start = at;
     right.target.duration = Micros(right_duration);
-    split_source(&mut left, &mut right, &current, speed)?;
+    cutlass_model::shift_keys(&mut right, -left_duration);
+    let curve = curve_points(draft, &current);
+    let curve_cut = match &curve {
+        Some((_, points)) => {
+            let share = left_duration as f64 / current.target.duration.0 as f64;
+            let cut = cutlass_model::split_curve(points, share).map_err(EditError::Speed)?;
+            split_curve_source(&mut left, &mut right, &current, cut.0)?;
+            Some(cut)
+        }
+        None => {
+            split_source(&mut left, &mut right, &current, speed)?;
+            None
+        }
+    };
     super::mark::split_time_marks(draft, &mut left, &mut right, left_duration, right_id)?;
     super::beat::split_beats(draft, &mut left, &mut right, right_id)?;
     let transitions = transition_ids(draft, &current);
@@ -59,6 +72,44 @@ pub fn split(
     draft.tracks[track_index]
         .segments
         .insert(segment_index + 1, right);
+    if let (Some((speed_id, _)), Some((_, before, after))) = (curve, curve_cut) {
+        // Each half plays its own stretch of the curve.
+        let right_speed = super::own::own(draft, track_index, segment_index + 1, &speed_id)?;
+        let left_speed = super::own::own(draft, track_index, segment_index, &speed_id)?;
+        for (id, points) in [(left_speed, before), (right_speed, after)] {
+            if let Some(curve) = draft
+                .materials
+                .speeds
+                .iter_mut()
+                .find(|speed| speed.id == id)
+                .and_then(|speed| speed.curve_speed.as_mut())
+            {
+                curve.speed_points = points;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Cut the source where a curve has played the share `x` of it.
+fn split_curve_source(
+    left: &mut Segment,
+    right: &mut Segment,
+    original: &Segment,
+    x: f64,
+) -> Result<(), EditError> {
+    let Some(source) = original.source_range.clone() else {
+        return Ok(());
+    };
+    let left_source = (source.duration.0 as f64 * x).round() as i64;
+    let right_source = source.duration.0 - left_source;
+    if left_source <= 0 || right_source <= 0 {
+        return Err(EditError::Range(
+            cutlass_model::RangeError::NonPositiveDuration,
+        ));
+    }
+    left.source_range = Some(TimeRange::new(source.start.0, left_source));
+    right.source_range = Some(TimeRange::new(source.start.0 + left_source, right_source));
     Ok(())
 }
 

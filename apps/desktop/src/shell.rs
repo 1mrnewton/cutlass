@@ -3244,7 +3244,8 @@ impl Shell {
     }
 
     /// Cut the selected video where its picture changes. One undo restores
-    /// the clip. The window waits while the pictures are read.
+    /// the clip. The pictures are read as a job; the cuts land when it
+    /// finishes, unless the clip changed meanwhile.
     pub fn split_scenes(&mut self) -> Result<(), ShellError> {
         let segment_id = self.scene_segment()?;
         let (path, range) = {
@@ -3276,12 +3277,33 @@ impl Shell {
             (video.path.clone(), range)
         };
         let file = self.opened_media(&path)?;
-        let cuts = scene_cuts(&self.readers, &file, &range).map_err(scene_message)?;
-        let times = {
-            let draft = self.session_draft()?;
-            timeline_cuts(draft, &segment_id, &range, &cuts)
-        };
-        self.split_at_times(&segment_id, &times)
+        self.refuse_busy()?;
+        let readers = self.readers.clone();
+        self.start_job("Split scenes", move |progress| {
+            progress.stage("Looking for cuts");
+            let cuts = scene_cuts(&readers, &file, &range).map_err(scene_message);
+            Box::new(move |shell: &mut Shell| {
+                let cuts = cuts?;
+                // The cuts are in the file's time; the clip must still show
+                // the same stretch of it for them to land where they belong.
+                let times = {
+                    let draft = shell.session_draft()?;
+                    let still = locate(draft, &segment_id).is_some_and(|(segment, _)| {
+                        segment
+                            .source_range
+                            .as_ref()
+                            .is_none_or(|now| *now == range)
+                    });
+                    if !still {
+                        return Err(ShellError::Unavailable(
+                            "the clip changed while its scenes were found".to_owned(),
+                        ));
+                    }
+                    timeline_cuts(draft, &segment_id, &range, &cuts)
+                };
+                shell.split_at_times(&segment_id, &times)
+            })
+        })
     }
 
     /// Cut the selected video at `times` on the timeline. Tests pass known
@@ -6065,6 +6087,45 @@ mod tests {
         );
         // The model stays loaded for the next transcript.
         assert!(desktop.speech.borrow().is_some());
+    }
+
+    #[test]
+    fn split_scenes_runs_as_a_job_and_cuts_a_real_movie_when_it_lands() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie =
+            root.join("Fireship - 5 open source tools that replaced my $320 mo AI stack.mp4");
+        let Ok(movie) = movie.canonicalize() else {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 30_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 30_000_000));
+        draft.duration = Micros(30_000_000);
+        let clip = draft.tracks[0].segments[0].id.clone();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(clip));
+        let revision = desktop.revision();
+        desktop.split_scenes().unwrap();
+        assert_eq!(
+            desktop.revision(),
+            revision,
+            "nothing lands before the job ends"
+        );
+        assert!(desktop.split_scenes().is_err(), "a second job waits");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the scenes took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        let clips = desktop.draft().unwrap().tracks[0].segments.len();
+        assert!(clips > 1, "30 s of a fast-cut video has a scene change");
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
     }
 
     fn empty_project(dir: &Path) {

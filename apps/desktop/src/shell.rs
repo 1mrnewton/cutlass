@@ -256,6 +256,8 @@ fn build_lanes(draft: &Draft) -> Vec<LaneView> {
                 track_id: lane.track_id,
                 kind: lane.kind,
                 main: lane.main,
+                name: (!track.is_default_name && !track.name.is_empty())
+                    .then(|| track.name.clone()),
                 mute: bit(track.attribute, TrackAttribute::MUTE),
                 hide: bit(track.attribute, TrackAttribute::HIDE),
                 lock: bit(track.attribute, TrackAttribute::LOCK),
@@ -272,6 +274,8 @@ pub struct LaneView {
     pub track_id: TrackId,
     pub kind: TrackType,
     pub main: bool,
+    /// The name someone gave the track, or `None` for its kind's name.
+    pub name: Option<String>,
     pub mute: bool,
     pub hide: bool,
     pub lock: bool,
@@ -1728,6 +1732,49 @@ impl Shell {
     pub fn toggle_attribute(&mut self, track_id: TrackId, bit: i32) -> Result<(), ShellError> {
         let on = !self.attribute_on(&track_id, bit);
         self.apply(Request::SetTrackAttribute { track_id, bit, on })
+    }
+
+    /// Add an empty track of `kind`. The shared rules place it: a video
+    /// overlay above the main track, audio under it, the rest above video.
+    pub fn add_track(&mut self, kind: TrackType) -> Result<TrackId, ShellError> {
+        let taken = |shell: &Self, id: &TrackId| {
+            shell
+                .draft()
+                .is_some_and(|draft| draft.tracks.iter().any(|track| &track.id == id))
+        };
+        let mut track_id = TrackId::new(self.fresh("track"));
+        while taken(self, &track_id) {
+            track_id = TrackId::new(self.fresh("track"));
+        }
+        self.apply(Request::InsertTrack {
+            track_id: track_id.clone(),
+            kind,
+        })?;
+        Ok(track_id)
+    }
+
+    /// Take a track and its clips off the timeline, as one undo step.
+    pub fn remove_track(&mut self, track_id: &TrackId) -> Result<(), ShellError> {
+        self.apply(Request::RemoveTrack {
+            track_id: track_id.clone(),
+        })
+    }
+
+    /// Name a track. A blank name goes back to the name its kind gives it.
+    /// The same name again changes nothing.
+    pub fn rename_track(&mut self, track_id: &TrackId, name: &str) -> Result<(), ShellError> {
+        let current = self
+            .draft()
+            .and_then(|draft| draft.tracks.iter().find(|track| &track.id == track_id))
+            .map(|track| (track.name.clone(), track.is_default_name));
+        let name = name.trim();
+        if current.is_some_and(|(old, default)| old == name && default == name.is_empty()) {
+            return Ok(());
+        }
+        self.apply(Request::RenameTrack {
+            track_id: track_id.clone(),
+            name: name.to_owned(),
+        })
     }
 
     pub fn drag_segment(
@@ -9242,6 +9289,41 @@ mod tests {
             "{error}"
         );
         assert_eq!(desktop.lanes()[0].clips[0].start, start);
+    }
+
+    #[test]
+    fn a_track_is_added_named_and_deleted_and_stays_while_empty() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let main = desktop.lanes()[0].track_id.clone();
+        let sound = desktop.add_track(TrackType::Audio).unwrap();
+        let over = desktop.add_track(TrackType::Video).unwrap();
+        // Empty rows stay on the desktop: the overlay above, the sound under.
+        let order: Vec<_> = desktop
+            .lanes()
+            .iter()
+            .map(|lane| lane.track_id.clone())
+            .collect();
+        assert_eq!(order, [over.clone(), main.clone(), sound.clone()]);
+
+        desktop.rename_track(&sound, "  Voice ").unwrap();
+        assert_eq!(desktop.lanes()[2].name.as_deref(), Some("Voice"));
+        let revision = desktop.session.as_ref().unwrap().revision();
+        desktop.rename_track(&sound, "Voice").unwrap();
+        assert_eq!(desktop.session.as_ref().unwrap().revision(), revision);
+        desktop.rename_track(&sound, " ").unwrap();
+        assert_eq!(desktop.lanes()[2].name, None);
+
+        desktop.remove_track(&over).unwrap();
+        assert_eq!(desktop.lanes().len(), 2);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.lanes().len(), 3);
+        assert!(matches!(
+            desktop.remove_track(&main).unwrap_err(),
+            ShellError::Edit(EditError::MainTrack)
+        ));
     }
 
     #[test]

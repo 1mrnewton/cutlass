@@ -119,6 +119,11 @@ pub const CLIP_HEIGHT: f32 = 28.0;
 pub const MAIN_CLIP_INSET: f32 = 8.0;
 /// The gap above and below any other clip.
 pub const CLIP_INSET: f32 = 6.0;
+/// The shortest a clip gets in a row dragged short.
+pub const MIN_CLIP_HEIGHT: f32 = 12.0;
+/// How short and how tall a track row can be dragged.
+pub const MIN_LANE_HEIGHT: f32 = 24.0;
+pub const MAX_LANE_HEIGHT: f32 = 240.0;
 
 /// A right-click menu.
 pub const MENU: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c);

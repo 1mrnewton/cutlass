@@ -9,7 +9,7 @@ use egui::{
 };
 
 use cutlass_editor::ruler_ticks;
-use cutlass_model::{FrameRate, Micros, SegmentId};
+use cutlass_model::{FrameRate, Micros, SegmentId, TrackId};
 use cutlass_session::TrimEdge;
 
 use crate::dialogs::{Dialogs, Finished, Picker};
@@ -146,6 +146,13 @@ pub struct ViewState {
     preview_guides: bool,
     /// The preview fills the screen.
     preview_full: bool,
+    /// Heights dragged for track rows, by track. Only this window keeps
+    /// them; the project does not save them.
+    lane_heights: std::collections::HashMap<TrackId, f32>,
+    /// The track head's right-click menu, where it opened.
+    track_menu: Option<TrackMenu>,
+    /// A track being named, and what is typed so far.
+    renaming: Option<(TrackId, String)>,
     /// The clip panel's open tab, page, and sections, and what is typed.
     inspector: inspector::InspectorState,
     background_buffer: String,
@@ -170,6 +177,16 @@ pub struct ViewState {
     lane_scroll: f32,
 }
 
+/// Where a track head's menu opened, and for which track.
+#[derive(Clone, Debug, PartialEq)]
+struct TrackMenu {
+    track_id: TrackId,
+    /// The main track stays; it cannot be deleted.
+    main: bool,
+    lock: bool,
+    at: Pos2,
+}
+
 impl Default for ViewState {
     fn default() -> Self {
         Self {
@@ -190,6 +207,9 @@ impl Default for ViewState {
             preview_canvas: None,
             preview_guides: false,
             preview_full: false,
+            lane_heights: std::collections::HashMap::new(),
+            track_menu: None,
+            renaming: None,
             inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
@@ -1987,6 +2007,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     ruler_and_lanes(shell, ui, view, body);
     paint_clip_menu(shell, ui);
     paint_gap_menu(shell, ui);
+    paint_track_menu(shell, ui, view);
     let handle = Rect::from_min_size(
         Pos2::new(rect.min.x, rect.min.y - tokens::SPLIT),
         Vec2::new(rect.width(), tokens::SPLIT),
@@ -2270,9 +2291,9 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     );
     let snap_at = shell.snap_line();
     let rows = shell.lanes();
-    let kinds: Vec<(bool, bool)> = rows
+    let kinds: Vec<(bool, f32)> = rows
         .iter()
-        .map(|lane| (lane.main, is_audio(lane)))
+        .map(|lane| (lane.main, lane_height(view, lane)))
         .collect();
     let laid = lane_rects(kinds, lane_area);
     let (low, high) = lane_scroll_range(&laid, lane_area);
@@ -2301,6 +2322,15 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             continue;
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
+        lane_head(shell, ui, view, lane, row, index);
+        resize_lane(
+            ui,
+            view,
+            lane,
+            row,
+            index,
+            rows.iter().position(|lane| lane.main),
+        );
     }
     ui.set_clip_rect(clip);
     shell.send_timeline_asks();
@@ -2548,6 +2578,188 @@ fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
         }
     } else if shown.dismissed {
         shell.close_gap_menu();
+    }
+}
+
+fn paint_track_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some(menu) = view.track_menu.clone() else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && pos != menu.at
+    {
+        view.track_menu = None;
+        return;
+    }
+    let removable = !menu.main && !menu.lock;
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("track-menu"),
+        menu.at,
+        crate::menu::TRACK_HEAD,
+        &|id| id != "delete-track" || removable,
+    );
+    if let Some(item) = shown.picked {
+        view.track_menu = None;
+        track_action(shell, view, &menu.track_id, item.id);
+    } else if shown.dismissed {
+        view.track_menu = None;
+    }
+}
+
+/// Run a row of the track head's menu.
+fn track_action(shell: &mut Shell, view: &mut ViewState, track_id: &TrackId, action: &str) {
+    let kind = match action {
+        "add-video" => Some(cutlass_model::TrackType::Video),
+        "add-audio" => Some(cutlass_model::TrackType::Audio),
+        "add-text" => Some(cutlass_model::TrackType::Text),
+        _ => None,
+    };
+    let result = match (action, kind) {
+        (_, Some(kind)) => shell.add_track(kind).map(|_| ()),
+        ("rename-track", None) => {
+            let lanes = shell.lanes();
+            let typed = lanes
+                .iter()
+                .find(|lane| &lane.track_id == track_id)
+                .map(|lane| {
+                    lane.name
+                        .clone()
+                        .unwrap_or_else(|| lane_name(&lane.kind, lane.main))
+                })
+                .unwrap_or_default();
+            view.renaming = Some((track_id.clone(), typed));
+            Ok(())
+        }
+        ("delete-track", None) => {
+            view.lane_heights.remove(track_id);
+            shell.remove_track(track_id)
+        }
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        shell.set_notice(error.to_string());
+    }
+}
+
+/// The track head: a right-click opens its menu, a double-click on the
+/// name names it, and while it is being named a field stands in for it.
+fn lane_head(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    index: usize,
+) {
+    let head = head_rect(row);
+    let label = Rect::from_min_max(
+        Pos2::new(head.left() + 34.0, row.center().y - 11.0),
+        Pos2::new(head.right() - 32.0, row.center().y + 11.0),
+    );
+    if let Some((track_id, typed)) = view.renaming.as_mut()
+        && track_id == &lane.track_id
+    {
+        let field = ui.put(
+            label,
+            egui::TextEdit::singleline(&mut *typed)
+                .font(FontId::proportional(12.0))
+                .text_color(tokens::TEXT),
+        );
+        if !field.has_focus() && !field.lost_focus() {
+            field.request_focus();
+        }
+        if field.lost_focus() {
+            let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+            let typed = typed.clone();
+            view.renaming = None;
+            if !cancel && let Err(error) = shell.rename_track(&lane.track_id, &typed) {
+                shell.set_notice(error.to_string());
+            }
+        }
+        return;
+    }
+    let response = ui
+        .interact(label, ui.scope_id().with(("head", index)), Sense::click())
+        .on_hover_text("Double-click to rename, right-click for more");
+    if response.double_clicked() {
+        track_action(shell, view, &lane.track_id, "rename-track");
+    }
+    if let Some(pos) = secondary_click(ui)
+        && head.contains(pos)
+    {
+        shell.close_gap_menu();
+        view.track_menu = Some(TrackMenu {
+            track_id: lane.track_id.clone(),
+            main: lane.main,
+            lock: lane.lock,
+            at: pos,
+        });
+    }
+}
+
+/// The part of a row left of its switches, where its icon and name are.
+fn head_rect(row: Rect) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH,
+            row.top(),
+        ),
+        Pos2::new(row.left() - tokens::COVER_WIDTH, row.bottom()),
+    )
+}
+
+/// A row's height: the one dragged for it, or its kind's own.
+fn lane_height(view: &ViewState, lane: &crate::shell::LaneView) -> f32 {
+    view.lane_heights
+        .get(&lane.track_id)
+        .copied()
+        .unwrap_or_else(|| row_height(lane.main, is_audio(lane)))
+}
+
+/// Drag a row's outer edge to make it taller or shorter: the top edge for
+/// rows above the main track, the bottom edge for the main track and the
+/// rows under it. A double-click on the edge gives back the usual height.
+fn resize_lane(
+    ui: &mut Ui,
+    view: &mut ViewState,
+    lane: &crate::shell::LaneView,
+    row: Rect,
+    index: usize,
+    main: Option<usize>,
+) {
+    let above = main.is_some_and(|main| index < main);
+    let edge_y = if above { row.top() } else { row.bottom() };
+    let edge = Rect::from_min_max(
+        Pos2::new(
+            row.left() - tokens::TRACK_HEAD - tokens::COVER_WIDTH,
+            edge_y - 3.0,
+        ),
+        Pos2::new(row.right(), edge_y + 3.0),
+    );
+    let response = ui
+        .interact(
+            edge,
+            ui.scope_id().with(("lane-edge", index)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    if response.double_clicked() {
+        view.lane_heights.remove(&lane.track_id);
+        return;
+    }
+    let delta = response.drag_delta().y;
+    if delta != 0.0 {
+        let height = lane_height(view, lane);
+        let grown = if above {
+            height - delta
+        } else {
+            height + delta
+        };
+        view.lane_heights.insert(
+            lane.track_id.clone(),
+            grown.clamp(tokens::MIN_LANE_HEIGHT, tokens::MAX_LANE_HEIGHT),
+        );
     }
 }
 
@@ -2964,7 +3176,10 @@ fn paint_lane(
             tokens::MUTED,
         );
     }
-    let name = lane_name(&lane.kind, lane.main);
+    let name = lane
+        .name
+        .clone()
+        .unwrap_or_else(|| lane_name(&lane.kind, lane.main));
     paint_lane_head(ui, row, lane_icon(&lane.kind), &name);
     let lock = Rect::from_center_size(
         Pos2::new(row.left() - tokens::COVER_WIDTH - 18.0, row.center().y),
@@ -3159,7 +3374,13 @@ fn clip_bounds(
     row: Rect,
     lanes_left: f32,
 ) -> Rect {
-    let height = clip_height(main, audio);
+    // A row dragged taller or shorter takes its clips with it.
+    let inset = clip_inset(main);
+    let height = if (row.height() - row_height(main, audio)).abs() < f32::EPSILON {
+        clip_height(main, audio)
+    } else {
+        (row.height() - 2.0 * inset).max(tokens::MIN_CLIP_HEIGHT)
+    };
     let x = lane_x(
         lanes_left,
         shell.pixel_size(),
@@ -3167,10 +3388,7 @@ fn clip_bounds(
         start.0,
     );
     let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    Rect::from_min_size(
-        Pos2::new(x, row.top() + clip_inset(main)),
-        Vec2::new(width, height),
-    )
+    Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height))
 }
 
 /// A clip's height: the main track is tallest, audio holds its waveform
@@ -4216,9 +4434,11 @@ fn edge_strips(visible: Rect) -> (Rect, Rect) {
 
 /// Each lane's row, the main lane centered. `kinds` is each lane's main and
 /// audio flags.
-fn lane_rects(kinds: Vec<(bool, bool)>, area: Rect) -> Vec<Rect> {
+/// Rows for lanes given as (main, height). The main row sits in the middle
+/// of `area`; the rows above it stack up and the rest stack down.
+fn lane_rects(kinds: Vec<(bool, f32)>, area: Rect) -> Vec<Rect> {
     let main_flags: Vec<bool> = kinds.iter().map(|(main, _)| *main).collect();
-    let height = |index: usize| row_height(kinds[index].0, kinds[index].1);
+    let height = |index: usize| kinds[index].1;
     let Some(main) = main_flags.iter().position(|main| *main) else {
         let mut top = area.top();
         return (0..kinds.len())
@@ -5449,11 +5669,35 @@ mod tests {
     #[test]
     fn lanes_take_their_heights_around_the_centered_main_track() {
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
-        let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);
+        let rows = lane_rects(
+            vec![
+                (false, row_height(false, false)),
+                (true, row_height(true, false)),
+                (false, row_height(false, true)),
+            ],
+            area,
+        );
         let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
         assert_eq!(heights, [40.0, 90.0, 58.0]);
         assert_eq!(rows[1].center().y, 200.0);
         assert_eq!(rows[2].top() - rows[1].bottom(), 8.0);
+    }
+
+    #[test]
+    fn a_dragged_row_height_moves_the_rows_around_it_and_its_clips_grow() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let rows = lane_rects(vec![(false, 100.0), (true, 90.0), (false, 30.0)], area);
+        assert_eq!(rows[0].height(), 100.0);
+        assert_eq!(rows[1].top() - rows[0].bottom(), 8.0);
+        assert_eq!(rows[2].height(), 30.0);
+        let tall = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 100.0));
+        let usual = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, row_height(false, false)));
+        let (decoders, encoders) = crate::register_codecs();
+        let shell = Shell::new(decoders, encoders, Settings::default());
+        let grown = clip_bounds(&shell, false, false, Micros(0), Micros(1), tall, 0.0);
+        assert_eq!(grown.height(), 100.0 - 2.0 * tokens::CLIP_INSET);
+        let kept = clip_bounds(&shell, false, false, Micros(0), Micros(1), usual, 0.0);
+        assert_eq!(kept.height(), tokens::CLIP_HEIGHT);
     }
 
     #[test]

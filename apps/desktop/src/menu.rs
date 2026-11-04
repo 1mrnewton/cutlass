@@ -239,6 +239,17 @@ pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
 /// The menu for a gap between clips on a row.
 pub const GAP_ROW: &[Entry] = &[done("close-gap", "Close gap", "")];
 
+/// The menu for a track's head. The prototype has none; these rows add,
+/// name and delete tracks.
+pub const TRACK_HEAD: &[Entry] = &[
+    done("add-video", "Add video track", ""),
+    done("add-audio", "Add audio track", ""),
+    done("add-text", "Add text track", ""),
+    SEP,
+    done("rename-track", "Rename track", ""),
+    done("delete-track", "Delete track", ""),
+];
+
 /// The menu for a media card in the library.
 pub const LIBRARY_CARD: &[Entry] = &[
     todo("open-file", "Open file location", ""),

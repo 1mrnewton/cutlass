@@ -18,8 +18,8 @@ use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture,
     Pointer, TimelineScale, TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement,
-    drop_gesture, fit_pixel_size, hit_test, lanes, last_accuracy_step, material_span,
-    minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
+    drop_gesture, fit_pixel_size, hit_test, last_accuracy_step, material_span, minimum_pixel_size,
+    move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -238,7 +238,7 @@ pub struct Picture {
 
 /// Each lane with its clips, in drawing order.
 fn build_lanes(draft: &Draft) -> Vec<LaneView> {
-    lanes(draft)
+    cutlass_editor::lanes_for(draft, true)
         .into_iter()
         .filter_map(|lane| {
             let track = draft.tracks.get(lane.track_index)?;
@@ -5177,6 +5177,8 @@ impl Shell {
         TimelineScale {
             lane_height: tokens::LANE_HEIGHT,
             pixel_size: self.pixel_size,
+            // The desktop adds and removes tracks, so an empty one stays.
+            empty_lanes: true,
         }
     }
 

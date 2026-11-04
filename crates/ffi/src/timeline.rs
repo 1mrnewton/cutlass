@@ -208,6 +208,7 @@ pub(crate) fn trim_request(
 const UNIT: TimelineScale = TimelineScale {
     lane_height: 1.0,
     pixel_size: 1.0,
+    empty_lanes: false,
 };
 
 fn gesture_refused(error: GestureError) -> FfiError {

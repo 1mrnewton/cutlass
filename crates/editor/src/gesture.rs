@@ -5,7 +5,7 @@ use cutlass_model::{
 use cutlass_session::{Request, TrimEdge};
 
 use crate::hit::{BadScale, Pointer, TimelineScale, hit_test, time_at};
-use crate::lane::{Lane, lanes};
+use crate::lane::{Lane, lanes_for};
 use crate::snap::snap_guides;
 
 /// Why a gesture could not name a request.
@@ -100,7 +100,7 @@ pub fn move_gesture(draft: &Draft, gesture: &MoveGesture) -> Result<GestureOutco
         Some(target) => target.time,
         None => hit.time,
     };
-    let rows = lanes(draft);
+    let rows = lanes_for(draft, gesture.scale.empty_lanes);
     let placed = placement(
         draft,
         &rows,
@@ -146,7 +146,7 @@ pub fn drop_gesture(draft: &Draft, gesture: &DropGesture) -> Result<DropOutcome,
     .map(|target| target.time)
     .unwrap_or(hit.time);
     let start = Micros(snapped.0.max(0));
-    let rows = lanes(draft);
+    let rows = lanes_for(draft, gesture.scale.empty_lanes);
     let placed = placement(
         draft,
         &rows,
@@ -522,6 +522,7 @@ mod tests {
         TimelineScale {
             lane_height: 40.0,
             pixel_size: 1.0,
+            empty_lanes: false,
         }
     }
 
@@ -685,7 +686,7 @@ mod tests {
         draft.tracks.insert(0, blocked);
         draft.tracks.insert(0, upper);
         let before = draft.clone();
-        let rows = lanes(&draft);
+        let rows = crate::lanes(&draft);
         let video = TrackType::Video;
         let dragged = SegmentId::new("b");
 
@@ -787,7 +788,7 @@ mod tests {
         draft.tracks[0]
             .segments
             .push(Segment::new("a", "media", TimeRange::new(0, 2_000_000)));
-        let rows = lanes(&draft);
+        let rows = crate::lanes(&draft);
         let placed = placement(
             &draft,
             &rows,

@@ -1,0 +1,48 @@
+//! The entropy coding direction of the tile syntax.
+//!
+//! The tile code in this module reads or writes every syntax element through
+//! [`Coder`]. When decoding, the value argument is ignored and the decoded
+//! value is returned. When encoding, the value is written and returned, so the
+//! same code updates contexts and reconstructs the picture exactly as a
+//! decoder will.
+
+use super::msac::Msac;
+
+pub trait Coder {
+    /// True when the coder writes the values it is given.
+    const WRITE: bool;
+    fn bool_adapt(&mut self, cdf: &mut [u16; 2], v: bool) -> bool;
+    fn bool_prob(&mut self, f: u32, v: bool) -> bool;
+    fn symbol<const N: usize>(&mut self, cdf: &mut [u16; N], v: usize) -> usize;
+    fn literal(&mut self, n: u32, v: u32) -> u32;
+    fn golomb(&mut self, v: u32) -> u32;
+    fn ns(&mut self, n: u32, v: u32) -> u32;
+}
+
+impl Coder for Msac<'_> {
+    const WRITE: bool = false;
+    #[inline(always)]
+    fn bool_adapt(&mut self, cdf: &mut [u16; 2], _v: bool) -> bool {
+        Msac::bool_adapt(self, cdf)
+    }
+    #[inline(always)]
+    fn bool_prob(&mut self, f: u32, _v: bool) -> bool {
+        Msac::bool_prob(self, f)
+    }
+    #[inline(always)]
+    fn symbol<const N: usize>(&mut self, cdf: &mut [u16; N], _v: usize) -> usize {
+        Msac::symbol(self, cdf)
+    }
+    #[inline(always)]
+    fn literal(&mut self, n: u32, _v: u32) -> u32 {
+        Msac::literal(self, n)
+    }
+    #[inline(always)]
+    fn golomb(&mut self, _v: u32) -> u32 {
+        Msac::golomb(self)
+    }
+    #[inline(always)]
+    fn ns(&mut self, n: u32, _v: u32) -> u32 {
+        Msac::ns(self, n)
+    }
+}

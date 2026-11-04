@@ -1,6 +1,8 @@
 //! Inter prediction for one block (spec 5.11.33 and 7.11.3).
 
 use crate::dsp::Pixel;
+
+use super::coder::Coder;
 use crate::dsp::mc;
 use crate::spec::tables::{QUANT_DIST_LOOKUP, QUANT_DIST_WEIGHT};
 
@@ -22,7 +24,7 @@ enum Dst {
     Tmp(usize),
 }
 
-impl<P: Pixel> TileDec<'_, P> {
+impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// compute_prediction() (5.11.33).
     pub fn compute_prediction(&mut self) -> R<()> {
         if !self.b.is_inter {

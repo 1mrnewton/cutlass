@@ -13,41 +13,48 @@ use crate::dsp::superres::upscale_plane;
 use super::frame::{FrameState, Picture};
 use super::obu::{FrameHeader, SequenceHeader};
 use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, NEARESTMV, block_height, block_width,
+    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, MiInfo, NEARESTMV, NONE, block_height, block_width,
     plane_residual_size, tx_h, tx_w,
 };
 
-fn filter_level(
+/// Filter level (7.14.5) of the block `m` for loop filter index `i`
+/// (0, 1: luma vertical / horizontal edges, 2, 3: U, V), with the block's
+/// `delta_lf` value `delta_lf`.
+fn filter_level_of(hdr: &FrameHeader, m: &MiInfo, i: usize, delta_lf: i32) -> u8 {
+    level_for(
+        hdr,
+        i,
+        delta_lf,
+        m.segment_id as usize,
+        m.ref_frame[0],
+        mode_type(m),
+    )
+}
+
+#[inline]
+fn mode_type(m: &MiInfo) -> usize {
+    usize::from(m.y_mode >= NEARESTMV && m.y_mode != GLOBALMV && m.y_mode != GLOBAL_GLOBALMV)
+}
+
+fn level_for(
     hdr: &FrameHeader,
-    fs: &FrameState,
-    row: usize,
-    col: usize,
-    plane: usize,
-    pass: usize,
+    i: usize,
+    delta_lf: i32,
+    seg: usize,
+    rf: i8,
+    mode_type: usize,
 ) -> u8 {
-    let m = fs.mi_at(row, col);
-    let i = if plane == 0 { pass } else { plane + 1 };
-    let delta_lf = if hdr.delta_lf_multi {
-        i32::from(m.delta_lf[i])
-    } else {
-        i32::from(m.delta_lf[0])
-    };
     let base = (delta_lf + i32::from(hdr.loop_filter.level[i])).clamp(0, 63);
     let mut lvl = base;
-    let seg = m.segment_id as usize;
     let feature = 1 + i;
     if hdr.seg_feature_active(seg, feature) {
         lvl = (lvl + i32::from(hdr.segmentation.feature_data[seg][feature])).clamp(0, 63);
     }
     if hdr.loop_filter.delta_enabled {
         let n_shift = lvl >> 5;
-        let rf = m.ref_frame[0];
         if rf == INTRA_FRAME {
             lvl += i32::from(hdr.loop_filter.ref_deltas[0]) << n_shift;
         } else if rf > INTRA_FRAME {
-            let mode_type = usize::from(
-                m.y_mode >= NEARESTMV && m.y_mode != GLOBALMV && m.y_mode != GLOBAL_GLOBALMV,
-            );
             lvl += (i32::from(hdr.loop_filter.ref_deltas[rf as usize]) << n_shift)
                 + (i32::from(hdr.loop_filter.mode_deltas[mode_type]) << n_shift);
         }
@@ -56,7 +63,150 @@ fn filter_level(
     lvl as u8
 }
 
+/// Number of `ref_frame[0]` classes in [`LfPlane::lut`]: 0..=7, and one for
+/// every negative value.
+const LF_REFS: usize = 9;
+
+/// Edge decisions for one plane and pass of the loop filter (7.14.2 -
+/// 7.14.5).
+struct LfPlane<'a> {
+    hdr: &'a FrameHeader,
+    fs: &'a FrameState,
+    tx: &'a [u8],
+    plane: usize,
+    pass: usize,
+    sx: usize,
+    sy: usize,
+    /// Loop filter index `i` of 7.14.5.
+    li: usize,
+    /// Levels for `delta_lf == 0`, by `[segment][ref class][mode type]`.
+    lut: [[[u8; 2]; LF_REFS]; 8],
+}
+
+impl<'a> LfPlane<'a> {
+    fn new(
+        hdr: &'a FrameHeader,
+        fs: &'a FrameState,
+        plane: usize,
+        pass: usize,
+        sx: usize,
+        sy: usize,
+    ) -> Self {
+        let li = if plane == 0 { pass } else { plane + 1 };
+        let mut lut = [[[0u8; 2]; LF_REFS]; 8];
+        for (seg, t) in lut.iter_mut().enumerate() {
+            for (rc, t) in t.iter_mut().enumerate() {
+                let rf = if rc < 8 { rc as i8 } else { NONE };
+                for (mt, t) in t.iter_mut().enumerate() {
+                    *t = level_for(hdr, li, 0, seg, rf, mt);
+                }
+            }
+        }
+        Self {
+            hdr,
+            fs,
+            tx: &fs.lf_tx[plane],
+            plane,
+            pass,
+            sx,
+            sy,
+            li,
+            lut,
+        }
+    }
+
+    #[inline]
+    fn level(&self, m: &MiInfo) -> u8 {
+        let d = if self.hdr.delta_lf_multi {
+            m.delta_lf[self.li]
+        } else {
+            m.delta_lf[0]
+        };
+        if d == 0 {
+            let rf = m.ref_frame[0];
+            let rc = if rf >= 0 { rf as usize } else { 8 };
+            self.lut[m.segment_id as usize & 7][rc.min(8)][mode_type(m)]
+        } else {
+            filter_level_of(self.hdr, m, self.li, i32::from(d))
+        }
+    }
+
+    /// `(filter_size, lvl)` of the edge at the 4x4 unit `(row, col)` (luma
+    /// 4x4 units, multiples of the subsampling step); `lvl == 0` when the
+    /// edge is not filtered. `filter_size` follows [`crate::dsp::lf`].
+    #[inline]
+    fn edge(&self, row: usize, col: usize) -> (u8, u8) {
+        let x = col * 4;
+        let y = row * 4;
+        let hdr = self.hdr;
+        if x >= hdr.frame_width as usize
+            || y >= hdr.frame_height as usize
+            || (self.pass == 0 && x == 0)
+            || (self.pass == 1 && y == 0)
+        {
+            return (0, 0);
+        }
+        let (sx, sy) = (self.sx, self.sy);
+        let fs = self.fs;
+        let st = fs.mi_stride;
+        let r = row | sy;
+        let c = col | sx;
+        let xp = x >> sx;
+        let yp = y >> sy;
+        let (prev_r, prev_c) = if self.pass == 0 {
+            (r, c - (1 << sx))
+        } else {
+            (r - (1 << sy), c)
+        };
+        let m = fs.mi_at(r, c);
+        let tx = self.tx[(r >> sy) * st + (c >> sx)];
+        let psz = plane_residual_size(m.bsize, sx != 0, sy != 0);
+        let (is_block_edge, is_tx_edge) = if self.pass == 0 {
+            (
+                xp.is_multiple_of(block_width(psz)),
+                xp.is_multiple_of(tx_w(tx)),
+            )
+        } else {
+            (
+                yp.is_multiple_of(block_height(psz)),
+                yp.is_multiple_of(tx_h(tx)),
+            )
+        };
+        let is_intra = m.ref_frame[0] <= INTRA_FRAME;
+        if !(is_tx_edge && (is_block_edge || !m.skip || is_intra)) {
+            return (0, 0);
+        }
+        let prev_tx = self.tx[(prev_r >> sy) * st + (prev_c >> sx)];
+        let base = if self.pass == 0 {
+            tx_w(prev_tx).min(tx_w(tx))
+        } else {
+            tx_h(prev_tx).min(tx_h(tx))
+        };
+        let filter_size = if self.plane == 0 {
+            base.min(16)
+        } else if base.min(8) == 8 {
+            6
+        } else {
+            4
+        };
+        let mut lvl = self.level(m);
+        if lvl == 0 {
+            lvl = self.level(fs.mi_at(prev_r, prev_c));
+        }
+        (filter_size as u8, lvl)
+    }
+}
+
+/// Plane rows filtered by one vertical-edge pass of [`loop_filter`] before
+/// moving to the next strip (keeps the strip in cache).
+const LF_STRIP_UNITS: usize = 16;
+
 /// Loop filter process (7.14).
+///
+/// Edges of one pass never overlap (an edge of size `s` has blocks at least
+/// `s` samples wide / tall on both sides), so the edges of a pass may be
+/// filtered in any order. Runs of adjacent 4-sample edges with the same
+/// filter size and level go to the kernel in one call.
 pub fn loop_filter<P: Pixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
@@ -68,7 +218,6 @@ pub fn loop_filter<P: Pixel>(
     }
     let bd = pic.bd;
     let sharp = hdr.loop_filter.sharpness;
-    let st = fs.mi_stride;
     for plane in 0..seq.num_planes() {
         if plane > 0 && hdr.loop_filter.level[1 + plane] == 0 {
             continue;
@@ -81,98 +230,79 @@ pub fn loop_filter<P: Pixel>(
         } else {
             (0, 0)
         };
+        // Units (4x4 in the plane) per row / column.
+        let nc = fs.mi_cols.div_ceil(1 << sx);
+        let nr = fs.mi_rows.div_ceil(1 << sy);
         let p = &mut pic.planes[plane];
         let stride = p.stride;
-        for pass in 0..2 {
-            let row_step = 1 << sy;
-            let col_step = 1 << sx;
-            let mut row = 0;
-            while row < fs.mi_rows {
-                let mut col = 0;
-                while col < fs.mi_cols {
-                    let x = col * 4;
-                    let y = row * 4;
-                    let on_screen = !(x >= hdr.frame_width as usize
-                        || y >= hdr.frame_height as usize
-                        || (pass == 0 && x == 0)
-                        || (pass == 1 && y == 0));
-                    if on_screen {
-                        let r = row | sy;
-                        let c = col | sx;
-                        let xp = x >> sx;
-                        let yp = y >> sy;
-                        let (prev_r, prev_c) = if pass == 0 {
-                            (r, c - (1 << sx))
-                        } else {
-                            (r - (1 << sy), c)
-                        };
-                        let m = fs.mi_at(r, c);
-                        let tx = fs.lf_tx[plane][(r >> sy) * st + (c >> sx)];
-                        let psz = plane_residual_size(m.bsize, sx != 0, sy != 0);
-                        let is_intra = m.ref_frame[0] <= INTRA_FRAME;
-                        let prev_tx = fs.lf_tx[plane][(prev_r >> sy) * st + (prev_c >> sx)];
-                        let (is_block_edge, is_tx_edge, base) = if pass == 0 {
-                            (
-                                xp % block_width(psz) == 0,
-                                xp % tx_w(tx) == 0,
-                                tx_w(prev_tx).min(tx_w(tx)),
-                            )
-                        } else {
-                            (
-                                yp % block_height(psz) == 0,
-                                yp % tx_h(tx) == 0,
-                                tx_h(prev_tx).min(tx_h(tx)),
-                            )
-                        };
-                        let apply = is_tx_edge && (is_block_edge || !m.skip || is_intra);
-                        if apply {
-                            let filter_size = if plane == 0 {
-                                base.min(16)
-                            } else if base.min(8) == 8 {
-                                6
-                            } else {
-                                4
-                            };
-                            let mut lvl = filter_level(hdr, fs, r, c, plane, pass);
-                            if lvl == 0 {
-                                lvl = filter_level(hdr, fs, prev_r, prev_c, plane, pass);
-                            }
-                            if lvl > 0 {
-                                if pass == 0 {
-                                    filter_vertical_edge(
-                                        &mut p.data,
-                                        stride,
-                                        xp,
-                                        yp,
-                                        4,
-                                        filter_size,
-                                        lvl,
-                                        sharp,
-                                        bd,
-                                    );
-                                } else {
-                                    filter_horizontal_edge(
-                                        &mut p.data,
-                                        stride,
-                                        xp,
-                                        yp,
-                                        4,
-                                        filter_size,
-                                        lvl,
-                                        sharp,
-                                        bd,
-                                    );
-                                }
-                            }
+        // Vertical edges, column by column within each strip of rows.
+        let lp = LfPlane::new(hdr, fs, plane, 0, sx, sy);
+        for strip in (0..nr).step_by(LF_STRIP_UNITS) {
+            let end = (strip + LF_STRIP_UNITS).min(nr);
+            for uc in 1..nc {
+                let mut run = (0u8, 0u8);
+                let mut start = strip;
+                for ur in strip..=end {
+                    let e = if ur < end {
+                        lp.edge(ur << sy, uc << sx)
+                    } else {
+                        (0, 0)
+                    };
+                    if e != run {
+                        if run.1 != 0 {
+                            filter_vertical_edge(
+                                &mut p.data,
+                                stride,
+                                uc * 4,
+                                start * 4,
+                                (ur - start) * 4,
+                                usize::from(run.0),
+                                run.1,
+                                sharp,
+                                bd,
+                            );
                         }
+                        run = e;
+                        start = ur;
                     }
-                    col += col_step;
                 }
-                row += row_step;
+            }
+        }
+        // Horizontal edges, row by row.
+        let lp = LfPlane::new(hdr, fs, plane, 1, sx, sy);
+        for ur in 1..nr {
+            let mut run = (0u8, 0u8);
+            let mut start = 0;
+            for uc in 0..=nc {
+                let e = if uc < nc {
+                    lp.edge(ur << sy, uc << sx)
+                } else {
+                    (0, 0)
+                };
+                if e != run {
+                    if run.1 != 0 {
+                        filter_horizontal_edge(
+                            &mut p.data,
+                            stride,
+                            start * 4,
+                            ur * 4,
+                            (uc - start) * 4,
+                            usize::from(run.0),
+                            run.1,
+                            sharp,
+                            bd,
+                        );
+                    }
+                    run = e;
+                    start = uc;
+                }
             }
         }
     }
 }
+
+/// Side, in samples, of the padded copy of one 64x64 luma area in [`cdef`].
+const CDEF_PAD_STRIDE: usize = 64 + 2 * CDEF_BORDER;
 
 /// CDEF process (7.15). `src` is the deblocked frame; `dst` starts as a copy of it.
 pub fn cdef<P: Pixel>(
@@ -186,116 +316,155 @@ pub fn cdef<P: Pixel>(
     let coeff_shift = bd - 8;
     let num_planes = seq.num_planes();
     let (ssx, ssy) = (seq.subsampling_x, seq.subsampling_y);
-    let mut pad = vec![0u16; 12 * 12];
-    let pstride = 8 + 2 * CDEF_BORDER;
-    let mut r = 0;
-    while r < fs.mi_rows {
-        let mut c = 0;
-        while c < fs.mi_cols {
-            let idx = fs.cdef_idx[(r >> 4) * fs.cdef_stride + (c >> 4)];
-            if idx >= 0 {
-                let rr = (r + 1).min(fs.mi_rows - 1);
-                let cc = (c + 1).min(fs.mi_cols - 1);
-                let skip = fs.mi_at(r, c).skip
-                    && fs.mi_at(rr, c).skip
-                    && fs.mi_at(r, cc).skip
-                    && fs.mi_at(rr, cc).skip;
-                if !skip {
-                    let idx = idx as usize;
-                    let lp = &src.planes[0];
-                    let (ydir, var) =
-                        cdef_direction(&lp.data[r * 4 * lp.stride + c * 4..], lp.stride, bd);
-                    let pri0 = i32::from(hdr.cdef.y_pri[idx]) << coeff_shift;
-                    let sec = i32::from(hdr.cdef.y_sec[idx]) << coeff_shift;
-                    let dir = if pri0 == 0 { 0 } else { ydir };
-                    let pri = adjust_luma_pri_strength(pri0, var);
-                    let damping = cdef_damping(i32::from(hdr.cdef.damping), bd, false);
-                    if pri != 0 || sec != 0 {
-                        cdef_plane_block(
-                            src, dst, 0, r, c, 0, 0, &mut pad, pstride, fs, pri, sec, dir, damping,
-                            bd,
-                        );
+    let y_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, false);
+    let uv_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, true);
+    // One padded copy per plane of the current 64x64 area, built on first use.
+    let mut pads: [Vec<u16>; 3] =
+        core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]);
+    let lp = &src.planes[0];
+    for sbr in (0..fs.mi_rows).step_by(16) {
+        for sbc in (0..fs.mi_cols).step_by(16) {
+            let idx = fs.cdef_idx[(sbr >> 4) * fs.cdef_stride + (sbc >> 4)];
+            if idx < 0 {
+                continue;
+            }
+            let idx = idx as usize;
+            let y_pri0 = i32::from(hdr.cdef.y_pri[idx]) << coeff_shift;
+            let y_sec = i32::from(hdr.cdef.y_sec[idx]) << coeff_shift;
+            let uv_pri = i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift;
+            let uv_sec = i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift;
+            let luma_on = y_pri0 != 0 || y_sec != 0;
+            let chroma_on = num_planes > 1 && (uv_pri != 0 || uv_sec != 0);
+            if !luma_on && !chroma_on {
+                continue;
+            }
+            let need_dir = y_pri0 != 0 || (chroma_on && uv_pri != 0);
+            let mut padded = [false; 3];
+            let r_end = (sbr + 16).min(fs.mi_rows);
+            let c_end = (sbc + 16).min(fs.mi_cols);
+            for r in (sbr..r_end).step_by(2) {
+                for c in (sbc..c_end).step_by(2) {
+                    let rr = (r + 1).min(fs.mi_rows - 1);
+                    let cc = (c + 1).min(fs.mi_cols - 1);
+                    let skip = fs.mi_at(r, c).skip
+                        && fs.mi_at(rr, c).skip
+                        && fs.mi_at(r, cc).skip
+                        && fs.mi_at(rr, cc).skip;
+                    if skip {
+                        continue;
                     }
-                    if num_planes > 1 {
-                        let pri = i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift;
-                        let sec = i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift;
-                        let dir = if pri == 0 {
+                    let (ydir, var) = if need_dir {
+                        cdef_direction(&lp.data[r * 4 * lp.stride + c * 4..], lp.stride, bd)
+                    } else {
+                        (0, 0)
+                    };
+                    let blk = CdefBlock { sbr, sbc, r, c, bd };
+                    if luma_on {
+                        let pri = adjust_luma_pri_strength(y_pri0, var);
+                        let dir = if y_pri0 == 0 { 0 } else { ydir };
+                        if pri != 0 || y_sec != 0 {
+                            cdef_plane_block(
+                                src,
+                                dst,
+                                0,
+                                &blk,
+                                (0, 0),
+                                &mut pads[0],
+                                &mut padded[0],
+                                fs,
+                                (pri, y_sec, dir, y_damping),
+                            );
+                        }
+                    }
+                    if chroma_on {
+                        let dir = if uv_pri == 0 {
                             0
                         } else {
                             cdef_uv_dir(ssx, ssy, ydir)
                         };
-                        let damping = cdef_damping(i32::from(hdr.cdef.damping), bd, true);
-                        if pri != 0 || sec != 0 {
-                            for plane in 1..3 {
-                                cdef_plane_block(
-                                    src,
-                                    dst,
-                                    plane,
-                                    r,
-                                    c,
-                                    u32::from(ssx),
-                                    u32::from(ssy),
-                                    &mut pad,
-                                    pstride,
-                                    fs,
-                                    pri,
-                                    sec,
-                                    dir,
-                                    damping,
-                                    bd,
-                                );
-                            }
+                        for plane in 1..3 {
+                            cdef_plane_block(
+                                src,
+                                dst,
+                                plane,
+                                &blk,
+                                (u32::from(ssx), u32::from(ssy)),
+                                &mut pads[plane],
+                                &mut padded[plane],
+                                fs,
+                                (uv_pri, uv_sec, dir, uv_damping),
+                            );
                         }
                     }
                 }
             }
-            c += 2;
         }
-        r += 2;
     }
 }
 
+/// Position of one 8x8 CDEF block: its 64x64 area `(sbr, sbc)` and its own
+/// `(r, c)`, both in luma 4x4 units.
+struct CdefBlock {
+    sbr: usize,
+    sbc: usize,
+    r: usize,
+    c: usize,
+    bd: u32,
+}
+
+/// Filters one 8x8 block (subsampled for chroma) of `plane`. `strength` is
+/// `(pri, sec, dir, damping)`. Pads the 64x64 area holding the block into
+/// `pad` first, unless `padded`.
 fn cdef_plane_block<P: Pixel>(
     src: &Picture<P>,
     dst: &mut Picture<P>,
     plane: usize,
-    r: usize,
-    c: usize,
-    sx: u32,
-    sy: u32,
+    blk: &CdefBlock,
+    (sx, sy): (u32, u32),
     pad: &mut [u16],
-    pstride: usize,
+    padded: &mut bool,
     fs: &FrameState,
-    pri: i32,
-    sec: i32,
-    dir: u8,
-    damping: i32,
-    bd: u32,
+    (pri, sec, dir, damping): (i32, i32, u8, i32),
 ) {
+    let ps = CDEF_PAD_STRIDE;
+    let sp = &src.planes[plane];
+    let sb_x = (blk.sbc * 4) >> sx;
+    let sb_y = (blk.sbr * 4) >> sy;
+    if !*padded {
+        let avail_w = (fs.mi_cols * 4) >> sx;
+        let avail_h = (fs.mi_rows * 4) >> sy;
+        cdef_pad_block(
+            pad,
+            ps,
+            &sp.data,
+            sp.stride,
+            sb_x,
+            sb_y,
+            64 >> sx,
+            64 >> sy,
+            avail_w,
+            avail_h,
+        );
+        *padded = true;
+    }
     let w = 8 >> sx;
     let h = 8 >> sy;
-    let x0 = (c * 4) >> sx;
-    let y0 = (r * 4) >> sy;
-    let sp = &src.planes[plane];
-    let avail_w = (fs.mi_cols * 4) >> sx;
-    let avail_h = (fs.mi_rows * 4) >> sy;
-    cdef_pad_block(
-        pad, pstride, &sp.data, sp.stride, x0, y0, w, h, avail_w, avail_h,
-    );
+    let x0 = (blk.c * 4) >> sx;
+    let y0 = (blk.r * 4) >> sy;
     let dp = &mut dst.planes[plane];
     let ds = dp.stride;
     cdef_filter(
         &mut dp.data[y0 * ds + x0..],
         ds,
-        pad,
-        pstride,
+        &pad[(y0 - sb_y) * ps + (x0 - sb_x)..],
+        ps,
         w,
         h,
         pri,
         sec,
         dir,
         damping,
-        bd,
+        blk.bd,
     );
 }
 

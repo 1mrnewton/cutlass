@@ -1,6 +1,8 @@
 //! Motion vector prediction (spec 7.10.2 – 7.10.4) and motion field estimation (7.9).
 
 use crate::dsp::Pixel;
+
+use super::coder::Coder;
 use crate::spec::tables::DIV_MULT;
 
 use super::frame::RefData;
@@ -14,7 +16,7 @@ use super::types::{
 const REF_CAT_LEVEL: u32 = 640;
 const MV_BORDER: i32 = 128;
 
-impl<P: Pixel> TileDec<'_, P> {
+impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     fn lower_mv_precision(&self, mv: &mut Mv) {
         if self.hdr.allow_high_precision_mv {
             return;

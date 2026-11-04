@@ -1,6 +1,8 @@
 //! Prediction and reconstruction calls for one block (spec 7.11, 7.12).
 
 use crate::dsp::Pixel;
+
+use super::coder::Coder;
 use crate::dsp::ipred::{self, EDGE_LEN, EDGE_OFF};
 use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP, QM_OFFSET, QUANTIZER_MATRIX};
 
@@ -15,6 +17,8 @@ use super::types::{
 pub struct Scratch<P> {
     pub levels: Vec<u8>,
     pub quant: Vec<i32>,
+    /// Planned levels of the transform block being written (encoder).
+    pub want: Vec<i32>,
     pub coefs: Vec<i32>,
     pub nz_rows: usize,
     pub nz_cols: usize,
@@ -34,6 +38,7 @@ impl<P: Pixel> Scratch<P> {
         Self {
             levels: vec![0; 36 * 36],
             quant: vec![0; 1024],
+            want: vec![0; 1024],
             coefs: vec![0; 64 * 64],
             nz_rows: 0,
             nz_cols: 0,
@@ -56,7 +61,7 @@ impl<P: Pixel> Default for Scratch<P> {
     }
 }
 
-impl<P: Pixel> TileDec<'_, P> {
+impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// get_qindex( 0, segment_id )
     fn block_qindex(&self) -> i32 {
         let seg = self.b.segment_id as usize;

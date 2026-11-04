@@ -494,6 +494,9 @@ pub struct Shell {
     waveforms: Option<Waveforms>,
     /// Files this frame's clips asked for peaks of.
     wave_asks: Vec<PathBuf>,
+    /// Library card waves by material id, with the peaks, length and width
+    /// they were spread from.
+    card_waves: std::collections::HashMap<String, CardWave>,
     face: FaceTable,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
@@ -580,6 +583,7 @@ impl Shell {
             film_asks: Vec::new(),
             waveforms: None,
             wave_asks: Vec::new(),
+            card_waves: std::collections::HashMap::new(),
             face: crate::face::installed(),
             gpu: None,
             preview_stale: false,
@@ -703,7 +707,8 @@ impl Shell {
     /// The library waveform of audio material `id`: `columns` levels, 0 to
     /// 1, across the whole file, once any of it is read. Asked for when the
     /// frame ends while missing or still being read.
-    pub fn material_wave(&mut self, id: &str, columns: usize) -> Option<Vec<f32>> {
+    /// Spread again only when the peaks, length or width moved.
+    pub fn material_wave(&mut self, id: &str, columns: usize) -> Option<Arc<[f32]>> {
         let waveforms = self.waveforms.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
         let Some(MaterialRef::Audio(audio)) = draft.materials.get(id) else {
@@ -718,7 +723,24 @@ impl Shell {
         if !peaks.complete {
             self.wave_asks.push(path);
         }
-        Some(spread_peaks(&peaks, duration, columns))
+        if let Some(kept) = self.card_waves.get(id)
+            && Arc::ptr_eq(&kept.peaks, &peaks)
+            && kept.duration == duration
+            && kept.columns == columns
+        {
+            return Some(Arc::clone(&kept.levels));
+        }
+        let levels: Arc<[f32]> = spread_peaks(&peaks, duration, columns).into();
+        self.card_waves.insert(
+            id.to_owned(),
+            CardWave {
+                peaks,
+                duration,
+                columns,
+                levels: Arc::clone(&levels),
+            },
+        );
+        Some(levels)
     }
 
     /// A stored media path as a file: inside the project when relative.
@@ -804,6 +826,7 @@ impl Shell {
         }
         self.session = None;
         self.lanes_cache.replace(None);
+        self.card_waves.clear();
         self.folder = None;
         self.hold = None;
         self.saved = None;
@@ -5380,6 +5403,14 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
 
 /// `peaks` spread over `columns`: the loudest level in each column's share
 /// of `duration`, the file's length. Past what was read is silence.
+/// A library card's wave and what it was spread from.
+struct CardWave {
+    peaks: Arc<cutlass_engine::Peaks>,
+    duration: i64,
+    columns: usize,
+    levels: Arc<[f32]>,
+}
+
 fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) -> Vec<f32> {
     let length = if duration > 0 {
         duration
@@ -6049,6 +6080,14 @@ mod tests {
         assert!(levels.iter().all(|level| (0.0..=1.0).contains(level)));
         let loud = levels.iter().filter(|level| **level > 0.05).count();
         assert!(loud > 100, "{loud} of {} columns have sound", levels.len());
+
+        // The library card's wave is spread once and kept while the peaks
+        // and width stay; a new width spreads again.
+        let card = desktop.material_wave("song", 64).expect("card wave");
+        assert_eq!(card.len(), 64);
+        let again = desktop.material_wave("song", 64).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&card, &again));
+        assert_eq!(desktop.material_wave("song", 32).unwrap().len(), 32);
     }
 
     #[test]

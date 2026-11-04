@@ -1037,7 +1037,7 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
             painter.rect_filled(rect, radius, tokens::CLIP_AUDIO);
             let wave = crate::shell::ClipWave {
                 first: 0,
-                levels: levels.clone(),
+                levels: levels.to_vec(),
                 gains: Vec::new(),
                 under_picture: false,
                 muted: false,
@@ -1100,7 +1100,7 @@ enum CardLook {
     /// A file's first frame, and its size in pixels, once read.
     Picture(Option<(egui::TextureId, [u32; 2])>),
     /// A sound file's levels, one per point across the card, once read.
-    Sound(Vec<f32>),
+    Sound(std::sync::Arc<[f32]>),
 }
 
 #[derive(Clone, Debug)]
@@ -1170,7 +1170,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     audio.id.as_str(),
                     &audio.path,
                     audio.duration.0,
-                    CardLook::Sound(Vec::new()),
+                    CardLook::Sound(std::sync::Arc::from([])),
                 );
             }
         }
@@ -2569,7 +2569,7 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
         name: file_label(&audio.path),
         meta: card_clock(audio.duration.0),
         on_timeline: used.contains(audio.id.as_str()),
-        look: CardLook::Sound(Vec::new()),
+        look: CardLook::Sound(std::sync::Arc::from([])),
     })
 }
 

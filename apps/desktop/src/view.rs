@@ -114,10 +114,21 @@ impl Shelf {
 
 /// The open library menu: where it opens, and whether it is for the
 /// picked cards or for the space between them.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct LibraryMenu {
     at: Pos2,
-    on_card: bool,
+    target: LibraryTarget,
+}
+
+/// What a library menu is for.
+#[derive(Clone, Debug, PartialEq)]
+enum LibraryTarget {
+    /// The space between the cards.
+    Empty,
+    /// The picked file cards.
+    Files,
+    /// One folder.
+    Folder(String),
 }
 
 pub struct ViewState {
@@ -165,6 +176,13 @@ pub struct ViewState {
     library_picked: Vec<String>,
     library_anchor: Option<String>,
     library_menu: Option<LibraryMenu>,
+    /// The library folder shown; empty is the top.
+    library_folder: String,
+    library_sort: cutlass_editor::LibrarySort,
+    /// The media shelf shows free stock instead of the project's files.
+    library_stock: bool,
+    /// A folder being named, and what is typed so far.
+    library_renaming: Option<(String, String)>,
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
@@ -219,6 +237,10 @@ impl Default for ViewState {
             library_picked: Vec::new(),
             library_anchor: None,
             library_menu: None,
+            library_folder: String::new(),
+            library_sort: cutlass_editor::LibrarySort::Name,
+            library_stock: false,
+            library_renaming: None,
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
@@ -870,18 +892,35 @@ fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
 
 fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    let shelf = view.library_shelf;
+    let stock = shelf == Shelf::Media && view.library_stock;
     column.add(
         egui::TextEdit::singleline(&mut view.library_query)
-            .hint_text(view.library_shelf.hint())
+            .hint_text(if stock {
+                "Search free stock"
+            } else {
+                shelf.hint()
+            })
             .desired_width(f32::INFINITY)
             .text_color(tokens::TEXT)
             .background_color(tokens::PROJECT_BAR)
             .margin(egui::Margin::symmetric(8, 6)),
     );
+    if shelf == Shelf::Media {
+        column.add_space(8.0);
+        source_switch(&mut column, view);
+    }
+    let bin = matches!(shelf, Shelf::Media | Shelf::Audio) && !stock;
+    if bin {
+        // A folder that is gone, as after another project opened, is the top.
+        if cutlass_editor::folder_trail(shell.library_store(), &view.library_folder).is_empty() {
+            view.library_folder.clear();
+        }
+        column.add_space(8.0);
+        path_bar(shell, &mut column, view);
+    }
     column.add_space(12.0);
     let grid = column.available_rect_before_wrap();
-    let shelf = view.library_shelf;
-    let bin = matches!(shelf, Shelf::Media | Shelf::Audio);
     // The space between and below the cards. Cards sit above it, so a
     // click here missed every card.
     let back = column.interact(grid, column.scope_id().with("library-back"), Sense::click());
@@ -893,7 +932,10 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         && back.secondary_clicked()
         && let Some(at) = back.interact_pointer_pos()
     {
-        view.library_menu = Some(LibraryMenu { at, on_card: false });
+        view.library_menu = Some(LibraryMenu {
+            at,
+            target: LibraryTarget::Empty,
+        });
     }
     let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let query = view.library_query.clone();
@@ -901,14 +943,34 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
         .id_salt("library-cards")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
-            let mut cards = shell
-                .draft()
-                .map(|draft| bin_cards(draft, shelf, &query))
-                .unwrap_or_default();
+            if stock {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Free stock needs a source. None is set up yet.")
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::MUTED),
+                );
+                return;
+            }
+            let mut cards = if bin {
+                folder_cards(shell.library_store(), &view.library_folder, &query)
+            } else {
+                Vec::new()
+            };
+            cards.extend(shell.draft().map_or_else(Vec::new, |draft| {
+                let place = BinPlace {
+                    store: shell.library_store(),
+                    folder: &view.library_folder,
+                    sort: view.library_sort,
+                };
+                bin_cards(draft, &place, shelf, &query)
+            }));
             fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
                     "No matches."
+                } else if !view.library_folder.is_empty() {
+                    "This folder is empty."
                 } else if shell.draft().is_some() {
                     shelf.empty()
                 } else {
@@ -920,7 +982,7 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                         .size(tokens::TYPE_SIZE)
                         .color(tokens::MUTED),
                 );
-            } else if let Some(id) = card_grid(ui, view, &cards, bin)
+            } else if let Some(id) = card_grid(shell, ui, view, &cards, bin)
                 && let Err(error) = shell.add_medium(&id)
             {
                 shell.set_notice(error.to_string());
@@ -929,9 +991,85 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
     library_menu(shell, &column, view);
 }
 
-/// The library menu, while open. No row is built yet, so a pick says so.
+/// Project or Free stock, over the media shelf.
+fn source_switch(ui: &mut Ui, view: &mut ViewState) {
+    ui.horizontal(|ui| {
+        for (label, stock) in [("Project", false), ("Free stock", true)] {
+            let on = view.library_stock == stock;
+            let button =
+                egui::Button::new(RichText::new(label).size(tokens::TYPE_SIZE).color(if on {
+                    tokens::TEXT
+                } else {
+                    tokens::FAINT
+                }))
+                .fill(if on {
+                    tokens::ACTIVE
+                } else {
+                    tokens::PROJECT_BAR
+                })
+                .corner_radius(CornerRadius::same(tokens::ICON_RADIUS));
+            if ui.add(button).clicked() && !on {
+                view.library_stock = stock;
+                view.library_picked.clear();
+                view.library_anchor = None;
+            }
+        }
+    });
+}
+
+/// "All", then each folder down to the one shown. A click goes there; a
+/// card dropped on one moves into it.
+fn path_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let trail: Vec<(String, String)> = std::iter::once((String::new(), "All".to_owned()))
+        .chain(
+            cutlass_editor::folder_trail(shell.library_store(), &view.library_folder)
+                .into_iter()
+                .map(|folder| (folder.id.clone(), folder.display_name.clone())),
+        )
+        .collect();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (index, (id, name)) in trail.iter().enumerate() {
+            if index > 0 {
+                ui.label(
+                    RichText::new("/")
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::FAINT),
+                );
+            }
+            let current = *id == view.library_folder;
+            let response = ui.add(
+                egui::Label::new(
+                    RichText::new(name)
+                        .size(tokens::TYPE_SIZE)
+                        .color(if current { tokens::TEXT } else { tokens::MUTED }),
+                )
+                .sense(Sense::click()),
+            );
+            drop_into_folder(shell, &response, id);
+            if response.clicked() {
+                view.library_folder.clone_from(id);
+                view.library_picked.clear();
+                view.library_anchor = None;
+            }
+        }
+    });
+}
+
+/// A card dragged from the library and let go over `response` moves into
+/// the folder `folder`, or to the top when it is empty.
+fn drop_into_folder(shell: &mut Shell, response: &egui::Response, folder: &str) {
+    if let Some(drop) = response.dnd_release_payload::<LibraryDrop>()
+        && drop.material_id != folder
+        && let Err(error) = shell.move_library_item(&drop.material_id, folder)
+    {
+        shell.set_notice(error.to_string());
+    }
+}
+
+/// The library menu for the empty space, the picked files, or a folder.
 fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
-    let Some(menu) = view.library_menu else {
+    let Some(menu) = view.library_menu.clone() else {
         return;
     };
     if let Some(pos) = secondary_click(ui)
@@ -940,24 +1078,104 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         view.library_menu = None;
         return;
     }
-    let entries = if menu.on_card {
-        crate::menu::LIBRARY_CARD
-    } else {
-        crate::menu::LIBRARY_EMPTY
+    let entries = match menu.target {
+        LibraryTarget::Empty => crate::menu::LIBRARY_EMPTY,
+        LibraryTarget::Files => crate::menu::LIBRARY_CARD,
+        LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER,
     };
+    let folder = matches!(menu.target, LibraryTarget::Folder(_));
     let shown = crate::menu::show(
         ui.ctx(),
         ui.scope_id().with("library-menu"),
         menu.at,
         entries,
-        &|_| true,
+        &|id| !folder || !crate::menu::LIBRARY_FOLDER_OFF.contains(&id),
     );
     if let Some(item) = shown.picked {
         view.library_menu = None;
-        shell.set_notice(format!("{} is not built yet", item.label));
+        library_action(shell, view, &menu.target, item);
     } else if shown.dismissed {
         view.library_menu = None;
     }
+}
+
+/// Run a library menu row.
+fn library_action(
+    shell: &mut Shell,
+    view: &mut ViewState,
+    target: &LibraryTarget,
+    item: crate::menu::Item,
+) {
+    let picked = view.library_picked.clone();
+    let result = match (item.id, target) {
+        ("new-folder", _) => shell
+            .new_library_folder(&view.library_folder, &[])
+            .map(|id| start_folder_name(shell, view, id)),
+        ("new-folder-with", LibraryTarget::Files) => shell
+            .new_library_folder(&view.library_folder, &picked)
+            .map(|id| start_folder_name(shell, view, id)),
+        ("sort-name", _) => {
+            view.library_sort = cutlass_editor::LibrarySort::Name;
+            shell.set_notice("Sorted by name");
+            Ok(())
+        }
+        ("sort-duration", _) => {
+            view.library_sort = cutlass_editor::LibrarySort::Duration;
+            shell.set_notice("Sorted by duration");
+            Ok(())
+        }
+        ("open-file", LibraryTarget::Files) => match picked.first() {
+            Some(id) => shell.reveal_library_file(id),
+            None => Ok(()),
+        },
+        ("delete", LibraryTarget::Files) => {
+            let files: Vec<String> = picked
+                .iter()
+                .filter(|id| {
+                    !shell
+                        .library_store()
+                        .folders
+                        .iter()
+                        .any(|folder| &folder.id == *id)
+                })
+                .cloned()
+                .collect();
+            view.library_picked.retain(|id| !files.contains(id));
+            shell.hide_library_files(&files)
+        }
+        ("delete", LibraryTarget::Folder(id)) => shell.delete_library_folder(id).map(|parent| {
+            view.library_picked.retain(|picked| picked != id);
+            let inside = cutlass_editor::folder_trail(shell.library_store(), &view.library_folder);
+            if inside.is_empty() && !view.library_folder.is_empty() {
+                view.library_folder = parent.unwrap_or_default();
+            }
+        }),
+        ("rename", LibraryTarget::Folder(id)) => {
+            start_folder_name(shell, view, id.clone());
+            Ok(())
+        }
+        _ => {
+            shell.set_notice(format!("{} is not built yet", item.label));
+            Ok(())
+        }
+    };
+    if let Err(error) = result {
+        shell.set_notice(error.to_string());
+    }
+}
+
+/// Pick a folder and put its name in a field to type over.
+fn start_folder_name(shell: &Shell, view: &mut ViewState, id: String) {
+    let name = shell
+        .library_store()
+        .folders
+        .iter()
+        .find(|folder| folder.id == id)
+        .map(|folder| folder.display_name.clone())
+        .unwrap_or_default();
+    view.library_picked = vec![id.clone()];
+    view.library_anchor = Some(id.clone());
+    view.library_renaming = Some((id, name));
 }
 
 /// Pick `id` the way a click does: alone, toggled with Command, or the run
@@ -996,7 +1214,13 @@ fn pick_card(view: &mut ViewState, cards: &[BinCard], id: &str, modifiers: egui:
 }
 
 /// Lay out the cards. Returns the card whose plus was pressed.
-fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) -> Option<String> {
+fn card_grid(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    cards: &[BinCard],
+    bin: bool,
+) -> Option<String> {
     let mut added = None;
     let width = ui.available_width().max(CARD_W);
     ui.set_min_width(width);
@@ -1013,15 +1237,35 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) ->
                 (index / cols) as f32 * pitch,
             );
         let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H + CARD_LABEL));
+        let folder = card.look == CardLook::Folder;
         paint_bin_card(ui, rect, card, view.library_picked.contains(&card.id));
+        if folder && folder_name_field(shell, ui, view, card, rect) {
+            continue;
+        }
         // A click picks the card. A drag only starts once the pointer moves.
-        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::click_and_drag());
-        response.dnd_set_drag_payload(LibraryDrop {
-            material_id: card.id.clone(),
-        });
+        let sense = if folder {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        };
+        let response = ui.interact(rect, ui.scope_id().with(&card.id), sense);
+        if folder {
+            drop_into_folder(shell, &response, &card.id);
+        } else {
+            response.dnd_set_drag_payload(LibraryDrop {
+                material_id: card.id.clone(),
+            });
+        }
         if response.clicked() {
             let modifiers = ui.input(|input| input.modifiers);
-            pick_card(view, cards, &card.id, modifiers);
+            if folder && !(modifiers.shift || modifiers.command || modifiers.ctrl) {
+                // A plain click on a folder goes into it.
+                view.library_folder.clone_from(&card.id);
+                view.library_picked = vec![card.id.clone()];
+                view.library_anchor = Some(card.id.clone());
+            } else {
+                pick_card(view, cards, &card.id, modifiers);
+            }
         }
         if response.secondary_clicked() {
             if !view.library_picked.contains(&card.id) {
@@ -1029,15 +1273,64 @@ fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) ->
                 view.library_anchor = Some(card.id.clone());
             }
             if bin && let Some(at) = response.interact_pointer_pos() {
-                view.library_menu = Some(LibraryMenu { at, on_card: true });
+                let target = if folder {
+                    LibraryTarget::Folder(card.id.clone())
+                } else {
+                    LibraryTarget::Files
+                };
+                view.library_menu = Some(LibraryMenu { at, target });
             }
         }
         response.on_hover_text(&card.name);
+        if folder {
+            continue;
+        }
         if bin && ui.rect_contains_pointer(rect) && card_plus(ui, rect, &card.id) {
             added = Some(card.id.clone());
         }
     }
     added
+}
+
+/// While `card` is the folder being named, a field over its name. Enter or
+/// a click away keeps the name; Escape keeps the old one. True while the
+/// field is up.
+fn folder_name_field(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    card: &BinCard,
+    rect: Rect,
+) -> bool {
+    let Some((id, typed)) = view.library_renaming.as_mut() else {
+        return false;
+    };
+    if *id != card.id {
+        return false;
+    }
+    let label = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.top() + CARD_H + 2.0),
+        Vec2::new(rect.width(), CARD_LABEL - 2.0),
+    );
+    let field = ui.put(
+        label,
+        egui::TextEdit::singleline(&mut *typed)
+            .font(FontId::proportional(12.0))
+            .text_color(tokens::TEXT),
+    );
+    if !field.has_focus() && !field.lost_focus() {
+        field.request_focus();
+    }
+    if field.lost_focus() {
+        let cancel = ui.input(|input| input.key_pressed(egui::Key::Escape));
+        let typed = typed.clone();
+        let id = id.clone();
+        view.library_renaming = None;
+        if !cancel && let Err(error) = shell.rename_library_folder(&id, &typed) {
+            shell.set_notice(error.to_string());
+        }
+    }
+    true
 }
 
 /// The round plus at the bottom right of a hovered card's picture. True when pressed.
@@ -1146,7 +1439,7 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         card.look = CardLook::Sound(levels);
                     }
                 }
-                CardLook::Swatch => {}
+                CardLook::Swatch | CardLook::Folder => {}
             }
         }
     });
@@ -1160,6 +1453,15 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
     match &card.look {
         CardLook::Swatch => {
             painter.rect_filled(rect, radius, swatch_color(&card.name));
+        }
+        CardLook::Folder => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+            let _ = icons::paint(
+                painter,
+                Rect::from_center_size(rect.center(), Vec2::splat(40.0)),
+                "folder",
+                tokens::MUTED,
+            );
         }
         CardLook::Picture(None) => {
             painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
@@ -1239,6 +1541,29 @@ enum CardLook {
     Picture(Option<(egui::TextureId, [u32; 2])>),
     /// A sound file's levels, one per point across the card, once read.
     Sound(std::sync::Arc<[f32]>),
+    /// A library folder.
+    Folder,
+}
+
+/// Where the library is looking: its folders, the one shown, and the order.
+struct BinPlace<'a> {
+    store: &'a cutlass_model::VirtualStore,
+    folder: &'a str,
+    sort: cutlass_editor::LibrarySort,
+}
+
+/// The folder cards in `folder`, by name.
+fn folder_cards(store: &cutlass_model::VirtualStore, folder: &str, query: &str) -> Vec<BinCard> {
+    cutlass_editor::library_folders(store, folder, query)
+        .into_iter()
+        .map(|folder| BinCard {
+            id: folder.id.clone(),
+            name: folder.display_name.clone(),
+            meta: String::new(),
+            on_timeline: false,
+            look: CardLook::Folder,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1246,70 +1571,26 @@ struct LibraryDrop {
     material_id: String,
 }
 
-fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
-    // A clip that changed its own copy of a video still shows that file,
-    // so the library lists each file once and marks it by file.
-    let paths: std::collections::HashMap<&str, &str> = draft
-        .materials
-        .videos
-        .iter()
-        .map(|video| (video.id.as_str(), video.path.as_str()))
-        .chain(
-            draft
-                .materials
-                .audios
-                .iter()
-                .map(|audio| (audio.id.as_str(), audio.path.as_str())),
-        )
-        .collect();
-    let used: std::collections::HashSet<&str> = draft
-        .tracks
-        .iter()
-        .flat_map(|track| track.segments.iter())
-        .map(|segment| segment.material_id.as_str())
-        .map(|id| {
-            paths
-                .get(id)
-                .copied()
-                .filter(|path| !path.is_empty())
-                .unwrap_or(id)
-        })
-        .collect();
-    let mut seen = std::collections::HashSet::new();
-    let mut fresh = |path: &str| path.is_empty() || seen.insert(path.to_owned());
+fn bin_cards(
+    draft: &cutlass_model::Draft,
+    place: &BinPlace<'_>,
+    shelf: Shelf,
+    query: &str,
+) -> Vec<BinCard> {
     let query = query.trim().to_lowercase();
     let mut cards = Vec::new();
+    let files = |shelf| {
+        cutlass_editor::library_files(draft, place.store, shelf, place.folder, place.sort, &query)
+    };
     match shelf {
         Shelf::Media => {
-            for video in &draft.materials.videos {
-                if !fresh(&video.path) {
-                    continue;
-                }
-                push_card(
-                    &mut cards,
-                    &used,
-                    &query,
-                    video.id.as_str(),
-                    &video.path,
-                    video.duration.0,
-                    CardLook::Picture(None),
-                );
+            for file in files(cutlass_editor::LibraryShelf::Media) {
+                cards.push(file_card(file, CardLook::Picture(None)));
             }
         }
         Shelf::Audio => {
-            for audio in &draft.materials.audios {
-                if !fresh(&audio.path) {
-                    continue;
-                }
-                push_card(
-                    &mut cards,
-                    &used,
-                    &query,
-                    audio.id.as_str(),
-                    &audio.path,
-                    audio.duration.0,
-                    CardLook::Sound(std::sync::Arc::from([])),
-                );
+            for file in files(cutlass_editor::LibraryShelf::Audio) {
+                cards.push(file_card(file, CardLook::Sound(std::sync::Arc::from([]))));
             }
         }
         Shelf::Transitions => {
@@ -1336,26 +1617,14 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
     cards
 }
 
-fn push_card(
-    cards: &mut Vec<BinCard>,
-    used: &std::collections::HashSet<&str>,
-    query: &str,
-    id: &str,
-    path: &str,
-    duration: i64,
-    look: CardLook,
-) {
-    let name = file_label(path);
-    if !query.is_empty() && !name.to_lowercase().contains(query) {
-        return;
-    }
-    cards.push(BinCard {
-        id: id.to_owned(),
-        name,
-        meta: card_clock(duration),
-        on_timeline: used.contains(id) || (!path.is_empty() && used.contains(path)),
+fn file_card(file: cutlass_editor::LibraryFile, look: CardLook) -> BinCard {
+    BinCard {
+        id: file.id,
+        name: file.name,
+        meta: card_clock(file.duration.0),
+        on_timeline: file.on_timeline,
         look,
-    });
+    }
 }
 
 /// A media card's length: minutes and seconds, with hours when it has them.
@@ -5924,6 +6193,17 @@ mod tests {
         );
     }
 
+    /// The cards at the top of the library, by name.
+    fn top_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
+        let store = cutlass_model::VirtualStore::default();
+        let place = BinPlace {
+            store: &store,
+            folder: "",
+            sort: cutlass_editor::LibrarySort::Name,
+        };
+        bin_cards(draft, &place, shelf, query)
+    }
+
     #[test]
     fn a_video_on_the_main_lane_is_a_media_card() {
         let mut draft = cutlass_model::Draft::empty("draft");
@@ -5936,7 +6216,7 @@ mod tests {
             "mat",
             cutlass_model::TimeRange::new(0, 2_500_000),
         ));
-        let cards = bin_cards(&draft, Shelf::Media, "");
+        let cards = top_cards(&draft, Shelf::Media, "");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].name, "clip.mp4");
         assert_eq!(cards[0].meta, "00:02");
@@ -5947,12 +6227,12 @@ mod tests {
         copy.id = "seg:mat".into();
         draft.materials.videos.push(copy);
         draft.tracks[0].segments[0].material_id = "seg:mat".into();
-        let cards = bin_cards(&draft, Shelf::Media, "");
+        let cards = top_cards(&draft, Shelf::Media, "");
         assert_eq!(cards.len(), 1);
         assert!(cards[0].on_timeline);
-        assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
-        assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
-        let blends = bin_cards(&draft, Shelf::Transitions, "");
+        assert!(top_cards(&draft, Shelf::Audio, "").is_empty());
+        assert!(top_cards(&draft, Shelf::Media, "nope").is_empty());
+        let blends = top_cards(&draft, Shelf::Transitions, "");
         assert_eq!(
             blends
                 .iter()
@@ -5962,7 +6242,7 @@ mod tests {
         );
         assert_eq!(blends[0].meta, "0.5s");
         assert!(!blends[0].on_timeline);
-        assert_eq!(bin_cards(&draft, Shelf::Transitions, "dip").len(), 1);
+        assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 1);
     }
 
     #[test]
@@ -6094,7 +6374,11 @@ mod tests {
             click(card, egui::PointerButton::Secondary),
         );
         assert_eq!(view.library_picked, picked);
-        assert!(view.library_menu.is_some_and(|menu| menu.on_card));
+        assert!(
+            view.library_menu
+                .as_ref()
+                .is_some_and(|menu| menu.target == LibraryTarget::Files)
+        );
         let row = text_pos(&output, "Delete").expect("the Delete row") + Vec2::new(4.0, 6.0);
         frame(
             &mut shell,
@@ -6102,8 +6386,118 @@ mod tests {
             click(row, egui::PointerButton::Primary),
         );
         assert!(view.library_menu.is_none());
-        assert_eq!(shell.notice(), "Delete is not built yet");
+        // Delete takes the card out of the library; the file stays in the draft.
+        assert_eq!(shell.notice(), "Deleted pattern.png");
         assert!(shell.draft().unwrap().materials.videos.len() == 1);
+        assert!(
+            shell
+                .library_files(
+                    cutlass_editor::LibraryShelf::Media,
+                    "",
+                    cutlass_editor::LibrarySort::Name,
+                    ""
+                )
+                .is_empty()
+        );
+        assert!(shell.unsaved());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_new_folder_is_named_opened_and_left_by_the_path_bar() {
+        let temp = std::env::temp_dir().join(format!("cutlass-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "All").is_some());
+        assert!(text_pos(&output, "Free stock").is_some());
+        let card = text_pos(&output, "pattern.png").expect("library card");
+        // Right-click below the cards for the empty-space menu.
+        let empty = card + Vec2::new(0.0, 60.0);
+        let output = frame(
+            &mut shell,
+            &mut view,
+            click(empty, egui::PointerButton::Secondary),
+        );
+        assert_eq!(
+            view.library_menu.as_ref().map(|menu| menu.target.clone()),
+            Some(LibraryTarget::Empty)
+        );
+        let row = text_pos(&output, "New folder").expect("New folder row") + Vec2::new(4.0, 6.0);
+        frame(
+            &mut shell,
+            &mut view,
+            click(row, egui::PointerButton::Primary),
+        );
+        let (id, typed) = view.library_renaming.clone().expect("a name field");
+        assert_eq!(typed, "Untitled folder");
+        view.library_renaming = Some((id.clone(), "Shots".to_owned()));
+        frame(&mut shell, &mut view, Vec::new());
+        frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(view.library_renaming.is_none());
+        let folder = text_pos(&output, "Shots").expect("the named folder");
+        assert!(shell.unsaved());
+        frame(
+            &mut shell,
+            &mut view,
+            click(folder, egui::PointerButton::Primary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(view.library_folder, id);
+        assert!(text_pos(&output, "pattern.png").is_none());
+        let all = text_pos(&output, "All").expect("the path bar");
+        frame(
+            &mut shell,
+            &mut view,
+            click(all, egui::PointerButton::Primary),
+        );
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(view.library_folder.is_empty());
+        assert!(text_pos(&output, "pattern.png").is_some());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

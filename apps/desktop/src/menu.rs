@@ -250,25 +250,39 @@ pub const TRACK_HEAD: &[Entry] = &[
     done("delete-track", "Delete track", ""),
 ];
 
-/// The menu for a media card in the library.
+/// The menu for the picked file cards in the library.
 pub const LIBRARY_CARD: &[Entry] = &[
-    todo("open-file", "Open file location", ""),
-    todo("delete", "Delete", ""),
-    todo("new-folder-with", "New folder with selected item", ""),
+    done("open-file", "Open file location", ""),
+    done("delete", "Delete", ""),
+    done("new-folder-with", "New folder with selected item", ""),
     todo("link-media", "Link to media", ""),
     todo("split-scenes", "Split scenes", ""),
     todo("export", "Export selected clips", ""),
 ];
 
+/// The menu for a folder in the library. The rows in
+/// [`LIBRARY_FOLDER_OFF`] are there but greyed, as in the prototype.
+pub const LIBRARY_FOLDER: &[Entry] = &[
+    done("delete", "Delete", ""),
+    done("open-file", "Open file location", ""),
+    done("new-folder-with", "New folder with selected item", ""),
+    done("rename", "Rename", ""),
+    done("link-media", "Link to media", ""),
+    todo("export", "Export selected clips", ""),
+];
+
+/// The folder menu's rows that cannot run on a folder.
+pub const LIBRARY_FOLDER_OFF: &[&str] = &["open-file", "new-folder-with", "link-media"];
+
 /// The menu for the empty space between library cards.
 pub const LIBRARY_EMPTY: &[Entry] = &[
-    todo("new-folder", "New folder", ""),
+    done("new-folder", "New folder", ""),
     sub(
         "sort",
         "Sort",
         &[
-            todo("sort-name", "Name", ""),
-            todo("sort-duration", "Duration", ""),
+            done("sort-name", "Name", ""),
+            done("sort-duration", "Duration", ""),
         ],
     ),
 ];

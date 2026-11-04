@@ -521,6 +521,10 @@ pub struct Shell {
     settings: Settings,
     session: Option<Session>,
     folder: Option<Folder>,
+    /// Library folder edits made, and how many the folder on disk holds.
+    /// They are not undo steps, so they count apart from the session.
+    library_edits: u64,
+    library_saved: u64,
     hold: Option<Hold>,
     /// The session revision the project folder holds, and when it was written.
     saved: Option<(u64, Instant)>,
@@ -656,6 +660,8 @@ impl Shell {
             settings,
             session: None,
             folder: None,
+            library_edits: 0,
+            library_saved: 0,
             hold: None,
             path: None,
             playhead: Micros(0),
@@ -1073,6 +1079,8 @@ impl Shell {
         self.session = Some(session);
         self.lanes_cache.replace(None);
         self.folder = Some(opened.folder);
+        self.library_edits = 0;
+        self.library_saved = 0;
         self.hold = Some(hold);
         self.playhead = Micros(0);
         self.playing = false;
@@ -1100,8 +1108,10 @@ impl Shell {
         // A write already under way finishes first, so two never overlap.
         self.finish_background_save();
         let (path, folder, revision) = self.save_snapshot()?;
+        let library = self.library_edits;
         folder.save(&path).map_err(ShellError::Store)?;
         self.saved = Some((revision, Instant::now()));
+        self.library_saved = library;
         Ok(())
     }
 
@@ -1148,6 +1158,9 @@ impl Shell {
         if let Some(saving) = self.saving.take() {
             let written = saving.handle.join();
             if self.path.as_ref() == Some(&saving.project) {
+                if matches!(written, Ok(Ok(()))) {
+                    self.library_saved = saving.library;
+                }
                 self.record_background_save(saving.revision, written);
             } else if let Ok(Err(error)) = written {
                 cutlass_logger::error!("autosave of {}: {error}", saving.project.display());
@@ -1216,6 +1229,7 @@ impl Shell {
             Ok(handle) => {
                 self.saving = Some(Saving {
                     revision,
+                    library: self.library_edits,
                     project,
                     handle,
                 });
@@ -1231,8 +1245,181 @@ impl Shell {
     /// An edit has landed since the folder was last written.
     pub fn unsaved(&self) -> bool {
         match (self.session.as_ref(), self.saved) {
-            (Some(session), Some((saved, _))) => session.revision() != saved,
+            (Some(session), Some((saved, _))) => {
+                session.revision() != saved || self.library_edits != self.library_saved
+            }
             _ => false,
+        }
+    }
+
+    /// The library's folders, and the cards taken out of it.
+    #[must_use]
+    pub fn library_store(&self) -> &cutlass_model::VirtualStore {
+        static EMPTY: std::sync::LazyLock<cutlass_model::VirtualStore> =
+            std::sync::LazyLock::new(cutlass_model::VirtualStore::default);
+        self.folder
+            .as_ref()
+            .and_then(|folder| folder.virtual_store.as_ref())
+            .unwrap_or(&EMPTY)
+    }
+
+    /// The file cards of `shelf` in `folder`, through the shared rules.
+    #[must_use]
+    pub fn library_files(
+        &self,
+        shelf: cutlass_editor::LibraryShelf,
+        folder: &str,
+        sort: cutlass_editor::LibrarySort,
+        query: &str,
+    ) -> Vec<cutlass_editor::LibraryFile> {
+        let Some(draft) = self.draft() else {
+            return Vec::new();
+        };
+        cutlass_editor::library_files(draft, self.library_store(), shelf, folder, sort, query)
+    }
+
+    /// Change the library's folders. The project then has unsaved changes.
+    fn edit_library<R>(
+        &mut self,
+        edit: impl FnOnce(&mut cutlass_model::VirtualStore) -> R,
+    ) -> Result<R, ShellError> {
+        let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
+        let store = folder.virtual_store.get_or_insert_with(Default::default);
+        let before = store.clone();
+        let result = edit(store);
+        if *store != before {
+            self.library_edits = self.library_edits.wrapping_add(1);
+        }
+        Ok(result)
+    }
+
+    /// A new folder in `parent`, holding `with`. Returns its id.
+    pub fn new_library_folder(
+        &mut self,
+        parent: &str,
+        with: &[String],
+    ) -> Result<String, ShellError> {
+        let mut id = self.fresh("folder");
+        while self
+            .library_store()
+            .folders
+            .iter()
+            .any(|folder| folder.id == id)
+        {
+            id = self.fresh("folder");
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        let with: Vec<&str> = with.iter().map(String::as_str).collect();
+        self.edit_library(|store| cutlass_editor::add_folder(store, &id, parent, &with, now))?;
+        Ok(id)
+    }
+
+    /// Name a library folder. A blank name keeps the old one.
+    pub fn rename_library_folder(&mut self, id: &str, name: &str) -> Result<(), ShellError> {
+        self.edit_library(|store| cutlass_editor::rename_folder(store, id, name))?;
+        Ok(())
+    }
+
+    /// Delete a library folder and the folders in it; their files move up.
+    /// Returns where they went.
+    pub fn delete_library_folder(&mut self, id: &str) -> Result<Option<String>, ShellError> {
+        let name = self.library_folder_name(id);
+        let parent = self.edit_library(|store| cutlass_editor::delete_folder(store, id))?;
+        if parent.is_some() {
+            self.set_notice(format!("Deleted {name}"));
+        }
+        Ok(parent)
+    }
+
+    /// Move a card or folder into `parent`. Says where it went.
+    pub fn move_library_item(&mut self, child: &str, parent: &str) -> Result<bool, ShellError> {
+        let moved = self.edit_library(|store| cutlass_editor::place(store, child, parent))?;
+        if moved {
+            let name = self.library_item_name(child);
+            let place = if parent.is_empty() {
+                "All".to_owned()
+            } else {
+                self.library_folder_name(parent)
+            };
+            self.set_notice(format!("Moved {name} to {place}"));
+        }
+        Ok(moved)
+    }
+
+    /// Take file cards out of the library. Their clips stay.
+    pub fn hide_library_files(&mut self, ids: &[String]) -> Result<(), ShellError> {
+        let paths: Vec<(String, String)> = ids
+            .iter()
+            .filter_map(|id| Some((id.clone(), self.library_path(id)?)))
+            .collect();
+        let name = match ids {
+            [one] => self.library_item_name(one),
+            many => format!("{} items", many.len()),
+        };
+        self.edit_library(|store| {
+            for (id, path) in &paths {
+                cutlass_editor::hide_file(store, id, path);
+            }
+        })?;
+        if !paths.is_empty() {
+            self.set_notice(format!("Deleted {name}"));
+        }
+        Ok(())
+    }
+
+    /// Show a card's file in the system's file manager.
+    pub fn reveal_library_file(&self, id: &str) -> Result<(), ShellError> {
+        let path = self
+            .library_path(id)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| ShellError::Io("this item has no file".to_owned()))?;
+        let file = media_file(self.path.as_deref(), Some(&path))
+            .ok_or_else(|| ShellError::Io(format!("{path} is not in the project")))?;
+        reveal(&file)
+    }
+
+    fn library_path(&self, id: &str) -> Option<String> {
+        let materials = &self.draft()?.materials;
+        materials
+            .videos
+            .iter()
+            .find(|video| video.id.as_str() == id)
+            .map(|video| video.path.clone())
+            .or_else(|| {
+                materials
+                    .audios
+                    .iter()
+                    .find(|audio| audio.id.as_str() == id)
+                    .map(|audio| audio.path.clone())
+            })
+    }
+
+    fn library_folder_name(&self, id: &str) -> String {
+        self.library_store()
+            .folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .map_or_else(|| "Folder".to_owned(), |folder| folder.display_name.clone())
+    }
+
+    fn library_item_name(&self, id: &str) -> String {
+        if self
+            .library_store()
+            .folders
+            .iter()
+            .any(|folder| folder.id == id)
+        {
+            return self.library_folder_name(id);
+        }
+        match self.library_path(id) {
+            Some(path) if !path.is_empty() => Path::new(&path)
+                .file_name()
+                .map_or(path.clone(), |name| name.to_string_lossy().into_owned()),
+            _ => "Clip".to_owned(),
         }
     }
 
@@ -6299,6 +6486,8 @@ type HeldEdit = (std::mem::Discriminant<Request>, Option<SegmentId>);
 /// An autosave in flight and the revision it writes.
 struct Saving {
     revision: u64,
+    /// The library edit count the write holds.
+    library: u64,
     /// The project it writes; a different one may be open when it lands.
     project: PathBuf,
     handle: std::thread::JoinHandle<Result<(), StoreError>>,
@@ -9370,6 +9559,50 @@ mod tests {
         desktop.pause();
         desktop.update_meter(20_000);
         assert!(desktop.meter_resting());
+    }
+
+    #[test]
+    fn library_folders_are_kept_with_the_project() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let media = |desktop: &Shell, folder: &str| {
+            desktop.library_files(
+                cutlass_editor::LibraryShelf::Media,
+                folder,
+                cutlass_editor::LibrarySort::Name,
+                "",
+            )
+        };
+        let card = media(&desktop, "")[0].id.clone();
+        let folder = desktop.new_library_folder("", &[card.clone()]).unwrap();
+        desktop.rename_library_folder(&folder, "Takes").unwrap();
+        assert!(media(&desktop, "").is_empty());
+        assert_eq!(media(&desktop, &folder).len(), 1);
+        assert!(desktop.unsaved());
+        desktop.save().unwrap();
+        assert!(!desktop.unsaved());
+        drop(desktop);
+
+        let mut again = shell();
+        again.open_folder(&temp.path).unwrap();
+        assert_eq!(again.library_store().folders[0].display_name, "Takes");
+        assert_eq!(media(&again, &folder).len(), 1);
+        assert!(again.move_library_item(&card, "").unwrap());
+        assert_eq!(
+            again.notice(),
+            format!("Moved {} to All", media(&again, "")[0].name)
+        );
+        assert_eq!(
+            again.delete_library_folder(&folder).unwrap().as_deref(),
+            Some("")
+        );
+        assert!(again.library_store().folders.is_empty());
+        assert!(again.unsaved());
     }
 
     #[test]

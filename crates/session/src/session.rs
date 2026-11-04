@@ -537,6 +537,31 @@ mod tests {
     }
 
     #[test]
+    fn undo_keeps_only_the_newest_steps_up_to_the_limit() {
+        let (mut session, track) = session();
+        let steps = crate::UNDO_LIMIT + 5;
+        for i in 0..steps {
+            let start = i64::try_from(i).unwrap() * 10;
+            session
+                .apply(
+                    session.revision(),
+                    &[place(&track, &format!("s{i}"), start, 10)],
+                )
+                .unwrap();
+        }
+        for _ in 0..crate::UNDO_LIMIT {
+            session.undo().unwrap();
+        }
+        // The five oldest steps were dropped, so undo stops at five clips.
+        assert!(matches!(session.undo(), Err(EditError::EmptyUndo)));
+        assert_eq!(session.draft().tracks[0].segments.len(), 5);
+        for _ in 0..crate::UNDO_LIMIT {
+            session.redo().unwrap();
+        }
+        assert_eq!(session.draft().tracks[0].segments.len(), steps);
+    }
+
+    #[test]
     fn a_split_curve_clip_gives_each_half_its_stretch_of_the_curve() {
         let (mut session, track) = session();
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 4_000_000));

@@ -15,9 +15,14 @@ struct RecordedStep {
     after: Draft,
 }
 
+/// Undo steps kept. Each step is a whole draft, so an uncapped stack grows
+/// with project size times session length; the oldest step goes first.
+pub const UNDO_LIMIT: usize = 100;
+
 /// Undo and redo stacks, plus a transaction those stacks do not open.
 ///
-/// `apply` still pushes the previous draft on success. `begin`, `record`,
+/// `apply` still pushes the previous draft on success, and the undo stack
+/// keeps at most [`UNDO_LIMIT`] steps. `begin`, `record`,
 /// `commit`, `amend`, and `rollback` are the other calls. `rollback` puts
 /// the open draft, and those stacks, back where they were at `begin`.
 #[derive(Clone, Debug, Default)]
@@ -30,7 +35,11 @@ pub struct History {
 }
 
 impl History {
+    /// Push one step. Past [`UNDO_LIMIT`] the oldest step is dropped.
     pub fn push_undo(&mut self, draft: Draft) {
+        if self.undo.len() >= UNDO_LIMIT {
+            self.undo.remove(0);
+        }
         self.undo.push(draft);
     }
 

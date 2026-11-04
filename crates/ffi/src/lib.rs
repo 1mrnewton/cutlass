@@ -500,17 +500,7 @@ impl PhoneHost {
     /// The picture or title clip's in and out animations.
     #[must_use]
     pub fn animations(&self, segment_id: &SegmentId) -> Option<PhoneAnimations> {
-        let animations = PhoneAnimations::of(self.draft(), segment_id)?;
-        let start = self
-            .draft()
-            .tracks
-            .iter()
-            .flat_map(|track| track.segments.iter())
-            .find(|segment| &segment.id == segment_id)?
-            .target
-            .start;
-        cutlass_editor::stage_box(self.draft(), segment_id, start, &self.sizes())?;
-        Some(animations)
+        cutlass_editor::clip_animations(self.draft(), segment_id, &self.sizes())
     }
 
     /// Give the clip the in (`enter`) or out animation `resource_id`,

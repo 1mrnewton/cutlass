@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod animation;
 mod append;
 mod controls;
 mod filmstrip;
@@ -19,6 +20,7 @@ mod stage;
 mod tools;
 mod zoom;
 
+pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, material_span};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};

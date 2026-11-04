@@ -1,65 +1,102 @@
 # H.264 scope
 
-Checkout: branch `h264-sw-enc-dec`. Crate `cutlass-h264`. Direction: decode and encode. Domain: progressive 8-bit 4:2:0 video for import and export. Container demux and mux stay in the container crates. The codec boundary is one access unit: Annex B or length-prefixed NAL units.
+Checkout: `8fce4a643865` on `h264-sw-enc-dec`. Crate `cutlass-h264`. Direction: decode and encode. Decode follows the recommendation's software process for the profiles and tools below. Encode emits progressive High, 8-bit, 4:2:0, CABAC. Container demux and mux stay in the container crates. The codec boundary is one access unit: Annex B or length-prefixed NAL units.
+
+`docs/codecs/h264/decode.md` is the decode grind list. This file is the contract. A row there that is still open stays open here.
 
 ## Normative text
 
-- Recommendation ITU-T H.264 (V16) (06/2026) | ISO/IEC 14496-10, in force. The published summary of V16 adds supplemental enhancement information messages. It does not change the 8-bit 4:2:0 reconstruction process this crate implements.
-- The syntax, decoding process, and CABAC tables were read from Recommendation ITU-T H.264 (V14) (08/2021), clauses 6, 7, 8, and 9 and Annexes A, B, and C. V15 (08/2024) removed a placeholder annex and renumbered later annexes. Clauses 7 through 9 are the reconstruction text used here. V16’s new SEI messages are skipped, not applied.
-- ISO/IEC 14496-15 AVC decoder configuration record (`avcC`) and length-prefixed samples, as read from FFmpeg `libavformat/avc.c` and the ISOBMFF sample description this workspace already stores as opaque extradata. The ISO text itself was not obtained.
+- Recommendation ITU-T H.264 (V16) (06/2026) is in force. Reconstruction follows clauses 7, 8, and 9 as read from V14 (08/2021), plus the annexes named below. V16 adds SEI. Picture timing and film grain change decoder output. The other V16 messages are consumed by size.
+- Annex A bounds the coded picture. Annex B is the byte stream. Annex D is the SEI that changes output time or the displayed picture. Annex E is sample aspect, timing, and colour tags. Annexes G, H, and I are SVC, MVC, and 3D. Those three are partial.
+- ISO/IEC 14496-15 (`avcC`) was not obtained. Length prefixes of 1, 2, and 4 bytes follow the record this crate already parses, checked against FFmpeg `libavformat/avc.c`.
 
-Official ITU conformance bitstreams were not obtained. That gap stays visible in `STATUS.md`.
+Official ITU conformance bitstreams were not obtained. That gap stays open. A self-encoded file does not close it.
 
 ## Sources read before the Cutlass code
 
-- ITU-T H.264 (V14) text for NAL units, SPS, PPS, slice headers, macroblock and residual syntax, intra prediction, inter prediction, direct modes, weighted prediction, inverse transform, deblocking, POC, reference lists, DPB marking, CAVLC, and CABAC. Returned to those clauses while writing each stage.
-- FFmpeg 8.1 (the tree current on 2026-10-28): `libavcodec/h264dec.c`, `h264_slice.c`, `h264_cabac.c`, `h264_cavlc.c`, `h264_mb.c`, `h264_parse.c`, `h264_ps.c`, `h264_refs.c`, `h264_loopfilter.c`, `h264pred.c`, `h264data.c`, `h264idct_template.c`, `h264qpel_template.c`, `h264chroma_template.c`, `cabac.c`, `h2645_parse.c`, and `libavformat/avc.c`. FFmpeg has no native software H.264 encoder. Its encoder path is libx264.
-- GStreamer: `gsth264parse` (Annex B and AVCC framing only), `gstopenh264dec` / `gstopenh264enc` (OpenH264), and `gstx264enc` (x264). GStreamer does not contain its own reconstruction. OpenH264’s decoder gained Main-profile tools in later releases and is not treated as a High-profile oracle.
-- OpenH264 decoder and encoder cores: `decode_slice.cpp`, `parse_mb_syn_cavlc.cpp`, `parse_mb_syn_cabac.cpp`, `rec_mb.cpp`, `manage_dec_ref.cpp`, `cabac_decoder.cpp`, `encoder.cpp`, `md.cpp`, `mv_pred.cpp`, `set_mb_syn_cavlc.cpp`, `set_mb_syn_cabac.cpp`, `deblocking.cpp`, `ratectl.cpp`.
-- x264 encoder: `encoder/encoder.c`, `analyse.c`, `macroblock.c`, `me.c`, `cabac.c`, `cavlc.c`, `ratecontrol.c`.
-- The JM reference software was not retrieved. The recommendation is the reference. Where a project and the recommendation disagree, the recommendation wins.
+- The V14 text for NAL units, parameter sets, slice headers, macroblock and residual syntax, intra and inter prediction, weighted prediction, the inverse transform, deblock, POC, reference lists, DPB marking, CAVLC, and CABAC, then the annexes as each tool was added. Where a project and the recommendation disagree, the recommendation wins.
+- FFmpeg 8.1.1: `libavcodec/h264dec.c` and the `h264_*.c` files next to it, plus `libavformat/avc.c`. Hardware decoders (`vaapi_h264.c`, `vdpau_h264.c`, `nvdec_h264.c`, `dxva2_h264.c`, `d3d12va_h264.c`, `vulkan_h264.c`) are ignored. FFmpeg has no software H.264 encoder. Encode checks use libx264. FFmpeg 8.1.1 refuses data partitions, FMO, separate colour planes, bit depths 11 and 13, and NAL types 20 and 21. Those paths use the recommendation as the oracle.
+- GStreamer: `gsth264parse` for framing, and `gstx264enc` / `gstopenh264dec` as wrappers. GStreamer has no software reconstruction of its own.
+- OpenH264 and x264 were read for the first progressive 8-bit encoder and decoder. The JM reference software was not retrieved.
 
-## What is required
+## Decode
 
-| Capability | Decode | Encode | Gate |
-| --- | --- | --- | --- |
-| Baseline, Main, and High, progressive, 8-bit, 4:2:0 | Accept | Emit High | Independent pictures match the reconstruction |
-| CAVLC and CABAC | Accept | Emit CABAC | Same |
-| I, P, and B slices, skip, direct, partitions down to 4x4 | Accept | Emit I, P, and B, 16x16 through 8x8 | Motion on a moving clip is not all intra |
-| SPS, PPS, DPB, POC types 0, 1, and 2, reorder | Accept | POC type 0, sliding window | Display order matches |
-| Explicit and implicit weighted prediction | Accept | Not emitted (`weighted_pred_flag` 0, `weighted_bipred_idc` 0) | Streams that set the flags still decode |
-| 4x4 and 8x8 transform, deblock, frame crop | Accept | Emit | Bit-exact against an independent decoder |
-| Annex B and 1-, 2-, and 4-byte length prefixes, `avcC` | Accept | `avcC` plus 4-byte lengths, or Annex B when `nal_length_size` is 0 | Both framings |
-| Rate | n/a | Frame QP tracks a bitrate | 0.75×–1.25× of the requested rate over the named clip |
-| Quality | n/a | Useful High-profile coding | Luma PSNR at least 30 dB on the named synthetic clip, at least 28 dB on one natural clip |
+A normal sequence parameter set is accepted for profiles 66, 77, 88, 100, 110, 122, and 244 (Baseline, Main, Extended, High, High 10, High 4:2:2, High 4:4:4 Predictive). The constraint byte is read and ignored, so a constrained Baseline or constrained High stream is decoded as that `profile_idc`. A subset sequence parameter set is accepted for profiles 83, 86, 118, 128, 135, 138, and 139. Any other `profile_idc`, including 44 and 134, is refused.
 
-Reconstruction is exact. Lossy comparison is only between the encoder input and an independent decode of its output.
+| Capability | Decode | Gate |
+| --- | --- | --- |
+| Progressive and interlaced 4:2:0, 4:2:2, and 4:4:4, 8 through 14 bits | Accept. Luma and chroma depths match. | Independent pictures match inside the cropped rectangle. 11-bit and 13-bit follow the recommendation, because FFmpeg refuses them. |
+| CAVLC and CABAC | Accept | Same |
+| I, P, B, SP, and SI. Skip, direct, partitions through 4×4 | Accept. SP and SI are 8-bit 4:2:0. | Same. SP and SI outside that depth and chroma are `unsupported`. |
+| Weighted prediction, 4×4 and 8×8 transforms, custom scaling lists, deblock, frame crop | Accept | Bit-exact against FFmpeg where FFmpeg decodes the tool |
+| POC types 0, 1, and 2. DPB, MMCO, reference-list modification, `frame_num` gaps | Accept | Display order matches |
+| Slice groups, map types 0 through 6 | Accept | The recommendation. FFmpeg's build leaves FMO out. |
+| Data partitions, NAL types 2, 3, and 4 | Accept | The recommendation. FFmpeg 8.1.1 does not decode them. |
+| Separate colour planes. QP′Y-zero transform bypass | Accept | Planes follow the recommendation. Bypass matches FFmpeg. |
+| Annex B and length prefixes of 1, 2, and 4 bytes. `avcC` | Accept | Both framings |
+| Picture timing and film grain | Picture timing can change the output time. Film grain changes the displayed picture and stays off the reference. | Timing matches the recommendation. Grain follows H.274, which need not match FFmpeg's synthesis. |
+| VUI sample aspect, timing, colour, transfer, matrix | Tags on the picture. Reserved ids stay unspecified. | A defined idc is the tag. A transfer this workspace does not implement stays an unspecified curve. |
+| Annex A picture size | A picture that fits any defined level is decoded, including one larger than the `level_idc` stored in the SPS. A picture outside every level is refused. | Flat pictures at the recorded sizes match FFmpeg |
+| SVC, MVC, and 3D | Partial. The tools with tests in `annex_g.rs` reconstruct. The open rows below are refused. | The recommendation, except where an ordinary P residual is also checked against FFmpeg |
 
-## Justified exclusions
+Reconstruction is exact inside the cropped rectangle. Lossy comparison is only for the encoder.
 
-- Interlaced, field, and MBAFF pictures (`frame_mbs_only_flag` 0). The local library is progressive. The decoder returns `unsupported`.
-- FMO (`num_slice_groups_minus1` > 0), data partitioning, SP/SI, scalable, multiview, and 3D extension NAL units.
-- Chroma other than 4:2:0, bit depth other than 8, separate colour planes, and QP-prime transform bypass.
-- SEI is skipped. It does not change samples. Film grain SEI is not applied.
-- Encoder does not emit weighted prediction, FMO, or more than one slice per picture. It still decodes those when the exclusion above does not apply.
-- Levels above the coded-size cap are refused. Caps: 4096×4096, 8 388 608 pixels, 16 reference frames, 8 MiB for one NAL, 256 PPS ids, 32 SPS ids.
+## Encode
 
-## Numeric gates, named before tuning
+The encoder emits one High profile (`profile_idc` 100), level 3.1, 8-bit 4:2:0, CABAC stream. POC type is 0. The reference window slides. Each picture is one slice. The first picture is intra 4×4 DC. A later picture is P, or one held picture becomes a B slice at 16×16. P motion is a radius-1 diamond at integer, half-pel, and quarter-pel, and a macroblock may be 16×16, 16×8, 8×16, or four 8×8 blocks. Inter luma uses an 8×8 transform when that residual is closer than sixteen 4×4 transforms. `weighted_pred_flag` and `weighted_bipred_idc` stay 0.
 
-Machine: this Mac, one thread, release build. Corpus: ffmpeg `testsrc2` 320×240 30 fps for 2 seconds at 500 kbps, and one natural clip from `../local-files` scaled to 640×360 for 30 frames at 800 kbps. Those files are not copied into the repo.
+| Capability | Encode | Gate |
+| --- | --- | --- |
+| High, progressive, 8-bit, 4:2:0, CABAC | Emit | This decoder and FFmpeg reconstruct the same samples |
+| I, P, and B | Emit. B stays 16×16 and does not emit skip or direct. | Motion on a moving clip is not all intra |
+| Rate | Frame QP tracks `bitrate` | 0.75×–1.25× of `bitrate * duration` over the named clip |
+| Quality | Useful High-profile coding | Luma PSNR at least 30 dB on the named synthetic clip, at least 28 dB on one natural clip |
+| Framing | `avcC` plus 4-byte lengths, or Annex B when `nal_length_size` is 0 | Both framings. Any other length size is refused |
 
-- Decode: samples match an independent decoder on the supported set. Tolerance is zero inside the cropped rectangle.
+## Limits
+
+Decoder caps are code limits on top of Annex A. A picture past every defined level is refused before a frame is allocated.
+
+| Cap | Decoder | Encoder |
+| --- | --- | --- |
+| Coded picture | 139,264 macroblocks, edge 16,880 samples. Levels 6, 6.1, and 6.2 share that `MaxFS`. | Each edge at most 4,096, and at most 8,388,608 pixels. Both edges even. |
+| Reference frames | 16 | The frames the High encoder keeps |
+| One NAL | 8 MiB | The slice it just wrote |
+| SPS ids | 32 | One |
+| PPS ids | 256 | One |
+| CPB count in the HRD | 32 | The encoder writes no HRD |
+| Threads | One. This crate does not spawn. | One |
+
+## Still refused
+
+- `chroma_format_idc` 0.
+- A bit depth outside 8 through 14, or a luma depth that differs from chroma.
+- SP and SI outside 8-bit 4:2:0. An SP slice that selects the 8×8 transform is malformed.
+- Inter-layer prediction with `quality_id` other than 0, `ref_layer_dq_id` other than 0, an inter-layer deblock idc other than 1, constrained intra resampling, or slice skip. A scan index other than 0 through 15. Resampling of a field, an MBAFF picture, separate colour planes, or chroma other than 4:2:0.
+- An `Intra_16×16` coefficient stays in the sample residual. The per-slice adaptive transform-coefficient flag is refused. Header-prediction sources 1 and 3, and a texture inter slice, are refused. `TextureFirstFlag` 0 is refused for view synthesis. `dmvp_flag` 0 is refused when view synthesis, adaptive luminance compensation, and run-length skip are off. A view-synthesis partition other than `P_L0_16×16`, `P_L0_L0_16×8`, `P_L0_L0_8×16`, `P_8×8`, or `B_L0_16×16` is refused. A predicted texture slice is refused.
+- `svc_vui_parameters_present_flag`, `mvc_vui_parameters_present_flag`, and `mvcd_vui_parameters_present_flag`.
+- Error concealment. An incomplete picture is an error. The next good IDR still decodes.
+- A thread pool. That waits on a shared Cutlass pool and does not live in this crate.
+- Encoder tools this crate only decodes: weighted prediction, FMO, more than one slice, interlaced pictures, bit depths other than 8, chroma other than 4:2:0, B partitions below 16×16, B skip, B direct, and 4×4 sub-macroblocks.
+
+## Numeric gates
+
+Machine: Apple M5 Pro, one thread, release. Corpus: ffmpeg `testsrc2` 320×240 at 30 fps for 2 seconds at 500 kbps, one natural clip from `../local-files` scaled to 640×360 for 30 frames at 800 kbps, a libx264 1280×720 High stream, and `12471039-uhd_3840_2160_24fps.mp4` from `../local-files`. Those files are not copied into the repo.
+
+- Decode: samples match an independent decoder on the supported set. Tolerance is zero inside the cropped rectangle. Tools FFmpeg refuses match the recommendation.
 - Encode rate: total payload bits within 0.75×–1.25× of `bitrate * duration`.
-- Encode quality: luma PSNR at least 30 dB (synthetic) and 28 dB (natural) against the source, after the independent decode. Chroma is reported, not gated, because the declared gate is luma.
-- Speed budget: 1280×720 High decode at 30 fps, one thread, on this machine. A miss stays a miss.
-- Memory: one 1280×720 decode stays under 64 MiB resident above the process baseline. A miss stays a miss.
-- Fuzz: at least 30 minutes on the decoder entry and a bounded encoder campaign. Random bytes must return an error and leave the decoder reusable. The campaign is not a substitute for the short deterministic hostile tests.
+- Encode quality: luma PSNR at least 30 dB on the synthetic clip and 28 dB on the natural clip. Chroma is reported.
+- Speed: 1280×720 High decode at 30 fps, one thread, on this machine. 3840×2160 was measured and has no realtime gate.
+- Memory: one 1280×720 decode stays under 64 MiB resident above the process baseline.
+- Fuzz: at least 30 minutes on the decoder entry and a bounded encoder campaign. Random bytes return an error and leave the decoder reusable.
 
 ## Milestones
 
-1. Shared picture contracts, without changing the AAC audio traits.
-2. Parameter sets, Annex B, and length prefixes.
-3. Reconstruction: transform, intra, inter, deblock, DPB.
-4. CAVLC and CABAC slice decode, bit-exact on independent streams.
-5. High-profile encoder with inter prediction, B-frame reorder, and rate control.
-6. Independent oracles, hostile input, fuzz, and release measurements.
+1. Parameter sets, Annex B, length prefixes, and `avcC`. Done.
+2. Progressive 8-bit 4:2:0 reconstruction through High, including CABAC, B slices, weights, and deblock. Done.
+3. High 10, the other depths through 14, 4:2:2, and 4:4:4. Done.
+4. Separate colour planes, lossless bypass, interlaced pictures, slice groups, data partitions, SP, and SI. Done.
+5. Picture timing, film grain, Annex E tags, and Annex A sizes. Done.
+6. Annexes G, H, and I. Partial. The open rows are listed above.
+7. High CABAC encoder with inter prediction, one B frame, and rate control. Done for the tools the encoder emits.
+8. ITU conformance bitstreams. Not available.

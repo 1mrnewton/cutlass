@@ -36,7 +36,7 @@ pub use cutlass_codec::access::{
     BitDepth, Channel, ChannelLayout, CodecError, CodecParams, ColorMatrix, ColorPrimaries,
     ColorRange, ColorType, FrameError, ImageError, MatrixCoefficients, Packet, Pcm, PhysicalPixel,
     PixelFormat, Plane, Rgb8, SampleFormat, SideData, StillImage, TextItem, Transfer, Transparency,
-    VideoFrame, Yuv420p,
+    VideoFrame, Yuv420High, Yuv420p, Yuv420p10, Yuv422High, Yuv422p, Yuv444High, Yuv444p,
 };
 pub use orient::Orientation;
 pub use video::VideoDecodeFactory;
@@ -318,13 +318,72 @@ pub trait Decoder: Send {
     }
 }
 
+/// Sample aspect ratio, horizontal samples over vertical samples.
+///
+/// [`Self::UNSPECIFIED`] is what a bitstream writes when Annex E gives no
+/// ratio. A zero edge is the same value: the ratio is not usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SampleAspect {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl SampleAspect {
+    pub const UNSPECIFIED: Self = Self {
+        width: 0,
+        height: 1,
+    };
+
+    #[must_use]
+    pub const fn ratio(width: u32, height: u32) -> Self {
+        if width == 0 || height == 0 {
+            Self::UNSPECIFIED
+        } else {
+            Self { width, height }
+        }
+    }
+}
+
+/// Sequence timing from Annex E.
+///
+/// Both counts are zero when the bitstream has no `timing_info`. `fixed` is
+/// `fixed_frame_rate_flag`. A frame rate, when the flag is set, is
+/// `time_scale / (2 * num_units)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequenceTiming {
+    pub num_units: u32,
+    pub time_scale: u32,
+    pub fixed: bool,
+}
+
+impl SequenceTiming {
+    pub const ABSENT: Self = Self {
+        num_units: 0,
+        time_scale: 0,
+        fixed: false,
+    };
+}
+
 /// One decoded picture, in display order once it is released.
 ///
-/// `picture` is the cropped coded-domain sample buffer. Color tags describe
-/// that buffer. They are not a conversion.
+/// `picture` is the cropped 8-bit 4:2:0 view. A 4:2:2 or 4:4:4 decode keeps the
+/// real samples in `yuv422`, `yuv422_high`, `yuv444`, or `yuv444_high`, and
+/// `picture` is those samples subsampled to 4:2:0. When `yuv420p10` is set, that
+/// buffer is the decoded 10-bit 4:2:0 picture and `picture` is those samples
+/// shifted right by two bits. When `yuv420_high` is set, that buffer is the
+/// decoded 4:2:0 picture at 9, 11, 12, 13, or 14 bits and `picture` is those
+/// samples shifted right by `bit_depth - 8`. A 10-bit 4:2:2 or 4:4:4 picture is
+/// the matching high buffer with `bit_depth` 10. Color tags, the sample aspect,
+/// and the sequence timing describe the decoded samples. They are not a conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoOutput {
     pub picture: Yuv420p,
+    pub yuv420p10: Option<Yuv420p10>,
+    pub yuv420_high: Option<Yuv420High>,
+    pub yuv422: Option<Yuv422p>,
+    pub yuv422_high: Option<Yuv422High>,
+    pub yuv444: Option<Yuv444p>,
+    pub yuv444_high: Option<Yuv444High>,
     pub pts: i64,
     pub duration: i64,
     pub timescale: u32,
@@ -333,6 +392,8 @@ pub struct VideoOutput {
     pub primaries: ColorPrimaries,
     pub transfer: Transfer,
     pub matrix: ColorMatrix,
+    pub sample_aspect: SampleAspect,
+    pub timing: SequenceTiming,
 }
 
 pub trait VideoDecoder: Send {
@@ -441,7 +502,7 @@ mod tests {
 
     use super::{
         AudioOutput, DecodeFactory, Decoder, Output, PictureInfo, PictureOutput, PictureSamples,
-        VideoDecoder, VideoOutput, picture_byte_len,
+        SampleAspect, SequenceTiming, VideoDecoder, VideoOutput, picture_byte_len,
     };
     use cutlass_codec::CodecId;
     use cutlass_codec::access::{
@@ -707,6 +768,12 @@ mod tests {
             let picture = Yuv420p::solid(2, 2, 16, 128, 128).expect("picture");
             Ok(vec![VideoOutput {
                 picture,
+                yuv420p10: None,
+                yuv420_high: None,
+                yuv422: None,
+                yuv422_high: None,
+                yuv444: None,
+                yuv444_high: None,
                 pts: packet.pts,
                 duration: packet.duration,
                 timescale: packet.timescale,
@@ -715,6 +782,8 @@ mod tests {
                 primaries: ColorPrimaries::Bt709,
                 transfer: Transfer::Bt709,
                 matrix: ColorMatrix::Bt709,
+                sample_aspect: SampleAspect::UNSPECIFIED,
+                timing: SequenceTiming::ABSENT,
             }])
         }
 

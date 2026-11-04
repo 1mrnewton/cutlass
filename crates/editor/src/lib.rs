@@ -47,7 +47,7 @@ pub use stage::{
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
-pub use view_zoom::{PREVIEW_ZOOMS, preview_zoom_step};
+pub use view_zoom::{ACTION_SAFE, PREVIEW_ZOOMS, TITLE_SAFE, preview_zoom_step, safe_box};
 pub use zoom::{
     Zoom, ZoomBounds, fit_pixel_size, last_accuracy_step, minimum_pixel_size, quarter_lane,
 };

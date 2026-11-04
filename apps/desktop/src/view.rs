@@ -140,6 +140,12 @@ pub struct ViewState {
     preview_pan: Vec2,
     /// The scale the canvas was last drawn at, fitted or not.
     preview_scale: f64,
+    /// Where the canvas was last drawn.
+    preview_canvas: Option<Rect>,
+    /// The action-safe and title-safe frames are drawn over the canvas.
+    preview_guides: bool,
+    /// The preview fills the screen.
+    preview_full: bool,
     /// The clip panel's open tab, page, and sections, and what is typed.
     inspector: inspector::InspectorState,
     background_buffer: String,
@@ -181,6 +187,9 @@ impl Default for ViewState {
             preview_zoom: None,
             preview_pan: Vec2::ZERO,
             preview_scale: 1.0,
+            preview_canvas: None,
+            preview_guides: false,
+            preview_full: false,
             inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
@@ -226,7 +235,21 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
-    if shell.draft().is_none() {
+    if view.preview_full && shell.draft().is_none() {
+        set_full_screen(ui, view, false);
+    }
+    if view.preview_full {
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            set_full_screen(ui, view, false);
+        }
+        panel(ui, full);
+        preview_panel(shell, ui, view, full);
+        job_strip(shell, ui, full);
+        shortcuts(shell, ui);
+        if shell.playing() || shell.preview_pending() {
+            ui.ctx().request_repaint();
+        }
+    } else if shell.draft().is_none() {
         projects_home(shell, ui, view, full, parent);
     } else {
         view.listed.clear();
@@ -1376,10 +1399,12 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     } else {
         view.preview_pan = Vec2::ZERO;
     }
+    view.preview_canvas = None;
     let mut place = |size: Vec2| {
         let size = canvas.unwrap_or(size);
         let (rect, scale) = placed_canvas(frame, size, view.preview_zoom, &mut view.preview_pan);
         view.preview_scale = scale;
+        view.preview_canvas = Some(rect);
         rect
     };
     let shown = match shell.preview_texture() {
@@ -1425,7 +1450,38 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         }
         Some(Err(_)) => {}
     }
+    if view.preview_guides
+        && let Some(canvas) = view.preview_canvas
+    {
+        paint_safe_areas(ui, frame, canvas);
+    }
     transport_bar(shell, ui, view, transport);
+}
+
+/// The action-safe and title-safe frames over the canvas at `canvas`,
+/// with a mark at its middle.
+fn paint_safe_areas(ui: &Ui, frame: Rect, canvas: Rect) {
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
+    let stroke = egui::Stroke::new(1.0, Color32::from_white_alpha(140));
+    for share in [cutlass_editor::ACTION_SAFE, cutlass_editor::TITLE_SAFE] {
+        let (left, top, width, height) =
+            cutlass_editor::safe_box(f64::from(canvas.width()), f64::from(canvas.height()), share);
+        let inner = Rect::from_min_size(
+            canvas.min + Vec2::new(left as f32, top as f32),
+            Vec2::new(width as f32, height as f32),
+        );
+        painter.rect_stroke(inner, CornerRadius::ZERO, stroke, egui::StrokeKind::Middle);
+    }
+    let middle = canvas.center();
+    painter.hline((middle.x - 8.0)..=(middle.x + 8.0), middle.y, stroke);
+    painter.vline(middle.x, (middle.y - 8.0)..=(middle.y + 8.0), stroke);
+}
+
+/// Fill the screen with the preview, or go back to the editor.
+fn set_full_screen(ui: &Ui, view: &mut ViewState, full: bool) {
+    view.preview_full = full;
+    ui.ctx()
+        .send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
 }
 
 /// Where a canvas `size` canvas pixels sits in `frame`: fitted, or at
@@ -1503,6 +1559,42 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         Vec2::splat(32.0),
     );
     background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
+    if live {
+        let guides = still.translate(Vec2::new(-80.0, 0.0));
+        let tip = if view.preview_guides {
+            "Hide safe-area guides"
+        } else {
+            "Show safe-area guides"
+        };
+        if round_button(ui, guides, "guides", tip, view.preview_guides).clicked() {
+            view.preview_guides = !view.preview_guides;
+        }
+        let mark = Rect::from_center_size(guides.center(), Vec2::new(16.0, 11.0));
+        let stroke = egui::Stroke::new(1.2, tokens::MUTED);
+        for inset in [0.0, 3.0] {
+            ui.painter().rect_stroke(
+                mark.shrink(inset),
+                CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        let screen = still.translate(Vec2::new(-120.0, 0.0));
+        let full = view.preview_full;
+        let tip = if full {
+            "Leave full screen"
+        } else {
+            "Full screen"
+        };
+        if round_button(ui, screen, "full-screen", tip, full).clicked() {
+            set_full_screen(ui, view, !full);
+        }
+        paint_corners(
+            ui,
+            Rect::from_center_size(screen.center(), Vec2::splat(13.0)),
+            full,
+        );
+    }
     let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
     if still_response.clicked() && live {
         view.ask_still = true;
@@ -1513,6 +1605,44 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+}
+
+/// A round transport button at `rect`, lit when `on`.
+fn round_button(ui: &Ui, rect: Rect, name: &str, tip: &str, on: bool) -> egui::Response {
+    let response = ui.interact(rect, ui.scope_id().with(name), Sense::click());
+    let fill = if on {
+        tokens::ACTIVE
+    } else {
+        tokens::ICON_BUTTON
+    };
+    ui.painter().circle_filled(rect.center(), 16.0, fill);
+    response.on_hover_text(tip)
+}
+
+/// Four corner brackets in `mark`: pointing out to fill the screen, in to
+/// leave it.
+fn paint_corners(ui: &Ui, mark: Rect, inward: bool) {
+    let stroke = egui::Stroke::new(1.4, tokens::MUTED);
+    let arm = 4.0;
+    for corner in [
+        mark.left_top(),
+        mark.right_top(),
+        mark.left_bottom(),
+        mark.right_bottom(),
+    ] {
+        let toward = (mark.center() - corner).normalized();
+        let (x, y) = (toward.x.signum(), toward.y.signum());
+        let tip = if inward {
+            corner + Vec2::new(x, y) * arm
+        } else {
+            corner
+        };
+        let (sx, sy) = if inward { (-x, -y) } else { (x, y) };
+        ui.painter()
+            .line_segment([tip, tip + Vec2::new(sx * arm, 0.0)], stroke);
+        ui.painter()
+            .line_segment([tip, tip + Vec2::new(0.0, sy * arm)], stroke);
+    }
 }
 
 /// − , the zoom, + from `left`: a step smaller, back to fit, a step bigger.
@@ -4720,7 +4850,8 @@ mod tests {
                 |ui| show(shell, ui, view, None),
             );
             output.textures_delta.clear();
-            // The round transport buttons, left to right: the toggle, the still.
+            // The round transport buttons, left to right: full screen, the
+            // guides, the toggle, the still.
             let mut buttons: Vec<Pos2> = output
                 .shapes
                 .iter()
@@ -4740,8 +4871,8 @@ mod tests {
         assert_eq!(black.len(), 1, "{black:?}");
         let ratio = black[0].width() / black[0].height();
         assert!((ratio - 16.0 / 9.0).abs() < 0.01, "{:?}", black[0]);
-        assert_eq!(buttons.len(), 2, "{buttons:?}");
-        let toggle = buttons[0];
+        assert_eq!(buttons.len(), 4, "{buttons:?}");
+        let toggle = buttons[2];
         let press = |pressed: bool| egui::Event::PointerButton {
             pos: toggle,
             button: egui::PointerButton::Primary,
@@ -6203,6 +6334,87 @@ mod tests {
         frame(&mut shell, &mut view, click(shown + Vec2::new(4.0, 4.0)));
         assert_eq!(view.preview_zoom, None);
         assert_eq!(view.preview_pan, Vec2::ZERO);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The centres of the round 16-pixel transport buttons, left to right.
+    fn round_buttons(output: &egui::FullOutput) -> Vec<Pos2> {
+        fn find(shape: &egui::Shape, found: &mut Vec<Pos2>) {
+            match shape {
+                egui::Shape::Circle(circle) if circle.radius == 16.0 => found.push(circle.center),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| find(shape, found)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            find(&clipped.shape, &mut found);
+        }
+        found.sort_by(|a, b| a.x.total_cmp(&b.x));
+        found
+    }
+
+    #[test]
+    fn the_guides_and_full_screen_buttons_toggle_and_escape_leaves() {
+        let (mut shell, temp) = open_span("full", 2_000_000);
+        shell.cycle_canvas().unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        let full_screen = |output: &egui::FullOutput| {
+            output.viewport_output.values().find_map(|viewport| {
+                viewport.commands.iter().find_map(|command| match command {
+                    egui::ViewportCommand::Fullscreen(on) => Some(*on),
+                    _ => None,
+                })
+            })
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let buttons = round_buttons(&output);
+        assert_eq!(buttons.len(), 4, "{buttons:?}");
+        let (full, guides) = (buttons[0], buttons[1]);
+        let editor_width = view.preview_canvas.expect("the canvas").width();
+        frame(&mut shell, &mut view, click(guides));
+        assert!(view.preview_guides);
+        let output = frame(&mut shell, &mut view, click(full));
+        assert!(view.preview_full);
+        assert_eq!(full_screen(&output), Some(true));
+        // Full screen shows the preview alone, so the canvas grows.
+        frame(&mut shell, &mut view, Vec::new());
+        let grown = view.preview_canvas.expect("the canvas").width();
+        assert!(grown > editor_width, "{grown} after {editor_width}");
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        };
+        let output = frame(&mut shell, &mut view, vec![escape]);
+        assert!(!view.preview_full);
+        assert_eq!(full_screen(&output), Some(false));
         let _ = std::fs::remove_dir_all(&temp);
     }
 

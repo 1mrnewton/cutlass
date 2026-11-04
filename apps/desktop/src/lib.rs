@@ -37,7 +37,12 @@ pub fn register_codecs_with(
         cutlass_platform_apple::register_decoders_with(&mut decoders, hardware.decode);
         cutlass_platform_apple::register_encoders_with(&mut encoders, hardware.encode);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        cutlass_platform_windows::register_decoders_with(&mut decoders, hardware.decode);
+        cutlass_platform_windows::register_encoders_with(&mut encoders, hardware.encode);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = hardware;
     cutlass_png::register_decoders(&mut decoders);
     cutlass_png::register_encoders(&mut encoders);

@@ -919,3 +919,94 @@ fn the_gpu_compositor_matches_the_cpu_frame() {
         );
     }
 }
+
+/// The movie `CUTLASS_MOVIE` names, walked a frame at a time through the
+/// Windows or Apple decoder: each picture covers the time asked for and
+/// times only move forward, which a decoder that gave B pictures back out
+/// of display order would break. For the first few pictures the Rust
+/// decoder also decodes, the two pictures match.
+#[test]
+#[ignore = "reads the movie CUTLASS_MOVIE names"]
+fn a_named_movie_decodes_in_display_order_on_the_platform() {
+    let Some(path) = std::env::var_os("CUTLASS_MOVIE").map(PathBuf::from) else {
+        eprintln!("skipped: CUTLASS_MOVIE is not set");
+        return;
+    };
+    let platform = crate::readers::installed_readers();
+    let off = cutlass_settings::Hardware {
+        decode: false,
+        encode: false,
+        ..cutlass_settings::Hardware::default()
+    };
+    let rust = crate::readers::readers_with(crate::register_codecs_with(&off).0);
+    let mut ours = platform.open(&path).expect("platform open");
+    let mut theirs = rust.open(&path).ok();
+    let info = ours.info().clone();
+    eprintln!("streams {:?}", info.streams);
+    let duration = info.duration.map_or(3_000_000, |duration| duration.0);
+    let cover = TimeRange::new(0, duration);
+    let (mut walked, mut matched, mut last) = (0, 0, -1_i64);
+    let mut time = 0_i64;
+    while time < duration.min(10_000_000) {
+        let held = ours
+            .decode_at(Micros(time), &cover)
+            .unwrap_or_else(|error| panic!("at {time}: {error}"));
+        assert!(
+            held.start.0 <= time && time < held.end.0,
+            "at {time}: picture covers {:?}..{:?}",
+            held.start,
+            held.end
+        );
+        assert!(
+            held.start.0 > last,
+            "at {time}: {:?} after {last}",
+            held.start
+        );
+        last = held.start.0;
+        walked += 1;
+        if let Some(reader) = theirs.as_mut() {
+            match reader.decode_at(Micros(time), &cover) {
+                Ok(other) if other.start == held.start => {
+                    let (Some(a), Some(b)) = (luma(&held.frame), luma(&other.frame)) else {
+                        panic!("at {time}: a picture that is not CPU 4:2:0");
+                    };
+                    let psnr = psnr(a, b);
+                    assert!(psnr > 35.0, "at {time}: {psnr:.1} dB against Rust");
+                    matched += 1;
+                    // A debug Rust decode of a 4K picture is slow; a few
+                    // pictures are enough to check the colour path.
+                    if matched == 5 {
+                        theirs = None;
+                    }
+                }
+                _ => theirs = None,
+            }
+        }
+        time = held.end.0;
+    }
+    eprintln!("walked {walked} pictures in order, {matched} matched the Rust decoder");
+    assert!(walked > 10);
+}
+
+fn luma(frame: &DecodedFrame) -> Option<&[u8]> {
+    match frame {
+        DecodedFrame::Coded {
+            width,
+            height,
+            pixel: PixelFormat::Yuv420p,
+            bytes,
+            ..
+        } => bytes.get(..(*width as usize) * (*height as usize)),
+        _ => None,
+    }
+}
+
+fn psnr(a: &[u8], b: &[u8]) -> f64 {
+    let error: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+        .sum::<f64>()
+        / a.len().max(1) as f64;
+    10.0 * (255.0_f64 * 255.0 / error.max(1e-9)).log10()
+}

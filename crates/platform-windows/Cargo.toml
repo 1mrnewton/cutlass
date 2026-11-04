@@ -4,11 +4,16 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Media Foundation, and the WASAPI preview queue."
+description = "Media Foundation, WIC, and the WASAPI preview queue."
 
 [dependencies]
 cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
+
+[dev-dependencies]
+cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
+cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
+cutlass-png = { path = "../codecs/png", version = "0.1.0" }
 
 # Cargo cannot mix `workspace = true` with one overridden lint, and `forbid`
 # cannot be allowed in a module. These are the workspace lints with

@@ -1058,8 +1058,11 @@ dependencies = [
 name = "cutlass-platform-windows"
 version = "0.1.0"
 dependencies = [
+ "cutlass-aac",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-jpeg",
+ "cutlass-png",
 ]
 
 [[package]]

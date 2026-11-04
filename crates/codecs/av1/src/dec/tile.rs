@@ -2720,7 +2720,7 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                 }) || y > 0;
                 let bdf = &self.block_decoded[plane];
                 let have_above_right = bdf[sub_row >> sy][(sub_col >> sx) + step_x + 1];
-                let have_below_left = bdf[(sub_row >> sy) + step_y + 1][(sub_col >> sx)];
+                let have_below_left = bdf[(sub_row >> sy) + step_y + 1][sub_col >> sx];
                 self.predict_intra(
                     plane,
                     start_x,
@@ -2999,91 +2999,58 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             let height = tx_h(adj);
             let lstride = width + 4;
             let levels = &mut self.scratch.levels;
-            for v in levels[..lstride * (height + 4)].iter_mut() {
-                *v = 0;
-            }
             let quant = &mut self.scratch.quant;
             let coeff_base_cdf = &mut cdf.coeff_base[tx_sz_ctx][ptype];
             let coeff_br_cdf = &mut cdf.coeff_br[tx_sz_ctx.min(3)][ptype];
-            let mut c = eob;
-            while c > 0 {
-                c -= 1;
-                let pos = scan[c] as usize;
-                let row = pos >> bwl;
-                let col = pos - (row << bwl);
-                let mut level: u32;
-                if c == eob - 1 {
-                    let n = height << bwl;
-                    let ctx = if c == 0 {
-                        0
-                    } else if c <= n / 8 {
-                        1
-                    } else if c <= n / 4 {
-                        2
-                    } else {
-                        3
-                    };
-                    level = self
-                        .msac
-                        .symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx])
-                        as u32
-                        + 1;
-                } else {
-                    let mut mag = 0u32;
-                    for idx in 0..5 {
-                        let rr = row as i32 + SIG_REF_DIFF_OFFSET[tx_class][idx][0] as i32;
-                        let cc = col as i32 + SIG_REF_DIFF_OFFSET[tx_class][idx][1] as i32;
-                        // Offsets are non-negative; the padding holds zeros.
-                        mag += u32::from(levels[rr as usize * lstride + cc as usize]).min(3);
-                    }
-                    let mut ctx = ((mag + 1) >> 1).min(4) as usize;
-                    if tx_class == 0 {
-                        if row == 0 && col == 0 {
-                            ctx = 0;
-                        } else {
-                            ctx +=
-                                COEFF_BASE_CTX_OFFSET[tx as usize][row.min(4)][col.min(4)] as usize;
-                        }
-                    } else {
-                        let idx = if tx_class == 2 { row } else { col };
-                        ctx += COEFF_BASE_POS_CTX_OFFSET[idx.min(2)] as usize;
-                    }
-                    level = self.msac.symbol(&mut coeff_base_cdf[ctx]) as u32;
-                }
-                if level > 2 {
-                    // coeff_br context
-                    let mut mag = 0u32;
-                    for idx in 0..3 {
-                        let rr = row + MAG_REF_OFFSET_WITH_TX_CLASS[tx_class][idx][0] as usize;
-                        let cc = col + MAG_REF_OFFSET_WITH_TX_CLASS[tx_class][idx][1] as usize;
-                        mag += u32::from(levels[rr * lstride + cc]).min(15);
-                    }
-                    let mag = ((mag + 1) >> 1).min(6) as usize;
-                    let ctx = if pos == 0 {
-                        mag
-                    } else if tx_class == 0 {
-                        if row < 2 && col < 2 {
-                            mag + 7
-                        } else {
-                            mag + 14
-                        }
-                    } else if tx_class == 1 {
-                        if col == 0 { mag + 7 } else { mag + 14 }
-                    } else if row == 0 {
-                        mag + 7
-                    } else {
-                        mag + 14
-                    };
-                    for _ in 0..4 {
-                        let br = self.msac.symbol(&mut coeff_br_cdf[ctx]) as u32;
-                        level += br;
-                        if br < 3 {
-                            break;
-                        }
-                    }
-                }
-                levels[row * lstride + col] = level.min(255) as u8;
-                quant[pos] = level as i32;
+            // The eob coefficient.
+            let n = height << bwl;
+            let last = eob - 1;
+            let ctx = if last == 0 {
+                0
+            } else if last <= n / 8 {
+                1
+            } else if last <= n / 4 {
+                2
+            } else {
+                3
+            };
+            let first = 1 + self
+                .msac
+                .symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx])
+                as u32;
+            let args = LevelArgs {
+                scan,
+                eob,
+                bwl,
+                lstride,
+                tx: tx as usize,
+                first,
+            };
+            match tx_class {
+                0 => read_levels::<0>(
+                    &mut self.msac,
+                    coeff_base_cdf,
+                    coeff_br_cdf,
+                    levels,
+                    quant,
+                    &args,
+                ),
+                1 => read_levels::<1>(
+                    &mut self.msac,
+                    coeff_base_cdf,
+                    coeff_br_cdf,
+                    levels,
+                    quant,
+                    &args,
+                ),
+                _ => read_levels::<2>(
+                    &mut self.msac,
+                    coeff_base_cdf,
+                    coeff_br_cdf,
+                    levels,
+                    quant,
+                    &args,
+                ),
             }
             // Signs and Golomb remainder.
             let tw = w.min(32);
@@ -3156,8 +3123,11 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                 let _ = th;
             }
             // Reset quant at the scan positions read.
-            for c in 0..eob {
-                quant[scan[c] as usize] = 0;
+            let levels = &mut self.scratch.levels;
+            for &p in &scan[..eob] {
+                let p = p as usize;
+                quant[p] = 0;
+                levels[p + ((p >> bwl) << 2)] = 0;
             }
             self.scratch.nz_rows = nz_rows.max(1);
             self.scratch.nz_cols = nz_cols.max(1);
@@ -3175,6 +3145,123 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             self.left_dc[plane][ly] = dc_category;
         }
         Ok(eob)
+    }
+}
+
+struct LevelArgs<'s> {
+    scan: &'s [u16],
+    eob: usize,
+    bwl: u32,
+    lstride: usize,
+    tx: usize,
+    first: u32,
+}
+
+/// Per transform size, the 2D coeff_base context offset of each position
+/// (Coeff_Base_Ctx_Offset expanded over the adjusted transform area).
+fn ctx_offset_table(tx: usize) -> &'static [u8] {
+    use std::sync::OnceLock;
+    static TABLES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    let t = TABLES.get_or_init(|| {
+        (0..19)
+            .map(|tx| {
+                let adj = ADJUSTED_TX_SIZE[tx];
+                let bwl = tx_w_log2(adj);
+                let w = 1usize << bwl;
+                let h = tx_h(adj);
+                let mut v = vec![0u8; w * h];
+                for r in 0..h {
+                    for c in 0..w {
+                        v[r * w + c] = COEFF_BASE_CTX_OFFSET[tx][r.min(4)][c.min(4)];
+                    }
+                }
+                v
+            })
+            .collect()
+    });
+    &t[tx]
+}
+
+/// Reads coeff_base / coeff_br for scan positions eob-1 down to 0 (the
+/// eob position's base level is `args.first`). `levels` is a zeroed padded
+/// buffer with stride `lstride` (= width + 4); position `pos` lives at
+/// `pos + 4 * row`.
+#[inline(always)]
+fn read_levels<const CLASS: usize>(
+    msac: &mut Msac<'_>,
+    base_cdf: &mut [[u16; 4]; 42],
+    br_cdf: &mut [[u16; 4]; 21],
+    levels: &mut [u8],
+    quant: &mut [i32],
+    a: &LevelArgs<'_>,
+) {
+    let ls = a.lstride;
+    let offs: [usize; 5] = std::array::from_fn(|i| {
+        SIG_REF_DIFF_OFFSET[CLASS][i][0] as usize * ls + SIG_REF_DIFF_OFFSET[CLASS][i][1] as usize
+    });
+    let br_offs: [usize; 3] = std::array::from_fn(|i| {
+        MAG_REF_OFFSET_WITH_TX_CLASS[CLASS][i][0] as usize * ls
+            + MAG_REF_OFFSET_WITH_TX_CLASS[CLASS][i][1] as usize
+    });
+    let ctx_tab = ctx_offset_table(a.tx);
+    let mask = (1usize << a.bwl) - 1;
+    let mut c = a.eob;
+    while c > 0 {
+        c -= 1;
+        let pos = a.scan[c] as usize;
+        let row = pos >> a.bwl;
+        let col = pos & mask;
+        let li = pos + (row << 2);
+        let mut level = if c == a.eob - 1 {
+            a.first
+        } else {
+            let mut mag = 0u32;
+            for o in offs {
+                mag += u32::from(levels[li + o]).min(3);
+            }
+            let m = ((mag + 1) >> 1).min(4) as usize;
+            let ctx = if CLASS == 0 {
+                if pos == 0 {
+                    0
+                } else {
+                    m + ctx_tab[pos] as usize
+                }
+            } else {
+                let idx = if CLASS == 2 { row } else { col };
+                m + COEFF_BASE_POS_CTX_OFFSET[idx.min(2)] as usize
+            };
+            msac.symbol(&mut base_cdf[ctx]) as u32
+        };
+        if level > 2 {
+            let mut mag = 0u32;
+            for o in br_offs {
+                mag += u32::from(levels[li + o]);
+            }
+            let mag = ((mag + 1) >> 1).min(6) as usize;
+            let near = if CLASS == 0 {
+                row < 2 && col < 2
+            } else if CLASS == 1 {
+                col == 0
+            } else {
+                row == 0
+            };
+            let ctx = if pos == 0 {
+                mag
+            } else if near {
+                mag + 7
+            } else {
+                mag + 14
+            };
+            for _ in 0..4 {
+                let br = msac.symbol(&mut br_cdf[ctx]) as u32;
+                level += br;
+                if br < 3 {
+                    break;
+                }
+            }
+        }
+        levels[li] = level.min(15) as u8;
+        quant[pos] = level as i32;
     }
 }
 

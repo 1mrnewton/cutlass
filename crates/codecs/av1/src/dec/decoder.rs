@@ -35,7 +35,7 @@ pub enum AnyPicture {
 /// One shown frame.
 #[derive(Clone)]
 pub struct DecodedFrame {
-    pub picture: AnyPicture,
+    pub picture: Arc<AnyPicture>,
     pub width: usize,
     pub height: usize,
     pub render_width: usize,
@@ -102,8 +102,21 @@ impl Av1Core {
         self.seq.as_ref()
     }
 
-    /// Decodes one temporal unit and returns the frames it shows.
+    /// Decodes one temporal unit and returns the frames it shows. A unit that
+    /// fails leaves the reference state as it was before the call.
     pub fn decode(&mut self, data: &[u8]) -> R<Vec<DecodedFrame>> {
+        let saved = (self.seq.clone(), self.ref_hdr.clone(), self.slots.clone());
+        let r = self.decode_unit(data);
+        if r.is_err() {
+            self.seq = saved.0;
+            self.ref_hdr = saved.1;
+            self.slots = saved.2;
+            self.pending = None;
+        }
+        r
+    }
+
+    fn decode_unit(&mut self, data: &[u8]) -> R<Vec<DecodedFrame>> {
         let mut out = Vec::new();
         for obu in split_obus(data)? {
             match obu.obu_type {
@@ -274,7 +287,7 @@ impl Av1Core {
     fn output(
         &self,
         seq: &SequenceHeader,
-        pic: &AnyPicture,
+        pic: &Arc<AnyPicture>,
         rh: &RefHeaderState,
         grain: &GrainParams,
     ) -> DecodedFrame {
@@ -283,16 +296,16 @@ impl Av1Core {
         let mono = seq.mono_chrome;
         let picture = if self.apply_grain && grain.apply_grain {
             let p = to_fg_params(grain);
-            match pic {
+            Arc::new(match &**pic {
                 AnyPicture::U8(src) => {
                     AnyPicture::U8(grain_apply(src, &p, w, h, mono, seq.matrix_coefficients))
                 }
                 AnyPicture::U16(src) => {
                     AnyPicture::U16(grain_apply(src, &p, w, h, mono, seq.matrix_coefficients))
                 }
-            }
+            })
         } else {
-            pic.clone()
+            Arc::clone(pic)
         };
         DecodedFrame {
             picture,
@@ -420,6 +433,7 @@ impl Av1Core {
             subsampling_y: seq.subsampling_y,
             showable: hdr.showable_frame,
         };
+        let pic = Arc::new(pic);
         let shown = if hdr.show_frame {
             Some(self.output(seq, &pic, &rh, &hdr.grain))
         } else {
@@ -428,7 +442,7 @@ impl Av1Core {
         if hdr.refresh_frame_flags != 0 {
             let data = Arc::new(ref_data(seq, &hdr, &fs));
             let slot = Slot {
-                pic: Arc::new(pic),
+                pic,
                 data,
                 cdf: Arc::from(final_cdf),
             };

@@ -34,7 +34,7 @@ fn main() -> Result<(), String> {
         pos += size;
         let frames = core.decode(frame).map_err(|e| format!("frame {n}: {e}"))?;
         for f in frames {
-            match &f.picture {
+            match &*f.picture {
                 AnyPicture::U8(p) => {
                     for pl in &p.planes {
                         for y in 0..pl.h {

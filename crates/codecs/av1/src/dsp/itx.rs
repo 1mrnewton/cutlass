@@ -3,10 +3,14 @@
 //!
 //! The row pass runs on groups of `L` rows at once and the column pass on
 //! groups of `L` columns at once: every 1D transform works on an array of
-//! `[i32; L]` lanes, so each butterfly is one short loop across lanes that
-//! LLVM vectorizes. All-zero rows are skipped, DC-only blocks and DC-only
-//! rows or columns of a DCT take shortcuts, and the input permutations of the
-//! DCT and ADST are folded into the loads.
+//! `[E; L]` lanes, so each butterfly is one short loop across lanes that LLVM
+//! vectorizes. `E` is `i16` for 8-bit streams (which vectorizes on plain
+//! SSE2) and `i32` otherwise. The DCT and ADST are tables of butterfly steps
+//! generated at compile time from the spec's step lists, with the steps whose
+//! inputs are known to be zero pruned away; the input permutations are folded
+//! into the loads and the identity transforms into the outputs. All-zero rows
+//! are skipped, and DC-only blocks and DC-only rows or columns of a DCT take
+//! shortcuts.
 //!
 //! The arithmetic inside the 1D transforms wraps. For a conformant stream the
 //! spec guarantees that every butterfly result fits its clamping range, which
@@ -158,7 +162,7 @@ fn in_perm(kind: Kind, n: usize) -> &'static [u8] {
 // Butterflies over lanes.
 
 #[inline(always)]
-fn cos128(angle: i32) -> i32 {
+const fn cos128(angle: i32) -> i32 {
     let a2 = (angle & 255) as usize;
     if a2 <= 64 {
         COS128_LOOKUP[a2] as i32
@@ -172,7 +176,7 @@ fn cos128(angle: i32) -> i32 {
 }
 
 #[inline(always)]
-fn sin128(angle: i32) -> i32 {
+const fn sin128(angle: i32) -> i32 {
     cos128(angle - 64)
 }
 
@@ -207,6 +211,8 @@ trait Lane: Copy + Default + Send + Sync + 'static {
     /// Converts a value inside the clamping range or equal to its maximum
     /// plus one (saturating).
     fn put_sat1(v: i32) -> Self;
+    /// `Round2(self, 4)` as 16 bits (used for 16-bit lanes only).
+    fn round4(self) -> i16;
 }
 
 impl Lane for i32 {
@@ -245,6 +251,10 @@ impl Lane for i32 {
     fn put_sat1(v: i32) -> i32 {
         v
     }
+    #[inline(always)]
+    fn round4(self) -> i16 {
+        (self.wrapping_add(8) >> 4) as i16
+    }
 }
 
 /// The exact product of two 16-bit values, written as the low and high
@@ -260,11 +270,9 @@ impl Lane for i16 {
     const NARROW: bool = true;
     #[inline(always)]
     fn rot(a: i16, b: i16, c: i32, s: i32) -> (i16, i16) {
-        let (c, s) = (c as i16, s as i16);
-        (
-            rnd12(prod16(a, c).wrapping_sub(prod16(b, s))) as i16,
-            rnd12(prod16(a, s).wrapping_add(prod16(b, c))) as i16,
-        )
+        let (a, b) = (a as i32, b as i32);
+        let (c, s) = (c as i16 as i32, s as i16 as i32);
+        (rnd12(a * c - b * s) as i16, rnd12(a * s + b * c) as i16)
     }
     #[inline(always)]
     fn had(x: i16, y: i16, _mn: i32, _mx: i32) -> (i16, i16) {
@@ -290,19 +298,23 @@ impl Lane for i16 {
     fn put_sat1(v: i32) -> i16 {
         (v - (v == 32768) as i32) as i16
     }
+    #[inline(always)]
+    fn round4(self) -> i16 {
+        (self >> 4) + ((self >> 3) & 1)
+    }
 }
 
-/// The spec's butterfly rotation `B(a, b, angle, flip)`.
+/// The spec's butterfly rotation `B(a, b, angle, flip)` with `c = cos128(angle)`
+/// and `s = sin128(angle)`.
 #[inline(always)]
 fn bf<E: Lane, const L: usize, const N: usize>(
     t: &mut [[E; L]; N],
     a: usize,
     b: usize,
-    angle: i32,
+    c: i32,
+    s: i32,
     flip: bool,
 ) {
-    let c = cos128(angle);
-    let s = sin128(angle);
     let ta = t[a];
     let tb = t[b];
     let mut x = [E::default(); L];
@@ -344,172 +356,551 @@ fn hd<E: Lane, const L: usize, const N: usize>(
 // ---------------------------------------------------------------------------
 // 1D transforms on permuted input.
 
-/// Inverse DCT of length `N` (spec 7.13.2.3, steps 2 to 31; the permutation of
-/// step 1 has been applied by the loader).
+/// One step of a 1D transform: the butterfly `B(a, b, angle, flip)` or the
+/// Hadamard rotation `H(a, b, flip)` (spec 7.13.2.1).
+#[derive(Clone, Copy)]
+struct Op {
+    had: bool,
+    flip: bool,
+    a: u8,
+    b: u8,
+    /// `cos128(angle)` and `sin128(angle)`.
+    cos: i16,
+    sin: i16,
+}
+
+/// A transform written out as its sequence of steps, built at compile time.
+/// Running the steps from a table (rather than unrolled code) keeps LLVM
+/// vectorizing across the lanes of each step.
+struct Prog<const M: usize> {
+    ops: [Op; M],
+    len: usize,
+}
+
+impl<const M: usize> Prog<M> {
+    const fn new() -> Self {
+        let nop = Op {
+            had: false,
+            flip: false,
+            a: 0,
+            b: 0,
+            cos: 0,
+            sin: 0,
+        };
+        Prog {
+            ops: [nop; M],
+            len: 0,
+        }
+    }
+
+    const fn push(mut self, had: bool, a: usize, b: usize, angle: usize, flip: bool) -> Self {
+        if self.len < M {
+            self.ops[self.len] = Op {
+                had,
+                flip,
+                a: a as u8,
+                b: b as u8,
+                cos: cos128(angle as i32) as i16,
+                sin: sin128(angle as i32) as i16,
+            };
+        }
+        self.len += 1;
+        self
+    }
+
+    /// `B(a, b, angle, flip)`; angles are given modulo 256.
+    const fn bf(self, a: usize, b: usize, angle: usize, flip: bool) -> Self {
+        self.push(false, a, b, angle & 255, flip)
+    }
+
+    /// `H(a, b, flip)`.
+    const fn h(self, a: usize, b: usize, flip: bool) -> Self {
+        self.push(true, a, b, 0, flip)
+    }
+}
+
+/// The inverse DCT of length `1 << n` (spec 7.13.2.3, steps 2 to 31; the
+/// permutation of step 1 is applied by the loaders).
+const fn dct_prog<const M: usize>(n: u32) -> Prog<M> {
+    let mut p = Prog::<M>::new();
+    let mut i;
+    let mut j;
+    if n == 6 {
+        i = 0;
+        while i < 16 {
+            p = p.bf(32 + i, 63 - i, 63 - 4 * brev(4, i), false);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 8 {
+            p = p.bf(16 + i, 31 - i, 6 + (brev(3, 7 - i) << 3), false);
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 16 {
+            p = p.h(32 + i * 2, 33 + i * 2, i & 1 != 0);
+            i += 1;
+        }
+    }
+    if n >= 4 {
+        i = 0;
+        while i < 4 {
+            p = p.bf(8 + i, 15 - i, 12 + (brev(2, 3 - i) << 4), false);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 8 {
+            p = p.h(16 + 2 * i, 17 + 2 * i, i & 1 != 0);
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 4 {
+            j = 0;
+            while j < 2 {
+                p = p.bf(
+                    62 - i * 4 - j,
+                    33 + i * 4 + j,
+                    60 - 16 * brev(2, i) + 64 * j,
+                    true,
+                );
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if n >= 3 {
+        i = 0;
+        while i < 2 {
+            p = p.bf(4 + i, 7 - i, 56 - 32 * i, false);
+            i += 1;
+        }
+    }
+    if n >= 4 {
+        i = 0;
+        while i < 4 {
+            p = p.h(8 + 2 * i, 9 + 2 * i, i & 1 != 0);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 2 {
+            j = 0;
+            while j < 2 {
+                p = p.bf(
+                    30 - 4 * i - j,
+                    17 + 4 * i + j,
+                    24 + (j << 6) + ((1 - i) << 5),
+                    true,
+                );
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 8 {
+            j = 0;
+            while j < 2 {
+                p = p.h(32 + i * 4 + j, 35 + i * 4 - j, i & 1 != 0);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    i = 0;
+    while i < 2 {
+        p = p.bf(2 * i, 2 * i + 1, 32 + 16 * i, i == 0);
+        i += 1;
+    }
+    if n >= 3 {
+        i = 0;
+        while i < 2 {
+            p = p.h(4 + 2 * i, 5 + 2 * i, i != 0);
+            i += 1;
+        }
+    }
+    if n >= 4 {
+        i = 0;
+        while i < 2 {
+            p = p.bf(14 - i, 9 + i, 48 + 64 * i, true);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 4 {
+            j = 0;
+            while j < 2 {
+                p = p.h(16 + 4 * i + j, 19 + 4 * i - j, i & 1 != 0);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 2 {
+            j = 0;
+            while j < 4 {
+                p = p.bf(
+                    61 - i * 8 - j,
+                    34 + i * 8 + j,
+                    56 + 256 - i * 32 + (j >> 1) * 64,
+                    true,
+                );
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    i = 0;
+    while i < 2 {
+        p = p.h(i, 3 - i, false);
+        i += 1;
+    }
+    if n >= 3 {
+        p = p.bf(6, 5, 32, true);
+    }
+    if n >= 4 {
+        i = 0;
+        while i < 2 {
+            j = 0;
+            while j < 2 {
+                p = p.h(8 + 4 * i + j, 11 + 4 * i - j, i != 0);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 4 {
+            p = p.bf(29 - i, 18 + i, 48 + (i >> 1) * 64, true);
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 4 {
+            j = 0;
+            while j < 4 {
+                p = p.h(32 + 8 * i + j, 39 + 8 * i - j, i & 1 != 0);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if n >= 3 {
+        i = 0;
+        while i < 4 {
+            p = p.h(i, 7 - i, false);
+            i += 1;
+        }
+    }
+    if n >= 4 {
+        i = 0;
+        while i < 2 {
+            p = p.bf(13 - i, 10 + i, 32, true);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 2 {
+            j = 0;
+            while j < 4 {
+                p = p.h(16 + i * 8 + j, 23 + i * 8 - j, i != 0);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 8 {
+            p = p.bf(59 - i, 36 + i, if i < 4 { 48 } else { 112 }, true);
+            i += 1;
+        }
+    }
+    if n >= 4 {
+        i = 0;
+        while i < 8 {
+            p = p.h(i, 15 - i, false);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 4 {
+            p = p.bf(27 - i, 20 + i, 32, true);
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 8 {
+            p = p.h(32 + i, 47 - i, false);
+            p = p.h(48 + i, 63 - i, true);
+            i += 1;
+        }
+    }
+    if n >= 5 {
+        i = 0;
+        while i < 16 {
+            p = p.h(i, 31 - i, false);
+            i += 1;
+        }
+    }
+    if n == 6 {
+        i = 0;
+        while i < 8 {
+            p = p.bf(55 - i, 40 + i, 32, true);
+            i += 1;
+        }
+        i = 0;
+        while i < 32 {
+            p = p.h(i, 63 - i, false);
+            i += 1;
+        }
+    }
+    p
+}
+
+/// The inverse ADST8 (spec 7.13.2.7, steps 2 to 6).
+const fn adst8_prog<const M: usize>() -> Prog<M> {
+    let mut p = Prog::<M>::new();
+    let mut i = 0;
+    while i < 4 {
+        p = p.bf(2 * i, 2 * i + 1, 60 - 16 * i, true);
+        i += 1;
+    }
+    i = 0;
+    while i < 4 {
+        p = p.h(i, 4 + i, false);
+        i += 1;
+    }
+    i = 0;
+    while i < 2 {
+        p = p.bf(4 + 3 * i, 5 + i, 48 - 32 * i, true);
+        i += 1;
+    }
+    i = 0;
+    while i < 2 {
+        let mut j = 0;
+        while j < 2 {
+            p = p.h(4 * j + i, 2 + 4 * j + i, false);
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < 2 {
+        p = p.bf(2 + 4 * i, 3 + 4 * i, 32, true);
+        i += 1;
+    }
+    p
+}
+
+/// The inverse ADST16 (spec 7.13.2.8, steps 2 to 8).
+const fn adst16_prog<const M: usize>() -> Prog<M> {
+    let mut p = Prog::<M>::new();
+    let mut i = 0;
+    let mut j;
+    while i < 8 {
+        p = p.bf(2 * i, 2 * i + 1, 62 - 8 * i, true);
+        i += 1;
+    }
+    i = 0;
+    while i < 8 {
+        p = p.h(i, 8 + i, false);
+        i += 1;
+    }
+    i = 0;
+    while i < 2 {
+        p = p.bf(8 + 2 * i, 9 + 2 * i, 56 - 32 * i, true);
+        p = p.bf(13 + 2 * i, 12 + 2 * i, 8 + 32 * i, true);
+        i += 1;
+    }
+    i = 0;
+    while i < 4 {
+        j = 0;
+        while j < 2 {
+            p = p.h(8 * j + i, 4 + 8 * j + i, false);
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < 2 {
+        j = 0;
+        while j < 2 {
+            p = p.bf(4 + 8 * j + 3 * i, 5 + 8 * j + i, 48 - 32 * i, true);
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < 2 {
+        j = 0;
+        while j < 4 {
+            p = p.h(4 * j + i, 2 + 4 * j + i, false);
+            j += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while i < 4 {
+        p = p.bf(2 + 4 * i, 3 + 4 * i, 32, true);
+        i += 1;
+    }
+    p
+}
+
+/// Drops the steps of `full` whose two inputs are known to be zero, given
+/// that only the inputs `0..nz` can be non-zero and input `k` sits at
+/// `perm[k]`. Both kinds of step map a pair of zeros to zeros, so the result
+/// is unchanged.
+const fn prune<const M: usize>(full: Prog<1024>, perm: &[u8], nz: usize) -> Prog<M> {
+    let mut live = [false; 64];
+    let mut k = 0;
+    while k < nz && k < perm.len() {
+        live[perm[k] as usize] = true;
+        k += 1;
+    }
+    let mut p = Prog::<M>::new();
+    let mut i = 0;
+    while i < full.len {
+        let op = full.ops[i];
+        let (a, b) = (op.a as usize, op.b as usize);
+        if live[a] || live[b] {
+            live[a] = true;
+            live[b] = true;
+            if p.len < M {
+                p.ops[p.len] = op;
+            }
+            p.len += 1;
+        }
+        i += 1;
+    }
+    p
+}
+
+const fn dct_nz<const M: usize>(n: u32, nz: usize) -> Prog<M> {
+    let perm: &[u8] = match n {
+        2 => &dct_perm::<4>(),
+        3 => &dct_perm::<8>(),
+        4 => &dct_perm::<16>(),
+        5 => &dct_perm::<32>(),
+        _ => &dct_perm::<64>(),
+    };
+    prune::<M>(dct_prog::<1024>(n), perm, nz)
+}
+
+const fn adst_nz<const M: usize>(n: u32, nz: usize) -> Prog<M> {
+    if n == 3 {
+        prune::<M>(adst8_prog::<1024>(), &adst_in_perm::<8>(), nz)
+    } else {
+        prune::<M>(adst16_prog::<1024>(), &adst_in_perm::<16>(), nz)
+    }
+}
+
+/// A static step table built by `$f::<M>($args)`.
+macro_rules! prog_table {
+    ($name:ident, $f:ident, $($arg:expr),*) => {
+        static $name: [Op; $f::<1024>($($arg),*).len] =
+            $f::<{ $f::<1024>($($arg),*).len }>($($arg),*).ops;
+    };
+}
+
+prog_table!(DCT4_1, dct_nz, 2, 1);
+prog_table!(DCT4_2, dct_nz, 2, 2);
+prog_table!(DCT4_4, dct_nz, 2, 4);
+prog_table!(DCT8_2, dct_nz, 3, 2);
+prog_table!(DCT8_4, dct_nz, 3, 4);
+prog_table!(DCT8_8, dct_nz, 3, 8);
+prog_table!(DCT16_4, dct_nz, 4, 4);
+prog_table!(DCT16_8, dct_nz, 4, 8);
+prog_table!(DCT16_16, dct_nz, 4, 16);
+prog_table!(DCT32_8, dct_nz, 5, 8);
+prog_table!(DCT32_16, dct_nz, 5, 16);
+prog_table!(DCT32_32, dct_nz, 5, 32);
+prog_table!(DCT64_8, dct_nz, 6, 8);
+prog_table!(DCT64_16, dct_nz, 6, 16);
+prog_table!(DCT64_32, dct_nz, 6, 32);
+prog_table!(ADST8_2, adst_nz, 3, 2);
+prog_table!(ADST8_4, adst_nz, 3, 4);
+prog_table!(ADST8_8, adst_nz, 3, 8);
+prog_table!(ADST16_4, adst_nz, 4, 4);
+prog_table!(ADST16_8, adst_nz, 4, 8);
+prog_table!(ADST16_16, adst_nz, 4, 16);
+
+/// The step table for a transform of length `n` whose inputs `nz..` are zero:
+/// the full table pruned for `n / 4`, `n / 2` or `n` live inputs (at most 32
+/// inputs of a 64-point transform are non-zero).
+fn prog_for(kind: Kind, n: usize, nz: usize) -> &'static [Op] {
+    let q = if nz <= n / 4 {
+        0
+    } else if nz <= n / 2 {
+        1
+    } else {
+        2
+    };
+    match (kind, n, q) {
+        (Kind::Dct, 4, 0) => &DCT4_1,
+        (Kind::Dct, 4, 1) => &DCT4_2,
+        (Kind::Dct, 4, _) => &DCT4_4,
+        (Kind::Dct, 8, 0) => &DCT8_2,
+        (Kind::Dct, 8, 1) => &DCT8_4,
+        (Kind::Dct, 8, _) => &DCT8_8,
+        (Kind::Dct, 16, 0) => &DCT16_4,
+        (Kind::Dct, 16, 1) => &DCT16_8,
+        (Kind::Dct, 16, _) => &DCT16_16,
+        (Kind::Dct, 32, 0) => &DCT32_8,
+        (Kind::Dct, 32, 1) => &DCT32_16,
+        (Kind::Dct, 32, _) => &DCT32_32,
+        (Kind::Dct, _, 0) if nz <= 8 => &DCT64_8,
+        (Kind::Dct, _, 0) => &DCT64_16,
+        (Kind::Dct, _, _) => &DCT64_32,
+        (_, 8, 0) => &ADST8_2,
+        (_, 8, 1) => &ADST8_4,
+        (_, 8, _) => &ADST8_8,
+        (_, _, 0) => &ADST16_4,
+        (_, _, 1) => &ADST16_8,
+        (_, _, _) => &ADST16_16,
+    }
+}
+
+/// Runs a step table on `t`.
 #[inline(always)]
-fn dct<E: Lane, const L: usize, const N: usize>(t: &mut [[E; L]; N], mn: i32, mx: i32) {
-    let n = N.trailing_zeros();
-    let br = |bits: u32, x: usize| brev(bits, x) as i32;
-    if n == 6 {
-        for i in 0..16 {
-            bf(t, 32 + i, 63 - i, 63 - 4 * br(4, i), false);
-        }
-    }
-    if n >= 5 {
-        for i in 0..8 {
-            bf(t, 16 + i, 31 - i, 6 + (br(3, 7 - i) << 3), false);
-        }
-    }
-    if n == 6 {
-        for i in 0..16 {
-            hd(t, 32 + i * 2, 33 + i * 2, i & 1 != 0, mn, mx);
-        }
-    }
-    if n >= 4 {
-        for i in 0..4 {
-            bf(t, 8 + i, 15 - i, 12 + (br(2, 3 - i) << 4), false);
-        }
-    }
-    if n >= 5 {
-        for i in 0..8 {
-            hd(t, 16 + 2 * i, 17 + 2 * i, i & 1 != 0, mn, mx);
-        }
-    }
-    if n == 6 {
-        for i in 0..4 {
-            for j in 0..2 {
-                let angle = 60 - 16 * br(2, i) + 64 * j as i32;
-                bf(t, 62 - i * 4 - j, 33 + i * 4 + j, angle, true);
-            }
-        }
-    }
-    if n >= 3 {
-        for i in 0..2 {
-            bf(t, 4 + i, 7 - i, 56 - 32 * i as i32, false);
-        }
-    }
-    if n >= 4 {
-        for i in 0..4 {
-            hd(t, 8 + 2 * i, 9 + 2 * i, i & 1 != 0, mn, mx);
-        }
-    }
-    if n >= 5 {
-        for i in 0..2 {
-            for j in 0..2 {
-                let angle = 24 + ((j as i32) << 6) + ((1 - i as i32) << 5);
-                bf(t, 30 - 4 * i - j, 17 + 4 * i + j, angle, true);
-            }
-        }
-    }
-    if n == 6 {
-        for i in 0..8 {
-            for j in 0..2 {
-                hd(t, 32 + i * 4 + j, 35 + i * 4 - j, i & 1 != 0, mn, mx);
-            }
-        }
-    }
-    for i in 0..2 {
-        bf(t, 2 * i, 2 * i + 1, 32 + 16 * i as i32, i == 0);
-    }
-    if n >= 3 {
-        for i in 0..2 {
-            hd(t, 4 + 2 * i, 5 + 2 * i, i != 0, mn, mx);
-        }
-    }
-    if n >= 4 {
-        for i in 0..2 {
-            bf(t, 14 - i, 9 + i, 48 + 64 * i as i32, true);
-        }
-    }
-    if n >= 5 {
-        for i in 0..4 {
-            for j in 0..2 {
-                hd(t, 16 + 4 * i + j, 19 + 4 * i - j, i & 1 != 0, mn, mx);
-            }
-        }
-    }
-    if n == 6 {
-        for i in 0..2 {
-            for j in 0..4 {
-                let angle = 56 - i as i32 * 32 + (j as i32 >> 1) * 64;
-                bf(t, 61 - i * 8 - j, 34 + i * 8 + j, angle, true);
-            }
-        }
-    }
-    for i in 0..2 {
-        hd(t, i, 3 - i, false, mn, mx);
-    }
-    if n >= 3 {
-        bf(t, 6, 5, 32, true);
-    }
-    if n >= 4 {
-        for i in 0..2 {
-            for j in 0..2 {
-                hd(t, 8 + 4 * i + j, 11 + 4 * i - j, i != 0, mn, mx);
-            }
-        }
-    }
-    if n >= 5 {
-        for i in 0..4 {
-            bf(t, 29 - i, 18 + i, 48 + (i as i32 >> 1) * 64, true);
-        }
-    }
-    if n == 6 {
-        for i in 0..4 {
-            for j in 0..4 {
-                hd(t, 32 + 8 * i + j, 39 + 8 * i - j, i & 1 != 0, mn, mx);
-            }
-        }
-    }
-    if n >= 3 {
-        for i in 0..4 {
-            hd(t, i, 7 - i, false, mn, mx);
-        }
-    }
-    if n >= 4 {
-        for i in 0..2 {
-            bf(t, 13 - i, 10 + i, 32, true);
-        }
-    }
-    if n >= 5 {
-        for i in 0..2 {
-            for j in 0..4 {
-                hd(t, 16 + i * 8 + j, 23 + i * 8 - j, i != 0, mn, mx);
-            }
-        }
-    }
-    if n == 6 {
-        for i in 0..8 {
-            bf(t, 59 - i, 36 + i, if i < 4 { 48 } else { 112 }, true);
-        }
-    }
-    if n >= 4 {
-        for i in 0..8 {
-            hd(t, i, 15 - i, false, mn, mx);
-        }
-    }
-    if n >= 5 {
-        for i in 0..4 {
-            bf(t, 27 - i, 20 + i, 32, true);
-        }
-    }
-    if n == 6 {
-        for i in 0..8 {
-            hd(t, 32 + i, 47 - i, false, mn, mx);
-            hd(t, 48 + i, 63 - i, true, mn, mx);
-        }
-    }
-    if n >= 5 {
-        for i in 0..16 {
-            hd(t, i, 31 - i, false, mn, mx);
-        }
-    }
-    if n == 6 {
-        for i in 0..8 {
-            bf(t, 55 - i, 40 + i, 32, true);
-        }
-        for i in 0..32 {
-            hd(t, i, 63 - i, false, mn, mx);
+fn run_prog<E: Lane, const L: usize, const N: usize>(
+    t: &mut [[E; L]; N],
+    ops: &[Op],
+    mn: i32,
+    mx: i32,
+) {
+    // Keep the step loop a loop: unrolled, LLVM vectorizes across steps.
+    let ops = if L > 1 {
+        core::hint::black_box(ops)
+    } else {
+        ops
+    };
+    for op in ops {
+        let a = op.a as usize & (N - 1);
+        let b = op.b as usize & (N - 1);
+        if op.had {
+            hd(t, a, b, op.flip, mn, mx);
+        } else {
+            bf(t, a, b, op.cos as i32, op.sin as i32, op.flip);
         }
     }
 }
@@ -552,64 +943,25 @@ fn adst4<E: Lane, const L: usize, const N: usize>(t: &mut [[E; L]; N]) {
 
 /// Inverse ADST8 (spec 7.13.2.7, input permutation already applied).
 #[inline(always)]
-fn adst8<E: Lane, const L: usize, const N: usize>(t: &mut [[E; L]; N], mn: i32, mx: i32) {
-    for i in 0..4 {
-        bf(t, 2 * i, 2 * i + 1, 60 - 16 * i as i32, true);
-    }
-    for i in 0..4 {
-        hd(t, i, 4 + i, false, mn, mx);
-    }
-    for i in 0..2 {
-        bf(t, 4 + 3 * i, 5 + i, 48 - 32 * i as i32, true);
-    }
-    for i in 0..2 {
-        for j in 0..2 {
-            hd(t, 4 * j + i, 2 + 4 * j + i, false, mn, mx);
-        }
-    }
-    for i in 0..2 {
-        bf(t, 2 + 4 * i, 3 + 4 * i, 32, true);
-    }
+fn adst8<E: Lane, const L: usize, const N: usize>(
+    t: &mut [[E; L]; N],
+    nz: usize,
+    mn: i32,
+    mx: i32,
+) {
+    run_prog(t, prog_for(Kind::Adst, 8, nz), mn, mx);
     adst_out(t, &ADST8_OUT);
 }
 
 /// Inverse ADST16 (spec 7.13.2.8, input permutation already applied).
 #[inline(always)]
-fn adst16<E: Lane, const L: usize, const N: usize>(t: &mut [[E; L]; N], mn: i32, mx: i32) {
-    for i in 0..8 {
-        bf(t, 2 * i, 2 * i + 1, 62 - 8 * i as i32, true);
-    }
-    for i in 0..8 {
-        hd(t, i, 8 + i, false, mn, mx);
-    }
-    for i in 0..2 {
-        bf(t, 8 + 2 * i, 9 + 2 * i, 56 - 32 * i as i32, true);
-        bf(t, 13 + 2 * i, 12 + 2 * i, 8 + 32 * i as i32, true);
-    }
-    for i in 0..4 {
-        for j in 0..2 {
-            hd(t, 8 * j + i, 4 + 8 * j + i, false, mn, mx);
-        }
-    }
-    for i in 0..2 {
-        for j in 0..2 {
-            bf(
-                t,
-                4 + 8 * j + 3 * i,
-                5 + 8 * j + i,
-                48 - 32 * i as i32,
-                true,
-            );
-        }
-    }
-    for i in 0..2 {
-        for j in 0..4 {
-            hd(t, 4 * j + i, 2 + 4 * j + i, false, mn, mx);
-        }
-    }
-    for i in 0..4 {
-        bf(t, 2 + 4 * i, 3 + 4 * i, 32, true);
-    }
+fn adst16<E: Lane, const L: usize, const N: usize>(
+    t: &mut [[E; L]; N],
+    nz: usize,
+    mn: i32,
+    mx: i32,
+) {
+    run_prog(t, prog_for(Kind::Adst, 16, nz), mn, mx);
     adst_out(t, &ADST16_OUT);
 }
 
@@ -654,15 +1006,16 @@ const K_IDT: u8 = 2;
 #[inline(always)]
 fn tx1d<E: Lane, const L: usize, const N: usize, const K: u8>(
     t: &mut [[E; L]; N],
+    nz: usize,
     mn: i32,
     mx: i32,
 ) {
     match K {
-        K_DCT => dct(t, mn, mx),
+        K_DCT => run_prog(t, prog_for(Kind::Dct, N, nz), mn, mx),
         K_ADST => match N {
             4 => adst4(t),
-            8 => adst8(t, mn, mx),
-            _ => adst16(t, mn, mx),
+            8 => adst8(t, nz, mn, mx),
+            _ => adst16(t, nz, mn, mx),
         },
         _ => {}
     }
@@ -683,8 +1036,6 @@ fn perm_for<const N: usize, const K: u8>() -> Option<&'static [u8; N]> {
 struct Params {
     /// Width of the transform.
     w: usize,
-    /// Row stride of `coefs`: `min(w, 32)`.
-    tw: usize,
     /// Column stride of the intermediate: `min(h, 32)`.
     ts: usize,
     nz_rows: usize,
@@ -712,7 +1063,9 @@ fn row_pass<E: Lane, const L: usize, const N: usize, const K: u8>(
     coefs: &[i32],
     tmp: &mut [i32],
 ) {
-    let (tw, ts) = (p.tw, p.ts);
+    // The row stride of `coefs` is known from the row length.
+    let tw = if N > 32 { 32 } else { N };
+    let ts = p.ts;
     let shift = p.row_shift;
     let rnd = (1i32 << shift) >> 1;
     let (cmin, cmax) = (p.cmin, p.cmax);
@@ -726,8 +1079,8 @@ fn row_pass<E: Lane, const L: usize, const N: usize, const K: u8>(
             }
             let v = rnd12(c.wrapping_mul(2896));
             let v = (v.wrapping_add(rnd) >> shift).max(cmin).min(cmax);
-            for col in tmp.chunks_exact_mut(ts).take(N) {
-                col[i] = v;
+            for j in 0..N {
+                tmp[j * ts + i] = v;
             }
         }
         return;
@@ -742,22 +1095,15 @@ fn row_pass<E: Lane, const L: usize, const N: usize, const K: u8>(
         if ncols < N {
             t = [[E::default(); L]; N];
         }
-        let rows = &coefs[r0 * tw..(r0 + L) * tw];
-        for (row, l) in rows.chunks_exact(tw).zip(0..L) {
-            let row = &row[..ncols];
-            if p.rect {
-                for (&k, &c) in perm.iter().zip(row) {
-                    t[k as usize & (N - 1)][l] = E::put(rnd12(c.wrapping_mul(2896)));
-                }
-            } else {
-                for (&k, &c) in perm.iter().zip(row) {
-                    t[k as usize & (N - 1)][l] = E::put(c);
-                }
-            }
+        // A constant count when all columns are loaded.
+        if ncols == tw {
+            load_rows(&mut t, coefs, perm, r0 * tw, tw, tw, p.rect);
+        } else {
+            load_rows(&mut t, coefs, perm, r0 * tw, tw, ncols, p.rect);
         }
-        tx1d::<E, L, N, K>(&mut t, p.rmin, p.rmax);
-        for (col, v) in tmp.chunks_exact_mut(ts).zip(t.iter()) {
-            let out = &mut col[r0..r0 + L];
+        tx1d::<E, L, N, K>(&mut t, ncols, p.rmin, p.rmax);
+        for (j, v) in t.iter().enumerate() {
+            let out = &mut tmp[j * ts + r0..][..L];
             for l in 0..L {
                 let x = if K == K_IDT {
                     idt::<N>(v[l].get())
@@ -770,13 +1116,39 @@ fn row_pass<E: Lane, const L: usize, const N: usize, const K: u8>(
                 out[l] = if !E::NARROW {
                     x.max(cmin).min(cmax)
                 } else if K == K_IDT {
-                    x.max(-32768).min(32767)
+                    x.clamp(-32768, 32767)
                 } else {
                     x
                 };
             }
         }
         r0 += L;
+    }
+}
+
+/// Transposing load: `t[perm[k]][l] = src[start + l * stride + k]` for
+/// `k < n`, optionally with the rectangular scaling.
+#[inline(always)]
+fn load_rows<E: Lane, const L: usize, const N: usize>(
+    t: &mut [[E; L]; N],
+    src: &[i32],
+    perm: &[u8; N],
+    start: usize,
+    stride: usize,
+    n: usize,
+    rect: bool,
+) {
+    for l in 0..L {
+        let row = &src[start + l * stride..][..n];
+        if rect {
+            for (&k, &c) in perm.iter().zip(row) {
+                t[k as usize & (N - 1)][l] = E::put(rnd12(c.wrapping_mul(2896)));
+            }
+        } else {
+            for (&k, &c) in perm.iter().zip(row) {
+                t[k as usize & (N - 1)][l] = E::put(c);
+            }
+        }
     }
 }
 
@@ -797,18 +1169,20 @@ fn col_pass<P: Pixel, E: Lane, const L: usize, const N: usize, const K: u8>(
     dst: &mut [P],
     stride: usize,
 ) {
-    let (w, ts, pmax) = (p.w, p.ts, p.pmax);
+    let (w, pmax) = (p.w, p.pmax);
+    // The column stride of `tmp` is known from the column length.
+    let ts = if N > 32 { 32 } else { N };
     if K == K_DCT && p.nz_rows == 1 {
         // Only T[0] of each column is non-zero: the column is constant.
         let mut vals = [0i32; 64];
-        for (j, col) in tmp.chunks_exact(ts).take(w).enumerate() {
-            let v = rnd12(col[0].wrapping_mul(2896));
+        for j in 0..w {
+            let v = rnd12(tmp[j * ts].wrapping_mul(2896));
             let x = if p.flip_lr { w - 1 - j } else { j };
             vals[x & 63] = v.wrapping_add(8) >> 4;
         }
         let vals = &vals[..w];
-        for row in dst.chunks_mut(stride).take(N) {
-            for (px, &v) in row[..w].iter_mut().zip(vals) {
+        for y in 0..N {
+            for (px, &v) in dst[y * stride..][..w].iter_mut().zip(vals) {
                 *px = P::from_i32((px.to_i32() + v).max(0).min(pmax));
             }
         }
@@ -824,29 +1198,49 @@ fn col_pass<P: Pixel, E: Lane, const L: usize, const N: usize, const K: u8>(
         if nrows < N {
             t = [[E::default(); L]; N];
         }
-        for l in 0..L {
-            let col = &tmp[(j0 + l) * ts..][..nrows];
-            for (&k, &c) in perm.iter().zip(col) {
-                t[k as usize & (N - 1)][l] = E::put(c);
-            }
+        // A constant count when all rows are loaded.
+        if nrows == ts {
+            load_rows(&mut t, tmp, perm, j0 * ts, ts, ts, false);
+        } else {
+            load_rows(&mut t, tmp, perm, j0 * ts, ts, nrows, false);
         }
-        tx1d::<E, L, N, K>(&mut t, p.cmin, p.cmax);
+        tx1d::<E, L, N, K>(&mut t, nrows, p.cmin, p.cmax);
         let x0 = if p.flip_lr { w - j0 - L } else { j0 };
         for (i, v) in t.iter().enumerate() {
             let y = if p.flip_ud { N - 1 - i } else { i };
-            let mut res = [0i32; L];
-            for l in 0..L {
-                let x = if K == K_IDT {
-                    idt::<N>(v[l].get())
-                } else {
-                    v[l].get()
-                };
-                res[l] = x.wrapping_add(8) >> 4;
+            let row = &mut dst[y * stride + x0..][..L];
+            if E::NARROW && !P::HBD {
+                // 8-bit: residuals and sums stay in 16 bits.
+                let mut res = [0i16; L];
+                for l in 0..L {
+                    res[l] = if K == K_IDT {
+                        (idt::<N>(v[l].get()).wrapping_add(8) >> 4) as i16
+                    } else {
+                        v[l].round4()
+                    };
+                }
+                if p.flip_lr {
+                    res.reverse();
+                }
+                for l in 0..L {
+                    let px = row[l].to_i32() as i16 + res[l];
+                    row[l] = P::from_i32(px.clamp(0, 255) as i32);
+                }
+            } else {
+                let mut res = [0i32; L];
+                for l in 0..L {
+                    let x = if K == K_IDT {
+                        idt::<N>(v[l].get())
+                    } else {
+                        v[l].get()
+                    };
+                    res[l] = x.wrapping_add(8) >> 4;
+                }
+                if p.flip_lr {
+                    res.reverse();
+                }
+                add_row::<P, L>(row, &res, pmax);
             }
-            if p.flip_lr {
-                res.reverse();
-            }
-            add_row::<P, L>(&mut dst[y * stride + x0..], &res, pmax);
         }
         j0 += L;
     }
@@ -870,6 +1264,7 @@ fn row_dispatch<E: Lane>(log2w: u32, kind: Kind, p: &Params, coefs: &[i32], tmp:
     }
     // Four rows at a time when there are at most four rows to transform.
     match (log2w, p.ts == 4 || p.nz_rows <= 4) {
+        (2, true) if p.ts == 4 => go!(1, 4),
         (2, true) => go!(4, 4),
         (2, false) => go!(8, 4),
         (3, true) => go!(4, 8),
@@ -907,7 +1302,7 @@ fn col_dispatch<P: Pixel, E: Lane>(
         };
     }
     match (log2h, p.w == 4) {
-        (2, true) => go!(4, 4),
+        (2, true) => go!(1, 4),
         (2, false) => go!(8, 4),
         (3, true) => go!(4, 8),
         (3, false) => go!(8, 8),
@@ -939,7 +1334,6 @@ fn run<P: Pixel, E: Lane, const TMP: usize>(
     let (flip_ud, flip_lr) = tx_type_flips(tx_type);
     let p = Params {
         w,
-        tw: w.min(32),
         ts: (1usize << log2h).min(32),
         nz_rows,
         nz_cols,
@@ -1093,7 +1487,11 @@ pub fn inv_txfm_add<P: Pixel>(
     }
 
     let need = w * th;
-    if need <= 64 {
+    if need <= 16 {
+        run_sized::<P, 16>(
+            dst, dst_stride, coefs, tx_size, tx_type, nz_rows, nz_cols, bd,
+        );
+    } else if need <= 64 {
         run_sized::<P, 64>(
             dst, dst_stride, coefs, tx_size, tx_type, nz_rows, nz_cols, bd,
         );
@@ -1110,8 +1508,8 @@ pub fn inv_txfm_add<P: Pixel>(
             dst, dst_stride, coefs, tx_size, tx_type, nz_rows, nz_cols, bd,
         );
     }
-    for row in coefs.chunks_exact_mut(tw).take(nz_rows) {
-        row[..nz_cols].fill(0);
+    for i in 0..nz_rows {
+        coefs[i * tw..][..nz_cols].fill(0);
     }
 }
 
@@ -1765,6 +2163,19 @@ mod tests {
         run_bd(8, 200);
     }
 
+    /// 8-bit samples held in `u16` take the 32-bit lane path.
+    #[test]
+    fn matches_spec_8bit_in_u16() {
+        let mut rng = Rng(77);
+        for tx_size in 0..19 {
+            for tx_type in allowed_types(tx_size) {
+                for it in 0..40 {
+                    check::<u16>(&mut rng, tx_size, tx_type, false, 8, (it % 5) as u32);
+                }
+            }
+        }
+    }
+
     #[test]
     fn matches_spec_10bit() {
         run_bd(10, 200);
@@ -1810,29 +2221,64 @@ mod tests {
     #[test]
     #[ignore]
     fn bench() {
+        // (name, tx_size, tx_type, nz_rows, nz_cols, bd)
+        let cases = [
+            ("4x4 dct", 0, 0, 4, 4, 8),
+            ("8x8 dct", 1, 0, 8, 8, 8),
+            ("16x16 dct", 2, 0, 16, 16, 8),
+            ("32x32 dct", 3, 0, 32, 32, 8),
+            ("64x64 dct", 4, 0, 32, 32, 8),
+            ("8x8 adst", 1, 3, 8, 8, 8),
+            ("16x16 dct 4x4nz", 2, 0, 4, 4, 8),
+            ("32x32 dct 8x8nz", 3, 0, 8, 8, 8),
+            ("8x8 dct 10b", 1, 0, 8, 8, 10),
+            ("16x16 dct 10b", 2, 0, 16, 16, 10),
+            ("8x8 idtx", 1, 9, 8, 8, 8),
+            ("4x4 dc", 0, 0, 1, 1, 8),
+        ];
+        let only: Option<usize> = std::env::var("ITX_CASE").ok().and_then(|v| v.parse().ok());
+        let px: usize = std::env::var("ITX_PX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000_000);
         let mut rng = Rng(7);
-        for (tx_size, name) in [
-            (0, "4x4"),
-            (1, "8x8"),
-            (2, "16x16"),
-            (3, "32x32"),
-            (4, "64x64"),
-        ] {
+        for (idx, &(name, tx_size, tx_type, nzr, nzc, bd)) in cases.iter().enumerate() {
+            if only.is_some_and(|o| o != idx) {
+                continue;
+            }
             let w = 1usize << TX_WIDTH_LOG2[tx_size];
-            let tw = w.min(32);
-            let n = 2_000_000 / (w * w);
-            let mut dst = vec![128u8; w * w];
-            let src: Vec<i32> = (0..tw * tw).map(|_| rng.range(-200, 200) as i32).collect();
+            let h = 1usize << TX_HEIGHT_LOG2[tx_size];
+            let (tw, th) = (w.min(32), h.min(32));
+            let n = px / (w * h);
+            let mut src = vec![0i32; tw * th];
+            for i in 0..nzr {
+                for j in 0..nzc {
+                    src[i * tw + j] = rng.range(-200, 200) as i32;
+                }
+            }
             let mut coefs = src.clone();
             let t0 = std::time::Instant::now();
-            for _ in 0..n {
-                coefs.copy_from_slice(&src);
-                inv_txfm_add(&mut dst, w, &mut coefs, tx_size, 0, tw, tw, false, 8);
+            if bd == 8 {
+                let mut dst = vec![128u8; w * h];
+                for _ in 0..n {
+                    coefs.copy_from_slice(&src);
+                    inv_txfm_add(
+                        &mut dst, w, &mut coefs, tx_size, tx_type, nzr, nzc, false, bd,
+                    );
+                }
+            } else {
+                let mut dst = vec![512u16; w * h];
+                for _ in 0..n {
+                    coefs.copy_from_slice(&src);
+                    inv_txfm_add(
+                        &mut dst, w, &mut coefs, tx_size, tx_type, nzr, nzc, false, bd,
+                    );
+                }
             }
             let ns = t0.elapsed().as_nanos() as f64 / n as f64;
             println!(
-                "{name} DCT_DCT full: {ns:.0} ns/block, {:.2} ns/px",
-                ns / (w * w) as f64
+                "{name}: {ns:.0} ns/block, {:.2} ns/px, {n} blocks",
+                ns / (w * h) as f64
             );
         }
     }

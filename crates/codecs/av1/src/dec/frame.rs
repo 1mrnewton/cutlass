@@ -106,7 +106,7 @@ pub struct FrameState {
     pub lr_cols: [usize; 3],
     pub lr_rows: [usize; 3],
     /// MotionFieldMvs[ref][y8][x8] for ref = 1..=7 (index 0 unused).
-    pub motion_field: Vec<Vec<Mv>>,
+    pub motion_field: Vec<super::mvpred::MfEntry>,
 }
 
 impl FrameState {

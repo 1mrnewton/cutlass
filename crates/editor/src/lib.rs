@@ -36,7 +36,7 @@ pub use gesture::{
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
-pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs};
+pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key};
 pub use lane::{Lane, lane_category, lanes};
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};

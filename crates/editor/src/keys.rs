@@ -149,6 +149,41 @@ impl ClipKeys {
     }
 }
 
+/// The request that moves every key at `from` from the clip's start to
+/// `to`, a drag of the key's mark. `None` when there is no key at `from`,
+/// `to` is off the clip, or another key is already at `to`.
+#[must_use]
+pub fn move_key(
+    draft: &Draft,
+    segment_id: &SegmentId,
+    from: Micros,
+    to: Micros,
+) -> Option<Request> {
+    let segment = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| segment.id == *segment_id)?;
+    let offsets = key_offsets(segment);
+    let on = (0..=segment.target.duration.0).contains(&to.0);
+    if from == to || !on || !offsets.contains(&from) || offsets.contains(&to) {
+        return None;
+    }
+    let mut keyframes = segment.common_keyframes.clone();
+    for group in &mut keyframes {
+        for key in &mut group.keyframe_list {
+            if key.time_offset == from {
+                key.time_offset = to;
+            }
+        }
+        group.keyframe_list.sort_by_key(|key| key.time_offset.0);
+    }
+    Some(Request::SetKeyframes {
+        segment_id: segment_id.clone(),
+        keyframes,
+    })
+}
+
 /// A Graphs panel curve to show: its name and its line through the unit
 /// square, x the share of time and y the share of the change.
 #[derive(Clone, Debug, PartialEq)]
@@ -210,6 +245,32 @@ mod tests {
 
     use super::*;
     use crate::stage::NoText;
+
+    #[test]
+    fn a_key_moves_to_a_free_time_on_the_clip_and_keeps_its_order() {
+        let mut draft = Draft::empty("D");
+        let mut segment = Segment::new("c", "v", TimeRange::new(0, 3_000_000));
+        for (offset, value) in [(0, 0.0), (1_000_000, 0.5), (2_000_000, 1.0)] {
+            put_key(&mut segment, "KFTypePositionX", Micros(offset), value);
+        }
+        draft.tracks[0].segments.push(segment);
+        let id = SegmentId::new("c");
+        let Some(Request::SetKeyframes { keyframes, .. }) =
+            move_key(&draft, &id, Micros(1_000_000), Micros(2_500_000))
+        else {
+            std::panic::resume_unwind(Box::new("no move"));
+        };
+        let moved: Vec<(i64, f64)> = keyframes[0]
+            .keyframe_list
+            .iter()
+            .map(|key| (key.time_offset.0, key.values[0]))
+            .collect();
+        assert_eq!(moved, [(0, 0.0), (2_000_000, 1.0), (2_500_000, 0.5)]);
+        // Onto another key, off the clip, or from no key: nothing.
+        assert!(move_key(&draft, &id, Micros(1_000_000), Micros(2_000_000)).is_none());
+        assert!(move_key(&draft, &id, Micros(1_000_000), Micros(4_000_000)).is_none());
+        assert!(move_key(&draft, &id, Micros(500_000), Micros(600_000)).is_none());
+    }
 
     #[test]
     fn the_steps_go_to_the_keys_more_than_a_frame_away() {

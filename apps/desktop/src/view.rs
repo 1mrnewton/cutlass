@@ -158,6 +158,9 @@ pub struct ViewState {
     listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
     marquee: Option<Rect>,
+    /// How far the lanes are moved down from where they center on the main
+    /// lane, in points; negative shows lanes further down.
+    lane_scroll: f32,
 }
 
 impl Default for ViewState {
@@ -199,6 +202,7 @@ impl Default for ViewState {
             listed_checked: None,
             marquee_press: None,
             marquee: None,
+            lane_scroll: 0.0,
         }
     }
 }
@@ -2190,7 +2194,17 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .iter()
         .map(|lane| (lane.main, is_audio(lane)))
         .collect();
-    let boxes = lane_rects(kinds, lane_area);
+    let laid = lane_rects(kinds, lane_area);
+    let (low, high) = lane_scroll_range(&laid, lane_area);
+    let scrolls = low < high;
+    if scrolls {
+        view.lane_scroll += lane_wheel(ui, tracks);
+    }
+    view.lane_scroll = view.lane_scroll.clamp(low, high);
+    let boxes: Vec<Rect> = laid
+        .iter()
+        .map(|rect| rect.translate(Vec2::new(0.0, view.lane_scroll)))
+        .collect();
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -2199,12 +2213,16 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     if rows.is_empty() {
         paint_empty_main(ui, lane_area);
     }
+    // Lanes scrolled past the ruler or the panel's foot are cut there.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.intersect(tracks));
     for (index, lane) in rows.iter().enumerate() {
         let Some(row) = boxes.get(index).copied() else {
             continue;
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
+    ui.set_clip_rect(clip);
     shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
@@ -2320,8 +2338,45 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         shell.set_notice(error.to_string());
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
-    pan_timeline(shell, ui, lane_area);
+    pan_timeline(shell, ui, lane_area, scrolls);
     zoom_timeline(shell, ui, lane_area);
+}
+
+/// How far the lanes may move: none while they fit, else far enough to
+/// bring the top lane or the bottom lane in with a little room.
+fn lane_scroll_range(boxes: &[Rect], area: Rect) -> (f32, f32) {
+    const ROOM: f32 = 8.0;
+    let (Some(top), Some(bottom)) = (
+        boxes.iter().map(|rect| rect.top()).reduce(f32::min),
+        boxes.iter().map(|rect| rect.bottom()).reduce(f32::max),
+    ) else {
+        return (0.0, 0.0);
+    };
+    let low = (area.bottom() - ROOM - bottom).min(0.0);
+    let high = (area.top() + ROOM - top).max(0.0);
+    (low, high)
+}
+
+/// This frame's wheel, whether the zoom modifier is held, and the pointer.
+/// egui already turns Shift and an up-and-down wheel sideways.
+fn wheel(ui: &Ui) -> (Vec2, bool, Option<Pos2>) {
+    ui.input(|input| {
+        (
+            input.smooth_scroll_delta,
+            input.modifiers.command || input.modifiers.ctrl,
+            input.pointer.hover_pos(),
+        )
+    })
+}
+
+/// The up-and-down wheel over the track area, in points to move the lanes.
+fn lane_wheel(ui: &Ui, tracks: Rect) -> f32 {
+    let (delta, command, pos) = wheel(ui);
+    let over = pos.is_some_and(|pos| tracks.contains(pos) && !over_menu(ui, pos));
+    if command || !over || delta.y.abs() <= delta.x.abs() {
+        return 0.0;
+    }
+    delta.y
 }
 
 fn secondary_click(ui: &Ui) -> Option<Pos2> {
@@ -2394,15 +2449,11 @@ fn scroll_with_drag(shell: &mut Shell, ui: &Ui, x_in_view: f64) {
     }
 }
 
-/// A wheel or a sideways swipe over the lanes moves the visible span.
-fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
-    let (delta, command, pos) = ui.input(|input| {
-        (
-            input.smooth_scroll_delta,
-            input.modifiers.command || input.modifiers.ctrl,
-            input.pointer.hover_pos(),
-        )
-    });
+/// A sideways swipe, or Shift and the wheel, over the lanes moves the
+/// visible span. While the lanes are taller than the panel the plain wheel
+/// scrolls them instead; while they fit it moves the span too.
+fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect, lanes_scroll: bool) {
+    let (delta, command, pos) = wheel(ui);
     if command || delta == Vec2::ZERO {
         return;
     }
@@ -2414,6 +2465,8 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     }
     let pixels = if delta.x.abs() >= delta.y.abs() {
         delta.x
+    } else if lanes_scroll {
+        return;
     } else {
         delta.y
     };
@@ -6123,6 +6176,90 @@ mod tests {
         assert!(beats[0].source > 0);
         assert!(beats[0].source < 2_000_000);
         assert_eq!(beats[0].time.0, beats[0].source);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_lanes_that_overflow_and_shift_wheel_pans_time() {
+        let temp = std::env::temp_dir().join(format!("cutlass-trim-{}-tall", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "segment",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        for index in 0..20 {
+            let mut track = cutlass_model::Track::main(format!("sound-{index}"));
+            track.kind = cutlass_model::TrackType::Audio;
+            track.segments.push(cutlass_model::Segment::new(
+                format!("tone-{index}"),
+                "tone",
+                cutlass_model::TimeRange::new(0, 1_000_000),
+            ));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let over = text_pos(&output, "segment").expect("main clip");
+        output.textures_delta.clear();
+        shell.zoom_in().unwrap();
+        shell.zoom_in().unwrap();
+        let wheel = |delta: Vec2, shift: bool| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers {
+                shift,
+                ..egui::Modifiers::default()
+            },
+        };
+        let mut spin = |delta: Vec2, shift: bool| {
+            for events in [
+                vec![egui::Event::PointerMoved(over), wheel(delta, shift)],
+                Vec::new(),
+            ] {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: screen,
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| show(&mut shell, ui, &mut view, None),
+                );
+                output.textures_delta.clear();
+            }
+            (shell.view_origin().0, view.lane_scroll)
+        };
+        let (before, _) = spin(Vec2::ZERO, false);
+        let (origin, scroll) = spin(Vec2::new(0.0, -120.0), false);
+        assert_eq!(origin, before, "the wheel moved time, not the lanes");
+        assert!(scroll < 0.0, "the lanes did not scroll: {scroll}");
+        let (origin, after) = spin(Vec2::new(0.0, -120.0), true);
+        assert!(origin > before, "shift and the wheel did not pan time");
+        assert_eq!(after, scroll, "shift and the wheel moved the lanes");
+        // However far the wheel goes, the last lane stops inside the panel.
+        for _ in 0..40 {
+            spin(Vec2::new(0.0, -120.0), false);
+        }
+        let (_, deepest) = spin(Vec2::new(0.0, -120.0), false);
+        let (_, still) = spin(Vec2::new(0.0, -120.0), false);
+        assert_eq!(deepest, still);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

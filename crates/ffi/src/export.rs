@@ -3,22 +3,17 @@
 //! The picture is drawn on the preview's GPU, so effect clips are in the
 //! file, and encoded as H.264. The sound is each clip's file mixed as in
 //! playback and encoded as AAC. The Apple encoders go first on an Apple
-//! phone, then the Rust ones. The file is written beside its destination and
-//! moved there only once it is finished, so a stopped or failed export leaves
-//! nothing behind.
+//! phone, then the Rust ones. The shared [`cutlass_export::write_movie`]
+//! writes the file, so a stopped or failed export leaves nothing behind.
 
-use std::fs::{self, File};
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use cutlass_codec::{CodecId, ContainerId};
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
-use cutlass_export::{AudioExport, ExportError, ExportRequest, ExportRun};
-use cutlass_isobmff::Mp4Mux;
+use cutlass_export::{AudioExport, ExportError, ExportRequest, MovieSources};
 use cutlass_model::{Draft, FrameRate, TimeRange};
 use cutlass_render::Renderer;
-use cutlass_renderer_software::SoftwareDevice;
 
 use crate::error::FfiError;
 
@@ -89,12 +84,9 @@ pub(crate) fn export_movie(
     if sources.draft.duration.0 <= 0 {
         return Err(refused("there is nothing to export"));
     }
-    let name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| refused("the export has no file name"))?;
-    let part = destination.with_file_name(format!(".{name}.part"));
+    if cutlass_export::part_path(destination).is_none() {
+        return Err(refused("the export has no file name"));
+    }
     let request = ExportRequest {
         range: TimeRange::new(0, sources.draft.duration.0),
         short_side,
@@ -106,18 +98,21 @@ pub(crate) fn export_movie(
         sidecar: None,
         late_by: 0,
     };
-    let written = write(sources, &request, &part, progress);
-    let result = match written {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = fs::remove_file(&part);
-            return Err(error);
-        }
-    };
-    fs::rename(&part, destination).map_err(|error| {
-        let _ = fs::remove_file(&part);
-        refused(&error.to_string())
-    })?;
+    let encoders = encoders();
+    let result = cutlass_export::write_movie(
+        &MovieSources {
+            draft: sources.draft,
+            root: Some(sources.root),
+            readers: sources.readers,
+            fonts: sources.fonts,
+            renderer: sources.renderer,
+            encoders: &encoders,
+        },
+        &request,
+        destination,
+        progress,
+    )
+    .map_err(exported)?;
     Ok(PhoneExport {
         path: destination.to_path_buf(),
         frames: u64::try_from(result.frames.len()).unwrap_or(u64::MAX),
@@ -126,43 +121,10 @@ pub(crate) fn export_movie(
     })
 }
 
-fn write(
-    sources: &Sources<'_>,
-    request: &ExportRequest,
-    part: &Path,
-    progress: &mut dyn FnMut(u64, u64) -> bool,
-) -> Result<cutlass_export::ExportResult, FfiError> {
-    let file = File::create(part).map_err(|error| refused(&error.to_string()))?;
-    let mut mux = Mp4Mux::new(BufWriter::new(file));
-    let mut device = SoftwareDevice::new();
-    let encoders = encoders();
-    let result = cutlass_export::export(
-        ExportRun {
-            draft: sources.draft,
-            device: &mut device,
-            request,
-            factory: &encoders,
-            readers: sources.readers,
-            mux: &mut mux,
-            destination: None,
-            root: Some(sources.root),
-            fonts: sources.fonts,
-            renderer: sources.renderer,
-            progress: Some(progress),
-        },
-        cutlass_export::file_audio(sources.readers, sources.draft, Some(sources.root)),
-    )
-    .map_err(exported)?;
-    let mut writer = mux
-        .into_writer()
-        .map_err(|error| refused(&error.to_string()))?;
-    std::io::Write::flush(&mut writer).map_err(|error| refused(&error.to_string()))?;
-    Ok(result)
-}
-
 fn exported(error: ExportError) -> FfiError {
     match error {
         ExportError::Cancelled => refused("export was stopped"),
+        ExportError::File(message) => refused(&message),
         error => refused(&format!("export failed: {error}")),
     }
 }

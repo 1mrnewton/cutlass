@@ -142,6 +142,10 @@ pub enum EditError {
     TextEmpty,
     /// The effect is not one the app ships.
     UnknownEffect,
+    /// The clip is not an effect, a filter, or an adjustment.
+    NotEffect,
+    /// An effect strength is outside 0 through 1.
+    EffectStrength,
     /// The canvas color is not empty and not a color the preview paints.
     CanvasColor,
     /// A canvas side is outside 1 through 7680.
@@ -343,6 +347,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             TimeRange::new(start.0, duration.0),
             effect_id,
         ),
+        Request::SetEffectStrength {
+            segment_id,
+            material_id,
+            value,
+        } => effect::set_effect_strength(draft, segment_id, material_id, *value),
         Request::SetKeyframes {
             segment_id,
             keyframes,

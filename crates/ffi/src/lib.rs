@@ -449,8 +449,7 @@ impl PhoneHost {
     /// within a frame of `time`. Other clips have none to show.
     #[must_use]
     pub fn keyframes(&self, segment_id: &SegmentId, time: Micros) -> Option<PhoneKeys> {
-        cutlass_editor::stage_box(self.draft(), segment_id, time, &self.sizes())?;
-        PhoneKeys::of(self.draft(), segment_id, time)
+        cutlass_editor::clip_keys(self.draft(), segment_id, time, &self.sizes())
     }
 
     /// Ease the span of the clip's keyframes that `time` is in along the
@@ -500,17 +499,7 @@ impl PhoneHost {
     /// The picture or title clip's in and out animations.
     #[must_use]
     pub fn animations(&self, segment_id: &SegmentId) -> Option<PhoneAnimations> {
-        let animations = PhoneAnimations::of(self.draft(), segment_id)?;
-        let start = self
-            .draft()
-            .tracks
-            .iter()
-            .flat_map(|track| track.segments.iter())
-            .find(|segment| &segment.id == segment_id)?
-            .target
-            .start;
-        cutlass_editor::stage_box(self.draft(), segment_id, start, &self.sizes())?;
-        Some(animations)
+        cutlass_editor::clip_animations(self.draft(), segment_id, &self.sizes())
     }
 
     /// Give the clip the in (`enter`) or out animation `resource_id`,

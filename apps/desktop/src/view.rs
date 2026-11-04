@@ -18,6 +18,8 @@ use crate::shell::{ExportRequest, ListedProject, MovePreview, Shell, ShellError}
 use crate::tokens;
 use crate::widgets;
 
+mod inspector;
+
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
 /// The name row under a card's picture.
@@ -130,22 +132,8 @@ pub struct ViewState {
     export_sound: bool,
     replace_prompt: bool,
     export_path: String,
-    text_buffer: String,
-    text_for: String,
-    text_size_buffer: String,
-    text_color_buffer: String,
-    letter_buffer: String,
-    line_buffer: String,
-    width_buffer: String,
-    x_buffer: String,
-    y_buffer: String,
-    scale_buffer: String,
-    opacity_buffer: String,
-    letterbox_buffer: String,
-    volume_buffer: String,
-    fade_in_buffer: String,
-    fade_out_buffer: String,
-    speed_buffer: String,
+    /// The clip panel's open tab, page, and sections, and what is typed.
+    inspector: inspector::InspectorState,
     background_buffer: String,
     name_buffer: String,
     dialogs: Dialogs,
@@ -181,22 +169,7 @@ impl Default for ViewState {
             export_sound: true,
             replace_prompt: false,
             export_path: String::new(),
-            text_buffer: String::new(),
-            text_for: String::new(),
-            text_size_buffer: String::new(),
-            text_color_buffer: String::new(),
-            letter_buffer: String::new(),
-            line_buffer: String::new(),
-            width_buffer: String::new(),
-            x_buffer: String::new(),
-            y_buffer: String::new(),
-            scale_buffer: String::new(),
-            opacity_buffer: String::new(),
-            letterbox_buffer: String::new(),
-            volume_buffer: String::new(),
-            fade_in_buffer: String::new(),
-            fade_out_buffer: String::new(),
-            speed_buffer: String::new(),
+            inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
             dialogs: Dialogs::new(),
@@ -227,6 +200,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         apply_dialog(shell, view, finished);
     }
     style(ui);
+    shell.hold_edits(ui.input(|input| input.pointer.any_down()));
     shell.chrome = crate::shell::Chrome::default();
     if shell.poll_job() {
         ui.ctx()
@@ -1551,22 +1525,7 @@ fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
             ui.set_width(content_width);
             ui.add_space(14.0);
             if let Some(inspection) = shell.inspection() {
-                section_title(ui, "Clip");
-                fact(ui, "Name", &inspection.material, content_width);
-                fact(
-                    ui,
-                    "Start",
-                    &shell.timecode_at(inspection.start),
-                    content_width,
-                );
-                fact(
-                    ui,
-                    "Duration",
-                    &card_meta(inspection.duration.0),
-                    content_width,
-                );
-                ui.add_space(12.0);
-                clip_fields(shell, ui, view, &inspection);
+                inspector::clip_panel(shell, ui, view, &inspection, content_width);
             } else {
                 section_title(ui, "Details");
                 project_facts(shell, ui, view, content_width);
@@ -1751,210 +1710,6 @@ fn ratio_label(ratio: &str) -> String {
     }
 }
 
-fn clip_fields(
-    shell: &mut Shell,
-    ui: &mut Ui,
-    view: &mut ViewState,
-    inspection: &crate::shell::Inspection,
-) {
-    if shell.place_enabled() {
-        if let Some(x) = number_field(ui, "X", &mut view.x_buffer, inspection.transform_x)
-            && !inspection.locked
-            && let Err(error) = shell.set_position(x, inspection.transform_y)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(y) = number_field(ui, "Y", &mut view.y_buffer, inspection.transform_y)
-            && !inspection.locked
-            && let Err(error) = shell.set_position(inspection.transform_x, y)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(scale) = number_field(ui, "Scale", &mut view.scale_buffer, inspection.scale_x)
-            && !inspection.locked
-            && let Err(error) = shell.set_scale(scale)
-        {
-            shell.set_notice(error.to_string());
-        }
-        let label = if shell.flipped() {
-            "Flipped"
-        } else {
-            "Upright"
-        };
-        let flip = widgets::toolbar_button(ui, label).on_hover_text("Top to bottom");
-        if flip.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.toggle_vertical_flip()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(opacity) =
-            number_field(ui, "Opacity", &mut view.opacity_buffer, inspection.opacity)
-            && !inspection.locked
-            && let Err(error) = shell.set_opacity(opacity)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if shell.crop_enabled()
-        && let Some(color) = color_field(
-            ui,
-            "Letterbox",
-            &mut view.letterbox_buffer,
-            &inspection.letterbox,
-            "Around the picture. Empty uses the project color",
-        )
-        && !inspection.locked
-        && let Err(error) = shell.set_letterbox(&color)
-    {
-        shell.set_notice(error.to_string());
-    }
-    if let Some(text) = inspection.text.clone() {
-        if view.text_for != inspection.segment_id.as_str() {
-            view.text_buffer = text;
-            view.text_for = inspection.segment_id.as_str().to_owned();
-        }
-        let response = widgets::field(ui, &mut view.text_buffer);
-        if commits(ui, &response)
-            && !inspection.locked
-            && let Err(error) = shell.set_text(view.text_buffer.clone())
-        {
-            shell.set_notice(error.to_string());
-        }
-        let face_name = if inspection.font.is_empty() {
-            "Face"
-        } else {
-            inspection.font.as_str()
-        };
-        let face = widgets::toolbar_button(ui, face_name).on_hover_text("Installed face");
-        if face.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.cycle_text_font()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(size) =
-            number_field(ui, "Size", &mut view.text_size_buffer, inspection.text_size)
-            && !inspection.locked
-            && let Err(error) = shell.set_text_size(size)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(color) = color_field(
-            ui,
-            "Color",
-            &mut view.text_color_buffer,
-            &inspection.text_color,
-            "Hex color",
-        ) && !inspection.locked
-            && let Err(error) = shell.set_text_color(&color)
-        {
-            shell.set_notice(error.to_string());
-        }
-        let align = widgets::toolbar_button(ui, align_name(inspection.text_align))
-            .on_hover_text("Left, center, or right");
-        if align.clicked()
-            && !inspection.locked
-            && let Err(error) = shell.cycle_text_align()
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(spacing) = number_field(
-            ui,
-            "Letters",
-            &mut view.letter_buffer,
-            inspection.letter_spacing,
-        ) && !inspection.locked
-            && let Err(error) = shell.set_letter_spacing(spacing)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(spacing) =
-            number_field(ui, "Lines", &mut view.line_buffer, inspection.line_spacing)
-            && !inspection.locked
-            && let Err(error) = shell.set_line_spacing(spacing)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(width) =
-            number_field(ui, "Width", &mut view.width_buffer, inspection.line_width)
-            && !inspection.locked
-            && let Err(error) = shell.set_line_width(width)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(volume) = number_field(ui, "Volume", &mut view.volume_buffer, inspection.volume)
-        && !inspection.locked
-        && let Err(error) = shell.set_volume(volume)
-    {
-        shell.set_notice(error.to_string());
-    }
-    if shell.fade_enabled() {
-        let fade_in = fade_seconds(inspection.fade_in);
-        let fade_out = fade_seconds(inspection.fade_out);
-        if let Some(seconds) = number_field(ui, "Fade in", &mut view.fade_in_buffer, fade_in)
-            && !inspection.locked
-            && let Err(error) = shell.set_fade_in(seconds)
-        {
-            shell.set_notice(error.to_string());
-        }
-        if let Some(seconds) = number_field(ui, "Fade out", &mut view.fade_out_buffer, fade_out)
-            && !inspection.locked
-            && let Err(error) = shell.set_fade_out(seconds)
-        {
-            shell.set_notice(error.to_string());
-        }
-    }
-    if let Some(speed) = number_field(ui, "Speed", &mut view.speed_buffer, inspection.speed)
-        && !inspection.locked
-        && let Err(error) = shell.set_speed(speed)
-    {
-        shell.set_notice(error.to_string());
-    }
-}
-
-/// A number row. The typed text stays while the field has focus, and the
-/// stored value returns when it does not. `Some` is a new finite parse.
-fn number_field(ui: &mut Ui, label: &str, text: &mut String, stored: f64) -> Option<f64> {
-    let mut edited = None;
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add_sized(
-            [108.0, 18.0],
-            egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
-        );
-        let response = widgets::field(ui, text);
-        if commits(ui, &response) {
-            edited = text.parse().ok();
-        }
-        if !response.has_focus() {
-            *text = format!("{stored}");
-        }
-        if label == "Y" {
-            response.on_hover_text("Up is positive");
-        } else if label == "Scale" {
-            response.on_hover_text("1 is the fitted picture");
-        } else if label == "Opacity" {
-            response.on_hover_text("1 is solid");
-        } else if label == "Size" {
-            response.on_hover_text("Pixels");
-        } else if label == "Letters" || label == "Lines" {
-            response.on_hover_text("0 is the normal gap");
-        } else if label == "Width" {
-            response.on_hover_text("Pixels. 0 keeps one line");
-        } else if label.starts_with("Fade") {
-            response.on_hover_text("Seconds");
-        }
-    });
-    ui.add_space(4.0);
-    edited.filter(|value| *value != stored)
-}
-
-fn fade_seconds(microseconds: i64) -> f64 {
-    microseconds as f64 / 1_000_000.0
-}
-
 fn color_field(
     ui: &mut Ui,
     label: &str,
@@ -1980,14 +1735,6 @@ fn color_field(
     });
     ui.add_space(4.0);
     edited.filter(|value| value != stored)
-}
-
-fn align_name(alignment: i32) -> &'static str {
-    match alignment {
-        1 => "Center",
-        2 => "Right",
-        _ => "Left",
-    }
 }
 
 fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -4558,6 +4305,170 @@ mod tests {
     }
 
     #[test]
+    fn each_kind_of_clip_paints_its_own_inspector_panel() {
+        use cutlass_model::{
+            Draft, MaterialAudio, MaterialEffect, MaterialText, MaterialVideo, RawMaterial,
+            Segment, TimeRange, Track, TrackType,
+        };
+        let temp = std::env::temp_dir().join(format!("cutlass-panels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = Draft::empty("draft");
+        draft.materials.videos.push(MaterialVideo::new("movie"));
+        draft.materials.audios.push(MaterialAudio {
+            id: "song".into(),
+            ..MaterialAudio::default()
+        });
+        let mut title = MaterialText::new("title");
+        title.content = "Hello".to_owned();
+        draft.materials.texts.push(title);
+        let mut caption = MaterialText::new("caption");
+        caption.content = "said words".to_owned();
+        caption.words.text = vec!["said".to_owned(), "words".to_owned()];
+        caption.words.start_time = vec![0, 1_500];
+        caption.words.end_time = vec![1_000, 2_000];
+        draft.materials.texts.push(caption);
+        let mut filter = MaterialEffect::new("warm");
+        filter.name = "Warm".to_owned();
+        draft.materials.effects.push(filter);
+        draft.materials.stickers.push(RawMaterial {
+            id: "star".into(),
+            ..RawMaterial::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("main", "movie", TimeRange::new(0, 2_000_000)));
+        for (id, kind, material) in [
+            ("sound", TrackType::Audio, "song"),
+            ("words", TrackType::Text, "title"),
+            ("said", TrackType::Text, "caption"),
+            ("look", TrackType::Filter, "warm"),
+            ("sticker", TrackType::Sticker, "star"),
+        ] {
+            let mut track = Track::main(id);
+            track.kind = kind;
+            track
+                .segments
+                .push(Segment::new(id, material, TimeRange::new(0, 2_000_000)));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        for (id, shown, hidden) in [
+            (
+                "main",
+                [
+                    "Video",
+                    "Audio",
+                    "Speed",
+                    "Animation",
+                    "Adjust",
+                    "Basic",
+                    "Cutout",
+                    "Mask",
+                    "Enhance",
+                    "Position & Size",
+                    "Scale",
+                    "Uniform scale",
+                    "Position",
+                    "Rotate",
+                    "Flip upside down",
+                    "Blend",
+                    "Stabilize",
+                    "Motion blur",
+                    "Canvas",
+                    "Later",
+                ]
+                .as_slice(),
+                // Blend starts shut on a video clip, as in the prototype.
+                [
+                    "Font size",
+                    "Stroke",
+                    "Volume",
+                    "Mode",
+                    "Opacity",
+                    "Line width",
+                ]
+                .as_slice(),
+            ),
+            (
+                "sound",
+                &["Audio", "Speed", "Volume", "Fade in", "Fade out", "Denoise"],
+                &["Position & Size", "Stroke", "Video"],
+            ),
+            (
+                "words",
+                &[
+                    "Text",
+                    "Animation",
+                    "Tracking",
+                    "Text to speech",
+                    "Basic",
+                    "Bubble",
+                    "Effects",
+                    "Font",
+                    "Font size",
+                    "Style",
+                    "Case",
+                    "Color",
+                    "Character",
+                    "Alignment",
+                    "Line width",
+                    "Preset style",
+                    "Position & Size",
+                    "Plane rotation",
+                    "Flip upside down",
+                    "Blend",
+                    "Stroke",
+                    "Background",
+                    "Glow",
+                    "Shadow",
+                    "Hello",
+                ],
+                &["Volume", "Rotate", "Mode"],
+            ),
+            ("said", &["Text", "1.50 s", "Font size"], &["Volume"]),
+            (
+                "look",
+                &["Filter", "Warm", "Amount", "Temp"],
+                &["Position & Size", "Volume", "Basic"],
+            ),
+            (
+                "sticker",
+                &["Sticker", "Animation", "Opacity"],
+                &["Position & Size", "Volume"],
+            ),
+        ] {
+            shell.select(Some(SegmentId::new(id)));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 2400.0))),
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            let lines = galleys(&output);
+            output.textures_delta.clear();
+            for label in shown {
+                assert!(
+                    lines.iter().any(|line| line == label),
+                    "{id} {label}: {lines:?}"
+                );
+            }
+            for label in hidden {
+                assert!(
+                    !lines.iter().any(|line| line == label),
+                    "{id} {label}: {lines:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn an_open_project_paints_the_editor() {
         let temp = std::env::temp_dir().join(format!("cutlass-editor-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
@@ -5852,6 +5763,223 @@ mod tests {
         );
         assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
         assert_eq!(chord(egui::Key::Space, control), None);
+    }
+
+    #[test]
+    fn dragging_a_slider_previews_each_value_and_undoes_in_one_step() {
+        let temp = std::env::temp_dir().join(format!("cutlass-slide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft
+            .materials
+            .videos
+            .push(cutlass_model::MaterialVideo::new("movie"));
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let label = text_pos(&output, "Scale").expect("the scale row");
+        // The track starts just past the row's name.
+        let start = label + Vec2::new(90.0, 6.0);
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(
+            &mut shell,
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+        );
+        let mut seen = Vec::new();
+        for step in 1..=3 {
+            let at = start + Vec2::new(30.0 * step as f32, 0.0);
+            frame(&mut shell, vec![egui::Event::PointerMoved(at)]);
+            seen.push(shell.inspection().unwrap().scale_x);
+        }
+        let end = start + Vec2::new(90.0, 0.0);
+        frame(&mut shell, vec![press(end, false)]);
+        frame(&mut shell, Vec::new());
+        assert!(
+            seen.windows(2).all(|pair| pair[1] > pair[0]),
+            "the preview did not follow the drag: {seen:?}"
+        );
+        assert!(shell.inspection().unwrap().scale_x > 1.0);
+        shell.undo().unwrap();
+        assert_eq!(shell.inspection().unwrap().scale_x, 1.0);
+        assert!(!shell.can_undo());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_animation_tab_stores_a_preset_on_the_picture() {
+        let temp = std::env::temp_dir().join(format!("cutlass-animate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.width = 640;
+        movie.height = 360;
+        draft.materials.videos.push(movie);
+        let mut main = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        main.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(main);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let tab = text_pos(&output, "Animation").expect("the Animation tab");
+        frame(&mut shell, click(tab + Vec2::new(4.0, 4.0)));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let tile = text_pos(&output, "Slide Up").expect("the Slide Up tile");
+        frame(&mut shell, click(tile + Vec2::new(4.0, 4.0)));
+        frame(&mut shell, Vec::new());
+        let enter = shell.animations().unwrap().enter.expect("an in animation");
+        assert_eq!(enter.resource_id, "cutlass-anim-in-slide-up");
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "0.5s").is_some(), "the length row");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// The centre of the first keyframe diamond painted in `output`.
+    fn diamond_pos(output: &egui::FullOutput) -> Option<Pos2> {
+        fn find(shape: &egui::Shape) -> Option<Pos2> {
+            match shape {
+                egui::Shape::Path(path) if path.points.len() == 4 && path.closed => {
+                    let [top, right, bottom, left] = [0, 1, 2, 3].map(|i| path.points[i]);
+                    let diamond = (top.x - bottom.x).abs() < 0.01
+                        && (left.y - right.y).abs() < 0.01
+                        && (right.x - left.x - 12.0).abs() < 0.01;
+                    diamond.then(|| Pos2::new(top.x, left.y))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+                _ => None,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| find(&clipped.shape))
+    }
+
+    #[test]
+    fn the_diamond_keys_the_picture_and_the_graphs_show_between_keys() {
+        let temp = std::env::temp_dir().join(format!("cutlass-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.width = 640;
+        movie.height = 360;
+        draft.materials.videos.push(movie);
+        let mut main = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        main.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(main);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "Graphs").is_none());
+        let diamond = diamond_pos(&output).expect("a keyframe diamond");
+        frame(&mut shell, click(diamond));
+        assert_eq!(shell.keys().unwrap().times, vec![Micros(0)]);
+        shell.seek(Micros(2_000_000));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        frame(
+            &mut shell,
+            click(diamond_pos(&output).expect("the diamond")),
+        );
+        assert_eq!(shell.keys().unwrap().times.len(), 2);
+        shell.seek(Micros(1_000_000));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "Graphs").is_some(), "the Graphs row");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

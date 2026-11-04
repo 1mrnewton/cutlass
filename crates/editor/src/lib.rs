@@ -5,12 +5,14 @@
 
 #![forbid(unsafe_code)]
 
+mod animation;
 mod append;
 mod controls;
 mod filmstrip;
 mod fling;
 mod gesture;
 mod hit;
+mod keys;
 mod lane;
 mod reorder;
 mod ruler;
@@ -19,6 +21,7 @@ mod stage;
 mod tools;
 mod zoom;
 
+pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, material_span};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
@@ -30,14 +33,15 @@ pub use gesture::{
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
+pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs};
 pub use lane::{Lane, lane_category, lanes};
 pub use reorder::{place_of, reorder_start};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
 pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
 pub use stage::{
-    MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageBox, StageGesture,
-    StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, stage_box, stage_gesture,
-    stage_pick,
+    MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
+    StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
+    stage_align, stage_box, stage_gesture, stage_pick,
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use zoom::{

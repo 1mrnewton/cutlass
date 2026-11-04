@@ -45,6 +45,10 @@ use cutlass_transcription::{
     FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
 };
 
+mod inspector;
+
+pub use inspector::{LetterCase, Panel, SILENT_DB, TextLook, gain_of_db, volume_db};
+
 use crate::face::FaceTable;
 use crate::tokens;
 use cutlass_probe::{self as probe, Probed};
@@ -179,6 +183,12 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::TextEmpty) => formatter.write_str("type something to add text"),
             Self::Edit(EditError::UnknownEffect) => {
                 formatter.write_str("that effect is not in this version")
+            }
+            Self::Edit(EditError::NotEffect) => {
+                formatter.write_str("a strength belongs on an effect, filter, or adjustment")
+            }
+            Self::Edit(EditError::EffectStrength) => {
+                formatter.write_str("the strength must be from zero to one")
             }
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
@@ -553,6 +563,10 @@ pub struct Shell {
     imported: Option<ImportedKind>,
     /// An autosave writing on its own thread.
     saving: Option<Saving>,
+    /// The pointer is held down, so like edits join one undo step.
+    holding: bool,
+    /// The kind, clip and revision of the last edit made while holding.
+    held_edit: Option<(HeldEdit, u64)>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -651,6 +665,8 @@ impl Shell {
             exported: None,
             imported: None,
             saving: None,
+            holding: false,
+            held_edit: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
@@ -2696,17 +2712,21 @@ impl Shell {
         let (material, text, words) = material_label(draft, &segment.material_id);
         let (text_size, text_color, text_align, letter_spacing, line_spacing, line_width, font) =
             text_style(draft, &segment.material_id);
+        // A keyed clip shows its pose where the playhead is.
+        let keyed = cutlass_editor::keyed_pose(draft, id, self.playhead).map(|(_, pose)| pose);
+        let (scale_x, scale_y) =
+            keyed.map_or(picture_scale(segment), |pose| (pose.scale, pose.scale));
         Some(Inspection {
             segment_id: segment.id.clone(),
             start: segment.target.start,
             duration: segment.target.duration,
             speed: segment.speed,
             volume: segment.volume,
-            scale_x: picture_scale(segment).0,
-            scale_y: picture_scale(segment).1,
-            rotation: segment.clip.rotation,
-            transform_x: segment.clip.transform.x,
-            transform_y: segment.clip.transform.y,
+            scale_x,
+            scale_y,
+            rotation: keyed.map_or(segment.clip.rotation, |pose| pose.rotation),
+            transform_x: keyed.map_or(segment.clip.transform.x, |pose| pose.x),
+            transform_y: keyed.map_or(segment.clip.transform.y, |pose| pose.y),
             opacity: segment.clip.alpha,
             text_size,
             text_color,
@@ -3633,14 +3653,102 @@ impl Shell {
     pub fn set_position(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a placement belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetPosition { segment_id, x, y })
+        let request = self.keyed_request(&segment_id, |pose| (pose.x, pose.y) = (x, y));
+        self.apply(request.unwrap_or(Request::SetPosition { segment_id, x, y }))
+    }
+
+    /// Put the selected picture or title where an align button says: an
+    /// edge on the canvas edge, or its centre on a centre line, as it sits
+    /// at the playhead. One undo restores the previous place.
+    pub fn align_selected(&mut self, align: cutlass_editor::StageAlign) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a placement belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        let (x, y) = cutlass_editor::stage_align(draft, &segment_id, self.playhead, &sizes, align)
+            .ok_or_else(|| ShellError::Unavailable("the clip has no size to align".to_owned()))?;
+        let request = self.keyed_request(&segment_id, |pose| (pose.x, pose.y) = (x, y));
+        self.apply(request.unwrap_or(Request::SetPosition { segment_id, x, y }))
+    }
+
+    /// The selected clip's in and out animations, when it is a picture or
+    /// title on the canvas.
+    #[must_use]
+    pub fn animations(&self) -> Option<cutlass_editor::ClipAnimations> {
+        let segment_id = self.selected()?;
+        let draft = self.session_draft().ok()?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        cutlass_editor::clip_animations(draft, segment_id, &sizes)
+    }
+
+    /// Give the selected clip the in (`enter`) or out animation
+    /// `resource_id`, `duration` long, or clear that side with `None`. The
+    /// session keeps the two inside the clip. One undo step.
+    pub fn set_animation(
+        &mut self,
+        enter: bool,
+        resource_id: Option<String>,
+        duration: Micros,
+    ) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        if self.animations().is_none() {
+            return Err(ShellError::Unavailable(
+                "only a picture or title takes animations".to_owned(),
+            ));
+        }
+        self.refuse_locked(&segment_id)?;
+        let kind = if enter {
+            cutlass_model::AnimType::In
+        } else {
+            cutlass_model::AnimType::Out
+        };
+        self.apply(Request::SetAnimation {
+            segment_id,
+            kind,
+            animation: resource_id,
+            duration,
+        })
     }
 
     /// Scale the selected picture. One undo restores the previous scale.
     pub fn set_scale(&mut self, scale: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a placement belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
-        self.apply(Request::SetScale { segment_id, scale })
+        let request = self.keyed_request(&segment_id, |pose| pose.scale = scale);
+        self.apply(request.unwrap_or(Request::SetScale { segment_id, scale }))
+    }
+
+    /// On a clip with keys, with the playhead on it, the request that keys
+    /// its pose there after `edit`, as a stage drag does. Elsewhere `None`,
+    /// and the edit changes the stored pose.
+    fn keyed_request(
+        &self,
+        segment_id: &SegmentId,
+        edit: impl FnOnce(&mut cutlass_editor::Pose),
+    ) -> Option<Request> {
+        let (offset, mut pose) =
+            cutlass_editor::keyed_pose(self.draft()?, segment_id, self.playhead)?;
+        edit(&mut pose);
+        Some(Request::KeyPose {
+            segment_id: segment_id.clone(),
+            offset,
+            x: pose.x,
+            y: pose.y,
+            scale: pose.scale,
+            rotation: pose.rotation,
+        })
     }
 
     /// Set how solid the selected picture is. `1` is solid and `0` is clear.
@@ -4768,12 +4876,39 @@ impl Shell {
     }
 
     fn apply_requests(&mut self, requests: &[Request]) -> Result<(), ShellError> {
+        let kind = requests
+            .first()
+            .map(|request| (std::mem::discriminant(request), self.selected().cloned()));
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         let revision = session.revision();
-        session
-            .apply(revision, requests)
-            .map_err(ShellError::Edit)?;
+        let joins = self.holding
+            && kind.is_some()
+            && self
+                .held_edit
+                .as_ref()
+                .is_some_and(|(held, at)| Some(held) == kind.as_ref() && *at == revision);
+        let next = if joins {
+            session.fold(revision, requests)
+        } else {
+            session.apply(revision, requests)
+        }
+        .map_err(ShellError::Edit)?;
+        self.held_edit = if self.holding {
+            kind.map(|kind| (kind, next))
+        } else {
+            None
+        };
         Ok(())
+    }
+
+    /// Whether the pointer is held down this frame. While it is, edits of
+    /// one kind to one clip in a row join one undo step, so a slider drag
+    /// shows each value and undoes in one go. Letting go ends the step.
+    pub fn hold_edits(&mut self, holding: bool) {
+        self.holding = holding;
+        if !holding {
+            self.held_edit = None;
+        }
     }
 
     fn session_draft(&self) -> Result<&Draft, ShellError> {
@@ -5830,12 +5965,28 @@ fn format_timecode(label: TimecodeLabel) -> String {
     )
 }
 
+/// Which request an edit was, and the clip selected for it.
+type HeldEdit = (std::mem::Discriminant<Request>, Option<SegmentId>);
+
 /// An autosave in flight and the revision it writes.
 struct Saving {
     revision: u64,
     /// The project it writes; a different one may be open when it lands.
     project: PathBuf,
     handle: std::thread::JoinHandle<Result<(), StoreError>>,
+}
+
+/// Title sizes from the installed faces, for the shared stage rules.
+struct FaceSizes<'a> {
+    draft: &'a Draft,
+    fonts: &'a dyn cutlass_eval::Fonts,
+}
+
+impl cutlass_editor::TextSizes for FaceSizes<'_> {
+    fn text_size(&self, segment: &Segment) -> Option<(f64, f64)> {
+        let (width, height) = cutlass_eval::text_size(self.draft, self.fonts, segment)?;
+        Some((f64::from(width), f64::from(height)))
+    }
 }
 
 /// A file copied into the project for an import, removed unless the import
@@ -6180,7 +6331,7 @@ mod tests {
         hash
     }
 
-    fn shell() -> Shell {
+    pub(super) fn shell() -> Shell {
         let (decoders, encoders) = crate::register_codecs();
         Shell::new(decoders, encoders, Settings::default())
     }
@@ -6372,12 +6523,12 @@ mod tests {
         );
     }
 
-    struct Temp {
-        path: PathBuf,
+    pub(super) struct Temp {
+        pub(super) path: PathBuf,
     }
 
     impl Temp {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
                 "cutlass-desktop-{}-{}",
@@ -7311,6 +7462,51 @@ mod tests {
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
         desktop.redo().unwrap();
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
+    }
+
+    #[test]
+    fn align_puts_the_pictures_edge_on_the_canvas_edge() {
+        use cutlass_editor::{NoText, StageAlign, stage_box};
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        desktop.set_scale(0.5).unwrap();
+        let clip = desktop.selected().cloned().unwrap();
+        let (width, height) = cutlass_editor::canvas_size(desktop.draft().unwrap());
+        let edges = |desktop: &Shell| {
+            let stage = stage_box(desktop.draft().unwrap(), &clip, Micros(0), &NoText).unwrap();
+            let corners = stage.corners();
+            let xs = corners.map(|corner| corner.0);
+            let ys = corners.map(|corner| corner.1);
+            (
+                xs.iter().copied().fold(f64::INFINITY, f64::min),
+                xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ys.iter().copied().fold(f64::INFINITY, f64::min),
+                ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        desktop.align_selected(StageAlign::Left).unwrap();
+        assert!(near(edges(&desktop).0, 0.0));
+        desktop.align_selected(StageAlign::Bottom).unwrap();
+        let (left, _, _, bottom) = edges(&desktop);
+        assert!(near(left, 0.0) && near(bottom, height));
+        desktop.align_selected(StageAlign::Right).unwrap();
+        assert!(near(edges(&desktop).1, width));
+        desktop.undo().unwrap();
+        assert!(near(edges(&desktop).0, 0.0));
     }
 
     #[test]
@@ -8853,6 +9049,196 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().fade_out, 1_000_000);
+    }
+
+    #[test]
+    fn a_picture_takes_in_and_out_animations_inside_its_length() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.width = 640;
+        video.height = 360;
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 1_000_000));
+        picture.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(picture);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("tone");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 500_000)));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+
+        desktop.select(Some(SegmentId::new("tone")));
+        assert_eq!(desktop.animations(), None);
+        assert_eq!(
+            desktop
+                .set_animation(true, Some("cutlass-anim-in-slide-up".to_owned()), Micros(1))
+                .unwrap_err()
+                .to_string(),
+            "only a picture or title takes animations"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        let none = desktop.animations().unwrap();
+        assert_eq!(
+            (none.enter, none.leave, none.length),
+            (None, None, Micros(1_000_000))
+        );
+        desktop
+            .set_animation(
+                true,
+                Some("cutlass-anim-in-slide-up".to_owned()),
+                Micros(700_000),
+            )
+            .unwrap();
+        desktop
+            .set_animation(
+                false,
+                Some("cutlass-anim-out-zoom-out".to_owned()),
+                Micros(700_000),
+            )
+            .unwrap();
+        let both = desktop.animations().unwrap();
+        let enter = both.enter.unwrap();
+        let leave = both.leave.unwrap();
+        assert_eq!(enter.resource_id, "cutlass-anim-in-slide-up");
+        assert_eq!(enter.duration, Micros(700_000));
+        // The two share the clip, so the out side gets what is left.
+        assert_eq!(leave.duration, Micros(300_000));
+
+        desktop.undo().unwrap();
+        assert_eq!(desktop.animations().unwrap().leave, None);
+        desktop.set_animation(true, None, Micros(0)).unwrap();
+        assert_eq!(desktop.animations().unwrap().enter, None);
+    }
+
+    #[test]
+    fn keys_toggle_step_and_ease_and_a_keyed_clip_keys_its_pose() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.width = 640;
+        video.height = 360;
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 2_000_000));
+        picture.source_range = Some(TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(picture);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+
+        // With no keys a scale is the stored one.
+        desktop.set_scale(0.5).unwrap();
+        assert!(desktop.keys().unwrap().times.is_empty());
+        desktop.toggle_keyframe().unwrap();
+        desktop.seek(Micros(2_000_000));
+        desktop.set_scale(1.5).unwrap();
+        // A pose edit on a keyed clip keys it at the playhead.
+        let keys = desktop.keys().unwrap();
+        assert_eq!(keys.times, vec![Micros(0), Micros(2_000_000)]);
+        assert_eq!(keys.here, Some(Micros(2_000_000)));
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.5);
+        desktop.seek(Micros(1_000_000));
+        let halfway = desktop.inspection().unwrap().scale_x;
+        assert!(halfway > 0.5 && halfway < 1.5, "halfway {halfway}");
+
+        desktop.step_keyframe(true);
+        assert_eq!(desktop.playhead(), Micros(2_000_000));
+        desktop.step_keyframe(true);
+        assert_eq!(desktop.playhead(), Micros(2_000_000));
+        desktop.step_keyframe(false);
+        assert_eq!(desktop.playhead(), Micros(0));
+
+        desktop.seek(Micros(1_000_000));
+        let curve = cutlass_editor::key_graphs()[0].name.clone();
+        desktop.ease_keyframes(Some(curve.clone())).unwrap();
+        assert_eq!(desktop.keys().unwrap().graph, Some(curve));
+        desktop.undo().unwrap();
+        assert_eq!(desktop.keys().unwrap().graph, None);
+
+        desktop.seek(Micros(2_000_000));
+        desktop.toggle_keyframe().unwrap();
+        assert_eq!(desktop.keys().unwrap().times, vec![Micros(0)]);
+        desktop.seek(Micros(5_000_000));
+        assert_eq!(
+            desktop.toggle_keyframe().unwrap_err().to_string(),
+            "move the playhead onto the clip to key it"
+        );
+    }
+
+    #[test]
+    fn a_held_drag_shows_each_value_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.set_scale(1.5).unwrap();
+
+        desktop.hold_edits(true);
+        for opacity in [0.9, 0.6, 0.3] {
+            desktop.set_opacity(opacity).unwrap();
+            assert_eq!(desktop.inspection().unwrap().opacity, opacity);
+        }
+        // Another kind of edit in the same hold is its own step.
+        desktop.set_scale(2.0).unwrap();
+        desktop.hold_edits(false);
+        // A new hold starts a new step, though it is the same kind.
+        desktop.hold_edits(true);
+        desktop.set_scale(2.5).unwrap();
+        desktop.hold_edits(false);
+
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().scale_x, 2.0);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.5);
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.3);
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 1.0);
+        assert_eq!(desktop.inspection().unwrap().scale_x, 1.5);
+    }
+
+    #[test]
+    fn edits_made_without_a_hold_each_undo_on_their_own() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("picture")));
+        desktop.set_opacity(0.5).unwrap();
+        desktop.set_opacity(0.25).unwrap();
+        desktop.undo().unwrap();
+        assert_eq!(desktop.inspection().unwrap().opacity, 0.5);
     }
 
     #[test]

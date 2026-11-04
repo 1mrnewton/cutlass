@@ -154,6 +154,8 @@ pub struct ViewState {
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// When the projects folder was last looked at.
+    listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
     marquee: Option<Rect>,
 }
@@ -194,6 +196,7 @@ impl Default for ViewState {
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
+            listed_checked: None,
             marquee_press: None,
             marquee: None,
         }
@@ -320,12 +323,21 @@ fn projects_home(
     paint_notice(shell, ui, bar.center().x, bar.bottom() + 12.0);
 }
 
+/// How often the projects home looks at the folder for changes.
+const PROJECTS_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
-    let root = projects_root(view);
-    let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
-    if view.listed_stamp != stamp {
-        view.listed = Shell::list_projects(&root);
-        view.listed_stamp = stamp;
+    let due = view
+        .listed_checked
+        .is_none_or(|checked| checked.elapsed() >= PROJECTS_CHECK);
+    if due || view.listed_stamp.is_empty() {
+        view.listed_checked = Some(std::time::Instant::now());
+        let root = projects_root(view);
+        let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
+        if view.listed_stamp != stamp {
+            view.listed = Shell::list_projects(&root);
+            view.listed_stamp = stamp;
+        }
     }
     view.listed.clone()
 }
@@ -1088,17 +1100,44 @@ struct LibraryDrop {
 }
 
 fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
+    // A clip that changed its own copy of a video still shows that file,
+    // so the library lists each file once and marks it by file.
+    let paths: std::collections::HashMap<&str, &str> = draft
+        .materials
+        .videos
+        .iter()
+        .map(|video| (video.id.as_str(), video.path.as_str()))
+        .chain(
+            draft
+                .materials
+                .audios
+                .iter()
+                .map(|audio| (audio.id.as_str(), audio.path.as_str())),
+        )
+        .collect();
     let used: std::collections::HashSet<&str> = draft
         .tracks
         .iter()
         .flat_map(|track| track.segments.iter())
         .map(|segment| segment.material_id.as_str())
+        .map(|id| {
+            paths
+                .get(id)
+                .copied()
+                .filter(|path| !path.is_empty())
+                .unwrap_or(id)
+        })
         .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut fresh = |path: &str| path.is_empty() || seen.insert(path.to_owned());
     let query = query.trim().to_lowercase();
     let mut cards = Vec::new();
     match shelf {
         Shelf::Media => {
             for video in &draft.materials.videos {
+                if !fresh(&video.path) {
+                    continue;
+                }
                 push_card(
                     &mut cards,
                     &used,
@@ -1112,6 +1151,9 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
         }
         Shelf::Audio => {
             for audio in &draft.materials.audios {
+                if !fresh(&audio.path) {
+                    continue;
+                }
                 push_card(
                     &mut cards,
                     &used,
@@ -1164,7 +1206,7 @@ fn push_card(
         id: id.to_owned(),
         name,
         meta: card_clock(duration),
-        on_timeline: used.contains(id),
+        on_timeline: used.contains(id) || (!path.is_empty() && used.contains(path)),
         look,
     });
 }
@@ -4251,6 +4293,8 @@ mod tests {
         assert!(!ctx.global_style().interaction.selectable_labels);
         output.textures_delta.clear();
         Shell::create_project(&root).unwrap();
+        // The home looks at the folder once a second; skip the wait.
+        view.listed_checked = None;
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
@@ -4964,6 +5008,14 @@ mod tests {
         assert_eq!(cards[0].name, "clip.mp4");
         assert_eq!(cards[0].meta, "00:02");
         assert_eq!(cards[0].look, CardLook::Picture(None));
+        assert!(cards[0].on_timeline);
+        // A clip's own copy of that video is still the one file.
+        let mut copy = draft.materials.videos[0].clone();
+        copy.id = "seg:mat".into();
+        draft.materials.videos.push(copy);
+        draft.tracks[0].segments[0].material_id = "seg:mat".into();
+        let cards = bin_cards(&draft, Shelf::Media, "");
+        assert_eq!(cards.len(), 1);
         assert!(cards[0].on_timeline);
         assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());

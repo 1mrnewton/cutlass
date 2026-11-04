@@ -17,7 +17,29 @@ use cutlass_model::Draft;
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
 
-use crate::{ExportError, ExportRequest, ExportResult, ExportRun, export, file_audio};
+use cutlass_codec::CodecId;
+
+use crate::{AudioExport, ExportError, ExportRequest, ExportResult, ExportRun, export, file_audio};
+
+/// Stereo AAC at 48 kHz, the sound a movie carries unless asked otherwise.
+pub const MOVIE_SOUND: AudioExport = AudioExport {
+    codec: CodecId::Aac,
+    bitrate: 192_000,
+    sample_rate: 48_000,
+    channels: 2,
+    limiter: 0,
+};
+
+/// Bits a second for an H.264 picture `short_side` pixels on its short
+/// side: about what a phone's own camera records at that size.
+#[must_use]
+pub fn video_bitrate(short_side: u32) -> u32 {
+    match short_side {
+        0..=720 => 6_000_000,
+        721..=1080 => 12_000_000,
+        _ => 40_000_000,
+    }
+}
 
 /// What a movie export reads, draws and encodes with.
 pub struct MovieSources<'a> {

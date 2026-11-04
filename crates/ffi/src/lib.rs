@@ -37,6 +37,7 @@ pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
     volume_position,
 };
+pub use cutlass_export::video_bitrate;
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
 pub use cutlass_playback::AudioHost;
@@ -46,7 +47,7 @@ pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
-pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders, video_bitrate};
+pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};
 pub use host::Commands;
 pub use keys::{PhoneGraph, PhoneKeys, graphs};
 pub use player::PhonePlayer;

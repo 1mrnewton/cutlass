@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use cutlass_codec::{CodecId, ContainerId};
 use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
-use cutlass_export::{AudioExport, ExportError, ExportRequest, MovieSources};
+use cutlass_export::{ExportError, ExportRequest, MovieSources};
 use cutlass_model::{Draft, FrameRate, TimeRange};
 use cutlass_render::Renderer;
 
@@ -19,15 +19,6 @@ use crate::error::FfiError;
 
 /// The short sides, in pixels, the phone offers.
 pub const PHONE_EXPORT_SIDES: [u32; 3] = [720, 1080, 2160];
-
-/// The sound every phone export carries.
-const SOUND: AudioExport = AudioExport {
-    codec: CodecId::Aac,
-    bitrate: 192_000,
-    sample_rate: 48_000,
-    channels: 2,
-    limiter: 0,
-};
 
 /// A finished export.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,17 +38,6 @@ pub fn encoders() -> EncodeFactory {
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_aac::register_encoders(&mut encoders);
     encoders
-}
-
-/// Bits a second for a picture `short_side` pixels on its short side: about
-/// what a phone's own camera records at that size.
-#[must_use]
-pub fn video_bitrate(short_side: u32) -> u32 {
-    match short_side {
-        0..=720 => 6_000_000,
-        721..=1080 => 12_000_000,
-        _ => 40_000_000,
-    }
 }
 
 /// What one export reads and draws with.
@@ -91,10 +71,10 @@ pub(crate) fn export_movie(
         range: TimeRange::new(0, sources.draft.duration.0),
         short_side,
         codec: CodecId::H264,
-        bitrate: video_bitrate(short_side),
+        bitrate: cutlass_export::video_bitrate(short_side),
         frame_rate: sources.draft.frame_rate().unwrap_or(FrameRate::FPS_30),
         container: ContainerId::Isobmff,
-        audio: Some(SOUND),
+        audio: Some(cutlass_export::MOVIE_SOUND),
         sidecar: None,
         late_by: 0,
     };

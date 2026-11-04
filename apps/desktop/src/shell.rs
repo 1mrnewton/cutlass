@@ -9578,6 +9578,22 @@ mod tests {
         land_job(&mut desktop);
         assert_eq!(desktop.exported(), Some(half.as_path()));
         assert!(std::fs::metadata(&half).unwrap().len() < bytes.len() as u64);
+
+        // HEVC is offered only where an encoder opens, and then it writes.
+        if desktop.encodes(CodecId::Hevc) {
+            let hevc = temp.path.join("hevc.mp4");
+            desktop
+                .export(ExportRequest {
+                    path: hevc.clone(),
+                    short_side: 480,
+                    codec: CodecId::Hevc,
+                    ..ExportRequest::default()
+                })
+                .unwrap();
+            land_job(&mut desktop);
+            assert_eq!(desktop.notice(), "Exported hevc.mp4");
+            assert_eq!(&std::fs::read(&hevc).unwrap()[4..8], b"ftyp");
+        }
     }
 
     #[test]

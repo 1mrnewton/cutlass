@@ -94,6 +94,18 @@ impl Session {
         Ok(self.revision)
     }
 
+    /// Whether [`Session::undo`] has a step to restore.
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    /// Whether [`Session::redo`] has a step to reapply.
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
     /// Restore the draft from before the last apply. The revision still advances.
     pub fn undo(&mut self) -> Result<u64, EditError> {
         let previous = self.history.pop_undo().ok_or(EditError::EmptyUndo)?;
@@ -510,6 +522,16 @@ mod tests {
             y,
             rest: Default::default(),
         }
+    }
+
+    #[test]
+    fn undo_and_redo_say_when_they_have_a_step() {
+        let (mut session, track) = session();
+        assert!(!session.can_undo() && !session.can_redo());
+        session.apply(0, &[place(&track, "a", 0, 1_000_000)]).unwrap();
+        assert!(session.can_undo() && !session.can_redo());
+        session.undo().unwrap();
+        assert!(!session.can_undo() && session.can_redo());
     }
 
     #[test]

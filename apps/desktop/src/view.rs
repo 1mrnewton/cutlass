@@ -619,13 +619,14 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
 }
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
-    if ui.button("Undo").clicked() {
+    let (undo, redo) = (shell.can_undo(), shell.can_redo());
+    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
             shell.set_notice(error.to_string());
         }
     }
-    if ui.button("Redo").clicked() {
+    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
             shell.set_notice(error.to_string());
@@ -1937,8 +1938,10 @@ fn toolbar_button(
 
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
-        "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
-        | "lock" | "linkage" | "magnet" | "snap" => true,
+        "undo" => shell.can_undo(),
+        "redo" => shell.can_redo(),
+        "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides" | "lock" | "linkage"
+        | "magnet" | "snap" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
         "freeze" => shell.freeze_enabled(),
         "reverse" => shell.reverse_enabled(),

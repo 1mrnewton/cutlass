@@ -1300,6 +1300,16 @@ impl Shell {
         })
     }
 
+    /// An edit is there to undo.
+    pub fn can_undo(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::can_undo)
+    }
+
+    /// An undone edit is there to redo.
+    pub fn can_redo(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::can_redo)
+    }
+
     pub fn undo(&mut self) -> Result<(), ShellError> {
         let session = self.session.as_mut().ok_or(ShellError::NoProject)?;
         session.undo().map_err(ShellError::Edit)?;

@@ -12,6 +12,7 @@ pub mod itx;
 pub mod lf;
 pub mod lr;
 pub mod mc;
+pub mod superres;
 
 /// One picture sample. `u8` holds 8-bit, `u16` holds 10- and 12-bit.
 pub trait Pixel:

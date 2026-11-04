@@ -2027,6 +2027,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     let lane_area = Rect::from_min_max(Pos2::new(lanes_left, tracks.top()), tracks.max);
     shell.prepare_lane(lane_area.width().max(1.0));
     let (rate, drop_frame) = ruler_rate(shell);
+    paint_marks(ui, shell, ruler, lanes_left);
     paint_ticks(
         ui,
         ruler,
@@ -2560,6 +2561,36 @@ fn lane_ruler(ruler: Rect, lanes_left: f32) -> Rect {
 fn lane_x(lanes_left: f32, pixel_size: f64, origin: i64, time: i64) -> f32 {
     let delta = (time - origin) as f64 * pixel_size;
     lanes_left + delta as f32
+}
+
+/// The I and O marks on the ruler: a band over the marked span, with an
+/// edge at each mark set.
+fn paint_marks(ui: &Ui, shell: &Shell, ruler: Rect, lanes_left: f32) {
+    let Some((start, end)) = shell.marked_span() else {
+        return;
+    };
+    let (pixel_size, origin) = (shell.pixel_size(), shell.view_origin().0);
+    let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+        Pos2::new(lanes_left, ruler.top()),
+        ruler.max,
+    ));
+    let left = lane_x(lanes_left, pixel_size, origin, start.0);
+    let right = lane_x(lanes_left, pixel_size, origin, end.0);
+    let band = Rect::from_min_max(
+        Pos2::new(left, ruler.top()),
+        Pos2::new(right, ruler.bottom()),
+    );
+    painter.rect_filled(band, CornerRadius::ZERO, tokens::MARKED);
+    let marks = shell.marks();
+    for (mark, x) in [(marks.mark_in, left), (marks.mark_out, right)] {
+        if mark.is_some() {
+            painter.vline(
+                x,
+                ruler.y_range(),
+                egui::Stroke::new(tokens::STROKE, tokens::EXPORT),
+            );
+        }
+    }
 }
 
 /// The ruler's ticks and labels across the lanes. Past the end of the cut,
@@ -3975,14 +4006,21 @@ fn export_dialog(
                     });
                     choice_row(ui, "Range", |ui| {
                         let picked = !shell.selection().is_empty();
-                        if !picked {
+                        let marked = shell.marked_span().is_some();
+                        let offered = |span| match span {
+                            ExportSpan::Whole => true,
+                            ExportSpan::Selected => picked,
+                            ExportSpan::Marked => marked,
+                        };
+                        if !offered(view.export_span) {
                             view.export_span = ExportSpan::Whole;
                         }
                         for (span, name) in [
                             (ExportSpan::Whole, "Whole timeline"),
+                            (ExportSpan::Marked, "In to out"),
                             (ExportSpan::Selected, "Selected clips"),
                         ] {
-                            let offered = span == ExportSpan::Whole || picked;
+                            let offered = offered(span);
                             let label = egui::Button::selectable(view.export_span == span, name);
                             if ui.add_enabled(offered, label).clicked() {
                                 view.export_span = span;
@@ -4156,6 +4194,11 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::A => "a",
         egui::Key::Q => "q",
         egui::Key::W => "w",
+        egui::Key::J => "j",
+        egui::Key::K => "k",
+        egui::Key::L => "l",
+        egui::Key::I => "i",
+        egui::Key::O => "o",
         _ => return None,
     };
     let modifiers = input.modifiers;
@@ -4163,7 +4206,9 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
     let control = modifiers.ctrl && !modifiers.command;
     let plain = !(modifiers.command || modifiers.alt || modifiers.shift || control);
     let blocked = match name {
-        "space" | "left" | "right" | "delete" | "q" | "w" => !plain,
+        "space" | "left" | "right" | "delete" | "q" | "w" | "j" | "k" | "l" | "i" | "o" => !plain,
+        // Option-X clears the marks.
+        "x" if modifiers.alt => modifiers.command || modifiers.shift || control,
         // S splits, and Shift-Command-S extracts the audio.
         "s" => !plain && !(modifiers.command && modifiers.shift && !modifiers.alt),
         _ => false,
@@ -4180,6 +4225,9 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
     }
     if input.modifiers.shift {
         parts.push("shift");
+    }
+    if input.modifiers.alt {
+        parts.push("alt");
     }
     parts.push(name);
     Some(parts.join("+"))
@@ -5763,6 +5811,34 @@ mod tests {
         );
         assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
         assert_eq!(chord(egui::Key::Space, control), None);
+        for (key, name) in [
+            (egui::Key::J, "j"),
+            (egui::Key::K, "k"),
+            (egui::Key::L, "l"),
+            (egui::Key::I, "i"),
+            (egui::Key::O, "o"),
+        ] {
+            assert_eq!(
+                chord(key, egui::Modifiers::default()).as_deref(),
+                Some(name)
+            );
+            assert_eq!(chord(key, egui::Modifiers::COMMAND), None);
+        }
+        assert_eq!(
+            chord(egui::Key::X, egui::Modifiers::ALT).as_deref(),
+            Some("alt+x")
+        );
+        assert_eq!(
+            chord(
+                egui::Key::X,
+                egui::Modifiers::ALT | egui::Modifiers::COMMAND
+            ),
+            None
+        );
+        assert_eq!(
+            chord(egui::Key::X, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+x")
+        );
     }
 
     #[test]

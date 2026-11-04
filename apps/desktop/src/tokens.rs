@@ -42,6 +42,8 @@ pub const MINIMIZE: Color32 = Color32::from_rgb(0xfe, 0xbc, 0x2e);
 pub const MAXIMIZE: Color32 = Color32::from_rgb(0x28, 0xc8, 0x40);
 /// The scrim behind a dialog.
 pub const SCRIM: Color32 = Color32::from_black_alpha(140);
+/// The ruler's band between the in and out marks.
+pub const MARKED: Color32 = Color32::from_rgba_premultiplied(0x00, 0x32, 0x36, 0x40);
 
 pub const TYPE_SIZE: f32 = 13.0;
 pub const TIMECODE_SIZE: f32 = 12.0;

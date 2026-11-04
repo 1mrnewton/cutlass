@@ -356,6 +356,8 @@ pub enum ExportSpan {
     Whole,
     /// From the first selected clip's start to the last one's end.
     Selected,
+    /// From the in mark, or the start, to the out mark, or the end.
+    Marked,
 }
 
 /// How many bits a second a movie spends, around the recommended rate.
@@ -512,6 +514,11 @@ pub struct Shell {
     path: Option<PathBuf>,
     playhead: Micros,
     playing: bool,
+    /// The J/K/L rate while playing: 1 is real time with sound; any other
+    /// moves the picture alone, backward below zero.
+    shuttle: i32,
+    /// The I and O marks.
+    marks: cutlass_editor::Marks,
     pixel_size: f64,
     /// Left edge of the lanes, in microseconds.
     view_origin: i64,
@@ -600,6 +607,12 @@ impl Shell {
         ensure_shortcut(&mut settings, "cut", "primary+x");
         ensure_shortcut(&mut settings, "paste", "primary+v");
         ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
+        ensure_shortcut(&mut settings, "shuttle_back", "j");
+        ensure_shortcut(&mut settings, "shuttle_stop", "k");
+        ensure_shortcut(&mut settings, "shuttle_forward", "l");
+        ensure_shortcut(&mut settings, "mark_in", "i");
+        ensure_shortcut(&mut settings, "mark_out", "o");
+        ensure_shortcut(&mut settings, "clear_marks", "alt+x");
         // Control-Y is the second redo. On Windows and Linux Control is the primary key.
         ensure_shortcut(
             &mut settings,
@@ -629,6 +642,8 @@ impl Shell {
             path: None,
             playhead: Micros(0),
             playing: false,
+            shuttle: 0,
+            marks: cutlass_editor::Marks::default(),
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
             lane_width: 800.0,
@@ -921,6 +936,7 @@ impl Shell {
         self.path = None;
         self.playhead = Micros(0);
         self.playing = false;
+        self.marks.clear();
         self.view_origin = 0;
         self.selection.clear();
         self.clipboard.clear();
@@ -1040,6 +1056,7 @@ impl Shell {
         self.hold = Some(hold);
         self.playhead = Micros(0);
         self.playing = false;
+        self.marks.clear();
         self.view_origin = 0;
         self.selection.clear();
         self.clipboard.clear();
@@ -1305,7 +1322,7 @@ impl Shell {
             self.silence();
         }
         self.playhead = Micros(time.0.max(0));
-        if self.playing {
+        if self.playing && self.shuttle == 1 {
             self.start_stream();
         } else if self.settings.playback.scrub_audio {
             self.queue_preview(PLAY_FRAMES);
@@ -1323,6 +1340,7 @@ impl Shell {
             self.playhead = Micros(0);
         }
         self.playing = true;
+        self.shuttle = 1;
         self.start_stream();
         self.preroll();
         self.reveal_playhead();
@@ -1330,7 +1348,61 @@ impl Shell {
 
     pub fn pause(&mut self) {
         self.playing = false;
+        self.shuttle = 0;
         self.silence();
+    }
+
+    /// The shuttle rate: 0 when stopped, 1 for real time, negative backward.
+    #[must_use]
+    pub fn shuttle_rate(&self) -> i32 {
+        if self.playing { self.shuttle } else { 0 }
+    }
+
+    /// J, K or L: play backward or forward, faster each press, or stop.
+    /// Any rate but real time forward plays the picture without sound.
+    pub fn shuttle(&mut self, key: cutlass_editor::Shuttle) {
+        let rate = cutlass_editor::shuttle_rate(self.shuttle_rate(), key);
+        let end = self.cut_duration().0;
+        match rate {
+            0 => self.pause(),
+            1 => self.play(),
+            _ if end <= 0 || (rate < 0 && self.playhead.0 <= 0) => self.pause(),
+            _ => {
+                if rate > 0 && self.playhead.0 >= end {
+                    self.playhead = Micros(0);
+                }
+                self.silence();
+                self.playing = true;
+                self.shuttle = rate;
+                self.reveal_playhead();
+            }
+        }
+    }
+
+    /// The I and O marks.
+    #[must_use]
+    pub fn marks(&self) -> cutlass_editor::Marks {
+        self.marks
+    }
+
+    /// Mark in at the playhead.
+    pub fn mark_in(&mut self) {
+        self.marks.set_in(self.playhead);
+    }
+
+    /// Mark out at the playhead.
+    pub fn mark_out(&mut self) {
+        self.marks.set_out(self.playhead);
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marks.clear();
+    }
+
+    /// The span the marks give on the timeline as cut, when they give one.
+    #[must_use]
+    pub fn marked_span(&self) -> Option<(Micros, Micros)> {
+        self.marks.span(self.cut_duration())
     }
 
     /// Open the clips playback reaches within [`PREROLL`] and start decoding
@@ -1410,6 +1482,19 @@ impl Shell {
             return;
         }
         let end = self.cut_duration();
+        if self.shuttle != 1 {
+            // The shuttle moves the picture alone, and stops at either end.
+            let moved = self
+                .playhead
+                .0
+                .saturating_add(elapsed.saturating_mul(i64::from(self.shuttle)));
+            self.playhead = Micros(moved.clamp(0, end.0.max(0)));
+            if moved <= 0 || moved >= end.0 {
+                self.pause();
+            }
+            self.reveal_playhead();
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             self.playing = false;
             self.silence();
@@ -1587,6 +1672,30 @@ impl Shell {
             Some("select_all") => self.select_all(),
             Some("delete_left") => self.delete_side(TrimEdge::Start),
             Some("delete_right") => self.delete_side(TrimEdge::End),
+            Some("shuttle_back") => {
+                self.shuttle(cutlass_editor::Shuttle::Back);
+                Ok(())
+            }
+            Some("shuttle_stop") => {
+                self.shuttle(cutlass_editor::Shuttle::Stop);
+                Ok(())
+            }
+            Some("shuttle_forward") => {
+                self.shuttle(cutlass_editor::Shuttle::Forward);
+                Ok(())
+            }
+            Some("mark_in") => {
+                self.mark_in();
+                Ok(())
+            }
+            Some("mark_out") => {
+                self.mark_out();
+                Ok(())
+            }
+            Some("clear_marks") => {
+                self.clear_marks();
+                Ok(())
+            }
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -4774,6 +4883,12 @@ impl Shell {
                     return Err(ShellError::Unavailable("no clip is selected".to_owned()));
                 };
                 TimeRange::new(start, end - start)
+            }
+            ExportSpan::Marked => {
+                let (start, end) = self.marked_span().ok_or_else(|| {
+                    ShellError::Unavailable("mark an in or an out first".to_owned())
+                })?;
+                TimeRange::new(start.0, end.0 - start.0)
             }
         };
         if range.duration.0 <= 0 {
@@ -8303,6 +8418,105 @@ mod tests {
         desktop.seek(Micros(30));
         assert!(desktop.playing());
         assert_eq!(desktop.revision(), revision);
+    }
+
+    /// A project with one picture clip `length` long on the main track.
+    fn span_shell(temp: &Temp, length: i64) -> Shell {
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, length));
+        picture.source_range = Some(TimeRange::new(0, length));
+        draft.tracks[0].segments.push(picture);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop
+    }
+
+    #[test]
+    fn the_shuttle_speeds_up_runs_backward_and_stops_at_either_end() {
+        use cutlass_editor::Shuttle;
+        let temp = Temp::new();
+        let mut desktop = span_shell(&temp, 10_000_000);
+        desktop.shuttle(Shuttle::Forward);
+        assert_eq!(desktop.shuttle_rate(), 1);
+        desktop.shuttle(Shuttle::Forward);
+        desktop.shuttle(Shuttle::Forward);
+        assert_eq!(desktop.shuttle_rate(), 4);
+        desktop.advance(1_000_000);
+        assert_eq!(desktop.playhead(), Micros(4_000_000));
+        desktop.shuttle(Shuttle::Back);
+        desktop.shuttle(Shuttle::Back);
+        assert_eq!(desktop.shuttle_rate(), -2);
+        desktop.advance(1_000_000);
+        assert_eq!(desktop.playhead(), Micros(2_000_000));
+        desktop.advance(5_000_000);
+        assert_eq!(desktop.playhead(), Micros(0));
+        assert!(!desktop.playing());
+        // Backward from the start has nowhere to go.
+        desktop.shuttle(Shuttle::Back);
+        assert!(!desktop.playing());
+        desktop.shuttle(Shuttle::Forward);
+        desktop.shuttle(Shuttle::Forward);
+        desktop.advance(20_000_000);
+        assert_eq!(desktop.playhead(), Micros(10_000_000));
+        assert!(!desktop.playing());
+        desktop.shuttle(Shuttle::Forward);
+        desktop.shuttle(Shuttle::Stop);
+        assert_eq!(desktop.shuttle_rate(), 0);
+        assert!(!desktop.playing());
+        // Space after a shuttle plays in real time.
+        desktop.toggle_play();
+        assert_eq!(desktop.shuttle_rate(), 1);
+    }
+
+    #[test]
+    fn the_keys_mark_in_and_out_and_export_the_marked_span() {
+        let temp = Temp::new();
+        let mut desktop = span_shell(&temp, 10_000_000);
+        for (keys, action) in [
+            ("j", "shuttle_back"),
+            ("k", "shuttle_stop"),
+            ("l", "shuttle_forward"),
+            ("i", "mark_in"),
+            ("o", "mark_out"),
+            ("alt+x", "clear_marks"),
+        ] {
+            assert!(
+                desktop
+                    .settings
+                    .shortcuts
+                    .iter()
+                    .any(|shortcut| shortcut.keys == keys && shortcut.action == action),
+                "{keys}"
+            );
+        }
+        let draft = desktop.draft().unwrap().clone();
+        assert_eq!(
+            desktop
+                .export_range(&draft, super::ExportSpan::Marked)
+                .unwrap_err()
+                .to_string(),
+            "mark an in or an out first"
+        );
+        desktop.seek(Micros(2_000_000));
+        desktop.run_shortcut("i").unwrap();
+        desktop.seek(Micros(6_000_000));
+        desktop.run_shortcut("o").unwrap();
+        assert_eq!(
+            desktop
+                .export_range(&draft, super::ExportSpan::Marked)
+                .unwrap(),
+            TimeRange::new(2_000_000, 4_000_000)
+        );
+        desktop.run_shortcut("alt+x").unwrap();
+        assert_eq!(desktop.marked_span(), None);
+        desktop.run_shortcut("o").unwrap();
+        assert_eq!(desktop.marked_span(), Some((Micros(0), Micros(6_000_000))));
+        desktop.close_project().unwrap();
+        assert_eq!(desktop.marks(), cutlass_editor::Marks::default());
     }
 
     #[test]

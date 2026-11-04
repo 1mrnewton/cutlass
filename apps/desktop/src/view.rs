@@ -132,6 +132,8 @@ pub struct ViewState {
     export_sound: bool,
     replace_prompt: bool,
     export_path: String,
+    /// The camera button was pressed; ask where to save the still.
+    ask_still: bool,
     /// The clip panel's open tab, page, and sections, and what is typed.
     inspector: inspector::InspectorState,
     background_buffer: String,
@@ -169,6 +171,7 @@ impl Default for ViewState {
             export_sound: true,
             replace_prompt: false,
             export_path: String::new(),
+            ask_still: false,
             inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
@@ -207,6 +210,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
     show_imported(shell, view);
+    if std::mem::take(&mut view.ask_still) {
+        let name = shell.project_name();
+        view.dialogs.save_still(parent, &name);
+    }
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
@@ -1391,7 +1398,9 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         }
         Some(Err(_)) => {}
     }
-    transport_bar(shell, ui, transport);
+    if transport_bar(shell, ui, transport) {
+        view.ask_still = true;
+    }
 }
 
 /// The preview canvas at `rect`, over black when `black` is on. Only the
@@ -1409,7 +1418,9 @@ fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
     );
 }
 
-fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
+/// The timecode, play button and preview buttons. Answers whether the
+/// camera button asked for a still.
+fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) -> bool {
     let live = shell.draft().is_some();
     let ink = if live { tokens::TEXT } else { tokens::MUTED };
     ui.painter().text(
@@ -1446,15 +1457,14 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     );
     background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
     let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
-    if still_response.clicked() {
-        shell.unavailable("still");
-    }
+    let asked = still_response.clicked() && live;
     ui.painter()
         .circle_filled(still.center(), 16.0, tokens::ICON_BUTTON);
     let camera = Rect::from_center_size(still.center(), Vec2::splat(16.0));
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+    asked
 }
 
 /// The button that shows the preview canvas over black or clear. Its mark
@@ -4127,6 +4137,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             view.export_path = path.display().to_string();
             write_export(shell, view)
         }
+        Picker::SaveStill => shell.export_still(&path),
     };
     match result {
         Ok(()) if finished.picker == Picker::SaveExport => view.export_open = false,

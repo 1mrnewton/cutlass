@@ -16,6 +16,7 @@ pub(crate) enum Picker {
     OpenProject,
     Import,
     SaveExport,
+    SaveStill,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -80,6 +81,35 @@ impl Dialogs {
                 .save_file()
                 .await
                 .map(|file| with_extension(file.path(), &extension))
+        });
+    }
+
+    /// Ask where to save a still, as PNG or JPEG. A name with neither
+    /// ending is saved as PNG.
+    pub(crate) fn save_still(&mut self, parent: Option<&eframe::Frame>, name: &str) {
+        let stem = if name.trim().is_empty() {
+            "Still"
+        } else {
+            name.trim()
+        };
+        let dialog = dialog(parent)
+            .set_file_name(format!("{stem}.png"))
+            .add_filter("PNG", &["png"])
+            .add_filter("JPEG", &["jpg", "jpeg"]);
+        self.start(Picker::SaveStill, async move {
+            dialog.save_file().await.map(|file| {
+                let path = file.path();
+                let known = path.extension().is_some_and(|typed| {
+                    ["png", "jpg", "jpeg"]
+                        .iter()
+                        .any(|known| typed.eq_ignore_ascii_case(known))
+                });
+                if known {
+                    path.to_path_buf()
+                } else {
+                    with_extension(path, "png")
+                }
+            })
         });
     }
 

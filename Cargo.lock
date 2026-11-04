@@ -597,6 +597,7 @@ dependencies = [
  "cutlass-webp",
  "eframe",
  "egui",
+ "image",
  "pollster",
  "rfd",
  "serde_json",

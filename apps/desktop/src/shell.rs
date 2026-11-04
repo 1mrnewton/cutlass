@@ -4911,6 +4911,64 @@ impl Shell {
         self.exported.as_deref()
     }
 
+    /// Save the picture at the playhead to `path` at the canvas size, as
+    /// JPEG for a `.jpg` or `.jpeg` name and PNG otherwise. It runs as a
+    /// job; when it lands it is offered like a finished export.
+    pub fn export_still(&mut self, path: &Path) -> Result<(), ShellError> {
+        self.refuse_busy()?;
+        let draft = self.session_draft()?.clone();
+        let jpeg = path.extension().is_some_and(|typed| {
+            typed.eq_ignore_ascii_case("jpg") || typed.eq_ignore_ascii_case("jpeg")
+        });
+        let format = if jpeg {
+            cutlass_export::StillFormat::Jpeg
+        } else {
+            cutlass_export::StillFormat::Png
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|_| cutlass_export::part_path(path).is_some())
+            .ok_or_else(|| ShellError::Io("the still has no file name".to_owned()))?;
+        if path.is_dir() {
+            return Err(ShellError::Io("the still path is a folder".to_owned()));
+        }
+        let time = self.playhead;
+        let root = self.path.clone();
+        let readers = self.readers.clone();
+        let encoders = self.encoders.clone();
+        let fonts = Arc::clone(&self.face);
+        let gpu = self.gpu.as_ref().map(|preview| {
+            let renderer = preview.renderer();
+            (renderer.device().clone(), renderer.queue().clone())
+        });
+        let destination = path.to_path_buf();
+        self.exported = None;
+        self.start_job("Still", move |progress| {
+            progress.stage(&format!("Writing {name}"));
+            let renderer = gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
+            let written = cutlass_export::write_still(
+                &cutlass_export::MovieSources {
+                    draft: &draft,
+                    root: root.as_deref(),
+                    readers: &readers,
+                    fonts: &*fonts,
+                    renderer: renderer.as_ref(),
+                    encoders: &encoders,
+                },
+                time,
+                format,
+                &destination,
+            );
+            Box::new(move |shell: &mut Shell| {
+                written.map_err(export_failure)?;
+                shell.set_notice(format!("Saved {name}"));
+                shell.exported = Some(destination);
+                Ok(())
+            })
+        })
+    }
+
     /// Stop offering the last export.
     pub fn forget_export(&mut self) {
         self.exported = None;
@@ -10482,6 +10540,42 @@ mod tests {
             assert_eq!(desktop.notice(), "Exported hevc.mp4");
             assert_eq!(&std::fs::read(&hevc).unwrap()[4..8], b"ftyp");
         }
+    }
+
+    #[test]
+    fn a_still_lands_the_canvas_at_the_playhead_as_png_or_jpeg() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(1_500_000));
+        let png = temp.path.join("frame.png");
+        desktop.export_still(&png).unwrap();
+        assert_eq!(desktop.job().map(|job| job.label), Some("Still".to_owned()));
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Saved frame.png");
+        assert_eq!(desktop.exported(), Some(png.as_path()));
+        assert!(!temp.path.join(".frame.png.part").exists());
+        let picture = image::open(&png).unwrap().to_rgba8();
+        assert_eq!(picture.dimensions(), (64, 32));
+        let [red, green, blue, alpha] = picture.get_pixel(32, 16).0;
+        let near = |got: u8, want: u8| got.abs_diff(want) <= 3;
+        assert!(
+            near(red, 0x33) && near(green, 0x66) && near(blue, 0x99) && alpha == 255,
+            "{:?}",
+            (red, green, blue, alpha)
+        );
+
+        let jpeg = temp.path.join("frame.JPG");
+        desktop.export_still(&jpeg).unwrap();
+        land_job(&mut desktop);
+        let bytes = std::fs::read(&jpeg).unwrap();
+        assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+
+        assert_eq!(
+            desktop.export_still(&temp.path).unwrap_err().to_string(),
+            ShellError::Io("the still path is a folder".to_owned()).to_string()
+        );
     }
 
     #[test]

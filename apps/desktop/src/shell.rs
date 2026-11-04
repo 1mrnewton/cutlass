@@ -9579,7 +9579,9 @@ mod tests {
             )
         };
         let card = media(&desktop, "")[0].id.clone();
-        let folder = desktop.new_library_folder("", &[card.clone()]).unwrap();
+        let folder = desktop
+            .new_library_folder("", std::slice::from_ref(&card))
+            .unwrap();
         desktop.rename_library_folder(&folder, "Takes").unwrap();
         assert!(media(&desktop, "").is_empty());
         assert_eq!(media(&desktop, &folder).len(), 1);

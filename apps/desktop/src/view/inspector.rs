@@ -45,6 +45,25 @@ pub(super) struct InspectorState {
     /// A slider or color being dragged; it is sent when the pointer lets go.
     live: HashMap<String, f64>,
     colors: HashMap<String, Color32>,
+    /// A tab, page, and section a menu row asked for, opened on the next
+    /// frame the panel draws.
+    pending: Option<Focus>,
+}
+
+/// Where a clip menu row sends the inspector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Focus {
+    pub(super) tab: usize,
+    pub(super) page: usize,
+    pub(super) section: Option<&'static str>,
+}
+
+impl InspectorState {
+    /// Open `focus` the next time the panel draws, after any reset for a
+    /// newly picked clip.
+    pub(super) fn focus(&mut self, focus: Focus) {
+        self.pending = Some(focus);
+    }
 }
 
 pub(super) fn clip_panel(
@@ -56,6 +75,7 @@ pub(super) fn clip_panel(
 ) {
     let panel = shell.panel().unwrap_or(Panel::Other);
     let state = &mut view.inspector;
+    let pending = state.pending.take();
     if state.clip != inspection.segment_id.as_str() {
         *state = InspectorState {
             clip: inspection.segment_id.as_str().to_owned(),
@@ -66,6 +86,13 @@ pub(super) fn clip_panel(
                 .collect(),
             ..InspectorState::default()
         };
+    }
+    if let Some(focus) = pending {
+        state.tab = focus.tab;
+        state.page = focus.page;
+        if let Some(section) = focus.section {
+            state.open.insert(section.to_owned());
+        }
     }
     if inspection.locked {
         note(ui, "This clip's row is locked.");

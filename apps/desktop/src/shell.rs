@@ -255,6 +255,7 @@ fn build_lanes(draft: &Draft) -> Vec<LaneView> {
                     name: clip_name(draft, segment),
                     start: segment.target.start,
                     duration: segment.target.duration,
+                    active: segment.visible,
                 })
                 .collect();
             Some(LaneView {
@@ -295,6 +296,8 @@ pub struct ClipSpan {
     pub name: String,
     pub start: Micros,
     pub duration: Micros,
+    /// Drawn and heard; a deactivated clip is dimmed on its row.
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -653,6 +656,7 @@ impl Shell {
         ensure_shortcut(&mut settings, "select_all", "primary+a");
         ensure_shortcut(&mut settings, "delete_left", "q");
         ensure_shortcut(&mut settings, "delete_right", "w");
+        ensure_shortcut(&mut settings, "deactivate", "v");
         Self {
             decoders,
             encoders,
@@ -1376,6 +1380,89 @@ impl Shell {
         Ok(())
     }
 
+    /// Deactivate the selection, or activate it again when every picked
+    /// clip is already off. One undo step. A deactivated clip is neither
+    /// drawn nor heard.
+    pub fn toggle_active(&mut self) -> Result<(), ShellError> {
+        let picked = self.selection();
+        if picked.is_empty() {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        }
+        let draft = self.session_draft()?;
+        let segments: Vec<&Segment> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .filter(|segment| picked.contains(&segment.id))
+            .collect();
+        let active = segments.iter().all(|segment| !segment.visible);
+        let requests: Vec<Request> = segments
+            .iter()
+            .map(|segment| Request::SetActive {
+                segment_id: segment.id.clone(),
+                active,
+            })
+            .collect();
+        self.apply_requests(&requests)
+    }
+
+    /// Every picked clip is deactivated.
+    #[must_use]
+    pub fn selection_inactive(&self) -> bool {
+        let picked = self.selection();
+        !picked.is_empty()
+            && self.draft().is_some_and(|draft| {
+                draft
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.segments)
+                    .filter(|segment| picked.contains(&segment.id))
+                    .all(|segment| !segment.visible)
+            })
+    }
+
+    /// Show the selected clip's file in the system's file manager.
+    pub fn reveal_selected_file(&self) -> Result<(), ShellError> {
+        let segment = self
+            .selected_segment()
+            .ok_or_else(|| ShellError::Unavailable("nothing is selected".to_owned()))?;
+        self.reveal_library_file(segment.material_id.as_str())
+    }
+
+    /// The selected clip names a file on disk.
+    #[must_use]
+    pub fn selected_has_file(&self) -> bool {
+        self.selected_segment()
+            .and_then(|segment| self.library_path(segment.material_id.as_str()))
+            .is_some_and(|path| !path.is_empty())
+    }
+
+    /// Mark in at the selected clip's start.
+    pub fn mark_clip_in(&mut self) -> Result<(), ShellError> {
+        let start = self.selected_span()?.0;
+        self.marks.set_in(start);
+        Ok(())
+    }
+
+    /// Mark out at the selected clip's end.
+    pub fn mark_clip_out(&mut self) -> Result<(), ShellError> {
+        let (start, duration) = self.selected_span()?;
+        self.marks
+            .set_out(Micros(start.0.saturating_add(duration.0)));
+        Ok(())
+    }
+
+    fn selected_span(&self) -> Result<(Micros, Micros), ShellError> {
+        let segment = self
+            .selected_segment()
+            .ok_or_else(|| ShellError::Unavailable("nothing is selected".to_owned()))?;
+        Ok((segment.target.start, segment.target.duration))
+    }
+
     /// Show a card's file in the system's file manager.
     pub fn reveal_library_file(&self, id: &str) -> Result<(), ShellError> {
         let path = self
@@ -1908,6 +1995,7 @@ impl Shell {
             Some("delete_left") => self.delete_side(TrimEdge::Start),
             Some("delete_right") => self.delete_side(TrimEdge::End),
             Some("ripple_delete") => self.ripple_delete(),
+            Some("deactivate") => self.toggle_active(),
             Some("shuttle_back") => {
                 self.shuttle(cutlass_editor::Shuttle::Back);
                 Ok(())
@@ -8745,6 +8833,40 @@ mod tests {
         desktop.undo().unwrap();
         assert_eq!(effects(&desktop).len(), 1);
         assert!(desktop.add_effect("effect:recipe/none").is_err());
+    }
+
+    #[test]
+    fn v_deactivates_the_picked_clip_dims_it_and_undo_restores_it() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("right")));
+        let active = |desktop: &Shell| {
+            desktop
+                .lanes()
+                .iter()
+                .flat_map(|lane| lane.clips.iter())
+                .find(|clip| clip.id.as_str() == "right")
+                .map(|clip| clip.active)
+        };
+        assert_eq!(active(&desktop), Some(true));
+        desktop.run_shortcut("v").unwrap();
+        assert_eq!(active(&desktop), Some(false));
+        assert!(desktop.selection_inactive());
+        desktop.run_shortcut("v").unwrap();
+        assert_eq!(active(&desktop), Some(true));
+        desktop.undo().unwrap();
+        assert_eq!(active(&desktop), Some(false));
+        desktop.undo().unwrap();
+        assert_eq!(active(&desktop), Some(true));
+
+        desktop.mark_clip_in().unwrap();
+        desktop.mark_clip_out().unwrap();
+        assert_eq!(desktop.marks().mark_in, Some(Micros(1_000_000)));
+        assert_eq!(desktop.marks().mark_out, Some(Micros(2_000_000)));
+        desktop.select(None);
+        assert!(desktop.toggle_active().is_err());
     }
 
     #[test]

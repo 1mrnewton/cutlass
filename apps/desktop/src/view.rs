@@ -2334,7 +2334,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     let body = Rect::from_min_max(body.min, Pos2::new(meter.left(), body.bottom()));
     ruler_and_lanes(shell, ui, view, body);
     paint_meter(ui, meter, shell.meter());
-    paint_clip_menu(shell, ui);
+    paint_clip_menu(shell, ui, view);
     paint_gap_menu(shell, ui);
     paint_track_menu(shell, ui, view);
     let handle = Rect::from_min_size(
@@ -2828,7 +2828,7 @@ fn secondary_click(ui: &Ui) -> Option<Pos2> {
     })
 }
 
-fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
+fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
     let Some(menu) = shell.clip_menu() else {
         return;
     };
@@ -2848,6 +2848,8 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
         "transcript" => shell.transcribe_enabled(),
         "extract-audio" => shell.extract_audio_enabled(),
         "flip" => shell.mirror_enabled(),
+        "open-file" => shell.selected_has_file(),
+        id if crate::menu::CLIP_OFF.contains(&id) => false,
         _ => true,
     };
     let shown = crate::menu::show(
@@ -2872,13 +2874,54 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
             "transcript" => shell.transcribe(),
             "extract-audio" => shell.extract_audio(),
             "flip" => shell.toggle_mirror(),
-            _ => Ok(()),
+            "deactivate" => shell.toggle_active(),
+            "open-file" => shell.reveal_selected_file(),
+            "range-in" => shell.mark_clip_in(),
+            "range-out" => shell.mark_clip_out(),
+            "beat" => {
+                if !shell.beating() {
+                    shell.toggle_beat();
+                }
+                Ok(())
+            }
+            "export" => {
+                view.export_span = crate::shell::ExportSpan::Selected;
+                view.export_open = true;
+                Ok(())
+            }
+            id => {
+                if let Some(focus) = inspector_focus(&kind, id) {
+                    view.inspector.focus(focus);
+                }
+                Ok(())
+            }
         };
         if let Err(error) = result {
             shell.set_notice(error.to_string());
         }
     } else if shown.dismissed {
         shell.close_clip_menu();
+    }
+}
+
+/// The inspector tab, page, and section a clip menu row opens.
+fn inspector_focus(kind: &cutlass_model::TrackType, id: &str) -> Option<inspector::Focus> {
+    let at = |tab, section| {
+        Some(inspector::Focus {
+            tab,
+            page: 0,
+            section,
+        })
+    };
+    match (kind, id) {
+        (cutlass_model::TrackType::Video, "edit-speed") => at(2, None),
+        (cutlass_model::TrackType::Video, "edit-animation") => at(3, None),
+        (cutlass_model::TrackType::Video, "edit-opacity") => at(0, Some("blend")),
+        (_, "volume" | "fade") => at(0, Some("sound")),
+        (_, "speed") => at(1, None),
+        (_, "style") => at(0, Some("stroke")),
+        (_, "edit-text" | "edit-effect" | "edit-filter" | "edit-adjust") => at(0, None),
+        _ => None,
     }
 }
 
@@ -4314,6 +4357,14 @@ fn paint_clip(
             paint_wave(ui.painter(), wave, clip_rect.left(), band, visible, colors);
         }
     }
+    if !clip.active {
+        // A deactivated clip stays in its place, dimmed.
+        painter.rect_filled(
+            clip_rect,
+            CornerRadius::same(CLIP_RADIUS),
+            Color32::from_black_alpha(150),
+        );
+    }
     if selected {
         painter.rect_stroke(
             clip_rect,
@@ -5254,6 +5305,23 @@ fn file_label(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_menu_edit_rows_open_their_inspector_tab() {
+        use cutlass_model::TrackType;
+        let tab = |kind: TrackType, id| inspector_focus(&kind, id).map(|focus| focus.tab);
+        assert_eq!(tab(TrackType::Video, "edit-speed"), Some(2));
+        assert_eq!(tab(TrackType::Video, "edit-animation"), Some(3));
+        assert_eq!(
+            inspector_focus(&TrackType::Video, "edit-opacity").and_then(|focus| focus.section),
+            Some("blend")
+        );
+        assert_eq!(tab(TrackType::Audio, "speed"), Some(1));
+        assert_eq!(tab(TrackType::Audio, "volume"), Some(0));
+        assert_eq!(tab(TrackType::Text, "edit-text"), Some(0));
+        assert_eq!(tab(TrackType::Effect, "edit-effect"), Some(0));
+        assert_eq!(tab(TrackType::Video, "copy"), None);
+    }
     use cutlass_settings::Settings;
     use egui::Color32;
 

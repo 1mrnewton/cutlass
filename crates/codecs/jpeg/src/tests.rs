@@ -218,7 +218,7 @@ fn a_restart_resets_the_dc_predictor() {
 }
 
 #[test]
-fn size_comes_from_the_frame_and_orientation_is_not_applied() {
+fn the_header_is_stored_and_the_picture_is_turned_upright() {
     let mut file = vec![0xff, 0xd8];
     file.extend(segment(0xe1, &exif(6)));
     file.extend(dqt(&[1u8; 64]));
@@ -231,9 +231,80 @@ fn size_comes_from_the_frame_and_orientation_is_not_applied() {
     file.extend(sos(&[(1, 0x00)], 0, 63, 0, 0));
     file.extend_from_slice(&[0x2b, 0xff, 0xd9, 0x00, 0x11]);
     let image = decode(&file).expect("oriented");
-    assert_eq!((image.width, image.height), (8, 4));
+    assert_eq!((image.width, image.height), (4, 8));
     assert_eq!(image.samples.len(), 32);
     assert_flat(&image, 128);
+}
+
+/// 16x8 gray: the left half white, the right half mid gray.
+fn two_tone(exif_tag: Option<u16>) -> Vec<u8> {
+    let mut file = vec![0xff, 0xd8];
+    if let Some(tag) = exif_tag {
+        file.extend(segment(0xe1, &exif(tag)));
+    }
+    file.extend(dqt(&[1u8; 64]));
+    file.extend(sof(0xc0, 16, 8, &[(1, 0x11, 0)]));
+    file.extend(segment(0xdd, &[0x00, 0x01]));
+    file.extend(dht(0x00, &DC_LUMA_COUNTS, &DC_LUMA_SYMBOLS));
+    file.extend(dht(0x10, &AC_LUMA_COUNTS, &AC_LUMA_SYMBOLS));
+    file.extend(sos(&[(1, 0x00)], 0, 63, 0, 0));
+    file.extend_from_slice(&[0xfe, 0xfe, 0x2b, 0xff, 0xd0, 0x2b, 0xff, 0xd9]);
+    file
+}
+
+#[test]
+fn each_exif_orientation_puts_the_white_half_where_the_camera_saw_it() {
+    let white_left = |image: &StillImage| {
+        (0..image.height as usize).all(|y| {
+            let row = &image.samples[y * image.width as usize..][..image.width as usize];
+            row[..row.len() / 2].iter().all(|s| *s == 255)
+                && row[row.len() / 2..].iter().all(|s| *s == 128)
+        })
+    };
+    let white_right = |image: &StillImage| {
+        (0..image.height as usize).all(|y| {
+            let row = &image.samples[y * image.width as usize..][..image.width as usize];
+            row[..row.len() / 2].iter().all(|s| *s == 128)
+                && row[row.len() / 2..].iter().all(|s| *s == 255)
+        })
+    };
+    let half = |image: &StillImage, top: u16| {
+        let split = image.samples.len() / 2;
+        let bottom = if top == 255 { 128 } else { 255 };
+        image.samples[..split].iter().all(|s| *s == top)
+            && image.samples[split..].iter().all(|s| *s == bottom)
+    };
+    for tag in [None, Some(1), Some(0), Some(9)] {
+        let image = decode(&two_tone(tag)).expect("upright");
+        assert_eq!((image.width, image.height), (16, 8), "{tag:?}");
+        assert!(white_left(&image), "{tag:?}");
+    }
+    for (tag, wide, check) in [
+        (
+            2,
+            true,
+            white_right(&decode(&two_tone(Some(2))).expect("2")),
+        ),
+        (
+            3,
+            true,
+            white_right(&decode(&two_tone(Some(3))).expect("3")),
+        ),
+        (4, true, white_left(&decode(&two_tone(Some(4))).expect("4"))),
+        (5, false, half(&decode(&two_tone(Some(5))).expect("5"), 255)),
+        (6, false, half(&decode(&two_tone(Some(6))).expect("6"), 255)),
+        (7, false, half(&decode(&two_tone(Some(7))).expect("7"), 128)),
+        (8, false, half(&decode(&two_tone(Some(8))).expect("8"), 128)),
+    ] {
+        let image = decode(&two_tone(Some(tag))).expect("turned");
+        let size = if wide { (16, 8) } else { (8, 16) };
+        assert_eq!((image.width, image.height), size, "tag {tag}");
+        assert!(check, "tag {tag}");
+        assert_eq!(
+            read_jpeg_info(&two_tone(Some(tag))).expect("info").width,
+            16
+        );
+    }
 }
 
 #[test]

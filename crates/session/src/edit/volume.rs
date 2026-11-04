@@ -3,8 +3,12 @@ use cutlass_model::{Draft, SegmentId};
 use super::speed::locate;
 use super::{EditError, ensure_unlocked};
 
-/// Set the segment gain. Mute and solo are track bits, not this number.
+/// Set the segment gain. Mute and solo are track bits, not this number. A
+/// negative gain, or one that is not finite, is refused.
 pub fn set_volume(draft: &mut Draft, segment_id: &SegmentId, volume: f64) -> Result<(), EditError> {
+    if !volume.is_finite() || volume < 0.0 {
+        return Err(EditError::Volume);
+    }
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
     draft.tracks[track_index].segments[segment_index].volume = volume;
@@ -34,6 +38,39 @@ mod tests {
         Request::Place {
             track_id: track.clone(),
             segment: Box::new(segment),
+        }
+    }
+
+    #[test]
+    fn a_negative_or_unfinite_volume_changes_nothing() {
+        let (mut session, track) = open();
+        session.apply(0, &[place(&track)]).unwrap();
+        let before = session.draft().clone();
+        for volume in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = session
+                .apply(
+                    1,
+                    &[Request::SetVolume {
+                        segment_id: "a".into(),
+                        volume,
+                    }],
+                )
+                .unwrap_err();
+            assert_eq!(error, EditError::Volume);
+            assert_eq!(session.draft(), &before);
+        }
+        // Silence and a boost past unity are gains like any other.
+        for (revision, volume) in [(1, 0.0), (2, 4.0)] {
+            session
+                .apply(
+                    revision,
+                    &[Request::SetVolume {
+                        segment_id: "a".into(),
+                        volume,
+                    }],
+                )
+                .unwrap();
+            assert_eq!(session.draft().tracks[0].segments[0].volume, volume);
         }
     }
 

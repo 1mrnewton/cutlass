@@ -72,7 +72,7 @@ pub fn mix_inputs(draft: &Draft, time: Micros) -> Vec<MixClip> {
     let mut clips = Vec::new();
     for track in &draft.tracks {
         for segment in &track.segments {
-            if map::is_graphic(draft, segment) {
+            if !map::contributes_sound(draft, segment) {
                 continue;
             }
             if !covers(&segment.target, time) {
@@ -174,7 +174,7 @@ fn covers(range: &cutlass_model::TimeRange, time: Micros) -> bool {
 
 fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> MixClip {
     let offset = Micros(time.0.saturating_sub(segment.target.start.0));
-    let volume = volume_from(segment, offset).unwrap_or(segment.volume);
+    let volume = clip_volume(segment, offset);
     let (fade_in_us, fade_out_us, fade_curve) = fade_of(draft, segment);
     let speed = map::placement_of(draft, segment)
         .and_then(|placement| map::speed_at(&placement, time))
@@ -190,6 +190,13 @@ fn clip_for(draft: &Draft, track: &Track, segment: &Segment, time: Micros) -> Mi
         muted: track_is_muted(track),
         role: ClipRole::Sound,
     }
+}
+
+/// The clip's gain `offset` into it, its volume keyframes applied. 1 is the
+/// file as recorded.
+#[must_use]
+pub fn clip_volume(segment: &Segment, offset: Micros) -> f64 {
+    volume_from(segment, offset).unwrap_or(segment.volume)
 }
 
 fn volume_from(segment: &Segment, offset: Micros) -> Result<f64, EngineError> {
@@ -252,12 +259,22 @@ fn apply_gain(pcm: &Pcm, volume: f64) -> Result<Pcm, EngineError> {
     Pcm::from_f32(pcm.rate, pcm.layout.clone(), scaled).map_err(|_| EngineError::Layout)
 }
 
+/// Every buffer added together in the widest layout among them. A mono
+/// buffer is heard on both sides of a stereo mix, as a clip with no sound
+/// of its own (silence) sits beside music. Other differing layouts are
+/// refused.
 fn sum(rate: u32, buffers: &[Pcm]) -> Result<Pcm, EngineError> {
     if buffers.is_empty() {
         return Pcm::from_f32(rate, ChannelLayout::mono(), Vec::new())
             .map_err(|_| EngineError::Layout);
     }
-    let layout = buffers[0].layout.clone();
+    let Some(layout) = buffers
+        .iter()
+        .map(|pcm| pcm.layout.clone())
+        .max_by_key(ChannelLayout::len)
+    else {
+        return Err(EngineError::Layout);
+    };
     let channels = layout.len();
     let frames = buffers.iter().map(|pcm| pcm.samples).max().unwrap_or(0);
     let len = usize::try_from(frames)
@@ -266,15 +283,24 @@ fn sum(rate: u32, buffers: &[Pcm]) -> Result<Pcm, EngineError> {
         .ok_or(EngineError::Overflow)?;
     let mut mixed = vec![0.0_f32; len];
     for pcm in buffers {
-        if pcm.layout != layout || pcm.rate != rate {
+        if pcm.rate != rate {
             return Err(EngineError::Layout);
         }
         let Some(samples) = pcm.as_f32() else {
             return Err(EngineError::Layout);
         };
+        let spread = if pcm.layout == layout {
+            1
+        } else if pcm.layout.len() == 1 {
+            channels
+        } else {
+            return Err(EngineError::Layout);
+        };
         for (index, sample) in samples.iter().enumerate() {
-            if let Some(slot) = mixed.get_mut(index) {
-                *slot += sample;
+            for side in 0..spread {
+                if let Some(slot) = mixed.get_mut(index * spread + side) {
+                    *slot += sample;
+                }
             }
         }
     }
@@ -285,11 +311,24 @@ fn sum(rate: u32, buffers: &[Pcm]) -> Result<Pcm, EngineError> {
 mod tests {
     use super::*;
     use cutlass_model::{
-        Draft, MaterialAudioFade, MaterialId, Segment, TimeRange, Track, TrackAttribute, TrackType,
+        Draft, LinkPair, MaterialAudio, MaterialAudioFade, MaterialId, MaterialVideo, Relationship,
+        Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
 
     fn mono(rate: u32, samples: Vec<f32>) -> Pcm {
         Pcm::from_f32(rate, ChannelLayout::mono(), samples).expect("pcm")
+    }
+
+    #[test]
+    fn a_mono_clip_is_heard_on_both_sides_of_a_stereo_mix() {
+        let stereo = Pcm::from_f32(4, ChannelLayout::stereo(), vec![0.1, 0.2, 0.3, 0.4]).unwrap();
+        let summed = sum(4, &[mono(4, vec![0.5, 0.0]), stereo.clone()]).unwrap();
+        assert_eq!(summed.layout, ChannelLayout::stereo());
+        assert_eq!(summed.as_f32().unwrap(), [0.6, 0.7, 0.3, 0.4]);
+        // The same either way round.
+        let other = sum(4, &[stereo, mono(4, vec![0.5, 0.0])]).unwrap();
+        assert_eq!(other, summed);
+        assert_eq!(sum(8, &[mono(4, vec![0.5])]), Err(EngineError::Layout));
     }
 
     fn sound(pcm: Pcm) -> MixClip {
@@ -406,5 +445,48 @@ mod tests {
         assert_eq!(clips[0].fade_in_us, 10);
         assert_eq!(clips[0].fade_curve, 2);
         assert!(matches!(clips[0].pcm, ClipPcm::Missing));
+    }
+
+    #[test]
+    fn a_separated_picture_sound_is_not_mixed_twice() {
+        let mut draft = Draft::empty("D");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("sound"),
+            kind: "video_original_sound".to_owned(),
+            path: "clip.mp4".to_owned(),
+            video_id: MaterialId::new("picture"),
+            ..MaterialAudio::default()
+        });
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 1_000_000),
+        ));
+        draft.tracks[0].segments.push(Segment::new(
+            "other",
+            "picture",
+            TimeRange::new(2_000_000, 1_000_000),
+        ));
+        let mut lane = Track::main("sound");
+        lane.kind = TrackType::Audio;
+        lane.segments
+            .push(Segment::new("sound", "sound", TimeRange::new(0, 1_000_000)));
+        draft.tracks.push(lane);
+        let both = mix_inputs(&draft, Micros(0));
+        assert_eq!(both.len(), 2);
+
+        draft.relationships.push(Relationship {
+            kind: "linkage".to_owned(),
+            id_to_id: vec![LinkPair {
+                owner: SegmentId::new("picture"),
+                dependent: SegmentId::new("sound"),
+            }],
+            ..Relationship::default()
+        });
+        assert_eq!(mix_inputs(&draft, Micros(0)).len(), 1);
+        assert_eq!(mix_inputs(&draft, Micros(2_000_000)).len(), 1);
     }
 }

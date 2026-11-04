@@ -36,6 +36,24 @@ impl SolidColor {
     }
 }
 
+impl SolidColor {
+    /// One pixel of this color at `time`, for a pass that stretches it over
+    /// the canvas instead of filling every pixel. Outside the span is a miss.
+    #[must_use]
+    pub fn one_pixel(&self, time: Micros) -> Sample {
+        let Some((start, end)) = self.span else {
+            return Sample::Miss;
+        };
+        if time.0 < start || time.0 >= end {
+            return Sample::Miss;
+        }
+        match fill(1, 1, self.packed) {
+            Ok(bytes) => Sample::Ready(Picture::Cpu(bytes)),
+            Err(_) => Sample::Miss,
+        }
+    }
+}
+
 fn exclusive_end(start: i64, duration: i64) -> Option<(i64, i64)> {
     if duration <= 0 {
         return None;

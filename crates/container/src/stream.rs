@@ -230,6 +230,23 @@ impl Gap {
     }
 }
 
+/// Clockwise quarter turn from a file display matrix.
+///
+/// A matrix that is not one of these four is [`DisplayQuarter::Zero`].
+/// Samples stay in coded order until a caller applies the turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DisplayQuarter {
+    /// No turn. The coded picture is already the one to place.
+    #[default]
+    Zero,
+    /// 90 degrees clockwise.
+    Clockwise90,
+    /// 180 degrees.
+    Half,
+    /// 270 degrees clockwise.
+    Clockwise270,
+}
+
 /// One stream in an opened file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stream {
@@ -239,6 +256,7 @@ pub struct Stream {
     language: Option<Language>,
     edits: Vec<Edit>,
     trim: Trim,
+    display: DisplayQuarter,
 }
 
 impl Stream {
@@ -258,7 +276,20 @@ impl Stream {
             language,
             edits,
             trim,
+            display: DisplayQuarter::Zero,
         }
+    }
+
+    /// Replaces the display quarter turn. The default is [`DisplayQuarter::Zero`].
+    #[must_use]
+    pub const fn with_display(mut self, display: DisplayQuarter) -> Self {
+        self.display = display;
+        self
+    }
+
+    #[must_use]
+    pub const fn display(&self) -> DisplayQuarter {
+        self.display
     }
 
     #[must_use]

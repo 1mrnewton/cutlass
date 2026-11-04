@@ -12,8 +12,8 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 use cutlass_model::{
-    Draft, MaterialEffect, MaterialPluginEffect, MaterialRef, MaterialVideoEffect, Segment,
-    StickerAnimation,
+    Draft, MaterialEffect, MaterialPluginEffect, MaterialRef, MaterialTransition,
+    MaterialVideoEffect, Segment, StickerAnimation,
 };
 use cutlass_storage::{ResourceId, StorageError};
 
@@ -122,6 +122,20 @@ pub trait PackageStore {
     fn locate(&self, id: &ResourceId) -> Result<Located, PackageError>;
 }
 
+/// A store with no published packages.
+///
+/// [`PackageStore::locate`] is [`PackageError::Missing`]. It does not read a file.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MissingPackages;
+
+impl PackageStore for MissingPackages {
+    fn locate(&self, id: &ResourceId) -> Result<Located, PackageError> {
+        Err(PackageError::Missing {
+            id: id.as_str().to_owned(),
+        })
+    }
+}
+
 /// The package id on an effect material.
 ///
 /// The first non-empty value of `effect_id`, otherwise `resource_id`.
@@ -153,6 +167,31 @@ pub fn animation_package_id(animation: &StickerAnimation) -> Option<&str> {
 #[must_use]
 pub fn plugin_package_id(effect: &MaterialPluginEffect) -> Option<&str> {
     published(&effect.plugin_id)
+}
+
+/// The package id on a transition.
+///
+/// The first non-empty value of `effect_id`, otherwise `resource_id`.
+/// The material row id and `path` are not package ids.
+#[must_use]
+pub fn transition_package_id(transition: &MaterialTransition) -> Option<&str> {
+    first_published(&transition.effect_id, &transition.resource_id)
+}
+
+/// Load the package named by `transition`.
+///
+/// A transition with no package id is [`PackageError::Missing`] for the
+/// material row. The returned [`Package::id`] is the package id.
+pub fn load_transition(
+    store: &dyn PackageStore,
+    transition: &MaterialTransition,
+) -> Result<Package, PackageError> {
+    let Some(id) = transition_package_id(transition) else {
+        return Err(PackageError::Missing {
+            id: transition.id.as_str().to_owned(),
+        });
+    };
+    finish(store, id)
 }
 
 /// The first package id on the segment's material, then each extra material.
@@ -199,6 +238,7 @@ pub fn map_storage_error(id: &str, error: &StorageError) -> PackageError {
         StorageError::EmptyUrl
         | StorageError::LeavesRoot { .. }
         | StorageError::NotADirectory { .. }
+        | StorageError::NotAbsolute { .. }
         | StorageError::SameRoot { .. }
         | StorageError::Download { .. }
         | StorageError::IndexVersion { .. }
@@ -211,7 +251,7 @@ pub fn map_storage_error(id: &str, error: &StorageError) -> PackageError {
 /// An effect with no package id is [`PackageError::Missing`] for the material
 /// row. An id that is not a resource id is [`PackageError::InvalidId`] and the
 /// store is not asked. The returned [`Package::id`] is the package id.
-pub fn load<S: PackageStore>(store: &S, effect: &MaterialEffect) -> Result<Package, PackageError> {
+pub fn load(store: &dyn PackageStore, effect: &MaterialEffect) -> Result<Package, PackageError> {
     let Some(id) = package_id(effect) else {
         return Err(PackageError::Missing {
             id: effect.id.as_str().to_owned(),
@@ -224,8 +264,8 @@ pub fn load<S: PackageStore>(store: &S, effect: &MaterialEffect) -> Result<Packa
 ///
 /// `draft` and `segment` are not changed. A segment with no package id is
 /// [`PackageError::Missing`] for `segment.material_id`.
-pub fn load_segment<S: PackageStore>(
-    store: &S,
+pub fn load_segment(
+    store: &dyn PackageStore,
     draft: &Draft,
     segment: &Segment,
 ) -> Result<Package, PackageError> {
@@ -255,7 +295,7 @@ fn package_from_ref<'a>(material: Option<MaterialRef<'a>>) -> Option<&'a str> {
     }
 }
 
-fn finish<S: PackageStore>(store: &S, package_id: &str) -> Result<Package, PackageError> {
+fn finish(store: &dyn PackageStore, package_id: &str) -> Result<Package, PackageError> {
     let resource = match ResourceId::new(package_id) {
         Ok(resource) => resource,
         Err(error) => return Err(invalid_package_id(package_id, &error)),
@@ -630,15 +670,16 @@ mod tests {
     use std::path::PathBuf;
 
     use cutlass_model::{
-        Draft, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialVideo,
-        MaterialVideoEffect, Micros, Segment, StickerAnimation, TimeRange,
+        Draft, MaterialAnimations, MaterialEffect, MaterialPluginEffect, MaterialTransition,
+        MaterialVideo, MaterialVideoEffect, Micros, Segment, StickerAnimation, TimeRange,
     };
     use cutlass_storage::{ResourceId, StorageError};
 
     use super::{
-        Located, MAX_PACKAGE_BYTES, PackageError, PackageStore, animation_package_id, hex_encode,
-        load, load_segment, map_storage_error, package_id, plugin_package_id, segment_package_id,
-        sha256, sha256_file, video_package_id,
+        Located, MAX_PACKAGE_BYTES, MissingPackages, PackageError, PackageStore,
+        animation_package_id, hex_encode, load, load_segment, load_transition, map_storage_error,
+        package_id, plugin_package_id, segment_package_id, sha256, sha256_file,
+        transition_package_id, video_package_id,
     };
 
     const EMPTY_HEX: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -947,6 +988,20 @@ mod tests {
         assert_eq!(package_id(&effect), Some("from-resource"));
         assert_eq!(video_package_id(&video), Some("from-resource"));
         assert_eq!(animation_package_id(&animation), Some("from-resource"));
+        let mut transition = MaterialTransition {
+            effect_id: "from-effect".to_owned(),
+            resource_id: "from-resource".to_owned(),
+            ..MaterialTransition::default()
+        };
+        assert_eq!(transition_package_id(&transition), Some("from-effect"));
+        transition.effect_id.clear();
+        assert_eq!(transition_package_id(&transition), Some("from-resource"));
+        transition.resource_id.clear();
+        assert_eq!(transition_package_id(&transition), None);
+        assert!(matches!(
+            load_transition(&Store::new(), &transition),
+            Err(PackageError::Missing { .. })
+        ));
         let error = load(&store, &effect).unwrap_err();
         assert_eq!(
             error,
@@ -1396,6 +1451,18 @@ mod tests {
                 message: "a fetch has no URL".to_owned(),
             },
             "glow: a fetch has no URL",
+        );
+    }
+
+    #[test]
+    fn an_empty_store_names_the_missing_package() {
+        let id = ResourceId::new("distort-invert").unwrap();
+        let error = MissingPackages.locate(&id).unwrap_err();
+        assert_eq!(
+            error,
+            PackageError::Missing {
+                id: "distort-invert".to_owned(),
+            }
         );
     }
 }

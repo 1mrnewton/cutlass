@@ -81,6 +81,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -267,6 +273,12 @@ dependencies = [
  "slab",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "camino"
+version = "1.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
 
 [[package]]
 name = "candle-core"
@@ -533,11 +545,14 @@ dependencies = [
  "cutlass-av1",
  "cutlass-avi",
  "cutlass-caf",
+ "cutlass-codec",
+ "cutlass-color",
  "cutlass-container",
  "cutlass-decode",
  "cutlass-editor",
  "cutlass-effects",
  "cutlass-encode",
+ "cutlass-engine",
  "cutlass-eval",
  "cutlass-export",
  "cutlass-flac",
@@ -546,8 +561,10 @@ dependencies = [
  "cutlass-gif",
  "cutlass-h264",
  "cutlass-hevc",
+ "cutlass-icons",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-logger",
  "cutlass-matroska",
  "cutlass-mjpeg",
  "cutlass-model",
@@ -563,11 +580,10 @@ dependencies = [
  "cutlass-platform-windows",
  "cutlass-playback",
  "cutlass-png",
+ "cutlass-probe",
  "cutlass-prores",
- "cutlass-renderer-android",
- "cutlass-renderer-metal",
+ "cutlass-render",
  "cutlass-renderer-software",
- "cutlass-renderer-windows",
  "cutlass-riff",
  "cutlass-session",
  "cutlass-settings",
@@ -581,6 +597,7 @@ dependencies = [
  "cutlass-webp",
  "eframe",
  "egui",
+ "pollster",
  "rfd",
  "serde_json",
 ]
@@ -622,6 +639,7 @@ dependencies = [
 name = "cutlass-aiff"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
  "cutlass-container",
 ]
 
@@ -730,6 +748,8 @@ dependencies = [
  "cutlass-model",
  "cutlass-picture",
  "cutlass-storage",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -751,8 +771,10 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-jpeg",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-picture",
  "cutlass-png",
+ "cutlass-riff",
  "cutlass-still",
  "serde_json",
 ]
@@ -764,11 +786,20 @@ dependencies = [
  "cutlass-captions",
  "cutlass-codec",
  "cutlass-compositor",
+ "cutlass-container",
+ "cutlass-decode",
  "cutlass-effects",
  "cutlass-engine",
  "cutlass-generated",
+ "cutlass-gpu",
  "cutlass-model",
+ "cutlass-pcm",
+ "cutlass-picture",
+ "cutlass-png",
  "cutlass-renderer-software",
+ "cutlass-riff",
+ "cutlass-still",
+ "cutlass-storage",
  "cutlass-text",
 ]
 
@@ -780,9 +811,13 @@ dependencies = [
  "cutlass-container",
  "cutlass-encode",
  "cutlass-eval",
+ "cutlass-gpu",
  "cutlass-model",
+ "cutlass-pcm",
  "cutlass-playback",
+ "cutlass-render",
  "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
 ]
 
@@ -790,10 +825,41 @@ dependencies = [
 name = "cutlass-ffi"
 version = "0.1.0"
 dependencies = [
+ "cutlass-aac",
+ "cutlass-aiff",
+ "cutlass-codec",
+ "cutlass-container",
+ "cutlass-decode",
+ "cutlass-editor",
+ "cutlass-effects",
+ "cutlass-encode",
+ "cutlass-eval",
+ "cutlass-export",
+ "cutlass-h264",
+ "cutlass-isobmff",
+ "cutlass-jpeg",
+ "cutlass-logger",
+ "cutlass-model",
+ "cutlass-pcm",
+ "cutlass-platform-apple",
  "cutlass-playback",
+ "cutlass-png",
+ "cutlass-probe",
+ "cutlass-render",
+ "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
+ "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+]
+
+[[package]]
+name = "cutlass-ffi-bindings"
+version = "0.1.0"
+dependencies = [
+ "cutlass-ffi",
+ "uniffi",
 ]
 
 [[package]]
@@ -852,6 +918,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-icons"
+version = "0.1.0"
+
+[[package]]
 name = "cutlass-isobmff"
 version = "0.1.0"
 dependencies = [
@@ -866,6 +936,10 @@ dependencies = [
  "cutlass-decode",
  "cutlass-encode",
 ]
+
+[[package]]
+name = "cutlass-logger"
+version = "0.1.0"
 
 [[package]]
 name = "cutlass-matroska"
@@ -980,19 +1054,30 @@ dependencies = [
 name = "cutlass-platform-windows"
 version = "0.1.0"
 dependencies = [
+ "cutlass-aac",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-jpeg",
+ "cutlass-png",
 ]
 
 [[package]]
 name = "cutlass-playback"
 version = "0.1.0"
 dependencies = [
+ "cutlass-container",
+ "cutlass-editor",
+ "cutlass-engine",
  "cutlass-eval",
+ "cutlass-font",
  "cutlass-gpu",
  "cutlass-model",
+ "cutlass-pcm",
+ "cutlass-platform-android",
  "cutlass-platform-apple",
+ "cutlass-platform-windows",
  "cutlass-renderer-software",
+ "cutlass-riff",
  "cutlass-session",
 ]
 
@@ -1005,6 +1090,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cutlass-pool"
+version = "0.1.0"
+
+[[package]]
+name = "cutlass-probe"
+version = "0.1.0"
+dependencies = [
+ "cutlass-adts",
+ "cutlass-aiff",
+ "cutlass-codec",
+ "cutlass-container",
+ "cutlass-isobmff",
+ "cutlass-jpeg",
+ "cutlass-model",
+ "cutlass-mp3-container",
+ "cutlass-riff",
+ "cutlass-still",
+]
+
+[[package]]
 name = "cutlass-prores"
 version = "0.1.0"
 dependencies = [
@@ -1013,28 +1118,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "cutlass-renderer-android"
+name = "cutlass-render"
 version = "0.1.0"
 dependencies = [
+ "cutlass-compositor",
+ "cutlass-decode",
+ "cutlass-effects",
+ "cutlass-encode",
+ "cutlass-eval",
  "cutlass-gpu",
-]
-
-[[package]]
-name = "cutlass-renderer-metal"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
+ "cutlass-h264",
+ "cutlass-isobmff",
+ "cutlass-model",
+ "cutlass-picture",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]
 name = "cutlass-renderer-software"
-version = "0.1.0"
-dependencies = [
- "cutlass-gpu",
-]
-
-[[package]]
-name = "cutlass-renderer-windows"
 version = "0.1.0"
 dependencies = [
  "cutlass-gpu",
@@ -1052,6 +1154,7 @@ dependencies = [
 name = "cutlass-session"
 version = "0.1.0"
 dependencies = [
+ "cutlass-effects",
  "cutlass-model",
 ]
 
@@ -1622,6 +1725,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "fs-err"
+version = "3.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2076,6 +2188,13 @@ name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
+
+[[package]]
+name = "icongen"
+version = "0.1.0"
+dependencies = [
+ "cutlass-icons",
+]
 
 [[package]]
 name = "ident_case"
@@ -3535,6 +3654,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7523beb55eece201a2356bee0bbca0d1ab466c14c07703b2e0ee6d42cb0c2c"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3572,6 +3700,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "skrifa"
@@ -3900,7 +4034,7 @@ dependencies = [
  "cfg-expr",
  "heck",
  "pkg-config",
- "toml",
+ "toml 0.8.23",
  "version-compare",
 ]
 
@@ -4021,9 +4155,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.8+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20489e00e4d8741d6be680764cc12e270655e375a20d1011e844a9c3379e678d"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned 1.1.2",
+ "toml_datetime 1.1.2+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.4",
 ]
 
 [[package]]
@@ -4052,7 +4201,7 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap",
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "winnow 0.7.15",
 ]
@@ -4077,6 +4226,12 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow 1.0.4",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tracing"
@@ -4169,6 +4324,85 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+
+[[package]]
+name = "uniffi"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76407f5f396a2c949a069eff4a9fca9ce462410eb872bffef4c2b7b89804a77a"
+dependencies = [
+ "anyhow",
+ "uniffi_core",
+ "uniffi_macros",
+ "uniffi_pipeline",
+]
+
+[[package]]
+name = "uniffi_core"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7530ae8efeaaa488622865966763fe0294832779fff80508c36d69c6a874a6a"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "once_cell",
+ "static_assertions",
+]
+
+[[package]]
+name = "uniffi_internal_macros"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f4bad017164375d99450d70495014810d15a84ba9da6ed14b9628b1424223ba"
+dependencies = [
+ "anyhow",
+ "indexmap",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "uniffi_macros"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b855a58da153739ce6e863f6e296edc3716a093768c4d3d957f17f5e4317c60"
+dependencies = [
+ "camino",
+ "fs-err",
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn 2.0.119",
+ "toml 1.1.8+spec-1.1.0",
+ "uniffi_meta",
+]
+
+[[package]]
+name = "uniffi_meta"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af0c88664a9cb9559856f5a250283c9708923b303170e2e5c7db8f4ad65e9459"
+dependencies = [
+ "anyhow",
+ "siphasher",
+ "uniffi_internal_macros",
+ "uniffi_pipeline",
+]
+
+[[package]]
+name = "uniffi_pipeline"
+version = "0.32.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d00f5c044b4a3dca0b1226c92ddaeea626f337470e22180dd182160c87a06b0b"
+dependencies = [
+ "anyhow",
+ "heck",
+ "indexmap",
+ "tempfile",
+ "uniffi_internal_macros",
+]
 
 [[package]]
 name = "uuid"

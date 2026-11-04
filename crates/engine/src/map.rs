@@ -7,7 +7,8 @@
 
 use cutlass_codec::Timescale;
 use cutlass_model::{
-    Draft, MaterialRef, MaterialSpeed, Micros, Segment, SpeedMode, SpeedPoint, TimeRange, TrackType,
+    Draft, MaterialId, MaterialRef, MaterialSpeed, Micros, Segment, SegmentId, SpeedMode,
+    SpeedPoint, TimeRange, TrackType,
 };
 
 /// Why a timeline time did not become a source microsecond.
@@ -56,6 +57,17 @@ pub fn micros_to_ticks(time: Micros, timescale: Timescale) -> Result<i64, MapErr
     scale(time.0, i128::from(timescale.ticks_per_second()), 1_000_000)
 }
 
+/// Microseconds as ticks of `timescale`, rounded down.
+///
+/// A seek uses this, so it never lands on a tick after `time`.
+pub fn micros_to_ticks_floor(time: Micros, timescale: Timescale) -> Result<i64, MapError> {
+    let denom = 1_000_000_i128;
+    let product = i128::from(time.0)
+        .checked_mul(i128::from(timescale.ticks_per_second()))
+        .ok_or(MapError::Overflow)?;
+    i64::try_from(product.div_euclid(denom)).map_err(|_| MapError::Overflow)
+}
+
 /// Instantaneous speed at `time`. A freeze does not consult the curve.
 pub fn speed_at(map: &TimelineMap, time: Micros) -> Result<f64, MapError> {
     if map.freeze.is_some() {
@@ -94,6 +106,53 @@ pub fn map_timeline(map: &TimelineMap, time: Micros) -> Result<Micros, MapError>
     Ok(Micros(position))
 }
 
+/// Timeline time whose picture is `source`.
+///
+/// The search follows [`map_timeline`], so speed, a curve, and reverse land
+/// on the same frame playback would show. `None` when no timeline time in
+/// the clip maps within a millisecond of `source`.
+#[must_use]
+pub fn timeline_for_source(map: &TimelineMap, source: Micros) -> Option<Micros> {
+    let start = map.target.start.0;
+    let end = start.checked_add(map.target.duration.0)?;
+    if end <= start {
+        return None;
+    }
+    let mut lo = start;
+    let mut hi = end - 1;
+    let mut best: Option<(u64, i64)> = None;
+    for _ in 0..64 {
+        if lo > hi {
+            break;
+        }
+        let mid = lo + (hi - lo) / 2;
+        let Ok(mapped) = map_timeline(map, Micros(mid)) else {
+            break;
+        };
+        let distance = mapped.0.abs_diff(source.0);
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, mid));
+        }
+        if mapped.0 == source.0 {
+            return Some(Micros(mid));
+        }
+        let later = if map.reverse {
+            mapped.0 > source.0
+        } else {
+            mapped.0 < source.0
+        };
+        if later {
+            lo = mid.saturating_add(1);
+        } else if mid == start {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let (distance, time) = best?;
+    (distance <= 1_000).then_some(Micros(time))
+}
+
 /// The map stored on `segment`. A curve with fewer than two points keeps the constant speed.
 pub fn placement_of(draft: &Draft, segment: &Segment) -> Result<TimelineMap, MapError> {
     let Some(source) = segment.source_range.clone() else {
@@ -124,6 +183,48 @@ pub fn media_path<'a>(draft: &'a Draft, segment: &Segment) -> Option<&'a str> {
         return Some(audio.path.as_str());
     }
     None
+}
+
+/// Whether the mix should read this segment.
+///
+/// A graphic is silent. A picture whose own sound has been placed on a linked
+/// clip is silent too, so that sound is not played twice.
+#[must_use]
+pub fn contributes_sound(draft: &Draft, segment: &Segment) -> bool {
+    if is_graphic(draft, segment) {
+        return false;
+    }
+    !original_sound_is_separate(draft, segment)
+}
+
+fn original_sound_is_separate(draft: &Draft, segment: &Segment) -> bool {
+    if !matches!(material(draft, segment), Some(MaterialRef::Video(_))) {
+        return false;
+    }
+    draft
+        .relationships
+        .iter()
+        .filter(|relationship| relationship.kind == "linkage")
+        .flat_map(|relationship| &relationship.id_to_id)
+        .any(|pair| {
+            pair.owner == segment.id && sound_for(draft, &pair.dependent, &segment.material_id)
+        })
+}
+
+fn sound_for(draft: &Draft, id: &SegmentId, video_id: &MaterialId) -> bool {
+    let Some(segment) = draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find(|segment| &segment.id == id)
+    else {
+        return false;
+    };
+    matches!(
+        material(draft, segment),
+        Some(MaterialRef::Audio(audio))
+            if &audio.video_id == video_id && audio.kind == "video_original_sound"
+    )
 }
 
 /// Text, a sticker, a shape, or a solid color is not a decoder input.
@@ -499,6 +600,14 @@ mod tests {
     }
 
     #[test]
+    fn a_seek_tick_never_rounds_past_the_time() {
+        let scale = Timescale::new(24);
+        assert_eq!(micros_to_ticks_floor(Micros(3_116_669), scale), Ok(74));
+        assert_eq!(micros_to_ticks(Micros(3_116_669), scale), Ok(75));
+        assert_eq!(micros_to_ticks_floor(Micros(-1), scale), Ok(-1));
+    }
+
+    #[test]
     fn file_ticks_convert_only_through_the_timescale() {
         let scale = Timescale::new(90_000);
         assert_eq!(ticks_to_micros(90_000, scale), Ok(Micros(1_000_000)));
@@ -729,5 +838,30 @@ mod tests {
         let segment = Segment::new("s", "t", TimeRange::new(0, 1));
         draft.tracks[0].segments.push(segment);
         assert!(is_graphic(&draft, &draft.tracks[0].segments[0]));
+    }
+
+    #[test]
+    fn a_source_time_lands_on_the_timeline_frame_that_shows_it() {
+        let constant = TimelineMap {
+            target: TimeRange::new(0, 1_000_000),
+            source: TimeRange::new(0, 2_000_000),
+            freeze: None,
+            speed: MapSpeed::Constant(2.0),
+            reverse: false,
+        };
+        let landed = timeline_for_source(&constant, Micros(800_000)).expect("time");
+        assert!(landed.0.abs_diff(400_000) <= 1);
+
+        let reversed = TimelineMap {
+            target: TimeRange::new(0, 1_000_000),
+            source: TimeRange::new(0, 1_000_000),
+            freeze: None,
+            speed: MapSpeed::Constant(1.0),
+            reverse: true,
+        };
+        let at_end = timeline_for_source(&reversed, Micros(999_999)).expect("start");
+        assert!(at_end.0.abs_diff(0) <= 1);
+        let at_start = timeline_for_source(&reversed, Micros(0)).expect("end");
+        assert!(at_start.0.abs_diff(999_999) <= 1);
     }
 }

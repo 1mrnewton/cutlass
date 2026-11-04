@@ -2,24 +2,41 @@
 //!
 //! The editor sends a playhead time. Seeking and scrubbing call
 //! [`cutlass_eval::frame`] for that time and keep the CPU readback. Playback
-//! does not open a container, decode, convert color, or mix samples. The
-//! engine already maps time and caches decoded pictures.
+//! does not register a container. [`Player`] holds the reader factory `frame`
+//! opens and keeps those files open across seeks. The engine maps time and
+//! caches decoded pictures.
 //!
 //! Linux has no output device. Playback stays silent until one exists. That
 //! silence is not a missing build, and it is not a failed open. Pictures
 //! still present. A missing device is [`AudioGap`], not a panic.
 //!
-//! WASAPI and AAudio are not in this pass.
+//! Apple plays through Core Audio. Windows plays through WASAPI. Android
+//! plays through AAudio.
 
 #![forbid(unsafe_code)]
 
 mod apple;
+mod faces;
+mod film;
+mod mixer;
 mod playhead;
 mod present;
+mod preview;
+mod transport;
+mod wave;
 
-pub use apple::{AudioGap, AudioHost, AudioOutput, CopyOutcome};
+pub use apple::{
+    AudioGap, AudioHost, AudioOutput, AudioSink, CopyOutcome, RATE as PREVIEW_RATE, StreamClock,
+};
+pub use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
+pub use faces::{FaceTable, MAX_FACE_BYTES, MAX_FACES, PREFERRED_FACES, face_label};
+pub use film::{FilmCell, film_cells, media_file};
+pub use mixer::{LEAD as MIX_LEAD, MixJob, Mixer, WINDOW as MIX_WINDOW};
 pub use playhead::{Player, PlayheadError, Readback, Tick};
-pub use present::{PresentError, Presentation};
+pub use present::{FrameCache, PresentError, Presentation};
+pub use preview::{PLAY_FRAMES, PreviewMix, preview_frames, queue_mix};
+pub use transport::{Program, Ticked, Transport};
+pub use wave::{ClipWave, clip_wave};
 
 #[cfg(test)]
 pub(crate) fn color_session(duration_us: i64, segment_us: i64) -> cutlass_session::Session {

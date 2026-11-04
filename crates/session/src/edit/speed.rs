@@ -79,7 +79,9 @@ pub fn set_curve_speed(
             cutlass_model::RangeError::NonPositiveDuration,
         ));
     }
-    if overlaps_except(&draft.tracks[track_index], &next, segment_id)? {
+    if !super::magnet::packs(draft.config.maintrack_adsorb, &draft.tracks[track_index])
+        && overlaps_except(&draft.tracks[track_index], &next, segment_id)?
+    {
         return Err(EditError::Overlap);
     }
     draft.tracks[track_index].segments[segment_index] = next;
@@ -157,7 +159,9 @@ pub fn set_constant_speed(
         ));
     }
     next.speed = speed;
-    if overlaps_except(&draft.tracks[track_index], &next, segment_id)? {
+    if !super::magnet::packs(draft.config.maintrack_adsorb, &draft.tracks[track_index])
+        && overlaps_except(&draft.tracks[track_index], &next, segment_id)?
+    {
         return Err(EditError::Overlap);
     }
     let refs = next.extra_material_refs.clone();

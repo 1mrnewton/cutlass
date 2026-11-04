@@ -4,7 +4,8 @@ use cutlass_codec::access::{
 
 use crate::{
     Cube, Curve, Depth, Error, Input, Layout, Lut, LutIssue, Matrix, Outcome, Picture,
-    PlatformView, Request, SegmentHdr, ThreeDl, apply_lut, convert, curve_from_codec,
+    PlatformView, Request, SegmentHdr, StillMap, StillTags, ThreeDl, apply_lut, convert,
+    curve_from_codec,
 };
 
 fn planes<'a>(
@@ -567,4 +568,219 @@ LUT_3D_SIZE 2
     assert_eq!(working.pixel(0, 0), Some([16, 16, 16, 255]));
     assert_eq!(working.draft, -1);
     assert_eq!(working.rgba[3], 255);
+}
+
+fn tags<'a>(
+    gamma: Option<u32>,
+    chromaticity: Option<[u32; 8]>,
+    srgb: Option<u8>,
+    icc: &'a [u8],
+) -> StillTags<'a> {
+    StillTags {
+        gamma_times_100000: gamma,
+        chromaticity,
+        srgb_intent: srgb,
+        icc_profile: icc,
+    }
+}
+
+fn mapped(tags: &StillTags<'_>, rgb: [u8; 3]) -> [u8; 3] {
+    StillMap::prepare(tags).expect("map").map_rgb(rgb)
+}
+
+#[test]
+fn reference_gamma_is_copied_and_linear_gamma_is_encoded() {
+    let reference = tags(Some(45_455), None, None, &[]);
+    let map = StillMap::prepare(&reference).expect("map");
+    assert!(map.is_identity());
+    assert_eq!(map.map_rgb([1, 2, 3]), [1, 2, 3]);
+
+    let linear = tags(Some(100_000), None, None, &[]);
+    assert_eq!(mapped(&linear, [128, 128, 128]), [186, 186, 186]);
+    assert_eq!(mapped(&linear, [0, 255, 128]), [0, 255, 186]);
+    assert_eq!(mapped(&linear, [1, 2, 3]), [21, 28, 34]);
+
+    let unnamed = tags(None, None, None, &[]);
+    assert!(StillMap::prepare(&unnamed).expect("map").is_identity());
+    assert!(matches!(
+        StillMap::prepare(&tags(Some(0), None, None, &[])),
+        Err(Error::Gamma)
+    ));
+}
+
+#[test]
+fn an_srgb_intent_wins_over_gamma_and_a_broken_profile_does_not() {
+    let intent = tags(Some(100_000), None, Some(0), &[1, 2, 3, 4]);
+    let map = StillMap::prepare(&intent).expect("map");
+    assert!(map.is_identity());
+    assert_eq!(map.map_rgb([128, 10, 20]), [128, 10, 20]);
+    assert!(
+        StillMap::prepare(&tags(Some(0), None, Some(3), &[]))
+            .expect("map")
+            .is_identity()
+    );
+
+    let broken = tags(Some(100_000), None, None, &[1, 2, 3, 4]);
+    assert_eq!(mapped(&broken, [128, 128, 128]), [186, 186, 186]);
+}
+
+#[test]
+fn chromaticity_moves_a_colored_sample_and_bt709_does_not() {
+    let bt709 = [
+        31_270, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000,
+    ];
+    let tagged = tags(Some(45_455), Some(bt709), None, &[]);
+    assert!(StillMap::prepare(&tagged).expect("map").is_identity());
+
+    let mut shifted = bt709;
+    shifted[2] = 50_000;
+    shifted[3] = 30_000;
+    let moved = tags(Some(45_455), Some(shifted), None, &[]);
+    assert_eq!(mapped(&moved, [180, 80, 40]), [180, 93, 86]);
+
+    let mut broken = bt709;
+    broken[1] = 0;
+    let fallback = tags(Some(100_000), Some(broken), None, &[]);
+    assert_eq!(mapped(&fallback, [128, 0, 0]), [186, 0, 0]);
+}
+
+#[test]
+fn a_linear_matrix_profile_overrides_reference_gamma() {
+    let profile = linear_bt709_profile(&gamma_tag(256));
+    let tagged = tags(Some(45_455), None, Some(1), &profile);
+    assert_eq!(mapped(&tagged, [128, 128, 128]), [186, 186, 186]);
+    assert_eq!(
+        mapped(&tags(Some(0), None, None, &profile), [128, 128, 128]),
+        [186, 186, 186]
+    );
+
+    let parametric = linear_bt709_profile(&para_gamma(1.0));
+    assert_eq!(
+        mapped(
+            &tags(Some(45_455), None, None, &parametric),
+            [128, 128, 128]
+        ),
+        [186, 186, 186]
+    );
+
+    // The quantized matrix leaves a tiny green residual. The working curve lifts it to 1.
+    let identity = linear_bt709_profile(&curv_identity());
+    assert_eq!(
+        mapped(&tags(None, None, None, &identity), [128, 0, 255]),
+        [186, 1, 255]
+    );
+
+    let ramp = linear_bt709_profile(&curv_ramp());
+    assert_eq!(
+        mapped(&tags(None, None, None, &ramp), [128, 0, 255]),
+        [186, 1, 255]
+    );
+}
+
+fn linear_bt709_profile(trc: &[u8]) -> Vec<u8> {
+    let columns = [
+        [0.4124564, 0.2126729, 0.0193339],
+        [0.3575761, 0.7151522, 0.1191920],
+        [0.1804375, 0.0721750, 0.9503041],
+    ];
+    let illuminant = [0.95047, 1.0, 1.08883];
+    let mut tags = Vec::new();
+    for column in columns {
+        tags.push(xyz_tag(column));
+    }
+    for _ in 0..3 {
+        tags.push(trc.to_vec());
+    }
+    let signatures: [[u8; 4]; 6] = [*b"rXYZ", *b"gXYZ", *b"bXYZ", *b"rTRC", *b"gTRC", *b"bTRC"];
+    let mut body = vec![0_u8; 128];
+    body[16..20].copy_from_slice(b"RGB ");
+    body[20..24].copy_from_slice(b"XYZ ");
+    body[36..40].copy_from_slice(b"acsp");
+    write_i32(&mut body, 68, fixed(illuminant[0]));
+    write_i32(&mut body, 72, fixed(illuminant[1]));
+    write_i32(&mut body, 76, fixed(illuminant[2]));
+    let mut cursor = 132 + signatures.len() * 12;
+    let mut entries = Vec::new();
+    for (signature, tag) in signatures.iter().zip(tags) {
+        entries.push((*signature, cursor, tag.len()));
+        cursor = cursor.saturating_add(tag.len()).div_ceil(4) * 4;
+    }
+    body.extend(
+        u32::try_from(signatures.len())
+            .expect("count")
+            .to_be_bytes(),
+    );
+    for (signature, offset, size) in &entries {
+        body.extend(signature);
+        body.extend(u32::try_from(*offset).expect("offset").to_be_bytes());
+        body.extend(u32::try_from(*size).expect("size").to_be_bytes());
+    }
+    for (index, (signature, _, _)) in entries.iter().enumerate() {
+        let _ = signature;
+        let tag = match index {
+            0..=2 => xyz_tag(columns[index]),
+            _ => trc.to_vec(),
+        };
+        let pad = (4 - tag.len() % 4) % 4;
+        body.extend(tag);
+        body.extend(std::iter::repeat_n(0, pad));
+    }
+    let size = u32::try_from(body.len()).expect("size");
+    body[..4].copy_from_slice(&size.to_be_bytes());
+    body
+}
+
+fn xyz_tag(xyz: [f64; 3]) -> Vec<u8> {
+    let mut tag = Vec::new();
+    tag.extend(b"XYZ ");
+    tag.extend([0, 0, 0, 0]);
+    for value in xyz {
+        tag.extend(fixed(value).to_be_bytes());
+    }
+    tag
+}
+
+fn para_gamma(gamma: f64) -> Vec<u8> {
+    let mut tag = Vec::new();
+    tag.extend(b"para");
+    tag.extend([0, 0, 0, 0]);
+    tag.extend(0_u16.to_be_bytes());
+    tag.extend(0_u16.to_be_bytes());
+    tag.extend(fixed(gamma).to_be_bytes());
+    tag
+}
+
+fn curv_ramp() -> Vec<u8> {
+    let mut tag = Vec::new();
+    tag.extend(b"curv");
+    tag.extend([0, 0, 0, 0]);
+    tag.extend(2_u32.to_be_bytes());
+    tag.extend(0_u16.to_be_bytes());
+    tag.extend(u16::MAX.to_be_bytes());
+    tag
+}
+
+fn curv_identity() -> Vec<u8> {
+    let mut tag = Vec::new();
+    tag.extend(b"curv");
+    tag.extend([0, 0, 0, 0]);
+    tag.extend(0_u32.to_be_bytes());
+    tag
+}
+
+fn gamma_tag(gamma_8_8: u16) -> Vec<u8> {
+    let mut tag = Vec::new();
+    tag.extend(b"curv");
+    tag.extend([0, 0, 0, 0]);
+    tag.extend(1_u32.to_be_bytes());
+    tag.extend(gamma_8_8.to_be_bytes());
+    tag
+}
+
+fn fixed(value: f64) -> i32 {
+    value.mul_add(65_536.0, 0.0).round() as i32
+}
+
+fn write_i32(bytes: &mut [u8], at: usize, value: i32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_be_bytes());
 }

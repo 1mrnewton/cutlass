@@ -12,6 +12,7 @@ mod backup;
 mod folder;
 mod hold;
 mod json;
+mod projects;
 mod repair;
 mod upgrade;
 
@@ -26,6 +27,7 @@ pub use folder::{
 };
 pub use hold::{Hold, hold};
 pub use json::{parse_draft, write_draft};
+pub use projects::{ListedProject, create_project, list_projects};
 pub use repair::{RepairNote, repair};
 pub use upgrade::{BUILD, Protocol, upgrade};
 

@@ -6,7 +6,7 @@ use crate::fragment::{self, SidxRef, Tfra};
 use crate::heif;
 use crate::index::Sample;
 use crate::legacy::{Demux, Error, Packet, SeekAt, Source, Stream, Timescale};
-use crate::limits::{MAX_METADATA_BYTES, MAX_SAMPLES};
+use crate::limits::{MAX_ATOMS, MAX_METADATA_BYTES, MAX_SAMPLES};
 use crate::movie::{self, BuiltTrack, Trex};
 use crate::parse::{self, file_header};
 use std::io::{Read, Seek, SeekFrom};
@@ -20,10 +20,13 @@ struct Runtime {
 }
 
 struct Fragments {
+    first: u64,
     next: u64,
     trex: Vec<Trex>,
     sidx: Vec<SidxRef>,
     mfra: Option<Vec<Tfra>>,
+    /// Built by walking every `moof` when the file has neither `sidx` nor `mfra`.
+    walked: Option<Vec<Tfra>>,
     exhausted: bool,
 }
 
@@ -112,23 +115,36 @@ impl IsoBmff {
             }
             let fragments = if built.fragmented {
                 Some(Fragments {
+                    first: first_moof.unwrap_or(at),
                     next: first_moof.unwrap_or(at),
                     trex: built.trex,
                     sidx,
                     mfra: None,
+                    walked: None,
                     exhausted: first_moof.is_none(),
                 })
             } else {
                 None
             };
-            return Ok(from_tracks(
+            let mut opened = from_tracks(
                 Timescale(built.timescale),
                 brands,
                 built.tracks,
                 media,
                 fragments,
                 file_len,
-            ));
+            );
+            // A finished fragment movie often leaves `mvhd` and `mdhd` at zero.
+            // The sample time lives in the fragments.
+            if opened.fragments.is_some()
+                && opened
+                    .streams
+                    .iter()
+                    .any(|stream| stream.params.duration_ticks == 0)
+            {
+                opened.measure_fragments(source)?;
+            }
+            return Ok(opened);
         }
 
         if let Some((origin, payload)) = meta {
@@ -289,7 +305,7 @@ impl<R: Read + Seek> IsoBmffFile<R> {
     }
 }
 
-impl<R: Read + Seek> cutlass_container::Demux for IsoBmffFile<R> {
+impl<R: Read + Seek + Send> cutlass_container::Demux for IsoBmffFile<R> {
     fn family(&self) -> cutlass_codec::ContainerId {
         cutlass_codec::ContainerId::Isobmff
     }
@@ -549,22 +565,24 @@ impl IsoBmff {
     ) -> Result<u64, Error> {
         let time = u64::try_from(ticks.max(0)).unwrap_or(0);
         if let Some(hit) = self.fragments.as_ref().and_then(|fragments| {
-            fragments
-                .sidx
-                .iter()
-                .filter(|row| row.track_id == track_id && row.time <= time)
-                .max_by_key(|row| row.time)
-                .map(|row| row.offset)
+            covering_offset(
+                fragments.sidx.iter().filter(|row| row.track_id == track_id),
+                time,
+                |row| row.time,
+                |row| row.offset,
+            )
         }) {
             return Ok(hit);
         }
         self.ensure_mfra(source)?;
         if let Some(hit) = self.fragments.as_ref().and_then(|fragments| {
             fragments.mfra.as_ref().and_then(|rows| {
-                rows.iter()
-                    .filter(|row| row.track_id == track_id && row.time <= time)
-                    .max_by_key(|row| row.time)
-                    .map(|row| row.moof_offset)
+                covering_offset(
+                    rows.iter().filter(|row| row.track_id == track_id),
+                    time,
+                    |row| row.time,
+                    |row| row.moof_offset,
+                )
             })
         }) {
             return Ok(hit);
@@ -574,14 +592,32 @@ impl IsoBmff {
                 || fragments.mfra.as_ref().is_some_and(|rows| !rows.is_empty())
         });
         if has_index {
-            Err(Error::SeekLimited {
+            return Err(Error::SeekLimited {
                 reason: "fragment index does not cover that time",
-            })
-        } else {
-            Err(Error::SeekLimited {
-                reason: "fragmented file has no sidx or mfra",
-            })
+            });
         }
+        if self
+            .fragments
+            .as_ref()
+            .is_some_and(|fragments| fragments.walked.is_none())
+        {
+            self.walk_fragments(source)?;
+        }
+        self.fragments
+            .as_ref()
+            .and_then(|fragments| {
+                fragments.walked.as_ref().and_then(|rows| {
+                    covering_offset(
+                        rows.iter().filter(|row| row.track_id == track_id),
+                        time,
+                        |row| row.time,
+                        |row| row.moof_offset,
+                    )
+                })
+            })
+            .ok_or(Error::SeekLimited {
+                reason: "fragmented file has no sync sample for that track",
+            })
     }
 
     fn ensure_mfra(&mut self, source: &mut dyn Source) -> Result<(), Error> {
@@ -678,6 +714,94 @@ impl IsoBmff {
             track.next_dts = next_dts;
         }
         restore_fragment_cursor(&mut self.fragments, saved.next);
+    }
+
+    /// The header duration is unknown. Keep the end of each track's last sample.
+    /// The fragment cursor stays where reading left it.
+    fn measure_fragments(&mut self, source: &mut dyn Source) -> Result<(), Error> {
+        let ends = self.walk_fragments(source)?;
+        for stream in &mut self.streams {
+            if stream.params.duration_ticks != 0 {
+                continue;
+            }
+            let Some((_, end)) = ends.iter().find(|(id, _)| *id == stream.params.track_id) else {
+                continue;
+            };
+            if *end > 0 {
+                stream.params.duration_ticks = u64::try_from(*end).unwrap_or(u64::MAX);
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk each top-level `moof` once, reading box headers and skipping `mdat`.
+    /// Each fragment with a sync sample becomes a seek row at that sample's
+    /// earliest presentation time. Returns the end of each track's last sample.
+    fn walk_fragments(&mut self, source: &mut dyn Source) -> Result<Vec<(u32, i64)>, Error> {
+        let Some((mut at, trex)) = self
+            .fragments
+            .as_ref()
+            .map(|fragments| (fragments.first, fragments.trex.clone()))
+        else {
+            return Ok(Vec::new());
+        };
+        let mut ends: Vec<(u32, i64)> = self
+            .streams
+            .iter()
+            .map(|stream| (stream.params.track_id, 0))
+            .collect();
+        let mut rows = Vec::new();
+        let mut seen = 0u32;
+        while at < self.file_len {
+            seen = seen.saturating_add(1);
+            if seen > MAX_ATOMS {
+                return Err(Error::Limit {
+                    what: "boxes",
+                    value: u64::from(seen),
+                });
+            }
+            let Some(header) = file_header(source, at, self.file_len)? else {
+                break;
+            };
+            if header.kind == *b"mfra" {
+                break;
+            }
+            if header.kind == *b"moof" {
+                let payload = parse::load_payload(source, &header, MAX_METADATA_BYTES)?;
+                let mut budget = 0u32;
+                let groups =
+                    fragment::parse_moof(&payload, header.start, &trex, &ends, &mut budget)?;
+                for group in groups {
+                    if let Some(time) = group
+                        .samples
+                        .iter()
+                        .filter(|sample| sample.keyframe)
+                        .map(|sample| sample.pts)
+                        .min()
+                    {
+                        rows.push(Tfra {
+                            track_id: group.track_id,
+                            time: u64::try_from(time).unwrap_or(0),
+                            moof_offset: header.start,
+                        });
+                    }
+                    let Some(last) = group.samples.last() else {
+                        continue;
+                    };
+                    let end = last.dts.saturating_add(i64::from(last.duration));
+                    if let Some(slot) = ends.iter_mut().find(|(id, _)| *id == group.track_id)
+                        && end > slot.1
+                    {
+                        slot.1 = end;
+                    }
+                }
+            }
+            at = header.end;
+        }
+        if let Some(fragments) = &mut self.fragments {
+            fragments.walked = Some(rows);
+        }
+        Ok(ends)
     }
 
     fn load_fragment(&mut self, source: &mut dyn Source, append: bool) -> Result<bool, Error> {
@@ -791,6 +915,30 @@ struct Landing {
     visited: u32,
 }
 
+/// The latest index row at or before `time`. A time before every row still
+/// uses the first row, so the start of a file whose first sample is not at
+/// zero can be opened.
+fn covering_offset<T>(
+    rows: impl Iterator<Item = T>,
+    time: u64,
+    row_time: impl Fn(&T) -> u64,
+    row_offset: impl Fn(&T) -> u64,
+) -> Option<u64> {
+    let mut earliest: Option<(u64, u64)> = None;
+    let mut covered: Option<(u64, u64)> = None;
+    for row in rows {
+        let at = row_time(&row);
+        let offset = row_offset(&row);
+        if earliest.is_none_or(|(earliest_time, _)| at < earliest_time) {
+            earliest = Some((at, offset));
+        }
+        if at <= time && covered.is_none_or(|(covered_time, _)| at >= covered_time) {
+            covered = Some((at, offset));
+        }
+    }
+    covered.or(earliest).map(|(_, offset)| offset)
+}
+
 fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     let Some(samples) = samples else {
         return Err(Error::SeekLimited {
@@ -840,6 +988,16 @@ fn locate(samples: Option<&Vec<Sample>>, ticks: i64) -> Result<Landing, Error> {
     while cursor > 0 && samples.get(cursor).is_some_and(|sample| !sample.keyframe) {
         visited = visited.saturating_add(1);
         cursor -= 1;
+    }
+    // `ticks` is a presentation time. With reordered pictures a sync sample
+    // decodes before it displays, so the one found by decode time can still
+    // display after `ticks`. Step back to a sync sample that does not.
+    while cursor > 0 && samples.get(cursor).is_some_and(|sample| sample.pts > ticks) {
+        let Some(earlier) = samples[..cursor].iter().rposition(|sample| sample.keyframe) else {
+            break;
+        };
+        visited = visited.saturating_add(u32::try_from(cursor - earlier).unwrap_or(u32::MAX));
+        cursor = earlier;
     }
     let Some(sample) = samples.get(cursor) else {
         return Err(Error::Missing { what: "sample" });
@@ -903,4 +1061,26 @@ fn scale_ticks(ticks: i64, from: u32, to: u32) -> i64 {
     let scaled = u128::from(ticks.unsigned_abs()) * u128::from(to) / u128::from(from);
     let value = i64::try_from(scaled).unwrap_or(i64::MAX);
     if negative { -value } else { value }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::covering_offset;
+
+    #[test]
+    fn a_time_before_the_first_index_row_uses_that_row() {
+        let rows = [(1u32, 1_001u64, 10u64), (1, 5_000, 20), (2, 0, 30)];
+        let video = |time| {
+            covering_offset(
+                rows.iter().copied().filter(|row| row.0 == 1),
+                time,
+                |row| row.1,
+                |row| row.2,
+            )
+        };
+        assert_eq!(video(0), Some(10));
+        assert_eq!(video(4_000), Some(10));
+        assert_eq!(video(5_000), Some(20));
+        assert_eq!(video(9_000), Some(20));
+    }
 }

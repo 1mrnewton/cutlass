@@ -3,14 +3,18 @@
 //! The factory tries registrations in order. The shell registers the platform
 //! decoder for this operating system first, then the Rust decoder for the
 //! same id. Probe reads stream parameters and timestamps. It does not decode.
+//! [`Media::decode_at`] seeks a picture. [`Media::audio_from`] seeks a PCM window.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use cutlass_codec::access::{ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, Transfer};
+use cutlass_codec::access::{
+    ChannelLayout, CodecParams, ColorPrimaries, PixelFormat, SampleFormat, Transfer,
+};
 use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
-use cutlass_container::{Demux, OpenError, ProbeResult, ReadError, SeekTo};
+use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
     PictureSamples, StillImage,
@@ -18,10 +22,30 @@ use cutlass_decode::{
 use cutlass_model::{Micros, TimeRange};
 
 use crate::error::EngineError;
-use crate::map::{micros_to_ticks, ticks_to_micros};
+use crate::map::{micros_to_ticks, micros_to_ticks_floor, ticks_to_micros};
 
 const HEADER_LIMIT: usize = 4096;
+/// Picture or audio packets one seek may decode before giving up.
 const DECODE_PACKETS: u32 = 64;
+/// Pictures one forward scene scan will decode. A longer file is read from its start.
+const MAX_SCAN_PICTURES: u32 = 4_000;
+/// How far past the last picture [`Media::decode_at`] keeps decoding forward
+/// instead of seeking. A longer jump seeks to the keyframe before the time.
+const FORWARD_REACH: i64 = 2_000_000;
+/// How far before the asked time an audio seek lands, so the decoder is
+/// primed by the time the asked sample comes out.
+const AUDIO_PREROLL: i64 = 100_000;
+/// Pictures one [`Media::decode_at`] may fail to decode and pass over. After
+/// a seek to an open-GOP keyframe, the leading pictures reference frames
+/// before the seek and cannot be decoded.
+const SKIPPED_PICTURES: u32 = 16;
+/// Samples from another stream that may sit ahead of the wanted one.
+/// A movie can store an audio chunk before the next picture.
+const OTHER_STREAM_PACKETS: u32 = 4_096;
+/// PCM frames one [`Media::audio_from`] call will decode.
+pub(crate) const MAX_AUDIO_FRAMES: u32 = 480_000;
+/// Full-scale positive [`i16`]. The mix uses the same divisor.
+const I16_FULL: f32 = 32_767.0;
 
 /// One stream, still in the file's own parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +67,9 @@ pub struct MediaInfo {
     pub duration: Option<Micros>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Clockwise quarter turn of the picture stream. [`DisplayQuarter::Zero`] when
+    /// the file has no picture, or the matrix is not a quarter turn.
+    pub display: DisplayQuarter,
     pub streams: Vec<StreamReport>,
 }
 
@@ -81,6 +108,30 @@ impl DecodedFrame {
             Self::Still(image) => image.height,
         }
     }
+
+    /// The memory the picture holds: its bytes or samples, or for a platform
+    /// buffer the 4:2:0 picture it stands for.
+    #[must_use]
+    pub fn byte_size(&self) -> usize {
+        match self {
+            Self::Coded { bytes, .. } => bytes.len(),
+            Self::Platform { width, height, .. } => *width as usize * *height as usize * 3 / 2,
+            Self::Still(image) => image.samples.len() * 2,
+        }
+    }
+}
+
+/// What a steered decode does after each picture. See
+/// [`Media::decode_steered`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Steer {
+    /// Keep going to the target.
+    Go,
+    /// Go to this time instead. A time before the picture just decoded
+    /// cannot be reached going forward, so it stops the decode.
+    Retarget(Micros),
+    /// Stop here.
+    Stop,
 }
 
 /// One picture and the source span it covers.
@@ -91,6 +142,7 @@ pub struct HeldFrame {
     pub frame: DecodedFrame,
 }
 
+#[derive(Clone)]
 struct Family {
     probe: fn(&[u8]) -> ProbeResult,
     open: fn(&Path) -> Result<Box<dyn Demux>, OpenError>,
@@ -100,9 +152,55 @@ struct Pipe {
     track: u32,
     timescale: Timescale,
     decoder: Box<dyn Decoder>,
+    /// Pictures the decoder returned that a pull has not handed out yet.
+    ready: VecDeque<Ready>,
+    /// The stream ended and the decoder was drained.
+    drained: bool,
+    /// The last picture packet's duration, for pictures a drain releases.
+    last_duration: i64,
+    /// Audio buffers a packet returned after the first, not handed out yet.
+    heard: VecDeque<AudioOutput>,
+    /// Stream ticks before the stream's time zero, from its edit list.
+    lead: i64,
+}
+
+impl Pipe {
+    fn new(track: u32, timescale: Timescale, decoder: Box<dyn Decoder>, lead: i64) -> Self {
+        Self {
+            track,
+            timescale,
+            decoder,
+            ready: VecDeque::new(),
+            drained: false,
+            last_duration: 0,
+            heard: VecDeque::new(),
+            lead,
+        }
+    }
+
+    /// `lead` in `timescale` ticks per second.
+    fn lead_in(&self, timescale: u32) -> i64 {
+        rescale(self.lead, self.timescale.ticks_per_second(), timescale)
+    }
+
+    /// Drop references, held pictures, and the end of stream before a seek.
+    fn reset(&mut self) {
+        self.decoder.reset();
+        self.ready.clear();
+        self.heard.clear();
+        self.drained = false;
+    }
+}
+
+/// One decoded picture and the stream ticks it starts at, when known.
+struct Ready {
+    frame: DecodedFrame,
+    pts: Option<i64>,
+    duration: i64,
 }
 
 /// Registered containers and the decoder factory.
+#[derive(Clone)]
 pub struct ReaderFactory {
     families: Vec<Family>,
     decoders: DecodeFactory,
@@ -139,6 +237,15 @@ impl ReaderFactory {
         Ok(info)
     }
 
+    /// Whether `path` has an audio stream. This reads the header and does not decode.
+    pub fn carries_sound(&self, path: &Path) -> Result<bool, EngineError> {
+        let info = self.probe(path)?;
+        Ok(info
+            .streams
+            .iter()
+            .any(|stream| stream.sample_rate.is_some_and(|rate| rate > 0)))
+    }
+
     /// Opens the container and a decoder for each picture or audio stream.
     pub fn open(&self, path: &Path) -> Result<Media, EngineError> {
         let info = self.probe(path)?;
@@ -149,6 +256,8 @@ impl ReaderFactory {
             picture,
             audio,
             info,
+            cursor: None,
+            run: None,
         })
     }
 
@@ -171,6 +280,45 @@ pub struct Media {
     picture: Option<Pipe>,
     audio: Option<Pipe>,
     info: MediaInfo,
+    /// Where the last [`Media::decode_at`] left the picture stream.
+    cursor: Option<Cursor>,
+    /// Decoded audio past the last [`Media::audio_from`], for the next one.
+    run: Option<AudioRun>,
+}
+
+/// Decoded audio the next [`Media::audio_from`] continues from.
+struct AudioRun {
+    /// Sample index, at `rate`, of the first held frame.
+    next: i64,
+    rate: u32,
+    layout: ChannelLayout,
+    /// Interleaved frames from `next` on.
+    samples: Vec<f32>,
+}
+
+impl AudioRun {
+    fn frames(&self) -> usize {
+        self.samples.len() / self.layout.len().max(1)
+    }
+
+    /// Drop up to `frames` leading frames.
+    fn skip(&mut self, frames: i64) {
+        let frames = usize::try_from(frames.max(0))
+            .unwrap_or(usize::MAX)
+            .min(self.frames());
+        self.samples.drain(..frames * self.layout.len());
+        self.next = self
+            .next
+            .saturating_add(i64::try_from(frames).unwrap_or(i64::MAX));
+    }
+}
+
+/// The picture stream after a [`Media::decode_at`]. A time inside `last`
+/// returns it again. A later time continues from here without a seek.
+struct Cursor {
+    last: HeldFrame,
+    /// A picture decoded past `last`, handed out first next time.
+    ahead: Option<HeldFrame>,
 }
 
 impl Media {
@@ -180,22 +328,174 @@ impl Media {
     }
 
     /// The picture that covers `source`, seeking in the file timescale when the stream has a clock.
+    ///
+    /// A time at or past the last picture, and within [`FORWARD_REACH`] of it,
+    /// decodes forward from where the stream is. Any other time seeks to the
+    /// keyframe before it. Either way pictures are decoded until one covers
+    /// `source`. A time before the first picture is that first picture. A time
+    /// past the last one is the last one.
     pub fn decode_at(
         &mut self,
         source: Micros,
         cover: &TimeRange,
     ) -> Result<HeldFrame, EngineError> {
+        self.decode_steered(source, cover, &mut |_| Steer::Go)
+    }
+
+    /// [`Self::decode_at`], asking `steer` after each picture decoded on the
+    /// way. It can move the target to a later time, which the decode then
+    /// stops at, or stop the decode. A stopped decode is
+    /// [`EngineError::Interrupted`], and the stream stays where it got to, so
+    /// a later time continues from there without a seek.
+    pub fn decode_steered(
+        &mut self,
+        mut source: Micros,
+        cover: &TimeRange,
+        steer: &mut dyn FnMut(&HeldFrame) -> Steer,
+    ) -> Result<HeldFrame, EngineError> {
+        if let Some(cursor) = &self.cursor
+            && cursor.last.start.0 <= source.0
+            && source.0 < cursor.last.end.0
+        {
+            return Ok(cursor.last.clone());
+        }
+        let cursor = self.cursor.take().filter(|cursor| {
+            cursor.last.end.0 <= source.0 && source.0 - cursor.last.end.0 <= FORWARD_REACH
+        });
+        // Resuming, the last picture still shows until the next one starts.
+        let (mut ahead, mut previous) = match cursor {
+            Some(cursor) => (cursor.ahead, Some(cursor.last)),
+            None => {
+                let (track, timescale) = {
+                    let Some(pipe) = self.picture.as_mut() else {
+                        return Err(EngineError::NoDecoder {
+                            codec: "picture".to_owned(),
+                        });
+                    };
+                    pipe.reset();
+                    (pipe.track, pipe.timescale)
+                };
+                self.seek_picture(source, track, timescale)?;
+                (None, None)
+            }
+        };
+        let mut skipped = 0_u32;
+        for _ in 0..MAX_SCAN_PICTURES {
+            let next = match ahead.take() {
+                Some(held) => Some(held),
+                None => match self.pull_picture(cover) {
+                    Ok(next) => next,
+                    Err(EngineError::Codec(CodecError::Malformed { .. }))
+                        if skipped < SKIPPED_PICTURES =>
+                    {
+                        skipped = skipped.saturating_add(1);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                },
+            };
+            let Some(held) = next else {
+                let last = previous.ok_or(EngineError::NotReady)?;
+                return Ok(self.keep(last, None));
+            };
+            match steer(&held) {
+                Steer::Go => {}
+                Steer::Retarget(later) if later.0 >= held.start.0 => source = later,
+                Steer::Retarget(_) | Steer::Stop => {
+                    self.keep(held, None);
+                    return Err(EngineError::Interrupted);
+                }
+            }
+            if held.start.0 > source.0 {
+                return Ok(match previous {
+                    Some(mut previous) => {
+                        // A gap before the next picture still shows this one.
+                        previous.end = Micros(previous.end.0.max(held.start.0));
+                        self.keep(previous, Some(held))
+                    }
+                    None => self.keep(held, None),
+                });
+            }
+            if source.0 < held.end.0 {
+                return Ok(self.keep(held, None));
+            }
+            previous = Some(held);
+        }
+        Err(EngineError::DecodeLimit)
+    }
+
+    /// Remember `last` for the next [`Media::decode_at`] and return it.
+    fn keep(&mut self, last: HeldFrame, ahead: Option<HeldFrame>) -> HeldFrame {
+        let returned = last.clone();
+        self.cursor = Some(Cursor { last, ahead });
+        returned
+    }
+
+    /// Pictures from `range`, at least `gap` microseconds apart, at most `limit`.
+    ///
+    /// One seek starts the read. Later pictures stay in file order. The stream
+    /// ending is an empty or short list, not an error.
+    pub fn pictures_across(
+        &mut self,
+        range: &TimeRange,
+        gap: i64,
+        limit: usize,
+    ) -> Result<Vec<HeldFrame>, EngineError> {
+        self.cursor = None;
+        if limit == 0 || range.duration.0 <= 0 {
+            return Err(EngineError::Window);
+        }
         let (track, timescale) = {
             let Some(pipe) = self.picture.as_mut() else {
                 return Err(EngineError::NoDecoder {
                     codec: "picture".to_owned(),
                 });
             };
-            pipe.decoder.reset();
+            pipe.reset();
             (pipe.track, pipe.timescale)
         };
+        self.seek_picture(range.start, track, timescale)?;
+        let end = range.start.0.saturating_add(range.duration.0);
+        let mut kept = Vec::new();
+        let mut last = None;
+        let mut decoded = 0_u32;
+        while kept.len() < limit {
+            if decoded == MAX_SCAN_PICTURES {
+                break;
+            }
+            decoded = decoded.saturating_add(1);
+            let held = match self.pull_picture(range) {
+                Ok(Some(held)) => held,
+                Ok(None) => break,
+                Err(_) if !kept.is_empty() => break,
+                Err(error) => return Err(error),
+            };
+            if held.start.0 >= end {
+                break;
+            }
+            if held.end.0 <= range.start.0 {
+                continue;
+            }
+            if last.is_some_and(|previous: i64| held.start.0 < previous.saturating_add(gap.max(0)))
+            {
+                continue;
+            }
+            last = Some(held.start.0);
+            kept.push(held);
+        }
+        Ok(kept)
+    }
+
+    fn seek_picture(
+        &mut self,
+        source: Micros,
+        track: u32,
+        timescale: Timescale,
+    ) -> Result<(), EngineError> {
+        self.run = None;
         if timescale.is_clock() {
-            let ticks = micros_to_ticks(source, timescale)?;
+            let lead = self.picture.as_ref().map_or(0, |pipe| pipe.lead);
+            let ticks = micros_to_ticks_floor(source, timescale)?.saturating_add(lead);
             self.demux
                 .seek(SeekTo {
                     track,
@@ -210,58 +510,351 @@ impl Media {
                 end: None,
             });
         }
-        let mut left = DECODE_PACKETS;
+        Ok(())
+    }
+
+    /// The next picture in display order.
+    ///
+    /// A push can return several pictures. The ones after the first wait in
+    /// the pipe for the next pull. At the end of the stream the decoder is
+    /// drained once, so a picture still held for reorder is not lost. A
+    /// picture covers the span from its own timestamp, not from the packet
+    /// that released it.
+    fn pull_picture(&mut self, cover: &TimeRange) -> Result<Option<HeldFrame>, EngineError> {
+        let mut pictures = 0_u32;
+        let mut others = 0_u32;
         loop {
-            if left == 0 {
+            let Some(pipe) = self.picture.as_mut() else {
+                return Err(EngineError::NoDecoder {
+                    codec: "picture".to_owned(),
+                });
+            };
+            let (track, timescale, lead) = (pipe.track, pipe.timescale, pipe.lead);
+            if let Some(ready) = pipe.ready.pop_front() {
+                let pts = ready.pts.map(|pts| pts.saturating_sub(lead));
+                let (start, end) = coverage(pts, ready.duration, timescale, cover)?;
+                return Ok(Some(HeldFrame {
+                    start,
+                    end,
+                    frame: ready.frame,
+                }));
+            }
+            if pictures == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
             }
-            left -= 1;
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
-                return Err(EngineError::NotReady);
+                let Some(pipe) = self.picture.as_mut() else {
+                    return Ok(None);
+                };
+                if pipe.drained {
+                    return Ok(None);
+                }
+                pipe.drained = true;
+                let outputs = match pipe.decoder.drain() {
+                    Ok(outputs) => outputs,
+                    Err(CodecError::Unsupported { .. }) => Vec::new(),
+                    Err(error) => return Err(EngineError::Codec(error)),
+                };
+                let duration = pipe.last_duration;
+                for (frame, pts) in outputs
+                    .into_iter()
+                    .filter_map(|output| coded_output(output, timescale))
+                {
+                    pipe.ready.push_back(Ready {
+                        frame,
+                        pts,
+                        duration,
+                    });
+                }
+                continue;
             };
             if packet.stream() != track {
+                if others == OTHER_STREAM_PACKETS {
+                    return Err(EngineError::DecodeLimit);
+                }
+                others = others.saturating_add(1);
                 continue;
             }
+            pictures = pictures.saturating_add(1);
             let access = access_packet(&packet);
             let Some(pipe) = self.picture.as_mut() else {
                 return Err(EngineError::NoDecoder {
                     codec: "picture".to_owned(),
                 });
             };
-            let Some(frame) = push_picture(pipe.decoder.as_mut(), &access)? else {
-                continue;
-            };
-            let (start, end) = coverage(&packet, timescale, cover)?;
-            return Ok(HeldFrame { start, end, frame });
+            let packet_pts = packet.timestamp().presentation_or_decode();
+            let duration = packet.timestamp().duration().unwrap_or(0);
+            pipe.last_duration = duration;
+            for (frame, pts) in push_picture(pipe.decoder.as_mut(), &access, timescale)? {
+                pipe.ready.push_back(Ready {
+                    frame,
+                    pts: pts.or(packet_pts),
+                    duration,
+                });
+            }
         }
+    }
+
+    /// PCM covering `source`, at the file rate, for at most `frames` sample frames.
+    ///
+    /// The mix resamples and stretches this buffer. Integer PCM is full-scale
+    /// `f32` before it returns. A file with no audio stream is [`EngineError::NotMedia`].
+    ///
+    /// A call that starts where the last one ended continues the decoded
+    /// stream: no seek, no decoder reset, so consecutive windows join without
+    /// a seam. Any other time seeks [`AUDIO_PREROLL`] early and trims to the
+    /// asked sample. Audio before the stream's first sample is silence.
+    pub fn audio_from(
+        &mut self,
+        source: Micros,
+        frames: u32,
+    ) -> Result<cutlass_codec::access::Pcm, EngineError> {
+        if frames == 0 || frames > MAX_AUDIO_FRAMES {
+            return Err(EngineError::Window);
+        }
+        self.cursor = None;
+        let (track, timescale, lead) = {
+            let Some(pipe) = self.audio.as_ref() else {
+                return Err(EngineError::NotMedia);
+            };
+            (pipe.track, pipe.timescale, pipe.lead)
+        };
+        let rate = self
+            .info
+            .streams
+            .iter()
+            .find(|stream| stream.track == track)
+            .and_then(|stream| stream.sample_rate)
+            .filter(|rate| *rate > 0);
+        let Some(rate) = rate.filter(|_| timescale.is_clock()) else {
+            return self.audio_from_start(source, frames);
+        };
+        let mut rate = self.run.as_ref().map_or(rate, |run| run.rate);
+        let mut want = sample_at(source, rate);
+        let continues = self
+            .run
+            .as_ref()
+            .is_some_and(|run| (run.next - want).abs() <= 1);
+        if continues {
+            want = self.run.as_ref().map_or(want, |run| run.next);
+        } else {
+            self.run = None;
+            if let Some(pipe) = self.audio.as_mut() {
+                pipe.reset();
+            }
+            let early = Micros(source.0.saturating_sub(AUDIO_PREROLL).max(0));
+            let ticks = micros_to_ticks_floor(early, timescale)?.saturating_add(lead);
+            self.demux
+                .seek(SeekTo {
+                    track,
+                    time: ticks,
+                    end: None,
+                })
+                .map_err(from_read)?;
+        }
+        let needed = i64::from(frames);
+        let mut empty = 0_u32;
+        loop {
+            if let Some(run) = self.run.as_mut() {
+                if run.next < want {
+                    run.skip(want - run.next);
+                }
+                let end = run.next + i64::try_from(run.frames()).unwrap_or(i64::MAX);
+                if run.next <= want && end >= want + needed {
+                    break;
+                }
+            }
+            let Some(output) = self.next_audio()? else {
+                break;
+            };
+            let lead = self
+                .audio
+                .as_ref()
+                .map_or(0, |pipe| pipe.lead_in(output.timescale));
+            let start = output
+                .pts
+                .saturating_sub(lead)
+                .checked_mul(i64::from(output.pcm.rate))
+                .and_then(|value| value.checked_div(i64::from(output.timescale.max(1))))
+                .unwrap_or(0)
+                .saturating_add(i64::from(output.skip_leading));
+            let pcm = audible(output)?.pcm;
+            if pcm.rate == 0 {
+                return Err(EngineError::NoClock);
+            }
+            let floats = unit_samples(&pcm)?;
+            if floats.is_empty() {
+                empty = empty.saturating_add(1);
+                if empty == 8 {
+                    break;
+                }
+                continue;
+            }
+            match self.run.as_mut() {
+                Some(run) => {
+                    if run.rate != pcm.rate || run.layout != pcm.layout {
+                        return Err(EngineError::Layout);
+                    }
+                    run.samples.extend_from_slice(&floats);
+                }
+                None => {
+                    if pcm.rate != rate {
+                        // The decoder runs at another rate than the stream
+                        // names, as HE-AAC does.
+                        rate = pcm.rate;
+                        want = sample_at(source, rate);
+                    }
+                    self.run = Some(AudioRun {
+                        next: start,
+                        rate,
+                        layout: pcm.layout.clone(),
+                        samples: floats,
+                    });
+                }
+            }
+        }
+        let Some(run) = self.run.as_mut() else {
+            return Err(EngineError::NotReady);
+        };
+        let channels = run.layout.len();
+        let mut out = Vec::with_capacity(usize::try_from(frames).unwrap_or(0) * channels);
+        let silent = (run.next - want).clamp(0, needed);
+        out.resize(usize::try_from(silent).unwrap_or(0) * channels, 0.0);
+        let take = usize::try_from(needed - silent)
+            .unwrap_or(0)
+            .min(run.frames());
+        out.extend(run.samples.drain(..take * channels));
+        run.next = run.next.saturating_add(i64::try_from(take).unwrap_or(0));
+        cutlass_codec::access::Pcm::from_f32(run.rate, run.layout.clone(), out)
+            .map_err(|_| EngineError::Layout)
+    }
+
+    /// [`Self::audio_from`] for a stream with no clock or no stated rate:
+    /// seek and read from the landed packet.
+    fn audio_from_start(
+        &mut self,
+        source: Micros,
+        frames: u32,
+    ) -> Result<cutlass_codec::access::Pcm, EngineError> {
+        self.run = None;
+        let (track, timescale, lead) = {
+            let Some(pipe) = self.audio.as_mut() else {
+                return Err(EngineError::NotMedia);
+            };
+            pipe.reset();
+            (pipe.track, pipe.timescale, pipe.lead)
+        };
+        if timescale.is_clock() {
+            let ticks = micros_to_ticks(source, timescale)?.saturating_add(lead);
+            self.demux
+                .seek(SeekTo {
+                    track,
+                    time: ticks,
+                    end: None,
+                })
+                .map_err(from_read)?;
+        } else {
+            let _ = self.demux.seek(SeekTo {
+                track,
+                time: 0,
+                end: None,
+            });
+        }
+        let mut samples = Vec::new();
+        let mut rate = 0_u32;
+        let mut layout = None;
+        let mut got = 0_u32;
+        let mut empty = 0_u32;
+        while got < frames {
+            let Some(ready) = self.pull_audio()? else {
+                break;
+            };
+            let pcm = ready.pcm;
+            if pcm.rate == 0 {
+                return Err(EngineError::NoClock);
+            }
+            if rate == 0 {
+                rate = pcm.rate;
+                layout = Some(pcm.layout.clone());
+            } else if rate != pcm.rate || layout.as_ref() != Some(&pcm.layout) {
+                return Err(EngineError::Layout);
+            }
+            let floats = unit_samples(&pcm)?;
+            let channels = pcm.layout.len();
+            if channels == 0 {
+                return Err(EngineError::Layout);
+            }
+            let available = floats.len() / channels;
+            if available == 0 {
+                empty = empty.saturating_add(1);
+                if empty == 8 {
+                    break;
+                }
+                continue;
+            }
+            let need = usize::try_from(frames - got).unwrap_or(usize::MAX);
+            let take_frames = available.min(need);
+            let take = take_frames.saturating_mul(channels);
+            samples.extend_from_slice(&floats[..take]);
+            got = got.saturating_add(u32::try_from(take_frames).unwrap_or(0));
+            if take_frames < available {
+                break;
+            }
+        }
+        let Some(layout) = layout else {
+            return Err(EngineError::NotReady);
+        };
+        if rate == 0 {
+            return Err(EngineError::NoClock);
+        }
+        cutlass_codec::access::Pcm::from_f32(rate, layout, samples).map_err(|_| EngineError::Layout)
     }
 
     /// The next decoded audio buffer, or [`None`] when the stream ends or there is no audio.
     pub fn pull_audio(&mut self) -> Result<Option<PcmReady>, EngineError> {
+        self.cursor = None;
+        self.run = None;
+        self.next_audio()?.map(audible).transpose()
+    }
+
+    /// The next decoded audio buffer with its timestamp. A packet that
+    /// returns several keeps the rest for the next call.
+    fn next_audio(&mut self) -> Result<Option<AudioOutput>, EngineError> {
         let Some(track) = self.audio.as_ref().map(|pipe| pipe.track) else {
             return Ok(None);
         };
-        let mut left = DECODE_PACKETS;
+        if let Some(output) = self.audio.as_mut().and_then(|pipe| pipe.heard.pop_front()) {
+            return Ok(Some(output));
+        }
+        let mut taken = 0_u32;
+        let mut others = 0_u32;
         loop {
-            if left == 0 {
+            if taken == DECODE_PACKETS {
                 return Err(EngineError::DecodeLimit);
             }
-            left -= 1;
             let Some(packet) = self.demux.read_packet().map_err(from_read)? else {
                 return Ok(None);
             };
             if packet.stream() != track {
+                if others == OTHER_STREAM_PACKETS {
+                    return Err(EngineError::DecodeLimit);
+                }
+                others = others.saturating_add(1);
                 continue;
             }
+            taken = taken.saturating_add(1);
             let access = access_packet(&packet);
             let Some(pipe) = self.audio.as_mut() else {
                 return Ok(None);
             };
             let outputs = pipe.decoder.push(&access)?;
-            for output in outputs {
-                if let Output::Audio(audio) = output {
-                    return Ok(Some(audible(audio)?));
-                }
+            pipe.heard
+                .extend(outputs.into_iter().filter_map(|output| match output {
+                    Output::Audio(audio) => Some(audio),
+                    Output::Picture(_) => None,
+                }));
+            if let Some(output) = pipe.heard.pop_front() {
+                return Ok(Some(output));
             }
         }
     }
@@ -308,7 +901,8 @@ fn audible(output: AudioOutput) -> Result<PcmReady, EngineError> {
 }
 
 fn coverage(
-    packet: &cutlass_codec::Packet,
+    start_ticks: Option<i64>,
+    duration: i64,
     timescale: Timescale,
     cover: &TimeRange,
 ) -> Result<(Micros, Micros), EngineError> {
@@ -316,39 +910,49 @@ fn coverage(
         let end = cover.start.0.saturating_add(cover.duration.0);
         return Ok((cover.start, Micros(end)));
     }
-    let Some(start_ticks) = packet.timestamp().presentation_or_decode() else {
+    let Some(start_ticks) = start_ticks else {
         let end = cover.start.0.saturating_add(cover.duration.0);
         return Ok((cover.start, Micros(end)));
     };
     let start = ticks_to_micros(start_ticks, timescale)?;
-    let duration = packet.timestamp().duration().unwrap_or(0);
     let end_ticks = start_ticks.saturating_add(duration.max(1));
     let end = ticks_to_micros(end_ticks, timescale)?;
     Ok((start, end))
 }
 
+/// Every picture one packet released, with its own start in stream ticks.
+/// A still keeps only its first frame and takes the packet's time.
 fn push_picture(
     decoder: &mut dyn Decoder,
     packet: &AccessPacket,
-) -> Result<Option<DecodedFrame>, EngineError> {
+    timescale: Timescale,
+) -> Result<Vec<(DecodedFrame, Option<i64>)>, EngineError> {
     match decoder.decode_picture(packet) {
         Ok(frames) => Ok(frames
             .into_iter()
-            .next()
-            .map(|still| DecodedFrame::Still(Box::new(still.image)))),
+            .take(1)
+            .map(|still| (DecodedFrame::Still(Box::new(still.image)), None))
+            .collect()),
         Err(CodecError::Unsupported {
             what: "picture output",
         }) => {
             let outputs = decoder.push(packet)?;
-            Ok(outputs.into_iter().find_map(coded_output))
+            Ok(outputs
+                .into_iter()
+                .filter_map(|output| coded_output(output, timescale))
+                .collect())
         }
         Err(error) => Err(EngineError::Codec(error)),
     }
 }
 
-fn coded_output(output: Output) -> Option<DecodedFrame> {
+/// A picture and its start. The start is kept only in the stream's own ticks.
+fn coded_output(output: Output, timescale: Timescale) -> Option<(DecodedFrame, Option<i64>)> {
     match output {
-        Output::Picture(picture) => Some(frame_from_picture(picture)),
+        Output::Picture(picture) => {
+            let pts = (picture.timescale() == timescale.ticks_per_second()).then(|| picture.pts());
+            Some((frame_from_picture(picture), pts))
+        }
         Output::Audio(_) => None,
     }
 }
@@ -384,52 +988,105 @@ fn access_packet(packet: &cutlass_codec::Packet) -> AccessPacket {
     }
 }
 
+/// The first picture and the first sound stream this host can decode. A
+/// stream it cannot, such as the spatial-audio track beside the AAC one in a
+/// recent iPhone movie, is passed over. A file with nothing decodable is the
+/// first stream's error.
 fn open_pipes(
     factory: &DecodeFactory,
     demux: &dyn Demux,
 ) -> Result<(Option<Pipe>, Option<Pipe>), EngineError> {
     let mut picture = None;
     let mut audio = None;
+    let mut first_error = None;
     for stream in demux.streams() {
         let sized = stream.params().size();
         let rate = stream.params().sample_rate();
         if sized.is_none() && rate.is_none() {
             continue;
         }
-        let codec = stream.params().codec();
-        let StreamCodec::Known(id) = codec else {
-            return Err(EngineError::UnknownCodec {
-                tag: unknown_tag(codec),
-            });
+        let wanted = if sized.is_some() {
+            picture.is_none()
+        } else {
+            audio.is_none()
         };
-        let params = params_for(
-            stream.params().extradata(),
-            sized,
-            rate,
-            stream.params().channels(),
-            *id,
-        )?;
-        let decoder = match factory.open(&params) {
-            Ok(decoder) => decoder,
-            Err(CodecError::Unsupported { .. }) => {
-                return Err(EngineError::NoDecoder {
-                    codec: format!("{id:?}"),
-                });
+        if !wanted {
+            continue;
+        }
+        match open_pipe(factory, stream) {
+            Ok(pipe) if sized.is_some() => picture = Some(pipe),
+            Ok(pipe) => audio = Some(pipe),
+            Err(error) => {
+                first_error.get_or_insert(error);
             }
-            Err(error) => return Err(EngineError::Codec(error)),
-        };
-        let pipe = Pipe {
-            track: stream.id().get(),
-            timescale: stream.timescale(),
-            decoder,
-        };
-        if sized.is_some() && picture.is_none() {
-            picture = Some(pipe);
-        } else if rate.is_some() && audio.is_none() {
-            audio = Some(pipe);
         }
     }
+    if picture.is_none()
+        && audio.is_none()
+        && let Some(error) = first_error
+    {
+        return Err(error);
+    }
     Ok((picture, audio))
+}
+
+fn open_pipe(
+    factory: &DecodeFactory,
+    stream: &cutlass_container::Stream,
+) -> Result<Pipe, EngineError> {
+    let codec = stream.params().codec();
+    let StreamCodec::Known(id) = codec else {
+        return Err(EngineError::UnknownCodec {
+            tag: unknown_tag(codec),
+        });
+    };
+    let params = params_for(
+        stream.params().extradata(),
+        stream.params().size(),
+        stream.params().sample_rate(),
+        stream.params().channels(),
+        *id,
+    )?;
+    let decoder = match factory.open(&params) {
+        Ok(decoder) => decoder,
+        Err(CodecError::Unsupported { .. }) => {
+            return Err(EngineError::NoDecoder {
+                codec: format!("{id:?}"),
+            });
+        }
+        Err(error) => return Err(EngineError::Codec(error)),
+    };
+    Ok(Pipe::new(
+        stream.id().get(),
+        stream.timescale(),
+        decoder,
+        edit_lead(stream.edits()),
+    ))
+}
+
+/// `ticks` at `from` ticks per second, counted at `to`. Rounds toward zero;
+/// a value out of range is zero.
+fn rescale(ticks: i64, from: u32, to: u32) -> i64 {
+    if from == to {
+        return ticks;
+    }
+    let scaled = i128::from(ticks) * i128::from(to) / i128::from(from.max(1));
+    i64::try_from(scaled).unwrap_or(0)
+}
+
+/// Where the stream's time zero falls, in its own ticks: the first edit's
+/// media time, less the empty edits before it that delay the stream. A
+/// stream with no edits starts at tick zero. Encoders write this to hide an
+/// AAC decoder's warm-up samples or the delay B-frames add to video.
+fn edit_lead(edits: &[cutlass_container::Edit]) -> i64 {
+    let mut empty = 0_i64;
+    for edit in edits {
+        match edit.media_time() {
+            None => empty = empty.saturating_add(edit.duration()),
+            Some(media) => return media.saturating_sub(empty),
+        }
+    }
+    0
 }
 
 fn params_for(
@@ -458,8 +1115,73 @@ fn params_for(
         _ => return Err(EngineError::Layout),
     };
     let mut params = CodecParams::audio(id, rate, layout);
-    params.extra = extra.to_vec();
+    let (extra, format) = codec_extra(id, extra)?;
+    params.extra = extra;
+    if let Some(format) = format {
+        params.sample_format = Some(format);
+    }
     Ok(params)
+}
+
+/// The PCM decoder reads three layout bytes and a sample format that matches
+/// them. A WAV description is sixteen bytes: tag, width, a reserved field,
+/// block align, channel mask, integer or float, then flags. Other codecs
+/// keep the container bytes and the caller's sample format.
+fn codec_extra(id: CodecId, extra: &[u8]) -> Result<(Vec<u8>, Option<SampleFormat>), EngineError> {
+    if id != CodecId::Pcm {
+        return Ok((extra.to_vec(), None));
+    }
+    if extra.is_empty() {
+        return Ok((Vec::new(), Some(SampleFormat::F32)));
+    }
+    if extra.len() == 3 {
+        return Ok((extra.to_vec(), Some(pcm_format(extra[0])?)));
+    }
+    if extra.len() < 16 {
+        return Err(EngineError::Layout);
+    }
+    let tag = u16::from_le_bytes([extra[0], extra[1]]);
+    let bits = u16::from_le_bytes([extra[2], extra[3]]);
+    let kind = u16::from_le_bytes([extra[12], extra[13]]);
+    // Coding byte: 1 s16, 2 s24, 3 s32, 4 f32, 5 f64. Then little-endian
+    // interleaved. The container already refused a big-endian WAV.
+    let coding = match (tag, bits, kind) {
+        (0x0001, 16, 0) => 1_u8,
+        (0x0001, 24, 0) => 2,
+        (0x0001, 32, 0) => 3,
+        (0x0003, 32, 1) => 4,
+        (0x0003, 64, 1) => 5,
+        _ => return Err(EngineError::Layout),
+    };
+    Ok((vec![coding, 0, 0], Some(pcm_format(coding)?)))
+}
+
+fn pcm_format(coding: u8) -> Result<SampleFormat, EngineError> {
+    match coding {
+        1 => Ok(SampleFormat::I16),
+        2..=5 => Ok(SampleFormat::F32),
+        _ => Err(EngineError::Layout),
+    }
+}
+
+/// The sample index at `rate` nearest `time`.
+fn sample_at(time: Micros, rate: u32) -> i64 {
+    let product = i128::from(time.0) * i128::from(rate);
+    let rounded = (product + 500_000).div_euclid(1_000_000);
+    i64::try_from(rounded).unwrap_or(i64::MAX)
+}
+
+fn unit_samples(pcm: &cutlass_codec::access::Pcm) -> Result<Vec<f32>, EngineError> {
+    if let Some(samples) = pcm.as_f32() {
+        return Ok(samples.to_vec());
+    }
+    let Some(samples) = pcm.as_i16() else {
+        return Err(EngineError::Layout);
+    };
+    Ok(samples
+        .iter()
+        .map(|sample| f32::from(*sample) / I16_FULL)
+        .collect())
 }
 
 fn unknown_tag(codec: &StreamCodec) -> String {
@@ -470,11 +1192,15 @@ fn unknown_tag(codec: &StreamCodec) -> String {
 }
 
 fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
+    let mut display = None;
     let streams: Vec<StreamReport> = demux
         .streams()
         .iter()
         .map(|stream| {
             let size = stream.params().size();
+            if size.is_some() && display.is_none() {
+                display = Some(stream.display());
+            }
             StreamReport {
                 track: stream.id().get(),
                 codec: unknown_tag(stream.params().codec()),
@@ -493,6 +1219,7 @@ fn stream_info(demux: &dyn Demux, byte_size: u64) -> MediaInfo {
         duration: None,
         width: picture.and_then(|stream| stream.width),
         height: picture.and_then(|stream| stream.height),
+        display: display.unwrap_or_default(),
         streams,
     }
 }
@@ -628,6 +1355,57 @@ fn from_read(error: ReadError) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cutlass_container::Edit;
+
+    fn edit(media_time: Option<i64>, duration: i64) -> Edit {
+        Edit::try_new(media_time, duration, 1, 1).unwrap()
+    }
+
+    #[test]
+    fn the_edit_list_sets_where_a_stream_starts() {
+        assert_eq!(edit_lead(&[]), 0);
+        // An AAC track that hides 5058 warm-up frames.
+        assert_eq!(edit_lead(&[edit(Some(5_058), 1_000_000)]), 5_058);
+        // An empty edit first delays the stream.
+        assert_eq!(edit_lead(&[edit(None, 600), edit(Some(1_024), 9_000)]), 424);
+        assert_eq!(edit_lead(&[edit(None, 600), edit(Some(0), 9_000)]), -600);
+        // Only the first media edit counts.
+        assert_eq!(edit_lead(&[edit(Some(10), 5), edit(Some(99), 5)]), 10);
+        // Edits with nothing to show start at zero; huge values do not wrap.
+        assert_eq!(edit_lead(&[edit(None, 600)]), 0);
+        assert_eq!(
+            edit_lead(&[edit(None, i64::MAX), edit(Some(i64::MIN), 1)]),
+            i64::MIN
+        );
+    }
+
+    #[test]
+    fn a_lead_moves_between_timescales() {
+        assert_eq!(rescale(4_800, 48_000, 48_000), 4_800);
+        assert_eq!(rescale(4_800, 48_000, 1_000), 100);
+        assert_eq!(rescale(-4_800, 48_000, 96_000), -9_600);
+        assert_eq!(rescale(7, 0, 1), 7);
+        assert_eq!(rescale(i64::MAX, 1, u32::MAX), 0);
+    }
+
+    #[test]
+    fn a_picture_counts_the_memory_it_holds() {
+        let coded = DecodedFrame::Coded {
+            width: 4,
+            height: 2,
+            pixel: PixelFormat::Yuv420p,
+            primaries: ColorPrimaries::Bt709,
+            transfer: Transfer::Bt709,
+            bytes: vec![0; 12],
+        };
+        assert_eq!(coded.byte_size(), 12);
+        let platform = DecodedFrame::Platform {
+            width: 3840,
+            height: 2160,
+            token: 0,
+        };
+        assert_eq!(platform.byte_size(), 3840 * 2160 * 3 / 2);
+    }
 
     #[test]
     fn a_missing_file_and_an_unknown_header_are_named_errors() {

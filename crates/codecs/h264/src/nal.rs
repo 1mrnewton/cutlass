@@ -201,16 +201,23 @@ pub fn access_unit(data: &[u8], length_size: u8) -> Result<Vec<Nal>, CodecError>
             what: "empty packet",
         });
     }
-    if starts_annex_b(data) {
-        return annex_b(data);
+    // A 4-byte length in 256..=511 begins with 00 00 01, the same bytes as an
+    // Annex B start code. A length that accounts for the whole buffer wins.
+    // Annex B remains the fallback when that length does not fit.
+    if length_size != 0 {
+        match length_prefixed(data, length_size) {
+            Ok(nals) => return Ok(nals),
+            Err(error) if !starts_annex_b(data) => return Err(error),
+            Err(_) => {}
+        }
     }
-    if length_size == 0 {
+    if !starts_annex_b(data) {
         return Err(CodecError::Malformed {
             at_bit: 0,
             what: "access unit framing",
         });
     }
-    length_prefixed(data, length_size)
+    annex_b(data)
 }
 
 fn starts_annex_b(data: &[u8]) -> bool {
@@ -435,5 +442,17 @@ mod tests {
         assert_eq!(annex.len(), 1);
         assert_eq!(annex[0].kind, 7);
         assert_eq!(length[0].rbsp, annex[0].rbsp);
+    }
+
+    #[test]
+    fn a_length_of_384_is_not_an_annex_b_start() {
+        let mut payload = vec![0x21];
+        payload.resize(0x180, 0x11);
+        let mut data = 0x180_u32.to_be_bytes().to_vec();
+        data.extend(payload);
+        let nals = access_unit(&data, 4).expect("length prefix");
+        assert_eq!(nals.len(), 1);
+        assert_eq!(nals[0].kind, 1);
+        assert_eq!(nals[0].rbsp, vec![0x11; 0x17f]);
     }
 }

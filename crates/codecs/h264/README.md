@@ -2,7 +2,7 @@
 
 ## What this crate is
 
-Native safe Rust decoder and encoder for progressive 8-bit 4:2:0 H.264. The crate forbids `unsafe`. It does not link FFmpeg, a C library, or another H.264 implementation. FFmpeg is an external oracle for the tests, the example, and the bench. The example and the bench exit 0 after printing `skip: ffmpeg is not installed` when that program is absent.
+Native safe Rust decoder and encoder for progressive 8-bit 4:2:0 H.264. The crate forbids `unsafe`. It does not link FFmpeg, a C library, or another H.264 implementation. FFmpeg is an external oracle for the tests, the example, and the bench. The example and the bench exit 0 after printing `skip: ffmpeg is not installed` when that program is absent. The desktop registers this decoder after the platform decoder, and export falls back to this encoder when no platform encoder takes the picture.
 
 The support record is [STATUS.md](STATUS.md). The scope is [SCOPE.md](SCOPE.md).
 

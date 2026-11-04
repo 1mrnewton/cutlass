@@ -1,6 +1,8 @@
 //! HEIF items. A still image is one packet per item. Grid reconstruction stays
 //! with the codec; this crate returns the grid payload and the coded tiles.
 
+use cutlass_container::DisplayQuarter;
+
 use crate::index::Sample;
 use crate::legacy::{Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
 use crate::limits::{MAX_PACKET_BYTES, MAX_SAMPLES, MAX_TRACKS};
@@ -126,7 +128,9 @@ pub fn parse_meta(
                         color: None,
                     },
                     edits: Vec::new(),
+                    display: DisplayQuarter::Zero,
                 },
+                matrix: [0; 9],
                 samples: vec![sample],
                 no_sync: false,
                 self_contained: true,

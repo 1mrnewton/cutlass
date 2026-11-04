@@ -142,7 +142,8 @@ fn map_stream(movie_timescale: u32, stream: &LegacyStream) -> Result<Stream, Ope
         language(params.language),
         edits,
         Trim::default(),
-    ))
+    )
+    .with_display(stream.display))
 }
 
 fn map_edit(

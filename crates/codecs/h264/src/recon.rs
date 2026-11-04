@@ -544,24 +544,27 @@ pub fn pred16<S: Sample>(
     match mode {
         0 if above_ok => {
             for y in 0..16 {
-                out[y * 16..y * 16 + 16].copy_from_slice(&above[..16]);
+                let Some(row) = above.get(..16) else {
+                    return out;
+                };
+                out[y * 16..y * 16 + 16].copy_from_slice(row);
             }
         }
         1 if left_ok => {
             for y in 0..16 {
-                out[y * 16..y * 16 + 16].fill(left[y]);
+                out[y * 16..y * 16 + 16].fill(left.get(y).copied().unwrap_or(S::mid()));
             }
         }
         2 => {
             let value = if above_ok && left_ok {
-                let sum = above[..16].iter().map(|v| pel(*v)).sum::<i32>()
-                    + left[..16].iter().map(|v| pel(*v)).sum::<i32>();
+                let sum = above.iter().take(16).map(|v| pel(*v)).sum::<i32>()
+                    + left.iter().take(16).map(|v| pel(*v)).sum::<i32>();
                 S::clip((sum + 16) >> 5)
             } else if left_ok {
-                let sum = left[..16].iter().map(|v| pel(*v)).sum::<i32>();
+                let sum = left.iter().take(16).map(|v| pel(*v)).sum::<i32>();
                 S::clip((sum + 8) >> 4)
             } else if above_ok {
-                let sum = above[..16].iter().map(|v| pel(*v)).sum::<i32>();
+                let sum = above.iter().take(16).map(|v| pel(*v)).sum::<i32>();
                 S::clip((sum + 8) >> 4)
             } else {
                 S::mid()
@@ -1571,6 +1574,22 @@ mod tests {
         let chroma_left = [0u8; 8];
         let chroma = pred_chroma(3, &chroma_above, &chroma_left, true, true, 100);
         assert_eq!(chroma[0], 41);
+    }
+
+    #[test]
+    fn plane_uses_the_corner_in_the_outer_term() {
+        let above: Vec<u8> = (1..=16).collect();
+        let left = above.clone();
+        let luma = pred16(3, &above, &left, true, true, 0);
+        assert_eq!(luma[0], 2);
+        assert_eq!(luma[7 * 16 + 7], 16);
+
+        let chroma_above = [10u8, 20, 30, 40, 50, 60, 70, 80];
+        let chroma_left = [8u8, 16, 24, 32, 40, 48, 56, 64];
+        let chroma = pred_chroma(3, &chroma_above, &chroma_left, true, true, 0);
+        assert_eq!(chroma[0], 18);
+        assert_eq!(chroma[3 * 8 + 3], 72);
+        assert_eq!(chroma[7 * 8 + 7], 144);
     }
 
     #[test]

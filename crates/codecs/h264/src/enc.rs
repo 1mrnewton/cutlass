@@ -3094,6 +3094,60 @@ impl<'a> CabacEnc<'a> {
 #[cfg(test)]
 mod tests {
     use super::H264Encoder;
+
+    /// What export does on a host with no platform encoder: RGBA frames in
+    /// through the general factory, configuration on the first packet, and
+    /// a stream the decoder reads back.
+    #[test]
+    fn export_reaches_the_rust_encoder_through_the_general_factory() {
+        use cutlass_decode::{DecodeFactory, Decoder, Output, PictureSamples};
+        use cutlass_encode::{
+            CpuFrame, EncodeFactory, FrameInput, FrameTime, PixelFormat, SideData,
+        };
+        let mut encoders = EncodeFactory::new();
+        super::register_encoders(&mut encoders);
+        let params = CodecParams::with_format(CodecId::H264, 64, 32, PixelFormat::Rgba8);
+        let mut encoder = encoders.open(&params).expect("adapted encoder");
+        let mut packets = Vec::new();
+        for index in 0..3 {
+            let time = FrameTime::new(index, 1, 30).unwrap();
+            let white = [255_u8, 255, 255, 255].repeat(64 * 32);
+            let frame = CpuFrame::new(64, 32, PixelFormat::Rgba8, white, time).unwrap();
+            packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).unwrap());
+        }
+        packets.extend(encoder.drain().unwrap());
+        assert_eq!(packets.len(), 3);
+        let configs: Vec<_> = packets
+            .iter()
+            .flat_map(|packet| &packet.side)
+            .filter_map(|side| match side {
+                SideData::Config(config) => Some(config.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(configs.len(), 1, "one configuration, on the first packet");
+        assert!(matches!(packets[0].side.first(), Some(SideData::Config(_))));
+
+        let mut decoders = DecodeFactory::new();
+        crate::register_decoders(&mut decoders);
+        let mut read = CodecParams::video(CodecId::H264, 64, 32);
+        read.extra = configs[0].clone();
+        let mut decoder = decoders.open(&read).expect("decoder");
+        let mut pictures = Vec::new();
+        for packet in &packets {
+            pictures.extend(Decoder::push(decoder.as_mut(), packet).unwrap());
+        }
+        pictures.extend(Decoder::drain(decoder.as_mut()).unwrap());
+        assert_eq!(pictures.len(), 3);
+        let Output::Picture(picture) = &pictures[0] else {
+            panic!("audio");
+        };
+        let PictureSamples::Cpu(bytes) = picture.samples() else {
+            panic!("platform buffer");
+        };
+        // White is limited-range luma 235, give or take the quantizer.
+        assert!(bytes[..64 * 32].iter().all(|luma| luma.abs_diff(235) <= 3));
+    }
     use cutlass_decode::{CodecId, CodecParams, Packet, VideoDecoder, Yuv420p};
     use cutlass_encode::{VideoEncoder, VideoInput};
 

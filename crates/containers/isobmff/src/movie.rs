@@ -2,11 +2,16 @@
 //!
 //! Edit lists are stored on the track. They are not applied to packet timestamps.
 
+use cutlass_container::DisplayQuarter;
+
 use crate::index::{self, ChunkMap, CtsRun, Run, Sample, Sizes, Sync, Tables};
 use crate::legacy::{Edit, Error, MediaKind, Stream, StreamParams, Timescale, VideoParams};
 use crate::limits::{MAX_EDITS, MAX_SAMPLES, MAX_TABLE_ROWS, MAX_TRACKS};
 use crate::parse::{self, Reader};
 use crate::stsd::{self, SampleDesc};
+
+const FIXED_ONE: i32 = 1 << 16;
+const IDENTITY: [i32; 9] = [FIXED_ONE, 0, 0, 0, FIXED_ONE, 0, 0, 0, 1 << 30];
 
 #[derive(Clone, Copy)]
 pub struct Trex {
@@ -18,6 +23,7 @@ pub struct Trex {
 
 pub struct BuiltTrack {
     pub stream: Stream,
+    pub matrix: [i32; 9],
     pub samples: Vec<Sample>,
     pub no_sync: bool,
     pub self_contained: bool,
@@ -26,6 +32,7 @@ pub struct BuiltTrack {
 pub struct Built {
     pub timescale: u32,
     pub duration: u64,
+    pub matrix: [i32; 9],
     pub tracks: Vec<BuiltTrack>,
     pub trex: Vec<Trex>,
     pub fragmented: bool,
@@ -49,6 +56,7 @@ struct Draft {
     partial_sync: Vec<u32>,
     edits: Vec<Edit>,
     refs_in_file: Vec<bool>,
+    matrix: [i32; 9],
 }
 
 pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built, Error> {
@@ -56,6 +64,7 @@ pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built,
     let mut built = Built {
         timescale: 0,
         duration: 0,
+        matrix: IDENTITY,
         tracks: Vec::new(),
         trex: Vec::new(),
         fragmented: false,
@@ -79,6 +88,11 @@ pub fn parse_moov(payload: &[u8], budget: &mut u32, depth: u32) -> Result<Built,
             _ => {}
         }
     }
+    let movie = built.matrix;
+    for track in &mut built.tracks {
+        let combined = combine(track.matrix, movie).unwrap_or([0; 9]);
+        track.stream.display = display_quarter(combined);
+    }
     if built.timescale == 0 {
         return Err(Error::Unsupported {
             what: "movie timescale 0",
@@ -99,6 +113,10 @@ fn parse_mvhd(payload: &[u8], built: &mut Built) -> Result<(), Error> {
         reader.skip(16)?;
         built.timescale = reader.u32()?;
         built.duration = reader.u64()?;
+    }
+    if reader.remaining().len() >= 52 {
+        reader.skip(16)?;
+        built.matrix = read_matrix(&mut reader)?;
     }
     if built.timescale == 0 {
         return Err(Error::Unsupported {
@@ -153,6 +171,7 @@ fn parse_trak(payload: &[u8], budget: &mut u32, depth: u32) -> Result<BuiltTrack
         partial_sync: Vec::new(),
         edits: Vec::new(),
         refs_in_file: Vec::new(),
+        matrix: IDENTITY,
     };
     for atom in parse::atoms(payload, 0, budget)? {
         match &atom.kind {
@@ -226,7 +245,9 @@ fn parse_trak(payload: &[u8], budget: &mut u32, depth: u32) -> Result<BuiltTrack
                 color,
             },
             edits: draft.edits,
+            display: DisplayQuarter::Zero,
         },
+        matrix: draft.matrix,
         samples,
         no_sync,
         self_contained,
@@ -260,13 +281,61 @@ fn parse_tkhd(payload: &[u8], draft: &mut Draft) -> Result<(), Error> {
         reader.skip(4)?;
         let _duration = reader.u64()?;
     }
+    read_track_geometry(&mut reader, draft)
+}
+
+fn read_track_geometry(reader: &mut Reader<'_>, draft: &mut Draft) -> Result<(), Error> {
     reader.skip(16)?;
-    reader.skip(36)?;
+    draft.matrix = read_matrix(reader)?;
     let width = reader.u32()?;
     let height = reader.u32()?;
     draft.width = width >> 16;
     draft.height = height >> 16;
     Ok(())
+}
+
+fn read_matrix(reader: &mut Reader<'_>) -> Result<[i32; 9], Error> {
+    let mut matrix = [0; 9];
+    for cell in &mut matrix {
+        *cell = reader.i32()?;
+    }
+    Ok(matrix)
+}
+
+/// `track` times `movie`, in the file's fixed-point layout.
+///
+/// The first two columns are 16.16 and the last column is 2.30. A product
+/// that does not fit in `i32` is refused.
+fn combine(track: [i32; 9], movie: [i32; 9]) -> Option<[i32; 9]> {
+    let shift = [16, 16, 30];
+    let mut out = [0; 9];
+    for row in 0..3 {
+        for col in 0..3 {
+            let mut sum = 0_i64;
+            for k in 0..3 {
+                let product =
+                    i64::from(track[row * 3 + k]).checked_mul(i64::from(movie[k * 3 + col]))?;
+                sum = sum.checked_add(product >> shift[k])?;
+            }
+            out[row * 3 + col] = i32::try_from(sum).ok()?;
+        }
+    }
+    Some(out)
+}
+
+fn display_quarter(matrix: [i32; 9]) -> DisplayQuarter {
+    let (a, b, c, d) = (matrix[0], matrix[1], matrix[3], matrix[4]);
+    if a == FIXED_ONE && b == 0 && c == 0 && d == FIXED_ONE {
+        DisplayQuarter::Zero
+    } else if a == 0 && b == FIXED_ONE && c == -FIXED_ONE && d == 0 {
+        DisplayQuarter::Clockwise90
+    } else if a == -FIXED_ONE && b == 0 && c == 0 && d == -FIXED_ONE {
+        DisplayQuarter::Half
+    } else if a == 0 && b == -FIXED_ONE && c == FIXED_ONE && d == 0 {
+        DisplayQuarter::Clockwise270
+    } else {
+        DisplayQuarter::Zero
+    }
 }
 
 fn parse_edts(

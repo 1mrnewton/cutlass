@@ -30,6 +30,8 @@ pub enum EngineError {
     MissingSegment,
     /// Playback has no picture yet. The audio clock is not waiting on it.
     NotReady,
+    /// A newer request stopped a decode before it reached its picture.
+    Interrupted,
     /// `cutlass-color` cannot turn this layout into CPU pixels.
     ColorMiss { layout: String },
     /// The window size is zero or past [`crate::MAX_WINDOW`].
@@ -78,6 +80,7 @@ impl fmt::Display for EngineError {
             Self::NotMedia => formatter.write_str("text and shapes do not enter the media graph"),
             Self::MissingSegment => formatter.write_str("segment is not on the draft"),
             Self::NotReady => formatter.write_str("picture is not ready"),
+            Self::Interrupted => formatter.write_str("a newer request stopped the decode"),
             Self::ColorMiss { layout } => write!(formatter, "no color conversion for {layout}"),
             Self::Window => formatter.write_str("picture window is empty or past the limit"),
             Self::DecodeLimit => formatter.write_str("decode stopped after the packet bound"),

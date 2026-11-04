@@ -7,7 +7,10 @@ license.workspace = true
 description = "The playhead, the preview, and the audio device."
 
 [dependencies]
+cutlass-editor = { path = "../editor", version = "0.1.0" }
+cutlass-engine = { path = "../engine", version = "0.1.0" }
 cutlass-eval = { path = "../eval", version = "0.1.0" }
+cutlass-font = { path = "../font", version = "0.1.0" }
 cutlass-gpu = { path = "../gpu", version = "0.1.0" }
 cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }
@@ -15,8 +18,17 @@ cutlass-session = { path = "../session", version = "0.1.0" }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 cutlass-platform-apple = { path = "../platform-apple", version = "0.1.0" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+cutlass-platform-windows = { path = "../platform-windows", version = "0.1.0" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+cutlass-platform-android = { path = "../platform-android", version = "0.1.0" }
+
 [dev-dependencies]
+cutlass-container = { path = "../container", version = "0.1.0" }
+cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
+cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
 
 [lints]
 workspace = true

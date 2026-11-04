@@ -1,11 +1,14 @@
 //! Walk a range, encode each frame, and mux the packets.
 //!
-//! A frame is included when its start is inside the half-open range. The
-//! picture is `eval::frame`, then the export clock. Audio is the same mix
+//! A frame is included when its start is inside the half-open range. With
+//! a renderer the picture is eval's frame layers drawn on the GPU, so
+//! recipe effects are in the file; without one it is `eval::frame` on the
+//! CPU, which has no recipe effects. Then the export clock. Audio is the same mix
 //! playback uses, on the export clock, so a missing clip is an error.
 
 use std::path::{Path, PathBuf};
 
+use cutlass_codec::access::SideData;
 use cutlass_codec::{
     FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale, Timestamp,
 };
@@ -15,23 +18,32 @@ use cutlass_encode::{
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
 };
 use cutlass_eval::{
-    AudioError, ClipPcm, ClockKind, Device, EvalError, MixWindow, Snapshot, audio_slice, frame,
-    wait_export_frame,
+    AudioError, ClipPcm, ClockKind, Device, EvalError, Fonts, Frame, MixWindow, OpenClips,
+    ReaderFactory, Snapshot, audio_slice, frame_in, layers_in, wait_export_frame,
 };
+use cutlass_gpu::Extent;
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
+use cutlass_render::{RenderError, Renderer, frame_layers};
 
-use crate::config::{AudioExport, ExportError, ExportRequest, output_size, validate};
+use crate::config::{AudioExport, ExportError, ExportRequest, coded_size, output_size, validate};
 use crate::sidecars::{file_name, sidecar_text, write_sidecar};
 
 const MAX_SAMPLES_PER_FRAME: u32 = 480_000;
 
-/// One evaluated picture. `rgba` is the software frame at the canvas size.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One evaluated picture: its time and the canvas size it was drawn at.
+/// The pixels go to the encoder and are not kept, so a long export holds
+/// one picture at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExportedFrame {
     pub time: Micros,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+}
+
+/// One evaluated picture with its pixels, on its way to the encoder.
+struct Evaluated {
+    frame: ExportedFrame,
+    rgba: Vec<u8>,
 }
 
 /// The muxed file and the pictures eval returned.
@@ -50,8 +62,21 @@ pub struct ExportRun<'a, D, M> {
     pub device: &'a mut D,
     pub request: &'a ExportRequest,
     pub factory: &'a EncodeFactory,
+    /// Opens video segments inside `frame`. An empty factory leaves those pictures out.
+    pub readers: &'a ReaderFactory,
     pub mux: &'a mut M,
     pub destination: Option<&'a Path>,
+    /// Project folder for a relative media path.
+    pub root: Option<&'a Path>,
+    /// Faces for text segments. A face this does not supply is not drawn.
+    pub fonts: &'a dyn Fonts,
+    /// Draws each frame on the GPU, as the preview does, so recipe effects
+    /// are in the file. `None` composes on the CPU, without them.
+    pub renderer: Option<&'a Renderer>,
+    /// Told the frames encoded and the frames in all after each picture.
+    /// Returning false stops the export with [`ExportError::Cancelled`],
+    /// and the mux is cancelled, so no part file is finished.
+    pub progress: Option<&'a mut dyn FnMut(u64, u64) -> bool>,
 }
 
 struct TrackTicks {
@@ -129,7 +154,8 @@ pub fn same_software_pixels(
 /// Evaluates `draft` over the request range, encodes, and muxes.
 ///
 /// The draft is borrowed and not written. `audio` supplies PCM for each
-/// audible segment; mute, volume, and fades are applied by the mix.
+/// audible segment at a timeline time, `count` mix frames at `rate`; mute,
+/// volume, and fades are applied by the mix.
 pub fn export<D, M, F>(
     mut run: ExportRun<'_, D, M>,
     mut audio: F,
@@ -137,7 +163,7 @@ pub fn export<D, M, F>(
 where
     D: Device,
     M: Mux,
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, ExportError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     validate(run.request)?;
     if run.mux.family() != run.request.container {
@@ -145,11 +171,14 @@ where
     }
     let sidecar_body = prepare_sidecar(run.draft, run.request, run.destination)?;
     let indexes = frame_indexes(run.request.frame_rate, &run.request.range)?;
-    let output = output_size(
-        run.draft.canvas_config.width,
-        run.draft.canvas_config.height,
-        run.request.long_side,
-    )?;
+    let output = coded_size(
+        run.request.codec,
+        output_size(
+            run.draft.canvas_config.width,
+            run.draft.canvas_config.height,
+            run.request.short_side,
+        )?,
+    );
     let mut video = open_video(run.factory, run.request, output)?;
     let mut audio_encoder = open_audio(run.factory, run.request)?;
     let mut tracks = add_tracks(run.mux, run.request, output)?;
@@ -371,8 +400,18 @@ where
     M: Mux,
 {
     let mut frames = Vec::with_capacity(indexes.len());
+    let mut clips = OpenClips::new();
+    let total = u64::try_from(indexes.len()).map_err(|_| ExportError::Limit)?;
     for index in indexes {
-        frames.push(encode_picture(run, video, tracks, *index, output)?);
+        frames.push(encode_picture(
+            run, video, tracks, *index, output, &mut clips,
+        )?);
+        if let Some(progress) = run.progress.as_mut() {
+            let done = u64::try_from(frames.len()).map_err(|_| ExportError::Limit)?;
+            if !progress(done, total) {
+                return Err(ExportError::Cancelled);
+            }
+        }
     }
     Ok(frames)
 }
@@ -383,6 +422,7 @@ fn encode_picture<D, M>(
     tracks: &mut TrackTicks,
     index: i64,
     output: (u32, u32),
+    clips: &mut OpenClips,
 ) -> Result<ExportedFrame, ExportError>
 where
     D: Device,
@@ -398,14 +438,25 @@ where
             .checked_add(run.request.late_by)
             .ok_or(ExportError::Range)?,
     );
-    let evaluated = evaluated_frame(run.draft, run.device, time, ready)?;
+    let evaluated = evaluated_frame(FrameInputs {
+        draft: run.draft,
+        device: run.device,
+        time,
+        ready_at: ready,
+        media: run.readers,
+        clips,
+        root: run.root,
+        fonts: run.fonts,
+        renderer: run.renderer,
+    })?;
     let bytes = scale_rgba(
-        evaluated.width,
-        evaluated.height,
+        evaluated.frame.width,
+        evaluated.frame.height,
         &evaluated.rgba,
         output.0,
         output.1,
     )?;
+    drop(evaluated.rgba);
     let timing = video_time(run.request.frame_rate, index)?;
     let picture = CpuFrame::new(output.0, output.1, PixelFormat::Rgba8, bytes, timing)
         .map_err(ExportError::Encoder)?;
@@ -418,7 +469,7 @@ where
         &packets,
         &mut tracks.video_ticks,
     )?;
-    Ok(evaluated)
+    Ok(evaluated.frame)
 }
 
 fn encode_audio<D, M, F>(
@@ -431,7 +482,7 @@ fn encode_audio<D, M, F>(
 where
     D: Device,
     M: Mux,
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, ExportError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     let Some(encoder) = audio_encoder.as_mut() else {
         return Ok(());
@@ -457,26 +508,73 @@ where
     Ok(())
 }
 
-fn evaluated_frame<D: Device>(
-    draft: &Draft,
-    device: &mut D,
+struct FrameInputs<'a, D> {
+    draft: &'a Draft,
+    device: &'a mut D,
     time: Micros,
     ready_at: Micros,
-) -> Result<ExportedFrame, ExportError> {
-    let snapshot = Snapshot::new(draft);
-    let picture = frame(&snapshot, time, device).map_err(map_eval)?;
+    media: &'a ReaderFactory,
+    clips: &'a mut OpenClips,
+    root: Option<&'a Path>,
+    fonts: &'a dyn Fonts,
+    renderer: Option<&'a Renderer>,
+}
+
+fn evaluated_frame<D: Device>(input: FrameInputs<'_, D>) -> Result<Evaluated, ExportError> {
+    let FrameInputs {
+        draft,
+        device,
+        time,
+        ready_at,
+        media,
+        clips,
+        root,
+        fonts,
+        renderer,
+    } = input;
+    let snapshot = Snapshot::with_fonts(draft, fonts);
+    let picture = match renderer {
+        Some(renderer) => {
+            let composed =
+                layers_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?;
+            drawn(renderer, composed)?
+        }
+        None => frame_in(&snapshot, time, device, media, clips, 0, root).map_err(map_eval)?,
+    };
     let picture = wait_export_frame::<D::Error>(time, ready_at, picture).map_err(map_eval)?;
     let width = u32::try_from(draft.canvas_config.width).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(draft.canvas_config.height).map_err(|_| ExportError::Canvas)?;
     if picture.extent.width != width || picture.extent.height != height {
         return Err(ExportError::Picture("canvas size".to_owned()));
     }
-    Ok(ExportedFrame {
-        time,
-        width,
-        height,
+    Ok(Evaluated {
+        frame: ExportedFrame {
+            time,
+            width,
+            height,
+        },
         rgba: picture.rgba,
     })
+}
+
+/// `composed` drawn on the GPU and read back.
+fn drawn(renderer: &Renderer, composed: cutlass_eval::Composed) -> Result<Frame, ExportError> {
+    let layers = frame_layers(composed).map_err(drawing)?;
+    let canvas = renderer
+        .canvas(layers.width, layers.height)
+        .map_err(drawing)?;
+    renderer.draw_frame(&canvas, &layers).map_err(drawing)?;
+    Ok(Frame {
+        extent: Extent {
+            width: layers.width,
+            height: layers.height,
+        },
+        rgba: renderer.read(&canvas).map_err(drawing)?,
+    })
+}
+
+fn drawing(error: RenderError) -> ExportError {
+    ExportError::Picture(error.to_string())
 }
 
 fn map_eval<E: std::fmt::Display>(error: EvalError<E>) -> ExportError {
@@ -501,7 +599,7 @@ fn mix_window<F>(
     audio: &mut F,
 ) -> Result<Pcm, ExportError>
 where
-    F: FnMut(&SegmentId, u32, u32) -> Result<ClipPcm, ExportError>,
+    F: FnMut(&SegmentId, Micros, u32, u32) -> Result<ClipPcm, ExportError>,
 {
     let next = request
         .frame_rate
@@ -535,7 +633,7 @@ where
             frames,
         },
         ClockKind::Export,
-        |segment, count, rate| match audio(segment, count, rate) {
+        |segment, when, count, rate| match audio(segment, when, count, rate) {
             Ok(pcm) => Ok(pcm),
             Err(error) => {
                 source_error = Some(error);
@@ -550,8 +648,41 @@ where
     if mixed.pcm.samples == 0 {
         silence(settings.sample_rate, settings.channels, frames)
     } else {
-        Ok(mixed.pcm)
+        to_channels(mixed.pcm, settings.channels)
     }
+}
+
+/// `pcm` with `channels` channels, as the encoder was opened: mono is copied
+/// to both sides, and stereo is averaged down to one.
+fn to_channels(pcm: Pcm, channels: u16) -> Result<Pcm, ExportError> {
+    let wanted = layout(channels)?;
+    if pcm.layout == wanted {
+        return Ok(pcm);
+    }
+    let from = pcm.layout.len();
+    let samples: Vec<f32> = match pcm.as_f32() {
+        Some(samples) => samples.to_vec(),
+        None => pcm
+            .as_i16()
+            .ok_or(ExportError::AudioLayout)?
+            .iter()
+            .map(|sample| f32::from(*sample) / 32_768.0)
+            .collect(),
+    };
+    let mixed: Vec<f32> = match (from, channels) {
+        (1, 2) => samples
+            .iter()
+            .flat_map(|sample| [*sample, *sample])
+            .collect(),
+        (2, 1) => samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[left, right]| (left + right) / 2.0)
+            .collect(),
+        _ => return Err(ExportError::AudioLayout),
+    };
+    Pcm::from_f32(pcm.rate, wanted, mixed).map_err(|_| ExportError::AudioLayout)
 }
 
 fn samples_between(start: i64, end: i64, rate: u32) -> Result<u32, ExportError> {
@@ -652,6 +783,17 @@ fn write_packets<M: Mux>(
     ticks: &mut i64,
 ) -> Result<(), ExportError> {
     for packet in packets {
+        for side in &packet.side {
+            match side {
+                SideData::Config(config) => {
+                    mux.set_config(TrackId::new(stream), config)
+                        .map_err(|_| ExportError::SideData)?;
+                }
+                // The priming the encoder adds is left in the file.
+                SideData::Gapless { .. } => {}
+                _ => return Err(ExportError::SideData),
+            }
+        }
         let file = file_packet(stream, packet)?;
         let duration = file.timestamp().duration().ok_or(ExportError::Packet)?;
         mux.write_packet(&file).map_err(ExportError::Mux)?;
@@ -661,9 +803,6 @@ fn write_packets<M: Mux>(
 }
 
 fn file_packet(stream: u32, packet: &AccessPacket) -> Result<FilePacket, ExportError> {
-    if !packet.side.is_empty() {
-        return Err(ExportError::SideData);
-    }
     if packet.duration < 0 {
         return Err(ExportError::Packet);
     }
@@ -724,8 +863,8 @@ fn stop<M: Mux>(mux: &mut M, error: ExportError) -> ExportError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, OnceLock};
 
     use cutlass_codec::access::{CodecError, SideData};
     use cutlass_codec::{CodecId, ContainerId};
@@ -734,7 +873,7 @@ mod tests {
         AudioInput, ChannelLayout, CodecParams, EncodeFactory, Encoder, FrameInput, Packet, Pcm,
         PixelFormat,
     };
-    use cutlass_eval::{ClipPcm, Snapshot, frame};
+    use cutlass_eval::{ClipPcm, OpenClips, ReaderFactory, Snapshot, frame};
     use cutlass_model::{
         Draft, FrameRate, HdrSettings, MaterialAudioFade, MaterialColorConfig, MaterialId,
         MaterialText, Micros, Segment, TimeRange, Track, TrackAttribute, TrackType, WordColumns,
@@ -743,7 +882,7 @@ mod tests {
     use cutlass_renderer_software::SoftwareDevice;
     use cutlass_session::Session;
 
-    use super::{ExportRun, export, frame_indexes, same_software_pixels};
+    use super::{ExportRun, export, frame_indexes, same_software_pixels, scale_rgba, to_channels};
     use crate::config::{AudioExport, ExportError, ExportRequest, SidecarKind, SidecarRequest};
 
     struct Stamp {
@@ -886,11 +1025,27 @@ mod tests {
         factory
     }
 
+    fn readers() -> &'static ReaderFactory {
+        static READERS: OnceLock<ReaderFactory> = OnceLock::new();
+        READERS.get_or_init(ReaderFactory::new)
+    }
+
     /// Pixels from the playback clock and from `eval::frame` at `time`.
     fn played_rgba(draft: &Draft, time: Micros, device: &mut SoftwareDevice) -> Vec<u8> {
         let session = Session::open(draft.clone());
-        let scrubbed = Player::new().scrub(&session, device, time).expect("scrub");
-        let evaluated = frame(&Snapshot::new(draft), time, device).expect("eval");
+        let mut player = Player::new();
+        player.set_readers(ReaderFactory::new());
+        let scrubbed = player.scrub(&session, device, time).expect("scrub");
+        let mut clips = OpenClips::new();
+        let evaluated = frame(
+            &Snapshot::new(draft),
+            time,
+            device,
+            readers(),
+            &mut clips,
+            0,
+        )
+        .expect("eval");
         assert_eq!(scrubbed.rgba, evaluated.rgba);
         scrubbed.rgba
     }
@@ -898,7 +1053,7 @@ mod tests {
     fn gif_request(range: TimeRange) -> ExportRequest {
         ExportRequest {
             range,
-            long_side: 240,
+            short_side: 240,
             codec: CodecId::Gif,
             bitrate: 2_000_000,
             frame_rate: FrameRate::FPS_30,
@@ -1006,8 +1161,159 @@ mod tests {
     }
 
     #[test]
+    fn the_mix_is_given_the_channels_the_encoder_was_opened_with() {
+        let mono = Pcm::from_f32(48_000, ChannelLayout::mono(), vec![0.5, -0.25]).unwrap();
+        let stereo = to_channels(mono.clone(), 2).unwrap();
+        assert_eq!(stereo.layout, ChannelLayout::stereo());
+        assert_eq!(stereo.as_f32().unwrap(), [0.5, 0.5, -0.25, -0.25]);
+        let back = to_channels(stereo, 1).unwrap();
+        assert_eq!(back.as_f32().unwrap(), [0.5, -0.25]);
+        assert_eq!(to_channels(mono.clone(), 1).unwrap(), mono);
+        assert_eq!(to_channels(mono, 6), Err(ExportError::AudioLayout));
+    }
+
+    #[test]
+    fn progress_counts_each_frame_and_a_stop_cancels_the_file() {
+        let draft = color_draft(16, 16, 1_000_000);
+        let request = gif_request(TimeRange::new(0, 100_000));
+        let factory = factory();
+        let run = |progress: &mut dyn FnMut(u64, u64) -> bool| {
+            let mut mux = MuxDraft::new(
+                ContainerId::Isobmff,
+                MuxMode::Progressive,
+                IndexPlace::End,
+                Limits::standard(),
+            );
+            let mut device = SoftwareDevice::new();
+            let result = export(
+                ExportRun {
+                    draft: &draft,
+                    device: &mut device,
+                    request: &request,
+                    factory: &factory,
+                    readers: readers(),
+                    mux: &mut mux,
+                    destination: None,
+                    root: None,
+                    fonts: &cutlass_eval::NoFonts,
+                    renderer: None,
+                    progress: Some(progress),
+                },
+                |_, _, _, _| Ok(ClipPcm::Missing),
+            );
+            (result.map(|result| result.frames.len()), mux.status())
+        };
+        let mut seen = Vec::new();
+        let (frames, _) = run(&mut |done, total| {
+            seen.push((done, total));
+            true
+        });
+        let frames = frames.expect("export");
+        let total = u64::try_from(frames).unwrap();
+        assert!(total > 1);
+        let expected: Vec<(u64, u64)> = (1..=total).map(|done| (done, total)).collect();
+        assert_eq!(seen, expected);
+        let (stopped, status) = run(&mut |done, _| done < 2);
+        assert_eq!(stopped, Err(ExportError::Cancelled));
+        assert_ne!(status, MuxStatus::Finished);
+    }
+
+    fn gpu() -> Option<cutlass_render::Renderer> {
+        let renderer = cutlass_render::Renderer::for_test().expect("a GPU is required");
+        if renderer.is_none() {
+            eprintln!("skipped: no GPU");
+        }
+        renderer
+    }
+
+    fn frames_of(draft: &Draft, renderer: Option<&cutlass_render::Renderer>) -> Vec<Vec<u8>> {
+        let request = gif_request(TimeRange::new(0, 100_000));
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        // The test encoder passes the scaled pixels through as packets.
+        export(
+            ExportRun {
+                draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer,
+                progress: None,
+            },
+            |_, _, _, _| Ok(ClipPcm::Missing),
+        )
+        .expect("export")
+        .finished
+        .packets()
+        .iter()
+        .map(|packet| packet.bytes().to_vec())
+        .collect()
+    }
+
+    /// `draft` with a white flash over everything from the start.
+    fn flashed(mut draft: Draft) -> Draft {
+        draft
+            .materials
+            .video_effects
+            .push(cutlass_model::MaterialVideoEffect {
+                id: "fx".into(),
+                effect_id: "recipe/white-flash".to_owned(),
+                ..cutlass_model::MaterialVideoEffect::default()
+            });
+        let mut row = Track::main("effects");
+        row.kind = TrackType::Effect;
+        let mut segment = Segment::new("fx", "fx", TimeRange::new(0, 1_000_000));
+        segment.render_index = 11_000;
+        row.segments.push(segment);
+        draft.tracks.push(row);
+        draft
+    }
+
+    #[test]
+    fn a_gpu_export_matches_the_cpu_export_without_effects() {
+        let Some(renderer) = gpu() else { return };
+        let draft = color_draft(64, 36, 1_000_000);
+        let gpu = frames_of(&draft, Some(&renderer));
+        let cpu = frames_of(&draft, None);
+        assert_eq!(gpu.len(), 3);
+        assert_eq!(gpu, cpu);
+    }
+
+    #[test]
+    fn a_recipe_effect_is_in_a_gpu_export_and_not_in_a_cpu_one() {
+        let Some(renderer) = gpu() else { return };
+        let draft = flashed(color_draft(64, 36, 1_000_000));
+        let before = draft.clone();
+        let gpu = frames_of(&draft, Some(&renderer));
+        let cpu = frames_of(&draft, None);
+        assert_eq!(draft, before);
+        // The flash starts clear and climbs to 0.9 at 0.08 s, so frame 2 at
+        // 30 fps (0.067 s) is three quarters of the way to white.
+        assert_eq!(cpu[2], red(426, 240));
+        assert!(
+            gpu[2]
+                .chunks(4)
+                .all(|pixel| pixel[0] == 255 && (186..=196).contains(&pixel[1])),
+            "{:?}",
+            &gpu[2][..4]
+        );
+        assert_eq!(gpu[0], red(426, 240));
+    }
+
+    #[test]
     fn export_encodes_each_eval_frame_and_muxes_it_in_the_file_timescale() {
-        let draft = color_draft(240, 135, 33_334);
+        let draft = color_draft(426, 240, 33_334);
         let before = draft.clone();
         let request = gif_request(TimeRange::new(0, 66_667));
         let mut mux = MuxDraft::new(
@@ -1024,21 +1330,29 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("export");
         assert_eq!(draft, before);
         assert_eq!(draft.duration, Micros(4_000_000));
         assert_eq!(result.frames.len(), 2);
-        assert_eq!(result.frames[0].rgba, red(240, 135));
-        assert_eq!(result.frames[1].rgba, clear(240, 135));
+        assert_eq!(result.frames[1].time, Micros(33_334));
+        assert_eq!(
+            (result.frames[0].width, result.frames[0].height),
+            (426, 240)
+        );
         let packets = result.finished.packets();
         assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0].bytes(), red(240, 135));
-        assert_eq!(packets[1].bytes(), clear(240, 135));
+        assert_eq!(packets[0].bytes(), red(426, 240));
+        assert_eq!(packets[1].bytes(), clear(426, 240));
         assert_eq!(packets[0].timestamp().presentation(), Some(0));
         assert_eq!(packets[1].timestamp().presentation(), Some(1));
         assert_eq!(packets[0].timestamp().duration(), Some(1));
@@ -1051,9 +1365,9 @@ mod tests {
         let mut playback = SoftwareDevice::new();
         let first = played_rgba(&draft, Micros(0), &mut playback);
         let second = played_rgba(&draft, Micros(33_334), &mut playback);
-        same_software_pixels(&draft, 240, 135, &first, &result.frames[0].rgba).expect("lock");
-        same_software_pixels(&draft, 240, 135, &second, &result.frames[1].rgba).expect("lock");
-        assert_eq!(first, red(240, 135));
+        same_software_pixels(&draft, 426, 240, &first, packets[0].bytes()).expect("lock");
+        same_software_pixels(&draft, 426, 240, &second, packets[1].bytes()).expect("lock");
+        assert_eq!(first, red(426, 240));
     }
 
     #[test]
@@ -1076,18 +1390,23 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("late");
-        assert_eq!(result.finished.packets()[0].bytes(), red(240, 135));
+        assert_eq!(result.finished.packets()[0].bytes(), red(426, 240));
         assert_eq!(draft, before);
 
         let mut declined = gif_request(TimeRange::new(0, 33_334));
         declined.codec = CodecId::Mjpeg;
-        declined.long_side = 480;
+        declined.short_side = 480;
         let wide = color_draft(480, 270, 1_000_000);
         let before_wide = wide.clone();
         let mut mux = MuxDraft::new(
@@ -1102,10 +1421,15 @@ mod tests {
                 device: &mut device,
                 request: &declined,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("decline");
         assert_eq!(
@@ -1124,10 +1448,15 @@ mod tests {
                 device: &mut device,
                 request: &declined,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("missing");
         assert_eq!(
@@ -1144,7 +1473,7 @@ mod tests {
         let before = draft.clone();
         let mut request = gif_request(TimeRange::new(0, 33_334));
         request.codec = CodecId::Vp9;
-        request.long_side = 480;
+        request.short_side = 480;
         let mut mux = MuxDraft::new(
             ContainerId::Isobmff,
             MuxMode::Progressive,
@@ -1159,10 +1488,15 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("side");
         assert_eq!(error, ExportError::SideData);
@@ -1224,10 +1558,15 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("hostile");
         assert!(matches!(error, ExportError::Mux(_)));
@@ -1246,10 +1585,15 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("family");
         assert_eq!(error, ExportError::Container);
@@ -1306,10 +1650,15 @@ mod tests {
                 device: &mut device,
                 request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |segment, frames, rate| {
+            |segment, _when, frames, rate| {
                 assert_eq!(frames, 4);
                 assert_eq!(rate, 4_000);
                 let value = if segment.as_str() == "other" {
@@ -1333,6 +1682,168 @@ mod tests {
             .expect("audio packet");
         assert_eq!(audio.timescale().ticks_per_second(), 4_000);
         samples_of(audio)
+    }
+
+    fn wav_readers() -> ReaderFactory {
+        fn open_wav(
+            path: &std::path::Path,
+        ) -> Result<Box<dyn cutlass_container::Demux>, cutlass_container::OpenError> {
+            let file = std::fs::File::open(path).map_err(|error| {
+                cutlass_container::OpenError::Source {
+                    message: error.to_string(),
+                }
+            })?;
+            let length = file
+                .metadata()
+                .map_err(|error| cutlass_container::OpenError::Source {
+                    message: error.to_string(),
+                })?
+                .len();
+            Ok(Box::new(cutlass_riff::WavDemux::open(file, length)?))
+        }
+        let mut readers = ReaderFactory::new();
+        readers.register_container(cutlass_riff::probe, open_wav);
+        cutlass_pcm::register_decoders(readers.decoders_mut());
+        readers
+    }
+
+    /// One second of mono 16-bit PCM at 48 kHz, every sample `value`.
+    fn write_wav(path: &std::path::Path, value: i16) {
+        let rate = 48_000_u32;
+        let payload: Vec<u8> = std::iter::repeat_n(value.to_le_bytes(), 48_000)
+            .flatten()
+            .collect();
+        let data = u32::try_from(payload.len()).expect("size");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        std::fs::write(path, bytes).expect("wav");
+    }
+
+    fn file_audio_samples(draft: &Draft, root: &std::path::Path) -> Vec<f32> {
+        let mut request = gif_request(TimeRange::new(0, 2_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        let readers = wav_readers();
+        let result = export(
+            ExportRun {
+                draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: &readers,
+                mux: &mut mux,
+                destination: None,
+                root: Some(root),
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
+            },
+            crate::file_audio(&readers, draft, Some(root)),
+        )
+        .expect("export");
+        result
+            .finished
+            .packets()
+            .iter()
+            .filter(|packet| packet.stream() == 1)
+            .flat_map(samples_of)
+            .collect()
+    }
+
+    #[test]
+    fn file_audio_reads_each_clip_from_the_project_and_a_path_outside_is_silent() {
+        let root =
+            std::env::temp_dir().join(format!("cutlass-export-sound-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("root");
+        write_wav(&root.join("tone.wav"), 16_384);
+        let mut draft = color_draft(240, 135, 1_000_000);
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone.wav".to_owned(),
+            duration: Micros(1_000_000),
+            ..cutlass_model::MaterialAudio::default()
+        });
+        push_sound(&mut draft, "tone", 1.0, 0, false);
+        draft.tracks.last_mut().expect("audio").segments[0].source_range =
+            Some(TimeRange::new(0, 1_000_000));
+        let before = draft.clone();
+        let samples = file_audio_samples(&draft, &root);
+        assert_eq!(samples.len(), 8, "two frames of 4 kHz audio");
+        for sample in &samples {
+            assert!((sample - 0.5).abs() < 0.01, "{samples:?}");
+        }
+        assert_eq!(draft, before);
+
+        draft.materials.audios[0].path = "../tone.wav".to_owned();
+        let escaped = file_audio_samples(&draft, &root);
+        assert_eq!(escaped, vec![0.0; 8]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_clip_is_asked_for_its_sound_at_the_frame_time() {
+        let mut request = gif_request(TimeRange::new(0, 3_000));
+        request.frame_rate = FrameRate {
+            numerator: 1_000,
+            denominator: 1,
+        };
+        request.audio = Some(audio_settings());
+        let mut draft = color_draft(240, 135, 1_000_000);
+        push_sound(&mut draft, "loud", 1.0, 0, false);
+        let mut mux = MuxDraft::new(
+            ContainerId::Isobmff,
+            MuxMode::Progressive,
+            IndexPlace::End,
+            Limits::standard(),
+        );
+        let mut device = SoftwareDevice::new();
+        let factory = factory();
+        let mut asked = Vec::new();
+        export(
+            ExportRun {
+                draft: &draft,
+                device: &mut device,
+                request: &request,
+                factory: &factory,
+                readers: readers(),
+                mux: &mut mux,
+                destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
+            },
+            |segment, when, _, _| {
+                asked.push((segment.as_str().to_owned(), when));
+                Ok(ClipPcm::Ready(tone(1.0)))
+            },
+        )
+        .expect("audio");
+        let loud = |time| ("loud".to_owned(), Micros(time));
+        assert_eq!(asked, vec![loud(0), loud(1_000), loud(2_000)]);
     }
 
     #[test]
@@ -1385,10 +1896,15 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("wait");
         assert_eq!(
@@ -1439,10 +1955,15 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: Some(&dir),
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("sidecar");
         let path = result.sidecar.expect("path");
@@ -1460,6 +1981,7 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut MuxDraft::new(
                     ContainerId::Isobmff,
                     MuxMode::Progressive,
@@ -1467,8 +1989,12 @@ mod tests {
                     Limits::standard(),
                 ),
                 destination: Some(&dir),
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("ass");
         assert_eq!(error, ExportError::Ass);
@@ -1478,7 +2004,7 @@ mod tests {
 
     #[test]
     fn scaled_output_keeps_the_eval_pixels_and_encodes_the_fitted_size() {
-        let draft = color_draft(480, 240, 1_000_000);
+        let draft = color_draft(960, 480, 1_000_000);
         let request = gif_request(TimeRange::new(0, 33_334));
         let mut mux = MuxDraft::new(
             ContainerId::Isobmff,
@@ -1494,19 +2020,31 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect("scale");
-        assert_eq!(result.output_width, 240);
-        assert_eq!(result.output_height, 120);
-        assert_eq!(result.frames[0].rgba, red(480, 240));
-        assert_eq!(result.finished.packets()[0].bytes(), red(240, 120));
+        assert_eq!(result.output_width, 480);
+        assert_eq!(result.output_height, 240);
+        assert_eq!(
+            (result.frames[0].width, result.frames[0].height),
+            (960, 480)
+        );
+        assert_eq!(result.finished.packets()[0].bytes(), red(480, 240));
         let mut playback = SoftwareDevice::new();
         let played = played_rgba(&draft, Micros(0), &mut playback);
-        assert_eq!(played, result.frames[0].rgba);
+        assert_eq!(played, red(960, 480));
+        assert_eq!(
+            scale_rgba(960, 480, &played, 480, 240).unwrap(),
+            result.finished.packets()[0].bytes()
+        );
     }
 
     #[test]
@@ -1539,13 +2077,77 @@ mod tests {
                 device: &mut device,
                 request: &request,
                 factory: &factory,
+                readers: readers(),
                 mux: &mut mux,
                 destination: None,
+                root: None,
+                fonts: &cutlass_eval::NoFonts,
+                renderer: None,
+                progress: None,
             },
-            |_, _, _| Ok(ClipPcm::Missing),
+            |_, _, _, _| Ok(ClipPcm::Missing),
         )
         .expect_err("limit");
         assert_eq!(error, ExportError::Limit);
         assert_eq!(draft, before);
+    }
+
+    const SAMPLE_TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
+
+    struct SampleFace;
+
+    impl cutlass_eval::Fonts for SampleFace {
+        fn face(&self, path: &str) -> Option<&[u8]> {
+            (path == "sample.ttf").then_some(SAMPLE_TTF)
+        }
+    }
+
+    #[test]
+    fn a_text_face_is_drawn_and_a_missing_face_is_not() {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 320;
+        draft.canvas_config.height = 180;
+        draft.duration = Micros(1_000_000);
+        draft.materials.texts.push(MaterialText {
+            id: MaterialId::new("caption"),
+            content: "A".to_owned(),
+            font_size: 64.0,
+            font_path: "sample.ttf".to_owned(),
+            text_color: "#FFFFFF".to_owned(),
+            ..MaterialText::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "caption", TimeRange::new(0, 1_000_000)));
+        let mut device = SoftwareDevice::new();
+        let mut clips = OpenClips::new();
+        let bare = super::evaluated_frame(super::FrameInputs {
+            draft: &draft,
+            device: &mut device,
+            time: Micros(0),
+            ready_at: Micros(0),
+            media: readers(),
+            clips: &mut clips,
+            root: None,
+            fonts: &cutlass_eval::NoFonts,
+            renderer: None,
+        })
+        .expect("bare");
+        let mut clips = OpenClips::new();
+        let drawn = super::evaluated_frame(super::FrameInputs {
+            draft: &draft,
+            device: &mut device,
+            time: Micros(0),
+            ready_at: Micros(0),
+            media: readers(),
+            clips: &mut clips,
+            root: None,
+            fonts: &SampleFace,
+            renderer: None,
+        })
+        .expect("drawn");
+        assert!(bare.rgba.iter().all(|byte| *byte == 0));
+        assert_ne!(bare.rgba, drawn.rgba);
+        assert!(drawn.rgba.iter().any(|byte| *byte != 0));
     }
 }

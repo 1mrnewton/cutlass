@@ -1,0 +1,7 @@
+module cutlass_ffi_bindingsFFI {
+    header "cutlass_ffi_bindingsFFI.h"
+    export *
+    use "Darwin"
+    use "_Builtin_stdbool"
+    use "_Builtin_stdint"
+}

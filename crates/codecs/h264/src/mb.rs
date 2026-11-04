@@ -4493,6 +4493,26 @@ fn pred8_block<S: Sample>(
                 fill
             };
         }
+        // Clause 8.3.2.2: when p[8..15, -1] are not available, they take p[7, -1]
+        // before the clause 8.3.2.2.1 filter. That block is the one to the upper right.
+        let upper_right = |dx: usize| {
+            row_ok(
+                pic,
+                mx * 4 + bx + 2 + dx,
+                (my * 4 + by) as i32 - 1,
+                mb.slice,
+                constrained,
+                here,
+            )
+        };
+        if upper_right(0) && upper_right(1) {
+            for (k, slot) in raw_above[8..].iter_mut().enumerate() {
+                *slot = pix(&pic.y, pic.w, pic.h, x + 8 + k as i32, y - 1);
+            }
+        } else {
+            let edge = raw_above[7];
+            raw_above[8..].fill(edge);
+        }
     }
     if left_ok {
         for (k, slot) in raw_left.iter_mut().enumerate() {
@@ -6258,6 +6278,145 @@ mod oracle {
             count, 0,
             "weightp mismatches {count} max {max} first {first:?}"
         );
+    }
+
+    /// High pictures from x264, including a B 8×8 whose list-0 neighbor does not
+    /// use list 0, and an intra gradient that selects plane and 8×8 prediction.
+    #[test]
+    fn high_profile_samples_match_ffmpeg() {
+        let Some(ffmpeg) = ffmpeg() else {
+            eprintln!("skip: ffmpeg is not installed");
+            return;
+        };
+        let gradient = |size: &str| {
+            format!(
+                "color=c=black:s={size},format=yuv420p,geq=lum='X*255/W':cb='128+X*40/W':cr='128+Y*40/H'"
+            )
+        };
+        let cases = [
+            (
+                "8x8-intra",
+                80,
+                64,
+                "2",
+                gradient("80x64"),
+                "cabac=1:bframes=0:8x8dct=1:weightp=0:no-deblock=1:keyint=1:scenecut=0:qp=20",
+            ),
+            (
+                "plane-intra",
+                80,
+                64,
+                "2",
+                gradient("80x64"),
+                "cabac=1:bframes=0:8x8dct=0:weightp=0:no-deblock=1:keyint=1:scenecut=0:qp=20",
+            ),
+            (
+                "b8x8-weightb",
+                320,
+                240,
+                "4",
+                "testsrc2=size=320x240:rate=30".to_owned(),
+                "cabac=1:bframes=2:8x8dct=0:weightp=0:no-deblock=1:direct=spatial:partitions=b8x8,i8x8,i4x4:weightb=1",
+            ),
+            (
+                "veryfast",
+                1280,
+                720,
+                "4",
+                "testsrc2=size=1280x720:rate=30".to_owned(),
+                "cabac=1:bframes=2",
+            ),
+        ];
+        for (label, width, height, frames, graph, params) in cases {
+            same_pictures(&ffmpeg, label, width, height, frames, &graph, params);
+        }
+    }
+
+    fn same_pictures(
+        ffmpeg: &str,
+        label: &str,
+        width: u32,
+        height: u32,
+        frames: &str,
+        graph: &str,
+        params: &str,
+    ) {
+        let dir = std::env::temp_dir().join(format!("cutlass-h264-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let coded = dir.join("s.h264");
+        let yuv = dir.join("s.yuv");
+        let encoded = Command::new(ffmpeg)
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                graph,
+                "-frames:v",
+                frames,
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "high",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                params,
+                "-f",
+                "h264",
+            ])
+            .arg(&coded)
+            .status()
+            .unwrap();
+        assert!(encoded.success(), "{label} encode failed");
+        let decoded = Command::new(ffmpeg)
+            .args(["-y", "-loglevel", "error", "-threads", "1", "-i"])
+            .arg(&coded)
+            .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .arg(&yuv)
+            .status()
+            .unwrap();
+        assert!(decoded.success(), "{label} decode failed");
+        let bytes = std::fs::read(&coded).unwrap();
+        let expected = std::fs::read(&yuv).unwrap();
+        let mut codec = CodecParams::video(CodecId::H264, width, height);
+        codec.nal_length_size = 0;
+        let mut decoder = H264Decoder::open(&codec).unwrap();
+        let mut got = Vec::new();
+        for (unit_index, unit) in access_units(&bytes).into_iter().enumerate() {
+            let packet = Packet::video(unit, 0, 1, 30, false);
+            match decoder.push(&packet) {
+                Ok(frames) => got.extend(pictures(&frames)),
+                Err(error) => panic!("{label} push {unit_index} failed: {error:?}"),
+            }
+        }
+        match decoder.drain() {
+            Ok(frames) => got.extend(pictures(&frames)),
+            Err(error) => panic!("{label} drain failed: {error:?}"),
+        }
+        assert_eq!(got.len(), expected.len(), "{label} picture bytes");
+        let mut count = 0usize;
+        let mut max = 0u8;
+        let mut first = None;
+        for (index, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            if a != b {
+                count += 1;
+                max = max.max(a.abs_diff(*b));
+                if first.is_none() {
+                    first = Some((index, *a, *b));
+                }
+            }
+        }
+        assert_eq!(
+            count, 0,
+            "{label} mismatches {count} max {max} first {first:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn pictures(frames: &[cutlass_decode::VideoOutput]) -> Vec<u8> {
@@ -9035,7 +9194,7 @@ fn predict_chroma<S: Sample>(
     recon::put_chroma_block(v, w, &frame.v, stride, pic, block);
 }
 
-/// Clause 8.4.3 implicit bipred weights from the picture-order distance.
+/// Clause 8.4.3.2. Implicit bipred weights from the picture-order distance.
 fn implicit_weights(slice: &Slice<'_>, r0: i8, r1: i8) -> (i32, i32) {
     let Some(poc0) = listed(&slice.poc0, r0) else {
         return (32, 32);

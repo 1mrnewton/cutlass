@@ -1,0 +1,26 @@
+[package]
+name = "cutlass-render"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The wgpu compositor."
+
+[dependencies]
+cutlass-effects = { path = "../effects", version = "0.1.0" }
+cutlass-eval = { path = "../eval", version = "0.1.0" }
+cutlass-gpu = { path = "../gpu", version = "0.1.0" }
+wgpu = "30.0.1"
+pollster = "1.0"
+
+[dev-dependencies]
+cutlass-decode = { path = "../decode", version = "0.1.0" }
+cutlass-encode = { path = "../encode", version = "0.1.0" }
+cutlass-h264 = { path = "../codecs/h264", version = "0.1.0" }
+cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
+cutlass-compositor = { path = "../compositor", version = "0.1.0" }
+cutlass-model = { path = "../model", version = "0.1.0" }
+cutlass-picture = { path = "../picture", version = "0.1.0" }
+
+[lints]
+workspace = true

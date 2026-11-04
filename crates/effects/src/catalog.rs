@@ -1,21 +1,21 @@
 //! Stable package ids, still posters, and preview URLs.
 //!
 //! Implemented here: five blend stand-ins, three distortion and glitch
-//! stand-ins with a defined CPU result (invert, contrast, and pixelate), and
-//! three text-animation packages whose kinds are in, out, and loop. Pixelate's
-//! block is [`PIXELATE_BLOCK`] pixels on each side. Text-animation kinds use
-//! [`AnimType`]. Each row has a stable id, a still poster path, and a preview
-//! URL. This module stores those rows and the pixelate block. Preview videos
-//! stay a URL for storage to fetch. This module does not start a transfer and
-//! does not sample a picture.
+//! stand-ins with a defined CPU result (invert, contrast, and pixelate),
+//! three text-animation packages whose kinds are in, out, and loop, and one
+//! fade transition. Pixelate's block is [`PIXELATE_BLOCK`] pixels on each
+//! side. Text-animation kinds use [`AnimType`]. Each row has a stable id, a
+//! still poster path, and a preview URL. This module stores those rows and
+//! the pixelate block. Preview videos stay a URL for storage to fetch. This
+//! module does not start a transfer and does not sample a picture.
 //!
 //! Unsupported: shader packages, a script host, a shader dialect, and the rest
-//! of a catalog of about 200 effect packages and about 30 text animations.
-//! Those ids are not listed here. A checksum does not authorize running
-//! package bytes. Text-animation kinds are parameters evaluated elsewhere;
-//! this module does not write a draft.
+//! of a catalog of about 200 effect packages, about 30 text animations, and
+//! the rest of the transition catalog. Those ids are not listed here. A
+//! checksum does not authorize running package bytes. Text-animation kinds
+//! are parameters evaluated elsewhere; this module does not write a draft.
 //!
-//! [`entry`] walks the eleven rows in [`entries`] order. That scan allocates
+//! [`entry`] walks the twelve rows in [`entries`] order. That scan allocates
 //! nothing.
 
 use cutlass_model::AnimType;
@@ -42,6 +42,8 @@ pub const ANIM_IN: &str = "text-anim-in";
 pub const ANIM_OUT: &str = "text-anim-out";
 /// Stable id for the text-animation loop package.
 pub const ANIM_LOOP: &str = "text-anim-loop";
+/// Stable id for the fade transition stand-in.
+pub const TRANSITION_FADE: &str = "transition-fade";
 
 /// Pixelate stand-in block, in pixels on each side.
 pub const PIXELATE_BLOCK: u32 = 2;
@@ -72,6 +74,13 @@ pub enum Distort {
     Pixelate,
 }
 
+/// Fade transition stand-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transition {
+    /// Crossfade from the outgoing picture to the incoming picture.
+    Fade,
+}
+
 /// Kind of one catalog row.
 ///
 /// Text-animation rows are [`AnimType::In`], [`AnimType::Out`], and
@@ -84,6 +93,8 @@ pub enum PackageKind {
     Distort(Distort),
     /// A text-animation package.
     TextAnim(AnimType),
+    /// A transition stand-in.
+    Transition(Transition),
 }
 
 /// One catalog row: stable id, still poster, and preview URL.
@@ -99,7 +110,7 @@ pub struct CatalogEntry {
     pub kind: PackageKind,
 }
 
-static ENTRIES: [CatalogEntry; 11] = [
+static ENTRIES: [CatalogEntry; 12] = [
     CatalogEntry {
         id: SOURCE_OVER,
         poster: "posters/blend-source-over.png",
@@ -166,18 +177,24 @@ static ENTRIES: [CatalogEntry; 11] = [
         preview_url: "https://assets.invalid/effects/text-anim-loop.mp4",
         kind: PackageKind::TextAnim(AnimType::Loop),
     },
+    CatalogEntry {
+        id: TRANSITION_FADE,
+        poster: "posters/transition-fade.png",
+        preview_url: "https://assets.invalid/effects/transition-fade.mp4",
+        kind: PackageKind::Transition(Transition::Fade),
+    },
 ];
 
 /// The row for `id`, or nothing when the id is unknown.
 ///
-/// The walk is the eleven rows from [`entries`], in that order. It allocates
+/// The walk is the twelve rows from [`entries`], in that order. It allocates
 /// nothing.
 #[must_use]
 pub fn entry(id: &str) -> Option<&'static CatalogEntry> {
     entries().iter().find(|row| row.id == id)
 }
 
-/// The eleven catalog rows, in stable order.
+/// The twelve catalog rows, in stable order.
 #[must_use]
 pub fn entries() -> &'static [CatalogEntry] {
     &ENTRIES
@@ -191,7 +208,8 @@ mod tests {
 
     use super::{
         ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, DIFFERENCE, Distort, INVERT,
-        MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, entries, entry,
+        MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,
+        Transition, entries, entry,
     };
 
     #[test]
@@ -211,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn entries_follow_the_eleven_ids() {
+    fn entries_follow_the_twelve_ids() {
         let ids = [
             SOURCE_OVER,
             MULTIPLY,
@@ -224,8 +242,9 @@ mod tests {
             ANIM_IN,
             ANIM_OUT,
             ANIM_LOOP,
+            TRANSITION_FADE,
         ];
-        assert_eq!(entries().len(), 11);
+        assert_eq!(entries().len(), 12);
         assert_eq!(entries().len(), ids.len());
         for (row, id) in entries().iter().zip(ids) {
             assert_eq!(row.id, id);
@@ -252,6 +271,10 @@ mod tests {
         assert_eq!(kind(ANIM_IN), PackageKind::TextAnim(AnimType::In));
         assert_eq!(kind(ANIM_OUT), PackageKind::TextAnim(AnimType::Out));
         assert_eq!(kind(ANIM_LOOP), PackageKind::TextAnim(AnimType::Loop));
+        assert_eq!(
+            kind(TRANSITION_FADE),
+            PackageKind::Transition(Transition::Fade)
+        );
     }
 
     #[test]

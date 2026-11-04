@@ -20,10 +20,18 @@ pub const TEXT: Color32 = Color32::from_rgb(0xf3, 0xf3, 0xf3);
 pub const MUTED: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
 /// Tertiary text.
 pub const FAINT: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
+/// A ruler tick.
+pub const RULER_TICK: Color32 = Color32::from_rgb(0x5a, 0x5a, 0x5a);
 /// The playhead.
 pub const PLAYHEAD: Color32 = Color32::WHITE;
-/// An icon button.
+/// An icon button, and a toolbar button that is on.
 pub const ICON_BUTTON: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
+/// The active library shelf.
+pub const ACTIVE: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
+/// The main lane.
+pub const LANE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
+/// The empty main lane edge.
+pub const LANE_LINE: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e);
 /// A selected clip edge.
 pub const SELECTED: Color32 = Color32::WHITE;
 /// The dialog title row.
@@ -50,25 +58,84 @@ pub const SPLIT: f32 = 6.0;
 pub const HAIRLINE: f32 = 1.0;
 pub const TOOLBAR_HEIGHT: f32 = 36.0;
 pub const RULER_HEIGHT: f32 = 44.0;
-pub const RAIL_WIDTH: f32 = 44.0;
+/// A major ruler tick. A minor tick is half as tall.
+pub const MAJOR_TICK: f32 = 12.0;
+pub const RAIL_WIDTH: f32 = 76.0;
 pub const COVER_WIDTH: f32 = 72.0;
-pub const TRANSPORT_HEIGHT: f32 = 40.0;
+pub const TRACK_HEAD: f32 = 130.0;
+pub const TRANSPORT_HEIGHT: f32 = 52.0;
 pub const ICON_BUTTON_SIZE: f32 = 28.0;
 pub const WINDOW_BUTTON: f32 = 12.0;
 
-pub const LIBRARY_WIDTH: f32 = 280.0;
+pub const LIBRARY_WIDTH: f32 = 368.0;
 pub const INSPECTOR_WIDTH: f32 = 300.0;
-pub const TIMELINE_HEIGHT: f32 = 280.0;
-pub const LIBRARY_MIN: f32 = 160.0;
-pub const INSPECTOR_MIN: f32 = 200.0;
+pub const TIMELINE_HEIGHT: f32 = 420.0;
+pub const LIBRARY_MIN: f32 = 260.0;
+pub const INSPECTOR_MIN: f32 = 240.0;
 pub const TIMELINE_MIN: f32 = 160.0;
 pub const PREVIEW_MIN_WIDTH: f32 = 320.0;
-pub const PREVIEW_MIN_HEIGHT: f32 = 180.0;
+pub const PREVIEW_MIN_HEIGHT: f32 = 268.0;
 pub const MIN_WINDOW_WIDTH: f32 = 1100.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 700.0;
 
 /// Lane height shared by drawing and hit testing.
 pub const LANE_HEIGHT: f64 = 48.0;
+
+/// A video clip: its body, the name and length
+/// chips, the waveform bars, and the volume line across them.
+pub const CLIP_VIDEO: Color32 = Color32::from_rgb(30, 76, 81);
+pub const CLIP_VIDEO_CHIP: Color32 = Color32::from_rgb(47, 94, 99);
+pub const CLIP_VIDEO_BAR: Color32 = Color32::from_rgb(51, 117, 125);
+pub const CLIP_VIDEO_LINE: Color32 = Color32::from_rgb(80, 122, 126);
+/// An audio clip, the same parts in navy.
+pub const CLIP_AUDIO: Color32 = Color32::from_rgb(29, 54, 94);
+pub const CLIP_AUDIO_CHIP: Color32 = Color32::from_rgb(45, 72, 114);
+pub const CLIP_AUDIO_BAR: Color32 = Color32::from_rgb(58, 130, 200);
+pub const CLIP_AUDIO_LINE: Color32 = Color32::from_rgb(100, 138, 186);
+/// The text in a clip's chips.
+pub const CLIP_TEXT: Color32 = Color32::from_rgb(224, 224, 224);
+/// The row across the top of a main-track or audio clip that holds its
+/// name chip, and on the main track its length chip.
+pub const CLIP_HEADER: f32 = 18.0;
+
+/// The share of a main-track clip's body under the header that its sound
+/// band takes: the stored `wave_ratio` fallback, 30.
+pub const WAVE_RATIO: f32 = 0.3;
+
+/// The cap on a loud waveform bar, and the tip on one that clips.
+pub const WAVE_LOUD: Color32 = Color32::from_rgb(226, 143, 72);
+pub const WAVE_CLIPPED: Color32 = Color32::from_rgb(215, 68, 50);
+
+/// A main-track clip, the 76 track height less its border: a header
+/// row, then the filmstrip over the sound band.
+pub const MAIN_CLIP_HEIGHT: f32 = 74.0;
+/// An audio clip: a header row over its waveform.
+pub const AUDIO_CLIP_HEIGHT: f32 = 46.0;
+/// Any other clip.
+pub const CLIP_HEIGHT: f32 = 28.0;
+/// The gap above and below a main-track clip inside its lane row.
+pub const MAIN_CLIP_INSET: f32 = 8.0;
+/// The gap above and below any other clip.
+pub const CLIP_INSET: f32 = 6.0;
+
+/// A right-click menu.
+pub const MENU: Color32 = Color32::from_rgb(0x2c, 0x2c, 0x2c);
+/// The menu row under the pointer, and the row whose submenu is open.
+pub const MENU_HOVER: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+/// A menu row that cannot run now.
+pub const MENU_DISABLED: Color32 = Color32::from_rgb(0x6f, 0x6f, 0x6f);
+/// A menu shortcut.
+pub const MENU_KEY: Color32 = Color32::from_rgb(0x8d, 0x8d, 0x8d);
+/// The shortcut of a row that cannot run now.
+pub const MENU_KEY_DISABLED: Color32 = Color32::from_rgb(0x5c, 0x5c, 0x5c);
+/// The arrow of a row with a submenu.
+pub const MENU_CHEVRON: Color32 = Color32::from_rgb(0xa3, 0xa3, 0xa3);
+/// The line between menu groups.
+pub const MENU_SEPARATOR: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20);
+/// The badge on a menu row this build cannot do yet.
+pub const MENU_BADGE: Color32 = Color32::from_rgb(0x6d, 0x5e, 0xfc);
+/// The narrowest a menu is drawn.
+pub const MENU_WIDTH: f32 = 248.0;
 
 #[cfg(test)]
 mod tests {
@@ -86,6 +153,9 @@ mod tests {
         assert_eq!(FAINT, Color32::from_rgb(0x73, 0x73, 0x73));
         assert_eq!(PLAYHEAD, Color32::WHITE);
         assert_eq!(ICON_BUTTON, Color32::from_rgb(0x2a, 0x2a, 0x2a));
+        assert_eq!(ACTIVE, Color32::from_rgb(0x33, 0x33, 0x33));
+        assert_eq!(LANE, Color32::from_rgb(0x24, 0x24, 0x24));
+        assert_eq!(LANE_LINE, Color32::from_rgb(0x2e, 0x2e, 0x2e));
         assert_eq!(SELECTED, Color32::WHITE);
         assert_eq!(TYPE_SIZE, 13.0);
         assert_eq!(TIMECODE_SIZE, 12.0);

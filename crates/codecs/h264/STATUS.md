@@ -2,7 +2,7 @@
 
 Checkout: `8fce4a643865` on `h264-sw-enc-dec`. Native safe Rust in `cutlass-h264`. No `unsafe`. No bundled C, FFmpeg, or other H.264 library.
 
-This record is partial. Annex A decode for the profiles in `SCOPE.md` is implemented, and Annexes G, H, and I are partial. The encoder still emits progressive High, 8-bit, 4:2:0, CABAC. The desktop factory does not register this crate. On macOS the desktop test opens the platform H.264 encoder.
+This record is partial. Annex A decode for the profiles in `SCOPE.md` is implemented, and Annexes G, H, and I are partial. The encoder still emits progressive High, 8-bit, 4:2:0, CABAC. The desktop registers this decoder after the platform decoder, and export falls back to this encoder when no platform encoder takes the picture.
 
 Writing this file did not re-run the suite, the bench, the fuzz campaigns, or the 3840×2160 file. Numbers below are the runs already recorded, named with the checkout that produced them.
 
@@ -67,7 +67,7 @@ Encode quality, from the default tests on that checkout: `testsrc2` 320×240, 60
 | Hostile input | Error, then a later IDR still decodes | Error, then a later picture still encodes | `hostile_framing_is_rejected_and_the_decoder_stays_usable`, `hostile_parameter_sets_are_rejected`, `random_packets_fail_closed`, `encoder_rejects_a_bad_configuration` | In the default tests. The 30-minute campaigns were not repeated on this checkout. |
 | 1280×720 High decode | The recorded run passed 30 fps and the memory gate | n/a | `high_720p_decode_meets_the_release_gates`, `against_ffmpeg` | Passed at `491f9300`. Not repeated here. |
 | ITU conformance bitstreams | Not run | Not run | Streams not obtained | Not available |
-| Desktop registration | Not wired | Not wired | `apps/desktop` registers PNG, JPEG, AAC, AV1, and PCM after the platform codecs | Not done |
+| Desktop registration | Wired after the platform opener | Registered; export falls back to it when no platform encoder takes the picture | `a_real_movie_returns_a_software_picture_and_audio` | Done |
 | Linux and Windows | Not run | Not run | The recorded runs are on this Mac | Not run |
 
 ## Checks for this edit
@@ -79,7 +79,6 @@ This edit rewrote `SCOPE.md` and `STATUS.md`. `cargo fmt`, `cargo lint`, `cargo 
 - The open Annex G, H, and I rows in `SCOPE.md`.
 - Official ITU conformance bitstreams, or this gap stays not available.
 - Repeat the fuzz campaigns, the 720p speed and memory gate, and the encoder quality gate on this checkout.
-- Register the software decoder where the platform has none for this codec.
 - Linux and Windows runs.
 - The workspace fmt, lint, test, and deny commands.
 - Encoder gaps that are outside the encoder target: B slices do not search below 16×16 and do not emit skip or direct. Intra blocks stay DC 4×4. Weighted prediction, 4×4 sub-macroblocks, and more than one slice per picture stay unemitted.

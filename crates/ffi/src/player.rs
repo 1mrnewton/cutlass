@@ -1,134 +1,176 @@
-//! Playhead play and audio output.
+//! Play, pause, seek, and the tick that moves the playhead with the sound.
 //!
-//! Seeking a picture needs a device this crate cannot construct. The player has no pause.
+//! The audio goes through the shared [`Transport`], the one the desktop
+//! plays through. A phone opens its device output once; tests keep the
+//! software buffer.
 
-use cutlass_playback::{AudioGap, AudioHost, CopyOutcome, Player};
-use cutlass_session::{Micros, Session};
+use cutlass_playback::{AudioGap, AudioHost, PlayheadError, Program, Transport};
+use cutlass_session::Micros;
 
 use crate::FfiError;
 
 /// The phone playhead and its audio output.
 #[derive(Default)]
 pub struct PhonePlayer {
-    player: Player,
+    transport: Transport,
+    playhead: Micros,
+    playing: bool,
 }
 
 impl PhonePlayer {
     /// Software audio, playhead at zero, not playing.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            player: Player::new(),
-        }
+        Self::default()
     }
 
     /// The playhead, in microseconds.
     #[must_use]
     pub fn playhead(&self) -> Micros {
-        self.player.playhead()
+        self.playhead
     }
 
-    /// Play is running inside the stored duration.
     #[must_use]
     pub fn is_playing(&self) -> bool {
-        self.player.is_playing()
-    }
-
-    /// The audio clock, in microseconds.
-    #[must_use]
-    pub fn audio_time(&self) -> Micros {
-        self.player.audio_time()
-    }
-
-    /// The last picture that was shown.
-    #[must_use]
-    pub fn readback(&self) -> Option<&[u8]> {
-        self.player.readback()
+        self.playing
     }
 
     /// Silence named by the host, when this output has no device.
     #[must_use]
     pub fn gap(&self) -> Option<AudioGap> {
-        self.player.output().gap()
-    }
-
-    /// Start play when the playhead is inside the stored duration.
-    ///
-    /// A negative duration is refused. The draft is left as it is.
-    pub fn play(&mut self, session: &Session) -> Result<(), FfiError> {
-        self.player.play(session)?;
-        Ok(())
+        self.transport.gap()
     }
 
     /// Choose the output. Linux is silence, not an error.
     pub fn open_output(&mut self, host: AudioHost) {
-        self.player.open_output(host);
+        self.playing = false;
+        self.transport.open(host);
     }
 
-    /// Move the audio clock by `frames` at `rate`. A zero rate is refused.
-    pub fn advance_audio(&mut self, frames: u32, rate: u32) -> Result<Micros, FfiError> {
-        Ok(self.player.advance_audio(frames, rate)?)
+    /// Play from the playhead, or from the start when it is at `end`. An
+    /// empty cut does not play. A negative `end` is refused.
+    pub fn play(&mut self, program: Program<'_>, end: Micros) -> Result<(), FfiError> {
+        if end.0 < 0 {
+            return Err(PlayheadError::Duration.into());
+        }
+        if end.0 == 0 {
+            self.playing = false;
+            return Ok(());
+        }
+        if self.playhead >= end {
+            self.playhead = Micros(0);
+        }
+        self.playing = true;
+        self.transport.start(program, self.playhead, end);
+        Ok(())
     }
 
-    /// Copy one stereo frame into `buffer` and advance the audio clock.
-    pub fn copy_sample(
-        &mut self,
-        sample: &[u8],
-        buffer: &mut [u8],
-    ) -> Result<CopyOutcome, FfiError> {
-        Ok(self.player.copy_pipeline_sample(sample, buffer)?)
+    pub fn pause(&mut self) {
+        self.playing = false;
+        self.transport.silence();
+    }
+
+    /// Move the playhead to `at`, held inside the cut. Playing goes on from
+    /// there.
+    pub fn seek(&mut self, program: Program<'_>, at: Micros, end: Micros) {
+        self.playhead = Micros(at.0.clamp(0, end.0.max(0)));
+        if self.playing {
+            self.transport.start(program, self.playhead, end);
+        }
+    }
+
+    /// Move a playing playhead by `elapsed` microseconds, toward the heard
+    /// audio. Play stops at `end`. A paused playhead stays where it is.
+    pub fn tick(&mut self, program: Program<'_>, elapsed: i64, end: Micros) -> Micros {
+        if !self.playing {
+            return self.playhead;
+        }
+        let ticked = self
+            .transport
+            .tick(program, self.playhead, elapsed, end, false);
+        self.playhead = ticked.playhead;
+        self.playing = ticked.playing;
+        self.playhead
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use cutlass_playback::{AudioGap, AudioHost, CopyOutcome, PlayheadError};
+    use cutlass_eval::ReaderFactory;
+    use cutlass_playback::{AudioGap, AudioHost, PlayheadError, Program};
+    use cutlass_session::{Draft, Micros};
 
     use super::PhonePlayer;
     use crate::FfiError;
 
-    fn session(duration: i64) -> cutlass_session::Session {
-        let mut draft = cutlass_session::Draft::empty("draft");
-        draft.duration = cutlass_session::Micros(duration);
-        cutlass_session::Session::open(draft)
+    fn program<'a>(draft: &'a Draft, readers: &'a ReaderFactory) -> Program<'a> {
+        Program {
+            draft,
+            revision: 0,
+            root: None,
+            readers,
+        }
     }
 
     #[test]
     fn a_new_player_is_at_zero_and_not_playing() {
         let player = PhonePlayer::new();
-        assert_eq!(player.playhead(), cutlass_session::Micros(0));
+        assert_eq!(player.playhead(), Micros(0));
         assert!(!player.is_playing());
-        assert_eq!(player.audio_time(), cutlass_session::Micros(0));
-        assert!(player.readback().is_none());
         assert_eq!(player.gap(), None);
     }
 
     #[test]
-    fn play_starts_without_rewriting_the_duration() {
-        let session = session(1_000_000);
+    fn play_ticks_to_the_end_and_stops_there() {
+        let draft = Draft::empty("draft");
+        let readers = ReaderFactory::default();
+        let end = Micros(100_000);
         let mut player = PhonePlayer::new();
-        player.play(&session).unwrap();
+        player.play(program(&draft, &readers), end).unwrap();
         assert!(player.is_playing());
-        assert_eq!(player.playhead(), cutlass_session::Micros(0));
-        assert_eq!(session.draft().duration, cutlass_session::Micros(1_000_000));
+        assert_eq!(
+            player.tick(program(&draft, &readers), 40_000, end),
+            Micros(40_000)
+        );
+        assert_eq!(player.tick(program(&draft, &readers), 90_000, end), end);
+        assert!(!player.is_playing());
+        // Play again from the end starts over.
+        player.play(program(&draft, &readers), end).unwrap();
+        assert_eq!(player.playhead(), Micros(0));
     }
 
     #[test]
-    fn a_negative_duration_refuses_play() {
-        let session = session(-1);
+    fn pause_holds_the_playhead_and_seek_stays_inside_the_cut() {
+        let draft = Draft::empty("draft");
+        let readers = ReaderFactory::default();
+        let end = Micros(100_000);
         let mut player = PhonePlayer::new();
-        let error = player.play(&session).unwrap_err();
+        player.play(program(&draft, &readers), end).unwrap();
+        player.tick(program(&draft, &readers), 30_000, end);
+        player.pause();
+        assert!(!player.is_playing());
+        assert_eq!(
+            player.tick(program(&draft, &readers), 30_000, end),
+            Micros(30_000)
+        );
+        player.seek(program(&draft, &readers), Micros(500_000), end);
+        assert_eq!(player.playhead(), end);
+        player.seek(program(&draft, &readers), Micros(-5), end);
+        assert_eq!(player.playhead(), Micros(0));
+    }
+
+    #[test]
+    fn an_empty_cut_does_not_play_and_a_negative_one_is_refused() {
+        let draft = Draft::empty("draft");
+        let readers = ReaderFactory::default();
+        let mut player = PhonePlayer::new();
+        player.play(program(&draft, &readers), Micros(0)).unwrap();
+        assert!(!player.is_playing());
+        let error = player
+            .play(program(&draft, &readers), Micros(-1))
+            .unwrap_err();
         assert!(matches!(error, FfiError::Playhead(PlayheadError::Duration)));
         assert!(!player.is_playing());
-        assert_eq!(session.draft().duration, cutlass_session::Micros(-1));
-    }
-
-    #[test]
-    fn a_zero_rate_does_not_move_audio_time() {
-        let mut player = PhonePlayer::new();
-        let error = player.advance_audio(1, 0).unwrap_err();
-        assert!(matches!(error, FfiError::Playhead(PlayheadError::NoClock)));
-        assert_eq!(player.audio_time(), cutlass_session::Micros(0));
     }
 
     #[test]
@@ -138,32 +180,5 @@ mod tests {
         assert_eq!(player.gap(), Some(AudioGap::Linux));
         player.open_output(AudioHost::Software);
         assert_eq!(player.gap(), None);
-    }
-
-    #[test]
-    fn a_stereo_frame_is_copied_and_the_clock_advances() {
-        let mut player = PhonePlayer::new();
-        let sample = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let mut buffer = [0_u8; 32];
-        let outcome = player.copy_sample(&sample, &mut buffer).unwrap();
-        assert_eq!(outcome, CopyOutcome::Copied(8));
-        assert_eq!(&buffer[..8], &sample[..8]);
-        assert_eq!(
-            player.audio_time(),
-            cutlass_session::Micros(1_000_000 / 48_000)
-        );
-    }
-
-    #[test]
-    fn an_empty_sample_copies_eight_zero_bytes() {
-        let mut player = PhonePlayer::new();
-        let mut buffer = [9_u8; 32];
-        let outcome = player.copy_sample(&[], &mut buffer).unwrap();
-        assert_eq!(outcome, CopyOutcome::Copied(8));
-        assert_eq!(&buffer[..8], &[0_u8; 8]);
-        assert_eq!(
-            player.audio_time(),
-            cutlass_session::Micros(1_000_000 / 48_000)
-        );
     }
 }

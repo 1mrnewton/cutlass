@@ -6,8 +6,9 @@
 //! drops the cache.
 
 use std::collections::VecDeque;
+use std::path::Path;
 
-use cutlass_eval::Snapshot;
+use cutlass_eval::{Fonts, OpenClips, ReaderFactory, Snapshot};
 use cutlass_gpu::Device;
 use cutlass_model::{DraftId, Micros};
 use cutlass_session::Session;
@@ -133,11 +134,126 @@ impl Cache {
     }
 }
 
+/// Composited pictures and the open movies behind them.
+///
+/// The picture key is the draft id, the revision, the timeline time, and the
+/// canvas size. Four pictures is enough for a short scrub. A new time seeks
+/// a movie that is already open. A new draft or revision drops both.
+pub struct FrameCache {
+    inner: Cache,
+    clips: OpenClips,
+}
+
+impl FrameCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Cache::new(),
+            clips: OpenClips::new(),
+        }
+    }
+
+    /// Drops every stored picture and every open file.
+    pub fn clear(&mut self) {
+        self.inner = Cache::new();
+        self.clips.clear();
+    }
+
+    /// The picture at `time`. A stored key is returned without evaluating again.
+    pub fn frame<D: Device>(
+        &mut self,
+        session: &Session,
+        device: &mut D,
+        time: Micros,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        fonts: &dyn Fonts,
+    ) -> Result<Readback, PresentError<D::Error>> {
+        evaluate(
+            &mut self.inner,
+            &mut self.clips,
+            session,
+            device,
+            time,
+            media,
+            DrawnWith { root, fonts },
+        )
+    }
+}
+
+pub(crate) struct DrawnWith<'a> {
+    pub(crate) root: Option<&'a Path>,
+    pub(crate) fonts: &'a dyn Fonts,
+}
+
+impl FrameCache {
+    /// Wait for every clip's picture, or show a clip's last picture while
+    /// the one asked for decodes. Preview does not wait, so a jump never
+    /// stops the window.
+    pub fn set_patient(&mut self, patient: bool) {
+        self.clips.set_patient(patient);
+    }
+
+    /// Whether the last frame showed an earlier picture than asked for. The
+    /// caller draws again until this is false.
+    pub fn take_stale(&mut self) -> bool {
+        self.clips.take_stale()
+    }
+
+    /// Open clips that start within `horizon` after `time` and start
+    /// decoding their first pictures.
+    pub fn preroll(
+        &mut self,
+        session: &Session,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        time: Micros,
+        horizon: Micros,
+    ) {
+        self.clips.set_project(root);
+        self.clips
+            .preroll(media, session.draft(), session.revision(), time, horizon);
+    }
+
+    /// The frame at `time` as GPU layers, or composed pixels when it needs
+    /// the CPU. The open clips are shared with [`Self::frame`]. Nothing is
+    /// stored: the caller keeps what it drew.
+    pub fn layers<D: Device>(
+        &mut self,
+        session: &Session,
+        device: &mut D,
+        time: Micros,
+        media: &ReaderFactory,
+        root: Option<&Path>,
+        fonts: &dyn Fonts,
+    ) -> Result<cutlass_eval::Composed, PresentError<D::Error>> {
+        cutlass_eval::layers_in(
+            &Snapshot::with_fonts(session.draft(), fonts),
+            time,
+            device,
+            media,
+            &mut self.clips,
+            session.revision(),
+            root,
+        )
+        .map_err(PresentError::Picture)
+    }
+}
+
+impl Default for FrameCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) fn evaluate<D: Device>(
     cache: &mut Cache,
+    clips: &mut OpenClips,
     session: &Session,
     device: &mut D,
     time: Micros,
+    media: &ReaderFactory,
+    drawn: DrawnWith<'_>,
 ) -> Result<Readback, PresentError<D::Error>> {
     let draft = session.draft();
     let revision = session.revision();
@@ -146,8 +262,16 @@ pub(crate) fn evaluate<D: Device>(
     if let Some(hit) = cache.lookup(&draft.id, revision, time, width, height) {
         return Ok(hit);
     }
-    let frame =
-        cutlass_eval::frame(&Snapshot::new(draft), time, device).map_err(PresentError::Picture)?;
+    let frame = cutlass_eval::frame_in(
+        &Snapshot::with_fonts(draft, drawn.fonts),
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        drawn.root,
+    )
+    .map_err(PresentError::Picture)?;
     let readback = Readback {
         width: frame.extent.width,
         height: frame.extent.height,

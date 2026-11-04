@@ -29,7 +29,7 @@ Known specification mismatches this crate follows libvpx on, because that is wha
 
 Profile 0, 8-bit, 4:2:0, key frames and inter frames. The decoder accepts partitions, transform sizes through 32×32, intra modes, inter modes including compound prediction, sub-pixel motion, the loop filter, segmentation, tiles, eight reference slots, `show_existing_frame`, error-resilient frames, probability adaptation, and reference scaling.
 
-Profiles 1, 2, and 3 (4:2:2, 4:4:4, 10-bit, 12-bit) return `CodecError::Unsupported`. A coded edge above 4096 returns `CodecError::Limit`. That edge is a resource limit, not a profile cut.
+Profiles 0 through 3 are decoded, including 10-bit and 12-bit 4:2:0, 4:2:2, 4:4:0, 4:4:4, and sRGB. The decoder accepts a picture a defined level allows, through a side of 16832 and 35,651,584 luma samples. Anything past that returns `CodecError::Limit`. The encoder still refuses a side above 4096.
 
 The encoder emits profile 0, error-resilient, one tile, no loop filter, no segmentation, DC intra, a single LAST reference, integer motion, and transforms no larger than 8×8. It quantizes and can follow a target bitrate. The decoder still accepts libvpx streams that use the rest of profile 0.
 
@@ -57,8 +57,29 @@ Recorded line:
 | Capability | Decode | Encode | Evidence | Status |
 | --- | --- | --- | --- | --- |
 | Profile 0, 8-bit, 4:2:0, key and inter | Accept | Emit, within the encoder limits above | `lossless_constant_matches_the_source`, `lossless_motion_matches_the_source`, `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `factories_open_the_profile_0_codec` | Verified on this machine |
-| Profiles 1–3 | Error | Error | `profile_one_is_unsupported`, `open_rejects_the_sizes_and_formats_outside_profile_0` | Verified |
-| Edge above 4096 | Error `Limit` | Error `Limit` | `open_rejects_the_sizes_and_formats_outside_profile_0` | Verified |
+| Profile 1, 8-bit 4:2:2, 4:4:0, 4:4:4, sRGB | Accept | Error | `profile1_chroma_matches_ffmpeg_software` | Verified |
+| Profile 2, 10-bit and 12-bit 4:2:0 | Accept | Error | `profile2_depth_matches_ffmpeg_software` | Verified |
+| Profile 3, 10-bit and 12-bit 4:2:2, 4:4:0, 4:4:4, sRGB | Accept | Error | `profile3_chroma_matches_ffmpeg_software` | Verified |
+| Side above 16832, or luma area above 35,651,584 | Error `Limit` | Error `Limit` above 4096 | `open_rejects_the_sizes_and_formats_outside_profile_0`, `level_width_above_4096_matches_ffmpeg_software` | Verified |
+| Official level 1 streams, all six tests, profile 0 and profile 2 | Pictures match at the coded size | n/a | `official_level_stream_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files/vp9-levels` is missing. |
+| 3840×2160 profile 0 | Pictures match | n/a | `uhd_3840x2160_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no 3840×2160 source. |
+| Four tile columns and two tile rows | Pictures match | One tile | `tiled_picture_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Four tile rows | Pictures match | One tile | `four_tile_rows_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Four tile columns and four tile rows | Pictures match | Columns and rows tested apart | `four_by_four_tiles_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Switchable, smooth, regular, sharp, and bilinear interpolation | Pictures match | Regular only | `interpolation_filters_match_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| 52×52 loop filter in 4:2:2, 4:4:0, 4:4:4, 10-bit and 12-bit 4:2:0, and 10-bit 4:2:2 | Pictures match | n/a | `odd_chroma_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| 53×53, subsampled chroma edge 27 | Pictures match | Even coded size | `odd_edge_chroma_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Lossless 4:4:4, 10-bit and 12-bit 4:2:0, and 12-bit 4:4:4 | Pictures match | 8-bit 4:2:0 quantizer 0 | `lossless_high_depth_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Loop filter sharpness 7 | Pictures match | Sharpness 0 | `sharp_loop_filter_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Sharpness 7 at 10-bit, 12-bit, and 10-bit 4:2:2 | Pictures match | 8-bit sharpness 7 | `sharp_high_depth_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Frame parallel mode | Pictures match | Probability adaptation | `frame_parallel_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Intra loop-filter delta -63 | Pictures match | Encoded deltas | `loop_filter_delta_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Relative segment quantizer step above 63 | Pictures match | No segmentation | `segment_quant_delta_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Alternate reference on context 1, backward sign bias | Pictures match | One context, bias 0 | `altref_context_matches_ffmpeg_software` | Verified on this machine. The test skips when `../local-files` has no source. |
+| Segment loop-filter step -63 and a last-frame reference | Pictures match | Quantizer feature only | `segment_tools_match_ffmpeg_software` | Verified on this machine. The test skips when libvpx headers are missing. |
+| Segment skip | Pictures match | No skip feature | `segment_skip_matches_ffmpeg_software` | Verified on this machine. The test skips when libvpx headers are missing. |
+| Absolute segment loop-filter step -8 | Pictures match, and they differ from the relative step | Relative deltas | `absolute_segment_loop_filter_matches_ffmpeg_software` | Verified on this machine. The test skips when libvpx headers are missing. |
+| Colour spaces 0, 3, 4, 5, and 6, and profile 0 sRGB | On the picture, or malformed | Space 1 only | `color_and_render_size_are_on_the_picture` | Verified |
 | Lossless round trip | Exact YUV | Emit | `lossless_constant_matches_the_source`, `lossless_ramp_and_odd_blocks_match_the_source`, `lossless_motion_matches_the_source`, `lossless_red_keyframe_matches_ffmpeg` | Verified |
 | Lossy PSNR and rate gates | n/a | Named bounds above | `lossy_keyframes_meet_the_psnr_gates`, `lossy_motion_meets_the_psnr_gate`, `thirty_frames_stay_near_500_kbps` | Verified |
 | libvpx-vp9, native vp9, and GStreamer vp9dec decode our bitstreams | n/a | All three | `independent_decoders_match_our_yuv` | Verified on this machine |
@@ -78,9 +99,17 @@ Recorded line:
 
 The run finished in 1800.03 seconds with exit 0. Mutated buffers produced no picture. The key-after-noise check did not fail.
 
-## Not exercised
+## Accepted, with no picture
 
-The segmentation temporal-update bit is implemented. The aq-mode 1 fixture (`segmentation_matches_libvpx`) uses map copy with `update_map` clear, including a predicted segment id of 4 on the inter frames. That fixture does not read the temporal bit.
+The decoder accepts these. No produced file turns the case on, so the picture was not compared.
+
+- Compound prediction stays unused. Encodes remain single-reference.
+- A 16× reference upscale is not produced. libvpx writes a keyframe when the size changes. 1/2 and 4/5 are compared.
+- Loop-filter mode deltas, and the frame quantizer deltas `y_dc`, `uv_dc`, and `uv_ac`, stay zero.
+- `reset_frame_context` of 2 resets one context, and 3 resets all four. No file makes those contexts diverge and then resets one of them.
+- Official level streams above level 1 are not on disk. Level 1, profile 0 and profile 2, is compared when `../local-files/vp9-levels` holds those files.
+
+The aq-mode 1 fixture (`segmentation_matches_libvpx`) uses map copy with `update_map` clear. A separate 320×240 aq-mode 3 encode is what sets the segmentation temporal-update bit.
 
 ## Still required before calling this complete
 

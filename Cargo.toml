@@ -51,25 +51,29 @@ members = [
     "crates/eval",
     "crates/export",
     "crates/ffi",
+    "crates/ffi-bindings",
     "crates/font",
     "crates/generated",
     "crates/gpu",
+    "crates/icons",
+    "crates/logger",
     "crates/model",
     "crates/picture",
     "crates/platform-android",
     "crates/platform-apple",
     "crates/platform-windows",
     "crates/playback",
-    "crates/renderer-android",
-    "crates/renderer-metal",
+    "crates/pool",
+    "crates/probe",
+    "crates/render",
     "crates/renderer-software",
-    "crates/renderer-windows",
     "crates/session",
     "crates/settings",
     "crates/storage",
     "crates/store",
     "crates/text",
     "crates/transcription",
+    "tools/icongen",
 ]
 
 [workspace.package]
@@ -106,3 +110,25 @@ wildcard_imports = "deny"
 exit = "deny"
 mem_forget = "deny"
 get_unwrap = "deny"
+
+# Playback mixes sound in real time, even in a debug build. Unoptimised,
+# two AAC clips take longer to decode and resample than they last, and the
+# device plays gaps. The sound decoders and the mixer build optimised.
+[profile.dev.package.cutlass-audio]
+opt-level = 3
+[profile.dev.package.cutlass-aac]
+opt-level = 3
+[profile.dev.package.cutlass-ac3]
+opt-level = 3
+[profile.dev.package.cutlass-alac]
+opt-level = 3
+[profile.dev.package.cutlass-flac]
+opt-level = 3
+[profile.dev.package.cutlass-mp3]
+opt-level = 3
+[profile.dev.package.cutlass-opus]
+opt-level = 3
+[profile.dev.package.cutlass-pcm]
+opt-level = 3
+[profile.dev.package.cutlass-vorbis]
+opt-level = 3

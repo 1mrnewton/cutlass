@@ -1,12 +1,5 @@
 use cutlass_model::{FrameRate, Micros};
 
-/// Pixels the two-frame accuracy step occupies.
-///
-/// Pixel size is pixels per microsecond. The last accuracy entry is a
-/// two-frame step, so its pixel size is this width divided by two frames
-/// of the draft rate.
-const TWO_FRAME_STEP_PIXELS: f64 = 400.0;
-
 /// The lane width and the cut length a zoom is clamped against.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomBounds {
@@ -51,6 +44,15 @@ impl Zoom {
         Self::apply(self.pixel_size * 0.5, bounds)
     }
 
+    /// Multiply the pixel size by `factor`, then clamp it to the lane.
+    #[must_use]
+    pub fn scale(self, factor: f64, bounds: ZoomBounds) -> Option<Self> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return None;
+        }
+        Self::apply(self.pixel_size * factor, bounds)
+    }
+
     /// Fit the cut to three quarters of the lane, then clamp it.
     #[must_use]
     pub fn zoom_to_fit(self, bounds: ZoomBounds) -> Option<Self> {
@@ -68,15 +70,13 @@ impl Zoom {
     }
 }
 
-/// The last accuracy step: two frames of `rate` across [`TWO_FRAME_STEP_PIXELS`].
+/// The last accuracy step: the ruler's finest step at `rate`.
 #[must_use]
 pub fn last_accuracy_step(rate: FrameRate) -> Option<f64> {
     if rate.numerator == 0 || rate.denominator == 0 {
         return None;
     }
-    let step = TWO_FRAME_STEP_PIXELS * f64::from(rate.numerator)
-        / (2.0 * 1_000_000.0 * f64::from(rate.denominator));
-    finite_positive(step)
+    finite_positive(crate::ruler::zoom_ceiling(rate))
 }
 
 /// A quarter of the lane divided by the cut length.
@@ -197,6 +197,23 @@ mod tests {
         assert_eq!(fitted, 0.75 * 800.0 / 10_000_000.0);
         assert!(fitted > minimum_pixel_size(limits).unwrap());
         assert!(fitted < last_accuracy_step(FrameRate::FPS_30).unwrap());
+    }
+
+    #[test]
+    fn a_pinch_scales_by_its_factor_and_stays_inside_the_lane() {
+        let limits = bounds(800.0, 10_000_000);
+        let start = minimum_pixel_size(limits).unwrap() * 4.0;
+        let zoom = Zoom::new(start).unwrap();
+        assert_eq!(zoom.scale(1.5, limits).unwrap().pixel_size(), start * 1.5);
+        assert_eq!(
+            zoom.scale(1_000.0, limits).unwrap().pixel_size(),
+            last_accuracy_step(FrameRate::FPS_30).unwrap()
+        );
+        assert_eq!(
+            zoom.scale(1.0e-9, limits).unwrap().pixel_size(),
+            minimum_pixel_size(limits).unwrap()
+        );
+        assert!(zoom.scale(0.0, limits).is_none());
     }
 
     #[test]

@@ -15,6 +15,7 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
     { id = "RUSTSEC-2026-0368", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
     { id = "RUSTSEC-2026-0369", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
+    { id = "RUSTSEC-2026-0429", reason = "candle-core reads and writes zip entries for npy. It does not call extract, which is the vulnerable API. Transcription loads safetensors." },
 ]
 
 [licenses]

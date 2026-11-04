@@ -246,6 +246,12 @@ pub enum Request {
         duration: Micros,
         effect_id: String,
     },
+    /// Run the effect clip `segment_id` over the picture clip `clip` alone,
+    /// or with `None` over every picture below it again.
+    BindEffect {
+        segment_id: SegmentId,
+        clip: Option<SegmentId>,
+    },
     /// Store `value`, from 0 to 1, as the strength of the effect, filter,
     /// or adjustment the clip uses. When another clip uses that material too,
     /// a copy named `material_id` takes its place on this clip only.

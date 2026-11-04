@@ -60,6 +60,6 @@ pub use materials::{
 };
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};
-pub use segment::{HdrSettings, ResponsiveLayout, Segment};
+pub use segment::{APPLY_ONE_CLIP, HdrSettings, ResponsiveLayout, Segment};
 pub use time::{FrameError, FrameRate, Micros, RangeError, TimeRange, TimecodeLabel};
 pub use track::Track;

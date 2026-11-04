@@ -459,6 +459,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetTextGlow { .. } => "set_text_glow",
         Request::AddText { .. } => "add_text",
         Request::AddEffect { .. } => "add_effect",
+        Request::BindEffect { .. } => "bind_effect",
         Request::SetEffectStrength { .. } => "set_effect_strength",
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::AddKeyframe { .. } => "add_keyframe",

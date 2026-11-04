@@ -147,6 +147,8 @@ pub enum EditError {
     UnknownEffect,
     /// The clip is not an effect, a filter, or an adjustment.
     NotEffect,
+    /// An effect binds to a picture clip, and only an effect clip binds.
+    EffectTarget,
     /// An effect strength is outside 0 through 1.
     EffectStrength,
     /// The canvas color is not empty and not a color the preview paints.
@@ -350,6 +352,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             TimeRange::new(start.0, duration.0),
             effect_id,
         ),
+        Request::BindEffect { segment_id, clip } => {
+            effect::bind_effect(draft, segment_id, clip.as_ref())
+        }
         Request::SetEffectStrength {
             segment_id,
             material_id,

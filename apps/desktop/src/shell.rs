@@ -188,6 +188,9 @@ impl std::fmt::Display for ShellError {
             Self::Edit(EditError::NotEffect) => {
                 formatter.write_str("a strength belongs on an effect, filter, or adjustment")
             }
+            Self::Edit(EditError::EffectTarget) => {
+                formatter.write_str("an effect goes on a picture clip")
+            }
             Self::Edit(EditError::EffectStrength) => {
                 formatter.write_str("the strength must be from zero to one")
             }

@@ -1,4 +1,5 @@
-//! Place a bundled effect on an effect row, and set an effect's strength.
+//! Place a bundled effect on an effect row, bind it to one clip, and set
+//! an effect's strength.
 
 use cutlass_effects::bundled_recipe;
 use cutlass_model::{
@@ -44,6 +45,30 @@ pub fn add_effect(
         value: 1.0,
         ..MaterialVideoEffect::default()
     });
+    Ok(())
+}
+
+/// Run the effect clip `segment_id` over the picture clip `clip` alone, or
+/// with `None` over every picture below it. Only a clip on an effect row
+/// binds, and only to a clip on a picture row.
+pub fn bind_effect(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    clip: Option<&SegmentId>,
+) -> Result<(), EditError> {
+    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let track = &draft.tracks[track_index];
+    if !matches!(track.kind, TrackType::Effect) {
+        return Err(EditError::EffectTarget);
+    }
+    ensure_unlocked(track.attribute)?;
+    if let Some(clip) = clip {
+        let (clip_track, _) = super::speed::locate(draft, clip)?;
+        if !matches!(draft.tracks[clip_track].kind, TrackType::Video) {
+            return Err(EditError::EffectTarget);
+        }
+    }
+    draft.tracks[track_index].segments[segment_index].bind_to(clip);
     Ok(())
 }
 
@@ -190,6 +215,43 @@ mod tests {
                 .all(|track| track.id.as_str() != "fx")
         );
         assert!(session.draft().materials.video_effects.is_empty());
+    }
+
+    #[test]
+    fn an_effect_binds_to_a_picture_clip_only() {
+        let mut session = open();
+        let bind = |clip: Option<&str>| Request::BindEffect {
+            segment_id: SegmentId::new("shake"),
+            clip: clip.map(SegmentId::new),
+        };
+        session
+            .apply(0, &[add("fx", "shake", 0, "recipe/shake"), bind(Some("a"))])
+            .unwrap();
+        let bound = |session: &Session| {
+            session
+                .draft()
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .find(|segment| segment.id.as_str() == "shake")
+                .and_then(cutlass_model::Segment::bound_clip)
+        };
+        assert_eq!(bound(&session), Some(SegmentId::new("a")));
+        assert_eq!(
+            session.apply(1, &[bind(Some("shake"))]),
+            Err(EditError::EffectTarget)
+        );
+        let wrong = Request::BindEffect {
+            segment_id: SegmentId::new("a"),
+            clip: None,
+        };
+        assert_eq!(session.apply(1, &[wrong]), Err(EditError::EffectTarget));
+        assert_eq!(
+            session.apply(1, &[bind(Some("gone"))]),
+            Err(EditError::MissingSegment)
+        );
+        session.apply(1, &[bind(None)]).unwrap();
+        assert_eq!(bound(&session), None);
     }
 
     #[test]

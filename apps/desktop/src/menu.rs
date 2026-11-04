@@ -236,6 +236,9 @@ pub fn clip_entries(kind: &TrackType) -> &'static [Entry] {
     }
 }
 
+/// The menu for a gap between clips on a row.
+pub const GAP_ROW: &[Entry] = &[done("close-gap", "Close gap", "")];
+
 /// The menu for a media card in the library.
 pub const LIBRARY_CARD: &[Entry] = &[
     todo("open-file", "Open file location", ""),

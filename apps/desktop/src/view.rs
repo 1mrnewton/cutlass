@@ -1986,6 +1986,7 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     let body = Rect::from_min_max(toolbar.left_bottom(), rect.max);
     ruler_and_lanes(shell, ui, view, body);
     paint_clip_menu(shell, ui);
+    paint_gap_menu(shell, ui);
     let handle = Rect::from_min_size(
         Pos2::new(rect.min.x, rect.min.y - tokens::SPLIT),
         Vec2::new(rect.width(), tokens::SPLIT),
@@ -2522,6 +2523,34 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
     }
 }
 
+/// The Close gap menu over a gap on a row.
+fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
+    let Some(menu) = shell.gap_menu().cloned() else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && (pos.x, pos.y) != (menu.x, menu.y)
+    {
+        shell.close_gap_menu();
+        return;
+    }
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("gap-menu"),
+        Pos2::new(menu.x, menu.y),
+        crate::menu::GAP_ROW,
+        &|_| true,
+    );
+    if shown.picked.is_some() {
+        shell.close_gap_menu();
+        if let Err(error) = shell.close_gap(&menu.track_id, menu.time) {
+            shell.set_notice(error.to_string());
+        }
+    } else if shown.dismissed {
+        shell.close_gap_menu();
+    }
+}
+
 fn scroll_with_drag(shell: &mut Shell, ui: &Ui, x_in_view: f64) {
     if shell.drag_scroll(x_in_view) {
         ui.ctx().request_repaint();
@@ -2967,6 +2996,17 @@ fn paint_lane(
         .collect();
     for clip in &lane.clips {
         paint_clip(shell, ui, lane, clip, row, lanes_left, index);
+    }
+    // A right-click on the row but off its clips may be over a gap.
+    if let Some(pos) = secondary_click(ui)
+        && row.contains(pos)
+        && pos.x >= lanes_left
+        && shell
+            .clip_menu()
+            .is_none_or(|menu| (menu.x, menu.y) != (pos.x, pos.y))
+        && let Some(time) = shell.lane_time_at(f64::from(pos.x - lanes_left))
+    {
+        shell.open_gap_menu(&lane.track_id, time, pos.x, pos.y);
     }
     paint_transitions(shell, ui, lane, row, lanes_left);
     for preview in &followers {
@@ -4437,7 +4477,11 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
     let control = modifiers.ctrl && !modifiers.command;
     let plain = !(modifiers.command || modifiers.alt || modifiers.shift || control);
     let blocked = match name {
-        "space" | "left" | "right" | "delete" | "q" | "w" | "j" | "k" | "l" | "i" | "o" => !plain,
+        "space" | "left" | "right" | "q" | "w" | "j" | "k" | "l" | "i" | "o" => !plain,
+        // Shift-Delete is the ripple delete.
+        "delete" => {
+            !plain && !(modifiers.shift && !modifiers.command && !modifiers.alt && !control)
+        }
         // Option-X clears the marks.
         "x" if modifiers.alt => modifiers.command || modifiers.shift || control,
         // S splits, and Shift-Command-S extracts the audio.
@@ -6061,6 +6105,11 @@ mod tests {
             Some("alt+x")
         );
         assert_eq!(
+            chord(egui::Key::Delete, egui::Modifiers::SHIFT).as_deref(),
+            Some("shift+delete")
+        );
+        assert_eq!(chord(egui::Key::Delete, egui::Modifiers::COMMAND), None);
+        assert_eq!(
             chord(
                 egui::Key::X,
                 egui::Modifiers::ALT | egui::Modifiers::COMMAND
@@ -6651,6 +6700,81 @@ mod tests {
         let mut shell = Shell::new(decoders, encoders, Settings::default());
         shell.open_folder(&temp).unwrap();
         (shell, temp)
+    }
+
+    #[test]
+    fn a_right_click_in_a_gap_offers_close_gap_and_closes_it() {
+        let temp = std::env::temp_dir().join(format!("cutlass-gap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        for (id, start) in [("a", 0), ("b", 3_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "color",
+                cutlass_model::TimeRange::new(start, 1_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let label = text_pos(&output, "a").expect("the first clip");
+        // Two seconds in is halfway along the gap.
+        let gap = Pos2::new(
+            label.x - 8.0 + (2_000_000.0 * shell.pixel_size()) as f32,
+            label.y + 4.0,
+        );
+        frame(
+            &mut shell,
+            &mut view,
+            click(gap, egui::PointerButton::Secondary),
+        );
+        assert!(shell.gap_menu().is_some(), "no menu over the gap");
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let row = text_pos(&output, "Close gap").expect("the Close gap row");
+        frame(
+            &mut shell,
+            &mut view,
+            click(row + Vec2::new(4.0, 6.0), egui::PointerButton::Primary),
+        );
+        let starts: Vec<i64> = shell.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.target.start.0)
+            .collect();
+        assert_eq!(starts, [0, 1_000_000]);
+        assert!(shell.gap_menu().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

@@ -477,6 +477,15 @@ pub struct ClipMenu {
     pub y: f32,
 }
 
+/// A menu opened over a gap: where it shows, and the row and time it is for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GapMenu {
+    pub x: f32,
+    pub y: f32,
+    pub track_id: TrackId,
+    pub time: Micros,
+}
+
 /// The guide Delete will remove. A time is a vertical line. A row is a
 /// horizontal line, in thousandths of the track-sheet height.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -532,6 +541,8 @@ pub struct Shell {
     selection: Vec<SegmentId>,
     clipboard: Vec<CopiedClip>,
     clip_menu: Option<ClipMenu>,
+    /// The Close gap menu, open over a gap on a row.
+    gap_menu: Option<GapMenu>,
     /// Vertical guides for this session. They are not stored in the draft.
     guides: Vec<Micros>,
     guide_preview: Option<Micros>,
@@ -607,6 +618,7 @@ impl Shell {
         ensure_shortcut(&mut settings, "cut", "primary+x");
         ensure_shortcut(&mut settings, "paste", "primary+v");
         ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
+        ensure_shortcut(&mut settings, "ripple_delete", "shift+delete");
         ensure_shortcut(&mut settings, "shuttle_back", "j");
         ensure_shortcut(&mut settings, "shuttle_stop", "k");
         ensure_shortcut(&mut settings, "shuttle_forward", "l");
@@ -654,6 +666,7 @@ impl Shell {
             selection: Vec::new(),
             clipboard: Vec::new(),
             clip_menu: None,
+            gap_menu: None,
             guides: Vec::new(),
             guide_preview: None,
             horizontal: Vec::new(),
@@ -1672,6 +1685,7 @@ impl Shell {
             Some("select_all") => self.select_all(),
             Some("delete_left") => self.delete_side(TrimEdge::Start),
             Some("delete_right") => self.delete_side(TrimEdge::End),
+            Some("ripple_delete") => self.ripple_delete(),
             Some("shuttle_back") => {
                 self.shuttle(cutlass_editor::Shuttle::Back);
                 Ok(())
@@ -4142,6 +4156,72 @@ impl Shell {
             self.beating = false;
         }
         Ok(())
+    }
+
+    /// Remove the selected clips and pull the later clips on their rows
+    /// left into the space. One undo step.
+    pub fn ripple_delete(&mut self) -> Result<(), ShellError> {
+        let ids: Vec<SegmentId> = {
+            let draft = self.session_draft()?;
+            self.selection
+                .iter()
+                .filter(|id| locate(draft, id).is_some())
+                .cloned()
+                .collect()
+        };
+        if ids.is_empty() {
+            return Err(ShellError::Unavailable("nothing is selected".to_owned()));
+        }
+        for id in &ids {
+            self.refuse_locked(id)?;
+        }
+        let requests = cutlass_editor::ripple_delete(self.session_draft()?, &ids);
+        self.apply_requests(&requests)?;
+        self.selection.clear();
+        Ok(())
+    }
+
+    /// Pull the clips after the gap at `time` on row `track_id` left by the
+    /// gap's length. One undo step.
+    pub fn close_gap(&mut self, track_id: &TrackId, time: Micros) -> Result<(), ShellError> {
+        let draft = self.session_draft()?;
+        let locked = draft
+            .tracks
+            .iter()
+            .find(|track| &track.id == track_id)
+            .is_some_and(|track| bit(track.attribute, TrackAttribute::LOCK));
+        if locked {
+            return Err(ShellError::Locked);
+        }
+        let requests = cutlass_editor::close_gap(draft, track_id, time);
+        if requests.is_empty() {
+            return Err(ShellError::Unavailable("there is no gap there".to_owned()));
+        }
+        self.apply_requests(&requests)
+    }
+
+    /// Open the Close gap menu at `(x, y)` when `time` on row `track_id` is
+    /// in a gap. Answers whether it opened.
+    pub fn open_gap_menu(&mut self, track_id: &TrackId, time: Micros, x: f32, y: f32) -> bool {
+        let gap = self
+            .draft()
+            .and_then(|draft| cutlass_editor::gap_at(draft, track_id, time));
+        self.gap_menu = gap.map(|_| GapMenu {
+            x,
+            y,
+            track_id: track_id.clone(),
+            time,
+        });
+        self.gap_menu.is_some()
+    }
+
+    pub fn close_gap_menu(&mut self) {
+        self.gap_menu = None;
+    }
+
+    #[must_use]
+    pub fn gap_menu(&self) -> Option<&GapMenu> {
+        self.gap_menu.as_ref()
     }
 
     /// Remember the selection for paste. The draft stays as it is.
@@ -8491,6 +8571,72 @@ mod tests {
         let mut desktop = shell();
         desktop.open_folder(&temp.path).unwrap();
         desktop
+    }
+
+    /// A main row with clips at 0–1, 2–3 and 5–6 seconds, magnet off.
+    fn gappy_shell(temp: &Temp) -> Shell {
+        let mut draft = Draft::empty("draft");
+        draft.config.maintrack_adsorb = false;
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        for (id, start) in [("a", 0), ("b", 2_000_000), ("c", 5_000_000)] {
+            let mut clip = Segment::new(id, "picture", TimeRange::new(start, 1_000_000));
+            clip.source_range = Some(TimeRange::new(0, 1_000_000));
+            draft.tracks[0].segments.push(clip);
+        }
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop
+    }
+
+    fn main_starts(desktop: &Shell) -> Vec<i64> {
+        desktop.draft().unwrap().tracks[0]
+            .segments
+            .iter()
+            .map(|segment| segment.target.start.0)
+            .collect()
+    }
+
+    #[test]
+    fn ripple_delete_and_close_gap_pull_the_later_clips_left() {
+        let temp = Temp::new();
+        let mut desktop = gappy_shell(&temp);
+        assert_eq!(
+            desktop.ripple_delete().unwrap_err().to_string(),
+            "nothing is selected"
+        );
+        desktop.select(Some(SegmentId::new("a")));
+        desktop.run_shortcut("shift+delete").unwrap();
+        assert_eq!(main_starts(&desktop), [1_000_000, 4_000_000]);
+        assert!(desktop.selection().is_empty());
+        desktop.undo().unwrap();
+        assert_eq!(main_starts(&desktop), [0, 2_000_000, 5_000_000]);
+
+        let main = desktop.draft().unwrap().tracks[0].id.clone();
+        assert!(!desktop.open_gap_menu(&main, Micros(500_000), 10.0, 20.0));
+        assert!(desktop.open_gap_menu(&main, Micros(4_000_000), 10.0, 20.0));
+        assert_eq!(
+            desktop.gap_menu().map(|menu| menu.time),
+            Some(Micros(4_000_000))
+        );
+        desktop.close_gap(&main, Micros(4_000_000)).unwrap();
+        assert_eq!(main_starts(&desktop), [0, 2_000_000, 3_000_000]);
+        assert_eq!(
+            desktop
+                .close_gap(&main, Micros(4_000_000))
+                .unwrap_err()
+                .to_string(),
+            "there is no gap there"
+        );
+        desktop
+            .toggle_attribute(main.clone(), TrackAttribute::LOCK)
+            .unwrap();
+        assert!(matches!(
+            desktop.close_gap(&main, Micros(1_500_000)),
+            Err(ShellError::Locked)
+        ));
     }
 
     #[test]

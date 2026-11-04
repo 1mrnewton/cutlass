@@ -11,6 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
@@ -225,6 +226,37 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
+/// Each lane with its clips, in drawing order.
+fn build_lanes(draft: &Draft) -> Vec<LaneView> {
+    lanes(draft)
+        .into_iter()
+        .filter_map(|lane| {
+            let track = draft.tracks.get(lane.track_index)?;
+            let clips = track
+                .segments
+                .iter()
+                .map(|segment| ClipSpan {
+                    id: segment.id.clone(),
+                    name: clip_name(draft, segment),
+                    start: segment.target.start,
+                    duration: segment.target.duration,
+                })
+                .collect();
+            Some(LaneView {
+                track_id: lane.track_id,
+                kind: lane.kind,
+                main: lane.main,
+                mute: bit(track.attribute, TrackAttribute::MUTE),
+                hide: bit(track.attribute, TrackAttribute::HIDE),
+                lock: bit(track.attribute, TrackAttribute::LOCK),
+                solo: bit(track.attribute, TrackAttribute::SOLO),
+                mute_by_solo: bit(track.attribute, TrackAttribute::MUTE_BY_SOLO),
+                clips,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaneView {
     pub track_id: TrackId,
@@ -400,6 +432,8 @@ pub struct Shell {
     readers: ReaderFactory,
     transport: Transport,
     preview_cache: RefCell<FrameCache>,
+    /// The lanes as last built, with the revision they were built at.
+    lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
     settings: Settings,
     session: Option<Session>,
     folder: Option<Folder>,
@@ -502,6 +536,7 @@ impl Shell {
             ),
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
+            lanes_cache: RefCell::new(None),
             settings,
             session: None,
             folder: None,
@@ -647,7 +682,7 @@ impl Shell {
     /// The library poster of material `id`: a thumbnail of its first frame,
     /// with the key it is stored under. Asked for when the frame ends while
     /// missing. Sound has no poster.
-    pub fn poster(&mut self, id: &str) -> Option<(ThumbKey, Option<std::sync::Arc<Thumb>>)> {
+    pub fn poster(&mut self, id: &str) -> Option<(ThumbKey, Option<Arc<Thumb>>)> {
         let thumbnails = self.thumbnails.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
         let Some(MaterialRef::Video(video)) = draft.materials.get(id) else {
@@ -768,6 +803,7 @@ impl Shell {
             self.save()?;
         }
         self.session = None;
+        self.lanes_cache.replace(None);
         self.folder = None;
         self.hold = None;
         self.saved = None;
@@ -888,6 +924,7 @@ impl Shell {
         session.set_linkage(linkage);
         self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
+        self.lanes_cache.replace(None);
         self.folder = Some(opened.folder);
         self.hold = Some(hold);
         self.playhead = Micros(0);
@@ -1011,37 +1048,21 @@ impl Shell {
         imported
     }
 
-    pub fn lanes(&self) -> Vec<LaneView> {
-        let Some(draft) = self.draft() else {
-            return Vec::new();
+    /// The lanes to draw, built again only when the revision moves.
+    pub fn lanes(&self) -> Arc<[LaneView]> {
+        let Some(session) = self.session.as_ref() else {
+            return Arc::from([]);
         };
-        lanes(draft)
-            .into_iter()
-            .filter_map(|lane| {
-                let track = draft.tracks.get(lane.track_index)?;
-                let clips = track
-                    .segments
-                    .iter()
-                    .map(|segment| ClipSpan {
-                        id: segment.id.clone(),
-                        name: clip_name(draft, segment),
-                        start: segment.target.start,
-                        duration: segment.target.duration,
-                    })
-                    .collect();
-                Some(LaneView {
-                    track_id: lane.track_id,
-                    kind: lane.kind,
-                    main: lane.main,
-                    mute: bit(track.attribute, TrackAttribute::MUTE),
-                    hide: bit(track.attribute, TrackAttribute::HIDE),
-                    lock: bit(track.attribute, TrackAttribute::LOCK),
-                    solo: bit(track.attribute, TrackAttribute::SOLO),
-                    mute_by_solo: bit(track.attribute, TrackAttribute::MUTE_BY_SOLO),
-                    clips,
-                })
-            })
-            .collect()
+        let revision = session.revision();
+        if let Some((built, lanes)) = self.lanes_cache.borrow().as_ref()
+            && *built == revision
+        {
+            return Arc::clone(lanes);
+        }
+        let built: Arc<[LaneView]> = build_lanes(session.draft()).into();
+        self.lanes_cache
+            .replace(Some((revision, Arc::clone(&built))));
+        built
     }
 
     pub fn seek_ruler(&mut self, x: f64) -> Result<Micros, ShellError> {
@@ -6448,7 +6469,11 @@ mod tests {
             .unwrap();
         assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
         assert_eq!(desktop.lanes()[0].clips.len(), 2);
+        // Nothing changed, so the lanes are the ones already built.
+        assert!(std::sync::Arc::ptr_eq(&desktop.lanes(), &desktop.lanes()));
+        let before = desktop.lanes();
         desktop.undo().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&before, &desktop.lanes()));
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
         desktop.undo().unwrap();
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
@@ -7461,11 +7486,12 @@ mod tests {
 
         let audio = desktop
             .lanes()
-            .into_iter()
+            .iter()
             .find(|lane| !lane.main)
+            .map(|lane| lane.track_id.clone())
             .expect("audio lane");
         desktop
-            .toggle_attribute(audio.track_id, TrackAttribute::MUTE)
+            .toggle_attribute(audio, TrackAttribute::MUTE)
             .unwrap();
         desktop.play();
         assert!(desktop.queued_preview().is_empty());

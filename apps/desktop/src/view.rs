@@ -134,6 +134,12 @@ pub struct ViewState {
     export_path: String,
     /// The camera button was pressed; ask where to save the still.
     ask_still: bool,
+    /// Screen pixels per canvas pixel in the preview, or `None` to fit.
+    preview_zoom: Option<f64>,
+    /// How far a zoomed canvas is dragged from the middle of the preview.
+    preview_pan: Vec2,
+    /// The scale the canvas was last drawn at, fitted or not.
+    preview_scale: f64,
     /// The clip panel's open tab, page, and sections, and what is typed.
     inspector: inspector::InspectorState,
     background_buffer: String,
@@ -172,6 +178,9 @@ impl Default for ViewState {
             replace_prompt: false,
             export_path: String::new(),
             ask_still: false,
+            preview_zoom: None,
+            preview_pan: Vec2::ZERO,
+            preview_scale: 1.0,
             inspector: inspector::InspectorState::default(),
             background_buffer: String::new(),
             name_buffer: String::new(),
@@ -1355,10 +1364,28 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         rect.min + Vec2::new(16.0, 16.0),
         Pos2::new(rect.max.x - 16.0, transport.min.y - 8.0),
     );
+    let canvas = shell.draft().map(|draft| {
+        Vec2::new(
+            draft.canvas_config.width.max(1) as f32,
+            draft.canvas_config.height.max(1) as f32,
+        )
+    });
+    if view.preview_zoom.is_some() {
+        let pan = ui.interact(frame, ui.scope_id().with("preview-pan"), Sense::drag());
+        view.preview_pan += pan.drag_delta();
+    } else {
+        view.preview_pan = Vec2::ZERO;
+    }
+    let mut place = |size: Vec2| {
+        let size = canvas.unwrap_or(size);
+        let (rect, scale) = placed_canvas(frame, size, view.preview_zoom, &mut view.preview_pan);
+        view.preview_scale = scale;
+        rect
+    };
     let shown = match shell.preview_texture() {
         Ok(Some((id, [width, height]))) => {
-            let fitted = fit_texture(frame, Vec2::new(width as f32, height as f32));
-            paint_canvas(ui, id, fitted, shell.preview_black());
+            let placed = place(Vec2::new(width as f32, height as f32));
+            paint_canvas(ui, frame, id, placed, shell.preview_black());
             Ok(())
         }
         Ok(None) => Err(None),
@@ -1383,8 +1410,8 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                         egui::TextureOptions::LINEAR,
                     ))
                 };
-                let fitted = fit_texture(frame, texture.size_vec2());
-                paint_canvas(ui, texture.id(), fitted, shell.preview_black());
+                let placed = place(texture.size_vec2());
+                paint_canvas(ui, frame, texture.id(), placed, shell.preview_black());
             }
         }
         Some(Err(error)) if shell.draft().is_some() => {
@@ -1398,19 +1425,37 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         }
         Some(Err(_)) => {}
     }
-    if transport_bar(shell, ui, transport) {
-        view.ask_still = true;
-    }
+    transport_bar(shell, ui, view, transport);
 }
 
-/// The preview canvas at `rect`, over black when `black` is on. Only the
-/// canvas gets that background; the area around it stays unfilled.
-fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
+/// Where a canvas `size` canvas pixels sits in `frame`: fitted, or at
+/// `zoom` screen pixels per canvas pixel moved by `pan`. A pan is held to
+/// what keeps the canvas over the middle. Answers the rect and its scale.
+fn placed_canvas(frame: Rect, size: Vec2, zoom: Option<f64>, pan: &mut Vec2) -> (Rect, f64) {
+    let Some(zoom) = zoom else {
+        let fitted = fit_texture(frame, size);
+        let scale = if size.x > 0.0 {
+            f64::from(fitted.width() / size.x)
+        } else {
+            1.0
+        };
+        return (fitted, scale);
+    };
+    let shown = size * zoom as f32;
+    let room = ((shown - frame.size()) / 2.0).max(Vec2::ZERO);
+    *pan = pan.clamp(-room, room);
+    (Rect::from_center_size(frame.center() + *pan, shown), zoom)
+}
+
+/// The preview canvas at `rect`, clipped to `frame`, over black when
+/// `black` is on. Only the canvas gets that background; the area around it
+/// stays unfilled.
+fn paint_canvas(ui: &Ui, frame: Rect, texture: egui::TextureId, rect: Rect, black: bool) {
+    let painter = ui.painter().with_clip_rect(frame.intersect(ui.clip_rect()));
     if black {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
     }
-    ui.painter().image(
+    painter.image(
         texture,
         rect,
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
@@ -1418,9 +1463,8 @@ fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
     );
 }
 
-/// The timecode, play button and preview buttons. Answers whether the
-/// camera button asked for a still.
-fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) -> bool {
+/// The timecode, play button, zoom, and preview buttons.
+fn transport_bar(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let live = shell.draft().is_some();
     let ink = if live { tokens::TEXT } else { tokens::MUTED };
     ui.painter().text(
@@ -1450,6 +1494,9 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) -> bool {
         Color32::from_rgb(0x12, 0x13, 0x0f),
     );
     play_response.on_hover_text(if shell.playing() { "Pause" } else { "Play" });
+    if live {
+        zoom_buttons(ui, view, Pos2::new(play.right() + 20.0, rect.center().y));
+    }
 
     let still = Rect::from_center_size(
         Pos2::new(rect.right() - 28.0, rect.center().y),
@@ -1457,14 +1504,57 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) -> bool {
     );
     background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
     let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
-    let asked = still_response.clicked() && live;
+    if still_response.clicked() && live {
+        view.ask_still = true;
+    }
     ui.painter()
         .circle_filled(still.center(), 16.0, tokens::ICON_BUTTON);
     let camera = Rect::from_center_size(still.center(), Vec2::splat(16.0));
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
-    asked
+}
+
+/// − , the zoom, + from `left`: a step smaller, back to fit, a step bigger.
+fn zoom_buttons(ui: &Ui, view: &mut ViewState, left: Pos2) {
+    let label = match view.preview_zoom {
+        None => "Fit".to_owned(),
+        Some(zoom) => format!("{:.0}%", zoom * 100.0),
+    };
+    let buttons = [
+        ("−", 24.0, "Zoom out"),
+        (label.as_str(), 48.0, "Fit the canvas"),
+        ("+", 24.0, "Zoom in"),
+    ];
+    let mut x = left.x;
+    for (index, (text, width, tip)) in buttons.into_iter().enumerate() {
+        let button = Rect::from_min_size(Pos2::new(x, left.y - 12.0), Vec2::new(width, 24.0));
+        x += width + 2.0;
+        let response = ui.interact(button, ui.scope_id().with(("zoom", index)), Sense::click());
+        let ink = if response.hovered() {
+            tokens::TEXT
+        } else {
+            tokens::MUTED
+        };
+        ui.painter().text(
+            button.center(),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::proportional(if index == 1 { 12.0 } else { 16.0 }),
+            ink,
+        );
+        if response.on_hover_text(tip).clicked() {
+            match index {
+                1 => view.preview_zoom = None,
+                _ => {
+                    let up = index == 2;
+                    if let Some(step) = cutlass_editor::preview_zoom_step(view.preview_scale, up) {
+                        view.preview_zoom = Some(step);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The button that shows the preview canvas over black or clear. Its mark
@@ -6067,6 +6157,71 @@ mod tests {
         let output = frame(&mut shell, Vec::new());
         assert!(text_pos(&output, "Graphs").is_some(), "the Graphs row");
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_zoom_buttons_step_the_canvas_and_fit_brings_it_back() {
+        let (mut shell, temp) = open_span("zoom", 2_000_000);
+        // A canvas bigger than the preview, so it fits below full size.
+        shell.cycle_canvas().unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let fit = text_pos(&output, "Fit").expect("the zoom label");
+        let fitted = view.preview_scale;
+        // The label's box is 48 wide; + is the next box, 24 wide.
+        let plus = fit + Vec2::new(46.0, 6.0);
+        frame(&mut shell, &mut view, click(plus));
+        let zoom = view.preview_zoom.expect("a zoom step");
+        assert!(zoom > fitted, "{zoom} after {fitted}");
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let label = format!("{:.0}%", zoom * 100.0);
+        let shown = text_pos(&output, &label).expect("the zoom shown");
+        frame(&mut shell, &mut view, click(shown + Vec2::new(4.0, 4.0)));
+        assert_eq!(view.preview_zoom, None);
+        assert_eq!(view.preview_pan, Vec2::ZERO);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_zoomed_canvas_pans_only_as_far_as_it_overhangs() {
+        let frame = Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+        let mut pan = Vec2::new(500.0, -500.0);
+        let (rect, scale) = placed_canvas(frame, Vec2::new(100.0, 50.0), Some(4.0), &mut pan);
+        assert_eq!(scale, 4.0);
+        // 400 by 200 shown in 200 by 100 overhangs 100 and 50 each side.
+        assert_eq!(pan, Vec2::new(100.0, -50.0));
+        assert_eq!(rect.left(), 0.0);
+        assert_eq!(rect.bottom(), 100.0);
+        let mut pan = Vec2::new(30.0, 30.0);
+        let (rect, scale) = placed_canvas(frame, Vec2::new(100.0, 50.0), None, &mut pan);
+        assert_eq!(
+            (rect, scale),
+            (Rect::from_min_size(Pos2::ZERO, frame.size()), 2.0)
+        );
     }
 
     #[test]

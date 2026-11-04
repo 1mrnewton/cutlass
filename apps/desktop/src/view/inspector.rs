@@ -18,6 +18,7 @@ use crate::shell::{
     Inspection, LetterCase, Panel, SILENT_DB, Shell, ShellError, TextLook, volume_db,
 };
 use crate::{icons, tokens};
+use cutlass_model::{ANIMATION_PRESETS, AnimType, Micros};
 
 use super::ViewState;
 
@@ -166,7 +167,7 @@ fn video_panel(
         }
         2 if still => note(ui, "A photo has no speed."),
         2 => speed_row(shell, ui, state, inspection),
-        3 => animation_tab(ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
+        3 => animation_tab(shell, ui, state, &["In", "Out", "Combo"], VIDEO_MOTIONS),
         4 => adjust_tab(ui, state),
         _ => later_note(ui, "AI stylize"),
     }
@@ -200,7 +201,7 @@ fn text_panel(
                 _ => later_tiles(ui, &["None", "Shadow", "Glow", "Outline"]),
             }
         }
-        1 => animation_tab(ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
+        1 => animation_tab(shell, ui, state, &["In", "Out", "Loop"], TEXT_MOTIONS),
         2 => {
             later_tiles(ui, &["Face", "Body", "Hand", "Custom"]);
             later_button(ui, "Start tracking");
@@ -245,6 +246,7 @@ fn sticker_panel(
     tabs(ui, &["Sticker", "Animation"], &mut state.tab);
     if state.tab == 1 {
         animation_tab(
+            shell,
             ui,
             state,
             &["In", "Out", "Loop"],
@@ -550,9 +552,22 @@ const TEXT_MOTIONS: &[&[&str]] = &[
 ];
 
 /// The In, Out, and Combo or Loop slots, each a grid of animations that
-/// starts with None. Nothing stores an animation yet.
-fn animation_tab(ui: &mut Ui, state: &mut InspectorState, slots: &[&str], motions: &[&[&str]]) {
+/// starts with None. In and Out store the shared presets on a picture or
+/// title, with a length; the rest are still to come.
+fn animation_tab(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    slots: &[&str],
+    motions: &[&[&str]],
+) {
     pages(ui, slots, &mut state.page);
+    if state.page < 2
+        && let Some(animations) = shell.animations()
+    {
+        animation_side(shell, ui, state, &animations, state.page == 0);
+        return;
+    }
     later_note(ui, "Animations");
     ui.add_enabled_ui(false, |ui| {
         let mut query = String::new();
@@ -566,6 +581,72 @@ fn animation_tab(ui: &mut Ui, state: &mut InspectorState, slots: &[&str], motion
     names.extend_from_slice(motions.get(state.page).copied().unwrap_or_default());
     later_tiles(ui, &names);
     later_slider(ui, "Duration", 2.0, "2.0s");
+}
+
+/// One side's grid: None, then each preset of that side, the chosen one
+/// outlined; then the chosen one's length, which previews as it drags.
+fn animation_side(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    animations: &cutlass_editor::ClipAnimations,
+    enter: bool,
+) {
+    let kind = if enter { AnimType::In } else { AnimType::Out };
+    let chosen = if enter {
+        &animations.enter
+    } else {
+        &animations.leave
+    };
+    let chosen_id = chosen.as_ref().map(|side| side.resource_id.as_str());
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let presets = ANIMATION_PRESETS
+            .iter()
+            .filter(|preset| preset.kind == kind);
+        let tiles = std::iter::once(("None", None)).chain(
+            presets.map(|preset| (preset.name, Some((preset.resource_id, preset.duration)))),
+        );
+        for (name, preset) in tiles {
+            let on = preset.map(|(id, _)| id) == chosen_id;
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(preset);
+            }
+        }
+    });
+    if let Some(preset) = picked {
+        let (id, duration) = preset.map_or((None, Micros(0)), |(id, duration)| {
+            (Some(id.to_owned()), duration)
+        });
+        send(shell, |shell| shell.set_animation(enter, id, duration));
+        return;
+    }
+    let Some(side) = chosen else {
+        return;
+    };
+    ui.add_space(8.0);
+    let seconds = side.duration.0 as f64 / 1e6;
+    let longest = (animations.length.0 as f64 / 1e6).max(0.1);
+    let key = if enter { "anim-in" } else { "anim-out" };
+    if let Some(value) = slider(ui, state, key, "Duration", seconds, 0.1..=longest, |v| {
+        format!("{v:.1}s")
+    }) {
+        let id = side.resource_id.clone();
+        let duration = Micros((value * 1e6).round() as i64);
+        send(shell, |shell| {
+            shell.set_animation(enter, Some(id), duration)
+        });
+    }
 }
 
 /// The Adjust tab of a picture: the color rows, each to come.

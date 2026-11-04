@@ -5835,6 +5835,67 @@ mod tests {
     }
 
     #[test]
+    fn the_animation_tab_stores_a_preset_on_the_picture() {
+        let temp = std::env::temp_dir().join(format!("cutlass-animate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut movie = cutlass_model::MaterialVideo::new("movie");
+        movie.width = 640;
+        movie.height = 360;
+        draft.materials.videos.push(movie);
+        let mut main = cutlass_model::Segment::new(
+            "main",
+            "movie",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        );
+        main.source_range = Some(cutlass_model::TimeRange::new(0, 2_000_000));
+        draft.tracks[0].segments.push(main);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut frame = |shell: &mut Shell, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let tab = text_pos(&output, "Animation").expect("the Animation tab");
+        frame(&mut shell, click(tab + Vec2::new(4.0, 4.0)));
+        frame(&mut shell, Vec::new());
+        let output = frame(&mut shell, Vec::new());
+        let tile = text_pos(&output, "Slide Up").expect("the Slide Up tile");
+        frame(&mut shell, click(tile + Vec2::new(4.0, 4.0)));
+        frame(&mut shell, Vec::new());
+        let enter = shell.animations().unwrap().enter.expect("an in animation");
+        assert_eq!(enter.resource_id, "cutlass-anim-in-slide-up");
+        let output = frame(&mut shell, Vec::new());
+        assert!(text_pos(&output, "0.5s").is_some(), "the length row");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn dragging_the_ruler_moves_the_playhead() {
         let temp = std::env::temp_dir().join(format!("cutlass-scrub-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);

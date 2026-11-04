@@ -3668,6 +3668,54 @@ impl Shell {
         self.apply(Request::SetPosition { segment_id, x, y })
     }
 
+    /// The selected clip's in and out animations, when it is a picture or
+    /// title on the canvas.
+    #[must_use]
+    pub fn animations(&self) -> Option<cutlass_editor::ClipAnimations> {
+        let segment_id = self.selected()?;
+        let draft = self.session_draft().ok()?;
+        let sizes = FaceSizes {
+            draft,
+            fonts: &*self.face,
+        };
+        cutlass_editor::clip_animations(draft, segment_id, &sizes)
+    }
+
+    /// Give the selected clip the in (`enter`) or out animation
+    /// `resource_id`, `duration` long, or clear that side with `None`. The
+    /// session keeps the two inside the clip. One undo step.
+    pub fn set_animation(
+        &mut self,
+        enter: bool,
+        resource_id: Option<String>,
+        duration: Micros,
+    ) -> Result<(), ShellError> {
+        let Some(segment_id) = self.selected().cloned() else {
+            return Err(if self.session.is_none() {
+                ShellError::NoProject
+            } else {
+                ShellError::Unavailable("nothing is selected".to_owned())
+            });
+        };
+        if self.animations().is_none() {
+            return Err(ShellError::Unavailable(
+                "only a picture or title takes animations".to_owned(),
+            ));
+        }
+        self.refuse_locked(&segment_id)?;
+        let kind = if enter {
+            cutlass_model::AnimType::In
+        } else {
+            cutlass_model::AnimType::Out
+        };
+        self.apply(Request::SetAnimation {
+            segment_id,
+            kind,
+            animation: resource_id,
+            duration,
+        })
+    }
+
     /// Scale the selected picture. One undo restores the previous scale.
     pub fn set_scale(&mut self, scale: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("a placement belongs on a picture")?;
@@ -8973,6 +9021,77 @@ mod tests {
             "the track is locked"
         );
         assert_eq!(desktop.inspection().unwrap().fade_out, 1_000_000);
+    }
+
+    #[test]
+    fn a_picture_takes_in_and_out_animations_inside_its_length() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        video.width = 640;
+        video.height = 360;
+        draft.materials.videos.push(video);
+        let mut picture = Segment::new("picture", "picture", TimeRange::new(0, 1_000_000));
+        picture.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(picture);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            path: "tone".to_owned(),
+            ..MaterialAudio::default()
+        });
+        let mut sound = Track::main("tone");
+        sound.kind = TrackType::Audio;
+        sound
+            .segments
+            .push(Segment::new("tone", "tone", TimeRange::new(0, 500_000)));
+        draft.tracks.push(sound);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+
+        desktop.select(Some(SegmentId::new("tone")));
+        assert_eq!(desktop.animations(), None);
+        assert_eq!(
+            desktop
+                .set_animation(true, Some("cutlass-anim-in-slide-up".to_owned()), Micros(1))
+                .unwrap_err()
+                .to_string(),
+            "only a picture or title takes animations"
+        );
+
+        desktop.select(Some(SegmentId::new("picture")));
+        let none = desktop.animations().unwrap();
+        assert_eq!(
+            (none.enter, none.leave, none.length),
+            (None, None, Micros(1_000_000))
+        );
+        desktop
+            .set_animation(
+                true,
+                Some("cutlass-anim-in-slide-up".to_owned()),
+                Micros(700_000),
+            )
+            .unwrap();
+        desktop
+            .set_animation(
+                false,
+                Some("cutlass-anim-out-zoom-out".to_owned()),
+                Micros(700_000),
+            )
+            .unwrap();
+        let both = desktop.animations().unwrap();
+        let enter = both.enter.unwrap();
+        let leave = both.leave.unwrap();
+        assert_eq!(enter.resource_id, "cutlass-anim-in-slide-up");
+        assert_eq!(enter.duration, Micros(700_000));
+        // The two share the clip, so the out side gets what is left.
+        assert_eq!(leave.duration, Micros(300_000));
+
+        desktop.undo().unwrap();
+        assert_eq!(desktop.animations().unwrap().leave, None);
+        desktop.set_animation(true, None, Micros(0)).unwrap();
+        assert_eq!(desktop.animations().unwrap().enter, None);
     }
 
     #[test]

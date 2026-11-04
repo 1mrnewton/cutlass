@@ -2998,25 +2998,45 @@ fn paint_transitions(
     }
 }
 
-/// Thumbnail textures by the picture they show, kept in egui's memory.
-#[derive(Clone, Default)]
-struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::TextureHandle>);
+/// Thumbnail textures by the picture they show, each with the frame it
+/// was last drawn in. egui's memory holds a shared handle, so reaching the
+/// map copies nothing.
+#[derive(Default)]
+struct FilmTextures {
+    shown: std::collections::HashMap<cutlass_engine::ThumbKey, (egui::TextureHandle, u64)>,
+    frame: u64,
+}
 
-/// Textures kept before the oldest are let go.
+type SharedFilm = std::sync::Arc<std::sync::Mutex<FilmTextures>>;
+
+/// Textures kept before the least recently drawn are let go.
 const FILM_TEXTURES: usize = 1500;
 
-/// Run `f` on the thumbnail textures, then keep them for the next frame.
+/// Run `f` on the thumbnail textures, then let go of the least recently
+/// drawn quarter when there are too many.
 fn with_film_textures<R>(ctx: &egui::Context, f: impl FnOnce(&mut FilmTextures) -> R) -> R {
     let store = egui::Id::NULL.with("film textures");
-    let mut textures = ctx
-        .data_mut(|data| data.get_temp::<FilmTextures>(store))
-        .unwrap_or_default();
-    if textures.0.len() > FILM_TEXTURES {
-        textures.0.clear();
-    }
+    let shared = ctx.data_mut(|data| data.get_temp_mut_or_default::<SharedFilm>(store).clone());
+    let mut textures = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    textures.frame = ctx.cumulative_pass_nr();
     let result = f(&mut textures);
-    ctx.data_mut(|data| data.insert_temp(store, textures));
+    evict(&mut textures, FILM_TEXTURES);
     result
+}
+
+/// Keep at most `limit` textures: past it, drop the least recently drawn
+/// until a quarter of the room is free again.
+fn evict(textures: &mut FilmTextures, limit: usize) {
+    if textures.shown.len() <= limit {
+        return;
+    }
+    let keep = limit - limit / 4;
+    let mut ages: Vec<u64> = textures.shown.values().map(|(_, used)| *used).collect();
+    ages.sort_unstable_by(|a, b| b.cmp(a));
+    let cutoff = ages[keep - 1];
+    textures.shown.retain(|_, (_, used)| *used >= cutoff);
 }
 
 /// The texture of `thumb`, loaded the first time it is shown.
@@ -3026,17 +3046,19 @@ fn film_texture(
     key: cutlass_engine::ThumbKey,
     thumb: &cutlass_engine::Thumb,
 ) -> egui::TextureId {
-    textures
-        .0
-        .entry(key)
-        .or_insert_with(|| {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [thumb.width as usize, thumb.height as usize],
-                &thumb.rgba,
-            );
-            ctx.load_texture("film", image, egui::TextureOptions::LINEAR)
-        })
-        .id()
+    let frame = textures.frame;
+    let entry = textures.shown.entry(key).or_insert_with(|| {
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [thumb.width as usize, thumb.height as usize],
+            &thumb.rgba,
+        );
+        (
+            ctx.load_texture("film", image, egui::TextureOptions::LINEAR),
+            frame,
+        )
+    });
+    entry.1 = frame;
+    entry.0.id()
 }
 
 /// The clip's filmstrip in the `film` rows of `clip_rect`, over the tiles
@@ -4172,6 +4194,32 @@ mod tests {
     use super::*;
     use cutlass_settings::Settings;
     use egui::Color32;
+
+    #[test]
+    fn film_textures_let_go_of_the_least_recently_drawn() {
+        let ctx = egui::Context::default();
+        let thumb = cutlass_engine::Thumb {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        let key = |n: i64| cutlass_engine::ThumbKey {
+            path: "clip.mov".into(),
+            time: Micros(n),
+        };
+        let mut textures = FilmTextures::default();
+        for n in 0..8 {
+            textures.frame = n as u64;
+            film_texture(&ctx, &mut textures, key(n), &thumb);
+        }
+        // Drawing the first again makes it recent.
+        textures.frame = 9;
+        film_texture(&ctx, &mut textures, key(0), &thumb);
+        evict(&mut textures, 4);
+        let mut kept: Vec<i64> = textures.shown.keys().map(|key| key.time.0).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [0, 6, 7]);
+    }
 
     #[test]
     fn the_first_frame_lists_projects_and_does_not_ask_to_close() {

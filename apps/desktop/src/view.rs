@@ -4229,6 +4229,7 @@ fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
         short_side: view.export_side,
         codec: view.export_codec,
         replace: view.replace_prompt,
+        ..ExportRequest::default()
     })
 }
 
@@ -6223,11 +6224,12 @@ mod tests {
     #[test]
     fn a_running_job_shows_its_stage_and_cancel_stops_it() {
         let (mut shell, temp) = open_span("job", 2_000_000);
-        let (_keep, gate) = std::sync::mpsc::channel::<()>();
         shell
             .start_job("Transcribe", move |progress| {
                 progress.stage("Listening");
-                let _ = gate.recv();
+                while !progress.cancelled() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
                 Box::new(|_: &mut Shell| Ok(()))
             })
             .unwrap();
@@ -6279,7 +6281,16 @@ mod tests {
             );
             output.textures_delta.clear();
         }
-        assert!(shell.job().is_none(), "Cancel did not stop the job");
+        assert_eq!(
+            shell.job().map(|job| job.stage),
+            Some("Stopping".to_owned()),
+            "Cancel did not stop the job"
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while shell.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(shell.job().is_none());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

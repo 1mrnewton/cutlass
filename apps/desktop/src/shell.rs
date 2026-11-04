@@ -313,8 +313,67 @@ pub struct Inspection {
 pub struct ExportRequest {
     pub path: PathBuf,
     pub short_side: i32,
+    /// PNG writes the frame at the playhead; H.264 or HEVC a movie.
     pub codec: CodecId,
     pub replace: bool,
+    pub span: ExportSpan,
+    /// `None` keeps the project's rate.
+    pub frame_rate: Option<FrameRate>,
+    pub quality: ExportQuality,
+    /// The movie carries the timeline's sound.
+    pub sound: bool,
+}
+
+impl Default for ExportRequest {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            short_side: 1080,
+            codec: CodecId::H264,
+            replace: false,
+            span: ExportSpan::Whole,
+            frame_rate: None,
+            quality: ExportQuality::Recommended,
+            sound: true,
+        }
+    }
+}
+
+/// How much of the timeline a movie holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportSpan {
+    #[default]
+    Whole,
+    /// From the first selected clip's start to the last one's end.
+    Selected,
+}
+
+/// How many bits a second a movie spends, around the recommended rate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportQuality {
+    Lower,
+    #[default]
+    Recommended,
+    Higher,
+}
+
+impl ExportQuality {
+    /// The bitrate for an H.264 or HEVC picture `short_side` pixels on its
+    /// short side. HEVC gets the same picture from fewer bits.
+    #[must_use]
+    pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
+        let base = cutlass_export::video_bitrate(short_side);
+        let base = if codec == CodecId::Hevc {
+            base / 10 * 6
+        } else {
+            base
+        };
+        match self {
+            Self::Lower => base / 2,
+            Self::Recommended => base,
+            Self::Higher => base.saturating_mul(2),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -487,7 +546,9 @@ pub struct Shell {
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
     /// Work running off the window thread, and the project it was started in.
-    job: Option<(crate::jobs::Job<Landing>, Option<PathBuf>)>,
+    job: Option<RunningJob>,
+    /// The movie the last export wrote.
+    exported: Option<PathBuf>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -499,7 +560,8 @@ pub struct Shell {
     /// Library card waves by material id, with the peaks, length and width
     /// they were spread from.
     card_waves: std::collections::HashMap<String, CardWave>,
-    face: FaceTable,
+    /// Shared so an export job reads the same faces.
+    face: Arc<FaceTable>,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
@@ -582,12 +644,13 @@ impl Shell {
             next_id: 0,
             speech: RefCell::new(None),
             job: None,
+            exported: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
             wave_asks: Vec::new(),
             card_waves: std::collections::HashMap::new(),
-            face: crate::face::installed(),
+            face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
             chrome: Chrome::default(),
@@ -1299,7 +1362,7 @@ impl Shell {
                 Micros(time),
                 &self.readers,
                 self.path.as_deref(),
-                &self.face,
+                &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let stale = cache.take_stale();
@@ -1337,7 +1400,7 @@ impl Shell {
                 time,
                 &self.readers,
                 root.as_deref(),
-                &self.face,
+                &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         Ok(Picture {
@@ -2964,12 +3027,12 @@ impl Shell {
         Ok(())
     }
 
-    /// Refuse a second job while one runs.
+    /// Refuse a second job while one runs, or is still stopping.
     fn refuse_busy(&self) -> Result<(), ShellError> {
         match &self.job {
-            Some((job, _)) => Err(ShellError::Unavailable(format!(
+            Some(running) => Err(ShellError::Unavailable(format!(
                 "{} is still running",
-                job.view().label
+                running.job.view().label
             ))),
             None => Ok(()),
         }
@@ -2985,36 +3048,52 @@ impl Shell {
         self.refuse_busy()?;
         let job = crate::jobs::Job::start(label, work)
             .map_err(|_| ShellError::Unavailable(format!("{label} could not start")))?;
-        self.job = Some((job, self.path.clone()));
+        self.job = Some(RunningJob {
+            job,
+            project: self.path.clone(),
+            stopping: false,
+        });
         Ok(())
     }
 
-    /// The job running now, for the window to show.
+    /// The job running now, for the window to show. A cancelled job says
+    /// so until its thread has stopped.
     pub fn job(&self) -> Option<crate::jobs::JobView> {
-        self.job.as_ref().map(|(job, _)| job.view())
+        self.job.as_ref().map(|running| {
+            let mut view = running.job.view();
+            if running.stopping {
+                "Stopping".clone_into(&mut view.stage);
+                view.fraction = None;
+            }
+            view
+        })
     }
 
-    /// Stop the running job. Whatever it was making is dropped.
+    /// Ask the running job to stop. Whatever it was making is dropped; the
+    /// job stays until its thread ends, so a new one waits for it.
     pub fn cancel_job(&mut self) {
-        if let Some((job, _)) = self.job.take() {
-            job.cancel();
+        if let Some(running) = self.job.as_mut() {
+            running.job.cancel();
+            running.stopping = true;
         }
     }
 
     /// Land the job if it finished. True while one still runs.
     pub fn poll_job(&mut self) -> bool {
-        let Some((job, project)) = self.job.as_ref() else {
+        let Some(running) = self.job.as_ref() else {
             return false;
         };
-        let landing = match job.poll() {
+        let landing = match running.job.poll() {
             crate::jobs::Poll::Running => return true,
             crate::jobs::Poll::Finished(landing) => Some(landing),
             crate::jobs::Poll::Lost => None,
         };
-        let label = job.view().label;
-        let same_project = *project == self.path;
+        let label = running.job.view().label;
+        let same_project = running.project == self.path;
+        let stopping = running.stopping;
         self.job = None;
         let result = match landing {
+            _ if stopping => Ok(()),
             Some(_) if !same_project => Err(ShellError::Unavailable(format!(
                 "{label} finished after its project closed"
             ))),
@@ -3689,17 +3768,17 @@ impl Shell {
     /// on a font file outside the repo.
     #[cfg(test)]
     pub fn use_face(&mut self, name: &str, bytes: Vec<u8>) {
-        self.face = FaceTable::named(name, bytes);
+        self.face = Arc::new(FaceTable::named(name, bytes));
     }
 
     #[cfg(test)]
     pub fn use_faces(&mut self, faces: Vec<(&str, Vec<u8>)>) {
-        self.face = FaceTable::from_pairs(
+        self.face = Arc::new(FaceTable::from_pairs(
             faces
                 .into_iter()
                 .map(|(name, bytes)| (name.to_owned(), bytes))
                 .collect(),
-        );
+        ));
     }
 
     pub fn remove_selected(&mut self) -> Result<(), ShellError> {
@@ -4318,6 +4397,9 @@ impl Shell {
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
         }
+        if matches!(request.codec, CodecId::H264 | CodecId::Hevc) {
+            return self.export_movie(request);
+        }
         if request.codec != CodecId::Png {
             return Err(ShellError::ExportUnavailable);
         }
@@ -4353,7 +4435,7 @@ impl Shell {
                 mux: &mut mux,
                 destination: None,
                 root: root.as_deref(),
-                fonts: &self.face,
+                fonts: &*self.face,
                 // The preview's device, so an effect clip is in the file.
                 renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
                 progress: None,
@@ -4367,6 +4449,124 @@ impl Shell {
             ));
         };
         write_replaced(&request.path, bytes)
+    }
+
+    /// Write the movie as a job. The window shows its progress; Cancel
+    /// leaves no file. When it lands, [`Self::exported`] names the file.
+    fn export_movie(&mut self, request: ExportRequest) -> Result<(), ShellError> {
+        self.refuse_busy()?;
+        let draft = self.session_draft()?.clone();
+        let range = self.export_range(&draft, request.span)?;
+        let Ok(short_side) = u32::try_from(request.short_side) else {
+            return Err(ShellError::Unavailable(
+                "the short side is not one of the steps".to_owned(),
+            ));
+        };
+        let name = request
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|_| cutlass_export::part_path(&request.path).is_some())
+            .ok_or_else(|| ShellError::Io("the export has no file name".to_owned()))?;
+        if request.path.is_dir() {
+            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        }
+        let movie = cutlass_export::ExportRequest {
+            range,
+            short_side,
+            codec: request.codec,
+            bitrate: request.quality.bitrate(short_side, request.codec),
+            frame_rate: request
+                .frame_rate
+                .or_else(|| draft.frame_rate())
+                .unwrap_or(FrameRate::FPS_30),
+            container: cutlass_codec::ContainerId::Isobmff,
+            audio: request.sound.then_some(cutlass_export::MOVIE_SOUND),
+            sidecar: None,
+            late_by: 0,
+        };
+        cutlass_export::validate(&movie).map_err(export_failure)?;
+        let root = self.path.clone();
+        let readers = self.readers.clone();
+        let encoders = self.encoders.clone();
+        let fonts = Arc::clone(&self.face);
+        // The preview's device, so an effect clip is in the file.
+        let gpu = self.gpu.as_ref().map(|preview| {
+            let renderer = preview.renderer();
+            (renderer.device().clone(), renderer.queue().clone())
+        });
+        let destination = request.path;
+        self.exported = None;
+        self.start_job("Export", move |progress| {
+            progress.stage(&format!("Writing {name}"));
+            let renderer = gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
+            let mut report = |done: u64, total: u64| {
+                if total > 0 {
+                    progress.fraction(done as f32 / total as f32);
+                }
+                !progress.cancelled()
+            };
+            let written = cutlass_export::write_movie(
+                &cutlass_export::MovieSources {
+                    draft: &draft,
+                    root: root.as_deref(),
+                    readers: &readers,
+                    fonts: &*fonts,
+                    renderer: renderer.as_ref(),
+                    encoders: &encoders,
+                },
+                &movie,
+                &destination,
+                &mut report,
+            );
+            Box::new(move |shell: &mut Shell| {
+                written.map_err(export_failure)?;
+                shell.set_notice(format!("Exported {name}"));
+                shell.exported = Some(destination);
+                Ok(())
+            })
+        })
+    }
+
+    /// The stretch of the timeline `span` names.
+    fn export_range(&self, draft: &Draft, span: ExportSpan) -> Result<TimeRange, ShellError> {
+        let range = match span {
+            ExportSpan::Whole => TimeRange::new(0, draft.duration.0),
+            ExportSpan::Selected => {
+                let picked = draft
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.segments)
+                    .filter(|segment| self.selection.contains(&segment.id))
+                    .map(|segment| {
+                        (
+                            segment.target.start.0,
+                            segment.target.start.0 + segment.target.duration.0,
+                        )
+                    })
+                    .reduce(|(start, end), (from, to)| (start.min(from), end.max(to)));
+                let Some((start, end)) = picked else {
+                    return Err(ShellError::Unavailable("no clip is selected".to_owned()));
+                };
+                TimeRange::new(start, end - start)
+            }
+        };
+        if range.duration.0 <= 0 {
+            return Err(ShellError::Unavailable(
+                "there is nothing to export".to_owned(),
+            ));
+        }
+        Ok(range)
+    }
+
+    /// The movie the last export wrote, until the next export starts.
+    pub fn exported(&self) -> Option<&Path> {
+        self.exported.as_deref()
+    }
+
+    /// Stop offering the last export.
+    pub fn forget_export(&mut self) {
+        self.exported = None;
     }
 
     pub fn drag_timeline(&mut self, delta_y: f32, window_height: f32) {
@@ -5043,6 +5243,14 @@ fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId
         .iter()
         .find(|segment| covers(segment, time))
         .map(|segment| segment.id.clone())
+}
+
+/// A job in flight, the project it started in, and whether it was asked
+/// to stop.
+struct RunningJob {
+    job: crate::jobs::Job<Landing>,
+    project: Option<PathBuf>,
+    stopping: bool,
 }
 
 /// What a finished job does on the window thread.
@@ -6016,8 +6224,12 @@ mod tests {
             })
             .unwrap();
         desktop.cancel_job();
+        assert_eq!(
+            desktop.job().map(|job| job.stage),
+            Some("Stopping".to_owned())
+        );
+        land(&mut desktop);
         assert!(desktop.job().is_none());
-        assert!(!desktop.poll_job());
         assert_ne!(desktop.notice(), "landed");
 
         let (go, gate) = std::sync::mpsc::channel::<()>();
@@ -9165,13 +9377,14 @@ mod tests {
     }
 
     #[test]
-    fn export_writes_the_playhead_png_and_refuses_a_codec_it_cannot_mux() {
+    fn export_writes_the_playhead_png_and_refuses_a_codec_it_cannot_encode() {
         let temp = Temp::new();
         let missing = shell().export(ExportRequest {
             path: temp.path.join("missing.png"),
             short_side: 480,
             codec: CodecId::Png,
             replace: false,
+            ..ExportRequest::default()
         });
         assert!(matches!(missing, Err(ShellError::NoProject)));
         assert!(!temp.path.join("missing.png").exists());
@@ -9186,6 +9399,7 @@ mod tests {
             short_side: 480,
             codec: CodecId::Vp8,
             replace: false,
+            ..ExportRequest::default()
         });
         assert!(matches!(declined, Err(ShellError::CodecDeclined(_))));
         assert!(!destination.exists());
@@ -9197,6 +9411,7 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
+                ..ExportRequest::default()
             })
             .unwrap();
         let written = std::fs::read(&destination).unwrap();
@@ -9216,6 +9431,7 @@ mod tests {
             short_side: 480,
             codec: CodecId::Png,
             replace: false,
+            ..ExportRequest::default()
         });
         assert!(matches!(overwrite, Err(ShellError::Overwrite(_))));
         assert_eq!(std::fs::read(&destination).unwrap(), kept);
@@ -9227,33 +9443,133 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: true,
+                ..ExportRequest::default()
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
         assert_eq!((width, height), (960, 480));
         assert!(samples.iter().all(|sample| *sample == 0));
         assert_eq!(desktop.draft().unwrap(), &before);
-        let clear = std::fs::read(&destination).unwrap();
-        let movie = desktop.export(ExportRequest {
-            path: destination.clone(),
-            short_side: 480,
-            codec: CodecId::H264,
-            replace: true,
-        });
-        assert!(matches!(
-            movie,
-            Err(ShellError::CodecDeclined(_) | ShellError::ExportUnavailable)
-        ));
-        assert_eq!(std::fs::read(&destination).unwrap(), clear);
 
         let step = desktop.export(ExportRequest {
             path: destination.clone(),
             short_side: 1000,
             codec: CodecId::Png,
             replace: true,
+            ..ExportRequest::default()
         });
         assert!(matches!(step, Err(ShellError::Unavailable(_))));
         assert_eq!(SHORT_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
+    }
+
+    /// A two-second color project, 64 by 32, at 30 frames a second.
+    fn movie_project(dir: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "color".into(),
+            is_color_clip: true,
+            solid_color: "0xFF336699".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("one", "color", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "two",
+            "color",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        draft.duration = Micros(2_000_000);
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    fn land_job(desktop: &mut Shell) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(desktop.job().is_none(), "the job did not finish");
+    }
+
+    #[test]
+    fn a_movie_export_runs_as_a_job_and_lands_an_mp4() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let destination = temp.path.join("cut.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Export".to_owned())
+        );
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported cut.mp4");
+        assert_eq!(desktop.exported(), Some(destination.as_path()));
+        let bytes = std::fs::read(&destination).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp");
+        assert!(!temp.path.join(".cut.mp4.part").exists());
+
+        // The selected clip alone is half as long, so the file is smaller.
+        desktop.select(Some(SegmentId::new("two")));
+        let half = temp.path.join("half.mp4");
+        desktop
+            .export(ExportRequest {
+                path: half.clone(),
+                short_side: 480,
+                span: super::ExportSpan::Selected,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        assert!(
+            desktop.exported().is_none(),
+            "a new export forgets the last"
+        );
+        land_job(&mut desktop);
+        assert_eq!(desktop.exported(), Some(half.as_path()));
+        assert!(std::fs::metadata(&half).unwrap().len() < bytes.len() as u64);
+    }
+
+    #[test]
+    fn a_cancelled_movie_export_leaves_no_file_and_nothing_selected_is_refused() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        let destination = temp.path.join("cut.mp4");
+        let nothing = desktop.export(ExportRequest {
+            path: destination.clone(),
+            short_side: 480,
+            span: super::ExportSpan::Selected,
+            ..ExportRequest::default()
+        });
+        assert_eq!(nothing.unwrap_err().to_string(), "no clip is selected");
+        assert!(desktop.job().is_none());
+
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        desktop.cancel_job();
+        // The worker sees the cancel at its next frame and removes its part;
+        // the job stays until then.
+        land_job(&mut desktop);
+        assert!(!temp.path.join(".cut.mp4.part").exists());
+        assert!(!destination.exists());
+        assert!(desktop.exported().is_none());
     }
 
     #[test]
@@ -9343,6 +9659,7 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
+                ..ExportRequest::default()
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
@@ -9377,6 +9694,7 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
+                ..ExportRequest::default()
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());

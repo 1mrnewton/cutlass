@@ -513,6 +513,74 @@ mod tests {
     }
 
     #[test]
+    fn a_split_curve_clip_gives_each_half_its_stretch_of_the_curve() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 4_000_000));
+        segment.source_range = Some(TimeRange::new(0, 4_000_000));
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: track.clone(),
+                    segment: Box::new(segment),
+                }],
+            )
+            .unwrap();
+        let revision = session
+            .apply(
+                1,
+                &[Request::SetCurveSpeed {
+                    segment_id: "a".into(),
+                    speed_id: MaterialId::new("curve"),
+                    points: vec![speed_point(0.0, 0.5), speed_point(1.0, 4.0)],
+                }],
+            )
+            .unwrap();
+        let whole = session.draft().tracks[0].segments[0].target.clone();
+        let at = whole.start.0 + whole.duration.0 / 2;
+        session
+            .apply(
+                revision,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(at),
+                    right_id: "b".into(),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let (left, right) = (&draft.tracks[0].segments[0], &draft.tracks[0].segments[1]);
+        let points = |segment: &Segment| {
+            let id = &segment.extra_material_refs[0];
+            draft
+                .materials
+                .speeds
+                .iter()
+                .find(|speed| &speed.id == id)
+                .and_then(|speed| speed.curve_speed.clone())
+                .unwrap()
+                .speed_points
+        };
+        assert_ne!(left.extra_material_refs, right.extra_material_refs);
+        for segment in [left, right] {
+            let source = segment.source_range.clone().unwrap().duration;
+            let mapped = cutlass_model::curve_target_duration(source, &points(segment)).unwrap();
+            assert!(
+                (mapped.0 - segment.target.duration.0).abs() <= 2,
+                "{mapped:?}"
+            );
+        }
+        // Slow at the start, so the first half of the time covers less than
+        // half the footage.
+        let left_source = left.source_range.clone().unwrap().duration.0;
+        assert!(left_source < 2_000_000, "{left_source}");
+        assert_eq!(
+            left_source + right.source_range.clone().unwrap().duration.0,
+            4_000_000
+        );
+    }
+
+    #[test]
     fn a_curve_speed_maps_duration_by_the_integral_and_trim_uses_that_factor() {
         let (mut session, track) = session();
         let mut segment = Segment::new("a", "media", TimeRange::new(0, 2_000_000));

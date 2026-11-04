@@ -11391,7 +11391,8 @@ mod tests {
     }
 
     fn land_job(desktop: &mut Shell) {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // A debug Rust encoder on a small CI runner takes well over a minute.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while desktop.poll_job() && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

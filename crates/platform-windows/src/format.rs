@@ -7,7 +7,7 @@ use std::mem::size_of;
 
 /// `GUID` as Windows lays it out.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Guid {
     pub data1: u32,
     pub data2: u16,

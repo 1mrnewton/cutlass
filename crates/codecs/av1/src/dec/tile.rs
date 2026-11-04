@@ -7,17 +7,17 @@ use crate::dsp::Pixel;
 use crate::spec::tables::{
     ADJUSTED_TX_SIZE, COEFF_BASE_CTX_OFFSET, COEFF_BASE_POS_CTX_OFFSET, COMPOUND_MODE_CTX_MAP,
     DEFAULT_SCAN_4X4, DEFAULT_SCAN_4X8, DEFAULT_SCAN_4X16, DEFAULT_SCAN_8X4, DEFAULT_SCAN_8X8,
-    DEFAULT_SCAN_8X16, DEFAULT_SCAN_8X32, DEFAULT_SCAN_16X4, DEFAULT_SCAN_16X8,
-    DEFAULT_SCAN_16X16, DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16,
-    DEFAULT_SCAN_32X32, FILTER_INTRA_MODE_TO_INTRA_DIR, INTRA_MODE_CONTEXT,
-    MAG_REF_OFFSET_WITH_TX_CLASS, MAX_TX_DEPTH_TABLE, MAX_TX_SIZE_RECT, MCOL_SCAN_4X4,
-    MCOL_SCAN_4X8, MCOL_SCAN_4X16, MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4,
-    MCOL_SCAN_16X8, MCOL_SCAN_16X16, MODE_TO_TXFM, MROW_SCAN_4X4, MROW_SCAN_4X8, MROW_SCAN_4X16,
-    MROW_SCAN_8X4, MROW_SCAN_8X8, MROW_SCAN_8X16, MROW_SCAN_16X4, MROW_SCAN_16X8, MROW_SCAN_16X16,
-    PALETTE_COLOR_CONTEXT, PALETTE_COLOR_HASH_MULTIPLIERS, PARTITION_SUBSIZE, SGR_PARAMS,
-    SIG_REF_DIFF_OFFSET, SIZE_GROUP, SPLIT_TX_SIZE, TX_SIZE_SQR, TX_SIZE_SQR_UP,
-    TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA, TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2,
-    TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1, TX_TYPE_INTRA_INV_SET2, WEDGE_BITS,
+    DEFAULT_SCAN_8X16, DEFAULT_SCAN_8X32, DEFAULT_SCAN_16X4, DEFAULT_SCAN_16X8, DEFAULT_SCAN_16X16,
+    DEFAULT_SCAN_16X32, DEFAULT_SCAN_32X8, DEFAULT_SCAN_32X16, DEFAULT_SCAN_32X32,
+    FILTER_INTRA_MODE_TO_INTRA_DIR, INTRA_MODE_CONTEXT, MAG_REF_OFFSET_WITH_TX_CLASS,
+    MAX_TX_DEPTH_TABLE, MAX_TX_SIZE_RECT, MCOL_SCAN_4X4, MCOL_SCAN_4X8, MCOL_SCAN_4X16,
+    MCOL_SCAN_8X4, MCOL_SCAN_8X8, MCOL_SCAN_8X16, MCOL_SCAN_16X4, MCOL_SCAN_16X8, MCOL_SCAN_16X16,
+    MODE_TO_TXFM, MROW_SCAN_4X4, MROW_SCAN_4X8, MROW_SCAN_4X16, MROW_SCAN_8X4, MROW_SCAN_8X8,
+    MROW_SCAN_8X16, MROW_SCAN_16X4, MROW_SCAN_16X8, MROW_SCAN_16X16, PALETTE_COLOR_CONTEXT,
+    PALETTE_COLOR_HASH_MULTIPLIERS, PARTITION_SUBSIZE, SGR_PARAMS, SIG_REF_DIFF_OFFSET, SIZE_GROUP,
+    SPLIT_TX_SIZE, TX_SIZE_SQR, TX_SIZE_SQR_UP, TX_TYPE_IN_SET_INTER, TX_TYPE_IN_SET_INTRA,
+    TX_TYPE_INTER_INV_SET1, TX_TYPE_INTER_INV_SET2, TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1,
+    TX_TYPE_INTRA_INV_SET2, WEDGE_BITS,
 };
 
 use super::cdf::CdfContext;
@@ -33,9 +33,9 @@ use super::types::{
     COMPOUND_WEDGE, DC_PRED, GLOBAL_GLOBALMV, GLOBALMV, GOLDEN_FRAME, H_ADST, H_DCT, H_FLIPADST,
     IDTX, INTRA_FRAME, LAST_FRAME, LAST2_FRAME, LAST3_FRAME, LOCALWARP, MiInfo, Mv, NEAR_NEARMV,
     NEAR_NEWMV, NEAREST_NEARESTMV, NEAREST_NEWMV, NEARESTMV, NEARMV, NEW_NEARESTMV, NEW_NEARMV,
-    NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32,
-    TX_64X16, TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height, block_width,
-    bw4, find_tx_size, is_directional, mi_height_log2, mi_width_log2, plane_residual_size, tx_h,
+    NEW_NEWMV, NEWMV, NONE, OBMC, SIMPLE, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_64X16,
+    TX_64X64, UV_CFL_PRED, V_ADST, V_DCT, V_FLIPADST, bh4, block_height, block_width, bw4,
+    find_tx_size, is_directional, mi_height_log2, mi_width_log2, plane_residual_size, tx_h,
     tx_h_log2, tx_w, tx_w_log2,
 };
 
@@ -337,7 +337,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
     }
 
     fn seg_feature_active(&self, feature: usize) -> bool {
-        self.hdr.seg_feature_active(self.b.segment_id as usize, feature)
+        self.hdr
+            .seg_feature_active(self.b.segment_id as usize, feature)
     }
 
     // ------------------------------------------------------------------
@@ -445,10 +446,7 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             let row_start = (r * (4 >> sy) + unit_size - 1) / unit_size;
             let row_end = unit_rows.min(((r + h) * (4 >> sy) + unit_size - 1) / unit_size);
             let (num, den) = if self.hdr.use_superres {
-                (
-                    (4 >> sx) * self.hdr.superres_denom as usize,
-                    unit_size * 8,
-                )
+                ((4 >> sx) * self.hdr.superres_denom as usize, unit_size * 8)
             } else {
                 (4 >> sx, unit_size)
             };
@@ -727,13 +725,12 @@ impl<'a, P: Pixel> TileDec<'a, P> {
         b.bsize = bsize;
         let w4 = bw4(bsize);
         let h4 = bh4(bsize);
-        b.has_chroma = if (h4 == 1 && self.sub_y && (r & 1) == 0)
-            || (w4 == 1 && self.sub_x && (c & 1) == 0)
-        {
-            false
-        } else {
-            self.num_planes > 1
-        };
+        b.has_chroma =
+            if (h4 == 1 && self.sub_y && (r & 1) == 0) || (w4 == 1 && self.sub_x && (c & 1) == 0) {
+                false
+            } else {
+                self.num_planes > 1
+            };
         b.avail_u = self.is_inside(r as isize - 1, c as isize);
         b.avail_l = self.is_inside(r as isize, c as isize - 1);
         b.avail_u_chroma = b.avail_u;
@@ -761,6 +758,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             self.reset_block_context();
         }
         self.store_mode_info_pre();
+        #[cfg(feature = "stats")]
+        self.count_tools();
         self.compute_prediction()?;
         self.residual()?;
         self.store_mode_info_post();
@@ -850,6 +849,55 @@ impl<'a, P: Pixel> TileDec<'a, P> {
     }
 
     fn store_mode_info_post(&mut self) {}
+
+    #[cfg(feature = "stats")]
+    fn count_tools(&self) {
+        use super::stats::hit;
+        let b = &self.b;
+        hit(if b.is_inter { 1 } else { 0 });
+        if b.ref_frame[1] > INTRA_FRAME {
+            hit(2);
+            match b.compound_type {
+                COMPOUND_WEDGE => hit(3),
+                COMPOUND_DIFFWTD => hit(4),
+                COMPOUND_DISTANCE => hit(5),
+                _ => {}
+            }
+        }
+        if b.interintra {
+            hit(6);
+        }
+        if b.motion_mode == OBMC {
+            hit(7);
+        }
+        if b.motion_mode == LOCALWARP {
+            hit(8);
+        }
+        if b.is_inter
+            && (b.y_mode == GLOBALMV || b.y_mode == GLOBAL_GLOBALMV)
+            && self.hdr.gm_type[b.ref_frame[0].max(0) as usize] > super::obu::TRANSLATION
+        {
+            hit(9);
+        }
+        if b.is_inter && !b.use_intrabc && self.is_scaled(b.ref_frame[0]) {
+            hit(10);
+        }
+        if b.palette_size_y > 0 || b.palette_size_uv > 0 {
+            hit(11);
+        }
+        if b.use_intrabc {
+            hit(12);
+        }
+        if b.use_filter_intra {
+            hit(13);
+        }
+        if !b.is_inter && b.uv_mode == UV_CFL_PRED {
+            hit(14);
+        }
+        if b.lossless {
+            hit(15);
+        }
+    }
 
     // ------------------------------------------------------------------
     // Intra frame mode info (5.11.7).
@@ -1114,7 +1162,9 @@ impl<'a, P: Pixel> TileDec<'a, P> {
     fn intra_angle_info_y(&mut self) {
         self.b.angle_delta_y = 0;
         if self.b.bsize >= BLOCK_8X8 && is_directional(self.b.y_mode) {
-            let v = self.msac.symbol(&mut self.cdf.angle_delta[self.b.y_mode as usize - 1]);
+            let v = self
+                .msac
+                .symbol(&mut self.cdf.angle_delta[self.b.y_mode as usize - 1]);
             self.b.angle_delta_y = v as i8 - 3;
         }
     }
@@ -1122,20 +1172,21 @@ impl<'a, P: Pixel> TileDec<'a, P> {
     fn intra_angle_info_uv(&mut self) {
         self.b.angle_delta_uv = 0;
         if self.b.bsize >= BLOCK_8X8 && is_directional(self.b.uv_mode) {
-            let v = self.msac.symbol(&mut self.cdf.angle_delta[self.b.uv_mode as usize - 1]);
+            let v = self
+                .msac
+                .symbol(&mut self.cdf.angle_delta[self.b.uv_mode as usize - 1]);
             self.b.angle_delta_uv = v as i8 - 3;
         }
     }
 
     fn read_uv_mode(&mut self) {
         let bs = self.b.bsize;
-        let cfl_allowed = if self.b.lossless
-            && plane_residual_size(bs, self.sub_x, self.sub_y) == BLOCK_4X4
-        {
-            true
-        } else {
-            !self.b.lossless && block_width(bs).max(block_height(bs)) <= 32
-        };
+        let cfl_allowed =
+            if self.b.lossless && plane_residual_size(bs, self.sub_x, self.sub_y) == BLOCK_4X4 {
+                true
+            } else {
+                !self.b.lossless && block_width(bs).max(block_height(bs)) <= 32
+            };
         let y = self.b.y_mode as usize;
         self.b.uv_mode = if cfl_allowed {
             self.msac.symbol(&mut self.cdf.uv_mode_cfl_allowed[y]) as u8
@@ -1172,7 +1223,9 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             && self.b.palette_size_y == 0
             && block_width(bs).max(block_height(bs)) <= 32
         {
-            self.b.use_filter_intra = self.msac.bool_adapt(&mut self.cdf.filter_intra[bs as usize]);
+            self.b.use_filter_intra = self
+                .msac
+                .bool_adapt(&mut self.cdf.filter_intra[bs as usize]);
             if self.b.use_filter_intra {
                 self.b.filter_intra_mode = self.msac.symbol(&mut self.cdf.filter_intra_mode) as u8;
             }
@@ -1287,7 +1340,10 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             if self.b.avail_l && self.mi(self.b.mi_row, self.b.mi_col - 1).palette_size[0] > 0 {
                 ctx += 1;
             }
-            if self.msac.bool_adapt(&mut self.cdf.palette_y_mode[bsize_ctx][ctx]) {
+            if self
+                .msac
+                .bool_adapt(&mut self.cdf.palette_y_mode[bsize_ctx][ctx])
+            {
                 let n = self.msac.symbol(&mut self.cdf.palette_y_size[bsize_ctx]) + 2;
                 self.b.palette_size_y = n as u8;
                 self.b.palette_y = self.read_palette_colors(0, n, false);
@@ -1514,7 +1570,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             } else {
                 0
             };
-            let ctx = usize::from(above_w >= tx_w(max_rect)) + usize::from(left_h >= tx_h(max_rect));
+            let ctx =
+                usize::from(above_w >= tx_w(max_rect)) + usize::from(left_h >= tx_h(max_rect));
             let depth = match max_depth {
                 4 => self.msac.symbol(&mut self.cdf.tx_64x64[ctx]),
                 3 => self.msac.symbol(&mut self.cdf.tx_32x32[ctx]),
@@ -1700,7 +1757,9 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     let ly = self.b.mi_row & (self.sb_size4 - 1);
                     let ctx = usize::from(self.left_seg_pred[ly & 31])
                         + usize::from(self.above_seg_pred[self.b.mi_col]);
-                    let p = self.msac.bool_adapt(&mut self.cdf.segment_id_predicted[ctx]);
+                    let p = self
+                        .msac
+                        .bool_adapt(&mut self.cdf.segment_id_predicted[ctx]);
                     if p {
                         self.b.segment_id = predicted;
                     } else {
@@ -1788,8 +1847,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             return Ok(());
         }
         if self.seg_feature_active(SEG_LVL_REF_FRAME) {
-            let v = self.hdr.segmentation.feature_data[self.b.segment_id as usize]
-                [SEG_LVL_REF_FRAME];
+            let v =
+                self.hdr.segmentation.feature_data[self.b.segment_id as usize][SEG_LVL_REF_FRAME];
             self.b.ref_frame = [v as i8, NONE];
             return Ok(());
         }
@@ -1816,9 +1875,17 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     4
                 }
             } else if au {
-                if above_single { usize::from(bwd(above[0])) } else { 3 }
+                if above_single {
+                    usize::from(bwd(above[0]))
+                } else {
+                    3
+                }
             } else if al {
-                if left_single { usize::from(bwd(left[0])) } else { 3 }
+                if left_single {
+                    usize::from(bwd(left[0]))
+                } else {
+                    3
+                }
             } else {
                 1
             };
@@ -1871,7 +1938,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                 if self.msac.bool_adapt(&mut self.cdf.uni_comp_ref[ctx][0]) {
                     self.b.ref_frame = [BWDREF_FRAME, ALTREF_FRAME];
                 } else {
-                    let ctx1 = self.ref_ctx(&[LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
+                    let ctx1 =
+                        self.ref_ctx(&[LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
                     if self.msac.bool_adapt(&mut self.cdf.uni_comp_ref[ctx1][1]) {
                         let ctx2 = self.ref_ctx(&[LAST3_FRAME], &[GOLDEN_FRAME], above, left);
                         if self.msac.bool_adapt(&mut self.cdf.uni_comp_ref[ctx2][2]) {
@@ -1884,7 +1952,12 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     }
                 }
             } else {
-                let ctx = self.ref_ctx(&[LAST_FRAME, LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
+                let ctx = self.ref_ctx(
+                    &[LAST_FRAME, LAST2_FRAME],
+                    &[LAST3_FRAME, GOLDEN_FRAME],
+                    above,
+                    left,
+                );
                 if !self.msac.bool_adapt(&mut self.cdf.comp_ref[ctx][0]) {
                     let ctx1 = self.ref_ctx(&[LAST_FRAME], &[LAST2_FRAME], above, left);
                     self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.comp_ref[ctx1][1]) {
@@ -1900,14 +1973,16 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                         LAST3_FRAME
                     };
                 }
-                let ctx = self.ref_ctx(&[BWDREF_FRAME, ALTREF2_FRAME], &[ALTREF_FRAME], above, left);
+                let ctx =
+                    self.ref_ctx(&[BWDREF_FRAME, ALTREF2_FRAME], &[ALTREF_FRAME], above, left);
                 if !self.msac.bool_adapt(&mut self.cdf.comp_bwd_ref[ctx][0]) {
                     let ctx1 = self.ref_ctx(&[BWDREF_FRAME], &[ALTREF2_FRAME], above, left);
-                    self.b.ref_frame[1] = if self.msac.bool_adapt(&mut self.cdf.comp_bwd_ref[ctx1][1]) {
-                        ALTREF2_FRAME
-                    } else {
-                        BWDREF_FRAME
-                    };
+                    self.b.ref_frame[1] =
+                        if self.msac.bool_adapt(&mut self.cdf.comp_bwd_ref[ctx1][1]) {
+                            ALTREF2_FRAME
+                        } else {
+                            BWDREF_FRAME
+                        };
                 } else {
                     self.b.ref_frame[1] = ALTREF_FRAME;
                 }
@@ -1915,10 +1990,12 @@ impl<'a, P: Pixel> TileDec<'a, P> {
         } else {
             let ctx = self.ref_ctx(&FWD, &BWD, above, left);
             if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx][0]) {
-                let ctx2 = self.ref_ctx(&[BWDREF_FRAME, ALTREF2_FRAME], &[ALTREF_FRAME], above, left);
+                let ctx2 =
+                    self.ref_ctx(&[BWDREF_FRAME, ALTREF2_FRAME], &[ALTREF_FRAME], above, left);
                 if !self.msac.bool_adapt(&mut self.cdf.single_ref[ctx2][1]) {
                     let ctx6 = self.ref_ctx(&[BWDREF_FRAME], &[ALTREF2_FRAME], above, left);
-                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx6][5]) {
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx6][5])
+                    {
                         ALTREF2_FRAME
                     } else {
                         BWDREF_FRAME
@@ -1927,17 +2004,24 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     self.b.ref_frame[0] = ALTREF_FRAME;
                 }
             } else {
-                let ctx3 = self.ref_ctx(&[LAST_FRAME, LAST2_FRAME], &[LAST3_FRAME, GOLDEN_FRAME], above, left);
+                let ctx3 = self.ref_ctx(
+                    &[LAST_FRAME, LAST2_FRAME],
+                    &[LAST3_FRAME, GOLDEN_FRAME],
+                    above,
+                    left,
+                );
                 if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx3][2]) {
                     let ctx5 = self.ref_ctx(&[LAST3_FRAME], &[GOLDEN_FRAME], above, left);
-                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx5][4]) {
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx5][4])
+                    {
                         GOLDEN_FRAME
                     } else {
                         LAST3_FRAME
                     };
                 } else {
                     let ctx4 = self.ref_ctx(&[LAST_FRAME], &[LAST2_FRAME], above, left);
-                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx4][3]) {
+                    self.b.ref_frame[0] = if self.msac.bool_adapt(&mut self.cdf.single_ref[ctx4][3])
+                    {
                         LAST2_FRAME
                     } else {
                         LAST_FRAME
@@ -1966,18 +2050,26 @@ impl<'a, P: Pixel> TileDec<'a, P> {
         {
             self.b.y_mode = GLOBALMV;
         } else if is_compound {
-            let ctx = COMPOUND_MODE_CTX_MAP[self.b.ref_mv_ctx >> 1][self.b.new_mv_ctx.min(4)] as usize;
-            self.b.y_mode = NEAREST_NEARESTMV + self.msac.symbol(&mut self.cdf.compound_mode[ctx]) as u8;
+            let ctx =
+                COMPOUND_MODE_CTX_MAP[self.b.ref_mv_ctx >> 1][self.b.new_mv_ctx.min(4)] as usize;
+            self.b.y_mode =
+                NEAREST_NEARESTMV + self.msac.symbol(&mut self.cdf.compound_mode[ctx]) as u8;
         } else {
-            let new_mv = self.msac.bool_adapt(&mut self.cdf.new_mv[self.b.new_mv_ctx]);
+            let new_mv = self
+                .msac
+                .bool_adapt(&mut self.cdf.new_mv[self.b.new_mv_ctx]);
             if !new_mv {
                 self.b.y_mode = NEWMV;
             } else {
-                let zero = self.msac.bool_adapt(&mut self.cdf.zero_mv[self.b.zero_mv_ctx]);
+                let zero = self
+                    .msac
+                    .bool_adapt(&mut self.cdf.zero_mv[self.b.zero_mv_ctx]);
                 if !zero {
                     self.b.y_mode = GLOBALMV;
                 } else {
-                    let rm = self.msac.bool_adapt(&mut self.cdf.ref_mv[self.b.ref_mv_ctx]);
+                    let rm = self
+                        .msac
+                        .bool_adapt(&mut self.cdf.ref_mv[self.b.ref_mv_ctx]);
                     self.b.y_mode = if !rm { NEARESTMV } else { NEARMV };
                 }
             }
@@ -2019,7 +2111,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             for dir in 0..dirs {
                 if self.needs_interp_filter() {
                     let ctx = self.interp_filter_ctx(dir);
-                    self.b.interp_filter[dir] = self.msac.symbol(&mut self.cdf.interp_filter[ctx]) as u8;
+                    self.b.interp_filter[dir] =
+                        self.msac.symbol(&mut self.cdf.interp_filter[ctx]) as u8;
                 } else {
                     self.b.interp_filter[dir] = 0;
                 }
@@ -2088,15 +2181,18 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             let ctx = SIZE_GROUP[bs as usize] as usize - 1;
             self.b.interintra = self.msac.bool_adapt(&mut self.cdf.inter_intra[ctx]);
             if self.b.interintra {
-                self.b.interintra_mode = self.msac.symbol(&mut self.cdf.inter_intra_mode[ctx]) as u8;
+                self.b.interintra_mode =
+                    self.msac.symbol(&mut self.cdf.inter_intra_mode[ctx]) as u8;
                 self.b.ref_frame[1] = INTRA_FRAME;
                 self.b.angle_delta_y = 0;
                 self.b.angle_delta_uv = 0;
                 self.b.use_filter_intra = false;
-                self.b.wedge_interintra =
-                    self.msac.bool_adapt(&mut self.cdf.wedge_inter_intra[bs as usize]);
+                self.b.wedge_interintra = self
+                    .msac
+                    .bool_adapt(&mut self.cdf.wedge_inter_intra[bs as usize]);
                 if self.b.wedge_interintra {
-                    self.b.wedge_index = self.msac.symbol(&mut self.cdf.wedge_index[bs as usize]) as u8;
+                    self.b.wedge_index =
+                        self.msac.symbol(&mut self.cdf.wedge_index[bs as usize]) as u8;
                     self.b.wedge_sign = 0;
                 }
             }
@@ -2205,17 +2301,27 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                         ctx += 3;
                     }
                 }
-                self.b.comp_group_idx =
-                    u8::from(self.msac.bool_adapt(&mut self.cdf.comp_group_idx[ctx.min(5)]));
+                self.b.comp_group_idx = u8::from(
+                    self.msac
+                        .bool_adapt(&mut self.cdf.comp_group_idx[ctx.min(5)]),
+                );
             }
             if self.b.comp_group_idx == 0 {
                 if self.seq.enable_jnt_comp {
                     let h = self.hdr;
                     let fwd = h
-                        .get_relative_dist(self.seq, h.order_hints[self.b.ref_frame[0] as usize], h.order_hint)
+                        .get_relative_dist(
+                            self.seq,
+                            h.order_hints[self.b.ref_frame[0] as usize],
+                            h.order_hint,
+                        )
                         .abs();
                     let bck = h
-                        .get_relative_dist(self.seq, h.order_hints[self.b.ref_frame[1] as usize], h.order_hint)
+                        .get_relative_dist(
+                            self.seq,
+                            h.order_hints[self.b.ref_frame[1] as usize],
+                            h.order_hint,
+                        )
                         .abs();
                     let mut ctx = if fwd == bck { 3 } else { 0 };
                     if au {
@@ -2232,7 +2338,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                             ctx += 1;
                         }
                     }
-                    self.b.compound_idx = u8::from(self.msac.bool_adapt(&mut self.cdf.compound_idx[ctx]));
+                    self.b.compound_idx =
+                        u8::from(self.msac.bool_adapt(&mut self.cdf.compound_idx[ctx]));
                     self.b.compound_type = if self.b.compound_idx != 0 {
                         COMPOUND_AVERAGE
                     } else {
@@ -2244,12 +2351,14 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             } else if n == 0 {
                 self.b.compound_type = COMPOUND_DIFFWTD;
             } else {
-                self.b.compound_type =
-                    if self.msac.bool_adapt(&mut self.cdf.compound_type[bs as usize]) {
-                        COMPOUND_DIFFWTD
-                    } else {
-                        COMPOUND_WEDGE
-                    };
+                self.b.compound_type = if self
+                    .msac
+                    .bool_adapt(&mut self.cdf.compound_type[bs as usize])
+                {
+                    COMPOUND_DIFFWTD
+                } else {
+                    COMPOUND_WEDGE
+                };
             }
             if self.b.compound_type == COMPOUND_WEDGE {
                 self.b.wedge_index = self.msac.symbol(&mut self.cdf.wedge_index[bs as usize]) as u8;
@@ -2295,7 +2404,11 @@ impl<'a, P: Pixel> TileDec<'a, P> {
 
     fn assign_mv(&mut self, is_compound: bool) -> R<()> {
         for i in 0..1 + usize::from(is_compound) {
-            let comp_mode = if self.b.use_intrabc { NEWMV } else { self.get_mode(i) };
+            let comp_mode = if self.b.use_intrabc {
+                NEWMV
+            } else {
+                self.get_mode(i)
+            };
             let pred = if self.b.use_intrabc {
                 let mut p = self.b.ref_stack_mv[0][0];
                 if p == Mv::ZERO {
@@ -2313,7 +2426,11 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             } else if comp_mode == GLOBALMV {
                 self.b.global_mvs[i]
             } else {
-                let mut pos = if comp_mode == NEARESTMV { 0 } else { self.b.ref_mv_idx };
+                let mut pos = if comp_mode == NEARESTMV {
+                    0
+                } else {
+                    self.b.ref_mv_idx
+                };
                 if comp_mode == NEWMV && self.b.num_mv_found <= 1 {
                     pos = 0;
                 }
@@ -2321,10 +2438,7 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             };
             if comp_mode == NEWMV {
                 let d = self.read_mv(i);
-                self.b.mv[i] = Mv::new(
-                    i32::from(pred.row) + d.0,
-                    i32::from(pred.col) + d.1,
-                );
+                self.b.mv[i] = Mv::new(i32::from(pred.row) + d.0, i32::from(pred.col) + d.1);
             } else {
                 self.b.mv[i] = pred;
             }
@@ -2605,10 +2719,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     self.b.avail_u_chroma
                 }) || y > 0;
                 let bdf = &self.block_decoded[plane];
-                let have_above_right =
-                    bdf[sub_row >> sy][(sub_col >> sx) + step_x + 1];
-                let have_below_left =
-                    bdf[(sub_row >> sy) + step_y + 1][(sub_col >> sx)];
+                let have_above_right = bdf[sub_row >> sy][(sub_col >> sx) + step_x + 1];
+                let have_below_left = bdf[(sub_row >> sy) + step_y + 1][(sub_col >> sx)];
                 self.predict_intra(
                     plane,
                     start_x,
@@ -2725,9 +2837,16 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             let sqr = TX_SIZE_SQR[tx as usize] as usize;
             if self.b.is_inter {
                 t = match set {
-                    1 => TX_TYPE_INTER_INV_SET1[self.msac.symbol(&mut self.cdf.inter_tx_type_set1[sqr])],
+                    1 => {
+                        TX_TYPE_INTER_INV_SET1
+                            [self.msac.symbol(&mut self.cdf.inter_tx_type_set1[sqr])]
+                    }
                     2 => TX_TYPE_INTER_INV_SET2[self.msac.symbol(&mut self.cdf.inter_tx_type_set2)],
-                    _ => TX_TYPE_INTER_INV_SET3[usize::from(self.msac.bool_adapt(&mut self.cdf.inter_tx_type_set3[sqr]))],
+                    _ => {
+                        TX_TYPE_INTER_INV_SET3[usize::from(
+                            self.msac.bool_adapt(&mut self.cdf.inter_tx_type_set3[sqr]),
+                        )]
+                    }
                 };
             } else {
                 let dir = if self.b.use_filter_intra {
@@ -2736,9 +2855,11 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     self.b.y_mode as usize
                 };
                 t = if set == 1 {
-                    TX_TYPE_INTRA_INV_SET1[self.msac.symbol(&mut self.cdf.intra_tx_type_set1[sqr][dir])]
+                    TX_TYPE_INTRA_INV_SET1
+                        [self.msac.symbol(&mut self.cdf.intra_tx_type_set1[sqr][dir])]
                 } else {
-                    TX_TYPE_INTRA_INV_SET2[self.msac.symbol(&mut self.cdf.intra_tx_type_set2[sqr][dir])]
+                    TX_TYPE_INTRA_INV_SET2
+                        [self.msac.symbol(&mut self.cdf.intra_tx_type_set2[sqr][dir])]
                 };
             }
         }
@@ -2757,7 +2878,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
         let y4 = start_y >> 2;
         let w4 = tx_w(tx) >> 2;
         let h4 = tx_h(tx) >> 2;
-        let tx_sz_ctx = ((TX_SIZE_SQR[tx as usize] + TX_SIZE_SQR_UP[tx as usize] + 1) >> 1) as usize;
+        let tx_sz_ctx =
+            ((TX_SIZE_SQR[tx as usize] + TX_SIZE_SQR_UP[tx as usize] + 1) >> 1) as usize;
         let ptype = usize::from(plane > 0);
         let (sx, sy) = self.plane_sub(plane);
         let max_x4 = self.fs.mi_cols >> sx;
@@ -2806,7 +2928,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             }
             for i in 0..h4 {
                 if y4 + i < max_y4 {
-                    left |= self.left_level[plane][(ly0 + i) & 31] | self.left_dc[plane][(ly0 + i) & 31];
+                    left |= self.left_level[plane][(ly0 + i) & 31]
+                        | self.left_dc[plane][(ly0 + i) & 31];
                 }
             }
             let mut c = usize::from(above != 0) + usize::from(left != 0) + 7;
@@ -2856,7 +2979,10 @@ impl<'a, P: Pixel> TileDec<'a, P> {
             };
             let eob_shift = eob_pt as i32 - 3;
             if eob_shift >= 0 {
-                if self.msac.bool_adapt(&mut cdf.eob_extra[tx_sz_ctx][ptype][eob_pt - 3]) {
+                if self
+                    .msac
+                    .bool_adapt(&mut cdf.eob_extra[tx_sz_ctx][ptype][eob_pt - 3])
+                {
                     eob += 1 << eob_shift;
                 }
                 for i in 1..(eob_pt as i32 - 2).max(0) {
@@ -2897,7 +3023,11 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     } else {
                         3
                     };
-                    level = self.msac.symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx]) as u32 + 1;
+                    level = self
+                        .msac
+                        .symbol(&mut cdf.coeff_base_eob[tx_sz_ctx][ptype][ctx])
+                        as u32
+                        + 1;
                 } else {
                     let mut mag = 0u32;
                     for idx in 0..5 {
@@ -2911,7 +3041,8 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                         if row == 0 && col == 0 {
                             ctx = 0;
                         } else {
-                            ctx += COEFF_BASE_CTX_OFFSET[tx as usize][row.min(4)][col.min(4)] as usize;
+                            ctx +=
+                                COEFF_BASE_CTX_OFFSET[tx as usize][row.min(4)][col.min(4)] as usize;
                         }
                     } else {
                         let idx = if tx_class == 2 { row } else { col };
@@ -2931,7 +3062,11 @@ impl<'a, P: Pixel> TileDec<'a, P> {
                     let ctx = if pos == 0 {
                         mag
                     } else if tx_class == 0 {
-                        if row < 2 && col < 2 { mag + 7 } else { mag + 14 }
+                        if row < 2 && col < 2 {
+                            mag + 7
+                        } else {
+                            mag + 14
+                        }
                     } else if tx_class == 1 {
                         if col == 0 { mag + 7 } else { mag + 14 }
                     } else if row == 0 {

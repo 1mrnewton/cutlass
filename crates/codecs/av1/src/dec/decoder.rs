@@ -243,7 +243,11 @@ impl Av1Core {
         Ok(())
     }
 
-    fn show_existing(&mut self, seq: &SequenceHeader, hdr: &FrameHeader) -> R<Option<DecodedFrame>> {
+    fn show_existing(
+        &mut self,
+        seq: &SequenceHeader,
+        hdr: &FrameHeader,
+    ) -> R<Option<DecodedFrame>> {
         let idx = hdr.frame_to_show_map_idx as usize;
         let Some(slot) = self.slots[idx].clone() else {
             return Err(malformed("show_existing_frame of empty slot"));
@@ -280,8 +284,12 @@ impl Av1Core {
         let picture = if self.apply_grain && grain.apply_grain {
             let p = to_fg_params(grain);
             match pic {
-                AnyPicture::U8(src) => AnyPicture::U8(grain_apply(src, &p, w, h, mono, seq.matrix_coefficients)),
-                AnyPicture::U16(src) => AnyPicture::U16(grain_apply(src, &p, w, h, mono, seq.matrix_coefficients)),
+                AnyPicture::U8(src) => {
+                    AnyPicture::U8(grain_apply(src, &p, w, h, mono, seq.matrix_coefficients))
+                }
+                AnyPicture::U16(src) => {
+                    AnyPicture::U16(grain_apply(src, &p, w, h, mono, seq.matrix_coefficients))
+                }
             }
         } else {
             pic.clone()
@@ -347,7 +355,16 @@ impl Av1Core {
                     _ => None,
                 }
             });
-            let (pic, c) = decode_frame::<u8>(seq, &hdr, &mut fs, &p.tiles, &mut cdf, refs, &self.ref_hdr, &mut self.lr_scratch)?;
+            let (pic, c) = decode_frame::<u8>(
+                seq,
+                &hdr,
+                &mut fs,
+                &p.tiles,
+                &mut cdf,
+                refs,
+                &self.ref_hdr,
+                &mut self.lr_scratch,
+            )?;
             (AnyPicture::U8(pic), c)
         } else {
             let refs: [Option<&Picture<u16>>; 8] = std::array::from_fn(|i| {
@@ -360,7 +377,16 @@ impl Av1Core {
                     _ => None,
                 }
             });
-            let (pic, c) = decode_frame::<u16>(seq, &hdr, &mut fs, &p.tiles, &mut cdf, refs, &self.ref_hdr, &mut self.lr_scratch)?;
+            let (pic, c) = decode_frame::<u16>(
+                seq,
+                &hdr,
+                &mut fs,
+                &p.tiles,
+                &mut cdf,
+                refs,
+                &self.ref_hdr,
+                &mut self.lr_scratch,
+            )?;
             (AnyPicture::U16(pic), c)
         };
         // Reference frame update process (7.20).
@@ -485,9 +511,11 @@ fn to_fg_params(g: &GrainParams) -> FilmGrainParams {
     p.point_y_value.copy_from_slice(&g.point_y_value[..14]);
     p.point_y_scaling.copy_from_slice(&g.point_y_scaling[..14]);
     p.point_cb_value.copy_from_slice(&g.point_cb_value[..10]);
-    p.point_cb_scaling.copy_from_slice(&g.point_cb_scaling[..10]);
+    p.point_cb_scaling
+        .copy_from_slice(&g.point_cb_scaling[..10]);
     p.point_cr_value.copy_from_slice(&g.point_cr_value[..10]);
-    p.point_cr_scaling.copy_from_slice(&g.point_cr_scaling[..10]);
+    p.point_cr_scaling
+        .copy_from_slice(&g.point_cr_scaling[..10]);
     p
 }
 
@@ -504,18 +532,60 @@ fn grain_apply<P: Pixel>(
     let (su, sv, suv_stride) = if mono {
         (&empty[..], &empty[..], 0)
     } else {
-        (&src.planes[1].data[..], &src.planes[2].data[..], src.planes[1].stride)
+        (
+            &src.planes[1].data[..],
+            &src.planes[2].data[..],
+            src.planes[1].stride,
+        )
     };
     let (dy, rest) = dst.planes.split_at_mut(1);
     let ys = dy[0].stride;
     if mono {
         let mut e1: [P; 0] = [];
         let mut e2: [P; 0] = [];
-        apply_film_grain(p, &src.planes[0].data, su, sv, src.planes[0].stride, suv_stride, &mut dy[0].data, &mut e1, &mut e2, ys, 0, w, h, src.sub_x, src.sub_y, true, matrix, src.bd);
+        apply_film_grain(
+            p,
+            &src.planes[0].data,
+            su,
+            sv,
+            src.planes[0].stride,
+            suv_stride,
+            &mut dy[0].data,
+            &mut e1,
+            &mut e2,
+            ys,
+            0,
+            w,
+            h,
+            src.sub_x,
+            src.sub_y,
+            true,
+            matrix,
+            src.bd,
+        );
     } else {
         let (du, dv) = rest.split_at_mut(1);
         let uvs = du[0].stride;
-        apply_film_grain(p, &src.planes[0].data, su, sv, src.planes[0].stride, suv_stride, &mut dy[0].data, &mut du[0].data, &mut dv[0].data, ys, uvs, w, h, src.sub_x, src.sub_y, false, matrix, src.bd);
+        apply_film_grain(
+            p,
+            &src.planes[0].data,
+            su,
+            sv,
+            src.planes[0].stride,
+            suv_stride,
+            &mut dy[0].data,
+            &mut du[0].data,
+            &mut dv[0].data,
+            ys,
+            uvs,
+            w,
+            h,
+            src.sub_x,
+            src.sub_y,
+            false,
+            matrix,
+            src.bd,
+        );
     }
     dst
 }
@@ -622,7 +692,14 @@ fn decode_frame<P: Pixel>(
     let saved = saved.unwrap_or_else(|| Box::new(cdf.clone()));
     // decode_frame_wrapup: in-loop filters.
     postfilter::loop_filter(seq, hdr, fs, &mut cur);
-    let cdef_on = seq.enable_cdef && !hdr.coded_lossless && !hdr.allow_intrabc && (hdr.cdef.bits > 0 || hdr.cdef.y_pri[0] != 0 || hdr.cdef.y_sec[0] != 0 || hdr.cdef.uv_pri[0] != 0 || hdr.cdef.uv_sec[0] != 0);
+    let cdef_on = seq.enable_cdef
+        && !hdr.coded_lossless
+        && !hdr.allow_intrabc
+        && (hdr.cdef.bits > 0
+            || hdr.cdef.y_pri[0] != 0
+            || hdr.cdef.y_sec[0] != 0
+            || hdr.cdef.uv_pri[0] != 0
+            || hdr.cdef.uv_sec[0] != 0);
     let cdef_pic = if cdef_on {
         let mut d = cur.clone();
         postfilter::cdef(seq, hdr, fs, &cur, &mut d);
@@ -652,7 +729,10 @@ fn decode_frame<P: Pixel>(
     // Visible size.
     for (p, pl) in final_pic.planes.iter_mut().enumerate() {
         let (sx, sy) = if p > 0 {
-            (usize::from(seq.subsampling_x), usize::from(seq.subsampling_y))
+            (
+                usize::from(seq.subsampling_x),
+                usize::from(seq.subsampling_y),
+            )
         } else {
             (0, 0)
         };

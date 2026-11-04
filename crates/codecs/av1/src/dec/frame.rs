@@ -47,7 +47,11 @@ impl<P: Pixel> Picture<P> {
         let ah = (h + 127 + 160) & !63;
         let mut planes = Vec::with_capacity(num_planes);
         for p in 0..num_planes {
-            let (sx, sy) = if p > 0 { (sub_x, sub_y) } else { (false, false) };
+            let (sx, sy) = if p > 0 {
+                (sub_x, sub_y)
+            } else {
+                (false, false)
+            };
             let pw = (w + usize::from(sx)) >> u32::from(sx);
             let ph = (h + usize::from(sy)) >> u32::from(sy);
             planes.push(Plane::new(pw, ph, aw >> u32::from(sx), ah >> u32::from(sy)));

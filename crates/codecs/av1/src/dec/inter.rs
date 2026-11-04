@@ -7,10 +7,9 @@ use crate::spec::tables::{QUANT_DIST_LOOKUP, QUANT_DIST_WEIGHT};
 use super::obu::TRANSLATION;
 use super::tile::{R, TileDec};
 use super::types::{
-    COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA, COMPOUND_WEDGE,
-    DC_PRED, GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SMOOTH_PRED,
-    V_PRED, bh4, block_height, block_width, bw4, mi_height_log2, mi_width_log2,
-    plane_residual_size,
+    COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA, COMPOUND_WEDGE, DC_PRED,
+    GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SMOOTH_PRED, V_PRED, bh4,
+    block_height, block_width, bw4, mi_height_log2, mi_width_log2, plane_residual_size,
 };
 
 /// Where a block prediction goes.
@@ -84,7 +83,15 @@ impl<P: Pixel> TileDec<'_, P> {
                 let mut c = 0;
                 let mut x = 0;
                 while x < n4w * 4 {
-                    self.predict_inter(plane, base_x + x, base_y + y, pred_w, pred_h, cand_row + r, cand_col + c)?;
+                    self.predict_inter(
+                        plane,
+                        base_x + x,
+                        base_y + y,
+                        pred_w,
+                        pred_h,
+                        cand_row + r,
+                        cand_col + c,
+                    )?;
                     x += pred_w;
                     c += 1;
                 }
@@ -120,7 +127,8 @@ impl<P: Pixel> TileDec<'_, P> {
             let pl = &self.cur.planes[plane];
             let st = pl.stride;
             for i in 0..h {
-                self.scratch.obmc[i * w..i * w + w].copy_from_slice(&pl.data[(y + i) * st + x..][..w]);
+                self.scratch.obmc[i * w..i * w + w]
+                    .copy_from_slice(&pl.data[(y + i) * st + x..][..w]);
             }
         }
         for ref_list in 0..1 + usize::from(is_compound) {
@@ -140,7 +148,11 @@ impl<P: Pixel> TileDec<'_, P> {
             } else {
                 0
             };
-            let dst = if is_compound { Dst::Tmp(ref_list) } else { Dst::Frame };
+            let dst = if is_compound {
+                Dst::Tmp(ref_list)
+            } else {
+                Dst::Frame
+            };
             if use_warp != 0 {
                 let mat = if use_warp == 1 {
                     self.b.local_warp
@@ -171,17 +183,39 @@ impl<P: Pixel> TileDec<'_, P> {
                 COMPOUND_WEDGE => {
                     let bs = self.b.bsize as usize;
                     let mstride = block_width(self.b.bsize);
-                    let Some(m) = mc::wedge_mask(bs, self.b.wedge_sign != 0, self.b.wedge_index as usize) else {
+                    let Some(m) =
+                        mc::wedge_mask(bs, self.b.wedge_sign != 0, self.b.wedge_index as usize)
+                    else {
                         return Err(super::tile::malformed("wedge mask"));
                     };
                     mc::mask_blend(dstp, st, t0, t1, w, h, m, mstride, sx != 0, sy != 0, bd);
                 }
                 COMPOUND_DIFFWTD => {
                     if plane == 0 {
-                        mc::diffwtd_mask(&mut self.scratch.mask, t0, t1, w, h, self.b.mask_type != 0, bd);
+                        mc::diffwtd_mask(
+                            &mut self.scratch.mask,
+                            t0,
+                            t1,
+                            w,
+                            h,
+                            self.b.mask_type != 0,
+                            bd,
+                        );
                     }
                     let mstride = block_width(self.b.bsize);
-                    mc::mask_blend(dstp, st, t0, t1, w, h, &self.scratch.mask, mstride, sx != 0, sy != 0, bd);
+                    mc::mask_blend(
+                        dstp,
+                        st,
+                        t0,
+                        t1,
+                        w,
+                        h,
+                        &self.scratch.mask,
+                        mstride,
+                        sx != 0,
+                        sy != 0,
+                        bd,
+                    );
                 }
                 COMPOUND_DISTANCE => {
                     mc::w_avg(dstp, st, t0, t1, w, h, fwd, bck, bd);
@@ -195,7 +229,18 @@ impl<P: Pixel> TileDec<'_, P> {
             let intra = &self.scratch.obmc[..w * h];
             if ct == COMPOUND_INTRA {
                 mc::ii_smooth_mask(&mut self.scratch.mask, w, w, h, self.b.interintra_mode);
-                mc::interintra_blend(dstp, st, intra, w, w, h, &self.scratch.mask, w, false, false);
+                mc::interintra_blend(
+                    dstp,
+                    st,
+                    intra,
+                    w,
+                    w,
+                    h,
+                    &self.scratch.mask,
+                    w,
+                    false,
+                    false,
+                );
             } else {
                 debug_assert_eq!(ct, COMPOUND_WEDGE);
                 let bs = self.b.bsize as usize;
@@ -216,7 +261,11 @@ impl<P: Pixel> TileDec<'_, P> {
         let mut dist = [0i32; 2];
         for l in 0..2 {
             let hnt = self.hdr.order_hints[refs[l] as usize];
-            dist[l] = self.hdr.get_relative_dist(self.seq, hnt, self.hdr.order_hint).abs().clamp(0, 31);
+            dist[l] = self
+                .hdr
+                .get_relative_dist(self.seq, hnt, self.hdr.order_hint)
+                .abs()
+                .clamp(0, 31);
         }
         let d0 = dist[1];
         let d1 = dist[0];
@@ -272,7 +321,15 @@ impl<P: Pixel> TileDec<'_, P> {
     }
 
     /// Motion vector scaling (7.11.3.3). Returns startX, startY, stepX, stepY.
-    fn scale_mv(&self, plane: usize, ref_up_w: usize, ref_h: usize, x: usize, y: usize, mv: Mv) -> (i64, i64, i64, i64) {
+    fn scale_mv(
+        &self,
+        plane: usize,
+        ref_up_w: usize,
+        ref_h: usize,
+        x: usize,
+        y: usize,
+        mv: Mv,
+    ) -> (i64, i64, i64, i64) {
         let (sx, sy) = self.plane_sub(plane);
         let fw = i64::from(self.hdr.frame_width);
         let fh = i64::from(self.hdr.frame_height);
@@ -314,7 +371,14 @@ impl<P: Pixel> TileDec<'_, P> {
         let (pw, ph, up_w, rh) = self.ref_geometry(plane, ref_frame);
         let (sx0, sy0, step_x, step_y) = if self.b.use_intrabc {
             let (sx, sy) = self.plane_sub(plane);
-            let s = self.scale_mv(plane, self.hdr.frame_width as usize, self.hdr.frame_height as usize, x, y, mv);
+            let s = self.scale_mv(
+                plane,
+                self.hdr.frame_width as usize,
+                self.hdr.frame_height as usize,
+                x,
+                y,
+                mv,
+            );
             let _ = (sx, sy);
             s
         } else {
@@ -362,7 +426,18 @@ impl<P: Pixel> TileDec<'_, P> {
             if self.scratch.emu.len() < fw * fh {
                 self.scratch.emu.resize(fw * fh, P::default());
             }
-            mc::emu_edge(&mut self.scratch.emu, fw, src, sstride, pw, ph, (ix - 3) as isize, (iy - 3) as isize, fw, fh);
+            mc::emu_edge(
+                &mut self.scratch.emu,
+                fw,
+                src,
+                sstride,
+                pw,
+                ph,
+                (ix - 3) as isize,
+                (iy - 3) as isize,
+                fw,
+                fh,
+            );
         }
         let emu = &self.scratch.emu;
         let (src, sstride, soff): (&[P], usize, usize) = if use_emu {
@@ -386,7 +461,22 @@ impl<P: Pixel> TileDec<'_, P> {
                     (&mut self.scratch.obmc[..], w)
                 };
                 if scaled {
-                    mc::put_scaled(out, ostride, src, soff, sstride, w, h, x_frac, y_frac, step_x as usize, step_y as usize, fx, fy, bd);
+                    mc::put_scaled(
+                        out,
+                        ostride,
+                        src,
+                        soff,
+                        sstride,
+                        w,
+                        h,
+                        x_frac,
+                        y_frac,
+                        step_x as usize,
+                        step_y as usize,
+                        fx,
+                        fy,
+                        bd,
+                    );
                 } else {
                     mc::put(out, ostride, src, soff, sstride, w, h, mx, my, fx, fy, bd);
                 }
@@ -398,7 +488,21 @@ impl<P: Pixel> TileDec<'_, P> {
                     &mut self.scratch.tmp1[..]
                 };
                 if scaled {
-                    mc::prep_scaled(tmp, src, soff, sstride, w, h, x_frac, y_frac, step_x as usize, step_y as usize, fx, fy, bd);
+                    mc::prep_scaled(
+                        tmp,
+                        src,
+                        soff,
+                        sstride,
+                        w,
+                        h,
+                        x_frac,
+                        y_frac,
+                        step_x as usize,
+                        step_y as usize,
+                        fx,
+                        fy,
+                        bd,
+                    );
                 } else {
                     mc::prep(tmp, src, soff, sstride, w, h, mx, my, fx, fy, bd);
                 }
@@ -439,12 +543,40 @@ impl<P: Pixel> TileDec<'_, P> {
                         } else {
                             &mut self.scratch.tmp1[..]
                         };
-                        mc::warp_8x8_prep(&mut tmp[i8 * 8 * w + j8 * 8..], w, &rp.data, rp.stride, pw, ph, mat, &shear, bx, by, sx != 0, sy != 0, bd);
+                        mc::warp_8x8_prep(
+                            &mut tmp[i8 * 8 * w + j8 * 8..],
+                            w,
+                            &rp.data,
+                            rp.stride,
+                            pw,
+                            ph,
+                            mat,
+                            &shear,
+                            bx,
+                            by,
+                            sx != 0,
+                            sy != 0,
+                            bd,
+                        );
                     }
                     _ => {
                         let pl = &mut self.cur.planes[plane];
                         let st = pl.stride;
-                        mc::warp_8x8_put(&mut pl.data[by * st + bx..], st, &rp.data, rp.stride, pw, ph, mat, &shear, bx, by, sx != 0, sy != 0, bd);
+                        mc::warp_8x8_put(
+                            &mut pl.data[by * st + bx..],
+                            st,
+                            &rp.data,
+                            rp.stride,
+                            pw,
+                            ph,
+                            mat,
+                            &shear,
+                            bx,
+                            by,
+                            sx != 0,
+                            sy != 0,
+                            bd,
+                        );
                     }
                 }
             }
@@ -471,10 +603,27 @@ impl<P: Pixel> TileDec<'_, P> {
                     let pred_h = (h >> 1).min(32 >> sy);
                     let px = (x4 * 4) >> sx;
                     let py = (b.mi_row * 4) >> sy;
-                    self.block_pred(plane, cand.ref_frame[0], px, py, pred_w, pred_h, cand.mv[0], cand.interp_filter, &Dst::Obmc)?;
+                    self.block_pred(
+                        plane,
+                        cand.ref_frame[0],
+                        px,
+                        py,
+                        pred_w,
+                        pred_h,
+                        cand.mv[0],
+                        cand.interp_filter,
+                        &Dst::Obmc,
+                    )?;
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
-                    mc::obmc_blend_above(&mut pl.data[py * st + px..], st, &self.scratch.obmc, pred_w, pred_w, pred_h);
+                    mc::obmc_blend_above(
+                        &mut pl.data[py * st + px..],
+                        st,
+                        &self.scratch.obmc,
+                        pred_w,
+                        pred_w,
+                        pred_h,
+                    );
                 }
                 x4 += step4;
             }
@@ -495,10 +644,27 @@ impl<P: Pixel> TileDec<'_, P> {
                     let pred_h = h.min((step4 * 4) >> sy);
                     let px = (b.mi_col * 4) >> sx;
                     let py = (y4 * 4) >> sy;
-                    self.block_pred(plane, cand.ref_frame[0], px, py, pred_w, pred_h, cand.mv[0], cand.interp_filter, &Dst::Obmc)?;
+                    self.block_pred(
+                        plane,
+                        cand.ref_frame[0],
+                        px,
+                        py,
+                        pred_w,
+                        pred_h,
+                        cand.mv[0],
+                        cand.interp_filter,
+                        &Dst::Obmc,
+                    )?;
                     let pl = &mut self.cur.planes[plane];
                     let st = pl.stride;
-                    mc::obmc_blend_left(&mut pl.data[py * st + px..], st, &self.scratch.obmc, pred_w, pred_w, pred_h);
+                    mc::obmc_blend_left(
+                        &mut pl.data[py * st + px..],
+                        st,
+                        &self.scratch.obmc,
+                        pred_w,
+                        pred_w,
+                        pred_h,
+                    );
                 }
                 y4 += step4;
             }
@@ -560,7 +726,10 @@ impl<P: Pixel> TileDec<'_, P> {
             r as i64
         };
         let clamp_nd = 1i64 << 13;
-        let nondiag = |v: i64| r2s(i128::from(v) * i128::from(div_factor), div_shift).clamp(-clamp_nd + 1, clamp_nd - 1);
+        let nondiag = |v: i64| {
+            r2s(i128::from(v) * i128::from(div_factor), div_shift)
+                .clamp(-clamp_nd + 1, clamp_nd - 1)
+        };
         let diag = |v: i64| {
             r2s(i128::from(v) * i128::from(div_factor), div_shift)
                 .clamp((1 << 16) - clamp_nd + 1, (1 << 16) + clamp_nd - 1)

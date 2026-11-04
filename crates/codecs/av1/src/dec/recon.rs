@@ -118,7 +118,11 @@ impl<P: Pixel> TileDec<'_, P> {
         };
         let mut above = false;
         let mut left = false;
-        if if plane == 0 { b.avail_u } else { b.avail_u_chroma } {
+        if if plane == 0 {
+            b.avail_u
+        } else {
+            b.avail_u_chroma
+        } {
             let mut r = b.mi_row - 1;
             let mut c = b.mi_col;
             if plane > 0 {
@@ -131,7 +135,11 @@ impl<P: Pixel> TileDec<'_, P> {
             }
             above = is_smooth(r, c);
         }
-        if if plane == 0 { b.avail_l } else { b.avail_l_chroma } {
+        if if plane == 0 {
+            b.avail_l
+        } else {
+            b.avail_l_chroma
+        } {
             let mut r = b.mi_row;
             let mut c = b.mi_col - 1;
             if plane > 0 {
@@ -300,7 +308,15 @@ impl<P: Pixel> TileDec<'_, P> {
         );
     }
 
-    pub fn predict_palette(&mut self, plane: usize, sx0: usize, sy0: usize, x: usize, y: usize, tx: u8) {
+    pub fn predict_palette(
+        &mut self,
+        plane: usize,
+        sx0: usize,
+        sy0: usize,
+        x: usize,
+        y: usize,
+        tx: u8,
+    ) {
         let w = tx_w(tx);
         let h = tx_h(tx);
         let palette = match plane {

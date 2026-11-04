@@ -1,6 +1,7 @@
 //! Frame-level in-loop filters: deblocking (7.14), CDEF (7.15), super
 //! resolution (7.16) and loop restoration (7.17).
 
+use crate::dsp::Pixel;
 use crate::dsp::cdef::{
     CDEF_BORDER, adjust_luma_pri_strength, cdef_damping, cdef_direction, cdef_filter,
     cdef_pad_block, cdef_uv_dir,
@@ -8,7 +9,6 @@ use crate::dsp::cdef::{
 use crate::dsp::lf::{filter_horizontal_edge, filter_vertical_edge};
 use crate::dsp::lr::{LrScratch, LrUnit, lr_plane};
 use crate::dsp::superres::upscale_plane;
-use crate::dsp::Pixel;
 
 use super::frame::{FrameState, Picture};
 use super::obu::{FrameHeader, SequenceHeader};
@@ -17,7 +17,14 @@ use super::types::{
     plane_residual_size, tx_h, tx_w,
 };
 
-fn filter_level(hdr: &FrameHeader, fs: &FrameState, row: usize, col: usize, plane: usize, pass: usize) -> u8 {
+fn filter_level(
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    row: usize,
+    col: usize,
+    plane: usize,
+    pass: usize,
+) -> u8 {
     let m = fs.mi_at(row, col);
     let i = if plane == 0 { pass } else { plane + 1 };
     let delta_lf = if hdr.delta_lf_multi {
@@ -50,7 +57,12 @@ fn filter_level(hdr: &FrameHeader, fs: &FrameState, row: usize, col: usize, plan
 }
 
 /// Loop filter process (7.14).
-pub fn loop_filter<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState, pic: &mut Picture<P>) {
+pub fn loop_filter<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    pic: &mut Picture<P>,
+) {
     if hdr.loop_filter.level[0] == 0 && hdr.loop_filter.level[1] == 0 {
         return;
     }
@@ -62,7 +74,10 @@ pub fn loop_filter<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, fs: &Frame
             continue;
         }
         let (sx, sy) = if plane > 0 {
-            (usize::from(seq.subsampling_x), usize::from(seq.subsampling_y))
+            (
+                usize::from(seq.subsampling_x),
+                usize::from(seq.subsampling_y),
+            )
         } else {
             (0, 0)
         };
@@ -124,9 +139,29 @@ pub fn loop_filter<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, fs: &Frame
                             }
                             if lvl > 0 {
                                 if pass == 0 {
-                                    filter_vertical_edge(&mut p.data, stride, xp, yp, 4, filter_size, lvl, sharp, bd);
+                                    filter_vertical_edge(
+                                        &mut p.data,
+                                        stride,
+                                        xp,
+                                        yp,
+                                        4,
+                                        filter_size,
+                                        lvl,
+                                        sharp,
+                                        bd,
+                                    );
                                 } else {
-                                    filter_horizontal_edge(&mut p.data, stride, xp, yp, 4, filter_size, lvl, sharp, bd);
+                                    filter_horizontal_edge(
+                                        &mut p.data,
+                                        stride,
+                                        xp,
+                                        yp,
+                                        4,
+                                        filter_size,
+                                        lvl,
+                                        sharp,
+                                        bd,
+                                    );
                                 }
                             }
                         }
@@ -140,7 +175,13 @@ pub fn loop_filter<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, fs: &Frame
 }
 
 /// CDEF process (7.15). `src` is the deblocked frame; `dst` starts as a copy of it.
-pub fn cdef<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState, src: &Picture<P>, dst: &mut Picture<P>) {
+pub fn cdef<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    src: &Picture<P>,
+    dst: &mut Picture<P>,
+) {
     let bd = src.bd;
     let coeff_shift = bd - 8;
     let num_planes = seq.num_planes();
@@ -170,18 +211,38 @@ pub fn cdef<P: Pixel>(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState, 
                     let pri = adjust_luma_pri_strength(pri0, var);
                     let damping = cdef_damping(i32::from(hdr.cdef.damping), bd, false);
                     if pri != 0 || sec != 0 {
-                        cdef_plane_block(src, dst, 0, r, c, 0, 0, &mut pad, pstride, fs, pri, sec, dir, damping, bd);
+                        cdef_plane_block(
+                            src, dst, 0, r, c, 0, 0, &mut pad, pstride, fs, pri, sec, dir, damping,
+                            bd,
+                        );
                     }
                     if num_planes > 1 {
                         let pri = i32::from(hdr.cdef.uv_pri[idx]) << coeff_shift;
                         let sec = i32::from(hdr.cdef.uv_sec[idx]) << coeff_shift;
-                        let dir = if pri == 0 { 0 } else { cdef_uv_dir(ssx, ssy, ydir) };
+                        let dir = if pri == 0 {
+                            0
+                        } else {
+                            cdef_uv_dir(ssx, ssy, ydir)
+                        };
                         let damping = cdef_damping(i32::from(hdr.cdef.damping), bd, true);
                         if pri != 0 || sec != 0 {
                             for plane in 1..3 {
                                 cdef_plane_block(
-                                    src, dst, plane, r, c, u32::from(ssx), u32::from(ssy), &mut pad, pstride, fs,
-                                    pri, sec, dir, damping, bd,
+                                    src,
+                                    dst,
+                                    plane,
+                                    r,
+                                    c,
+                                    u32::from(ssx),
+                                    u32::from(ssy),
+                                    &mut pad,
+                                    pstride,
+                                    fs,
+                                    pri,
+                                    sec,
+                                    dir,
+                                    damping,
+                                    bd,
                                 );
                             }
                         }
@@ -218,10 +279,24 @@ fn cdef_plane_block<P: Pixel>(
     let sp = &src.planes[plane];
     let avail_w = (fs.mi_cols * 4) >> sx;
     let avail_h = (fs.mi_rows * 4) >> sy;
-    cdef_pad_block(pad, pstride, &sp.data, sp.stride, x0, y0, w, h, avail_w, avail_h);
+    cdef_pad_block(
+        pad, pstride, &sp.data, sp.stride, x0, y0, w, h, avail_w, avail_h,
+    );
     let dp = &mut dst.planes[plane];
     let ds = dp.stride;
-    cdef_filter(&mut dp.data[y0 * ds + x0..], ds, pad, pstride, w, h, pri, sec, dir, damping, bd);
+    cdef_filter(
+        &mut dp.data[y0 * ds + x0..],
+        ds,
+        pad,
+        pstride,
+        w,
+        h,
+        pri,
+        sec,
+        dir,
+        damping,
+        bd,
+    );
 }
 
 /// Upscaling process (7.16) of every plane.
@@ -282,8 +357,16 @@ pub fn loop_restoration<P: Pixel>(
             .map(|u| LrUnit {
                 kind: u.kind,
                 wiener: [
-                    [i32::from(u.wiener[0][0]), i32::from(u.wiener[0][1]), i32::from(u.wiener[0][2])],
-                    [i32::from(u.wiener[1][0]), i32::from(u.wiener[1][1]), i32::from(u.wiener[1][2])],
+                    [
+                        i32::from(u.wiener[0][0]),
+                        i32::from(u.wiener[0][1]),
+                        i32::from(u.wiener[0][2]),
+                    ],
+                    [
+                        i32::from(u.wiener[1][0]),
+                        i32::from(u.wiener[1][1]),
+                        i32::from(u.wiener[1][2]),
+                    ],
                 ],
                 sgr_set: u.sgr_set,
                 sgr_xqd: [i32::from(u.sgr_xqd[0]), i32::from(u.sgr_xqd[1])],

@@ -21,12 +21,14 @@ fn main() -> Result<(), String> {
     }
     let hdr_len = u16::from_le_bytes([data[6], data[7]]) as usize;
     let mut pos = hdr_len;
-    let mut out = std::io::BufWriter::new(std::fs::File::create(&args[2]).map_err(|e| e.to_string())?);
+    let mut out =
+        std::io::BufWriter::new(std::fs::File::create(&args[2]).map_err(|e| e.to_string())?);
     let mut core = Av1Core::new();
     let mut n = 0;
     let start = std::time::Instant::now();
     while pos + 12 <= data.len() {
-        let size = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let size =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 12;
         let frame = &data[pos..(pos + size).min(data.len())];
         pos += size;
@@ -36,7 +38,8 @@ fn main() -> Result<(), String> {
                 AnyPicture::U8(p) => {
                     for pl in &p.planes {
                         for y in 0..pl.h {
-                            out.write_all(&pl.data[y * pl.stride..y * pl.stride + pl.w]).map_err(|e| e.to_string())?;
+                            out.write_all(&pl.data[y * pl.stride..y * pl.stride + pl.w])
+                                .map_err(|e| e.to_string())?;
                         }
                     }
                 }
@@ -54,5 +57,7 @@ fn main() -> Result<(), String> {
         }
     }
     eprintln!("{n} frames in {:.3}s", start.elapsed().as_secs_f64());
+    #[cfg(feature = "stats")]
+    eprintln!("{}", cutlass_av1::dec::stats::report());
     Ok(())
 }

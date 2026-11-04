@@ -24,9 +24,17 @@ impl<P: Pixel> TileDec<'_, P> {
             if self.hdr.force_integer_mv {
                 let a = x.abs();
                 let a_int = (a + 3) >> 3;
-                *v = if x > 0 { (a_int << 3) as i16 } else { (-(a_int << 3)) as i16 };
+                *v = if x > 0 {
+                    (a_int << 3) as i16
+                } else {
+                    (-(a_int << 3)) as i16
+                };
             } else if x & 1 != 0 {
-                *v = if x > 0 { (x - 1) as i16 } else { (x + 1) as i16 };
+                *v = if x > 0 {
+                    (x - 1) as i16
+                } else {
+                    (x + 1) as i16
+                };
             }
         }
     }
@@ -245,7 +253,13 @@ impl<P: Pixel> TileDec<'_, P> {
         }
     }
 
-    fn scan_point(&mut self, delta_row: isize, delta_col: isize, is_compound: bool, found: &mut bool) {
+    fn scan_point(
+        &mut self,
+        delta_row: isize,
+        delta_col: isize,
+        is_compound: bool,
+        found: &mut bool,
+    ) {
         let r = self.b.mi_row as isize + delta_row;
         let c = self.b.mi_col as isize + delta_col;
         if self.inside(r, c) && self.mi(r as usize, c as usize).ref_frame[0] != NOT_WRITTEN {
@@ -505,7 +519,11 @@ impl<P: Pixel> TileDec<'_, P> {
                         }
                     }
                 }
-                idx += if pass == 0 { bw4(m.bsize) } else { bh4(m.bsize) };
+                idx += if pass == 0 {
+                    bw4(m.bsize)
+                } else {
+                    bh4(m.bsize)
+                };
             }
         }
         if is_compound {
@@ -683,7 +701,10 @@ pub fn motion_field_estimation(
         let Some(rd) = refs[src_idx].as_ref() else {
             return false;
         };
-        if rd.mi_rows != mi_rows || rd.mi_cols != mi_cols || rd.frame_type == 0 || rd.frame_type == 2
+        if rd.mi_rows != mi_rows
+            || rd.mi_cols != mi_cols
+            || rd.frame_type == 0
+            || rd.frame_type == 2
         {
             return false;
         }
@@ -745,7 +766,8 @@ fn mv_projection(mv: Mv, num: i32, den: i32) -> Mv {
     let den = den.min(31);
     let num = num.clamp(-31, 31);
     let p = |v: i16| {
-        let scaled = crate::dsp::round2_signed(i32::from(v) * num * DIV_MULT[den as usize] as i32, 14);
+        let scaled =
+            crate::dsp::round2_signed(i32::from(v) * num * DIV_MULT[den as usize] as i32, 14);
         scaled.clamp(-(1 << 14) + 1, (1 << 14) - 1)
     };
     Mv::new(p(mv.row), p(mv.col))

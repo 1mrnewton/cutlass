@@ -6,6 +6,10 @@ publish.workspace = true
 license.workspace = true
 description = "The av1 codec."
 
+[features]
+# Counts which coding tools the decoder sees (for test coverage reports).
+stats = []
+
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }

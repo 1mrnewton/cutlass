@@ -588,7 +588,7 @@ pub fn parse_frame_header(data: &[u8], ctx: &HeaderContext<'_>) -> R<FrameHeader
     let mut ref_valid: [bool; 8] = std::array::from_fn(|i| ctx.refs[i].valid);
     let mut ref_order_hint: [u32; 8] = std::array::from_fn(|i| ctx.refs[i].order_hint);
     let id_len = if seq.frame_id_numbers_present {
-        seq.additional_frame_id_length + seq.delta_frame_id_length + 1
+        seq.additional_frame_id_length + seq.delta_frame_id_length
     } else {
         0
     };

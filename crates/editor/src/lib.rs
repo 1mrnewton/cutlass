@@ -8,6 +8,7 @@
 mod animation;
 mod append;
 mod controls;
+mod effect_shelf;
 mod filmstrip;
 mod fling;
 mod gesture;
@@ -29,6 +30,10 @@ mod zoom;
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
+pub use effect_shelf::{
+    EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace, effect_cards, effect_of_card,
+    effect_requests, effect_row_for, effect_target,
+};
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{
     FLING_DECAY, FLING_LIMIT, FLING_REST, FLING_START, FlingStep, fling_start, fling_step,

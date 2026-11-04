@@ -8,7 +8,7 @@ use cutlass_session::{Micros, Request, SegmentId};
 use crate::media::{fresh, room};
 
 /// How long a new effect clip lasts.
-pub const NEW_EFFECT_LENGTH: Micros = Micros(3_000_000);
+pub const NEW_EFFECT_LENGTH: Micros = cutlass_editor::EFFECT_LENGTH;
 
 /// An effect the picker shows. `id` is what [`crate::PhoneHost::add_effect`]
 /// takes; `preview` is the file name of its looping preview video in the

@@ -7,6 +7,7 @@ license.workspace = true
 description = "Timeline geometry and gestures that become requests."
 
 [dependencies]
+cutlass-effects = { path = "../effects", version = "0.1.0" }
 cutlass-model = { path = "../model", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }
 serde_json = "1.0.154"

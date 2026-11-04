@@ -737,6 +737,7 @@ dependencies = [
 name = "cutlass-editor"
 version = "0.1.0"
 dependencies = [
+ "cutlass-effects",
  "cutlass-model",
  "cutlass-session",
  "serde_json",

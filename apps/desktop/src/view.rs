@@ -1083,13 +1083,17 @@ fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
         LibraryTarget::Files => crate::menu::LIBRARY_CARD,
         LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER,
     };
-    let folder = matches!(menu.target, LibraryTarget::Folder(_));
+    let off = match menu.target {
+        LibraryTarget::Empty => &[][..],
+        LibraryTarget::Files => crate::menu::LIBRARY_CARD_OFF,
+        LibraryTarget::Folder(_) => crate::menu::LIBRARY_FOLDER_OFF,
+    };
     let shown = crate::menu::show(
         ui.ctx(),
         ui.scope_id().with("library-menu"),
         menu.at,
         entries,
-        &|id| !folder || !crate::menu::LIBRARY_FOLDER_OFF.contains(&id),
+        &|id| !off.contains(&id),
     );
     if let Some(item) = shown.picked {
         view.library_menu = None;

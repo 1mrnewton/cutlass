@@ -250,12 +250,13 @@ pub const TRACK_HEAD: &[Entry] = &[
     done("delete-track", "Delete track", ""),
 ];
 
-/// The menu for the picked file cards in the library.
+/// The menu for the picked file cards in the library. The rows in
+/// [`LIBRARY_CARD_OFF`] are there but greyed, as in the prototype.
 pub const LIBRARY_CARD: &[Entry] = &[
     done("open-file", "Open file location", ""),
     done("delete", "Delete", ""),
     done("new-folder-with", "New folder with selected item", ""),
-    todo("link-media", "Link to media", ""),
+    done("link-media", "Link to media", ""),
     todo("split-scenes", "Split scenes", ""),
     todo("export", "Export selected clips", ""),
 ];
@@ -270,6 +271,9 @@ pub const LIBRARY_FOLDER: &[Entry] = &[
     done("link-media", "Link to media", ""),
     todo("export", "Export selected clips", ""),
 ];
+
+/// The card menu's rows the prototype greys.
+pub const LIBRARY_CARD_OFF: &[&str] = &["link-media"];
 
 /// The folder menu's rows that cannot run on a folder.
 pub const LIBRARY_FOLDER_OFF: &[&str] = &["open-file", "new-folder-with", "link-media"];

@@ -551,6 +551,8 @@ pub struct Shell {
     exported: Option<PathBuf>,
     /// What the last import that landed added, until the window looks.
     imported: Option<ImportedKind>,
+    /// An autosave writing on its own thread.
+    saving: Option<Saving>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -648,6 +650,7 @@ impl Shell {
             job: None,
             exported: None,
             imported: None,
+            saving: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
@@ -1041,22 +1044,25 @@ impl Shell {
     }
 
     pub fn save(&mut self) -> Result<(), ShellError> {
+        // A write already under way finishes first, so two never overlap.
+        self.finish_background_save();
+        let (path, folder, revision) = self.save_snapshot()?;
+        folder.save(&path).map_err(ShellError::Store)?;
+        self.saved = Some((revision, Instant::now()));
+        Ok(())
+    }
+
+    /// Bring the folder up to the open draft, and hand back where to write
+    /// it, a copy to write, and the revision that copy holds.
+    fn save_snapshot(&mut self) -> Result<(PathBuf, Folder, u64), ShellError> {
         let path = self.path.clone().ok_or(ShellError::NoProject)?;
         if !path.is_dir() {
             return Err(ShellError::MissingFolder(path));
         }
-        let enabled = self
-            .session
-            .as_ref()
-            .ok_or(ShellError::NoProject)?
-            .linkage()
-            .enabled;
-        let draft = self
-            .session
-            .as_ref()
-            .ok_or(ShellError::NoProject)?
-            .draft()
-            .clone();
+        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let enabled = session.linkage().enabled;
+        let revision = session.revision();
+        let draft = session.draft().clone();
         let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
         let main = folder.project.main_timeline_id.clone();
         let name = draft.name.clone();
@@ -1080,33 +1086,93 @@ impl Shell {
             }
         }
         folder.set_linkage_enabled(enabled);
-        folder.save(&path).map_err(ShellError::Store)?;
-        let revision = self.session.as_ref().map_or(0, Session::revision);
-        self.saved = Some((revision, Instant::now()));
-        Ok(())
+        Ok((path, folder.clone(), revision))
+    }
+
+    /// Wait for the background write, if one is under way, and record how
+    /// it went.
+    fn finish_background_save(&mut self) {
+        if let Some(saving) = self.saving.take() {
+            let written = saving.handle.join();
+            if self.path.as_ref() == Some(&saving.project) {
+                self.record_background_save(saving.revision, written);
+            } else if let Ok(Err(error)) = written {
+                cutlass_logger::error!("autosave of {}: {error}", saving.project.display());
+            }
+        }
+    }
+
+    fn record_background_save(
+        &mut self,
+        revision: u64,
+        written: std::thread::Result<Result<(), StoreError>>,
+    ) {
+        let error = match written {
+            Ok(Ok(())) => {
+                self.saved = Some((revision, Instant::now()));
+                return;
+            }
+            Ok(Err(error)) => ShellError::Store(error),
+            Err(_) => ShellError::Io("the save stopped unexpectedly".to_owned()),
+        };
+        self.autosave_failed(&error);
+    }
+
+    /// The edits stay unsaved, so quitting still writes them; the clock
+    /// restarts so a failing disk is tried once per gap.
+    fn autosave_failed(&mut self, error: &ShellError) {
+        cutlass_logger::error!("autosave: {error}");
+        if let Some((saved, _)) = self.saved {
+            self.saved = Some((saved, Instant::now()));
+        }
+        self.set_notice(format!("Could not save: {error}"));
     }
 
     /// Write the project when an edit has landed since the last write, at
-    /// most once per [`AUTOSAVE_GAP`]. Returns how long until a held-back
-    /// write is due, so the window can wake for it.
+    /// most once per [`AUTOSAVE_GAP`]. The write runs on its own thread, so
+    /// the window does not wait for the disk. Returns how long until the
+    /// window should look again.
     pub fn autosave(&mut self) -> Option<Duration> {
+        const LOOK_AGAIN: Duration = Duration::from_millis(50);
+        if let Some(saving) = self.saving.as_ref() {
+            if !saving.handle.is_finished() {
+                return Some(LOOK_AGAIN);
+            }
+            self.finish_background_save();
+        }
         if !self.unsaved() {
             return None;
         }
-        let (saved, at) = self.saved?;
+        let (_, at) = self.saved?;
         let wait = AUTOSAVE_GAP.saturating_sub(at.elapsed());
         if !wait.is_zero() {
             return Some(wait);
         }
-        if let Err(error) = self.save() {
-            cutlass_logger::error!("autosave: {error}");
-            // The edits stay unsaved, so quitting still writes them; the
-            // clock restarts so a failing disk is tried once per gap.
-            self.saved = Some((saved, Instant::now()));
-            self.set_notice(format!("Could not save: {error}"));
-            return Some(AUTOSAVE_GAP);
+        let (path, folder, revision) = match self.save_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.autosave_failed(&error);
+                return Some(AUTOSAVE_GAP);
+            }
+        };
+        let project = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("cutlass autosave".to_owned())
+            .spawn(move || folder.save(&path));
+        match spawned {
+            Ok(handle) => {
+                self.saving = Some(Saving {
+                    revision,
+                    project,
+                    handle,
+                });
+                Some(LOOK_AGAIN)
+            }
+            Err(error) => {
+                self.autosave_failed(&ShellError::Io(error.to_string()));
+                Some(AUTOSAVE_GAP)
+            }
         }
-        None
     }
 
     /// An edit has landed since the folder was last written.
@@ -5764,6 +5830,14 @@ fn format_timecode(label: TimecodeLabel) -> String {
     )
 }
 
+/// An autosave in flight and the revision it writes.
+struct Saving {
+    revision: u64,
+    /// The project it writes; a different one may be open when it lands.
+    project: PathBuf,
+    handle: std::thread::JoinHandle<Result<(), StoreError>>,
+}
+
 /// A file copied into the project for an import, removed unless the import
 /// keeps it.
 struct CopyGuard(Option<PathBuf>);
@@ -6988,7 +7062,17 @@ mod tests {
         desktop.import_file(&picture).unwrap();
         let wait = desktop.autosave().expect("the write waits for the gap");
         std::thread::sleep(wait);
-        assert_eq!(desktop.autosave(), None);
+        // The write runs on its own thread; the window looks again until it
+        // has landed.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Some(wait) = desktop.autosave() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the autosave never landed"
+            );
+            std::thread::sleep(wait);
+        }
+        assert!(!desktop.unsaved());
         drop(desktop);
 
         let mut reopened = shell();
@@ -7001,6 +7085,44 @@ mod tests {
             videos[0].path
         );
         assert_eq!(reopened.autosave(), None);
+    }
+
+    #[test]
+    fn an_autosave_writes_on_its_own_thread_and_a_save_waits_for_it() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let wait = desktop.autosave().expect("the write waits for the gap");
+        std::thread::sleep(wait);
+        // The write starts and the window is told to look again soon.
+        assert_eq!(
+            desktop.autosave(),
+            Some(std::time::Duration::from_millis(50))
+        );
+        assert!(desktop.saving.is_some());
+        // An explicit save, or quitting, waits for it rather than writing
+        // the same files at once.
+        desktop.save().unwrap();
+        assert!(desktop.saving.is_none());
+        assert!(!desktop.unsaved());
+        assert_eq!(desktop.autosave(), None);
+
+        // A write still under way when another project opens counts for
+        // the project it wrote, not the new one.
+        desktop.import_file(&picture).unwrap();
+        std::thread::sleep(super::AUTOSAVE_GAP);
+        assert!(desktop.autosave().is_some());
+        let other = Temp::new();
+        empty_project(&other.path);
+        desktop.open_folder(&other.path).unwrap();
+        assert!(!desktop.unsaved());
+        let mut reopened = shell();
+        reopened.open_folder(&temp.path).unwrap();
+        assert_eq!(reopened.draft().unwrap().materials.videos.len(), 2);
     }
 
     #[test]

@@ -4374,6 +4374,7 @@ mod tests {
                     "Uniform scale",
                     "Position",
                     "Rotate",
+                    "Flip upside down",
                     "Blend",
                     "Stabilize",
                     "Motion blur",
@@ -4382,7 +4383,15 @@ mod tests {
                 ]
                 .as_slice(),
                 // Blend starts shut on a video clip, as in the prototype.
-                ["Font size", "Stroke", "Volume", "Mode", "Opacity"].as_slice(),
+                [
+                    "Font size",
+                    "Stroke",
+                    "Volume",
+                    "Mode",
+                    "Opacity",
+                    "Line width",
+                ]
+                .as_slice(),
             ),
             (
                 "sound",
@@ -4406,9 +4415,11 @@ mod tests {
                     "Color",
                     "Character",
                     "Alignment",
+                    "Line width",
                     "Preset style",
                     "Position & Size",
                     "Plane rotation",
+                    "Flip upside down",
                     "Blend",
                     "Stroke",
                     "Background",

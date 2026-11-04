@@ -369,6 +369,13 @@ fn position_size(
                 send(shell, |shell| shell.align_selected(align));
             }
         }
+        // Mirror, side to side, is on the timeline toolbar.
+        if shell.mirror_enabled() {
+            let flipped = shell.flipped();
+            if switch_row(ui, "Flip upside down", flipped, true).clicked() {
+                send(shell, Shell::toggle_vertical_flip);
+            }
+        }
     });
 }
 
@@ -644,6 +651,16 @@ fn text_basic(
             send(shell, |shell| shell.set_text_color(&color));
         }
         spacing_row(shell, ui, state, inspection);
+        let (width, _) = pair_row(
+            ui,
+            state,
+            "Line width",
+            ("px", inspection.line_width.round()),
+            ("", f64::NAN),
+        );
+        if let Some(value) = width {
+            send(shell, |shell| shell.set_line_width(value.max(0.0)));
+        }
         alignment_row(shell, ui, inspection);
         preset_styles(shell, ui);
     });

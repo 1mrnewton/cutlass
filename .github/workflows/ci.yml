@@ -9,8 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: GTK file dialogs
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+      - name: GTK file dialogs and a software GPU
+        # mesa-vulkan-drivers brings lavapipe, a Vulkan device on the CPU, so
+        # the wgpu tests run here instead of skipping.
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev mesa-vulkan-drivers
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -58,15 +60,7 @@ jobs:
               rust = lint_lines(text, "[lints.rust]")
               clippy = lint_lines(text, "[lints.clippy]")
               if (
-                  (
-                      member.startswith("crates/platform-")
-                      or member
-                      in {
-                          "crates/renderer-metal",
-                          "crates/renderer-windows",
-                          "crates/renderer-android",
-                      }
-                  )
+                  member.startswith("crates/platform-")
                   and rust == denied_rust
                   and clippy == workspace_clippy
               ):
@@ -85,6 +79,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
+        env:
+          CUTLASS_REQUIRE_GPU: "1"
         run: cargo test --workspace --all-targets
       - name: Public release logger
         run: |

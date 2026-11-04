@@ -8,11 +8,13 @@
 #![forbid(unsafe_code)]
 
 mod collection;
+mod faces;
 mod kern;
 mod otf;
 mod strike;
 mod ttf;
 
+pub use faces::{FaceEntry, MAX_COLLECTION_FACES, list_faces, single_face};
 pub use strike::{BitmapGlyph, BitmapPixels};
 
 use std::cmp::Ordering;
@@ -286,9 +288,12 @@ impl Font<'_> {
         let metrics = parse_hhea(directory.table(b"hhea")?, num_glyphs)?;
         let hmtx = Hmtx::parse(directory.table(b"hmtx")?, metrics, num_glyphs)?;
         let cmap = parse_cmap(directory.table(b"cmap")?)?;
-        let kern = match directory.table(b"kern") {
-            Ok(table) => kern::parse(table)?,
-            Err(FontError::MissingTable) => kern::Kerning::empty(),
+        // A kern table in a form this reader cannot apply, such as Apple's
+        // version 1 tables, leaves the face without kerning. A torn one is
+        // still an error.
+        let kern = match directory.table(b"kern").and_then(kern::parse) {
+            Ok(kerning) => kerning,
+            Err(FontError::MissingTable | FontError::Unsupported) => kern::Kerning::empty(),
             Err(error) => return Err(error),
         };
         let outlines = match directory.kind {
@@ -932,6 +937,13 @@ mod tests {
         hostile[kern_at + 10] = 0x01;
         hostile[kern_at + 11] = 0xF4;
         assert!(matches!(read(&hostile), Err(FontError::Truncated)));
+
+        // Apple's version 1 kern table: the face reads, without kerning.
+        let mut apple = SAMPLE_TTF.to_vec();
+        apple[kern_at..kern_at + 4].copy_from_slice(&[0, 1, 0, 0]);
+        let unkerned = read(&apple).expect("face without kerning");
+        assert_eq!(unkerned.kerning(2, 3), 0);
+        assert_eq!(unkerned.advance(3).expect("B"), 700);
 
         let otf = read(SAMPLE_OTF).expect("otf");
         assert_eq!(otf.kerning(2, 3), -80);

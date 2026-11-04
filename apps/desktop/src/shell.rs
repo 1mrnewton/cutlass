@@ -11,16 +11,18 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Pointer, TimelineScale,
-    TrimGesture, TrimPlan, Zoom, ZoomBounds, drop_gesture, fit_pixel_size, hit_test, lane_category,
-    lanes, last_accuracy_step, minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
+    Append, AppendLane, DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture,
+    Pointer, TimelineScale, TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement,
+    drop_gesture, fit_pixel_size, hit_test, lanes, last_accuracy_step, material_span,
+    minimum_pixel_size, move_gesture, snap_guides, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
-use cutlass_eval::{Heard, ReaderFactory, SceneError, scene_cuts, source_on_timeline};
+use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
+use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
     Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialId, MaterialRef, MaterialTransition,
     MaterialVideo, MetaType, Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel,
@@ -29,22 +31,23 @@ use cutlass_model::{
     track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
-    AudioHost, AudioOutput, FrameCache, PLAY_FRAMES, PreviewMix, preview_frames, queue_mix,
+    AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
 };
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
 use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
+use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
     FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
 };
 
 use crate::face::FaceTable;
-use crate::probe::{self, Probed};
 use crate::tokens;
+use cutlass_probe::{self as probe, Probed};
 
 /// Long-side steps the export dialog offers.
-pub const LONG_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
+pub const SHORT_SIDES: [i32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
 /// A blend the Transitions shelf can drop onto a main-track cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +66,17 @@ impl TransitionOffer {
         format!("transition:{}", self.id)
     }
 }
+
+/// How long a notice shows, its fade in and out included.
+pub const NOTICE_SHOWN: Duration = Duration::from_millis(2_160);
+
+/// How long a notice takes to fade out at the end of [`NOTICE_SHOWN`].
+pub const NOTICE_FADE: Duration = Duration::from_millis(160);
+
+/// The shortest time between two automatic writes of the project.
+pub const AUTOSAVE_GAP: Duration = Duration::from_millis(500);
+
+pub use cutlass_playback::ClipWave;
 
 /// The color stored on a marker dropped from the timeline.
 pub const MARKER_COLOR: &str = "#E8B931";
@@ -135,6 +149,7 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("the scale must be greater than zero")
             }
             Self::Edit(EditError::Fade) => formatter.write_str("a fade cannot be negative"),
+            Self::Edit(EditError::Volume) => formatter.write_str("the volume must be zero or more"),
             Self::Edit(EditError::Opacity) => {
                 formatter.write_str("the opacity must be from zero to one")
             }
@@ -158,6 +173,10 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("the line width must be from zero through 8192")
             }
             Self::Edit(EditError::TextFont) => formatter.write_str("the face is not a file name"),
+            Self::Edit(EditError::TextEmpty) => formatter.write_str("type something to add text"),
+            Self::Edit(EditError::UnknownEffect) => {
+                formatter.write_str("that effect is not in this version")
+            }
             Self::Edit(EditError::CanvasColor) => {
                 formatter.write_str("the canvas color is not a hex color")
             }
@@ -259,7 +278,7 @@ pub struct Inspection {
 #[derive(Clone, Debug)]
 pub struct ExportRequest {
     pub path: PathBuf,
-    pub long_side: i32,
+    pub short_side: i32,
     pub codec: CodecId,
     pub replace: bool,
 }
@@ -277,14 +296,7 @@ pub struct Chrome {
     pub close_requested: bool,
 }
 
-/// One saved project in the launch list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ListedProject {
-    pub path: PathBuf,
-    pub name: String,
-    pub duration: Micros,
-    pub modified: SystemTime,
-}
+pub use cutlass_store::ListedProject;
 
 struct ClipDrag {
     id: SegmentId,
@@ -378,17 +390,20 @@ pub struct MovePreview {
     pub track_id: TrackId,
 }
 
+/// How far ahead playback opens clips and decodes their first pictures.
+const PREROLL: Micros = Micros(1_000_000);
 pub struct Shell {
     decoders: DecodeFactory,
     encoders: EncodeFactory,
     readers: ReaderFactory,
-    output: AudioOutput,
-    heard: Heard,
+    transport: Transport,
     preview_cache: RefCell<FrameCache>,
     settings: Settings,
     session: Option<Session>,
     folder: Option<Folder>,
     hold: Option<Hold>,
+    /// The session revision the project folder holds, and when it was written.
+    saved: Option<(u64, Instant)>,
     path: Option<PathBuf>,
     playhead: Micros,
     playing: bool,
@@ -396,8 +411,8 @@ pub struct Shell {
     /// Left edge of the lanes, in microseconds.
     view_origin: i64,
     lane_width: f64,
-    /// Fit the cut on the next lane layout. An empty cut stays at the opening scale.
-    fit_on_layout: bool,
+    /// The cut has been fit to the lanes since the project opened.
+    fitted: bool,
     library_width: f32,
     inspector_width: f32,
     timeline_height: f32,
@@ -428,10 +443,26 @@ pub struct Shell {
     pending_trim: Option<PendingTrim>,
     pending_moves: Vec<PendingMove>,
     notice: String,
+    /// When the notice was set; it fades out [`NOTICE_SHOWN`] later.
+    notice_since: Instant,
+    /// The preview canvas shows black under the picture, or nothing.
+    preview_black: bool,
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// Timeline thumbnails, once the window starts them.
+    thumbnails: Option<Thumbnails>,
+    /// Thumbnails this frame's clips asked for, nearest the view first.
+    film_asks: Vec<ThumbKey>,
+    /// Timeline waveforms, once the window starts them.
+    waveforms: Option<Waveforms>,
+    /// Files this frame's clips asked for peaks of.
+    wave_asks: Vec<PathBuf>,
     face: FaceTable,
+    /// The preview canvas on eframe's GPU device, once the window has one.
+    gpu: Option<crate::gpu::Preview>,
+    /// The canvas shows a clip's earlier picture while the asked one decodes.
+    preview_stale: bool,
     pub chrome: Chrome,
 }
 
@@ -447,12 +478,27 @@ impl Shell {
         ensure_shortcut(&mut settings, "copy", "primary+c");
         ensure_shortcut(&mut settings, "cut", "primary+x");
         ensure_shortcut(&mut settings, "paste", "primary+v");
+        ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
+        // Control-Y is the second redo. On Windows and Linux Control is the primary key.
+        ensure_shortcut(
+            &mut settings,
+            "redo_y",
+            if cfg!(target_os = "macos") {
+                "ctrl+y"
+            } else {
+                "primary+y"
+            },
+        );
+        ensure_shortcut(&mut settings, "select_all", "primary+a");
+        ensure_shortcut(&mut settings, "delete_left", "q");
+        ensure_shortcut(&mut settings, "delete_right", "w");
         Self {
             decoders,
             encoders,
-            readers: crate::readers::installed_readers(),
-            output: AudioOutput::open(AudioHost::Software),
-            heard: Heard::new(),
+            readers: crate::readers::readers_with(
+                crate::register_codecs_with(&settings.hardware).0,
+            ),
+            transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
             settings,
             session: None,
@@ -464,7 +510,7 @@ impl Shell {
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
             lane_width: 800.0,
-            fit_on_layout: false,
+            fitted: false,
             library_width: tokens::LIBRARY_WIDTH,
             inspector_width: tokens::INSPECTOR_WIDTH,
             timeline_height: tokens::TIMELINE_HEIGHT,
@@ -488,9 +534,18 @@ impl Shell {
             pending_trim: None,
             pending_moves: Vec::new(),
             notice: String::new(),
+            notice_since: Instant::now(),
+            preview_black: true,
+            saved: None,
             next_id: 0,
             speech: RefCell::new(None),
-            face: FaceTable::load(),
+            thumbnails: None,
+            film_asks: Vec::new(),
+            waveforms: None,
+            wave_asks: Vec::new(),
+            face: crate::face::installed(),
+            gpu: None,
+            preview_stale: false,
             chrome: Chrome::default(),
         }
     }
@@ -498,6 +553,149 @@ impl Shell {
     pub fn codecs_ready(&self) -> bool {
         let picture = CodecParams::video(CodecId::Png, 1, 1);
         self.decoders.open(&picture).is_ok() && self.encoders.open(&picture).is_ok()
+    }
+
+    /// Decode timeline thumbnails on their own thread. `ready` runs there
+    /// after each one is stored.
+    pub fn start_thumbnails(&mut self, ready: impl Fn() + Send + 'static) {
+        self.thumbnails = Some(Thumbnails::start(self.readers.clone(), ready));
+    }
+
+    /// The filmstrip of clip `id`, drawn `clip_width` by `height` pixels:
+    /// the tiles that meet `visible`, pixels from the clip's left edge, each
+    /// with its picture once stored. A missing picture is asked for when the
+    /// frame ends, by [`Self::send_timeline_asks`]. A clip with no picture file
+    /// has no filmstrip.
+    pub fn film(
+        &mut self,
+        id: &SegmentId,
+        clip_width: f64,
+        height: f64,
+        visible: std::ops::Range<f64>,
+    ) -> Vec<FilmCell> {
+        let (Some(thumbnails), Some(session)) = (self.thumbnails.as_ref(), self.session.as_ref())
+        else {
+            return Vec::new();
+        };
+        let cells = film_cells(
+            session.draft(),
+            self.path.as_deref(),
+            thumbnails,
+            id,
+            clip_width,
+            height,
+            visible,
+            self.pixel_size,
+        );
+        self.film_asks.extend(
+            cells
+                .iter()
+                .filter(|cell| cell.thumb.is_none())
+                .map(|cell| cell.key.clone()),
+        );
+        cells
+    }
+
+    /// Send this frame's thumbnail and waveform asks, and pause both
+    /// workers while playing.
+    pub fn send_timeline_asks(&mut self) {
+        let asks = std::mem::take(&mut self.film_asks);
+        if let Some(thumbnails) = self.thumbnails.as_ref() {
+            thumbnails.set_paused(self.playing);
+            thumbnails.want(asks);
+        }
+        let asks = std::mem::take(&mut self.wave_asks);
+        if let Some(waveforms) = self.waveforms.as_ref() {
+            waveforms.set_paused(self.playing);
+            waveforms.want(asks);
+        }
+    }
+
+    /// Read timeline waveforms on their own thread. `ready` runs there after
+    /// each publish.
+    pub fn start_waveforms(&mut self, ready: impl Fn() + Send + 'static) {
+        self.waveforms = Some(Waveforms::start(self.readers.clone(), ready));
+    }
+
+    /// The waveform of clip `id`, `clip_width` pixels wide: one level, 0 to
+    /// 1, per pixel column of `visible`, pixels from the clip's left edge,
+    /// at the clip's volume. A file not read yet is asked for when the frame
+    /// ends: an audio clip has no waveform until its peaks arrive, a video
+    /// clip an empty one. A video file with no sound has none.
+    pub fn wave(
+        &mut self,
+        id: &SegmentId,
+        clip_width: f64,
+        visible: std::ops::Range<f64>,
+    ) -> Option<ClipWave> {
+        let waveforms = self.waveforms.as_ref()?;
+        let draft = self.session.as_ref().map(Session::draft)?;
+        cutlass_playback::clip_wave(
+            draft,
+            self.path.as_deref(),
+            waveforms,
+            id,
+            self.pixel_size,
+            clip_width,
+            visible,
+            &mut self.wave_asks,
+        )
+    }
+
+    /// The library poster of material `id`: a thumbnail of its first frame,
+    /// with the key it is stored under. Asked for when the frame ends while
+    /// missing. Sound has no poster.
+    pub fn poster(&mut self, id: &str) -> Option<(ThumbKey, Option<std::sync::Arc<Thumb>>)> {
+        let thumbnails = self.thumbnails.as_ref()?;
+        let draft = self.session.as_ref().map(Session::draft)?;
+        let Some(MaterialRef::Video(video)) = draft.materials.get(id) else {
+            return None;
+        };
+        let path = self.media_file(Some(&video.path))?;
+        let key = ThumbKey {
+            path,
+            time: Micros(0),
+        };
+        let thumb = thumbnails.get(&key);
+        if thumb.is_none() {
+            self.film_asks.push(key.clone());
+        }
+        Some((key, thumb))
+    }
+
+    /// The library waveform of audio material `id`: `columns` levels, 0 to
+    /// 1, across the whole file, once any of it is read. Asked for when the
+    /// frame ends while missing or still being read.
+    pub fn material_wave(&mut self, id: &str, columns: usize) -> Option<Vec<f32>> {
+        let waveforms = self.waveforms.as_ref()?;
+        let draft = self.session.as_ref().map(Session::draft)?;
+        let Some(MaterialRef::Audio(audio)) = draft.materials.get(id) else {
+            return None;
+        };
+        let duration = audio.duration.0;
+        let path = self.media_file(Some(&audio.path))?;
+        let Some(peaks) = waveforms.get(&path) else {
+            self.wave_asks.push(path);
+            return None;
+        };
+        if !peaks.complete {
+            self.wave_asks.push(path);
+        }
+        Some(spread_peaks(&peaks, duration, columns))
+    }
+
+    /// A stored media path as a file: inside the project when relative.
+    fn media_file(&self, stored: Option<&str>) -> Option<PathBuf> {
+        media_file(self.path.as_deref(), stored)
+    }
+
+    /// Black under the preview canvas, or nothing so it shows clear.
+    pub fn preview_black(&self) -> bool {
+        self.preview_black
+    }
+
+    pub fn toggle_preview_background(&mut self) {
+        self.preview_black = !self.preview_black;
     }
 
     pub fn notice(&self) -> &str {
@@ -528,73 +726,38 @@ impl Shell {
             .unwrap_or_else(|| "Untitled".to_owned())
     }
 
+    /// The one folder everything Cutlass writes lives under.
+    ///
+    /// On macOS this is `~/Library/Application Support/Cutlass`. Naming it
+    /// does not create it.
+    #[must_use]
+    pub fn home() -> Home {
+        cutlass_storage::desktop_home()
+    }
+
     /// Where new projects are created and where the launch list looks.
     ///
-    /// On macOS this is `~/Library/Application Support/Cutlass/Projects`.
     /// The directory is created when the first project is saved.
     #[must_use]
     pub fn projects_directory() -> PathBuf {
-        application_support()
-            .map(|base| base.join("Cutlass").join("Projects"))
-            .unwrap_or_else(|| std::env::temp_dir().join("cutlass-projects"))
+        Self::home().projects()
+    }
+
+    /// The user's settings file.
+    #[must_use]
+    pub fn settings_path() -> PathBuf {
+        Self::home().settings_file()
     }
 
     /// Projects under `root`, newest first. A folder without a draft is skipped.
     #[must_use]
     pub fn list_projects(root: &Path) -> Vec<ListedProject> {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            return Vec::new();
-        };
-        let mut projects = Vec::new();
-        for entry in entries {
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Ok(folder) = Folder::read(&path) else {
-                continue;
-            };
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(UNIX_EPOCH);
-            let name = if folder.draft.name.is_empty() {
-                entry.file_name().to_string_lossy().into_owned()
-            } else {
-                folder.draft.name
-            };
-            projects.push(ListedProject {
-                path,
-                name,
-                duration: folder.draft.duration,
-                modified,
-            });
-        }
-        projects.sort_by(|left, right| {
-            right
-                .modified
-                .cmp(&left.modified)
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        projects
+        cutlass_store::list_projects(root)
     }
 
     /// Write a new empty project under `root` and return its folder.
     pub fn create_project(root: &Path) -> Result<PathBuf, ShellError> {
-        std::fs::create_dir_all(root).map_err(|error| ShellError::Io(error.to_string()))?;
-        let (name, path, id) = next_project_slot(root);
-        let mut draft = Draft::empty(id);
-        draft.name = name;
-        let now = unix_millis();
-        draft.create_time = now;
-        draft.update_time = now;
-        let mut folder = Folder::new(draft);
-        folder.set_linkage_enabled(true);
-        folder.save(&path).map_err(ShellError::Store)?;
-        Ok(path)
+        cutlass_store::create_project(root).map_err(ShellError::Store)
     }
 
     /// Write the open project, then leave it so the launch list is showing.
@@ -605,6 +768,7 @@ impl Shell {
         self.session = None;
         self.folder = None;
         self.hold = None;
+        self.saved = None;
         self.path = None;
         self.playhead = Micros(0);
         self.playing = false;
@@ -619,10 +783,10 @@ impl Shell {
         self.beating = false;
         self.selected_beat = None;
         self.cancel_clip_drag();
-        self.fit_on_layout = false;
+        self.fitted = false;
         self.notice.clear();
-        self.heard.clear();
-        self.output.queue(&[]);
+        self.transport.forget_files();
+        self.silence();
         Ok(())
     }
 
@@ -661,12 +825,18 @@ impl Shell {
         }
     }
 
-    /// Remember the lane width, and fit a saved cut the first time it is shown.
+    /// Remember the lane width. Until a cut has been fit once, an empty
+    /// timeline shows [`EMPTY_SPAN`] across a third of the lanes, and the
+    /// first clip, or a saved cut, is fit to three quarters.
     pub fn prepare_lane(&mut self, width: f32) {
         self.set_lane_width(width);
-        if self.fit_on_layout {
-            self.fit_on_layout = false;
-            let _ = self.zoom_fit();
+        if self.fitted || self.session.is_none() {
+            return;
+        }
+        if self.cut_duration().0 > 0 {
+            self.fitted = self.zoom_fit().is_ok();
+        } else if let Some(size) = empty_pixel_size(self.lane_width, self.zoom_bounds().rate) {
+            self.pixel_size = size;
         }
     }
 
@@ -681,20 +851,23 @@ impl Shell {
     /// Software output and a live device are open. Linux and a missing device
     /// are not. Pictures still advance either way.
     pub fn audio_output_open(&self) -> bool {
-        self.output.gap().is_none()
+        self.transport.gap().is_none()
     }
 
     /// Replace the software buffer with the output for `host`.
     pub fn open_preview_audio(&mut self, host: AudioHost) {
-        self.output = AudioOutput::open(host);
+        self.transport.open(host);
     }
 
     #[cfg(test)]
     pub(crate) fn queued_preview(&self) -> &[u8] {
-        self.output.queued()
+        self.transport.output().queued()
     }
 
     pub fn open_folder(&mut self, path: &Path) -> Result<(), ShellError> {
+        if self.unsaved() {
+            self.save()?;
+        }
         let opened = cutlass_store::open(path).map_err(ShellError::Store)?;
         let hold = cutlass_store::hold(path).map_err(ShellError::Store)?;
         let rate = opened
@@ -711,6 +884,7 @@ impl Shell {
         );
         let mut session = Session::open(opened.folder.draft.clone());
         session.set_linkage(linkage);
+        self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
         self.folder = Some(opened.folder);
         self.hold = Some(hold);
@@ -728,10 +902,10 @@ impl Shell {
         self.selected_beat = None;
         self.cancel_clip_drag();
         self.pixel_size = opening_pixel_size(rate);
-        self.fit_on_layout = self.cut_duration().0 > 0;
+        self.fitted = false;
         self.notice.clear();
-        self.heard.clear();
-        self.output.queue(&[]);
+        self.transport.forget_files();
+        self.silence();
         Ok(())
     }
 
@@ -776,10 +950,51 @@ impl Shell {
         }
         folder.set_linkage_enabled(enabled);
         folder.save(&path).map_err(ShellError::Store)?;
+        let revision = self.session.as_ref().map_or(0, Session::revision);
+        self.saved = Some((revision, Instant::now()));
         Ok(())
     }
 
+    /// Write the project when an edit has landed since the last write, at
+    /// most once per [`AUTOSAVE_GAP`]. Returns how long until a held-back
+    /// write is due, so the window can wake for it.
+    pub fn autosave(&mut self) -> Option<Duration> {
+        if !self.unsaved() {
+            return None;
+        }
+        let (_, at) = self.saved?;
+        let revision = self.session.as_ref()?.revision();
+        let wait = AUTOSAVE_GAP.saturating_sub(at.elapsed());
+        if !wait.is_zero() {
+            return Some(wait);
+        }
+        if let Err(error) = self.save() {
+            cutlass_logger::error!("autosave: {error}");
+            self.saved = Some((revision, Instant::now()));
+            self.set_notice(format!("Could not save: {error}"));
+        }
+        None
+    }
+
+    /// An edit has landed since the folder was last written.
+    pub fn unsaved(&self) -> bool {
+        match (self.session.as_ref(), self.saved) {
+            (Some(session), Some((saved, _))) => session.revision() != saved,
+            _ => false,
+        }
+    }
+
     pub fn import_file(&mut self, path: &Path) -> Result<(), ShellError> {
+        match self.import_file_in(path) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                cutlass_logger::error!("import {}: {error}", path.display());
+                Err(error)
+            }
+        }
+    }
+
+    fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let (stored, copied) = place_in_project(&project, path)?;
@@ -843,9 +1058,12 @@ impl Shell {
         if self.playing && self.settings.playback.seek_during_playback == SeekDuringPlayback::Pause
         {
             self.playing = false;
+            self.silence();
         }
         self.playhead = Micros(time.0.max(0));
-        if self.playing || self.settings.playback.scrub_audio {
+        if self.playing {
+            self.start_stream();
+        } else if self.settings.playback.scrub_audio {
             self.queue_preview(PLAY_FRAMES);
         }
         self.reveal_playhead();
@@ -861,13 +1079,56 @@ impl Shell {
             self.playhead = Micros(0);
         }
         self.playing = true;
-        self.queue_preview(PLAY_FRAMES);
+        self.start_stream();
+        self.preroll();
         self.reveal_playhead();
     }
 
     pub fn pause(&mut self) {
         self.playing = false;
-        self.output.queue(&[]);
+        self.silence();
+    }
+
+    /// Open the clips playback reaches within [`PREROLL`] and start decoding
+    /// them, so a cut does not open a file on the frame it lands.
+    fn preroll(&self) {
+        if !self.playing {
+            return;
+        }
+        if let Some(session) = self.session.as_ref() {
+            self.preview_cache.borrow_mut().preroll(
+                session,
+                &self.readers,
+                self.path.as_deref(),
+                self.playhead,
+                PREROLL,
+            );
+        }
+    }
+
+    /// Stop every sound: the stream and the scrub slice.
+    fn silence(&mut self) {
+        self.transport.silence();
+    }
+
+    /// Stream audio from the playhead. A host with no stream clock queues
+    /// one slice per tick instead.
+    fn start_stream(&mut self) {
+        let end = self.cut_duration();
+        let Some(session) = self.session.as_ref() else {
+            self.transport.silence();
+            return;
+        };
+        self.transport.start(
+            Program {
+                draft: session.draft(),
+                revision: session.revision(),
+                root: self.path.as_deref(),
+                readers: &self.readers,
+            },
+            self.playhead,
+            end,
+        );
     }
 
     pub fn toggle_play(&mut self) {
@@ -897,60 +1158,118 @@ impl Shell {
         self.preview_bytes()
     }
 
+    /// Move the playhead while playing, by `elapsed`. With a stream clock it
+    /// is also pulled toward the heard audio, so the picture stays with the
+    /// sound without taking on the device's uneven steps.
     pub fn advance(&mut self, elapsed: i64) {
         if !self.playing || elapsed <= 0 {
             return;
         }
-        let end = self.cut_duration().0;
-        if end <= 0 {
+        let end = self.cut_duration();
+        let Some(session) = self.session.as_ref() else {
             self.playing = false;
-            self.playhead = Micros(0);
-            self.output.queue(&[]);
+            self.silence();
+            return;
+        };
+        let ticked = self.transport.tick(
+            Program {
+                draft: session.draft(),
+                revision: session.revision(),
+                root: self.path.as_deref(),
+                readers: &self.readers,
+            },
+            self.playhead,
+            elapsed,
+            end,
+            self.settings.playback.loop_playback,
+        );
+        self.playhead = ticked.playhead;
+        self.playing = ticked.playing;
+        if end.0 <= 0 {
             return;
         }
-        let mut next = self.playhead.0.saturating_add(elapsed);
-        if next >= end {
-            if self.settings.playback.loop_playback {
-                next %= end;
-            } else {
-                next = end;
-                self.playing = false;
-            }
-        }
-        self.playhead = Micros(next);
-        if self.playing {
-            self.queue_preview(preview_frames(elapsed));
-        } else {
-            self.output.queue(&[]);
-        }
+        self.preroll();
         self.reveal_playhead();
     }
 
     #[cfg(test)]
     pub(crate) fn set_readers(&mut self, readers: ReaderFactory) {
+        self.transport.forget_mixer();
         self.readers = readers;
         self.preview_cache.borrow_mut().clear();
-        self.heard.clear();
+        self.transport.forget_files();
     }
 
     fn queue_preview(&mut self, frames: u32) {
         let Some(session) = self.session.as_ref() else {
-            self.output.queue(&[]);
+            self.transport.silence();
             return;
         };
-        let root = self.path.clone();
-        queue_mix(
-            &mut self.output,
-            PreviewMix {
+        self.transport.queue(
+            Program {
                 draft: session.draft(),
                 revision: session.revision(),
-                time: self.playhead,
-                frames,
+                root: self.path.as_deref(),
                 readers: &self.readers,
-                heard: &mut self.heard,
-                root: root.as_deref(),
             },
+            self.playhead,
+            frames,
         );
+    }
+
+    /// Draw preview on `state`'s device from now on.
+    pub fn attach_gpu(&mut self, state: &eframe::egui_wgpu::RenderState) {
+        self.gpu = Some(crate::gpu::Preview::new(state));
+    }
+
+    /// The preview as a GPU texture and its size, or `None` before
+    /// [`Self::attach_gpu`]. A frame already on the canvas is not drawn again.
+    pub fn preview_texture(&mut self) -> Result<Option<(egui::TextureId, [u32; 2])>, ShellError> {
+        let time = self.sample_time().0;
+        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(None);
+        };
+        let key = crate::gpu::Drawn {
+            draft: session.draft().id.to_string(),
+            revision: session.revision(),
+            time,
+        };
+        if let Some(shown) = gpu.shown(&key) {
+            return Ok(Some(shown));
+        }
+        let mut device = SoftwareDevice::new();
+        let mut cache = self.preview_cache.borrow_mut();
+        cache.set_patient(false);
+        let composed = cache
+            .layers(
+                session,
+                &mut device,
+                Micros(time),
+                &self.readers,
+                self.path.as_deref(),
+                &self.face,
+            )
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let stale = cache.take_stale();
+        drop(cache);
+        let layers = cutlass_render::frame_layers(composed)
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let shown = gpu
+            .show(&layers, key)
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        if stale {
+            gpu.forget();
+        }
+        self.preview_stale = stale;
+        Ok(Some(shown))
+    }
+
+    /// The preview shows a clip's earlier picture while the one asked for
+    /// decodes. The window draws again until this is false.
+    #[must_use]
+    pub fn preview_pending(&self) -> bool {
+        self.preview_stale
     }
 
     pub fn preview_bytes(&self) -> Result<Picture, ShellError> {
@@ -958,9 +1277,9 @@ impl Shell {
         let time = self.sample_time();
         let mut device = SoftwareDevice::new();
         let root = self.path.clone();
-        let picture = self
-            .preview_cache
-            .borrow_mut()
+        let mut cache = self.preview_cache.borrow_mut();
+        cache.set_patient(true);
+        let picture = cache
             .frame(
                 session,
                 &mut device,
@@ -998,7 +1317,7 @@ impl Shell {
             .map(|shortcut| shortcut.action.clone());
         match action.as_deref() {
             Some("undo") => self.undo(),
-            Some("redo") => self.redo(),
+            Some("redo" | "redo_y") => self.redo(),
             Some("play") => {
                 self.toggle_play();
                 Ok(())
@@ -1010,6 +1329,10 @@ impl Shell {
             Some("copy") => self.copy_selected(),
             Some("cut") => self.cut_selected(),
             Some("paste") => self.paste(),
+            Some("extract_audio") => self.extract_audio(),
+            Some("select_all") => self.select_all(),
+            Some("delete_left") => self.delete_side(TrimEdge::Start),
+            Some("delete_right") => self.delete_side(TrimEdge::End),
             _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
         }
     }
@@ -1459,7 +1782,7 @@ impl Shell {
         let x = self.time_zero_x(x);
         let (kind, duration, first_clip) = {
             let draft = self.session_draft()?;
-            let span = medium_span(draft, material_id).ok_or_else(|| {
+            let span = material_span(draft, material_id).ok_or_else(|| {
                 ShellError::Unavailable("the media is not in the library".to_owned())
             })?;
             let first_clip = draft.tracks.iter().all(|track| track.segments.is_empty());
@@ -1496,6 +1819,57 @@ impl Shell {
                 (track_id, start, Some(kind))
             }
         };
+        self.place_medium(material_id, track_id, start, duration, lane, first_clip)
+    }
+
+    /// Add a library item at the end of its lane: main for a picture, else the
+    /// first open lane of its kind. A new lane opens when there is none.
+    /// The playhead goes to the new clip.
+    pub fn add_medium(&mut self, material_id: &str) -> Result<(), ShellError> {
+        let (track_id, start, lane, duration, first_clip) = {
+            let draft = self.session_draft()?;
+            let (kind, duration) = material_span(draft, material_id).ok_or_else(|| {
+                ShellError::Unavailable("the media is not in the library".to_owned())
+            })?;
+            let first_clip = draft.tracks.iter().all(|track| track.segments.is_empty());
+            let Append { lane, start } = append_placement(draft, kind);
+            match lane {
+                AppendLane::Track(track_id) => (track_id, start, None, duration, first_clip),
+                AppendLane::New(kind) => (
+                    TrackId::new(String::new()),
+                    start,
+                    Some(kind),
+                    duration,
+                    first_clip,
+                ),
+            }
+        };
+        if duration.0 <= 0 {
+            return Err(ShellError::Unavailable(
+                "the media has no duration".to_owned(),
+            ));
+        }
+        let track_id = if lane.is_some() {
+            TrackId::new(self.fresh("track"))
+        } else {
+            track_id
+        };
+        self.place_medium(material_id, track_id, start, duration, lane, first_clip)?;
+        self.seek(start);
+        Ok(())
+    }
+
+    /// Place the whole of `material_id` at `start` on `track_id`, opening the
+    /// lane first when `lane` names its kind. Linkage follows the drop rules.
+    fn place_medium(
+        &mut self,
+        material_id: &str,
+        track_id: TrackId,
+        start: Micros,
+        duration: Micros,
+        lane: Option<TrackType>,
+        first_clip: bool,
+    ) -> Result<(), ShellError> {
         let segment_id = SegmentId::new(self.fresh("seg"));
         let mut requests = Vec::new();
         if let Some(kind) = lane {
@@ -1685,6 +2059,18 @@ impl Shell {
                 self.selection.push(id);
             }
         }
+    }
+
+    /// Select every clip on the timeline.
+    pub fn select_all(&mut self) -> Result<(), ShellError> {
+        let ids: Vec<SegmentId> = self
+            .session_draft()?
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter().map(|segment| segment.id.clone()))
+            .collect();
+        self.select_box(ids, false);
+        Ok(())
     }
 
     pub fn selected(&self) -> Option<&SegmentId> {
@@ -3326,6 +3712,17 @@ impl Shell {
         self.clip_menu
     }
 
+    /// The kind of track the selected clip sits on.
+    #[must_use]
+    pub fn selected_track_kind(&self) -> Option<TrackType> {
+        let id = self.selected()?;
+        self.draft()?
+            .tracks
+            .iter()
+            .find(|track| track.segments.iter().any(|segment| &segment.id == id))
+            .map(|track| track.kind.clone())
+    }
+
     /// The split tool is armed. A click on a clip cuts it at that time.
     #[must_use]
     pub fn blade(&self) -> bool {
@@ -3609,6 +4006,39 @@ impl Shell {
         self.split_clip(segment_id, at)
     }
 
+    /// Delete the part of the clip under the playhead before it (`Start`) or after it (`End`).
+    ///
+    /// The selection wins when it covers the playhead. Each side must keep a
+    /// frame, as in a split. After a left delete the playhead goes to the
+    /// clip's new start, so the frame under it stays the same with the magnet on.
+    pub fn delete_side(&mut self, edge: TrimEdge) -> Result<(), ShellError> {
+        let at = self.playhead;
+        let refused = || ShellError::Unavailable("delete is not available".to_owned());
+        let segment_id = self.clip_under(at).ok_or_else(refused)?;
+        self.refuse_locked(&segment_id)?;
+        let draft = self.session_draft()?;
+        let (segment, _) = locate(draft, &segment_id).ok_or_else(refused)?;
+        let start = segment.target.start.0;
+        let end = start.saturating_add(segment.target.duration.0);
+        let margin = split_margin(draft);
+        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
+            return Err(refused());
+        }
+        self.apply(Request::Trim {
+            segment_id: segment_id.clone(),
+            edge,
+            time: at,
+        })?;
+        if edge == TrimEdge::Start
+            && let Some((segment, _)) = self.draft().and_then(|draft| locate(draft, &segment_id))
+        {
+            let start = segment.target.start;
+            self.seek(start);
+        }
+        self.select(Some(segment_id));
+        Ok(())
+    }
+
     /// Cut one clip at a lane pixel. `x` is from the left of the lanes.
     pub fn split_pointer(
         &mut self,
@@ -3673,22 +4103,35 @@ impl Shell {
 
     pub fn set_notice(&mut self, message: impl Into<String>) {
         self.notice = message.into();
+        self.notice_since = Instant::now();
     }
 
     pub fn unavailable(&mut self, control: &str) {
-        self.notice = format!("{control} is not available");
+        self.set_notice(format!("{control} is not available"));
+    }
+
+    /// How long the notice has shown.
+    pub fn notice_age(&self) -> Duration {
+        self.notice_since.elapsed()
+    }
+
+    /// Drop the notice once it has faded out.
+    pub fn expire_notice(&mut self) {
+        if self.notice_age() >= NOTICE_SHOWN {
+            self.notice.clear();
+        }
     }
 
     /// Writes a PNG of the frame at the playhead.
     ///
-    /// The long side is one of [`LONG_SIDES`]. A PNG is one picture, so the
+    /// The short side is one of [`SHORT_SIDES`]. A PNG is one picture, so the
     /// export range is that frame. The software encoder writes it, and the
     /// still mux checks the file before it replaces `request.path`. A codec
     /// this shell cannot mux is refused after the encoder probe.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
-        if !LONG_SIDES.contains(&request.long_side) {
+        if !SHORT_SIDES.contains(&request.short_side) {
             return Err(ShellError::Unavailable(
-                "the long side is not one of the steps".to_owned(),
+                "the short side is not one of the steps".to_owned(),
             ));
         }
         if request.path.exists() && !request.replace {
@@ -3696,7 +4139,7 @@ impl Shell {
         }
         let root = self.path.clone();
         let draft = self.session_draft()?;
-        let (width, height) = self.scaled_canvas(request.long_side);
+        let (width, height) = self.scaled_canvas(request.short_side)?;
         let params = CodecParams::video(request.codec, width, height);
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
@@ -3704,16 +4147,16 @@ impl Shell {
         if request.codec != CodecId::Png {
             return Err(ShellError::ExportUnavailable);
         }
-        let Ok(long_side) = u32::try_from(request.long_side) else {
+        let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
-                "the long side is not one of the steps".to_owned(),
+                "the short side is not one of the steps".to_owned(),
             ));
         };
         let rate = draft.frame_rate().unwrap_or(FrameRate::FPS_30);
         let range = playhead_frame(rate, self.playhead)?;
         let export_request = cutlass_export::ExportRequest {
             range,
-            long_side,
+            short_side,
             codec: CodecId::Png,
             bitrate: 0,
             frame_rate: rate,
@@ -3737,8 +4180,11 @@ impl Shell {
                 destination: None,
                 root: root.as_deref(),
                 fonts: &self.face,
+                // The preview's device, so an effect clip is in the file.
+                renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
+                progress: None,
             },
-            |_, _, _| Ok(cutlass_eval::ClipPcm::Missing),
+            |_, _, _, _| Ok(cutlass_eval::ClipPcm::Missing),
         )
         .map_err(export_failure)?;
         let Some(bytes) = mux.bytes() else {
@@ -4049,20 +4495,14 @@ impl Shell {
             ))
     }
 
-    fn scaled_canvas(&self, long_side: i32) -> (u32, u32) {
+    /// The size export writes the canvas at, from the shared export rule.
+    fn scaled_canvas(&self, short_side: i32) -> Result<(u32, u32), ShellError> {
         let (width, height) = self
             .draft()
             .map(|draft| (draft.canvas_config.width, draft.canvas_config.height))
             .unwrap_or((1920, 1080));
-        let width = f64::from(width.max(1));
-        let height = f64::from(height.max(1));
-        let scale = f64::from(long_side.max(1)) / width.max(height);
-        let scaled_width = (width * scale).round().max(1.0);
-        let scaled_height = (height * scale).round().max(1.0);
-        (
-            u32::try_from(scaled_width as i64).unwrap_or(1),
-            u32::try_from(scaled_height as i64).unwrap_or(1),
-        )
+        let side = u32::try_from(short_side).unwrap_or(0);
+        cutlass_export::output_size(width, height, side).map_err(export_failure)
     }
 
     fn side_max(&self, window_width: f32, other: f32, floor: f32) -> f32 {
@@ -4136,6 +4576,19 @@ fn write_replaced(path: &Path, bytes: &[u8]) -> Result<(), ShellError> {
 
 fn opening_pixel_size(rate: FrameRate) -> f64 {
     last_accuracy_step(rate).unwrap_or(0.006)
+}
+
+/// How much time an empty timeline shows across a third of the lanes.
+pub const EMPTY_SPAN: Micros = Micros(10_000_000);
+
+/// [`EMPTY_SPAN`] across a third of `lane_width`, no closer than the
+/// finest ruler step.
+fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
+    let size = lane_width / 3.0 / EMPTY_SPAN.0 as f64;
+    if !size.is_finite() || size <= 0.0 {
+        return None;
+    }
+    Some(size.min(last_accuracy_step(rate)?))
 }
 
 fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
@@ -4261,26 +4714,6 @@ fn draft_has_linkage(draft: &Draft) -> bool {
         .relationships
         .iter()
         .any(|item| item.kind == "linkage" && !item.id_to_id.is_empty())
-}
-
-fn medium_span(draft: &Draft, id: &str) -> Option<(TrackType, Micros)> {
-    if let Some(video) = draft
-        .materials
-        .videos
-        .iter()
-        .find(|item| item.id.as_str() == id)
-    {
-        let kind = MetaType::parse(&video.kind)
-            .and_then(lane_category)
-            .unwrap_or(TrackType::Video);
-        return Some((kind, video.duration));
-    }
-    let audio = draft
-        .materials
-        .audios
-        .iter()
-        .find(|item| item.id.as_str() == id)?;
-    Some((TrackType::Audio, audio.duration))
 }
 
 fn held_frame(draft: &Draft, segment: &Segment, playhead: Micros) -> Result<Micros, ShellError> {
@@ -4984,58 +5417,27 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
     Err(ShellError::Io("the project resources are full".to_owned()))
 }
 
-#[cfg(target_os = "macos")]
-fn application_support() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support"),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn application_support() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(PathBuf::from)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn application_support() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        return Some(PathBuf::from(xdg));
-    }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".local").join("share"))
-}
-
-fn next_project_slot(root: &Path) -> (String, PathBuf, String) {
-    for index in 1..100_000 {
-        let name = if index == 1 {
-            "Project".to_owned()
-        } else {
-            format!("Project {index}")
-        };
-        let path = root.join(&name);
-        if !path.exists() {
-            return (name, path, format!("project-{index}"));
-        }
-    }
-    let stamp = unix_millis();
-    let name = format!("Project {stamp}");
-    let path = root.join(&name);
-    (name, path, format!("project-{stamp}"))
-}
-
-fn unix_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+/// `peaks` spread over `columns`: the loudest level in each column's share
+/// of `duration`, the file's length. Past what was read is silence.
+fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) -> Vec<f32> {
+    let length = if duration > 0 {
+        duration
+    } else {
+        peaks.levels.len() as i64 * 1_000_000 / i64::from(cutlass_engine::BUCKETS_PER_SECOND)
+    };
+    let count = columns.max(1) as i64;
+    (0..count)
+        .map(|column| {
+            let from = Micros(length * column / count);
+            let to = Micros((length * (column + 1) / count - 1).max(from.0));
+            peaks.level(from, to)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportRequest, LONG_SIDES, Shell, ShellError};
+    use super::{ExportRequest, SHORT_SIDES, Shell, ShellError};
     use cutlass_codec::{
         CodecId, ContainerId, FrameSize, Packet as FilePacket, StreamCodec, StreamParams,
         Timescale, Timestamp,
@@ -5223,6 +5625,193 @@ mod tests {
         Shell::new(decoders, encoders, Settings::default())
     }
 
+    #[test]
+    fn a_far_jump_shows_the_last_picture_until_the_asked_one_decodes() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/12471039-uhd_3840_2160_24fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the 4K movie is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let Ok(state) = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) else {
+            eprintln!("skipped: no GPU");
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 3840, 2160, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 9_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 9_000_000));
+        draft.materials.videos[0].duration = Micros(9_000_000);
+        draft.duration = Micros(9_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        desktop.preview_texture().unwrap().expect("first frame");
+        assert!(!desktop.preview_pending(), "the first frame waits");
+
+        desktop.seek(Micros(8_200_000));
+        desktop.preview_texture().unwrap().expect("held frame");
+        assert!(desktop.preview_pending(), "a far jump shows the held frame");
+        let mut paints = 0;
+        while desktop.preview_pending() {
+            assert!(paints < 2_000, "the asked frame never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            desktop.preview_texture().unwrap().expect("frame");
+            paints += 1;
+        }
+        let gpu = desktop
+            .gpu
+            .as_ref()
+            .and_then(crate::gpu::Preview::read)
+            .unwrap();
+        let cpu = desktop.preview_bytes().unwrap().rgba;
+        let off = gpu
+            .chunks(4)
+            .zip(cpu.chunks(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
+            .count();
+        assert!(off * 1000 <= gpu.len() / 4, "{off} pixels differ");
+    }
+
+    #[test]
+    fn playback_waits_for_the_sound_then_follows_it_and_hears_an_edit() {
+        let movie = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: the movie with sound is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 8_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 8_000_000));
+        draft.materials.videos[0].duration = Micros(8_000_000);
+        draft.duration = Micros(8_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.open_preview_audio(AudioHost::current());
+        if desktop.transport.output().clock().is_none() {
+            eprintln!("skipped: no audio device");
+            return;
+        }
+        desktop.seek(Micros(1_000_000));
+        desktop.play();
+        assert!(desktop.transport.is_streaming());
+        // Each tick passes the time that really went by, as the window does.
+        let mut last = std::time::Instant::now();
+        let mut step = |desktop: &mut Shell| {
+            std::thread::sleep(std::time::Duration::from_micros(16_667));
+            let now = std::time::Instant::now();
+            let elapsed = i64::try_from(now.duration_since(last).as_micros()).unwrap();
+            last = now;
+            desktop.advance(elapsed);
+        };
+        let mut ticks = 0;
+        loop {
+            assert!(ticks < 120, "the stream never started");
+            step(&mut desktop);
+            ticks += 1;
+            if desktop.transport.heard_frames() != Some(0) {
+                break;
+            }
+            // Nothing heard after this tick, so nothing was heard during it.
+            assert_eq!(desktop.playhead, Micros(1_000_000), "the picture held");
+        }
+        for _ in 0..30 {
+            step(&mut desktop);
+        }
+        let heard = desktop.transport.heard_time().unwrap();
+        assert!(desktop.playhead.0 > 1_300_000, "playback moved");
+        assert!(
+            (desktop.playhead.0 - heard.0).abs() < 10_000,
+            "picture {} audio {}",
+            desktop.playhead.0,
+            heard.0
+        );
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        desktop
+            .toggle_attribute(track, TrackAttribute::MUTE)
+            .unwrap();
+        step(&mut desktop);
+        let revision = desktop.session.as_ref().unwrap().revision();
+        assert_eq!(desktop.transport.mix_revision(), Some(revision));
+        desktop.pause();
+        assert!(!desktop.transport.is_streaming());
+    }
+
+    #[test]
+    fn preview_draws_a_real_movie_on_the_gpu_like_the_cpu() {
+        let movie =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files/IMG_8143.MP4");
+        if !movie.is_file() {
+            eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+            return;
+        }
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let state = match pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("skipped: {error}");
+                return;
+            }
+        };
+        let temp = Temp::new();
+        let draft = crate::open_movie::movie_draft(&movie, 848, 608, true).unwrap();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        desktop.seek(Micros(400_000));
+
+        let (id, size) = desktop.preview_texture().unwrap().expect("gpu preview");
+        assert_eq!(size, [848, 608]);
+        assert!(state.renderer.read().texture(&id).is_some());
+        let again = desktop.preview_texture().unwrap().expect("gpu preview");
+        assert_eq!(again, (id, size));
+
+        let gpu = desktop
+            .gpu
+            .as_ref()
+            .and_then(crate::gpu::Preview::read)
+            .unwrap();
+        let cpu = desktop.preview_bytes().unwrap().rgba;
+        let off = gpu
+            .chunks(4)
+            .zip(cpu.chunks(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
+            .count();
+        assert!(off * 1000 <= gpu.len() / 4, "{off} pixels differ");
+
+        desktop.seek(Micros(433_334));
+        let (next, _) = desktop.preview_texture().unwrap().expect("gpu preview");
+        assert_eq!(next, id);
+        assert_ne!(
+            desktop
+                .gpu
+                .as_ref()
+                .and_then(crate::gpu::Preview::read)
+                .unwrap(),
+            gpu
+        );
+    }
+
     struct Temp {
         path: PathBuf,
     }
@@ -5370,6 +5959,380 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_filmstrip_fills_from_the_thumbnail_worker() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 4_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 4_000_000));
+        draft.duration = Micros(4_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let id = SegmentId::new("movie");
+        assert!(desktop.film(&id, 400.0, 48.0, 0.0..400.0).is_empty());
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        // 4 s across 400 px: 85 px tiles at 48 rows of 16:9, five of them.
+        desktop.pixel_size = 400.0 / 4_000_000.0;
+        let cells = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        assert_eq!(cells.len(), 5);
+        assert!(cells.iter().all(|cell| cell.thumb.is_none()));
+        desktop.send_timeline_asks();
+        for _ in 0..cells.len() {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("a thumbnail");
+        }
+        let cells = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        for cell in &cells {
+            let thumb = cell.thumb.as_ref().expect("stored");
+            assert_eq!((thumb.width, thumb.height), (284, 160));
+            assert!(thumb.rgba.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]));
+        }
+        assert_ne!(cells[0].thumb, cells[4].thumb);
+    }
+
+    #[test]
+    fn a_portrait_clip_gets_tall_narrow_tiles() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("7150172-hd_720_1280_50fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        // Stored as 16:9, as a bad probe might; the file's own shape wins.
+        let draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 1_000_000.0;
+        let id = SegmentId::new("movie");
+        let wide = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        assert_eq!(wide[0].tile.width, 48.0 * 16.0 / 9.0);
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a thumbnail");
+        let tall = desktop.film(&id, 400.0, 48.0, 0.0..400.0);
+        assert_eq!(tall[0].tile.width, 27.0);
+        let thumb = tall[0].thumb.as_ref().expect("stored");
+        assert_eq!((thumb.width, thumb.height), (90, 160));
+    }
+
+    #[test]
+    fn an_audio_clip_reads_its_waveform_from_the_worker() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.duration = Micros(20_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(20_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 20_000_000));
+        segment.source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        // 20 s across 400 px: one column every 50 ms.
+        desktop.pixel_size = 400.0 / 20_000_000.0;
+        let id = SegmentId::new("song");
+        assert_eq!(desktop.wave(&id, 400.0, 100.0..300.0), None);
+        desktop.send_timeline_asks();
+        let mut levels = None;
+        while receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok()
+        {
+            levels = desktop.wave(&id, 400.0, 100.0..300.0);
+            let read = desktop.waveforms.as_ref().unwrap().get(
+                &desktop
+                    .media_file(Some(&sound.display().to_string()))
+                    .unwrap(),
+            );
+            if read.is_some_and(|peaks| peaks.complete) {
+                break;
+            }
+        }
+        let wave = levels.expect("peaks");
+        assert!(!wave.under_picture);
+        let (first, levels) = (wave.first, wave.levels);
+        assert_eq!(first, 100);
+        assert_eq!(levels.len(), 200);
+        assert!(levels.iter().all(|level| (0.0..=1.0).contains(level)));
+        let loud = levels.iter().filter(|level| **level > 0.05).count();
+        assert!(loud > 100, "{loud} of {} columns have sound", levels.len());
+    }
+
+    #[test]
+    fn a_library_waveform_takes_the_loudest_level_in_each_column() {
+        let peaks = cutlass_engine::Peaks {
+            levels: vec![0.1, 0.9, 0.2, 0.3, 0.0, 0.5],
+            complete: true,
+        };
+        // 60 ms of sound across three columns, 20 ms each.
+        assert_eq!(super::spread_peaks(&peaks, 60_000, 3), [0.9, 0.3, 0.5]);
+        // Without a stored length, the peaks say how long the file is.
+        assert_eq!(super::spread_peaks(&peaks, 0, 2), [0.9, 0.5]);
+    }
+
+    #[test]
+    fn a_library_picture_shows_its_first_frame_once_read() {
+        let temp = Temp::new();
+        Folder::new(Draft::empty("draft")).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        assert!(desktop.poster(&id).is_none(), "no worker, no poster");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        let (_, thumb) = desktop.poster(&id).expect("a picture has a poster");
+        assert!(thumb.is_none());
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the poster was read");
+        let (_, thumb) = desktop.poster(&id).unwrap();
+        assert!(thumb.is_some_and(|thumb| thumb.width > 0 && thumb.height > 0));
+        assert!(
+            desktop.material_wave(&id, 10).is_none(),
+            "a picture has no sound"
+        );
+    }
+
+    #[test]
+    fn a_video_clip_with_sound_reads_its_waveform_under_the_picture() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 20_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.duration = Micros(20_000_000);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 20_000_000.0;
+        let id = SegmentId::new("movie");
+        assert_eq!(
+            desktop.wave(&id, 400.0, 0.0..400.0),
+            Some(super::ClipWave {
+                first: 0,
+                levels: Vec::new(),
+                gains: Vec::new(),
+                under_picture: true,
+                muted: false,
+            }),
+            "a video holds its band open while it is read"
+        );
+        desktop.send_timeline_asks();
+        // Wait until the first 20 s, 2000 buckets, have been read.
+        let path = desktop
+            .media_file(Some(&movie.display().to_string()))
+            .unwrap();
+        while desktop
+            .waveforms
+            .as_ref()
+            .unwrap()
+            .get(&path)
+            .is_none_or(|peaks| peaks.levels.len() < 2_000 && !peaks.complete)
+        {
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("peaks");
+        }
+        let wave = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks");
+        assert!(wave.under_picture);
+        assert_eq!(wave.levels.len(), 400);
+        let loud = wave.levels.iter().filter(|level| **level > 0.05).count();
+        assert!(loud > 200, "{loud} of 400 columns have sound");
+    }
+
+    #[test]
+    fn a_waveform_follows_the_clip_volume() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.duration = Micros(5_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(5_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 5_000_000));
+        segment.source_range = Some(TimeRange::new(0, 5_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 5_000_000.0;
+        let id = SegmentId::new("song");
+        let _ = desktop.wave(&id, 400.0, 0.0..400.0);
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("peaks");
+        let full = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
+        desktop.select(Some(id.clone()));
+        desktop.set_volume(0.5).unwrap();
+        let half = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks");
+        assert!(half.gains.iter().all(|gain| *gain == 0.5));
+        let half = half.levels;
+        for (full, half) in full.iter().zip(&half) {
+            assert!((full * 0.5 - half).abs() < 1e-6);
+        }
+        let track = desktop.draft().unwrap().tracks[0].id.clone();
+        assert!(!desktop.wave(&id, 400.0, 0.0..400.0).unwrap().muted);
+        desktop
+            .toggle_attribute(track.clone(), TrackAttribute::MUTE)
+            .unwrap();
+        assert!(desktop.wave(&id, 400.0, 0.0..400.0).unwrap().muted);
+        desktop
+            .toggle_attribute(track, TrackAttribute::MUTE)
+            .unwrap();
+        desktop.set_volume(0.0).unwrap();
+        let muted = desktop.wave(&id, 400.0, 0.0..400.0).expect("peaks").levels;
+        assert!(muted.iter().all(|level| *level == 0.0));
+        assert!(full.iter().any(|level| *level > 0.05));
+    }
+
+    #[test]
+    fn a_video_clip_without_sound_has_no_waveform() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("7150172-hd_720_1280_50fps.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = Temp::new();
+        let draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        desktop.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        desktop.pixel_size = 400.0 / 1_000_000.0;
+        let id = SegmentId::new("movie");
+        assert_eq!(
+            desktop.wave(&id, 400.0, 0.0..400.0),
+            Some(super::ClipWave {
+                first: 0,
+                levels: Vec::new(),
+                gains: Vec::new(),
+                under_picture: true,
+                muted: false,
+            }),
+            "a video holds its band open while it is read"
+        );
+        desktop.send_timeline_asks();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("read");
+        let path = desktop
+            .media_file(Some(&movie.display().to_string()))
+            .unwrap();
+        let peaks = desktop
+            .waveforms
+            .as_ref()
+            .unwrap()
+            .get(&path)
+            .expect("read");
+        assert!(peaks.complete && peaks.levels.is_empty());
+        assert_eq!(desktop.wave(&id, 400.0, 0.0..400.0), None);
+    }
+
+    #[test]
+    fn the_preview_background_starts_black_and_toggles_clear() {
+        let mut desktop = shell();
+        assert!(desktop.preview_black());
+        desktop.toggle_preview_background();
+        assert!(!desktop.preview_black());
+        desktop.toggle_preview_background();
+        assert!(desktop.preview_black());
+    }
+
+    #[test]
+    fn an_import_is_written_to_the_folder_without_closing_the_project() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert_eq!(desktop.autosave(), None);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let wait = desktop.autosave().expect("the write waits for the gap");
+        std::thread::sleep(wait);
+        assert_eq!(desktop.autosave(), None);
+        drop(desktop);
+
+        let mut reopened = shell();
+        reopened.open_folder(&temp.path).unwrap();
+        let videos = &reopened.draft().unwrap().materials.videos;
+        assert_eq!(videos.len(), 1);
+        assert!(
+            videos[0].path.ends_with("pattern.png"),
+            "{}",
+            videos[0].path
+        );
+        assert_eq!(reopened.autosave(), None);
+    }
+
+    #[test]
     fn import_stores_a_still_and_a_sound_without_a_timeline_clip() {
         let temp = Temp::new();
         empty_project(&temp.path);
@@ -5418,6 +6381,76 @@ mod tests {
         assert!(error.to_string().contains("still"), "{error}");
         assert_eq!(desktop.draft().unwrap(), &before);
         assert!(!temp.path.join("Resources").join("short.png").exists());
+    }
+
+    #[test]
+    fn an_import_failure_is_written_to_the_log() {
+        let log_dir =
+            std::env::temp_dir().join(format!("cutlass-import-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&log_dir);
+        std::fs::create_dir_all(&log_dir).unwrap();
+        cutlass_logger::init(&log_dir).unwrap();
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let junk = temp.path.join("notes.txt");
+        std::fs::write(&junk, b"hello").unwrap();
+        let error = desktop.import_file(&junk).unwrap_err();
+        let log = std::fs::read_to_string(log_dir.join(cutlass_logger::FILE_NAME)).unwrap();
+        assert!(log.contains(&error.to_string()), "{log}");
+        assert!(log.contains("notes.txt"), "{log}");
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    #[test]
+    fn a_fragmented_movie_imports_when_the_header_duration_is_empty() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/GOOGLE IS BACK! (Gemini 3.8 Flash).mp4");
+        if !path.is_file() {
+            eprintln!("skipped: the fragmented sample is not in ../local-files");
+            return;
+        }
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&path).unwrap();
+        let video = &desktop.draft().unwrap().materials.videos[0];
+        assert_eq!(video.width, 854);
+        assert_eq!(video.height, 480);
+        assert!(
+            (1_009_000_000..1_011_000_000).contains(&video.duration.0),
+            "{}",
+            video.duration.0
+        );
+        assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
+    }
+
+    #[test]
+    fn an_empty_timeline_opens_at_a_third_and_the_first_clip_fits() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.prepare_lane(900.0);
+        assert_eq!(desktop.pixel_size(), 300.0 / 10_000_000.0);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        let y = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        desktop.prepare_lane(900.0);
+        let cut = desktop.cut_duration().0 as f64;
+        let fitted = desktop.pixel_size();
+        assert!((fitted * cut - 675.0).abs() < 1.0e-6, "{}", fitted * cut);
+        desktop.drop_medium(&id, 0.0, y).unwrap();
+        desktop.prepare_lane(900.0);
+        assert_eq!(desktop.pixel_size(), fitted);
     }
 
     #[test]
@@ -6638,14 +7671,15 @@ mod tests {
         readers.decoders_mut().register(CodecId::Jpeg, open_flat);
         desktop.set_readers(readers);
 
+        // The clip and its decode thread each open the movie.
         let first = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 2);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
         assert_ne!(first.rgba, [0x33, 0x66, 0x99, 0xFF].repeat(4));
         assert!(first.rgba.iter().any(|byte| *byte != 0));
 
         desktop.seek(Micros(10));
         let later = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 2);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
         assert_eq!(later.rgba, first.rgba);
 
         let track = desktop.draft().unwrap().tracks[0].id.clone();
@@ -6654,14 +7688,14 @@ mod tests {
             .unwrap();
         desktop.seek(Micros(20));
         let muted = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
         assert_eq!(muted.rgba, first.rgba);
 
         desktop
             .toggle_attribute(track, TrackAttribute::HIDE)
             .unwrap();
         let hidden = desktop.preview_bytes().unwrap();
-        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 4);
+        assert_eq!(KEPT_OPENS.load(Ordering::Relaxed), 8);
         assert_eq!(hidden.rgba, vec![0; 16]);
     }
 
@@ -7414,7 +8448,7 @@ mod tests {
         assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00;59");
         desktop.toggle_drop_frame().unwrap();
         assert_eq!(desktop.frame_rate_label(), "59.94 fps");
-        assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00:00");
+        assert_eq!(desktop.timecode_at(Micros(1_000_000)), "00:00:00:59");
         desktop.undo().unwrap();
         assert!(desktop.drop_frame_enabled());
         desktop.undo().unwrap();
@@ -7813,7 +8847,7 @@ mod tests {
         let temp = Temp::new();
         let missing = shell().export(ExportRequest {
             path: temp.path.join("missing.png"),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::Png,
             replace: false,
         });
@@ -7827,7 +8861,7 @@ mod tests {
         let destination = temp.path.join("out.png");
         let declined = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::Vp8,
             replace: false,
         });
@@ -7838,14 +8872,15 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
             })
             .unwrap();
         let written = std::fs::read(&destination).unwrap();
         let (width, height, samples) = png_samples(&written);
-        assert_eq!((width, height), (480, 240));
+        // The short side is 480; the 2:1 canvas keeps its shape.
+        assert_eq!((width, height), (960, 480));
         assert!(
             samples
                 .chunks(4)
@@ -7856,7 +8891,7 @@ mod tests {
         let kept = std::fs::read(&destination).unwrap();
         let overwrite = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::Png,
             replace: false,
         });
@@ -7867,19 +8902,19 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: true,
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
-        assert_eq!((width, height), (480, 240));
+        assert_eq!((width, height), (960, 480));
         assert!(samples.iter().all(|sample| *sample == 0));
         assert_eq!(desktop.draft().unwrap(), &before);
         let clear = std::fs::read(&destination).unwrap();
         let movie = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 480,
+            short_side: 480,
             codec: CodecId::H264,
             replace: true,
         });
@@ -7891,12 +8926,12 @@ mod tests {
 
         let step = desktop.export(ExportRequest {
             path: destination.clone(),
-            long_side: 1000,
+            short_side: 1000,
             codec: CodecId::Png,
             replace: true,
         });
         assert!(matches!(step, Err(ShellError::Unavailable(_))));
-        assert_eq!(LONG_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
+        assert_eq!(SHORT_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
     }
 
     #[test]
@@ -7926,6 +8961,74 @@ mod tests {
         (image.width, image.height, image.samples.clone())
     }
 
+    /// A grey frame with a vignette clip over it, exported as a PNG at the
+    /// first frame: with eframe's GPU the corners are darker than the middle.
+    #[test]
+    fn an_export_draws_an_effect_clip_through_the_preview_gpu() {
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
+        let state = match pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &eframe::egui_wgpu::WgpuConfiguration::default(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        )) {
+            Ok(state) => state,
+            Err(error) if std::env::var_os(cutlass_render::REQUIRE_GPU).is_some() => {
+                panic!("a GPU is required: {error}")
+            }
+            Err(_) => {
+                eprintln!("skipped: no GPU");
+                return;
+            }
+        };
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 16;
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "grey".into(),
+            is_color_clip: true,
+            solid_color: "0xFF808080".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("grey", "grey", TimeRange::new(0, 1_000_000)));
+        draft
+            .materials
+            .video_effects
+            .push(cutlass_model::MaterialVideoEffect {
+                id: "fx".into(),
+                effect_id: "recipe/vignette".to_owned(),
+                ..cutlass_model::MaterialVideoEffect::default()
+            });
+        let mut row = Track::main("effects");
+        row.kind = TrackType::Effect;
+        let mut effect = Segment::new("fx", "fx", TimeRange::new(0, 1_000_000));
+        effect.render_index = 11_000;
+        row.segments.push(effect);
+        draft.tracks.push(row);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.attach_gpu(&state);
+        let destination = temp.path.join("out.png");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                codec: CodecId::Png,
+                replace: false,
+            })
+            .unwrap();
+        let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
+        let at = |x: u32, y: u32| samples[usize::try_from((y * width + x) * 4).unwrap()];
+        let (middle, corner) = (at(width / 2, height / 2), at(0, 0));
+        assert!(corner + 40 < middle, "corner {corner}, middle {middle}");
+    }
+
     fn export_still(dir: &Path, media: &Path) {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 16;
@@ -7949,7 +9052,7 @@ mod tests {
         desktop
             .export(ExportRequest {
                 path: destination.clone(),
-                long_side: 480,
+                short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
             })
@@ -8529,6 +9632,148 @@ mod tests {
                 .filter(|segment| segment.target.start == Micros(8_800_000))
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn q_and_w_delete_either_side_of_the_playhead_and_command_a_selects_every_clip() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "media", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "b",
+            "media",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.magnet_enabled());
+        let targets = |desktop: &Shell| -> Vec<TimeRange> {
+            desktop.draft().unwrap().tracks[0]
+                .segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect()
+        };
+
+        desktop.seek(Micros(400_000));
+        desktop.run_shortcut("q").unwrap();
+        assert_eq!(
+            targets(&desktop),
+            [
+                TimeRange::new(0, 600_000),
+                TimeRange::new(600_000, 1_000_000)
+            ]
+        );
+        assert_eq!(desktop.playhead(), Micros(0));
+        assert_eq!(desktop.selection(), [SegmentId::new("a")]);
+
+        desktop.seek(Micros(300_000));
+        desktop.run_shortcut("w").unwrap();
+        assert_eq!(
+            targets(&desktop),
+            [
+                TimeRange::new(0, 300_000),
+                TimeRange::new(300_000, 1_000_000)
+            ]
+        );
+        assert_eq!(desktop.playhead(), Micros(300_000));
+
+        desktop.seek(Micros(310_000));
+        assert_eq!(
+            desktop.run_shortcut("q").unwrap_err().to_string(),
+            "delete is not available"
+        );
+
+        desktop.undo().unwrap();
+        assert_eq!(targets(&desktop)[0], TimeRange::new(0, 600_000));
+        let redo = if cfg!(target_os = "macos") {
+            "ctrl+y"
+        } else {
+            "primary+y"
+        };
+        desktop.run_shortcut(redo).unwrap();
+        assert_eq!(targets(&desktop)[0], TimeRange::new(0, 300_000));
+
+        desktop.run_shortcut("primary+a").unwrap();
+        assert_eq!(
+            desktop.selection(),
+            [SegmentId::new("a"), SegmentId::new("b")]
+        );
+    }
+
+    #[test]
+    fn the_card_plus_adds_at_the_end_of_the_matching_lane() {
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        let mut picture = MaterialVideo::new("picture");
+        picture.duration = Micros(500_000);
+        draft.materials.videos.push(picture);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("tone"),
+            duration: Micros(300_000),
+            ..MaterialAudio::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("a", "picture", TimeRange::new(0, 1_000_000)));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+
+        desktop.add_medium("picture").unwrap();
+        let main = &desktop.draft().unwrap().tracks[0];
+        assert_eq!(main.segments[1].target, TimeRange::new(1_000_000, 500_000));
+        assert_eq!(desktop.playhead(), Micros(1_000_000));
+
+        desktop.add_medium("tone").unwrap();
+        desktop.add_medium("tone").unwrap();
+        let draft = desktop.draft().unwrap();
+        let sound: Vec<&Track> = draft
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackType::Audio)
+            .collect();
+        assert_eq!(sound.len(), 1);
+        assert_eq!(
+            sound[0]
+                .segments
+                .iter()
+                .map(|segment| segment.target.clone())
+                .collect::<Vec<_>>(),
+            [TimeRange::new(0, 300_000), TimeRange::new(300_000, 300_000)]
+        );
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .all(|track| track.kind != TrackType::Audio)
+        );
+        assert_eq!(
+            desktop.add_medium("missing").unwrap_err().to_string(),
+            "the media is not in the library"
+        );
+    }
+
+    #[test]
+    fn shift_command_s_extracts_the_audio() {
+        let mut bare = shell();
+        assert_eq!(
+            bare.run_shortcut("primary+shift+s")
+                .unwrap_err()
+                .to_string(),
+            "no project is open"
         );
     }
 
@@ -10121,8 +11366,7 @@ mod tests {
     #[test]
     fn naming_the_projects_directory_does_not_create_it() {
         let path = Shell::projects_directory();
-        let under_support = path.ends_with(Path::new("Cutlass").join("Projects"));
-        let fallback = path.ends_with("cutlass-projects");
-        assert!(under_support || fallback, "{}", path.display());
+        assert_eq!(path, Shell::home().projects());
+        assert!(path.starts_with(Shell::home().root()));
     }
 }

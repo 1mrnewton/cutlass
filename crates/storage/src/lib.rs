@@ -1,4 +1,7 @@
-//! Bundled resources and the app cache.
+//! The Cutlass root folder, bundled resources, and the app cache.
+//!
+//! [`Home`] lays out the one root every shell names; a shell passes that
+//! path and nothing else.
 //!
 //! A bundled file is read from the resources directory. A downloaded file is
 //! read from the cache directory. The index records the id, the location, the
@@ -10,6 +13,7 @@
 
 mod bundle;
 mod cache;
+mod home;
 mod index;
 mod quota;
 
@@ -20,6 +24,7 @@ use std::path::{Path, PathBuf};
 use cutlass_download::hash_file;
 
 pub use cutlass_download::{Checksum, DownloadError, Downloader, Job, JobId, Priority, Progress};
+pub use home::{Home, desktop_home};
 pub use index::{Place, Record, ResourceId};
 pub use quota::{Quota, Shortfall};
 
@@ -44,6 +49,8 @@ pub enum StorageError {
     NotAFile { path: PathBuf },
     /// The bundle or the cache is not a directory.
     NotADirectory { path: PathBuf },
+    /// A root must be an absolute path.
+    NotAbsolute { path: PathBuf },
     /// The bundle and the cache are the same directory.
     SameRoot { path: PathBuf },
     /// No complete file has this id.
@@ -97,6 +104,9 @@ impl fmt::Display for StorageError {
             }
             Self::NotADirectory { path } => {
                 write!(formatter, "{} is not a directory", path.display())
+            }
+            Self::NotAbsolute { path } => {
+                write!(formatter, "{} is not an absolute path", path.display())
             }
             Self::SameRoot { path } => {
                 write!(

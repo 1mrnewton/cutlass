@@ -17,7 +17,7 @@ use cutlass_encode::{AudioInput, Encoder, FrameInput, Packet as Encoded, Picture
 use super::cf::{self, Cf};
 use super::sys;
 use crate::limits::{packet_ok, picture_ok};
-use crate::orient::{self, Orientation};
+use cutlass_decode::orient::{self, Orientation};
 
 pub struct StillDecoder {
     codec: CodecId,

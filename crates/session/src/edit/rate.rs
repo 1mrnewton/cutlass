@@ -53,7 +53,14 @@ mod tests {
             .unwrap();
         assert_eq!(session.draft().frame_rate(), Some(FrameRate::FPS_29_97));
         assert!(!session.draft().is_drop_frame_timecode);
-        assert_eq!(session.draft().timecode(Micros(1_000_000)), None);
+        assert_eq!(
+            session
+                .draft()
+                .timecode(Micros(1_000_000))
+                .unwrap()
+                .format(),
+            "00:00:00:29"
+        );
         session.undo().unwrap();
         assert!(session.draft().is_drop_frame_timecode);
 

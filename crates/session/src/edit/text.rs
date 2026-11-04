@@ -1,4 +1,6 @@
-use cutlass_model::{Draft, MaterialText, SegmentId};
+use cutlass_model::{
+    Draft, MaterialId, MaterialText, Segment, SegmentId, TimeRange, TrackId, TrackType,
+};
 
 use super::speed::locate;
 use super::{EditError, ensure_unlocked};
@@ -29,6 +31,54 @@ pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Res
         id: material_id,
         content: content.to_owned(),
         ..MaterialText::default()
+    });
+    Ok(())
+}
+
+/// The size a new text clip starts at, in pixels of the canvas.
+pub const NEW_TEXT_SIZE: f64 = 80.0;
+
+/// Place a new text clip on `track_id` over `target`, saying `content` in
+/// `face`, white, at [`NEW_TEXT_SIZE`]. A missing track is added as text.
+/// Blank content, a face that is not a file name, or an id already in use
+/// changes nothing.
+pub fn add_text(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    target: TimeRange,
+    content: &str,
+    face: &str,
+) -> Result<(), EditError> {
+    if content.trim().is_empty() {
+        return Err(EditError::TextEmpty);
+    }
+    let face = face.trim();
+    if !face_file(face) {
+        return Err(EditError::TextFont);
+    }
+    if draft.materials.get(material_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
+        if !matches!(track.kind, TrackType::Text) {
+            return Err(EditError::TrackKind);
+        }
+        ensure_unlocked(track.attribute)?;
+    } else {
+        super::track::insert_track(draft, track_id, &TrackType::Text)?;
+    }
+    let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
+    segment.render_index = TrackType::Text.render_floor().unwrap_or(0);
+    super::place::place(draft, track_id, segment)?;
+    draft.materials.texts.push(MaterialText {
+        id: material_id.clone(),
+        kind: "text".to_owned(),
+        content: content.to_owned(),
+        font_path: face.to_owned(),
+        font_size: NEW_TEXT_SIZE,
+        ..MaterialText::new(material_id.clone())
     });
     Ok(())
 }
@@ -576,5 +626,87 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, EditError::LockedTrack);
         assert_eq!(session.draft().materials.texts[0].font_path, "");
+    }
+
+    fn add(track: &str, segment: &str, start: i64, content: &str, face: &str) -> Request {
+        Request::AddText {
+            track_id: TrackId::new(track),
+            segment_id: cutlass_model::SegmentId::new(segment),
+            material_id: MaterialId::new(format!("m-{segment}")),
+            start: cutlass_model::Micros(start),
+            duration: cutlass_model::Micros(2_000_000),
+            content: content.to_owned(),
+            face: face.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_new_text_clip_gets_its_row_its_words_and_its_face_in_one_step() {
+        let mut session = open();
+        session
+            .apply(0, &[add("t1", "hello", 500_000, "Hello", "Arial.ttf")])
+            .unwrap();
+        assert_eq!(session.revision(), 1);
+        let draft = session.draft();
+        let row = draft
+            .tracks
+            .iter()
+            .find(|track| track.id.as_str() == "t1")
+            .unwrap();
+        assert_eq!(row.kind, cutlass_model::TrackType::Text);
+        assert_eq!(row.segments[0].target, TimeRange::new(500_000, 2_000_000));
+        let text = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.id.as_str() == "m-hello")
+            .unwrap();
+        assert_eq!(text.content, "Hello");
+        assert_eq!(text.font_path, "Arial.ttf");
+        assert_eq!(text.font_size, super::NEW_TEXT_SIZE);
+
+        // A second clip goes on the same row after the first.
+        session
+            .apply(1, &[add("t1", "later", 2_500_000, "Later", "Arial.ttf")])
+            .unwrap();
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(
+            session
+                .draft()
+                .tracks
+                .iter()
+                .all(|track| track.id.as_str() != "t1")
+        );
+        assert_eq!(session.draft().materials.texts.len(), 1);
+    }
+
+    #[test]
+    fn a_bad_new_text_clip_changes_nothing() {
+        let mut session = open();
+        let before = session.draft().clone();
+        for (request, expected) in [
+            (add("t1", "x", 0, "  ", "Arial.ttf"), EditError::TextEmpty),
+            (add("t1", "x", 0, "Hi", ""), EditError::TextFont),
+            (add("t1", "x", 0, "Hi", "../evil.ttf"), EditError::TextFont),
+            (add("main", "x", 0, "Hi", "Arial.ttf"), EditError::TrackKind),
+            (
+                add("t1", "a", 0, "Hi", "Arial.ttf"),
+                EditError::DuplicateSegment,
+            ),
+        ] {
+            assert_eq!(session.apply(0, &[request]).unwrap_err(), expected);
+            assert_eq!(session.draft(), &before);
+        }
+        session
+            .apply(0, &[add("t1", "x", 0, "Hi", "Arial.ttf")])
+            .unwrap();
+        let overlap = add("t1", "y", 1_000_000, "Hi", "Arial.ttf");
+        let after = session.draft().clone();
+        assert_eq!(
+            session.apply(1, &[overlap]).unwrap_err(),
+            EditError::Overlap
+        );
+        assert_eq!(session.draft(), &after);
     }
 }

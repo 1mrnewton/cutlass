@@ -506,6 +506,16 @@ pub trait Mux {
     fn cancel(&mut self);
     fn finish(&mut self, durations: &[TrackDuration]) -> Result<FinishedMux, FailedMux>;
     fn status(&self) -> MuxStatus;
+    /// The codec configuration an encoder handed over with a packet of
+    /// `track`, such as an `avcC` record or an AAC AudioSpecificConfig. A
+    /// family that writes its index at the end can still store it. The
+    /// default stores none and refuses.
+    fn set_config(&mut self, track: TrackId, config: &[u8]) -> Result<(), MuxError> {
+        let _ = (track, config);
+        Err(MuxError::Rejected {
+            message: "this container stores no codec configuration".to_owned(),
+        })
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use cutlass_codec::{ContainerId, Packet};
 ///
 /// The trait is object-safe so `engine` can hold `Box<dyn Demux>`.
 /// Open stays on the concrete type because it consumes the input.
-pub trait Demux {
+pub trait Demux: Send {
     fn family(&self) -> ContainerId;
 
     /// Streams published by a successful open.

@@ -3,6 +3,7 @@
 //! One packet is one image. `FF 00` inside a scan is a data byte. Arithmetic
 //! SOF markers and `DAC` are refused before any coefficient is written.
 
+use cutlass_decode::orient::{Orientation, upright};
 use cutlass_decode::{
     BitDepth, CodecError, CodecId, CodecParams, ColorType, Decoder, Output, Packet, StillImage,
     StillOutput,
@@ -44,8 +45,9 @@ const COM: u8 = 0xfe;
 
 /// Size and coding of one JPEG frame.
 ///
-/// `orientation` is the EXIF tag when APP1 carries one. It is not applied
-/// to the samples. `width` and `height` are the frame header.
+/// `orientation` is the EXIF tag when APP1 carries one. `width` and
+/// `height` are the frame header, as stored; the decoded picture is turned
+/// upright.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JpegInfo {
     pub width: u32,
@@ -108,12 +110,27 @@ pub fn read_jpeg_info(bytes: &[u8]) -> Result<JpegInfo, CodecError> {
     parse(bytes, false).map(|parsed| parsed.info)
 }
 
+/// Decode the picture and turn it upright by its EXIF orientation.
 pub(crate) fn decode_jpeg(bytes: &[u8]) -> Result<StillImage, CodecError> {
     let parsed = parse(bytes, true)?;
-    parsed.image.ok_or(CodecError::Malformed {
+    let mut image = parsed.image.ok_or(CodecError::Malformed {
         at_bit: 0,
         what: "scan",
-    })
+    })?;
+    if let Some(tag) = parsed.info.orientation {
+        let channels = if image.color == ColorType::Gray { 1 } else { 3 };
+        let (width, height, samples) = upright(
+            Orientation::from_tag(u32::from(tag)),
+            image.width,
+            image.height,
+            channels,
+            &image.samples,
+        )?;
+        image.width = width;
+        image.height = height;
+        image.samples = samples;
+    }
+    Ok(image)
 }
 
 struct Parsed {

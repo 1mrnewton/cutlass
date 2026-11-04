@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+mod planar;
 pub mod video;
 
 use std::sync::Arc;
@@ -416,6 +417,21 @@ impl EncodeFactory {
                 Ok(encoder) => return Ok(encoder),
                 Err(CodecError::Unsupported { .. }) => {}
                 Err(err) => return Err(err),
+            }
+        }
+        // A picture codec with only a 4:2:0 encoder, as on a host with no
+        // platform encoder, takes frames through the adapter.
+        if params.width > 0 && params.height > 0 {
+            for opener in &self.video_openers {
+                if opener.id != params.codec {
+                    continue;
+                }
+                matched = true;
+                match (opener.open)(params) {
+                    Ok(encoder) => return Ok(Box::new(planar::Planar::new(encoder))),
+                    Err(CodecError::Unsupported { .. }) => {}
+                    Err(err) => return Err(err),
+                }
             }
         }
         Err(CodecError::Unsupported {

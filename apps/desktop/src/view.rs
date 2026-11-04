@@ -8,6 +8,7 @@ use egui::{
     Ui, Vec2,
 };
 
+use cutlass_editor::ruler_ticks;
 use cutlass_model::{FrameRate, Micros, SegmentId};
 use cutlass_session::TrimEdge;
 
@@ -19,6 +20,10 @@ use crate::widgets;
 
 const CARD_W: f32 = 144.0;
 const CARD_H: f32 = 96.0;
+/// The name row under a card's picture.
+const CARD_PLUS_RADIUS: f32 = 11.0;
+const CARD_PLUS_INSET: f32 = 6.0;
+const CARD_LABEL: f32 = 24.0;
 const CARD_GAP: f32 = 8.0;
 const TRIM_EDGE: f32 = 6.0;
 
@@ -105,6 +110,14 @@ impl Shelf {
     }
 }
 
+/// The open library menu: where it opens, and whether it is for the
+/// picked cards or for the space between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LibraryMenu {
+    at: Pos2,
+    on_card: bool,
+}
+
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     export_open: bool,
@@ -133,6 +146,11 @@ pub struct ViewState {
     dialogs: Dialogs,
     library_query: String,
     library_shelf: Shelf,
+    /// The library cards picked, by card id, and the card a Shift-click
+    /// range starts from.
+    library_picked: Vec<String>,
+    library_anchor: Option<String>,
+    library_menu: Option<LibraryMenu>,
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
@@ -170,6 +188,9 @@ impl Default for ViewState {
             dialogs: Dialogs::new(),
             library_query: String::new(),
             library_shelf: Shelf::Media,
+            library_picked: Vec::new(),
+            library_anchor: None,
+            library_menu: None,
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
@@ -216,7 +237,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             export_dialog(shell, ui, view, parent);
         }
         shortcuts(shell, ui);
-        if shell.playing() {
+        if shell.playing() || shell.preview_pending() {
             ui.ctx().request_repaint();
         }
     }
@@ -296,9 +317,7 @@ fn projects_home(
                 }
             });
         });
-    if !shell.notice().is_empty() {
-        paint_notice(ui, bar.center().x, bar.bottom() + 12.0, shell.notice());
-    }
+    paint_notice(shell, ui, bar.center().x, bar.bottom() + 12.0);
 }
 
 fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
@@ -645,7 +664,7 @@ fn regions(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, row: Rect, size
     shell.chrome.inspector = true;
 }
 
-fn library_panel(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+fn library_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let rail = Rect::from_min_size(rect.min, Vec2::new(tokens::RAIL_WIDTH, rect.height()));
     shelf_rail(ui, view, rail);
     let hairline = Rect::from_min_size(
@@ -698,7 +717,7 @@ fn shelf_button(ui: &mut Ui, shelf: Shelf, active: bool) -> egui::Response {
     response.on_hover_text(shelf.label())
 }
 
-fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     let mut column = ui.new_child(egui::UiBuilder::new().max_rect(rect));
     column.add(
         egui::TextEdit::singleline(&mut view.library_query)
@@ -710,17 +729,32 @@ fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
     );
     column.add_space(12.0);
     let grid = column.available_rect_before_wrap();
-    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let shelf = view.library_shelf;
+    let bin = matches!(shelf, Shelf::Media | Shelf::Audio);
+    // The space between and below the cards. Cards sit above it, so a
+    // click here missed every card.
+    let back = column.interact(grid, column.scope_id().with("library-back"), Sense::click());
+    if back.clicked() {
+        view.library_picked.clear();
+        view.library_anchor = None;
+    }
+    if bin
+        && back.secondary_clicked()
+        && let Some(at) = back.interact_pointer_pos()
+    {
+        view.library_menu = Some(LibraryMenu { at, on_card: false });
+    }
+    let mut grid_ui = column.new_child(egui::UiBuilder::new().max_rect(grid));
     let query = view.library_query.clone();
     ScrollArea::vertical()
         .id_salt("library-cards")
         .auto_shrink([false, false])
         .show(&mut grid_ui, |ui| {
-            let cards = shell
+            let mut cards = shell
                 .draft()
                 .map(|draft| bin_cards(draft, shelf, &query))
                 .unwrap_or_default();
+            fill_looks(shell, ui.ctx(), &mut cards);
             if cards.is_empty() {
                 let message = if !query.trim().is_empty() {
                     "No matches."
@@ -735,66 +769,296 @@ fn asset_column(shell: &Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
                         .size(tokens::TYPE_SIZE)
                         .color(tokens::MUTED),
                 );
-            } else {
-                card_grid(ui, &cards);
+            } else if let Some(id) = card_grid(ui, view, &cards, bin)
+                && let Err(error) = shell.add_medium(&id)
+            {
+                shell.set_notice(error.to_string());
             }
         });
+    library_menu(shell, &column, view);
 }
 
-fn card_grid(ui: &mut Ui, cards: &[BinCard]) {
+/// The library menu, while open. No row is built yet, so a pick says so.
+fn library_menu(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
+    let Some(menu) = view.library_menu else {
+        return;
+    };
+    if let Some(pos) = secondary_click(ui)
+        && pos != menu.at
+    {
+        view.library_menu = None;
+        return;
+    }
+    let entries = if menu.on_card {
+        crate::menu::LIBRARY_CARD
+    } else {
+        crate::menu::LIBRARY_EMPTY
+    };
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("library-menu"),
+        menu.at,
+        entries,
+        &|_| true,
+    );
+    if let Some(item) = shown.picked {
+        view.library_menu = None;
+        shell.set_notice(format!("{} is not built yet", item.label));
+    } else if shown.dismissed {
+        view.library_menu = None;
+    }
+}
+
+/// Pick `id` the way a click does: alone, toggled with Command, or the run
+/// from the anchor with Shift.
+fn pick_card(view: &mut ViewState, cards: &[BinCard], id: &str, modifiers: egui::Modifiers) {
+    let toggle = modifiers.command || modifiers.ctrl;
+    let index = |wanted: &str| cards.iter().position(|card| card.id == wanted);
+    if modifiers.shift
+        && let Some(from) = view.library_anchor.as_deref().and_then(index)
+        && let Some(to) = index(id)
+    {
+        let run = cards[from.min(to)..=from.max(to)]
+            .iter()
+            .map(|card| card.id.clone());
+        if toggle {
+            for card in run {
+                if !view.library_picked.contains(&card) {
+                    view.library_picked.push(card);
+                }
+            }
+        } else {
+            view.library_picked = run.collect();
+        }
+        return;
+    }
+    if toggle {
+        if let Some(at) = view.library_picked.iter().position(|card| card == id) {
+            view.library_picked.remove(at);
+        } else {
+            view.library_picked.push(id.to_owned());
+        }
+    } else {
+        view.library_picked = vec![id.to_owned()];
+    }
+    view.library_anchor = Some(id.to_owned());
+}
+
+/// Lay out the cards. Returns the card whose plus was pressed.
+fn card_grid(ui: &mut Ui, view: &mut ViewState, cards: &[BinCard], bin: bool) -> Option<String> {
+    let mut added = None;
     let width = ui.available_width().max(CARD_W);
     ui.set_min_width(width);
     let cols = ((width + CARD_GAP) / (CARD_W + CARD_GAP)).floor().max(1.0) as usize;
     let cols = cols.max(1);
     let rows = cards.len().div_ceil(cols);
-    let height = rows as f32 * (CARD_H + CARD_GAP);
+    let pitch = CARD_H + CARD_LABEL + CARD_GAP;
+    let height = rows as f32 * pitch;
     let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     for (index, card) in cards.iter().enumerate() {
         let origin = area.min
             + Vec2::new(
                 (index % cols) as f32 * (CARD_W + CARD_GAP),
-                (index / cols) as f32 * (CARD_H + CARD_GAP),
+                (index / cols) as f32 * pitch,
             );
-        let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H));
-        paint_bin_card(ui, rect, card);
-        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::drag());
+        let rect = Rect::from_min_size(origin, Vec2::new(CARD_W, CARD_H + CARD_LABEL));
+        paint_bin_card(ui, rect, card, view.library_picked.contains(&card.id));
+        // A click picks the card. A drag only starts once the pointer moves.
+        let response = ui.interact(rect, ui.scope_id().with(&card.id), Sense::click_and_drag());
         response.dnd_set_drag_payload(LibraryDrop {
             material_id: card.id.clone(),
         });
+        if response.clicked() {
+            let modifiers = ui.input(|input| input.modifiers);
+            pick_card(view, cards, &card.id, modifiers);
+        }
+        if response.secondary_clicked() {
+            if !view.library_picked.contains(&card.id) {
+                view.library_picked = vec![card.id.clone()];
+                view.library_anchor = Some(card.id.clone());
+            }
+            if bin && let Some(at) = response.interact_pointer_pos() {
+                view.library_menu = Some(LibraryMenu { at, on_card: true });
+            }
+        }
         response.on_hover_text(&card.name);
+        if bin && ui.rect_contains_pointer(rect) && card_plus(ui, rect, &card.id) {
+            added = Some(card.id.clone());
+        }
+    }
+    added
+}
+
+/// The round plus at the bottom right of a hovered card's picture. True when pressed.
+fn card_plus(ui: &mut Ui, card: Rect, id: &str) -> bool {
+    let center = Pos2::new(
+        card.right() - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+        card.top() + CARD_H - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+    );
+    let rect = Rect::from_center_size(center, Vec2::splat(CARD_PLUS_RADIUS * 2.0));
+    let response = ui
+        .interact(rect, ui.scope_id().with(("card-plus", id)), Sense::click())
+        .on_hover_text("Add to timeline");
+    let (fill, ink) = if response.hovered() {
+        (Color32::WHITE, tokens::PANEL)
+    } else {
+        (Color32::from_black_alpha(184), Color32::WHITE)
+    };
+    let painter = ui.painter();
+    painter.circle_filled(center, CARD_PLUS_RADIUS, fill);
+    let arm = 4.5;
+    let stroke = egui::Stroke::new(1.5, ink);
+    painter.line_segment([center - Vec2::X * arm, center + Vec2::X * arm], stroke);
+    painter.line_segment([center - Vec2::Y * arm, center + Vec2::Y * arm], stroke);
+    response.clicked()
+}
+
+/// A card: its picture, then its name under it.
+fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard, picked: bool) {
+    let picture = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_H));
+    let painter = ui.painter().with_clip_rect(rect);
+    paint_card_face(&painter, picture, card);
+    if picked {
+        painter.rect_stroke(
+            picture,
+            CornerRadius::same(CLIP_RADIUS),
+            egui::Stroke::new(tokens::STROKE, tokens::SELECTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let font = FontId::proportional(12.0);
+    let name = middle_ellipsis(ui.ctx(), &card.name, &font, rect.width() - 4.0);
+    painter.text(
+        Pos2::new(rect.left() + 2.0, picture.bottom() + 6.0),
+        Align2::LEFT_TOP,
+        name,
+        font,
+        tokens::MUTED,
+    );
+}
+
+/// `text` cut in the middle with an ellipsis until it fits `width`, the way
+/// a file name keeps its start and its extension.
+fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -> String {
+    let fits = |text: &str| {
+        ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(text.to_owned(), font.clone(), tokens::TEXT)
+                .size()
+                .x
+        }) <= width
+    };
+    if fits(text) {
+        return text.to_owned();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = chars.len();
+    while keep > 1 {
+        keep -= 1;
+        let head = keep.div_ceil(2);
+        let tail = keep / 2;
+        let cut: String = chars[..head]
+            .iter()
+            .chain(std::iter::once(&'…'))
+            .chain(&chars[chars.len() - tail..])
+            .collect();
+        if fits(&cut) {
+            return cut;
+        }
+    }
+    "…".to_owned()
+}
+
+/// Read each card's picture or sound from the shell, asking for what is
+/// missing.
+fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
+    with_film_textures(ctx, |textures| {
+        for card in cards.iter_mut() {
+            match card.look {
+                CardLook::Picture(_) => {
+                    if let Some((key, Some(thumb))) = shell.poster(&card.id) {
+                        let texture = film_texture(ctx, textures, key, &thumb);
+                        card.look = CardLook::Picture(Some((texture, [thumb.width, thumb.height])));
+                    }
+                }
+                CardLook::Sound(_) => {
+                    if let Some(levels) = shell.material_wave(&card.id, CARD_W as usize) {
+                        card.look = CardLook::Sound(levels);
+                    }
+                }
+                CardLook::Swatch => {}
+            }
+        }
+    });
+}
+
+/// The card's picture: the file's first frame cut to fill, its sound, or a
+/// color, with "Added" at the top left once on the timeline and the length
+/// at the top right.
+fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
+    let radius = CornerRadius::same(CLIP_RADIUS);
+    match &card.look {
+        CardLook::Swatch => {
+            painter.rect_filled(rect, radius, swatch_color(&card.name));
+        }
+        CardLook::Picture(None) => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+        }
+        CardLook::Picture(Some((texture, [width, height]))) => {
+            let uv = cover_uv(rect.size(), *width as f32, *height as f32);
+            painter.add(
+                egui::epaint::RectShape::filled(rect, radius, Color32::WHITE)
+                    .with_texture(*texture, uv),
+            );
+        }
+        CardLook::Sound(levels) => {
+            painter.rect_filled(rect, radius, tokens::CLIP_AUDIO);
+            let wave = crate::shell::ClipWave {
+                first: 0,
+                levels: levels.clone(),
+                gains: Vec::new(),
+                under_picture: false,
+                muted: false,
+            };
+            paint_wave(painter, &wave, rect.left(), rect, rect, WaveColors::AUDIO);
+        }
+    }
+    let small = FontId::proportional(11.0);
+    if card.on_timeline {
+        let galley = painter.layout_no_wrap("Added".to_owned(), small.clone(), Color32::WHITE);
+        let chip = Rect::from_min_size(
+            rect.left_top() + Vec2::new(6.0, 6.0),
+            galley.size() + Vec2::new(10.0, 4.0),
+        );
+        painter.rect_filled(chip, CornerRadius::same(4), Color32::from_black_alpha(170));
+        painter.galley(chip.min + Vec2::new(5.0, 2.0), galley, Color32::WHITE);
+    }
+    if !card.meta.is_empty() {
+        let corner = rect.right_top() + Vec2::new(-8.0, 8.0);
+        painter.text(
+            corner + Vec2::new(0.0, 1.0),
+            Align2::RIGHT_TOP,
+            &card.meta,
+            small.clone(),
+            Color32::from_black_alpha(160),
+        );
+        painter.text(corner, Align2::RIGHT_TOP, &card.meta, small, Color32::WHITE);
     }
 }
 
-fn paint_bin_card(ui: &Ui, rect: Rect, card: &BinCard) {
-    let painter = ui.painter().with_clip_rect(rect);
-    paint_card_face(&painter, rect, card);
-}
-
-fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
-    let swatch = swatch_color(&card.name);
-    painter.rect_filled(rect, CornerRadius::same(12), swatch);
-    painter.text(
-        rect.left_bottom() + Vec2::new(8.0, -22.0),
-        Align2::LEFT_BOTTOM,
-        &card.name,
-        FontId::proportional(12.0),
-        Color32::WHITE,
-    );
-    painter.text(
-        rect.left_bottom() + Vec2::new(8.0, -8.0),
-        Align2::LEFT_BOTTOM,
-        &card.meta,
-        FontId::proportional(11.0),
-        Color32::from_white_alpha(220),
-    );
-    if card.on_timeline {
-        painter.text(
-            rect.left_top() + Vec2::new(8.0, 8.0),
-            Align2::LEFT_TOP,
-            "On timeline",
-            FontId::proportional(10.0),
-            Color32::WHITE,
-        );
+/// The part of a `width` by `height` picture that fills `size` without
+/// stretching: the middle, cut at the sides or the top and bottom.
+fn cover_uv(size: Vec2, width: f32, height: f32) -> Rect {
+    if width <= 0.0 || height <= 0.0 || size.x <= 0.0 || size.y <= 0.0 {
+        return Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    }
+    let shown = (size.x / size.y) / (width / height);
+    if shown < 1.0 {
+        let cut = (1.0 - shown) / 2.0;
+        Rect::from_min_max(Pos2::new(cut, 0.0), Pos2::new(1.0 - cut, 1.0))
+    } else {
+        let cut = (1.0 - 1.0 / shown) / 2.0;
+        Rect::from_min_max(Pos2::new(0.0, cut), Pos2::new(1.0, 1.0 - cut))
     }
 }
 
@@ -803,6 +1067,18 @@ struct BinCard {
     name: String,
     meta: String,
     on_timeline: bool,
+    look: CardLook,
+}
+
+/// What fills a library card's picture.
+#[derive(Clone, Debug, PartialEq)]
+enum CardLook {
+    /// A color from the name, for a card with no file.
+    Swatch,
+    /// A file's first frame, and its size in pixels, once read.
+    Picture(Option<(egui::TextureId, [u32; 2])>),
+    /// A sound file's levels, one per point across the card, once read.
+    Sound(Vec<f32>),
 }
 
 #[derive(Clone, Debug)]
@@ -829,6 +1105,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     video.id.as_str(),
                     &video.path,
                     video.duration.0,
+                    CardLook::Picture(None),
                 );
             }
         }
@@ -841,6 +1118,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     audio.id.as_str(),
                     &audio.path,
                     audio.duration.0,
+                    CardLook::Sound(Vec::new()),
                 );
             }
         }
@@ -854,6 +1132,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     name: offer.name.to_owned(),
                     meta: card_meta(offer.duration),
                     on_timeline: false,
+                    look: CardLook::Swatch,
                 });
             }
         }
@@ -874,6 +1153,7 @@ fn push_card(
     id: &str,
     path: &str,
     duration: i64,
+    look: CardLook,
 ) {
     let name = file_label(path);
     if !query.is_empty() && !name.to_lowercase().contains(query) {
@@ -882,9 +1162,21 @@ fn push_card(
     cards.push(BinCard {
         id: id.to_owned(),
         name,
-        meta: card_meta(duration),
+        meta: card_clock(duration),
         on_timeline: used.contains(id),
+        look,
     });
+}
+
+/// A media card's length: minutes and seconds, with hours when it has them.
+fn card_clock(micros: i64) -> String {
+    let seconds = micros.max(0) / 1_000_000;
+    let (hours, minutes, seconds) = (seconds / 3_600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 fn card_meta(micros: i64) -> String {
@@ -925,10 +1217,23 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
         rect.min + Vec2::new(16.0, 16.0),
         Pos2::new(rect.max.x - 16.0, transport.min.y - 8.0),
     );
-    ui.painter()
-        .rect_filled(frame, CornerRadius::same(12), tokens::GAP);
-    match shell.preview_bytes() {
-        Ok(picture) => {
+    let shown = match shell.preview_texture() {
+        Ok(Some((id, [width, height]))) => {
+            let fitted = fit_texture(frame, Vec2::new(width as f32, height as f32));
+            paint_canvas(ui, id, fitted, shell.preview_black());
+            Ok(())
+        }
+        Ok(None) => Err(None),
+        Err(error) => Err(Some(error)),
+    };
+    let fallback = match shown {
+        Ok(()) => None,
+        Err(Some(error)) => Some(Err(error)),
+        Err(None) => Some(shell.preview_bytes()),
+    };
+    match fallback {
+        None => {}
+        Some(Ok(picture)) => {
             if let Some(image) = raster(&picture) {
                 let texture = if let Some(texture) = &mut view.preview {
                     texture.set(image, egui::TextureOptions::LINEAR);
@@ -941,34 +1246,36 @@ fn preview_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rec
                     ))
                 };
                 let fitted = fit_texture(frame, texture.size_vec2());
-                ui.painter().image(
-                    texture.id(),
-                    fitted,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                paint_canvas(ui, texture.id(), fitted, shell.preview_black());
             }
         }
-        Err(error) => {
-            if shell.draft().is_some() {
-                ui.painter().text(
-                    frame.center(),
-                    Align2::CENTER_CENTER,
-                    error.to_string(),
-                    FontId::proportional(tokens::TYPE_SIZE),
-                    tokens::MUTED,
-                );
-            }
+        Some(Err(error)) if shell.draft().is_some() => {
+            ui.painter().text(
+                frame.center(),
+                Align2::CENTER_CENTER,
+                error.to_string(),
+                FontId::proportional(tokens::TYPE_SIZE),
+                tokens::MUTED,
+            );
         }
+        Some(Err(_)) => {}
     }
-    ui.painter().text(
-        frame.left_top() + Vec2::new(12.0, 12.0),
-        Align2::LEFT_TOP,
-        shell.timecode(),
-        FontId::monospace(11.0),
-        tokens::TEXT,
-    );
     transport_bar(shell, ui, transport);
+}
+
+/// The preview canvas at `rect`, over black when `black` is on. Only the
+/// canvas gets that background; the area around it stays unfilled.
+fn paint_canvas(ui: &Ui, texture: egui::TextureId, rect: Rect, black: bool) {
+    if black {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    }
+    ui.painter().image(
+        texture,
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
@@ -1006,6 +1313,7 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         Pos2::new(rect.right() - 28.0, rect.center().y),
         Vec2::splat(32.0),
     );
+    background_toggle(shell, ui, still.translate(Vec2::new(-40.0, 0.0)));
     let still_response = ui.interact(still, ui.scope_id().with("still"), Sense::click());
     if still_response.clicked() {
         shell.unavailable("still");
@@ -1016,6 +1324,49 @@ fn transport_bar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
     let _ = icons::paint(ui.painter(), camera, "camera", tokens::MUTED);
     still_response.on_hover_text("Export still frame");
     shell.chrome.transport = true;
+}
+
+/// The button that shows the preview canvas over black or clear. Its mark
+/// is a filled square for black and a two-by-two checker for clear.
+fn background_toggle(shell: &mut Shell, ui: &Ui, button: Rect) {
+    let response = ui.interact(button, ui.scope_id().with("background"), Sense::click());
+    if response.clicked() {
+        shell.toggle_preview_background();
+    }
+    ui.painter()
+        .circle_filled(button.center(), 16.0, tokens::ICON_BUTTON);
+    let mark = Rect::from_center_size(button.center(), Vec2::splat(12.0));
+    if shell.preview_black() {
+        ui.painter()
+            .rect_filled(mark, CornerRadius::same(2), Color32::BLACK);
+        ui.painter().rect_stroke(
+            mark,
+            CornerRadius::same(2),
+            egui::Stroke::new(1.0, tokens::MUTED),
+            egui::StrokeKind::Inside,
+        );
+    } else {
+        let half = mark.width() / 2.0;
+        for (column, row) in [(0.0, 0.0), (1.0, 1.0)] {
+            let cell = Rect::from_min_size(
+                mark.min + Vec2::new(column * half, row * half),
+                Vec2::splat(half),
+            );
+            ui.painter()
+                .rect_filled(cell, CornerRadius::ZERO, tokens::MUTED);
+        }
+        ui.painter().rect_stroke(
+            mark,
+            CornerRadius::ZERO,
+            egui::Stroke::new(1.0, tokens::MUTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_text(if shell.preview_black() {
+        "Show the canvas clear"
+    } else {
+        "Show the canvas on black"
+    });
 }
 
 fn duration_label(shell: &Shell) -> String {
@@ -1456,14 +1807,12 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
     shell.chrome.timeline = true;
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), tokens::TOOLBAR_HEIGHT));
     paint_toolbar(shell, ui, toolbar);
-    if !shell.notice().is_empty() {
-        paint_notice(
-            ui,
-            toolbar.center().x,
-            toolbar.bottom() + tokens::RULER_HEIGHT + 8.0,
-            shell.notice(),
-        );
-    }
+    paint_notice(
+        shell,
+        ui,
+        toolbar.center().x,
+        toolbar.bottom() + tokens::RULER_HEIGHT + 8.0,
+    );
     ui.painter().hline(
         toolbar.x_range(),
         toolbar.bottom(),
@@ -1689,23 +2038,49 @@ const TOOLS: &[Option<(&str, &str)>] = &[
     Some(("zoomIn", "Zoom in")),
 ];
 
-fn paint_notice(ui: &Ui, center_x: f32, top: f32, notice: &str) {
+/// The notice as a toast that fades in, holds, then fades out and goes.
+fn paint_notice(shell: &mut Shell, ui: &Ui, center_x: f32, top: f32) {
+    shell.expire_notice();
+    if shell.notice().is_empty() {
+        return;
+    }
+    let age = shell.notice_age();
+    let alpha = notice_alpha(age);
+    let left = crate::shell::NOTICE_SHOWN.saturating_sub(age);
+    if alpha < 1.0 {
+        ui.ctx().request_repaint();
+    } else {
+        ui.ctx()
+            .request_repaint_after(left.saturating_sub(crate::shell::NOTICE_FADE));
+    }
+    let ink = Color32::from_rgb(0x14, 0x14, 0x14).gamma_multiply(alpha);
     let galley = ui.ctx().fonts_mut(|fonts| {
-        fonts.layout_no_wrap(
-            notice.to_owned(),
-            FontId::proportional(12.0),
-            Color32::from_rgb(0x14, 0x14, 0x14),
-        )
+        fonts.layout_no_wrap(shell.notice().to_owned(), FontId::proportional(12.0), ink)
     });
     let size = galley.size() + Vec2::new(24.0, 12.0);
     let rect = Rect::from_min_size(Pos2::new(center_x - size.x / 2.0, top), size);
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(99), Color32::WHITE);
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::same(99),
+        Color32::WHITE.gamma_multiply(alpha),
+    );
     ui.painter().galley(
         rect.left_center() + Vec2::new(12.0, -galley.size().y / 2.0),
         galley,
-        Color32::from_rgb(0x14, 0x14, 0x14),
+        ink,
     );
+}
+
+/// How opaque a notice is `age` after it was set: a quick fade in, a hold,
+/// and [`crate::shell::NOTICE_FADE`] out at the end.
+fn notice_alpha(age: std::time::Duration) -> f32 {
+    const FADE_IN: f32 = 0.04;
+    let age = age.as_secs_f32();
+    let shown = crate::shell::NOTICE_SHOWN.as_secs_f32();
+    let fade = crate::shell::NOTICE_FADE.as_secs_f32();
+    let rising = if age < FADE_IN { age / FADE_IN } else { 1.0 };
+    let falling = ((shown - age) / fade).clamp(0.0, 1.0);
+    rising.min(falling)
 }
 
 fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
@@ -1726,8 +2101,11 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     );
     let snap_at = shell.snap_line();
     let rows = shell.lanes();
-    let flags: Vec<bool> = rows.iter().map(|lane| lane.main).collect();
-    let boxes = lane_rects(flags, lane_area);
+    let kinds: Vec<(bool, bool)> = rows
+        .iter()
+        .map(|lane| (lane.main, is_audio(lane)))
+        .collect();
+    let boxes = lane_rects(kinds, lane_area);
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -1742,6 +2120,7 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
+    shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
         lanes_left,
@@ -1880,96 +2259,46 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui) {
         shell.close_clip_menu();
         return;
     }
-    let width = 132.0;
-    let row_height = 28.0;
-    let mut labels = vec!["Copy", "Cut", "Delete", "Paste"];
-    if shell.extract_audio_enabled() {
-        labels.insert(0, "Extract audio");
-    }
-    if shell.split_scenes_enabled() {
-        labels.insert(0, "Split scenes");
-    }
-    if shell.transcribe_enabled() {
-        labels.insert(0, "Transcribe");
-    }
-    if shell.crop_enabled() {
-        labels.insert(0, "Crop");
-    }
-    if shell.rotate_enabled() {
-        labels.insert(0, "Rotate");
-    }
-    if shell.mirror_enabled() {
-        labels.insert(0, "Mirror");
-    }
-    if shell.reverse_enabled() {
-        labels.insert(0, "Reverse");
-    }
-    if shell.freeze_enabled() {
-        labels.insert(0, "Freeze");
-    }
-    let rect = Rect::from_min_size(
+    let Some(kind) = shell.selected_track_kind() else {
+        shell.close_clip_menu();
+        return;
+    };
+    let enabled = |id: &str| match id {
+        "edit-crop" => shell.crop_enabled(),
+        "split-scenes" => shell.split_scenes_enabled(),
+        "transcript" => shell.transcribe_enabled(),
+        "extract-audio" => shell.extract_audio_enabled(),
+        "flip" => shell.mirror_enabled(),
+        _ => true,
+    };
+    let shown = crate::menu::show(
+        ui.ctx(),
+        ui.scope_id().with("clip-menu"),
         Pos2::new(menu.x, menu.y),
-        Vec2::new(width, row_height * labels.len() as f32),
+        crate::menu::clip_entries(&kind),
+        &enabled,
     );
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(8), tokens::PANEL);
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(8),
-        egui::Stroke::new(1.0, tokens::LANE_LINE),
-        egui::StrokeKind::Inside,
-    );
-    let mut acted = false;
-    for (index, label) in labels.iter().enumerate() {
-        let item = Rect::from_min_size(
-            Pos2::new(rect.left(), rect.top() + index as f32 * row_height),
-            Vec2::new(width, row_height),
-        );
-        let response = ui.interact(
-            item,
-            ui.scope_id().with(("clip-menu", *label)),
-            Sense::click(),
-        );
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(item, CornerRadius::same(6), tokens::ICON_BUTTON);
-        }
-        ui.painter().text(
-            item.left_center() + Vec2::new(12.0, 0.0),
-            Align2::LEFT_CENTER,
-            *label,
-            FontId::proportional(12.0),
-            tokens::TEXT,
-        );
-        if response.clicked() {
-            let result = match *label {
-                "Copy" => shell.copy_selected(),
-                "Cut" => shell.cut_selected(),
-                "Paste" => shell.paste(),
-                "Freeze" => shell.toggle_freeze(),
-                "Reverse" => shell.toggle_reverse(),
-                "Mirror" => shell.toggle_mirror(),
-                "Rotate" => shell.turn_clockwise(),
-                "Crop" => shell.toggle_crop(),
-                "Transcribe" => shell.transcribe(),
-                "Split scenes" => shell.split_scenes(),
-                "Extract audio" => shell.extract_audio(),
-                _ => shell.remove_selected(),
-            };
-            if let Err(error) = result {
-                shell.set_notice(error.to_string());
+    if let Some(item) = shown.picked {
+        shell.close_clip_menu();
+        let result = match item.id {
+            _ if !item.built => {
+                shell.set_notice(format!("{} is not built yet", item.label));
+                Ok(())
             }
-            acted = true;
+            "copy" => shell.copy_selected(),
+            "cut" => shell.cut_selected(),
+            "delete" => shell.remove_selected(),
+            "edit-crop" => shell.toggle_crop(),
+            "split-scenes" => shell.split_scenes(),
+            "transcript" => shell.transcribe(),
+            "extract-audio" => shell.extract_audio(),
+            "flip" => shell.toggle_mirror(),
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            shell.set_notice(error.to_string());
         }
-    }
-    let outside = ui.input(|input| {
-        input.pointer.primary_clicked()
-            && input
-                .pointer
-                .interact_pos()
-                .is_none_or(|pos| !rect.contains(pos))
-    });
-    if acted || outside {
+    } else if shown.dismissed {
         shell.close_clip_menu();
     }
 }
@@ -1995,7 +2324,7 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     let Some(pos) = pos else {
         return;
     };
-    if !lane_area.contains(pos) {
+    if !lane_area.contains(pos) || over_menu(ui, pos) {
         return;
     }
     let pixels = if delta.x.abs() >= delta.y.abs() {
@@ -2004,6 +2333,13 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
         delta.y
     };
     shell.pan_pixels(-f64::from(pixels));
+}
+
+/// A right-click menu is open under `pos`, so a wheel there scrolls the menu.
+fn over_menu(ui: &Ui, pos: Pos2) -> bool {
+    ui.ctx()
+        .layer_id_at(pos)
+        .is_some_and(|layer| layer.order == egui::Order::Foreground)
 }
 
 /// A pinch, or a wheel with the zoom modifier, scales the lanes around the pointer.
@@ -2015,7 +2351,7 @@ fn zoom_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     let Some(pos) = pos else {
         return;
     };
-    if !lane_area.contains(pos) {
+    if !lane_area.contains(pos) || over_menu(ui, pos) {
         return;
     }
     let x = f64::from(pos.x - lane_area.left()).max(0.0);
@@ -2088,16 +2424,17 @@ fn lane_under(boxes: &[Rect], pos: Pos2) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn paint_library_ghost(shell: &Shell, ui: &Ui) {
+fn paint_library_ghost(shell: &mut Shell, ui: &Ui) {
     let Some(payload) = egui::DragAndDrop::payload::<LibraryDrop>(ui.ctx()) else {
         return;
     };
     let Some(pos) = ui.input(|input| input.pointer.interact_pos()) else {
         return;
     };
-    let Some(card) = ghost_card(shell, &payload.material_id) else {
+    let Some(mut card) = ghost_card(shell, &payload.material_id) else {
         return;
     };
+    fill_looks(shell, ui.ctx(), std::slice::from_mut(&mut card));
     let rect = Rect::from_center_size(pos, Vec2::new(CARD_W, CARD_H));
     let layer = egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("library-ghost"));
     paint_card_face(&ui.ctx().layer_painter(layer), rect, &card);
@@ -2113,6 +2450,7 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
             name: offer.name.to_owned(),
             meta: card_meta(offer.duration),
             on_timeline: false,
+            look: CardLook::Swatch,
         });
     }
     let draft = shell.draft()?;
@@ -2131,8 +2469,9 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
         return Some(BinCard {
             id: video.id.as_str().to_owned(),
             name: file_label(&video.path),
-            meta: card_meta(video.duration.0),
+            meta: card_clock(video.duration.0),
             on_timeline: used.contains(video.id.as_str()),
+            look: CardLook::Picture(None),
         });
     }
     let audio = draft
@@ -2143,8 +2482,9 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
     Some(BinCard {
         id: audio.id.as_str().to_owned(),
         name: file_label(&audio.path),
-        meta: card_meta(audio.duration.0),
+        meta: card_clock(audio.duration.0),
         on_timeline: used.contains(audio.id.as_str()),
+        look: CardLook::Sound(Vec::new()),
     })
 }
 
@@ -2236,6 +2576,8 @@ fn lane_x(lanes_left: f32, pixel_size: f64, origin: i64, time: i64) -> f32 {
     lanes_left + delta as f32
 }
 
+/// The ruler's ticks and labels across the lanes. Past the end of the cut,
+/// the ticks keep going.
 fn paint_ticks(
     ui: &Ui,
     ruler: Rect,
@@ -2248,150 +2590,38 @@ fn paint_ticks(
     if !pixel_size.is_finite() || pixel_size <= 0.0 {
         return;
     }
-    let grid = TickGrid {
-        ui,
-        ruler,
-        lanes_left,
-        pixel_size,
-        origin,
-        width: f64::from(ruler.right() - lanes_left),
-    };
-    if let Some(stride) = frame_stride(pixel_size, rate) {
-        paint_frame_ticks(&grid, rate, drop_frame, stride);
+    let width = f64::from(ruler.right() - lanes_left).max(0.0);
+    let span = (width / pixel_size).ceil();
+    if !span.is_finite() || span > i64::MAX as f64 {
         return;
     }
-    let step = second_step(pixel_size);
-    let origin = grid.origin as f64;
-    let mut time = if origin <= 0.0 {
-        0.0
-    } else {
-        (origin / step).floor() * step
-    };
-    if time < 0.0 {
-        time = 0.0;
-    }
-    while (time - origin) * pixel_size <= grid.width {
-        paint_major(&grid, time, second_label(time));
-        paint_minor(&grid, time, time + step / 2.0);
-        time += step;
-        if step <= 0.0 {
-            break;
-        }
-    }
-}
-
-struct TickGrid<'a> {
-    ui: &'a Ui,
-    ruler: Rect,
-    lanes_left: f32,
-    pixel_size: f64,
-    origin: i64,
-    width: f64,
-}
-
-/// One, two, or five frames, when that gap is wide enough to read. Otherwise the
-/// ruler stays on whole seconds.
-fn frame_stride(pixel_size: f64, rate: FrameRate) -> Option<i64> {
-    let frame = rate.frame_start(1)?;
-    let width = frame.0 as f64 * pixel_size;
-    if frame.0 <= 0 || !width.is_finite() || width <= 0.0 {
-        return None;
-    }
-    [1, 2, 5]
-        .into_iter()
-        .find(|stride| *stride as f64 * width >= 72.0)
-}
-
-fn paint_frame_ticks(grid: &TickGrid<'_>, rate: FrameRate, drop_frame: bool, stride: i64) {
-    let mut index = rate.frame_index(Micros(grid.origin.max(0))).unwrap_or(0);
-    if stride > 1 {
-        index -= index.rem_euclid(stride);
-    }
-    let origin = grid.origin as f64;
-    for _ in 0..10_000 {
-        let Some(start) = rate.frame_start(index) else {
-            return;
+    let from = Micros(origin.max(0));
+    let to = Micros(origin.saturating_add(span as i64));
+    let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+        Pos2::new(lanes_left, ruler.top()),
+        ruler.max,
+    ));
+    for tick in ruler_ticks(rate, drop_frame, pixel_size, from, to) {
+        let x = lane_x(lanes_left, pixel_size, origin, tick.time.0);
+        let height = if tick.major {
+            tokens::MAJOR_TICK
+        } else {
+            tokens::MAJOR_TICK / 2.0
         };
-        let time = start.0 as f64;
-        if (time - origin) * grid.pixel_size > grid.width {
-            return;
-        }
-        paint_major(grid, time, ruler_label(time, 1.0, rate, drop_frame));
-        let next = index.saturating_add(stride);
-        let Some(next_start) = rate.frame_start(next) else {
-            return;
-        };
-        if next <= index {
-            return;
-        }
-        let minor = (time + next_start.0 as f64) / 2.0;
-        paint_minor(grid, time, minor);
-        index = next;
-    }
-}
-
-fn second_step(pixel_size: f64) -> f64 {
-    const STEPS: [f64; 9] = [
-        1_000_000.0,
-        2_000_000.0,
-        5_000_000.0,
-        10_000_000.0,
-        30_000_000.0,
-        60_000_000.0,
-        300_000_000.0,
-        600_000_000.0,
-        1_800_000_000.0,
-    ];
-    STEPS
-        .into_iter()
-        .find(|step| step * pixel_size >= 72.0)
-        .unwrap_or(STEPS[STEPS.len() - 1])
-}
-
-fn paint_major(grid: &TickGrid<'_>, time: f64, label: String) {
-    let x = lane_x(
-        grid.lanes_left,
-        grid.pixel_size,
-        grid.origin,
-        time.round() as i64,
-    );
-    if x < grid.lanes_left - 1.0 || x > grid.ruler.right() + 1.0 {
-        return;
-    }
-    grid.ui.painter().vline(
-        x,
-        (grid.ruler.bottom() - 12.0)..=grid.ruler.bottom(),
-        egui::Stroke::new(1.0, tokens::MUTED),
-    );
-    grid.ui.painter().text(
-        Pos2::new(x + 4.0, grid.ruler.bottom() - 14.0),
-        Align2::LEFT_BOTTOM,
-        label,
-        FontId::proportional(10.0),
-        tokens::FAINT,
-    );
-}
-
-fn paint_minor(grid: &TickGrid<'_>, major: f64, minor: f64) {
-    let x = lane_x(
-        grid.lanes_left,
-        grid.pixel_size,
-        grid.origin,
-        major.round() as i64,
-    );
-    let minor_x = lane_x(
-        grid.lanes_left,
-        grid.pixel_size,
-        grid.origin,
-        minor.round() as i64,
-    );
-    let origin = grid.origin as f64;
-    if (minor - origin) * grid.pixel_size <= grid.width && minor_x - x >= 8.0 {
-        grid.ui.painter().vline(
-            minor_x,
-            (grid.ruler.bottom() - 6.0)..=grid.ruler.bottom(),
-            egui::Stroke::new(1.0, tokens::MUTED),
+        painter.vline(
+            x,
+            (ruler.bottom() - height)..=ruler.bottom(),
+            egui::Stroke::new(1.0, tokens::RULER_TICK),
         );
+        if let Some(label) = tick.label {
+            painter.text(
+                Pos2::new(x + 4.0, ruler.bottom() - tokens::MAJOR_TICK - 2.0),
+                Align2::LEFT_BOTTOM,
+                label,
+                FontId::monospace(11.0),
+                tokens::MUTED,
+            );
+        }
     }
 }
 
@@ -2405,57 +2635,8 @@ fn ruler_rate(shell: &Shell) -> (FrameRate, bool) {
     }
 }
 
-/// A step shorter than one second names the frame. A longer step stays on the second.
-fn ruler_label(micros: f64, step: f64, rate: FrameRate, drop_frame: bool) -> String {
-    if step < 1_000_000.0
-        && let Some(label) = sub_second_label(micros, rate, drop_frame)
-    {
-        return label;
-    }
-    second_label(micros)
-}
-
-fn sub_second_label(micros: f64, rate: FrameRate, drop_frame: bool) -> Option<String> {
-    if !micros.is_finite() || micros < 0.0 {
-        return None;
-    }
-    let rounded = micros.round();
-    if rounded > i64::MAX as f64 {
-        return None;
-    }
-    let label = rate.label(Micros(rounded as i64), drop_frame)?;
-    let separator = if label.drop_frame { ';' } else { ':' };
-    if label.hours > 0 {
-        Some(format!(
-            "{:02}:{:02}:{:02}{separator}{:02}",
-            label.hours, label.minutes, label.seconds, label.frames
-        ))
-    } else {
-        Some(format!(
-            "{:02}:{:02}{separator}{:02}",
-            label.minutes, label.seconds, label.frames
-        ))
-    }
-}
-
-fn second_label(micros: f64) -> String {
-    let total = (micros / 1_000_000.0).floor();
-    if !total.is_finite() || total < 0.0 {
-        return String::new();
-    }
-    let total = total as i64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
 fn paint_empty_main(ui: &Ui, area: Rect) {
-    let height = 64.0;
+    let height = row_height(true, false);
     let lane = Rect::from_min_size(
         Pos2::new(area.left(), area.center().y - height / 2.0),
         Vec2::new(area.width(), height),
@@ -2665,7 +2846,15 @@ fn clips_touching(
     for (lane, row) in rows.iter().zip(boxes.iter().copied()) {
         for clip in &lane.clips {
             let (start, duration) = preview_bounds(shell, clip);
-            let bounds = clip_bounds(shell, lane.main, start, duration, row, lanes_left);
+            let bounds = clip_bounds(
+                shell,
+                lane.main,
+                is_audio(lane),
+                start,
+                duration,
+                row,
+                lanes_left,
+            );
             if bounds.intersects(rect) {
                 ids.push(clip.id.clone());
             }
@@ -2677,12 +2866,13 @@ fn clips_touching(
 fn clip_bounds(
     shell: &Shell,
     main: bool,
+    audio: bool,
     start: Micros,
     duration: Micros,
     row: Rect,
     lanes_left: f32,
 ) -> Rect {
-    let (inset, height) = if main { (8.0, 48.0) } else { (6.0, 28.0) };
+    let height = clip_height(main, audio);
     let x = lane_x(
         lanes_left,
         shell.pixel_size(),
@@ -2690,7 +2880,39 @@ fn clip_bounds(
         start.0,
     );
     let width = (duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height))
+    Rect::from_min_size(
+        Pos2::new(x, row.top() + clip_inset(main)),
+        Vec2::new(width, height),
+    )
+}
+
+/// A clip's height: the main track is tallest, audio holds its waveform
+/// under a header, the rest are a single row.
+fn clip_height(main: bool, audio: bool) -> f32 {
+    if main {
+        tokens::MAIN_CLIP_HEIGHT
+    } else if audio {
+        tokens::AUDIO_CLIP_HEIGHT
+    } else {
+        tokens::CLIP_HEIGHT
+    }
+}
+
+fn is_audio(lane: &crate::shell::LaneView) -> bool {
+    lane.kind == cutlass_model::TrackType::Audio
+}
+
+fn clip_inset(main: bool) -> f32 {
+    if main {
+        tokens::MAIN_CLIP_INSET
+    } else {
+        tokens::CLIP_INSET
+    }
+}
+
+/// A lane row: its clips and the gap above and below them.
+fn row_height(main: bool, audio: bool) -> f32 {
+    clip_height(main, audio) + 2.0 * clip_inset(main)
 }
 
 fn paint_transitions(
@@ -2742,6 +2964,350 @@ fn paint_transitions(
     }
 }
 
+/// Thumbnail textures by the picture they show, kept in egui's memory.
+#[derive(Clone, Default)]
+struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::TextureHandle>);
+
+/// Textures kept before the oldest are let go.
+const FILM_TEXTURES: usize = 1500;
+
+/// Run `f` on the thumbnail textures, then keep them for the next frame.
+fn with_film_textures<R>(ctx: &egui::Context, f: impl FnOnce(&mut FilmTextures) -> R) -> R {
+    let store = egui::Id::NULL.with("film textures");
+    let mut textures = ctx
+        .data_mut(|data| data.get_temp::<FilmTextures>(store))
+        .unwrap_or_default();
+    if textures.0.len() > FILM_TEXTURES {
+        textures.0.clear();
+    }
+    let result = f(&mut textures);
+    ctx.data_mut(|data| data.insert_temp(store, textures));
+    result
+}
+
+/// The texture of `thumb`, loaded the first time it is shown.
+fn film_texture(
+    ctx: &egui::Context,
+    textures: &mut FilmTextures,
+    key: cutlass_engine::ThumbKey,
+    thumb: &cutlass_engine::Thumb,
+) -> egui::TextureId {
+    textures
+        .0
+        .entry(key)
+        .or_insert_with(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [thumb.width as usize, thumb.height as usize],
+                &thumb.rgba,
+            );
+            ctx.load_texture("film", image, egui::TextureOptions::LINEAR)
+        })
+        .id()
+}
+
+/// The clip's filmstrip in the `film` rows of `clip_rect`, over the tiles
+/// that meet `visible`. A tile without its picture yet keeps the clip color.
+fn paint_film(
+    shell: &mut Shell,
+    ui: &Ui,
+    id: &SegmentId,
+    clip_rect: Rect,
+    film: Rect,
+    visible: Rect,
+) {
+    let span =
+        f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
+    let cells = shell.film(
+        id,
+        f64::from(clip_rect.width()),
+        f64::from(film.height()),
+        span,
+    );
+    if cells.is_empty() {
+        return;
+    }
+    with_film_textures(ui.ctx(), |textures| {
+        // Inside the clip's edge, rounded where a picture meets a corner.
+        let inner = clip_rect.shrink(1.0);
+        let radius = CLIP_RADIUS - 1;
+        let painter = ui.painter().with_clip_rect(visible);
+        for cell in cells {
+            let Some(thumb) = cell.thumb else {
+                continue;
+            };
+            let texture = film_texture(ui.ctx(), textures, cell.key, &thumb);
+            let full = film.height() * thumb.width as f32 / thumb.height as f32;
+            let tile = Rect::from_min_size(
+                Pos2::new(clip_rect.left() + cell.tile.left as f32, film.top()),
+                Vec2::new(cell.tile.width as f32, film.height()),
+            );
+            let drawn = tile.intersect(inner).intersect(film);
+            if drawn.width() <= 0.0 || drawn.height() <= 0.0 {
+                continue;
+            }
+            let uv = Rect::from_min_max(
+                Pos2::new(
+                    (drawn.left() - tile.left()) / full,
+                    (drawn.top() - film.top()) / film.height(),
+                ),
+                Pos2::new(
+                    ((drawn.right() - tile.left()) / full).min(1.0),
+                    (drawn.bottom() - film.top()) / film.height(),
+                ),
+            );
+            let at = |a: f32, b: f32| (a - b).abs() < 0.5;
+            let corner = |side: bool, end: bool| if side && end { radius } else { 0 };
+            let (left, right) = (
+                at(drawn.left(), inner.left()),
+                at(drawn.right(), inner.right()),
+            );
+            let (top, bottom) = (
+                at(drawn.top(), inner.top()),
+                at(drawn.bottom(), inner.bottom()),
+            );
+            let corners = CornerRadius {
+                nw: corner(left, top),
+                ne: corner(right, top),
+                sw: corner(left, bottom),
+                se: corner(right, bottom),
+            };
+            painter.add(
+                egui::epaint::RectShape::filled(drawn, corners, Color32::from_gray(210))
+                    .with_texture(texture, uv),
+            );
+        }
+    });
+}
+
+/// The corner radius of a clip.
+const CLIP_RADIUS: u8 = 7;
+
+/// The lowest a bar at `x` reaches in `band`, which shares the clip's
+/// sides and bottom: the bottom, raised inside the rounded corners.
+fn corner_floor(band: Rect, x: f32) -> f32 {
+    let radius = f32::from(CLIP_RADIUS);
+    let inset = (x - band.left()).min(band.right() - x);
+    if inset >= radius {
+        return band.bottom();
+    }
+    let across = radius - inset.max(0.0);
+    band.bottom() - (radius - (radius * radius - across * across).max(0.0).sqrt())
+}
+
+/// Waveform bars are one point wide, one every two points.
+const BAR_PITCH: f32 = 2.0;
+/// The quietest level a bar shows, in decibels below full scale.
+const WAVE_FLOOR_DB: f32 = 48.0;
+/// A bar this high in the band wears an orange cap.
+const WAVE_LOUD: f32 = 0.9;
+/// A level this close to full scale clips, and its bar wears a red tip.
+const WAVE_CLIPPED: f32 = 0.999;
+
+/// How much of the band a level fills: decibels from the floor up to full
+/// scale, so speech sits high in the band.
+fn wave_height(level: f32) -> f32 {
+    if level <= 0.0 || !level.is_finite() {
+        return 0.0;
+    }
+    ((20.0 * level.log10() + WAVE_FLOOR_DB) / WAVE_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// A waveform's bars and volume line, and the clip fill it sits on.
+#[derive(Clone, Copy)]
+struct WaveColors {
+    bar: Color32,
+    line: Color32,
+    fill: Color32,
+}
+
+impl WaveColors {
+    const VIDEO: Self = Self {
+        bar: tokens::CLIP_VIDEO_BAR,
+        line: tokens::CLIP_VIDEO_LINE,
+        fill: tokens::CLIP_VIDEO,
+    };
+    const AUDIO: Self = Self {
+        bar: tokens::CLIP_AUDIO_BAR,
+        line: tokens::CLIP_AUDIO_LINE,
+        fill: tokens::CLIP_AUDIO,
+    };
+}
+
+/// `from` moved `t` of the way to `to`, channel by channel.
+fn lerp(from: Color32, to: Color32, t: f32) -> Color32 {
+    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(
+        mix(from.r(), to.r()),
+        mix(from.g(), to.g()),
+        mix(from.b(), to.b()),
+        mix(from.a(), to.a()),
+    )
+}
+
+/// Where the volume line sits in the band for a gain: 100% at 45%,
+/// +20 dB, the most a clip takes, at the top, and quieter gains down the
+/// same decibel scale as the bars.
+fn volume_height(gain: f32) -> f32 {
+    const UNITY: f32 = 0.45;
+    if gain <= 0.0 || !gain.is_finite() {
+        return 0.0;
+    }
+    let db = 20.0 * gain.log10();
+    if db >= 0.0 {
+        UNITY + (1.0 - UNITY) * (db / 20.0).min(1.0)
+    } else {
+        UNITY * (1.0 + db / WAVE_FLOOR_DB).max(0.0)
+    }
+}
+
+/// The waveform as bars rising from the bottom of `band`, each the loudest
+/// of the pixel columns under it, crossed by the volume line. Columns count from `clip_left`.
+fn paint_wave(
+    painter: &egui::Painter,
+    wave: &crate::shell::ClipWave,
+    clip_left: f32,
+    band: Rect,
+    visible: Rect,
+    colors: WaveColors,
+) {
+    let WaveColors { bar, line, fill } = colors;
+    // A muted track's bars fade almost into the clip, without their caps.
+    let bar = if wave.muted {
+        lerp(fill, bar, 0.2)
+    } else {
+        bar
+    };
+    let painter = painter.with_clip_rect(band.intersect(visible));
+    let floor = band.bottom() - 1.0;
+    let reach = (band.height() - 2.0).max(1.0);
+    let mut mesh = egui::Mesh::default();
+    let mut index = 0;
+    while index < wave.levels.len() {
+        let column = wave.first as usize + index;
+        let slot = column / BAR_PITCH as usize;
+        let end = ((slot + 1) * BAR_PITCH as usize - wave.first as usize).min(wave.levels.len());
+        let level = wave.levels[index..end].iter().copied().fold(0.0, f32::max);
+        index = end;
+        let height = wave_height(level) * reach;
+        if height <= 0.0 {
+            continue;
+        }
+        let left = clip_left + slot as f32 * BAR_PITCH;
+        let top = floor - height;
+        let bottom = floor.min(corner_floor(band, left + 0.5));
+        if top >= bottom {
+            continue;
+        }
+        mesh.add_colored_rect(
+            Rect::from_min_max(Pos2::new(left, top), Pos2::new(left + 1.0, bottom)),
+            bar,
+        );
+        let cap = |from: f32, color: Color32, mesh: &mut egui::Mesh| {
+            mesh.add_colored_rect(
+                Rect::from_min_max(Pos2::new(left, from), Pos2::new(left + 1.0, from + 1.0)),
+                color,
+            );
+        };
+        if wave.muted {
+            continue;
+        }
+        if level >= WAVE_CLIPPED {
+            cap(top, tokens::WAVE_CLIPPED, &mut mesh);
+            cap(top + 1.0, tokens::WAVE_LOUD, &mut mesh);
+        } else if wave_height(level) >= WAVE_LOUD {
+            cap(top, tokens::WAVE_LOUD, &mut mesh);
+        }
+    }
+    // The volume line, a device pixel thick, at each column's gain.
+    let thick = 1.0 / painter.pixels_per_point();
+    for (index, gain) in wave.gains.iter().enumerate() {
+        let left = clip_left + (wave.first as usize + index) as f32;
+        let y = (floor - volume_height(*gain) * reach).round();
+        if y + thick > corner_floor(band, left + 0.5) {
+            continue;
+        }
+        mesh.add_colored_rect(
+            Rect::from_min_max(Pos2::new(left, y), Pos2::new(left + 1.0, y + thick)),
+            line,
+        );
+    }
+    painter.add(mesh);
+}
+
+/// A clip's header row, when it has one, its filmstrip, and its sound band.
+struct ClipParts {
+    header: Option<Rect>,
+    film: Option<Rect>,
+    band: Option<Rect>,
+}
+
+/// Main-track and audio clips carry a header row. Under it a main-track
+/// clip with sound gives 30% to the band and the rest to the
+/// filmstrip; an audio clip is all band. Other clips are all filmstrip.
+fn clip_parts(clip_rect: Rect, main: bool, audio: bool, sound: bool) -> ClipParts {
+    if !main && !audio {
+        return ClipParts {
+            header: None,
+            film: Some(clip_rect),
+            band: None,
+        };
+    }
+    let split = clip_rect.top() + tokens::CLIP_HEADER.min(clip_rect.height());
+    let header = Some(Rect::from_min_max(
+        clip_rect.min,
+        Pos2::new(clip_rect.right(), split),
+    ));
+    let body = Rect::from_min_max(Pos2::new(clip_rect.left(), split), clip_rect.max);
+    if audio {
+        return ClipParts {
+            header,
+            film: None,
+            band: Some(body),
+        };
+    }
+    if !sound {
+        return ClipParts {
+            header,
+            film: Some(body),
+            band: None,
+        };
+    }
+    let top = body.bottom() - body.height() * tokens::WAVE_RATIO;
+    ClipParts {
+        header,
+        film: Some(Rect::from_min_max(body.min, Pos2::new(body.right(), top))),
+        band: Some(Rect::from_min_max(Pos2::new(body.left(), top), body.max)),
+    }
+}
+
+/// The header's chips, left to right from its left edge: the clip's name,
+/// then its length when given.
+fn paint_header(ui: &Ui, header: Rect, clip: Rect, chips: &[String], fill: Color32, faded: bool) {
+    let painter = ui
+        .painter()
+        .with_clip_rect(clip.shrink(1.0).intersect(header));
+    let text = if faded {
+        tokens::CLIP_TEXT.gamma_multiply(0.45)
+    } else {
+        tokens::CLIP_TEXT
+    };
+    let mut left = header.left() + 4.0;
+    for chip in chips {
+        let galley = painter.layout_no_wrap(chip.clone(), FontId::proportional(11.0), text);
+        let rect = Rect::from_min_size(
+            Pos2::new(left, header.top() + 1.5),
+            Vec2::new(galley.size().x + 8.0, header.height() - 3.0),
+        );
+        painter.rect_filled(rect, CornerRadius::same(3), fill);
+        painter.galley(
+            Pos2::new(rect.left() + 4.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text,
+        );
+        left = rect.right() + 4.0;
+    }
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -2752,7 +3318,15 @@ fn paint_clip(
     index: usize,
 ) {
     let (start, duration) = preview_bounds(shell, clip);
-    let clip_rect = clip_bounds(shell, lane.main, start, duration, row, lanes_left);
+    let clip_rect = clip_bounds(
+        shell,
+        lane.main,
+        is_audio(lane),
+        start,
+        duration,
+        row,
+        lanes_left,
+    );
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
@@ -2773,29 +3347,64 @@ fn paint_clip(
     } else {
         lane_color(&lane.kind)
     };
-    painter.rect_filled(clip_rect, CornerRadius::same(7), fill);
+    painter.rect_filled(clip_rect, CornerRadius::same(CLIP_RADIUS), fill);
+    let audio = is_audio(lane);
+    let span =
+        f64::from(visible.left() - clip_rect.left())..f64::from(visible.right() - clip_rect.left());
+    let wave = if ghost {
+        None
+    } else {
+        shell.wave(&clip.id, f64::from(clip_rect.width()), span)
+    };
+    let parts = clip_parts(clip_rect, lane.main, audio, wave.is_some());
+    if !ghost {
+        if let Some(film) = parts.film {
+            paint_film(shell, ui, &clip.id, clip_rect, film, visible);
+        }
+        if let (Some(band), Some(wave)) = (parts.band, wave.as_ref()) {
+            let colors = if audio {
+                WaveColors::AUDIO
+            } else {
+                WaveColors::VIDEO
+            };
+            paint_wave(ui.painter(), wave, clip_rect.left(), band, visible, colors);
+        }
+    }
     if selected {
         painter.rect_stroke(
             clip_rect,
-            CornerRadius::same(7),
+            CornerRadius::same(CLIP_RADIUS),
             egui::Stroke::new(1.5, tokens::SELECTED),
             egui::StrokeKind::Inside,
         );
     }
-    let painter = ui
-        .painter()
-        .with_clip_rect(clip_rect.shrink(6.0).intersect(row));
-    painter.text(
-        clip_rect.left_center() + Vec2::new(8.0, 0.0),
-        Align2::LEFT_CENTER,
-        &clip.name,
-        FontId::proportional(11.0),
-        if ghost {
-            Color32::WHITE.gamma_multiply(0.45)
+    if let Some(header) = parts.header {
+        let mut chips = vec![clip.name.clone()];
+        if lane.main {
+            chips.push(shell.timecode_at(duration));
+        }
+        let chip = if audio {
+            tokens::CLIP_AUDIO_CHIP
         } else {
-            Color32::WHITE
-        },
-    );
+            tokens::CLIP_VIDEO_CHIP
+        };
+        paint_header(ui, header, clip_rect.intersect(row), &chips, chip, ghost);
+    } else {
+        let painter = ui
+            .painter()
+            .with_clip_rect(clip_rect.shrink(6.0).intersect(row));
+        painter.text(
+            clip_rect.left_center() + Vec2::new(8.0, 0.0),
+            Align2::LEFT_CENTER,
+            &clip.name,
+            FontId::proportional(11.0),
+            if ghost {
+                Color32::WHITE.gamma_multiply(0.45)
+            } else {
+                Color32::WHITE
+            },
+        );
+    }
     let span = format!(
         "{} · {}–{}",
         clip.name,
@@ -3151,15 +3760,15 @@ fn paint_move_follower(
     row: Rect,
     lanes_left: f32,
 ) {
-    let (inset, height) = if lane.main { (8.0, 48.0) } else { (6.0, 28.0) };
-    let x = lane_x(
+    let clip_rect = clip_bounds(
+        shell,
+        lane.main,
+        is_audio(lane),
+        preview.start,
+        preview.duration,
+        row,
         lanes_left,
-        shell.pixel_size(),
-        shell.view_origin().0,
-        preview.start.0,
     );
-    let width = (preview.duration.0 as f32 * shell.pixel_size() as f32).max(8.0);
-    let clip_rect = Rect::from_min_size(Pos2::new(x, row.top() + inset), Vec2::new(width, height));
     let visible = clip_rect.intersect(row);
     if visible.width() <= 0.0 || visible.height() <= 0.0 {
         return;
@@ -3232,20 +3841,24 @@ fn edge_strips(visible: Rect) -> (Rect, Rect) {
     (left, right)
 }
 
-fn lane_rects(main_flags: Vec<bool>, area: Rect) -> Vec<Rect> {
+/// Each lane's row, the main lane centered. `kinds` is each lane's main and
+/// audio flags.
+fn lane_rects(kinds: Vec<(bool, bool)>, area: Rect) -> Vec<Rect> {
+    let main_flags: Vec<bool> = kinds.iter().map(|(main, _)| *main).collect();
+    let height = |index: usize| row_height(kinds[index].0, kinds[index].1);
     let Some(main) = main_flags.iter().position(|main| *main) else {
-        return main_flags
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                Rect::from_min_size(
-                    Pos2::new(area.left(), area.top() + index as f32 * 48.0),
-                    Vec2::new(area.width(), 40.0),
-                )
+        let mut top = area.top();
+        return (0..kinds.len())
+            .map(|index| {
+                let rect = Rect::from_min_size(
+                    Pos2::new(area.left(), top),
+                    Vec2::new(area.width(), height(index)),
+                );
+                top += height(index) + 8.0;
+                rect
             })
             .collect();
     };
-    let height = |index: usize| if main_flags[index] { 64.0 } else { 40.0 };
     let mut tops = vec![0.0; main_flags.len()];
     tops[main] = area.center().y - height(main) / 2.0;
     let mut y = tops[main];
@@ -3307,7 +3920,7 @@ fn lane_icon(kind: &cutlass_model::TrackType) -> &'static str {
 
 fn lane_color(kind: &cutlass_model::TrackType) -> Color32 {
     match kind {
-        cutlass_model::TrackType::Audio => Color32::from_rgb(0x4e, 0x8f, 0x7c),
+        cutlass_model::TrackType::Audio => tokens::CLIP_AUDIO,
         cutlass_model::TrackType::Text
         | cutlass_model::TrackType::TextToVideoText
         | cutlass_model::TrackType::TextToVideoTextAudio => Color32::from_rgb(0x9a, 0x86, 0xb0),
@@ -3317,7 +3930,7 @@ fn lane_color(kind: &cutlass_model::TrackType) -> Color32 {
         }
         cutlass_model::TrackType::Filter => Color32::from_rgb(0x6a, 0x8f, 0x72),
         cutlass_model::TrackType::Adjust => Color32::from_rgb(0x8a, 0x7e, 0x9a),
-        _ => Color32::from_rgb(0x5b, 0x8a, 0xa3),
+        _ => tokens::CLIP_VIDEO,
     }
 }
 
@@ -3328,8 +3941,8 @@ fn export_dialog(
     parent: Option<&eframe::Frame>,
 ) {
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
-        ui.label(RichText::new("Long side").color(tokens::MUTED));
-        for side in crate::shell::LONG_SIDES {
+        ui.label(RichText::new("Short side").color(tokens::MUTED));
+        for side in crate::shell::SHORT_SIDES {
             if ui
                 .selectable_label(view.export_side == side, side.to_string())
                 .clicked()
@@ -3412,7 +4025,7 @@ fn import_chosen(
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
     shell.export(ExportRequest {
         path: std::path::PathBuf::from(&view.export_path),
-        long_side: view.export_side,
+        short_side: view.export_side,
         codec: view.export_codec,
         replace: view.replace_prompt,
     })
@@ -3446,14 +4059,28 @@ fn pressed_chord(input: &egui::InputState) -> Option<String> {
         egui::Key::C => "c",
         egui::Key::X => "x",
         egui::Key::V => "v",
+        egui::Key::A => "a",
+        egui::Key::Q => "q",
+        egui::Key::W => "w",
         _ => return None,
     };
-    if matches!(name, "space" | "left" | "right" | "delete" | "s")
-        && (input.modifiers.command || input.modifiers.alt || input.modifiers.shift)
-    {
+    let modifiers = input.modifiers;
+    // Control apart from the primary key, as on a Mac.
+    let control = modifiers.ctrl && !modifiers.command;
+    let plain = !(modifiers.command || modifiers.alt || modifiers.shift || control);
+    let blocked = match name {
+        "space" | "left" | "right" | "delete" | "q" | "w" => !plain,
+        // S splits, and Shift-Command-S extracts the audio.
+        "s" => !plain && !(modifiers.command && modifiers.shift && !modifiers.alt),
+        _ => false,
+    };
+    if blocked {
         return None;
     }
     let mut parts = Vec::new();
+    if control {
+        parts.push("ctrl");
+    }
     if input.modifiers.command {
         parts.push("primary");
     }
@@ -3583,7 +4210,11 @@ mod tests {
         assert!(shell.chrome.transport);
         assert!(shell.chrome.export);
         let painted = painted_text(&output);
+        let lines = galleys(&output);
         output.textures_delta.clear();
+        // The timecode shows on the transport only, not over the preview.
+        assert!(!lines.iter().any(|line| line == "00:00:00:00"), "{lines:?}");
+        assert!(painted.contains("00:00:00:00  /  "), "{painted}");
         assert!(painted.contains("Details"), "{painted}");
         assert!(painted.contains("Main"), "{painted}");
         assert!(painted.contains("Untitled"), "{painted}");
@@ -3592,10 +4223,574 @@ mod tests {
             "{painted}"
         );
         assert!(painted.contains("Projects"), "{painted}");
-        assert!(painted.contains("00:00:01"), "{painted}");
+        assert!(painted.contains("00:10"), "{painted}");
+        assert!(painted.contains("00:20"), "{painted}");
         assert!(painted.contains("No clips"), "{painted}");
         assert!(!painted.contains("Import a file"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Rects filled black larger than a button's mark: the canvas background.
+    fn black_rects(output: &egui::FullOutput) -> Vec<Rect> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == Color32::BLACK && rect.rect.width() > 32.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_preview_canvas_turns_black_and_the_toggle_clears_it() {
+        let temp = std::env::temp_dir().join(format!("cutlass-black-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 16;
+        draft.canvas_config.height = 9;
+        draft.duration = Micros(1_000_000);
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "solid".into(),
+                is_color_clip: true,
+                solid_color: "0xFFFF0000".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "solid",
+            "solid",
+            cutlass_model::TimeRange::new(0, 1_000_000),
+        ));
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            // The round transport buttons, left to right: the toggle, the still.
+            let mut buttons: Vec<Pos2> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Circle(circle)
+                        if circle.radius == 16.0 && circle.fill == tokens::ICON_BUTTON =>
+                    {
+                        Some(circle.center)
+                    }
+                    _ => None,
+                })
+                .collect();
+            buttons.sort_by(|a, b| a.x.total_cmp(&b.x));
+            (black_rects(&output), buttons)
+        };
+        let (black, buttons) = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(black.len(), 1, "{black:?}");
+        let ratio = black[0].width() / black[0].height();
+        assert!((ratio - 16.0 / 9.0).abs() < 0.01, "{:?}", black[0]);
+        assert_eq!(buttons.len(), 2, "{buttons:?}");
+        let toggle = buttons[0];
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: toggle,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(toggle), press(true)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(false)]);
+        assert!(!shell.preview_black());
+        // The click lands after that frame's canvas was painted; the next is clear.
+        let (black, _) = frame(&mut shell, &mut view, Vec::new());
+        assert!(black.is_empty(), "{black:?}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_video_clip_paints_its_filmstrip_once_the_thumbnails_land() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-film-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = cutlass_model::TimeRange::new(0, 6_000_000);
+        draft.tracks[0].segments[0].source_range =
+            Some(cutlass_model::TimeRange::new(0, 6_000_000));
+        draft.duration = Micros(6_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        shell.start_thumbnails(move || {
+            let _ = sender.send(());
+        });
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let tiles = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            // Textured tiles in the lanes, below the preview.
+            output
+                .shapes
+                .iter()
+                .filter(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) => {
+                        rect.fill_texture_id() != egui::TextureId::default()
+                            && rect.rect.center().y > 450.0
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        // The first frame asks for the tiles; none are stored yet.
+        assert_eq!(tiles(&mut shell, &mut view), 0);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a thumbnail");
+        while receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok()
+        {}
+        assert!(tiles(&mut shell, &mut view) >= 3);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn an_audio_clip_paints_its_waveform_once_the_peaks_arrive() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-wave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.duration = Micros(20_000_000);
+        draft.materials.audios.push(cutlass_model::MaterialAudio {
+            id: cutlass_model::MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(20_000_000),
+            ..cutlass_model::MaterialAudio::default()
+        });
+        let mut segment = cutlass_model::Segment::new(
+            "song",
+            "song",
+            cutlass_model::TimeRange::new(0, 20_000_000),
+        );
+        segment.source_range = Some(cutlass_model::TimeRange::new(0, 20_000_000));
+        let mut track = cutlass_model::Track::main("audio");
+        track.kind = cutlass_model::TrackType::Audio;
+        track.segments.push(segment);
+        draft.tracks.push(track);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        shell.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let wave = tokens::CLIP_AUDIO_BAR;
+        let columns = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Mesh(mesh)
+                        if mesh.vertices.first().is_some_and(|v| v.color == wave) =>
+                    {
+                        Some(mesh.vertices.len() / 4)
+                    }
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+        assert_eq!(columns(&mut shell, &mut view), 0);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("peaks");
+        while receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok()
+        {}
+        // One bar every two points.
+        assert!(columns(&mut shell, &mut view) > 50);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_video_clip_paints_its_sound_in_a_band_along_the_bottom() {
+        let root =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.mp4");
+        if !movie.is_file() {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        }
+        let temp = std::env::temp_dir().join(format!("cutlass-band-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = cutlass_model::TimeRange::new(0, 20_000_000);
+        draft.tracks[0].segments[0].source_range =
+            Some(cutlass_model::TimeRange::new(0, 20_000_000));
+        draft.duration = Micros(20_000_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        shell.start_waveforms(move || {
+            let _ = sender.send(());
+        });
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let wave = tokens::CLIP_VIDEO_BAR;
+        let frame = |shell: &mut Shell, view: &mut ViewState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output.shapes
+        };
+        let _ = frame(&mut shell, &mut view);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("peaks");
+        while receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .is_ok()
+        {}
+        let shapes = frame(&mut shell, &mut view);
+        let clip = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.fill == tokens::CLIP_VIDEO => Some(rect.rect),
+                _ => None,
+            })
+            .expect("the clip");
+        // The band is the bottom 30% of the body under the header.
+        let body = clip.height() - tokens::CLIP_HEADER;
+        let band_top = clip.bottom() - body * tokens::WAVE_RATIO;
+        let bars: Vec<Pos2> = shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh)
+                    if mesh.vertices.first().is_some_and(|v| v.color == wave) =>
+                {
+                    Some(
+                        mesh.vertices
+                            .iter()
+                            .filter(|v| v.color != tokens::CLIP_VIDEO_LINE)
+                            .map(|v| v.pos)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(bars.len() / 4 > 100, "{} bars", bars.len() / 4);
+        assert!(
+            bars.iter()
+                .all(|pos| pos.y >= band_top && pos.y <= clip.bottom())
+        );
+        let floor = bars.iter().map(|pos| pos.y).fold(f32::MIN, f32::max);
+        assert_eq!(floor, clip.bottom() - 1.0);
+        // Bars are a point wide, one every two points from the clip's edge.
+        for bar in bars.chunks(4) {
+            let left = bar.iter().map(|pos| pos.x).fold(f32::MAX, f32::min);
+            let right = bar.iter().map(|pos| pos.x).fold(f32::MIN, f32::max);
+            assert_eq!(right - left, 1.0);
+            assert_eq!((left - clip.left()) % 2.0, 0.0);
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_main_track_clip_heads_itself_with_name_and_length_chips() {
+        let temp = std::env::temp_dir().join(format!("cutlass-chips-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut video = cutlass_model::MaterialVideo::new("mat");
+        video.path = "Resources/clip.mp4".into();
+        video.duration = Micros(2_500_000);
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "seg",
+            "mat",
+            cutlass_model::TimeRange::new(0, 2_500_000),
+        ));
+        draft.duration = Micros(2_500_000);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let rects = |fill: Color32| -> Vec<Rect> {
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
+                    _ => None,
+                })
+                .collect()
+        };
+        let clip = rects(tokens::CLIP_VIDEO);
+        assert_eq!(clip.len(), 1, "{clip:?}");
+        let clip = clip[0];
+        assert_eq!(clip.height(), tokens::MAIN_CLIP_HEIGHT);
+        let chips = rects(tokens::CLIP_VIDEO_CHIP);
+        assert_eq!(chips.len(), 2, "{chips:?}");
+        for chip in &chips {
+            assert_eq!(chip.top(), clip.top() + 1.5);
+            assert_eq!(chip.bottom(), clip.top() + tokens::CLIP_HEADER - 1.5);
+        }
+        assert_eq!(chips[0].left(), clip.left() + 4.0);
+        assert_eq!(chips[1].left(), chips[0].right() + 4.0);
+        let lines = galleys(&output);
+        assert!(lines.iter().any(|line| line == "clip.mp4"), "{lines:?}");
+        assert!(lines.iter().any(|line| line == "00:00:02:15"), "{lines:?}");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_bar_climbs_in_decibels_from_the_floor_to_full_scale() {
+        assert_eq!(wave_height(0.0), 0.0);
+        assert_eq!(wave_height(1.0), 1.0);
+        assert_eq!(wave_height(2.0), 1.0);
+        // -6 dB of a 48 dB range.
+        assert!((wave_height(0.5) - 0.875).abs() < 0.001);
+        assert_eq!(wave_height(0.001), 0.0);
+        assert_eq!(wave_height(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn bars_in_a_bottom_corner_stop_at_the_rounded_edge() {
+        let band = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 20.0));
+        assert_eq!(corner_floor(band, 50.0), 20.0);
+        assert_eq!(corner_floor(band, 7.0), 20.0);
+        assert_eq!(corner_floor(band, 0.0), 13.0);
+        assert_eq!(corner_floor(band, 100.0), 13.0);
+        assert!((corner_floor(band, 3.5) - (20.0 - (7.0 - 36.75_f32.sqrt()))).abs() < 1e-4);
+        let ctx = egui::Context::default();
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![1.0; 100],
+            gains: Vec::new(),
+            under_picture: false,
+            muted: true,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::AUDIO);
+        });
+        output.textures_delta.clear();
+        let mut bottoms = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Mesh(mesh) = &clipped.shape {
+                for quad in mesh.vertices.chunks(4) {
+                    let bounds = Rect::from_points(&quad.iter().map(|v| v.pos).collect::<Vec<_>>());
+                    bottoms.push((bounds.left(), bounds.bottom()));
+                }
+            }
+        }
+        assert!(!bottoms.is_empty());
+        for (left, bottom) in bottoms {
+            assert!(
+                bottom <= corner_floor(band, left + 0.5) + 1e-4,
+                "bar at {left} reaches {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn loud_bars_wear_an_orange_cap_and_clipped_bars_a_red_tip() {
+        let ctx = egui::Context::default();
+        let band = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(8.0, 20.0));
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![0.1, 0.1, 0.8, 0.8, 1.0, 1.0],
+            gains: vec![1.0; 6],
+            under_picture: true,
+            muted: false,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::VIDEO);
+        });
+        output.textures_delta.clear();
+        let colors: Vec<(f32, Color32)> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .step_by(4)
+            .map(|vertex| (vertex.pos.x, vertex.color))
+            .filter(|(_, color)| *color != tokens::CLIP_VIDEO_LINE)
+            .collect();
+        let at = |x: f32| -> Vec<Color32> {
+            colors
+                .iter()
+                .filter(|(left, _)| *left == x)
+                .map(|(_, color)| *color)
+                .collect()
+        };
+        assert_eq!(at(0.0), [tokens::CLIP_VIDEO_BAR]);
+        assert_eq!(at(2.0), [tokens::CLIP_VIDEO_BAR, tokens::WAVE_LOUD]);
+        assert_eq!(
+            at(4.0),
+            [
+                tokens::CLIP_VIDEO_BAR,
+                tokens::WAVE_CLIPPED,
+                tokens::WAVE_LOUD
+            ]
+        );
+    }
+
+    #[test]
+    fn the_volume_line_sits_at_unity_and_climbs_with_the_gain() {
+        assert_eq!(volume_height(0.0), 0.0);
+        assert_eq!(volume_height(1.0), 0.45);
+        assert_eq!(volume_height(10.0), 1.0);
+        assert_eq!(volume_height(100.0), 1.0);
+        assert!(volume_height(0.5) < 0.45 && volume_height(0.5) > 0.0);
+        let ctx = egui::Context::default();
+        let band = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(4.0, 22.0));
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![0.0; 4],
+            gains: vec![1.0, 1.0, 10.0, 10.0],
+            under_picture: true,
+            muted: false,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::VIDEO);
+        });
+        output.textures_delta.clear();
+        let tops: Vec<f32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|vertex| vertex.color == tokens::CLIP_VIDEO_LINE)
+            .step_by(4)
+            .map(|vertex| vertex.pos.y)
+            .collect();
+        // Floor 21, reach 20: unity 9 points up, +20 dB at the top.
+        assert_eq!(tops, [12.0, 12.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_muted_track_fades_its_bars_into_the_clip_and_drops_the_caps() {
+        let ctx = egui::Context::default();
+        let band = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(4.0, 20.0));
+        let wave = crate::shell::ClipWave {
+            first: 0,
+            levels: vec![1.0; 4],
+            gains: Vec::new(),
+            under_picture: true,
+            muted: true,
+        };
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            paint_wave(ui.painter(), &wave, 0.0, band, band, WaveColors::VIDEO);
+        });
+        output.textures_delta.clear();
+        let colors: Vec<Color32> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.vertices.clone()),
+                _ => None,
+            })
+            .flatten()
+            .map(|vertex| vertex.color)
+            .collect();
+        let faded = lerp(tokens::CLIP_VIDEO, tokens::CLIP_VIDEO_BAR, 0.2);
+        assert_eq!(colors.len(), 8);
+        assert!(colors.iter().all(|color| *color == faded));
+    }
+
+    #[test]
+    fn lanes_take_their_heights_around_the_centered_main_track() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
+        let rows = lane_rects(vec![(false, false), (true, false), (false, true)], area);
+        let heights: Vec<f32> = rows.iter().map(Rect::height).collect();
+        assert_eq!(heights, [40.0, 90.0, 58.0]);
+        assert_eq!(rows[1].center().y, 200.0);
+        assert_eq!(rows[2].top() - rows[1].bottom(), 8.0);
+    }
+
+    #[test]
+    fn a_notice_fades_in_holds_and_fades_out() {
+        let at = |ms| notice_alpha(std::time::Duration::from_millis(ms));
+        assert_eq!(at(0), 0.0);
+        assert_eq!(at(100), 1.0);
+        assert_eq!(at(1_900), 1.0);
+        assert!((at(2_080) - 0.5).abs() < 0.01, "{}", at(2_080));
+        assert_eq!(at(2_160), 0.0);
+        assert_eq!(at(5_000), 0.0);
     }
 
     #[test]
@@ -3623,36 +4818,51 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_second_tick_names_the_frame() {
-        let step = 1_000_000.0 / 30.0;
-        let rate = FrameRate::FPS_30;
-        let frame = rate.frame_start(1).expect("frame").0 as f64;
-        assert_eq!(ruler_label(0.0, step, rate, false), "00:00:00");
-        assert_eq!(ruler_label(frame, step, rate, false), "00:00:01");
-        assert_eq!(ruler_label(1_000_000.0, step, rate, false), "00:01:00");
-        assert_eq!(
-            ruler_label(3_600_000_000.0, step, rate, false),
-            "01:00:00:00"
-        );
-        assert_eq!(frame_stride(0.006, rate), Some(1));
-        assert_eq!(frame_stride(72.0 / 1_000_000.0, rate), None);
-        assert_eq!(ruler_label(1_000_000.0, 1_000_000.0, rate, false), "00:01");
-        assert_eq!(
-            ruler_label(3_661_000_000.0, 1_000_000.0, rate, false),
-            "01:01:01"
-        );
-        assert_eq!(ruler_label(-1.0, step, rate, false), "");
-        assert_eq!(
-            ruler_label(0.0, step, FrameRate::FPS_29_97, true),
-            "00:00;00"
-        );
-    }
-
-    #[test]
     fn a_utc_date_is_the_civil_day() {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(86_400), "1970-01-02");
         assert_eq!(utc_date(946_684_800), "2000-01-01");
+    }
+
+    #[test]
+    fn a_card_shows_its_length_as_a_clock() {
+        assert_eq!(card_clock(0), "00:00");
+        assert_eq!(card_clock(93_400_000), "01:33");
+        assert_eq!(card_clock(1_011_000_000), "16:51");
+        assert_eq!(card_clock(3_725_000_000), "1:02:05");
+    }
+
+    #[test]
+    fn a_poster_fills_its_card_cut_at_the_sides_or_the_ends() {
+        let card = Vec2::new(144.0, 96.0);
+        let wide = cover_uv(card, 1920.0, 1080.0);
+        assert!((wide.min.x - (1.0 - 1.5 / (16.0 / 9.0)) / 2.0).abs() < 1e-5);
+        assert_eq!((wide.min.y, wide.max.y), (0.0, 1.0));
+        let tall = cover_uv(card, 1080.0, 1920.0);
+        assert_eq!((tall.min.x, tall.max.x), (0.0, 1.0));
+        assert!(tall.min.y > 0.0 && (tall.min.y + tall.max.y - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_long_name_keeps_its_start_and_its_extension() {
+        let ctx = egui::Context::default();
+        let mut cut = String::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            cut = middle_ellipsis(
+                ui.ctx(),
+                "GOOGLE IS BACK with Gemini 3 (flash).mp4",
+                &FontId::proportional(12.0),
+                120.0,
+            );
+        });
+        output.textures_delta.clear();
+        assert!(cut.starts_with("GOOGLE"), "{cut}");
+        assert!(cut.ends_with(".mp4"), "{cut}");
+        assert!(cut.contains('…'), "{cut}");
+        assert_eq!(
+            middle_ellipsis(&ctx, "short.mp4", &FontId::proportional(12.0), 120.0),
+            "short.mp4"
+        );
     }
 
     #[test]
@@ -3670,7 +4880,8 @@ mod tests {
         let cards = bin_cards(&draft, Shelf::Media, "");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].name, "clip.mp4");
-        assert_eq!(cards[0].meta, "2.5s");
+        assert_eq!(cards[0].meta, "00:02");
+        assert_eq!(cards[0].look, CardLook::Picture(None));
         assert!(cards[0].on_timeline);
         assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
@@ -3721,11 +4932,158 @@ mod tests {
         assert!((80.0..tokens::LIBRARY_WIDTH).contains(&card.x), "{card:?}");
         assert!((40.0..500.0).contains(&card.y), "{card:?}");
         let notice = text_pos(&output, "Imported pattern.png").expect("notice");
-        let tick = text_pos(&output, "00:00:00").expect("frame tick");
+        let tick = text_pos(&output, "00:00").expect("first tick");
         assert!(
             notice.y > tick.y,
             "notice {notice:?} overlaps tick {tick:?}"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    fn library_cards(cards: &[&str]) -> Vec<BinCard> {
+        cards
+            .iter()
+            .map(|id| BinCard {
+                id: (*id).to_owned(),
+                name: (*id).to_owned(),
+                meta: String::new(),
+                on_timeline: false,
+                look: CardLook::Swatch,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_click_picks_one_card_command_toggles_and_shift_takes_the_run() {
+        let cards = library_cards(&["a", "b", "c", "d"]);
+        let mut view = ViewState::new();
+        let plain = egui::Modifiers::default();
+        pick_card(&mut view, &cards, "b", plain);
+        assert_eq!(view.library_picked, ["b"]);
+        pick_card(&mut view, &cards, "d", egui::Modifiers::SHIFT);
+        assert_eq!(view.library_picked, ["b", "c", "d"]);
+        pick_card(&mut view, &cards, "c", egui::Modifiers::COMMAND);
+        assert_eq!(view.library_picked, ["b", "d"]);
+        pick_card(&mut view, &cards, "a", egui::Modifiers::COMMAND);
+        assert_eq!(view.library_picked, ["b", "d", "a"]);
+        pick_card(&mut view, &cards, "c", plain);
+        assert_eq!(view.library_picked, ["c"]);
+    }
+
+    #[test]
+    fn a_click_on_a_library_card_picks_it_and_a_right_click_opens_its_menu() {
+        let temp = std::env::temp_dir().join(format!("cutlass-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let card = text_pos(&output, "pattern.png").expect("library card");
+        let click = |pos: Pos2, button: egui::PointerButton| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers: egui::Modifiers::default(),
+            };
+            vec![egui::Event::PointerMoved(pos), event(true), event(false)]
+        };
+        frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Primary),
+        );
+        frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(view.library_picked.len(), 1);
+        assert!(!egui::DragAndDrop::has_any_payload(&ctx));
+        assert!(shell.lanes().iter().all(|lane| lane.clips.is_empty()));
+        let picked = view.library_picked.clone();
+        let output = frame(
+            &mut shell,
+            &mut view,
+            click(card, egui::PointerButton::Secondary),
+        );
+        assert_eq!(view.library_picked, picked);
+        assert!(view.library_menu.is_some_and(|menu| menu.on_card));
+        let row = text_pos(&output, "Delete").expect("the Delete row") + Vec2::new(4.0, 6.0);
+        frame(
+            &mut shell,
+            &mut view,
+            click(row, egui::PointerButton::Primary),
+        );
+        assert!(view.library_menu.is_none());
+        assert_eq!(shell.notice(), "Delete is not built yet");
+        assert!(shell.draft().unwrap().materials.videos.len() == 1);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_plus_on_a_hovered_card_adds_the_clip_to_the_main_lane() {
+        let temp = std::env::temp_dir().join(format!("cutlass-plus-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let name = text_pos(&output, "pattern.png").expect("library card");
+        let plus = Pos2::new(
+            name.x - 2.0 + CARD_W - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+            name.y - 6.0 - CARD_PLUS_INSET - CARD_PLUS_RADIUS,
+        );
+        frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(plus)]);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: plus,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(&mut shell, &mut view, vec![press(true), press(false)]);
+        let lanes = shell.lanes();
+        let main = lanes.iter().find(|lane| lane.main).expect("main lane");
+        assert_eq!(main.clips.len(), 1);
+        assert!(view.library_picked.is_empty());
         let _ = std::fs::remove_dir_all(&temp);
     }
 
@@ -3811,7 +5169,7 @@ mod tests {
         );
         let painted = painted_text(&output);
         output.textures_delta.clear();
-        assert!(painted.contains("On timeline"), "{painted}");
+        assert!(painted.contains("Added"), "{painted}");
         assert!(!painted.contains("No clips"), "{painted}");
         let _ = std::fs::remove_dir_all(&temp);
     }
@@ -4029,6 +5387,84 @@ mod tests {
         output.textures_delta.clear();
         assert!(!shell.playing());
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn s_splits_and_shift_command_s_extracts_but_other_s_chords_do_nothing() {
+        let chord = |modifiers: egui::Modifiers| {
+            let ctx = egui::Context::default();
+            let mut chord = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::ModifiersChanged(modifiers),
+                        egui::Event::Key {
+                            key: egui::Key::S,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| chord = ui.input(pressed_chord),
+            );
+            output.textures_delta.clear();
+            chord
+        };
+        assert_eq!(chord(egui::Modifiers::default()).as_deref(), Some("s"));
+        assert_eq!(
+            chord(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT).as_deref(),
+            Some("primary+shift+s")
+        );
+        assert_eq!(chord(egui::Modifiers::COMMAND), None);
+        assert_eq!(chord(egui::Modifiers::SHIFT), None);
+    }
+
+    #[test]
+    fn control_y_q_w_and_command_a_build_their_chords() {
+        let chord = |key: egui::Key, modifiers: egui::Modifiers| {
+            let ctx = egui::Context::default();
+            let mut chord = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::ModifiersChanged(modifiers),
+                        egui::Event::Key {
+                            key,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| chord = ui.input(pressed_chord),
+            );
+            output.textures_delta.clear();
+            chord
+        };
+        let control = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(chord(egui::Key::Y, control).as_deref(), Some("ctrl+y"));
+        assert_eq!(
+            chord(egui::Key::A, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+a")
+        );
+        assert_eq!(
+            chord(egui::Key::Q, egui::Modifiers::default()).as_deref(),
+            Some("q")
+        );
+        assert_eq!(
+            chord(egui::Key::W, egui::Modifiers::default()).as_deref(),
+            Some("w")
+        );
+        assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
+        assert_eq!(chord(egui::Key::Space, control), None);
     }
 
     #[test]
@@ -4797,9 +6233,10 @@ mod tests {
             },
             |ui| show(&mut shell, ui, &mut view, None),
         );
-        output.textures_delta.clear();
         assert!(shell.clip_menu().is_some());
-        let copy = Pos2::new(text.x + 24.0, text.y + 10.0);
+        // A clip low in the window opens its menu moved up to fit.
+        let copy = text_pos(&output, "Copy").expect("the Copy row") + Vec2::new(4.0, 6.0);
+        output.textures_delta.clear();
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: screen,

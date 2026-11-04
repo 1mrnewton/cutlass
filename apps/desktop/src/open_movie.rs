@@ -14,8 +14,8 @@ use cutlass_color::{Input, Matrix, Outcome, Picture as ColorPicture, Request};
 use cutlass_engine::DecodedFrame;
 use cutlass_eval::{OpenClips, ReaderFactory, Snapshot, frame};
 use cutlass_model::{
-    Draft, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros, Segment, TimeRange,
-    TrackAttribute,
+    Crop, Draft, MaterialCanvas, MaterialColorConfig, MaterialDraft, MaterialVideo, Micros,
+    Segment, TimeRange, TrackAttribute,
 };
 use cutlass_renderer_software::SoftwareDevice;
 
@@ -413,12 +413,17 @@ fn evaluated_still(path: &Path) -> Result<(), String> {
     let draft = movie_draft(path, width, height, true)?;
     same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
 
+    // Twice the picture and two rows taller: the fit doubles the picture and
+    // leaves one clear row above and below.
     let mut wide = movie_draft(path, width, height, false)?;
-    let canvas_w = width.checked_add(2).ok_or("canvas width")?;
-    let canvas_h = height.checked_add(2).ok_or("canvas height")?;
+    let canvas_w = width.checked_mul(2).ok_or("canvas width")?;
+    let canvas_h = height
+        .checked_mul(2)
+        .and_then(|rows| rows.checked_add(2))
+        .ok_or("canvas height")?;
     wide.canvas_config.width = i32::try_from(canvas_w).map_err(|_| "canvas width")?;
     wide.canvas_config.height = i32::try_from(canvas_h).map_err(|_| "canvas height")?;
-    centered(
+    doubled(
         &render(&readers, &wide, Micros(0))?,
         canvas_w,
         canvas_h,
@@ -520,12 +525,17 @@ fn evaluated_frame(path: &Path) -> Result<(), String> {
     let draft = movie_draft(path, width, height, true)?;
     same_picture(&render(&readers, &draft, Micros(0))?, &expected)?;
 
+    // Twice the picture and two rows taller: the fit doubles the picture and
+    // leaves one clear row above and below.
     let mut wide = movie_draft(path, width, height, false)?;
-    let canvas_w = width.checked_add(2).ok_or("canvas width")?;
-    let canvas_h = height.checked_add(2).ok_or("canvas height")?;
+    let canvas_w = width.checked_mul(2).ok_or("canvas width")?;
+    let canvas_h = height
+        .checked_mul(2)
+        .and_then(|rows| rows.checked_add(2))
+        .ok_or("canvas height")?;
     wide.canvas_config.width = i32::try_from(canvas_w).map_err(|_| "canvas width")?;
     wide.canvas_config.height = i32::try_from(canvas_h).map_err(|_| "canvas height")?;
-    centered(
+    doubled(
         &render(&readers, &wide, Micros(0))?,
         canvas_w,
         canvas_h,
@@ -551,7 +561,12 @@ fn evaluated_frame(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn movie_draft(path: &Path, width: u32, height: u32, under: bool) -> Result<Draft, String> {
+pub(crate) fn movie_draft(
+    path: &Path,
+    width: u32,
+    height: u32,
+    under: bool,
+) -> Result<Draft, String> {
     let mut draft = Draft::empty("draft");
     draft.canvas_config.width = i32::try_from(width).map_err(|_| "width")?;
     draft.canvas_config.height = i32::try_from(height).map_err(|_| "height")?;
@@ -603,7 +618,11 @@ fn render(readers: &ReaderFactory, draft: &Draft, time: Micros) -> Result<Vec<u8
     Ok(picture.rgba)
 }
 
-fn centered(
+/// `canvas` holds `picture` scaled up twice, centered between one clear row
+/// at the top and one at the bottom. Each output pixel center sits a quarter
+/// pixel from a source center, so it is three quarters of that pixel and a
+/// quarter of the next one out, the edge pixel repeated.
+fn doubled(
     canvas: &[u8],
     canvas_w: u32,
     canvas_h: u32,
@@ -611,45 +630,52 @@ fn centered(
     pic_w: u32,
     pic_h: u32,
 ) -> Result<(), String> {
-    let x0 = canvas_w.saturating_sub(pic_w) / 2;
-    let y0 = canvas_h.saturating_sub(pic_h) / 2;
-    if x0 == 0 || y0 == 0 {
-        return Err("the picture covers the canvas edge".to_owned());
+    let (canvas_w, canvas_h) = (canvas_w as usize, canvas_h as usize);
+    let (pic_w, pic_h) = (pic_w as usize, pic_h as usize);
+    if canvas_w != pic_w * 2 || canvas_h != pic_h * 2 + 2 {
+        return Err(format!("canvas {canvas_w}x{canvas_h} for {pic_w}x{pic_h}"));
     }
-    let canvas_len = usize::try_from(canvas_w)
-        .ok()
-        .and_then(|width| width.checked_mul(usize::try_from(canvas_h).ok()?))
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or("canvas length")?;
-    if canvas.len() != canvas_len {
+    if canvas.len() != canvas_w * canvas_h * 4 || picture.len() != pic_w * pic_h * 4 {
         return Err(format!("canvas is {} bytes", canvas.len()));
     }
-    let corner = canvas.get(..4).ok_or("canvas")?;
-    if corner != [0, 0, 0, 0] {
-        return Err(format!("corner {corner:?}"));
+    let stride = canvas_w * 4;
+    let last = (canvas_h - 1) * stride;
+    if canvas[..stride]
+        .iter()
+        .chain(&canvas[last..])
+        .any(|byte| *byte != 0)
+    {
+        return Err(format!("corner {:?}", &canvas[..4]));
     }
-    let canvas_stride = usize::try_from(canvas_w)
-        .map_err(|_| "canvas width")?
-        .checked_mul(4)
-        .ok_or("canvas stride")?;
-    let picture_stride = usize::try_from(pic_w)
-        .map_err(|_| "picture width")?
-        .checked_mul(4)
-        .ok_or("picture stride")?;
-    for row in 0..usize::try_from(pic_h).map_err(|_| "picture height")? {
-        let dest = (usize::try_from(y0).map_err(|_| "origin")? + row)
-            .checked_mul(canvas_stride)
-            .and_then(|row| row.checked_add(usize::try_from(x0).ok()?.checked_mul(4)?))
-            .ok_or("canvas row")?;
-        let src = row.checked_mul(picture_stride).ok_or("picture row")?;
-        let got = canvas
-            .get(dest..dest + picture_stride)
-            .ok_or("canvas row")?;
-        let expected = picture
-            .get(src..src + picture_stride)
-            .ok_or("picture row")?;
-        if got != expected {
-            return Err(format!("centered row {row} differs"));
+    // The source pixel an output pixel leans on, and its quarter neighbor.
+    let taps = |out: usize, len: usize| {
+        let own = out / 2;
+        let other = if out.is_multiple_of(2) {
+            own.saturating_sub(1)
+        } else {
+            (own + 1).min(len - 1)
+        };
+        (own, other)
+    };
+    for y in 0..pic_h * 2 {
+        let (row, row_other) = taps(y, pic_h);
+        for x in 0..canvas_w {
+            let (column, column_other) = taps(x, pic_w);
+            let at = |cx: usize, cy: usize, channel: usize| {
+                f64::from(picture[(cy * pic_w + cx) * 4 + channel])
+            };
+            for channel in 0..4 {
+                let near = 0.75 * at(column, row, channel) + 0.25 * at(column_other, row, channel);
+                let far = 0.75 * at(column, row_other, channel)
+                    + 0.25 * at(column_other, row_other, channel);
+                let expected = (0.75 * near + 0.25 * far).round();
+                let got = f64::from(canvas[(y + 1) * stride + x * 4 + channel]);
+                if (got - expected).abs() > 1.0 {
+                    return Err(format!(
+                        "doubled pixel {x},{y} channel {channel}: {got} vs {expected}"
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -699,4 +725,197 @@ fn split_yuv(width: u32, height: u32, bytes: &[u8]) -> Option<Yuv420p> {
         bytes[u_end..v_end].to_vec(),
     )
     .ok()
+}
+
+/// One parity case: a name and an edit to the movie draft.
+type Edit = fn(&mut Draft);
+
+/// A layer, or a compound's child layer, is a decoded picture the GPU converts.
+fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
+    frame.layers.iter().any(|layer| match &layer.source {
+        cutlass_eval::GpuSource::Yuv { .. } => true,
+        cutlass_eval::GpuSource::Nested(child) => decodes_on_gpu(child),
+        cutlass_eval::GpuSource::Rgba(_) | cutlass_eval::GpuSource::Effect(_) => false,
+    })
+}
+
+#[test]
+fn the_gpu_compositor_matches_the_cpu_frame() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+    let path = root.join("IMG_8143.MP4");
+    if !path.is_file() {
+        eprintln!("skipped: ../local-files/IMG_8143.MP4 is missing");
+        return;
+    }
+    let Some(renderer) = cutlass_render::Renderer::for_test().expect("a GPU is required") else {
+        eprintln!("skipped: no GPU");
+        return;
+    };
+    let fonts = crate::face::installed();
+    let cases: [(&str, (u32, u32), Edit); 10] = [
+        ("same size", (848, 608), |_| {}),
+        ("shrunk to fit", (424, 240), |_| {}),
+        ("centered", (1000, 700), |_| {}),
+        ("moved, turned, flipped, faded", (848, 608), |draft| {
+            let clip = &mut draft.tracks[0].segments[1].clip;
+            clip.scale.x = 0.6;
+            clip.scale.y = 0.45;
+            clip.rotation = 30.0;
+            clip.transform.x = 0.2;
+            clip.transform.y = -0.1;
+            clip.flip.horizontal = true;
+            clip.alpha = 0.7;
+        }),
+        ("a quarter turn", (848, 608), |draft| {
+            draft.tracks[0].segments[1].clip.rotation = 90.0;
+        }),
+        ("cropped", (848, 608), |draft| {
+            let crop = &mut draft.materials.videos[0].crop;
+            crop.upper_left_x = 0.1;
+            crop.upper_left_y = 0.2;
+            crop.upper_right_x = 0.8;
+            crop.upper_right_y = 0.2;
+            crop.lower_left_x = 0.1;
+            crop.lower_left_y = 0.9;
+            crop.lower_right_x = 0.8;
+            crop.lower_right_y = 0.9;
+        }),
+        ("background", (1000, 700), |draft| {
+            draft.canvas_config.background = Some("#336699".to_owned());
+        }),
+        ("blur backdrop", (1000, 700), |draft| {
+            let canvas = MaterialCanvas {
+                id: "canvas".into(),
+                kind: "canvas_blur".to_owned(),
+                blur: 0.05,
+                ..MaterialCanvas::default()
+            };
+            draft.tracks[0].segments[1]
+                .extra_material_refs
+                .push(canvas.id.clone());
+            draft.materials.canvases.push(canvas);
+            draft.tracks[0].segments[1].clip.scale.x = 0.7;
+            draft.tracks[0].segments[1].clip.scale.y = 0.7;
+            draft.tracks[0].segments[1].clip.alpha = 0.8;
+        }),
+        ("nested compound", (848, 608), |draft| {
+            // The movie draft becomes a compound's child, moved, turned,
+            // faded and cropped on a parent that has a solid under it.
+            let mut child = draft.clone();
+            child.id = "child".into();
+            let mut parent = Draft::empty("parent");
+            parent.canvas_config = draft.canvas_config.clone();
+            parent.materials.material_colors = draft.materials.material_colors.clone();
+            parent.tracks[0]
+                .segments
+                .push(draft.tracks[0].segments[0].clone());
+            let crop = Crop {
+                upper_left_x: 0.05,
+                upper_left_y: 0.1,
+                upper_right_x: 0.9,
+                upper_right_y: 0.1,
+                lower_left_x: 0.05,
+                lower_left_y: 0.95,
+                lower_right_x: 0.9,
+                lower_right_y: 0.95,
+            };
+            parent.materials.drafts.push(MaterialDraft {
+                id: "nest".into(),
+                draft: Some(Box::new(child)),
+                crop,
+                ..MaterialDraft::default()
+            });
+            let mut segment = Segment::new("compound", "nest", TimeRange::new(0, 1_000_000));
+            segment.source_range = Some(TimeRange::new(0, 1_000_000));
+            segment.render_index = 1;
+            segment.clip.scale.x = 0.75;
+            segment.clip.scale.y = 0.75;
+            segment.clip.rotation = 15.0;
+            segment.clip.alpha = 0.85;
+            parent.tracks[0].segments.push(segment);
+            *draft = parent;
+        }),
+        ("title over video", (848, 608), |draft| {
+            let mut text = cutlass_model::MaterialText::new("words");
+            text.content = "Smooth playback".to_owned();
+            text.font_size = 72.0;
+            text.font_path = crate::face::installed().name().to_owned();
+            text.text_color = "#FFFFFF".to_owned();
+            draft.materials.texts.push(text);
+            let mut title = Segment::new("title", "words", TimeRange::new(0, 1_000_000));
+            title.render_index = 2;
+            title.clip.transform.y = -0.5;
+            title.clip.rotation = 8.0;
+            title.clip.alpha = 0.9;
+            draft.tracks[0].segments.push(title);
+        }),
+    ];
+    let readers = crate::readers::installed_readers();
+    for (name, (width, height), edit) in cases {
+        let mut draft = movie_draft(&path, width, height, true).unwrap();
+        edit(&mut draft);
+        let time = Micros(500_000);
+        let mut device = SoftwareDevice::new();
+        let cpu = frame(
+            &Snapshot::with_fonts(&draft, &fonts),
+            time,
+            &mut device,
+            &readers,
+            &mut OpenClips::new(),
+            0,
+        )
+        .unwrap()
+        .rgba;
+        let mut clips = OpenClips::new();
+        let composed = cutlass_eval::layers_in(
+            &Snapshot::with_fonts(&draft, &fonts),
+            time,
+            &mut device,
+            &readers,
+            &mut clips,
+            0,
+            None,
+        )
+        .unwrap();
+        let cutlass_eval::Composed::Layers(layers) = composed else {
+            panic!("{name}: composed on the CPU");
+        };
+        assert!(
+            decodes_on_gpu(&layers),
+            "{name}: the movie did not reach the GPU"
+        );
+        if name == "title over video" && !fonts.name().is_empty() {
+            assert!(
+                layers.layers.iter().any(|layer| matches!(
+                    &layer.source,
+                    cutlass_eval::GpuSource::Rgba(raster) if raster.width() > 1
+                )),
+                "the title was not drawn"
+            );
+        }
+        let canvas = renderer.canvas(width, height).unwrap();
+        renderer.draw_frame(&canvas, &layers).unwrap();
+        let gpu = renderer.read(&canvas).unwrap();
+        assert_eq!(gpu.len(), cpu.len(), "{name}");
+        let pixels = cpu.len() / 4;
+        let mut off = 0;
+        let mut worst = 0;
+        for (a, b) in gpu.chunks(4).zip(cpu.chunks(4)) {
+            let diff = a
+                .iter()
+                .zip(b)
+                .map(|(x, y)| x.abs_diff(*y))
+                .max()
+                .unwrap_or(0);
+            worst = worst.max(diff);
+            if diff > 2 {
+                off += 1;
+            }
+        }
+        eprintln!("{name}: {off} of {pixels} pixels differ by more than 2, worst {worst}");
+        assert!(
+            off * 1000 <= pixels,
+            "{name}: {off} of {pixels} pixels differ"
+        );
+    }
 }

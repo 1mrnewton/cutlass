@@ -1,12 +1,5 @@
 use cutlass_model::{FrameRate, Micros};
 
-/// Pixels the two-frame accuracy step occupies.
-///
-/// Pixel size is pixels per microsecond. The last accuracy entry is a
-/// two-frame step, so its pixel size is this width divided by two frames
-/// of the draft rate.
-const TWO_FRAME_STEP_PIXELS: f64 = 400.0;
-
 /// The lane width and the cut length a zoom is clamped against.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoomBounds {
@@ -77,15 +70,13 @@ impl Zoom {
     }
 }
 
-/// The last accuracy step: two frames of `rate` across [`TWO_FRAME_STEP_PIXELS`].
+/// The last accuracy step: the ruler's finest step at `rate`.
 #[must_use]
 pub fn last_accuracy_step(rate: FrameRate) -> Option<f64> {
     if rate.numerator == 0 || rate.denominator == 0 {
         return None;
     }
-    let step = TWO_FRAME_STEP_PIXELS * f64::from(rate.numerator)
-        / (2.0 * 1_000_000.0 * f64::from(rate.denominator));
-    finite_positive(step)
+    finite_positive(crate::ruler::zoom_ceiling(rate))
 }
 
 /// A quarter of the lane divided by the cut length.

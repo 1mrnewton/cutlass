@@ -13,14 +13,18 @@
 use cutlass_compositor::Device;
 use cutlass_effects::PackageStore;
 use cutlass_engine::{DisplayQuarter, ReaderFactory, map_timeline, placement_of};
-use cutlass_model::{Draft, DraftId, MaterialRef, Micros, Segment, SegmentId, TrackAttribute};
+use cutlass_gpu::{Affine, Placement};
+use cutlass_model::{
+    Crop, Draft, DraftId, MaterialRef, Micros, Segment, SegmentId, TrackAttribute,
+};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 
 use crate::canvas::over_backdrop;
-use crate::frame::{EvalError, Fonts, Snapshot, compose};
+use crate::frame::{EvalError, Fonts, Snapshot, compose, compose_layers};
+use crate::gpu::{Composed, GpuLayer, GpuSource};
 use crate::media::{
-    OpenClips, PictureTransform, apply_crop, backdrop_for, picture_transform, place_with,
-    segment_clip,
+    OpenClips, PictureTransform, apply_crop, backdrop_for, gpu_crop, gpu_place, picture_transform,
+    place_with, segment_clip,
 };
 
 /// Compound drafts above this many ancestors are not drawn.
@@ -34,27 +38,86 @@ pub(crate) struct NestedLayer {
 }
 
 pub(crate) struct NestedPicture {
-    bytes: CpuBytes,
+    child: Child,
     canvas_w: u32,
     canvas_h: u32,
     transform: PictureTransform,
     backdrop: crate::canvas::Backdrop,
 }
 
+/// The child frame a compound places.
+enum Child {
+    /// Composed on the CPU, then cropped.
+    Cpu(CpuBytes),
+    /// Left as layers for the GPU, with the crop still to apply.
+    Gpu(Composed, Crop),
+}
+
 impl PictureSource for NestedPicture {
     fn sample(&self, _time: Micros) -> Sample {
-        let Sample::Ready(Picture::Cpu(bytes)) = place_with(
+        let Child::Cpu(bytes) = &self.child else {
+            return Sample::Miss;
+        };
+        let Sample::Ready(Picture::Cpu(placed)) = place_with(
             self.canvas_w,
             self.canvas_h,
-            self.bytes.clone(),
+            bytes.clone(),
             self.transform,
             DisplayQuarter::Zero,
         ) else {
             return Sample::Miss;
         };
-        let sharp =
-            matches!(self.backdrop, crate::canvas::Backdrop::Blur(_)).then_some(&self.bytes);
-        Sample::Ready(Picture::Cpu(over_backdrop(bytes, sharp, &self.backdrop)))
+        let sharp = matches!(self.backdrop, crate::canvas::Backdrop::Blur(_)).then_some(bytes);
+        Sample::Ready(Picture::Cpu(over_backdrop(placed, sharp, &self.backdrop)))
+    }
+}
+
+impl NestedPicture {
+    /// The compound as GPU layers: a color backdrop, if any, then the child
+    /// frame placed like a picture. `None` for a child composed on the CPU,
+    /// which the caller samples instead.
+    pub(crate) fn gpu(&self) -> Option<Vec<GpuLayer>> {
+        let Child::Gpu(composed, crop) = &self.child else {
+            return None;
+        };
+        let (source, size) = match composed {
+            Composed::Layers(layers) => (
+                GpuSource::Nested(Box::new(layers.clone())),
+                (layers.width, layers.height),
+            ),
+            Composed::Frame(frame) => {
+                let bytes =
+                    CpuBytes::new(frame.extent.width, frame.extent.height, frame.rgba.clone())
+                        .ok()?;
+                (
+                    GpuSource::Rgba(bytes),
+                    (frame.extent.width, frame.extent.height),
+                )
+            }
+        };
+        let (to_oriented, picture) = gpu_crop(*crop, 1.0, size)?;
+        let placement = Placement {
+            to_picture: gpu_place(self.transform, picture, (self.canvas_w, self.canvas_h))?,
+            picture,
+            to_oriented,
+            oriented: size,
+            to_texture: Affine::IDENTITY,
+            opacity: f64::from(self.transform.opacity()) / 255.0,
+        };
+        let mut layers = Vec::new();
+        match &self.backdrop {
+            crate::canvas::Backdrop::None => {}
+            crate::canvas::Backdrop::Color(pixel) => {
+                layers.push(GpuLayer::fill(CpuBytes::new(1, 1, pixel.to_vec()).ok()?));
+            }
+            crate::canvas::Backdrop::Blur(_) | crate::canvas::Backdrop::Image(_) => return None,
+        }
+        layers.push(GpuLayer {
+            source,
+            placement,
+            backdrop: None,
+        });
+        Some(layers)
     }
 }
 
@@ -69,6 +132,8 @@ pub(crate) struct NestPass<'a, D: Device> {
     pub(crate) clips: &'a mut OpenClips,
     pub(crate) revision: u64,
     pub(crate) ancestors: &'a [DraftId],
+    /// Leave each child as GPU layers instead of composing it.
+    pub(crate) gpu: bool,
 }
 
 pub(crate) fn nest_layers<D: Device>(
@@ -91,7 +156,7 @@ pub(crate) fn nest_layers<D: Device>(
             ) {
                 continue;
             }
-            let Some(placed) = place_child(draft, segment, pass.time, pass)? else {
+            let Some(placed) = place_child(draft, segment, pass.time, pass, pass.gpu)? else {
                 continue;
             };
             layers.push(NestedLayer {
@@ -115,7 +180,7 @@ pub(crate) fn picture_at<D: Device>(
     time: Micros,
     pass: &mut NestPass<'_, D>,
 ) -> Result<Option<CpuBytes>, EvalError<D::Error>> {
-    let Some(placed) = place_child(draft, segment, time, pass)? else {
+    let Some(placed) = place_child(draft, segment, time, pass, false)? else {
         return Ok(None);
     };
     match placed.sample(time) {
@@ -129,6 +194,7 @@ fn place_child<D: Device>(
     segment: &Segment,
     time: Micros,
     pass: &mut NestPass<'_, D>,
+    gpu: bool,
 ) -> Result<Option<NestedPicture>, EvalError<D::Error>> {
     if !segment.visible || segment.source_range.is_none() {
         return Ok(None);
@@ -162,14 +228,6 @@ fn place_child<D: Device>(
     let Ok(mapped) = map_timeline(&map, time) else {
         return Ok(None);
     };
-    let Some(rendered) = child_frame(draft, child, &segment.id, mapped, pass)? else {
-        return Ok(None);
-    };
-    let Ok(bytes) = CpuBytes::new(rendered.extent.width, rendered.extent.height, rendered.rgba)
-    else {
-        return Ok(None);
-    };
-    let bytes = apply_crop(bytes, crop, 1.0);
     let backdrop = backdrop_for(
         draft,
         segment,
@@ -178,8 +236,28 @@ fn place_child<D: Device>(
         pass.width,
         pass.height,
     );
+    let on_gpu = gpu
+        && matches!(
+            backdrop,
+            crate::canvas::Backdrop::None | crate::canvas::Backdrop::Color(_)
+        );
+    let child = if on_gpu {
+        let Some(layers) = child_layers(draft, child, &segment.id, mapped, pass)? else {
+            return Ok(None);
+        };
+        Child::Gpu(layers, crop)
+    } else {
+        let Some(rendered) = child_frame(draft, child, &segment.id, mapped, pass)? else {
+            return Ok(None);
+        };
+        let Ok(bytes) = CpuBytes::new(rendered.extent.width, rendered.extent.height, rendered.rgba)
+        else {
+            return Ok(None);
+        };
+        Child::Cpu(apply_crop(bytes, crop, 1.0))
+    };
     Ok(Some(NestedPicture {
-        bytes,
+        child,
         canvas_w: pass.width,
         canvas_h: pass.height,
         transform,
@@ -206,6 +284,31 @@ fn child_frame<D: Device>(
         &chain,
     ) {
         Ok(frame) => Ok(Some(frame)),
+        Err(EvalError::Canvas) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The child draft at `time` as GPU layers, or its CPU frame when it needs one.
+fn child_layers<D: Device>(
+    draft: &Draft,
+    child: &Draft,
+    segment: &SegmentId,
+    time: Micros,
+    pass: &mut NestPass<'_, D>,
+) -> Result<Option<Composed>, EvalError<D::Error>> {
+    let child_clips = pass.clips.child(segment);
+    let chain = descend(pass.ancestors, &draft.id);
+    match compose_layers(
+        &Snapshot::with_fonts_and_packages(child, pass.fonts, pass.packages),
+        time,
+        pass.device,
+        pass.media,
+        child_clips,
+        pass.revision,
+        &chain,
+    ) {
+        Ok(composed) => Ok(Some(composed)),
         Err(EvalError::Canvas) => Ok(None),
         Err(error) => Err(error),
     }
@@ -408,19 +511,22 @@ mod tests {
         draft.canvas_config.height = 4;
         let full = pixels(&draft, 0);
         assert_eq!(&full[0..4], &[255, 0, 0, 255]);
+        // The middle two columns, 2x4, fit the 4x4 canvas as 2x4 again.
         draft.materials.drafts[0].crop = Crop {
             upper_left_x: 0.25,
-            upper_left_y: 0.25,
+            upper_left_y: 0.0,
             upper_right_x: 0.75,
-            upper_right_y: 0.25,
+            upper_right_y: 0.0,
             lower_left_x: 0.25,
-            lower_left_y: 0.75,
+            lower_left_y: 1.0,
             lower_right_x: 0.75,
-            lower_right_y: 0.75,
+            lower_right_y: 1.0,
         };
         let cropped = pixels(&draft, 0);
         assert_eq!(&cropped[0..4], &[0, 0, 0, 0]);
-        assert_eq!(&cropped[20..24], &[255, 0, 0, 255]);
+        assert_eq!(&cropped[4..8], &[255, 0, 0, 255]);
+        assert_eq!(&cropped[8..12], &[255, 0, 0, 255]);
+        assert_eq!(&cropped[12..16], &[0, 0, 0, 0]);
     }
 
     #[test]
@@ -536,6 +642,7 @@ mod tests {
             clips: &mut clips,
             revision: 0,
             ancestors,
+            gpu: false,
         };
         nest_layers(draft, &mut pass).expect("layers")
     }

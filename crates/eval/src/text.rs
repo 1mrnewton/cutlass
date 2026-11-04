@@ -11,12 +11,18 @@
 
 use cutlass_captions::{CaptionQuery, PageLimits, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
-use cutlass_model::{Draft, MaterialRef, MaterialText, Micros, TrackAttribute, WordColumns};
+use std::collections::HashMap;
+
+use cutlass_gpu::{Affine, Placement};
+use cutlass_model::{
+    Draft, MaterialRef, MaterialText, Micros, SegmentId, TrackAttribute, WordColumns,
+};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
 
 use crate::Fonts;
-use crate::media::{picture_transform, place_with, segment_clip};
+use crate::gpu::{GpuLayer, GpuSource};
+use crate::media::{gpu_place, picture_transform, place_with, segment_clip};
 
 pub(crate) struct TextLayer {
     pub(crate) render_index: i32,
@@ -26,44 +32,57 @@ pub(crate) struct TextLayer {
 }
 
 pub(crate) struct PlacedText {
-    ink: Ink,
+    /// The text drawn tight around its glyphs, before placement.
+    raster: CpuBytes,
     width: u32,
     height: u32,
     transform: crate::media::PictureTransform,
 }
 
-enum Ink {
-    Run(TextSource),
-    Caption(CpuBytes),
-}
-
 impl PictureSource for PlacedText {
-    fn sample(&self, time: Micros) -> Sample {
-        let bytes = match &self.ink {
-            Ink::Run(source) => {
-                let Sample::Ready(Picture::Cpu(bytes)) = source.sample(time) else {
-                    return Sample::Miss;
-                };
-                bytes
-            }
-            Ink::Caption(bytes) => bytes.clone(),
-        };
+    fn sample(&self, _time: Micros) -> Sample {
         place_with(
             self.width,
             self.height,
-            bytes,
+            self.raster.clone(),
             self.transform,
             DisplayQuarter::Zero,
         )
     }
 }
 
+impl PlacedText {
+    /// The raster as a GPU layer, placed as [`PictureSource::sample`] places
+    /// it, so the canvas-sized picture is never built.
+    pub(crate) fn gpu(&self) -> Option<Vec<GpuLayer>> {
+        let size = (self.raster.width(), self.raster.height());
+        let placement = Placement {
+            to_picture: gpu_place(self.transform, size, (self.width, self.height))?,
+            picture: size,
+            to_oriented: Affine::IDENTITY,
+            oriented: size,
+            to_texture: Affine::IDENTITY,
+            opacity: f64::from(self.transform.opacity()) / 255.0,
+        };
+        Some(vec![GpuLayer {
+            source: GpuSource::Rgba(self.raster.clone()),
+            placement,
+            backdrop: None,
+        }])
+    }
+}
+
+/// Text segments covering `time`, placed. A title's raster is kept in
+/// `rasters` for its segment, so a later frame of the same revision does not
+/// lay it out and draw it again. Captions change with time and are drawn
+/// each frame.
 pub(crate) fn text_layers(
     draft: &Draft,
     fonts: &dyn Fonts,
     width: u32,
     height: u32,
     time: Micros,
+    rasters: &mut HashMap<SegmentId, CpuBytes>,
 ) -> Vec<TextLayer> {
     let mut layers = Vec::new();
     for (track_index, track) in draft.tracks.iter().enumerate() {
@@ -91,30 +110,38 @@ pub(crate) fn text_layers(
             let Some((clip, uniform)) = segment_clip(segment, time) else {
                 continue;
             };
-            let Some(transform) = picture_transform(&clip, &uniform, width, height) else {
+            let Some(transform) = picture_transform(&clip, &uniform, width, height)
+                .map(crate::media::PictureTransform::native)
+            else {
                 continue;
             };
             if transform.omitted() {
                 continue;
             }
-            let ink = if words_present(material) {
+            let raster = if words_present(material) {
                 let Some(bytes) = caption_picture(face, material, segment.target.start, time)
                 else {
                     continue;
                 };
-                Ink::Caption(bytes)
+                bytes
+            } else if let Some(kept) = rasters.get(&segment.id) {
+                kept.clone()
             } else {
                 let Ok(source) = TextSource::open(face, None, material, segment) else {
                     continue;
                 };
-                Ink::Run(source)
+                let Sample::Ready(Picture::Cpu(bytes)) = source.sample(time) else {
+                    continue;
+                };
+                rasters.insert(segment.id.clone(), bytes.clone());
+                bytes
             };
             layers.push(TextLayer {
                 render_index: segment.render_index,
                 track_index,
                 segment_index,
                 placed: PlacedText {
-                    ink,
+                    raster,
                     width,
                     height,
                     transform,
@@ -330,6 +357,33 @@ mod tests {
         assert!(shown.chunks(4).any(|pixel| pixel == [0, 0, 0, 0]));
         assert!(!ink(&pixels(&draft, 1_000_000)));
         assert_eq!(draft, before);
+    }
+
+    /// Rows and columns that hold any drawn pixel.
+    fn inked_span(rgba: &[u8], width: usize) -> (usize, usize) {
+        let lit: Vec<usize> = rgba
+            .chunks(4)
+            .enumerate()
+            .filter(|(_, pixel)| pixel[3] > 0)
+            .map(|(index, _)| index)
+            .collect();
+        let columns = lit.iter().map(|index| index % width);
+        let rows = lit.iter().map(|index| index / width);
+        let span = |values: Vec<usize>| {
+            values.iter().max().unwrap_or(&0) - values.iter().min().unwrap_or(&0) + 1
+        };
+        (span(columns.collect()), span(rows.collect()))
+    }
+
+    #[test]
+    fn a_title_keeps_its_own_size_instead_of_fitting_the_canvas() {
+        let small = text_segment("A", false);
+        let mut large = small.clone();
+        large.canvas_config.width = 512;
+        large.canvas_config.height = 512;
+        let (width, height) = inked_span(&pixels(&small, 0), 256);
+        assert!(width < 128 && height < 128, "{width}x{height}");
+        assert_eq!(inked_span(&pixels(&large, 0), 512), (width, height));
     }
 
     #[test]

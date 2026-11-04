@@ -28,6 +28,18 @@ pub enum FfiError {
         /// The path the phone asked for.
         name: String,
     },
+    /// The call was refused before it reached the session: a file that
+    /// cannot be imported, a library item with nothing to place, or a split
+    /// too close to an edge. The draft is unchanged.
+    Refused {
+        /// Why, for the phone to show.
+        reason: String,
+    },
+    /// The picture at that time could not be drawn.
+    Frame {
+        /// Why, for the phone to show.
+        reason: String,
+    },
 }
 
 impl fmt::Display for FfiError {
@@ -40,6 +52,7 @@ impl fmt::Display for FfiError {
             Self::PathEscapes { name } => {
                 write!(formatter, "path {name} leaves the project folder")
             }
+            Self::Refused { reason } | Self::Frame { reason } => formatter.write_str(reason),
         }
     }
 }
@@ -50,7 +63,10 @@ impl std::error::Error for FfiError {
             Self::Store(error) => Some(error),
             Self::Playhead(error) => Some(error),
             Self::Storage(error) => Some(error),
-            Self::Edit(_) | Self::PathEscapes { .. } => None,
+            Self::Edit(_)
+            | Self::PathEscapes { .. }
+            | Self::Refused { .. }
+            | Self::Frame { .. } => None,
         }
     }
 }
@@ -115,6 +131,7 @@ fn edit_cause(error: EditError) -> String {
         EditError::Position => "the position is not a finite number".to_owned(),
         EditError::Scale => "the scale must be greater than zero".to_owned(),
         EditError::Fade => "a fade cannot be negative".to_owned(),
+        EditError::Volume => "the volume must be zero or more".to_owned(),
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
@@ -124,6 +141,8 @@ fn edit_cause(error: EditError) -> String {
         EditError::LineSpacing => "line spacing must be greater than -1 and at most 4".to_owned(),
         EditError::LineWidth => "the line width must be from zero through 8192".to_owned(),
         EditError::TextFont => "the face is not a file name".to_owned(),
+        EditError::TextEmpty => "type something to add text".to_owned(),
+        EditError::UnknownEffect => "that effect is not in this version".to_owned(),
         EditError::CanvasColor => "the canvas color is not a hex color".to_owned(),
         EditError::CanvasSize => "the canvas side must be from 1 to 7680".to_owned(),
         EditError::CanvasRatio => "the canvas ratio is not a project ratio".to_owned(),

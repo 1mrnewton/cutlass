@@ -7,7 +7,9 @@ use cutlass_generated::{PictureSource, SolidColor};
 use cutlass_model::{Draft, Micros};
 use cutlass_picture::{CpuBytes, Picture, Sample};
 
-use crate::effect::{StackLayer, present};
+use crate::canvas::canvas_rgba;
+use crate::effect::{RecipeMark, StackLayer, needs_cpu, present, recipe_marks};
+use crate::gpu::{Composed, FrameLayers, GpuLayer};
 use crate::media::{OpenClips, Placed, video_layers};
 use crate::nest::{NestPass, NestedLayer, NestedPicture, nest_layers};
 use crate::sources::{SolidLayer, solid_layers};
@@ -160,6 +162,125 @@ pub fn frame_in<D: Device>(
     compose(snapshot, time, device, media, clips, revision, &[])
 }
 
+/// The frame as GPU layers, or composed pixels when it needs the CPU.
+///
+/// A frame with an effect mark or a clip filter is composed on the CPU, as
+/// [`frame_in`] composes it. Any other frame is the project background, then
+/// every layer in order: a clip the GPU path covers is its decoded picture
+/// and placement, a solid is one stretched pixel, and the rest are their
+/// CPU pictures.
+pub fn layers_in<D: Device>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    root: Option<&std::path::Path>,
+) -> Result<Composed, EvalError<D::Error>> {
+    clips.set_project(root);
+    compose_layers(snapshot, time, device, media, clips, revision, &[])
+}
+
+/// [`layers_in`] for a draft under `ancestors`, as a compound's child is.
+/// A frame that needs the CPU is composed again on the CPU path.
+pub(crate) fn compose_layers<D: Device>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    ancestors: &[cutlass_model::DraftId],
+) -> Result<Composed, EvalError<D::Error>> {
+    let layers = with_layers(
+        snapshot,
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        ancestors,
+        true,
+        |draft, _device, extent, layers| {
+            let stack = stack_of(layers);
+            let effects = recipe_marks(draft, time, &stack);
+            if needs_cpu(draft, time, &stack) {
+                return Ok(Err(effects));
+            }
+            Ok(Ok(gpu_layers(draft, time, extent, layers, effects)))
+        },
+    )?;
+    match layers {
+        Ok(layers) => Ok(Composed::Layers(layers)),
+        Err(effects) => {
+            let frame = compose(snapshot, time, device, media, clips, revision, ancestors)?;
+            if effects.is_empty() {
+                return Ok(Composed::Frame(frame));
+            }
+            // The CPU picture is one layer; the recipe effects run over it.
+            let (width, height) = (frame.extent.width, frame.extent.height);
+            let mut layers = FrameLayers::pixels(frame).ok_or(EvalError::Canvas)?;
+            layers.layers.extend(
+                effects
+                    .into_iter()
+                    .map(|mark| GpuLayer::effect(mark.steps, width, height)),
+            );
+            Ok(Composed::Layers(layers))
+        }
+    }
+}
+
+fn gpu_layers(
+    draft: &Draft,
+    time: Micros,
+    extent: Extent,
+    layers: &[Ordered<'_>],
+    effects: Vec<RecipeMark>,
+) -> FrameLayers {
+    let mut out = Vec::new();
+    let mut effects = effects.into_iter().peekable();
+    let effect = |mark: RecipeMark| GpuLayer::effect(mark.steps, extent.width, extent.height);
+    if let Some(pixel) = draft
+        .canvas_config
+        .background
+        .as_deref()
+        .and_then(canvas_rgba)
+        .and_then(|pixel| CpuBytes::new(1, 1, pixel.to_vec()).ok())
+    {
+        out.push(GpuLayer::fill(pixel));
+    }
+    for layer in layers {
+        while let Some(mark) = effects.next_if(|mark| mark.key < layer.key) {
+            out.push(effect(mark));
+        }
+        let gpu = match &layer.paint {
+            Paint::Video(placed) => placed.gpu(time),
+            Paint::Solid(solid) => match solid.one_pixel(time) {
+                Sample::Ready(Picture::Cpu(pixel)) => Some(vec![GpuLayer::fill(pixel)]),
+                Sample::Ready(Picture::Platform(_)) | Sample::Miss => Some(Vec::new()),
+            },
+            Paint::Nest(nested) => nested.gpu(),
+            Paint::Text(text) => text.gpu(),
+            Paint::Mixed(_) => None,
+        };
+        match gpu {
+            Some(gpu) => out.extend(gpu),
+            None => {
+                if let Sample::Ready(Picture::Cpu(picture)) = layer.source().sample(time) {
+                    out.push(GpuLayer::canvas(picture));
+                }
+            }
+        }
+    }
+    out.extend(effects.map(effect));
+    FrameLayers {
+        width: extent.width,
+        height: extent.height,
+        layers: out,
+    }
+}
+
 pub(crate) fn compose<D: Device>(
     snapshot: &Snapshot<'_>,
     time: Micros,
@@ -169,6 +290,35 @@ pub(crate) fn compose<D: Device>(
     revision: u64,
     ancestors: &[cutlass_model::DraftId],
 ) -> Result<Frame, EvalError<D::Error>> {
+    with_layers(
+        snapshot,
+        time,
+        device,
+        media,
+        clips,
+        revision,
+        ancestors,
+        false,
+        |draft, device, extent, layers| {
+            let stack = stack_of(layers);
+            present(draft, snapshot.packages(), time, device, extent, &stack)
+        },
+    )
+}
+
+/// Build every layer at `time` in order, then hand them to `finish`.
+#[allow(clippy::too_many_arguments)]
+fn with_layers<D: Device, T>(
+    snapshot: &Snapshot<'_>,
+    time: Micros,
+    device: &mut D,
+    media: &ReaderFactory,
+    clips: &mut OpenClips,
+    revision: u64,
+    ancestors: &[cutlass_model::DraftId],
+    gpu: bool,
+    finish: impl FnOnce(&Draft, &mut D, Extent, &[Ordered<'_>]) -> Result<T, EvalError<D::Error>>,
+) -> Result<T, EvalError<D::Error>> {
     let draft = snapshot.draft();
     let extent = canvas_extent(draft).ok_or(EvalError::Canvas)?;
     clips.prepare(draft, revision);
@@ -183,6 +333,7 @@ pub(crate) fn compose<D: Device>(
         clips,
         revision,
         ancestors,
+        gpu,
     };
     let nests = nest_layers(draft, &mut pass)?;
     let prepared = crate::transition::prepare(
@@ -195,7 +346,14 @@ pub(crate) fn compose<D: Device>(
     )?;
     let mut layers = ordered(
         solid_layers(draft, extent.width, extent.height),
-        text_layers(draft, pass.fonts, extent.width, extent.height, pass.time),
+        text_layers(
+            draft,
+            pass.fonts,
+            extent.width,
+            extent.height,
+            pass.time,
+            pass.clips.texts(),
+        ),
         video_layers(
             draft,
             pass.media,
@@ -215,15 +373,7 @@ pub(crate) fn compose<D: Device>(
         extent.height,
         pass.time,
     );
-    let stack = stack_of(&layers);
-    present(
-        draft,
-        snapshot.packages(),
-        pass.time,
-        pass.device,
-        extent,
-        &stack,
-    )
+    finish(draft, pass.device, extent, &layers)
 }
 
 fn stack_of<'a>(layers: &'a [Ordered<'a>]) -> Vec<StackLayer<'a>> {
@@ -894,5 +1044,147 @@ mod tests {
         let full = still_frame(&path, width, height, Crop::default(), "free");
         let left = still_frame(&path, half, height, left_half(), "free");
         assert_eq!(left, columns(&full, width as usize, 0, half as usize));
+    }
+}
+
+#[cfg(test)]
+mod recipe_tests {
+    use cutlass_effects::bundled_recipe;
+    use cutlass_engine::ReaderFactory;
+    use cutlass_model::{
+        Draft, MaterialColorConfig, MaterialVideoEffect, Micros, Segment, TimeRange, Track,
+        TrackAttribute, TrackType,
+    };
+    use cutlass_renderer_software::SoftwareDevice;
+
+    use super::{Snapshot, layers_in};
+    use crate::gpu::{Composed, FrameLayers, GpuSource};
+    use crate::media::OpenClips;
+
+    fn colour(draft: &mut Draft, id: &str, render_index: i32, track: usize) {
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: id.into(),
+            is_color_clip: true,
+            solid_color: "0xFFFF0000".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        let mut segment = Segment::new(id, id, TimeRange::new(0, 2_000_000));
+        segment.render_index = render_index;
+        draft.tracks[track].segments.push(segment);
+    }
+
+    /// A red clip with `effect_id` on an effect row from 0.5 s for 1 s.
+    fn with_effect(effect_id: &str) -> Draft {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 4;
+        draft.canvas_config.height = 2;
+        colour(&mut draft, "below", 0, 0);
+        draft.materials.video_effects.push(MaterialVideoEffect {
+            id: "fx".into(),
+            effect_id: effect_id.to_owned(),
+            ..MaterialVideoEffect::default()
+        });
+        let mut row = Track::main("effects");
+        row.kind = TrackType::Effect;
+        let mut segment = Segment::new("fx", "fx", TimeRange::new(500_000, 1_000_000));
+        segment.render_index = TrackType::Effect.render_floor().unwrap_or(0);
+        row.segments.push(segment);
+        draft.tracks.push(row);
+        draft
+    }
+
+    fn layers(draft: &Draft, time: i64) -> FrameLayers {
+        let mut device = SoftwareDevice::new();
+        let media = ReaderFactory::new();
+        let mut clips = OpenClips::new();
+        match layers_in(
+            &Snapshot::new(draft),
+            Micros(time),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+            None,
+        )
+        .expect("layers")
+        {
+            Composed::Layers(layers) => layers,
+            Composed::Frame(_) => panic!("composed on the CPU"),
+        }
+    }
+
+    fn effects(frame: &FrameLayers) -> Vec<usize> {
+        frame
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, layer)| matches!(layer.source, GpuSource::Effect(_)))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn a_recipe_effect_is_a_gpu_layer_over_what_is_below_with_its_own_clock() {
+        let draft = with_effect("recipe/white-flash");
+        let before = draft.clone();
+        let frame = layers(&draft, 600_000);
+        assert_eq!(effects(&frame), vec![frame.layers.len() - 1]);
+        let Some(GpuSource::Effect(steps)) = frame.layers.last().map(|layer| &layer.source) else {
+            panic!("no effect layer");
+        };
+        let recipe = bundled_recipe("recipe/white-flash").expect("recipe");
+        assert_eq!(steps, &recipe.steps_at(Micros(100_000)));
+        assert_eq!(draft, before);
+    }
+
+    #[test]
+    fn a_layer_with_a_higher_index_stays_above_the_effect() {
+        let mut draft = with_effect("recipe/vignette");
+        let top = draft.tracks.len() - 1;
+        colour(&mut draft, "above", 20_000, top);
+        let frame = layers(&draft, 600_000);
+        let at = effects(&frame);
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0], frame.layers.len() - 2);
+    }
+
+    #[test]
+    fn no_effect_layer_outside_its_span_on_a_hidden_row_or_when_unknown() {
+        let draft = with_effect("recipe/vignette");
+        assert!(effects(&layers(&draft, 100_000)).is_empty());
+        assert!(effects(&layers(&draft, 1_500_000)).is_empty());
+
+        let mut hidden = draft.clone();
+        if let Some(row) = hidden.tracks.last_mut() {
+            row.attribute = TrackAttribute(TrackAttribute::HIDE);
+        }
+        assert!(effects(&layers(&hidden, 600_000)).is_empty());
+
+        let mut invisible = draft;
+        if let Some(row) = invisible.tracks.last_mut() {
+            row.segments[0].visible = false;
+        }
+        assert!(effects(&layers(&invisible, 600_000)).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_recipe_is_not_run() {
+        let mut device = SoftwareDevice::new();
+        let media = ReaderFactory::new();
+        let mut clips = OpenClips::new();
+        let draft = with_effect("recipe/no-such-effect");
+        let composed = layers_in(
+            &Snapshot::new(&draft),
+            Micros(600_000),
+            &mut device,
+            &media,
+            &mut clips,
+            0,
+            None,
+        )
+        .expect("frame");
+        if let Composed::Layers(frame) = composed {
+            assert!(effects(&frame).is_empty());
+        }
     }
 }

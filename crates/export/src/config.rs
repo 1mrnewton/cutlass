@@ -1,8 +1,9 @@
 //! The export request: resolution, codec, bitrate, frame rate, and audio.
 //!
-//! The long side is one of a fixed list. GIF uses a shorter list. A step
-//! outside that list is refused. The other edge keeps the canvas aspect
-//! with integer division.
+//! The short side is one of a fixed list, so "1080" on a 16:9 canvas is
+//! 1920 by 1080, as phone editors name sizes. GIF uses a smaller list. A
+//! step outside that list is refused. The other edge keeps the canvas
+//! aspect with integer division.
 
 use std::fmt;
 
@@ -12,11 +13,15 @@ use cutlass_encode::CodecError;
 use cutlass_eval::AudioError;
 use cutlass_model::{FrameRate, TimeRange};
 
-/// Video long-side steps, in pixels.
-pub const VIDEO_LONG_SIDES: [u32; 6] = [480, 720, 1080, 1440, 2160, 4320];
+/// Video short-side steps, in pixels.
+pub const VIDEO_SHORT_SIDES: [u32; 6] = [480, 720, 1080, 1440, 2160, 4320];
 
-/// GIF long-side steps, in pixels.
-pub const GIF_LONG_SIDES: [u32; 3] = [240, 320, 640];
+/// GIF short-side steps, in pixels.
+pub const GIF_SHORT_SIDES: [u32; 3] = [240, 320, 640];
+
+/// The longest edge an export may have, in pixels. A canvas thin enough
+/// to stretch the long edge past this is refused.
+pub const MAX_EDGE: u32 = 16_384;
 
 /// Most frames one export will encode.
 ///
@@ -59,7 +64,7 @@ pub struct SidecarRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportRequest {
     pub range: TimeRange,
-    pub long_side: u32,
+    pub short_side: u32,
     pub codec: CodecId,
     pub bitrate: u32,
     pub frame_rate: FrameRate,
@@ -72,8 +77,8 @@ pub struct ExportRequest {
 /// Why export did not write a file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExportError {
-    /// The long side is not a step for this codec.
-    Resolution { long_side: u32 },
+    /// The short side is not a step for this codec.
+    Resolution { short_side: u32 },
     /// The frame rate has a zero numerator or denominator.
     FrameRate,
     /// The range is empty, negative, or does not fit in the timeline clock.
@@ -114,13 +119,15 @@ pub enum ExportError {
     NotSoftwareRgba,
     /// Playback and export RGBA differ.
     PixelMismatch,
+    /// The progress callback asked export to stop.
+    Cancelled,
 }
 
 impl fmt::Display for ExportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Resolution { long_side } => {
-                write!(formatter, "long side {long_side} is not an export step")
+            Self::Resolution { short_side } => {
+                write!(formatter, "short side {short_side} is not an export step")
             }
             Self::FrameRate => formatter.write_str("the frame rate is empty"),
             Self::Range => formatter.write_str("the export range is not a span"),
@@ -142,6 +149,7 @@ impl fmt::Display for ExportError {
             Self::HdrNotThisCase => formatter.write_str("HDR is not the software pixel comparison"),
             Self::NotSoftwareRgba => formatter.write_str("the bytes are not software RGBA"),
             Self::PixelMismatch => formatter.write_str("playback and export pixels differ"),
+            Self::Cancelled => formatter.write_str("export was stopped"),
         }
     }
 }
@@ -157,17 +165,17 @@ impl std::error::Error for ExportError {
     }
 }
 
-/// Refuses a long side, a frame rate, a range, or an audio layout that export
+/// Refuses a short side, a frame rate, a range, or an audio layout that export
 /// will not run.
 pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
     let steps = if request.codec == CodecId::Gif {
-        GIF_LONG_SIDES.as_slice()
+        GIF_SHORT_SIDES.as_slice()
     } else {
-        VIDEO_LONG_SIDES.as_slice()
+        VIDEO_SHORT_SIDES.as_slice()
     };
-    if !steps.contains(&request.long_side) {
+    if !steps.contains(&request.short_side) {
         return Err(ExportError::Resolution {
-            long_side: request.long_side,
+            short_side: request.short_side,
         });
     }
     if request.frame_rate.numerator == 0 || request.frame_rate.denominator == 0 {
@@ -193,51 +201,69 @@ pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
     Ok(())
 }
 
-/// Output size for a canvas and a long-side step.
+/// Output size for a canvas and a short-side step.
 ///
-/// The longer canvas edge becomes `long_side`. The other edge is
-/// `short * long_side / long`, truncated toward zero, and at least 1.
+/// The shorter canvas edge becomes `short_side`; a square canvas is
+/// `short_side` both ways. The other edge is `long * short_side / short`,
+/// truncated toward zero, and at most [`MAX_EDGE`].
 pub fn output_size(
     canvas_w: i32,
     canvas_h: i32,
-    long_side: u32,
+    short_side: u32,
 ) -> Result<(u32, u32), ExportError> {
     let width = u32::try_from(canvas_w).map_err(|_| ExportError::Canvas)?;
     let height = u32::try_from(canvas_h).map_err(|_| ExportError::Canvas)?;
-    if width == 0 || height == 0 || long_side == 0 {
+    if width == 0 || height == 0 || short_side == 0 {
         return Err(ExportError::Canvas);
     }
     if width >= height {
-        let short = scale_edge(height, width, long_side)?;
-        Ok((long_side, short))
+        let long = scale_edge(width, height, short_side)?;
+        Ok((long, short_side))
     } else {
-        let short = scale_edge(width, height, long_side)?;
-        Ok((short, long_side))
+        let long = scale_edge(height, width, short_side)?;
+        Ok((short_side, long))
     }
 }
 
-fn scale_edge(short: u32, long: u32, long_side: u32) -> Result<u32, ExportError> {
-    let value = u64::from(short) * u64::from(long_side) / u64::from(long);
-    let value = u32::try_from(value).map_err(|_| ExportError::Limit)?;
-    if value == 0 {
-        return Err(ExportError::Canvas);
+/// `size` as `codec` can code it: a codec that halves its colour planes
+/// both ways needs even edges, so an odd edge loses one pixel. Other codecs
+/// keep the size.
+#[must_use]
+pub fn coded_size(codec: CodecId, (width, height): (u32, u32)) -> (u32, u32) {
+    let halved = matches!(
+        codec,
+        CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp8 | CodecId::Vp9
+    );
+    if halved {
+        ((width & !1).max(2), (height & !1).max(2))
+    } else {
+        (width, height)
     }
-    Ok(value)
+}
+
+/// The long edge for a canvas `long` by `short` scaled so `short` becomes
+/// `short_side`.
+fn scale_edge(long: u32, short: u32, short_side: u32) -> Result<u32, ExportError> {
+    let value = u64::from(long) * u64::from(short_side) / u64::from(short);
+    if value > u64::from(MAX_EDGE) {
+        return Err(ExportError::Limit);
+    }
+    u32::try_from(value).map_err(|_| ExportError::Limit)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioExport, ExportError, ExportRequest, GIF_LONG_SIDES, VIDEO_LONG_SIDES, output_size,
-        validate,
+        AudioExport, ExportError, ExportRequest, GIF_SHORT_SIDES, VIDEO_SHORT_SIDES, coded_size,
+        output_size, validate,
     };
     use cutlass_codec::{CodecId, ContainerId};
     use cutlass_model::{FrameRate, TimeRange};
 
-    fn request(codec: CodecId, long_side: u32) -> ExportRequest {
+    fn request(codec: CodecId, short_side: u32) -> ExportRequest {
         ExportRequest {
             range: TimeRange::new(0, 1_000_000),
-            long_side,
+            short_side,
             codec,
             bitrate: 2_000_000,
             frame_rate: FrameRate::FPS_30,
@@ -249,20 +275,20 @@ mod tests {
     }
 
     #[test]
-    fn video_and_gif_accept_only_their_long_side_steps() {
-        for side in VIDEO_LONG_SIDES {
+    fn video_and_gif_accept_only_their_short_side_steps() {
+        for side in VIDEO_SHORT_SIDES {
             assert!(validate(&request(CodecId::H264, side)).is_ok(), "{side}");
             let gif = validate(&request(CodecId::Gif, side));
-            assert_eq!(gif, Err(ExportError::Resolution { long_side: side }));
+            assert_eq!(gif, Err(ExportError::Resolution { short_side: side }));
         }
-        for side in GIF_LONG_SIDES {
+        for side in GIF_SHORT_SIDES {
             assert!(validate(&request(CodecId::Gif, side)).is_ok(), "{side}");
             let video = validate(&request(CodecId::H264, side));
-            assert_eq!(video, Err(ExportError::Resolution { long_side: side }));
+            assert_eq!(video, Err(ExportError::Resolution { short_side: side }));
         }
         assert_eq!(
             validate(&request(CodecId::H264, 1000)),
-            Err(ExportError::Resolution { long_side: 1000 })
+            Err(ExportError::Resolution { short_side: 1000 })
         );
     }
 
@@ -298,13 +324,32 @@ mod tests {
     }
 
     #[test]
-    fn the_long_side_sets_the_longer_edge_and_truncates_the_other() {
-        assert_eq!(output_size(1920, 1080, 1080), Ok((1080, 607)));
-        assert_eq!(output_size(1080, 1920, 1080), Ok((607, 1080)));
-        assert_eq!(output_size(480, 270, 480), Ok((480, 270)));
+    fn the_short_side_sets_the_shorter_edge_and_truncates_the_other() {
+        assert_eq!(output_size(1920, 1080, 1080), Ok((1920, 1080)));
+        assert_eq!(output_size(1080, 1920, 1080), Ok((1080, 1920)));
+        assert_eq!(output_size(1920, 1080, 720), Ok((1280, 720)));
+        assert_eq!(output_size(1920, 1080, 2160), Ok((3840, 2160)));
+        assert_eq!(output_size(1920, 1080, 4320), Ok((7680, 4320)));
+        assert_eq!(output_size(1080, 1350, 1080), Ok((1080, 1350)));
+        assert_eq!(output_size(1000, 1001, 480), Ok((480, 480)));
         assert_eq!(output_size(100, 100, 480), Ok((480, 480)));
         assert_eq!(output_size(0, 10, 480), Err(ExportError::Canvas));
         assert_eq!(output_size(-1, 10, 480), Err(ExportError::Canvas));
-        assert_eq!(output_size(100_000, 1, 480), Err(ExportError::Canvas));
+        // A sliver canvas would stretch the long edge past any encoder.
+        assert_eq!(output_size(100_000, 1, 480), Err(ExportError::Limit));
+        assert_eq!(output_size(1, 100_000, 480), Err(ExportError::Limit));
+        assert_eq!(output_size(i32::MAX, 1, 4320), Err(ExportError::Limit));
+        assert_eq!(output_size(16_384, 4320, 4320), Ok((16_384, 4320)));
+        assert_eq!(output_size(3800, 1000, 4320), Err(ExportError::Limit));
+    }
+
+    #[test]
+    fn a_half_chroma_codec_codes_even_edges() {
+        use cutlass_codec::CodecId;
+        assert_eq!(coded_size(CodecId::H264, (720, 405)), (720, 404));
+        assert_eq!(coded_size(CodecId::Hevc, (607, 1080)), (606, 1080));
+        assert_eq!(coded_size(CodecId::H264, (1, 1)), (2, 2));
+        assert_eq!(coded_size(CodecId::Png, (720, 405)), (720, 405));
+        assert_eq!(coded_size(CodecId::Gif, (607, 1080)), (607, 1080));
     }
 }

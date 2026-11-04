@@ -14,6 +14,19 @@ run.sh
 xcuserdata/
 *.xcuserstate
 
+# Mobile signing material and machine-local paths.
+local.properties
+*.jks
+*.keystore
+keystore.properties
+*.p8
+*.p12
+*.mobileprovision
+*.provisionprofile
+GoogleService-Info.plist
+google-services.json
+
 # Added by cargo
 
 /target
+.vscode/

@@ -228,7 +228,7 @@ fn stream_of(sound: &Sound) -> Result<Stream, OpenError> {
     ))
 }
 
-impl<R: Read + Seek> Demux for AiffDemux<R> {
+impl<R: Read + Seek + Send> Demux for AiffDemux<R> {
     fn family(&self) -> ContainerId {
         ContainerId::Aiff
     }

@@ -57,6 +57,17 @@ pub fn micros_to_ticks(time: Micros, timescale: Timescale) -> Result<i64, MapErr
     scale(time.0, i128::from(timescale.ticks_per_second()), 1_000_000)
 }
 
+/// Microseconds as ticks of `timescale`, rounded down.
+///
+/// A seek uses this, so it never lands on a tick after `time`.
+pub fn micros_to_ticks_floor(time: Micros, timescale: Timescale) -> Result<i64, MapError> {
+    let denom = 1_000_000_i128;
+    let product = i128::from(time.0)
+        .checked_mul(i128::from(timescale.ticks_per_second()))
+        .ok_or(MapError::Overflow)?;
+    i64::try_from(product.div_euclid(denom)).map_err(|_| MapError::Overflow)
+}
+
 /// Instantaneous speed at `time`. A freeze does not consult the curve.
 pub fn speed_at(map: &TimelineMap, time: Micros) -> Result<f64, MapError> {
     if map.freeze.is_some() {
@@ -586,6 +597,14 @@ mod tests {
             reverse,
         };
         map_timeline(&map, Micros(at)).map(|time| time.0)
+    }
+
+    #[test]
+    fn a_seek_tick_never_rounds_past_the_time() {
+        let scale = Timescale::new(24);
+        assert_eq!(micros_to_ticks_floor(Micros(3_116_669), scale), Ok(74));
+        assert_eq!(micros_to_ticks(Micros(3_116_669), scale), Ok(75));
+        assert_eq!(micros_to_ticks_floor(Micros(-1), scale), Ok(-1));
     }
 
     #[test]

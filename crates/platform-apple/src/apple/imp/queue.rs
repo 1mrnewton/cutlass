@@ -1,22 +1,32 @@
 //! The preview output queue.
 //!
-//! The render callback walks the stored slice. Past the end it writes
+//! The render callback walks the stored samples. Past the end it writes
 //! silence, so the device keeps running. It does not decode or mix.
+//!
+//! A slice set with [`OutputQueue::set_sample`] replaces what is held.
+//! Samples added with [`OutputQueue::append`] play after what is already
+//! held, so a caller that keeps a little ahead hears one unbroken stream.
+//! [`OutputQueue::played_frames`] counts the frames handed to the device,
+//! which is the clock a player follows.
 
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use super::sys::{self, AudioQueueBuffer, AudioQueueRef, AudioStreamBasicDescription};
 use crate::limits::audio_ok;
 
 const LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
 const FLOAT_PACKED: u32 = 1 | 8;
-const BUFFERS: usize = 2;
+const BUFFERS: usize = 3;
 const BUFFER_BYTES: u32 = 4_096;
 /// Eight channels of `f32`, the largest frame this queue will copy.
 const MAX_FRAME_BYTES: usize = 32;
 const MAX_SLICE_BYTES: usize = 64 * 1024;
+/// The most a stream may hold ahead of the device: a second of eight
+/// channels of `f32` at 48 kHz.
+const MAX_STREAM_BYTES: usize = 2 * 1024 * 1024;
 
 /// The output queue could not take the sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,11 +44,86 @@ pub enum QueueError {
 struct Held {
     bytes: Vec<u8>,
     cursor: usize,
+    /// Frames copied out of `bytes` since the queue opened. Silence written
+    /// past the end is not counted.
+    played: u64,
+    /// When `played` last moved.
+    moved: Option<Instant>,
+}
+
+impl Held {
+    fn append(&mut self, sample: &[u8]) -> Result<(), QueueError> {
+        self.bytes.drain(..self.cursor.min(self.bytes.len()));
+        self.cursor = 0;
+        if self.bytes.len().saturating_add(sample.len()) > MAX_STREAM_BYTES {
+            return Err(QueueError::Hostile);
+        }
+        self.bytes.extend_from_slice(sample);
+        Ok(())
+    }
+
+    /// Fill `out` the way the render callback does and count what played.
+    fn pull(&mut self, frame: usize, out: &mut [u8]) -> usize {
+        let before = self.cursor;
+        let copied = pull_frames(&self.bytes, &mut self.cursor, frame, out);
+        let taken = (self.cursor - before) / frame.max(1);
+        if taken > 0 {
+            self.played = self
+                .played
+                .saturating_add(u64::try_from(taken).unwrap_or(0));
+            self.moved = Some(Instant::now());
+        }
+        copied
+    }
 }
 
 struct Shared {
     held: Mutex<Held>,
     frame_bytes: usize,
+}
+
+impl Shared {
+    fn append(&self, sample: &[u8]) -> Result<(), QueueError> {
+        if !sample.is_empty() && !sample.len().is_multiple_of(self.frame_bytes) {
+            return Err(QueueError::Truncated);
+        }
+        lock(&self.held).append(sample)
+    }
+
+    fn buffered_frames(&self) -> usize {
+        let guard = lock(&self.held);
+        guard.bytes.len().saturating_sub(guard.cursor) / self.frame_bytes
+    }
+
+    fn clear(&self) {
+        let mut guard = lock(&self.held);
+        guard.bytes.clear();
+        guard.cursor = 0;
+    }
+}
+
+/// Appends to a queue's stream from another thread, such as a mixer.
+#[derive(Clone)]
+pub struct StreamSink {
+    shared: Arc<Shared>,
+}
+
+impl StreamSink {
+    /// Play `sample` after the samples already held. See [`OutputQueue::append`].
+    pub fn append(&self, sample: &[u8]) -> Result<(), QueueError> {
+        self.shared.append(sample)
+    }
+
+    /// Frames held that the device has not taken yet.
+    #[must_use]
+    pub fn buffered_frames(&self) -> usize {
+        self.shared.buffered_frames()
+    }
+
+    /// Drop every held frame.
+    pub fn clear(&self) {
+        self.shared.clear();
+    }
 }
 
 /// A Core Audio output queue. The callback copies one stored sample.
@@ -62,6 +147,8 @@ impl OutputQueue {
             held: Mutex::new(Held {
                 bytes: Vec::new(),
                 cursor: 0,
+                played: 0,
+                moved: None,
             }),
             frame_bytes,
         });
@@ -117,6 +204,67 @@ impl OutputQueue {
         guard.bytes.extend_from_slice(sample);
         guard.cursor = 0;
         Ok(())
+    }
+
+    /// Play `sample` after the samples already held.
+    ///
+    /// Frames the device has taken are dropped first. A stream that would
+    /// hold more than a second is refused and left as it was.
+    pub fn append(&self, sample: &[u8]) -> Result<(), QueueError> {
+        self.shared.append(sample)
+    }
+
+    /// Frames held that the device has not taken yet.
+    #[must_use]
+    pub fn buffered_frames(&self) -> usize {
+        self.shared.buffered_frames()
+    }
+
+    /// Frames handed to the device since the queue opened, and when that
+    /// count last moved. The device takes whole buffers, so a clock that
+    /// follows it moves on from that instant by elapsed time.
+    #[must_use]
+    pub fn played_frames(&self) -> (u64, Option<Instant>) {
+        let guard = lock(&self.shared.held);
+        (guard.played, guard.moved)
+    }
+
+    /// Frames in one device buffer: how far the count jumps at once.
+    #[must_use]
+    pub fn buffer_frames(&self) -> u64 {
+        u64::try_from(BUFFER_BYTES as usize / self.shared.frame_bytes).unwrap_or(0)
+    }
+
+    /// Frames the device holds in its own buffers before they are heard.
+    #[must_use]
+    pub fn latency_frames(&self) -> u64 {
+        let frames = BUFFER_BYTES as usize / self.shared.frame_bytes;
+        u64::try_from(BUFFERS * frames).unwrap_or(0)
+    }
+
+    /// Drop every held frame. The played count stays.
+    pub fn clear(&self) {
+        self.shared.clear();
+    }
+
+    /// Start the device again. iOS stops a queue when another app or the
+    /// system takes the audio, and it stays silent until started. Starting a
+    /// running queue does nothing.
+    pub fn resume(&self) -> Result<(), QueueError> {
+        let started = unsafe { sys::AudioQueueStart(self.queue, ptr::null()) };
+        if started == 0 {
+            Ok(())
+        } else {
+            Err(QueueError::NoDevice)
+        }
+    }
+
+    /// A handle another thread can append through while this queue plays.
+    #[must_use]
+    pub fn sink(&self) -> StreamSink {
+        StreamSink {
+            shared: Arc::clone(&self.shared),
+        }
     }
 
     /// Copy one sample the way the callback does.
@@ -237,11 +385,7 @@ unsafe extern "C" fn render(
     let shared = unsafe { &*(user.cast::<Shared>()) };
     let frame = shared.frame_bytes;
     let mut block = [0_u8; 4_096];
-    let copied = {
-        let mut guard = lock(&shared.held);
-        let Held { bytes, cursor } = &mut *guard;
-        pull_frames(bytes, cursor, frame, &mut block)
-    };
+    let copied = lock(&shared.held).pull(frame, &mut block);
     unsafe {
         let header = &mut *buffer;
         let capacity = usize::try_from(header.audio_data_bytes_capacity).unwrap_or(0);
@@ -296,6 +440,29 @@ mod tests {
         assert_eq!(out, [0_u8; 24]);
         assert_eq!(cursor, 16);
         assert_eq!(pull_frames(&bytes, &mut cursor, 0, &mut out), 0);
+    }
+
+    #[test]
+    fn an_appended_stream_plays_in_order_and_counts_what_played() {
+        let mut held = Held {
+            bytes: Vec::new(),
+            cursor: 0,
+            played: 0,
+            moved: None,
+        };
+        held.append(&[1, 1, 2, 2]).expect("append");
+        let mut out = [9_u8; 2];
+        assert_eq!(held.pull(2, &mut out), 2);
+        assert_eq!(out, [1, 1]);
+        held.append(&[3, 3]).expect("append");
+        let mut out = [9_u8; 6];
+        assert_eq!(held.pull(2, &mut out), 6);
+        assert_eq!(out, [2, 2, 3, 3, 0, 0]);
+        assert_eq!(held.played, 3);
+        assert!(held.moved.is_some());
+        assert_eq!(held.bytes.len() - held.cursor, 0);
+        let hostile = vec![0_u8; MAX_STREAM_BYTES + 2];
+        assert_eq!(held.append(&hostile), Err(QueueError::Hostile));
     }
 
     #[test]

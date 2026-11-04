@@ -1,21 +1,12 @@
 //! Free Hugeicons, stroked in the widget pass.
 //!
-//! Path data lives in [`icon_data`]. A name that is not in that map is an
-//! error. The button shows the error instead of an empty mark. The blade
-//! path is the only mark that is not from the free set.
-
-mod icon_data;
+//! Path data lives in `cutlass-icons`, which the phones draw from too. A name
+//! that is not in that table is an error. The button shows the error instead
+//! of an empty mark.
 
 use std::fmt;
 
-pub use icon_data::ICONS;
-
-/// One mark in the 24 viewBox.
-#[derive(Clone, Copy, Debug)]
-pub enum Mark {
-    Circle { cx: f32, cy: f32, r: f32 },
-    Path(&'static str),
-}
+use cutlass_icons::{IconData, Shape};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IconError {
@@ -36,13 +27,10 @@ struct Outline {
 }
 
 /// The icon, or an error when the name is absent.
-pub fn require(name: &str) -> Result<&'static icon_data::IconData, IconError> {
-    ICONS
-        .iter()
-        .find(|icon| icon.name == name)
-        .ok_or_else(|| IconError {
-            name: name.to_owned(),
-        })
+pub fn require(name: &str) -> Result<&'static IconData, IconError> {
+    cutlass_icons::get(name).ok_or_else(|| IconError {
+        name: name.to_owned(),
+    })
 }
 
 /// Flatten every path in the named icon. A path the map cannot stroke is an error.
@@ -50,7 +38,7 @@ pub fn outlines(name: &str) -> Result<Vec<Vec<(f32, f32)>>, IconError> {
     let icon = require(name)?;
     let mut outlines = Vec::new();
     for mark in icon.marks {
-        if let Mark::Path(data) = mark {
+        if let Shape::Path(data) = mark.shape {
             let parsed = parse_path(data).map_err(|_| IconError {
                 name: name.to_owned(),
             })?;
@@ -62,11 +50,7 @@ pub fn outlines(name: &str) -> Result<Vec<Vec<(f32, f32)>>, IconError> {
     Ok(outlines)
 }
 
-pub fn is_filled(name: &str) -> Result<bool, IconError> {
-    Ok(require(name)?.fill)
-}
-
-/// Stroke the icon into `rect`. The stroke is 1.5 in a 24 viewBox, scaled to the rect.
+/// Paint the icon into `rect`. Each mark keeps its own stroke width in the 24 viewBox, scaled to the rect.
 pub fn paint(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -74,16 +58,22 @@ pub fn paint(
     color: egui::Color32,
 ) -> Result<(), IconError> {
     let icon = require(name)?;
-    let scale = rect.width().min(rect.height()) / 24.0;
-    let width = crate::tokens::STROKE * scale;
-    let stroke = egui::Stroke::new(width, color);
+    let scale = rect.width().min(rect.height()) / cutlass_icons::VIEWBOX;
     for mark in icon.marks {
-        match mark {
-            Mark::Circle { cx, cy, r } => {
+        let stroke = mark.stroke.map_or(egui::Stroke::NONE, |stroke| {
+            egui::Stroke::new(stroke.width * scale, color)
+        });
+        match mark.shape {
+            Shape::Circle { cx, cy, r } => {
                 let center = rect.min + egui::vec2(cx * scale, cy * scale);
-                painter.circle_stroke(center, r * scale, stroke);
+                let fill = if mark.fill {
+                    color
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                painter.circle(center, r * scale, fill, stroke);
             }
-            Mark::Path(data) => {
+            Shape::Path(data) => {
                 let paths = parse_path(data).map_err(|_| IconError {
                     name: name.to_owned(),
                 })?;
@@ -96,11 +86,9 @@ pub fn paint(
                         .iter()
                         .map(|(x, y)| rect.min + egui::vec2(x * scale, y * scale))
                         .collect();
-                    if icon.fill && path.closed {
+                    if mark.fill && path.closed {
                         painter.add(egui::Shape::Path(egui::epaint::PathShape::convex_polygon(
-                            points,
-                            color,
-                            egui::Stroke::NONE,
+                            points, color, stroke,
                         )));
                     } else if path.closed {
                         painter.add(egui::Shape::Path(egui::epaint::PathShape::closed_line(
@@ -301,31 +289,23 @@ mod tests {
 
     #[test]
     fn every_mapped_icon_strokes_and_a_missing_name_is_an_error() {
-        assert!(ICONS.len() >= 65);
+        assert!(cutlass_icons::ICONS.len() >= 65);
         assert!(require("not-an-icon").is_err());
-        for icon in ICONS {
+        for icon in cutlass_icons::ICONS {
             let drawn = outlines(icon.name).expect(icon.name);
             assert!(
                 !drawn.is_empty()
                     || icon
                         .marks
                         .iter()
-                        .any(|mark| matches!(mark, Mark::Circle { .. })),
+                        .any(|mark| matches!(mark.shape, Shape::Circle { .. })),
             );
             for outline in drawn {
                 assert!(outline.len() >= 2, "{}", icon.name);
             }
         }
-        assert!(is_filled("blade").expect("blade"));
-        assert!(!is_filled("play").expect("play"));
-    }
-
-    #[test]
-    fn the_hugeicons_notice_stays_with_the_path_data() {
-        let source = include_str!("icons/icon_data.rs");
-        assert!(source.contains("MIT License"));
-        assert!(source.contains("Copyright (c) 2025 Hugeicons"));
-        assert!(source.contains("name: \"blade\""));
+        assert!(require("blade").expect("blade").marks[0].fill);
+        assert!(!require("play").expect("play").marks[0].fill);
     }
 
     #[test]

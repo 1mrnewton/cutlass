@@ -20,15 +20,15 @@ cutlass-store = { path = "../../crates/store", version = "0.1.0" }
 cutlass-storage = { path = "../../crates/storage", version = "0.1.0" }
 cutlass-session = { path = "../../crates/session", version = "0.1.0" }
 cutlass-eval = { path = "../../crates/eval", version = "0.1.0" }
+cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
 cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
+cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
 cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
 cutlass-logger = { path = "../../crates/logger", version = "0.1.0" }
-cutlass-renderer-metal = { path = "../../crates/renderer-metal", version = "0.1.0" }
-cutlass-renderer-windows = { path = "../../crates/renderer-windows", version = "0.1.0" }
-cutlass-renderer-android = { path = "../../crates/renderer-android", version = "0.1.0" }
 cutlass-renderer-software = { path = "../../crates/renderer-software", version = "0.1.0" }
+cutlass-render = { path = "../../crates/render", version = "0.1.0" }
 cutlass-isobmff = { path = "../../crates/containers/isobmff", version = "0.1.0" }
 cutlass-matroska = { path = "../../crates/containers/matroska", version = "0.1.0" }
 cutlass-mpegts = { path = "../../crates/containers/mpegts", version = "0.1.0" }
@@ -38,6 +38,7 @@ cutlass-aiff = { path = "../../crates/containers/aiff", version = "0.1.0" }
 cutlass-still = { path = "../../crates/containers/still", version = "0.1.0" }
 cutlass-mp3-container = { path = "../../crates/containers/mp3", version = "0.1.0" }
 cutlass-adts = { path = "../../crates/containers/adts", version = "0.1.0" }
+cutlass-probe = { path = "../../crates/probe", version = "0.1.0" }
 cutlass-ogg = { path = "../../crates/containers/ogg", version = "0.1.0" }
 cutlass-flac-container = { path = "../../crates/containers/flac", version = "0.1.0" }
 cutlass-caf = { path = "../../crates/containers/caf", version = "0.1.0" }
@@ -85,6 +86,6 @@ cutlass-platform-windows = { path = "../../crates/platform-windows", version = "
 workspace = true
 
 [dev-dependencies]
+pollster = "1.0"
 cutlass-color = { path = "../../crates/color", version = "0.1.0" }
-cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
 serde_json = "1.0.154"

@@ -217,7 +217,7 @@ mod tests {
     fn a_dialog_uses_the_shared_chrome() {
         let output = paint(|ui| {
             let _ = dialog(ui, "Export", |ui| {
-                ui.label("Long side");
+                ui.label("Short side");
             });
         });
         assert!(has_color(&output, tokens::PROJECT_BAR) || has_color(&output, tokens::DIALOG_HEAD));

@@ -19,6 +19,7 @@ use cutlass_gpu::Extent;
 use cutlass_model::{Draft, Micros, SegmentId};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, PlatformBuffer, Sample, rgba_len};
 
+use crate::ahead::ReadAhead;
 use crate::cache::FrameWindow;
 use crate::clock::{ClockKind, MediaClock};
 use crate::error::EngineError;
@@ -38,9 +39,32 @@ pub struct VideoSource {
     preload: RefCell<Preload>,
     decodes: Cell<u32>,
     display: DisplayQuarter,
+    /// A decode thread an export-clock read waits on instead of decoding here.
+    ahead: Option<ReadAhead>,
+    /// Off, a read whose picture the thread has not decoded yet returns the
+    /// picture this clip showed last instead of waiting. Preview turns it off.
+    patient: Cell<bool>,
+    /// A read returned an earlier picture than the one asked for.
+    stale: Cell<bool>,
 }
 
 impl VideoSource {
+    /// Decode this clip on its own thread, `frames` pictures ahead.
+    ///
+    /// The thread opens the file again through `factory`. An export-clock
+    /// read then waits on it instead of decoding on the caller's thread, and
+    /// moving forward finds the next picture already decoded. Playback-clock
+    /// reads, filmstrip cells, and waveforms are unchanged.
+    pub fn read_ahead(
+        &mut self,
+        factory: &ReaderFactory,
+        frames: usize,
+    ) -> Result<(), EngineError> {
+        let media = factory.open(&self.path)?;
+        self.ahead = Some(ReadAhead::start(media, self.map.source.clone(), frames)?);
+        Ok(())
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -91,22 +115,72 @@ impl VideoSource {
 
     /// The picture at `time`. Playback misses without decoding. Export decodes and waits.
     pub fn picture_at(&self, time: Micros) -> Result<Picture, EngineError> {
+        to_picture(&self.frame_at(time)?)
+    }
+
+    /// Wait for the picture asked for, or not. See [`Self::take_stale`].
+    pub fn set_patient(&self, patient: bool) {
+        self.patient.set(patient);
+    }
+
+    /// Whether a read since the last call returned an earlier picture than
+    /// the one asked for, because the clip's thread was still decoding it.
+    /// The flag clears.
+    pub fn take_stale(&self) -> bool {
+        self.stale.replace(false)
+    }
+
+    /// Start decoding the picture at `time` on the clip's thread without
+    /// waiting. A clip without a thread, or a time outside the clip, is left
+    /// alone.
+    pub fn prefetch(&self, time: Micros) {
+        if let (Some(ahead), Ok(source)) = (&self.ahead, map::map_timeline(&self.map, time)) {
+            ahead.prefetch(source);
+        }
+    }
+
+    /// The decoded picture at `time`, before color conversion, for a pass
+    /// that converts on the GPU. It is cached and decoded like
+    /// [`Self::picture_at`].
+    pub fn decoded_at(&self, time: Micros) -> Result<DecodedFrame, EngineError> {
+        self.frame_at(time)
+    }
+
+    /// The decoded picture at `time`. A clip that is not patient and whose
+    /// thread has not decoded it yet returns the stored picture nearest it
+    /// and marks itself stale. A clip with nothing stored waits.
+    fn frame_at(&self, time: Micros) -> Result<DecodedFrame, EngineError> {
         let source = map::map_timeline(&self.map, time)?;
         let cached = self.cache.borrow().get(source.0).cloned();
         if let Some(frame) = cached {
-            return to_picture(&frame);
+            return Ok(frame);
         }
-        match self.clock.borrow().kind() {
-            ClockKind::Playback => Err(EngineError::NotReady),
-            ClockKind::Export => {
-                let held = self.decode(source)?;
-                let frame = held.frame.clone();
-                self.cache
-                    .borrow_mut()
-                    .insert(held.start.0, held.end.0, held.frame);
-                to_picture(&frame)
-            }
+        if self.clock.borrow().kind() == ClockKind::Playback {
+            return Err(EngineError::NotReady);
         }
+        let held = match &self.ahead {
+            Some(ahead) if !self.patient.get() => match ahead.try_picture(source)? {
+                Some(held) => held,
+                None => {
+                    let shown = ahead
+                        .nearest(source)
+                        .map(|held| held.frame)
+                        .or_else(|| self.cache.borrow().nearest(source.0).cloned());
+                    if let Some(shown) = shown {
+                        self.stale.set(true);
+                        return Ok(shown);
+                    }
+                    ahead.picture(source)?
+                }
+            },
+            Some(ahead) => ahead.picture(source)?,
+            None => self.decode(source)?,
+        };
+        let frame = held.frame.clone();
+        self.cache
+            .borrow_mut()
+            .insert(held.start.0, held.end.0, held.frame);
+        Ok(frame)
     }
 
     /// The filmstrip cell for `time`, if a fill already stored one.
@@ -231,6 +305,9 @@ pub fn open_segment_in(
         preload: RefCell::new(Preload::new()),
         decodes: Cell::new(0),
         display,
+        ahead: None,
+        patient: Cell::new(true),
+        stale: Cell::new(false),
     })
 }
 

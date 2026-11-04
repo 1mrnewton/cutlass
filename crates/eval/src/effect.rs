@@ -16,8 +16,8 @@
 
 use cutlass_compositor::{ComposeError, Device, Extent, Frame, submit};
 use cutlass_effects::{
-    EffectSource, PackageKind, PackageStore, animation_package_id, entry, package_id,
-    plugin_package_id, segment_package_id, video_package_id,
+    EffectSource, PackageKind, PackageStore, Step, animation_package_id, bundled_recipe, entry,
+    package_id, plugin_package_id, segment_package_id, video_package_id,
 };
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, TrackAttribute};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
@@ -72,6 +72,17 @@ impl PictureSource for Held {
     fn sample(&self, _time: Micros) -> Sample {
         Sample::Ready(Picture::Cpu(self.0.clone()))
     }
+}
+
+/// The frame has an effect mark or a clip filter, so it composes on the CPU.
+pub(crate) fn needs_cpu(draft: &Draft, time: Micros, stack: &[StackLayer<'_>]) -> bool {
+    !global_marks(draft, time, stack).is_empty()
+        || stack.iter().any(|layer| {
+            !matches!(
+                clip_filter(draft, layer.track_index, layer.segment_index),
+                ClipFilter::None
+            )
+        })
 }
 
 pub(crate) fn present<D: Device>(
@@ -260,43 +271,82 @@ fn paint<D: Device>(
 }
 
 fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) -> Vec<Mark<'a>> {
-    let mut marks = Vec::new();
-    for (track_index, track) in draft.tracks.iter().enumerate() {
-        if track.attribute.contains(TrackAttribute::HIDE) {
-            continue;
-        }
-        for (segment_index, segment) in track.segments.iter().enumerate() {
-            if !segment.visible || drawn(stack, track_index, segment_index) {
-                continue;
-            }
-            if !covers(segment.target.start.0, segment.target.duration.0, time.0) {
-                continue;
-            }
-            if !is_effect_material(draft, segment) {
-                continue;
-            }
-            let Some(id) = segment_package_id(draft, segment) else {
-                continue;
-            };
-            if matches!(entry(id).map(|row| row.kind), Some(PackageKind::Blend(_))) {
-                continue;
-            }
-            marks.push(Mark {
-                render_index: segment.render_index,
-                track_index,
-                segment_index,
-                segment,
-            });
-        }
-    }
+    let mut marks: Vec<Mark<'a>> = effect_segments(draft, time, stack)
+        .filter(|(_, _, _, id)| bundled_recipe(id).is_none())
+        .filter(|(_, _, _, id)| {
+            !matches!(entry(id).map(|row| row.kind), Some(PackageKind::Blend(_)))
+        })
+        .map(|(track_index, segment_index, segment, _)| Mark {
+            render_index: segment.render_index,
+            track_index,
+            segment_index,
+            segment,
+        })
+        .collect();
     marks.sort_by_key(|mark| (mark.render_index, mark.track_index, mark.segment_index));
     marks
 }
 
-fn drawn(stack: &[StackLayer<'_>], track_index: usize, segment_index: usize) -> bool {
-    stack
+/// A recipe effect at one frame: where it sits among the layers, and its
+/// steps at that time.
+pub(crate) struct RecipeMark {
+    pub(crate) key: (i32, usize, usize),
+    pub(crate) steps: Vec<Step>,
+}
+
+/// The bundled recipe effects covering `time`, back to front. Their steps
+/// are worked out at `time` less the segment's start.
+pub(crate) fn recipe_marks(
+    draft: &Draft,
+    time: Micros,
+    stack: &[StackLayer<'_>],
+) -> Vec<RecipeMark> {
+    let mut marks: Vec<RecipeMark> = effect_segments(draft, time, stack)
+        .filter_map(|(track_index, segment_index, segment, id)| {
+            let recipe = bundled_recipe(id)?;
+            let offset = Micros(time.0.saturating_sub(segment.target.start.0));
+            Some(RecipeMark {
+                key: (segment.render_index, track_index, segment_index),
+                steps: recipe.steps_at(offset),
+            })
+        })
+        .collect();
+    marks.sort_by_key(|mark| mark.key);
+    marks
+}
+
+/// Visible effect segments on visible rows that cover `time` and are not
+/// drawn themselves, with their package id.
+fn effect_segments<'a>(
+    draft: &'a Draft,
+    time: Micros,
+    stack: &[StackLayer<'_>],
+) -> impl Iterator<Item = (usize, usize, &'a Segment, &'a str)> {
+    let drawn_now: Vec<(usize, usize)> = stack
         .iter()
-        .any(|layer| layer.track_index == track_index && layer.segment_index == segment_index)
+        .map(|layer| (layer.track_index, layer.segment_index))
+        .collect();
+    draft
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, track)| !track.attribute.contains(TrackAttribute::HIDE))
+        .flat_map(|(track_index, track)| {
+            track
+                .segments
+                .iter()
+                .enumerate()
+                .map(move |(segment_index, segment)| (track_index, segment_index, segment))
+        })
+        .filter(move |(track_index, segment_index, segment)| {
+            segment.visible
+                && !drawn_now.contains(&(*track_index, *segment_index))
+                && covers(segment.target.start.0, segment.target.duration.0, time.0)
+                && is_effect_material(draft, segment)
+        })
+        .filter_map(move |(track_index, segment_index, segment)| {
+            segment_package_id(draft, segment).map(|id| (track_index, segment_index, segment, id))
+        })
 }
 
 fn is_effect_material(draft: &Draft, segment: &Segment) -> bool {

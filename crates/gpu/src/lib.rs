@@ -10,6 +10,10 @@
 
 #![forbid(unsafe_code)]
 
+mod placement;
+
+pub use placement::{Affine, Placement};
+
 /// The longest edge a framebuffer or a drawn picture may have.
 pub const MAX_EDGE: u32 = 8_192;
 

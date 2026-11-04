@@ -145,7 +145,7 @@ impl<R: Read + Seek> StillDemux<R> {
     }
 }
 
-impl<R: Read + Seek> Demux for StillDemux<R> {
+impl<R: Read + Seek + Send> Demux for StillDemux<R> {
     fn family(&self) -> ContainerId {
         ContainerId::Still
     }

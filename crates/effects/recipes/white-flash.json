@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "white-flash",
+  "name": "White Flash",
+  "passes": [
+    {
+      "block": "flash",
+      "params": {
+        "amount": { "keys": [[0, 0], [0.08, 0.9], [0.5, 0], [1, 0]], "repeat": 1 }
+      }
+    }
+  ]
+}

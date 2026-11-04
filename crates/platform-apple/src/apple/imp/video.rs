@@ -1215,13 +1215,13 @@ fn copy_planar(
     }
     let (primaries, transfer) = buffer_color(image);
     PictureOutput::cpu(
-        PictureInfo {
-            width: picture_width,
-            height: picture_height,
-            pixel: PixelFormat::Yuv420p,
+        PictureInfo::new(
+            picture_width,
+            picture_height,
+            PixelFormat::Yuv420p,
             primaries,
             transfer,
-        },
+        ),
         bytes,
         pts,
         timescale,

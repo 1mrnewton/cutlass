@@ -726,13 +726,13 @@ impl Decoder for Held {
         let mut outputs = Vec::new();
         for (pts, timescale) in self.0.drain(..) {
             let picture = PictureOutput::cpu(
-                PictureInfo {
-                    width: 2,
-                    height: 2,
-                    pixel: PixelFormat::Yuv420p,
-                    primaries: ColorPrimaries::Bt709,
-                    transfer: Transfer::Bt709,
-                },
+                PictureInfo::new(
+                    2,
+                    2,
+                    PixelFormat::Yuv420p,
+                    ColorPrimaries::Bt709,
+                    Transfer::Bt709,
+                ),
                 vec![16, 16, 16, 16, 128, 128],
                 pts,
                 timescale,

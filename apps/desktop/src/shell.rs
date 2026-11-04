@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
     Append, AppendLane, DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture,
-    Pointer, TimelineScale, TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement,
-    drop_gesture, fit_pixel_size, hit_test, last_accuracy_step, material_span, minimum_pixel_size,
-    move_gesture, snap_guides, trim_gesture,
+    Pointer, TITLE_LENGTH, TimelineScale, TitlePlace, TrimGesture, TrimPlan, Zoom, ZoomBounds,
+    append_placement, drop_gesture, fit_pixel_size, free_row, hit_test, last_accuracy_step,
+    material_span, minimum_pixel_size, move_gesture, snap_guides, title_requests, title_style,
+    trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
@@ -2550,6 +2551,64 @@ impl Shell {
         if first_clip {
             let _ = self.zoom_fit();
         }
+        Ok(())
+    }
+
+    /// Add the text shelf's `card_id` at the playhead, on the first text row
+    /// with room, else on a new one. The new title is picked.
+    pub fn add_title(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(self.session_draft()?, TrackType::Text, start, TITLE_LENGTH)
+            .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_title(card_id, track_id, start)
+    }
+
+    /// Place the text shelf's `card_id` where it was dropped on the lanes.
+    pub fn drop_title(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
+        let outcome = {
+            let gesture = DropGesture {
+                kind: TrackType::Text,
+                duration: TITLE_LENGTH,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        let (track_id, start) = match outcome {
+            DropOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            DropOutcome::Place { track_id, start } => (track_id, start),
+            DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
+        };
+        self.place_title(card_id, track_id, start)
+    }
+
+    fn place_title(
+        &mut self,
+        card_id: &str,
+        track_id: TrackId,
+        start: Micros,
+    ) -> Result<(), ShellError> {
+        let style = title_style(card_id).ok_or_else(|| {
+            ShellError::Unavailable("the title is not on the text shelf".to_owned())
+        })?;
+        let place = TitlePlace {
+            track_id,
+            segment_id: SegmentId::new(self.fresh("seg")),
+            material_id: MaterialId::new(self.fresh("text")),
+            start,
+            face: self.face.name().to_owned(),
+        };
+        self.apply_requests(&title_requests(style, &place))?;
+        self.select(Some(place.segment_id));
         Ok(())
     }
 
@@ -8553,6 +8612,62 @@ mod tests {
             TimeRange::new(1_000_000, 1_000_000),
         ));
         Folder::new(draft).save(dir).unwrap();
+    }
+
+    #[test]
+    fn a_title_card_lands_at_the_playhead_styled_and_undoes_in_one_step() {
+        let temp = Temp::new();
+        touching_cut(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        desktop.seek(Micros(500_000));
+        let lower = cutlass_editor::title_style("title:lower-third").unwrap();
+        desktop.add_title(&lower.card_id()).unwrap();
+        desktop.add_title(&lower.card_id()).unwrap();
+        let rows = |desktop: &Shell| {
+            desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .filter(|track| track.kind == TrackType::Text)
+                .count()
+        };
+        assert_eq!(rows(&desktop), 2, "the second title overlaps the first");
+        let draft = desktop.draft().unwrap();
+        let text = &draft.materials.texts[0];
+        assert_eq!(text.words().unwrap(), "Lower third");
+        assert_eq!(text.text_color, "#EFC56A");
+        let picked = desktop.selected().cloned().unwrap();
+        let segment = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == picked)
+            .unwrap();
+        assert_eq!(segment.target.start, Micros(500_000));
+        assert_eq!(segment.target.duration, cutlass_editor::TITLE_LENGTH);
+        assert!(segment.clip.transform.y < 0.0);
+        desktop.undo().unwrap();
+        assert_eq!(rows(&desktop), 1);
+        assert_eq!(desktop.draft().unwrap().materials.texts.len(), 1);
+
+        let end = cutlass_editor::title_style("title:end-card").unwrap();
+        let text_row = crate::tokens::LANE_HEIGHT / 2.0;
+        desktop
+            .drop_title(&end.card_id(), lane_time(&desktop, 4_000_000.0), text_row)
+            .unwrap();
+        assert_eq!(rows(&desktop), 1, "the drop lands after the first title");
+        let draft = desktop.draft().unwrap();
+        let dropped = draft
+            .materials
+            .texts
+            .iter()
+            .find(|text| text.words().as_deref() == Some("End card"))
+            .unwrap();
+        assert_eq!(dropped.text_color, "#F0E2C4");
+        assert!(desktop.drop_title("title:nope", 0.0, text_row).is_err());
     }
 
     #[test]

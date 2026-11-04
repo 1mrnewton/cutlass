@@ -101,7 +101,7 @@ impl Shelf {
         match self {
             Self::Media => "No media yet. Use File → Import.",
             Self::Audio => "No audio yet. Use File → Import.",
-            Self::Text => "No text in this project.",
+            Self::Text => "No title matches the search.",
             Self::Stickers => "No stickers in this project.",
             Self::Effects => "No effects in this project.",
             Self::Transitions => "No transitions in this project.",
@@ -982,10 +982,15 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                         .size(tokens::TYPE_SIZE)
                         .color(tokens::MUTED),
                 );
-            } else if let Some(id) = card_grid(shell, ui, view, &cards, bin)
-                && let Err(error) = shell.add_medium(&id)
-            {
-                shell.set_notice(error.to_string());
+            } else if let Some(id) = card_grid(shell, ui, view, &cards, bin) {
+                let added = if id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+                    shell.add_title(&id)
+                } else {
+                    shell.add_medium(&id)
+                };
+                if let Err(error) = added {
+                    shell.set_notice(error.to_string());
+                }
             }
         });
     library_menu(shell, &column, view);
@@ -1443,7 +1448,7 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         card.look = CardLook::Sound(levels);
                     }
                 }
-                CardLook::Swatch | CardLook::Folder => {}
+                CardLook::Swatch | CardLook::Folder | CardLook::Title(_) => {}
             }
         }
     });
@@ -1457,6 +1462,16 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
     match &card.look {
         CardLook::Swatch => {
             painter.rect_filled(rect, radius, swatch_color(&card.name));
+        }
+        CardLook::Title(color) => {
+            painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "Aa",
+                FontId::proportional(28.0),
+                *color,
+            );
         }
         CardLook::Folder => {
             painter.rect_filled(rect, radius, tokens::ICON_BUTTON);
@@ -1547,6 +1562,8 @@ enum CardLook {
     Sound(std::sync::Arc<[f32]>),
     /// A library folder.
     Folder,
+    /// A title style: "Aa" in its color.
+    Title(Color32),
 }
 
 /// Where the library is looking: its folders, the one shown, and the order.
@@ -1611,14 +1628,31 @@ fn bin_cards(
                 });
             }
         }
-        Shelf::Text
-        | Shelf::Stickers
+        Shelf::Text => {
+            for style in cutlass_editor::TITLE_STYLES {
+                if !query.is_empty() && !style.name.to_lowercase().contains(&query) {
+                    continue;
+                }
+                cards.push(title_card(style));
+            }
+        }
+        Shelf::Stickers
         | Shelf::Effects
         | Shelf::Filters
         | Shelf::Adjustments
         | Shelf::Templates => {}
     }
     cards
+}
+
+fn title_card(style: &cutlass_editor::TitleStyle) -> BinCard {
+    BinCard {
+        id: style.card_id(),
+        name: style.name.to_owned(),
+        meta: style.meta.to_owned(),
+        on_timeline: false,
+        look: CardLook::Title(Color32::from_hex(style.color).unwrap_or(Color32::WHITE)),
+    }
 }
 
 fn file_card(file: cutlass_editor::LibraryFile, look: CardLook) -> BinCard {
@@ -3213,6 +3247,8 @@ fn release_library_drop(
     let y = f64::from(row) * tokens::LANE_HEIGHT + tokens::LANE_HEIGHT / 2.0;
     let landed = if material_id.starts_with("transition:") {
         shell.drop_transition(&material_id, x, y)
+    } else if material_id.starts_with(cutlass_editor::TITLE_CARD_PREFIX) {
+        shell.drop_title(&material_id, x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };
@@ -3253,6 +3289,9 @@ fn paint_library_ghost(shell: &mut Shell, ui: &Ui) {
 }
 
 fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
+    if let Some(style) = cutlass_editor::title_style(material_id) {
+        return Some(title_card(style));
+    }
     if let Some(offer) = crate::shell::TRANSITION_OFFERS
         .iter()
         .find(|offer| offer.card_id() == material_id)

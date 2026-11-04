@@ -530,6 +530,8 @@ pub struct Shell {
     /// The J/K/L rate while playing: 1 is real time with sound; any other
     /// moves the picture alone, backward below zero.
     shuttle: i32,
+    /// The level meter's bars between frames.
+    meter: cutlass_playback::LevelMeter,
     /// The I and O marks.
     marks: cutlass_editor::Marks,
     pixel_size: f64,
@@ -659,6 +661,7 @@ impl Shell {
             playhead: Micros(0),
             playing: false,
             shuttle: 0,
+            meter: cutlass_playback::LevelMeter::new(),
             marks: cutlass_editor::Marks::default(),
             pixel_size: opening_pixel_size(FrameRate::FPS_30),
             view_origin: 0,
@@ -1489,6 +1492,29 @@ impl Shell {
     pub fn scrub(&mut self, time: Micros) -> Result<Picture, ShellError> {
         self.seek(time);
         self.preview_bytes()
+    }
+
+    /// Move the level meter on by `elapsed`. It reads what the device plays
+    /// while playing with sound, and falls to rest otherwise.
+    pub fn update_meter(&mut self, elapsed: i64) {
+        let peak = if self.playing && self.shuttle == 1 {
+            self.transport.heard_peak()
+        } else {
+            None
+        };
+        self.meter.update(peak, elapsed);
+    }
+
+    /// The left and right channels of the level meter.
+    #[must_use]
+    pub fn meter(&self) -> [cutlass_playback::ChannelReading; 2] {
+        self.meter.reading()
+    }
+
+    /// The meter is at rest, so it needs no more frames.
+    #[must_use]
+    pub fn meter_resting(&self) -> bool {
+        self.meter.is_resting()
     }
 
     /// Move the playhead while playing, by `elapsed`. With a stream clock it
@@ -7224,6 +7250,43 @@ mod tests {
     }
 
     #[test]
+    fn the_meter_rises_with_heard_sound_and_falls_when_paused() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file() {
+            eprintln!("skipped: {} is missing", sound.display());
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.duration = Micros(20_000_000);
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("song"),
+            path: sound.display().to_string(),
+            duration: Micros(20_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut segment = Segment::new("song", "song", TimeRange::new(0, 20_000_000));
+        segment.source_range = Some(TimeRange::new(0, 20_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(5_000_000));
+        desktop.play();
+        let mut loudest = cutlass_playback::METER_FLOOR_DB;
+        for _ in 0..25 {
+            desktop.advance(40_000);
+            desktop.update_meter(40_000);
+            loudest = loudest.max(desktop.meter()[0].level);
+        }
+        assert!(loudest > -40.0, "{loudest}");
+        desktop.pause();
+        desktop.update_meter(10_000_000);
+        assert!(desktop.meter_resting());
+    }
+
+    #[test]
     fn an_audio_clip_reads_its_waveform_from_the_worker() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
         let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
@@ -9289,6 +9352,24 @@ mod tests {
             "{error}"
         );
         assert_eq!(desktop.lanes()[0].clips[0].start, start);
+    }
+
+    #[test]
+    fn the_meter_rests_while_paused_and_hears_the_mix_while_playing() {
+        let temp = Temp::new();
+        color_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.update_meter(20_000);
+        assert!(desktop.meter_resting());
+        desktop.play();
+        desktop.advance(20_000);
+        desktop.update_meter(20_000);
+        // A picture with no sound plays silence, so the meter stays down.
+        assert!(desktop.meter_resting());
+        desktop.pause();
+        desktop.update_meter(20_000);
+        assert!(desktop.meter_resting());
     }
 
     #[test]

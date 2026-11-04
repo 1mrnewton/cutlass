@@ -119,6 +119,13 @@ pub const CLIP_HEIGHT: f32 = 28.0;
 pub const MAIN_CLIP_INSET: f32 = 8.0;
 /// The gap above and below any other clip.
 pub const CLIP_INSET: f32 = 6.0;
+/// The level meter's column at the timeline's right edge.
+pub const METER_WIDTH: f32 = 40.0;
+/// The meter's bars: quiet, loud (from -12 dB), and near full scale (from
+/// -3 dB), and the mark a clipped channel shows.
+pub const METER_LOW: Color32 = Color32::from_rgb(0x3d, 0xd6, 0x8c);
+pub const METER_LOUD: Color32 = Color32::from_rgb(0xf5, 0xc5, 0x42);
+pub const METER_HOT: Color32 = Color32::from_rgb(0xff, 0x5f, 0x57);
 /// The shortest a clip gets in a row dragged short.
 pub const MIN_CLIP_HEIGHT: f32 = 12.0;
 /// How short and how tall a track row can be dragged.

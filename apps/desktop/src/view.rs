@@ -292,7 +292,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         }
         job_strip(shell, ui, full);
         shortcuts(shell, ui);
-        if shell.playing() || shell.preview_pending() {
+        if shell.playing() || shell.preview_pending() || !shell.meter_resting() {
             ui.ctx().request_repaint();
         }
     }
@@ -2004,7 +2004,13 @@ fn timeline_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Re
         egui::Stroke::new(1.0, tokens::GAP),
     );
     let body = Rect::from_min_max(toolbar.left_bottom(), rect.max);
+    let meter = Rect::from_min_max(
+        Pos2::new(body.right() - tokens::METER_WIDTH, body.top()),
+        body.max,
+    );
+    let body = Rect::from_min_max(body.min, Pos2::new(meter.left(), body.bottom()));
     ruler_and_lanes(shell, ui, view, body);
+    paint_meter(ui, meter, shell.meter());
     paint_clip_menu(shell, ui);
     paint_gap_menu(shell, ui);
     paint_track_menu(shell, ui, view);
@@ -2578,6 +2584,81 @@ fn paint_gap_menu(shell: &mut Shell, ui: &mut Ui) {
         }
     } else if shown.dismissed {
         shell.close_gap_menu();
+    }
+}
+
+/// The level meter: a bar for each channel from the floor at the bottom to
+/// full scale at the top, its held peak as a line, and a red cap while the
+/// channel has clipped.
+fn paint_meter(ui: &Ui, rect: Rect, channels: [cutlass_playback::ChannelReading; 2]) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    painter.rect_filled(rect, CornerRadius::ZERO, tokens::PANEL);
+    painter.vline(
+        rect.left(),
+        rect.y_range(),
+        egui::Stroke::new(1.0, tokens::GAP),
+    );
+    let span = Rect::from_min_max(
+        Pos2::new(rect.left() + 16.0, rect.top() + tokens::RULER_HEIGHT),
+        Pos2::new(rect.right() - 4.0, rect.bottom() - 8.0),
+    );
+    if span.height() <= 0.0 || span.width() <= 0.0 {
+        return;
+    }
+    let y_at = |db: f32| span.bottom() - cutlass_playback::meter_fraction(db) * span.height();
+    for db in [0.0, -12.0, -24.0, -48.0] {
+        painter.text(
+            Pos2::new(span.left() - 2.0, y_at(db)),
+            Align2::RIGHT_CENTER,
+            format!("{}", -db as i32),
+            FontId::proportional(8.0),
+            tokens::FAINT,
+        );
+    }
+    let bar_width = (span.width() - 2.0) / 2.0;
+    for (index, channel) in channels.iter().enumerate() {
+        let left = span.left() + index as f32 * (bar_width + 2.0);
+        let well = Rect::from_min_max(
+            Pos2::new(left, span.top()),
+            Pos2::new(left + bar_width, span.bottom()),
+        );
+        painter.rect_filled(well, CornerRadius::ZERO, tokens::LANE);
+        // The bar in three bands, each up to where the level reaches.
+        for (from, to, color) in [
+            (cutlass_playback::METER_FLOOR_DB, -12.0, tokens::METER_LOW),
+            (-12.0, -3.0, tokens::METER_LOUD),
+            (-3.0, 0.0, tokens::METER_HOT),
+        ] {
+            if channel.level <= from {
+                continue;
+            }
+            let top = y_at(channel.level.min(to));
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(well.left(), top),
+                    Pos2::new(well.right(), y_at(from)),
+                ),
+                CornerRadius::ZERO,
+                color,
+            );
+        }
+        if channel.hold > cutlass_playback::METER_FLOOR_DB {
+            painter.hline(
+                well.x_range(),
+                y_at(channel.hold),
+                egui::Stroke::new(1.0, tokens::TEXT),
+            );
+        }
+        if channel.clipped {
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(well.left(), span.top() - 5.0),
+                    Vec2::new(bar_width, 3.0),
+                ),
+                CornerRadius::ZERO,
+                tokens::METER_HOT,
+            );
+        }
     }
 }
 
@@ -5698,6 +5779,66 @@ mod tests {
         assert_eq!(grown.height(), 100.0 - 2.0 * tokens::CLIP_INSET);
         let kept = clip_bounds(&shell, false, false, Micros(0), Micros(1), usual, 0.0);
         assert_eq!(kept.height(), tokens::CLIP_HEIGHT);
+    }
+
+    #[test]
+    fn the_meter_fills_its_bands_up_to_the_level_and_caps_a_clip() {
+        let paint = |channels| {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(40.0, 300.0));
+                paint_meter(ui, rect, channels);
+            });
+            output.textures_delta.clear();
+            let fills: Vec<(Color32, Rect)> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) => Some((rect.fill, rect.rect)),
+                    _ => None,
+                })
+                .collect();
+            fills
+        };
+        let quiet = cutlass_playback::ChannelReading {
+            level: -30.0,
+            hold: -20.0,
+            clipped: false,
+        };
+        let fills = paint([quiet, quiet]);
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|(color, _)| *color == tokens::METER_LOW)
+                .count(),
+            2
+        );
+        assert!(!fills.iter().any(|(color, _)| *color == tokens::METER_LOUD));
+        assert!(!fills.iter().any(|(color, _)| *color == tokens::METER_HOT));
+        let hot = cutlass_playback::ChannelReading {
+            level: 0.0,
+            hold: 0.0,
+            clipped: true,
+        };
+        let fills = paint([hot, quiet]);
+        // The left bar runs through all three bands and wears the clip cap.
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|(color, _)| *color == tokens::METER_HOT)
+                .count(),
+            2
+        );
+        assert_eq!(
+            fills
+                .iter()
+                .filter(|(color, _)| *color == tokens::METER_LOUD)
+                .count(),
+            1
+        );
+        let rest = cutlass_playback::LevelMeter::new().reading();
+        let fills = paint(rest);
+        assert!(!fills.iter().any(|(color, _)| *color == tokens::METER_LOW));
     }
 
     #[test]

@@ -39,14 +39,22 @@ pub struct PreviewMix<'a> {
 /// leaves the current slice in place. A failed mix queues silence so the
 /// picture can still be shown.
 pub fn queue_mix(output: &mut AudioOutput, mix: PreviewMix<'_>) {
+    let _ = queue_mix_peak(output, mix);
+}
+
+/// [`queue_mix`], and the left and right peaks of what was queued, or `None`
+/// when nothing was.
+pub(crate) fn queue_mix_peak(output: &mut AudioOutput, mix: PreviewMix<'_>) -> Option<[f32; 2]> {
     if output.gap().is_some() {
-        return;
+        return None;
     }
     let frames = mix.frames.min(max_frames());
     if frames == 0 {
-        return;
+        return None;
     }
-    output.queue(&mixed_bytes(mix, frames));
+    let bytes = mixed_bytes(mix, frames);
+    output.queue(&bytes);
+    Some(crate::meter::window_peak(&bytes))
 }
 
 /// `frames` of mixed stereo at `mix.time`. A failed mix is silence of the

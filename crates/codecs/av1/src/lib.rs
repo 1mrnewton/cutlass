@@ -9,12 +9,22 @@
 //! overlapped motion are rejected.
 
 #![forbid(unsafe_code)]
+// Kernels index fixed-size tables and take many scalar parameters, as the
+// specification's processes do.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::cast_lossless,
+    clippy::identity_op,
+    clippy::erasing_op
+)]
 
 mod bits;
 mod cdef;
 mod deblock;
 mod decode;
 mod dims;
+pub mod dsp;
 mod encode;
 mod grain;
 mod header;
@@ -23,6 +33,7 @@ mod inter;
 mod predict;
 mod qm;
 mod restore;
+pub mod spec;
 mod superres;
 mod symbol;
 mod tables;

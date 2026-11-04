@@ -15,6 +15,7 @@ mod hit;
 mod keys;
 mod lane;
 mod reorder;
+mod ripple;
 mod ruler;
 mod snap;
 mod stage;
@@ -38,6 +39,7 @@ pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs};
 pub use lane::{Lane, lane_category, lanes};
 pub use reorder::{place_of, reorder_start};
+pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
 pub use snap::{SnapKind, SnapTarget, snap, snap_guides, transition_middle};
 pub use stage::{

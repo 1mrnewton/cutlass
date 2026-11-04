@@ -94,6 +94,18 @@ impl Session {
         Ok(self.revision)
     }
 
+    /// Whether [`Session::undo`] has a step to restore.
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    /// Whether [`Session::redo`] has a step to reapply.
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
     /// Restore the draft from before the last apply. The revision still advances.
     pub fn undo(&mut self) -> Result<u64, EditError> {
         let previous = self.history.pop_undo().ok_or(EditError::EmptyUndo)?;
@@ -510,6 +522,86 @@ mod tests {
             y,
             rest: Default::default(),
         }
+    }
+
+    #[test]
+    fn undo_and_redo_say_when_they_have_a_step() {
+        let (mut session, track) = session();
+        assert!(!session.can_undo() && !session.can_redo());
+        session
+            .apply(0, &[place(&track, "a", 0, 1_000_000)])
+            .unwrap();
+        assert!(session.can_undo() && !session.can_redo());
+        session.undo().unwrap();
+        assert!(!session.can_undo() && session.can_redo());
+    }
+
+    #[test]
+    fn a_split_curve_clip_gives_each_half_its_stretch_of_the_curve() {
+        let (mut session, track) = session();
+        let mut segment = Segment::new("a", "media", TimeRange::new(0, 4_000_000));
+        segment.source_range = Some(TimeRange::new(0, 4_000_000));
+        session
+            .apply(
+                0,
+                &[Request::Place {
+                    track_id: track.clone(),
+                    segment: Box::new(segment),
+                }],
+            )
+            .unwrap();
+        let revision = session
+            .apply(
+                1,
+                &[Request::SetCurveSpeed {
+                    segment_id: "a".into(),
+                    speed_id: MaterialId::new("curve"),
+                    points: vec![speed_point(0.0, 0.5), speed_point(1.0, 4.0)],
+                }],
+            )
+            .unwrap();
+        let whole = session.draft().tracks[0].segments[0].target.clone();
+        let at = whole.start.0 + whole.duration.0 / 2;
+        session
+            .apply(
+                revision,
+                &[Request::Split {
+                    segment_id: "a".into(),
+                    at: Micros(at),
+                    right_id: "b".into(),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let (left, right) = (&draft.tracks[0].segments[0], &draft.tracks[0].segments[1]);
+        let points = |segment: &Segment| {
+            let id = &segment.extra_material_refs[0];
+            draft
+                .materials
+                .speeds
+                .iter()
+                .find(|speed| &speed.id == id)
+                .and_then(|speed| speed.curve_speed.clone())
+                .unwrap()
+                .speed_points
+        };
+        assert_ne!(left.extra_material_refs, right.extra_material_refs);
+        for segment in [left, right] {
+            let source = segment.source_range.clone().unwrap().duration;
+            let mapped = cutlass_model::curve_target_duration(source, &points(segment)).unwrap();
+            assert!(
+                (mapped.0 - segment.target.duration.0).abs() <= 2,
+                "{mapped:?}"
+            );
+        }
+        // Slow at the start, so the first half of the time covers less than
+        // half the footage.
+        let left_source = left.source_range.clone().unwrap().duration.0;
+        assert!(left_source < 2_000_000, "{left_source}");
+        assert_eq!(
+            left_source + right.source_range.clone().unwrap().duration.0,
+            4_000_000
+        );
     }
 
     #[test]

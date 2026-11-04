@@ -812,6 +812,7 @@ dependencies = [
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-gpu",
+ "cutlass-isobmff",
  "cutlass-model",
  "cutlass-pcm",
  "cutlass-playback",

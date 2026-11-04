@@ -191,6 +191,7 @@ mod tests {
     fn text_content_does_not_rewrite_word_columns() {
         let mut draft = Draft::empty("D");
         draft.tracks[0].id = TrackId::new("main");
+        draft.tracks[0].kind = cutlass_model::TrackType::Text;
         draft.materials.texts.push(MaterialText {
             id: MaterialId::new("media"),
             content: "old".to_owned(),

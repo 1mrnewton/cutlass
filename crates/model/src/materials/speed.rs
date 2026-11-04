@@ -99,6 +99,94 @@ pub fn curve_target_duration(
     Ok(Micros(target as i64))
 }
 
+/// Cut a curve where `share` of its timeline length has played. Returns
+/// the share of the source played by then, and the two halves' curves,
+/// each stretched back over 0 to 1, so each half's integral is its own
+/// length. `share` is strictly between 0 and 1.
+pub fn split_curve(
+    points: &[SpeedPoint],
+    share: f64,
+) -> Result<(f64, Vec<SpeedPoint>, Vec<SpeedPoint>), ConstantSpeedError> {
+    if !(share.is_finite() && share > 0.0 && share < 1.0) {
+        return Err(ConstantSpeedError::NonPositiveDuration);
+    }
+    let corners = corners(&prepared_points(points)?);
+    let total = curve_speed_factor(points)?;
+    let mut left = share * total;
+    let mut cut = None;
+    for pair in corners.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        let piece = speed_piece(x0, x1, y0, y1)?;
+        if left > piece {
+            left -= piece;
+            continue;
+        }
+        // Invert dF = dx / y on a piece where y is linear in x.
+        let width = x1 - x0;
+        let slope = (y1 - y0) / width;
+        let along = if slope == 0.0 {
+            left * y0
+        } else {
+            y0 * (slope * left).exp_m1() / slope
+        };
+        let x = (x0 + along).clamp(x0, x1);
+        cut = Some((x, interpolate(x0, y0, x1, y1, x)));
+        break;
+    }
+    let (x, y) = cut.ok_or(ConstantSpeedError::Unrepresentable)?;
+    if !(x > 0.0 && x < 1.0) {
+        return Err(ConstantSpeedError::NonPositiveDuration);
+    }
+    let point = |x: f64, y: f64| SpeedPoint {
+        x,
+        y,
+        rest: Map::new(),
+    };
+    let mut before: Vec<SpeedPoint> = corners
+        .iter()
+        .filter(|corner| corner.0 < x)
+        .map(|&(cx, cy)| point(cx / x, cy))
+        .collect();
+    before.push(point(1.0, y));
+    let mut after = vec![point(0.0, y)];
+    after.extend(
+        corners
+            .iter()
+            .filter(|corner| corner.0 > x)
+            .map(|&(cx, cy)| point((cx - x) / (1.0 - x), cy)),
+    );
+    Ok((x, before, after))
+}
+
+/// The curve from 0 to 1 as straight pieces: 0, each point inside, and 1,
+/// with the speed held before the first point and after the last.
+fn corners(prepared: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let at = |x: f64| -> f64 {
+        let (first, last) = (prepared[0], prepared[prepared.len() - 1]);
+        if x <= first.0 {
+            return first.1;
+        }
+        if x >= last.0 {
+            return last.1;
+        }
+        prepared
+            .windows(2)
+            .find(|pair| x <= pair[1].0)
+            .map_or(last.1, |pair| {
+                interpolate(pair[0].0, pair[0].1, pair[1].0, pair[1].1, x)
+            })
+    };
+    let mut corners = vec![(0.0, at(0.0))];
+    corners.extend(
+        prepared
+            .iter()
+            .filter(|point| point.0 > 0.0 && point.0 < 1.0)
+            .copied(),
+    );
+    corners.push((1.0, at(1.0)));
+    corners
+}
+
 fn prepared_points(points: &[SpeedPoint]) -> Result<Vec<(f64, f64)>, ConstantSpeedError> {
     let mut indexed = Vec::with_capacity(points.len());
     for (index, point) in points.iter().enumerate() {
@@ -222,6 +310,33 @@ impl Default for MaterialSpeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_split_curve_keeps_each_halfs_length_and_the_speed_at_the_cut() {
+        let point = |x: f64, y: f64| SpeedPoint {
+            x,
+            y,
+            rest: Map::new(),
+        };
+        let points = [point(0.0, 1.0), point(0.5, 4.0), point(1.0, 0.5)];
+        let source = Micros(10_000_000);
+        let whole = curve_target_duration(source, &points).unwrap().0 as f64;
+        for share in [0.1, 0.3, 0.5, 0.8] {
+            let (x, before, after) = split_curve(&points, share).unwrap();
+            let left = curve_speed_factor(&before).unwrap() * x * source.0 as f64;
+            let right = curve_speed_factor(&after).unwrap() * (1.0 - x) * source.0 as f64;
+            assert!((left - share * whole).abs() < 1.0, "{share}: {left}");
+            assert!(
+                (right - (1.0 - share) * whole).abs() < 1.0,
+                "{share}: {right}"
+            );
+            assert_eq!(before.last().unwrap().y, after[0].y);
+        }
+        let flat = [point(0.0, 2.0), point(1.0, 2.0)];
+        let (x, _, _) = split_curve(&flat, 0.25).unwrap();
+        assert!((x - 0.25).abs() < 1e-12);
+        assert!(split_curve(&flat, 1.0).is_err());
+    }
 
     #[test]
     fn a_speed_material_defaults_to_constant_one() {

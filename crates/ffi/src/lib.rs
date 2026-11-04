@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod animate;
 mod cache;
 mod canvas;
 mod codecs;
@@ -25,6 +26,7 @@ mod strip;
 mod text;
 mod timeline;
 
+pub use animate::{PhoneAnimation, PhoneAnimationPreset, PhoneAnimations, animation_presets};
 pub use cache::ResourceCache;
 pub use canvas::{
     BACKGROUND_BLURS, BACKGROUND_COLORS, PhoneBackground, PhoneRatio, phone_background,
@@ -35,6 +37,7 @@ pub use cutlass_editor::{
     Bar, Tool, ToolId, clock, fling_start, fling_step, speed_at, speed_position, tools, volume_at,
     volume_position,
 };
+pub use cutlass_export::video_bitrate;
 pub use cutlass_logger::InitError as LogError;
 pub use cutlass_model::TrackType;
 pub use cutlass_playback::AudioHost;
@@ -44,9 +47,9 @@ pub use cutlass_storage::Home;
 pub use cutlass_store::{ListedProject, create_project, list_projects};
 pub use effect::{NEW_EFFECT_LENGTH, PhoneEffect, phone_effects};
 pub use error::FfiError;
-pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders, video_bitrate};
+pub use export::{PHONE_EXPORT_SIDES, PhoneExport, encoders};
 pub use host::Commands;
-pub use keys::PhoneKeys;
+pub use keys::{PhoneGraph, PhoneKeys, graphs};
 pub use player::PhonePlayer;
 pub use preview::{Picture, Preview};
 pub use project::Project;
@@ -450,6 +453,29 @@ impl PhoneHost {
         PhoneKeys::of(self.draft(), segment_id, time)
     }
 
+    /// Ease the span of the clip's keyframes that `time` is in along the
+    /// Graphs panel curve `graph`, or make it straight with `None`. One undo
+    /// step.
+    pub fn ease_keyframes(
+        &mut self,
+        segment_id: &SegmentId,
+        time: Micros,
+        graph: Option<String>,
+    ) -> Result<(), FfiError> {
+        let keys = self
+            .keyframes(segment_id, time)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "only a picture or title takes keyframes".to_owned(),
+            })?;
+        let request = keys
+            .ease(segment_id, graph)
+            .ok_or_else(|| FfiError::Refused {
+                reason: "move the playhead between two keyframes to ease them".to_owned(),
+            })?;
+        self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
     /// Remove the keyframe within a frame of `time` on the clip, or key the
     /// clip's pose and opacity at `time`. One undo step.
     pub fn toggle_keyframe(
@@ -468,6 +494,53 @@ impl PhoneHost {
                 reason: "move the playhead onto the clip to key it".to_owned(),
             })?;
         self.apply(self.revision(), &[request])?;
+        Ok(())
+    }
+
+    /// The picture or title clip's in and out animations.
+    #[must_use]
+    pub fn animations(&self, segment_id: &SegmentId) -> Option<PhoneAnimations> {
+        let animations = PhoneAnimations::of(self.draft(), segment_id)?;
+        let start = self
+            .draft()
+            .tracks
+            .iter()
+            .flat_map(|track| track.segments.iter())
+            .find(|segment| &segment.id == segment_id)?
+            .target
+            .start;
+        cutlass_editor::stage_box(self.draft(), segment_id, start, &self.sizes())?;
+        Some(animations)
+    }
+
+    /// Give the clip the in (`enter`) or out animation `resource_id`,
+    /// `duration` long, or clear that side with `None`. One undo step.
+    pub fn set_animation(
+        &mut self,
+        segment_id: &SegmentId,
+        enter: bool,
+        resource_id: Option<String>,
+        duration: Micros,
+    ) -> Result<(), FfiError> {
+        if self.animations(segment_id).is_none() {
+            return Err(FfiError::Refused {
+                reason: "only a picture or title takes animations".to_owned(),
+            });
+        }
+        let kind = if enter {
+            cutlass_model::AnimType::In
+        } else {
+            cutlass_model::AnimType::Out
+        };
+        self.apply(
+            self.revision(),
+            &[Request::SetAnimation {
+                segment_id: segment_id.clone(),
+                kind,
+                animation: resource_id,
+                duration,
+            }],
+        )?;
         Ok(())
     }
 
@@ -857,7 +930,7 @@ mod tests {
     use cutlass_storage::StorageError;
 
     use super::PhoneHost;
-    use crate::{FfiError, start_log};
+    use crate::{FfiError, PhoneAnimation, animation_presets, start_log};
 
     struct Temp {
         path: PathBuf,
@@ -1233,6 +1306,95 @@ mod tests {
         assert!(host.toggle_keyframe(&clip, Micros(2_000_000)).is_err());
         host.undo().unwrap();
         assert_eq!(host.keyframes(&clip, Micros(0)).unwrap().times.len(), 2);
+    }
+
+    #[test]
+    fn a_picture_takes_an_in_and_an_out_animation_from_the_presets() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        let none = host.animations(&clip).unwrap();
+        assert_eq!(
+            (none.enter, none.leave, none.length),
+            (None, None, Micros(1_000_000))
+        );
+
+        let presets = animation_presets();
+        let zoom = presets
+            .iter()
+            .find(|preset| !preset.enter && preset.name == "Zoom Out")
+            .unwrap();
+        host.set_animation(
+            &clip,
+            false,
+            Some(zoom.resource_id.clone()),
+            Micros(5_000_000),
+        )
+        .unwrap();
+        let set = host.animations(&clip).unwrap();
+        assert_eq!(
+            set.leave,
+            Some(PhoneAnimation {
+                resource_id: zoom.resource_id.clone(),
+                duration: Micros(1_000_000),
+            })
+        );
+        assert!(
+            host.set_animation(&clip, true, Some(zoom.resource_id.clone()), Micros(1))
+                .is_err()
+        );
+        host.set_animation(&clip, false, None, Micros(0)).unwrap();
+        assert_eq!(host.animations(&clip).unwrap().leave, None);
+        host.undo().unwrap();
+        assert!(host.animations(&clip).unwrap().leave.is_some());
+    }
+
+    #[test]
+    fn a_graph_eases_the_span_the_playhead_is_in() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        let id = host
+            .import_probed(&fixture("pattern.png"), still(1_000_000))
+            .unwrap();
+        let clip = host.append(&id).unwrap();
+        host.toggle_keyframe(&clip, Micros(0)).unwrap();
+        let start = host.stage(&clip, Micros(0)).unwrap().center_x;
+        host.stage_begin(&clip, Micros(800_000)).unwrap();
+        host.stage_move(400.0, 0.0, 1.0, 0.0).unwrap();
+        host.stage_end();
+
+        let keys = host.keyframes(&clip, Micros(0)).unwrap();
+        assert_eq!(
+            (keys.span, keys.graph.as_deref()),
+            (Some(Micros(800_000)), None)
+        );
+        assert_eq!(host.keyframes(&clip, Micros(800_000)).unwrap().span, None);
+        assert!(host.ease_keyframes(&clip, Micros(900_000), None).is_err());
+
+        let straight = host.stage(&clip, Micros(400_000)).unwrap().center_x;
+        assert!((straight - start - 200.0).abs() < 1e-6, "{straight}");
+        host.ease_keyframes(&clip, Micros(400_000), Some("Ease In".to_owned()))
+            .unwrap();
+        let keys = host.keyframes(&clip, Micros(400_000)).unwrap();
+        assert_eq!(keys.graph.as_deref(), Some("Ease In"));
+        let eased = host.stage(&clip, Micros(400_000)).unwrap().center_x;
+        assert!(eased < straight - 50.0, "{eased} {straight}");
+        host.undo().unwrap();
+        assert_eq!(host.keyframes(&clip, Micros(400_000)).unwrap().graph, None);
+
+        let graphs = crate::graphs();
+        assert_eq!(graphs.len(), 26);
+        assert_eq!(graphs[0].name, "Linear");
+        for graph in &graphs {
+            let (first, last) = (graph.points[0], graph.points[graph.points.len() - 1]);
+            assert_eq!(first, (0.0, 0.0), "{}", graph.name);
+            assert!((last.0 - 1.0).abs() < 1e-9 && (last.1 - 1.0).abs() < 1e-9);
+        }
     }
 
     #[test]

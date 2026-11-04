@@ -11,9 +11,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod animation;
 mod clip;
 mod draft;
 mod enums;
+pub mod graphs;
 mod id;
 mod keyframe;
 mod linkage;
@@ -25,16 +27,20 @@ mod serde_util;
 mod time;
 mod track;
 
+pub use animation::{
+    ANIMATION_PRESETS, AnimationPreset, Motion, animated_at, animation_preset, segment_animations,
+};
 pub use clip::{Clip, Flip, Point, UniformScale};
 pub use draft::{CanvasConfig, Draft, DraftConfig};
 pub use enums::{
     AnimType, ApplyType, CanvasRatio, CropRatio, HdrDisplayMode, HdrType, KeyframeCurve,
     RenderIndexMode, SegmentSource, SpeedMode, TrackAttribute, TrackFlag, TrackType,
 };
+pub use graphs::{GRAPH_PRESETS, GraphPreset};
 pub use id::{DraftId, MaterialId, SegmentId, TrackId};
 pub use keyframe::{
-    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, POSE_KEYS, add_keys, clip_at, key_offsets,
-    put_key, remove_keys, sample,
+    ALPHA_KEY, CommonKeyframe, CommonKeyframeGroup, GraphPoint, KeyframeGraph, POSE_KEYS, add_keys,
+    clip_at, key_offsets, put_key, remove_keys, sample, shift_keys,
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
@@ -47,8 +53,8 @@ pub use materials::{
     VisibleBeat, VisibleMark, WordColumns, beat_timeline_time, blend_extents, blend_window,
     clip_mark_time, constant_target_duration, curve_speed_factor, curve_target_duration, new_beats,
     new_time_mark, referenced_time_marks, segment_beats, segment_bloom, segment_time_mark,
-    set_time_mark_items, set_user_beats, source_time_at, time_mark_items, track_holds_beats,
-    user_beats, visible_beats, visible_marks,
+    set_time_mark_items, set_user_beats, source_time_at, split_curve, time_mark_items,
+    track_holds_beats, user_beats, visible_beats, visible_marks,
 };
 pub use meta::MetaType;
 pub use relationship::{LinkPair, Relationship};

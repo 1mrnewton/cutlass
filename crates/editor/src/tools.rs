@@ -126,7 +126,7 @@ const MAIN_CLIP: &[Tool] = &[
     ready(T::Split, "Split"),
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
-    later(T::Animations, "Animations"),
+    ready(T::Animations, "Animations"),
     later(T::Effects, "Effects"),
     ready(T::Delete, "Delete"),
     later(T::Duplicate, "Duplicate"),
@@ -148,7 +148,7 @@ const OVERLAY_CLIP: &[Tool] = &[
     ready(T::Volume, "Volume"),
     ready(T::Speed, "Speed"),
     later(T::Splice, "To main"),
-    later(T::Animations, "Animations"),
+    ready(T::Animations, "Animations"),
     ready(T::Delete, "Delete"),
     later(T::Duplicate, "Duplicate"),
     later(T::Crop, "Crop"),
@@ -172,7 +172,7 @@ const AUDIO_CLIP: &[Tool] = &[
 const TEXT_CLIP: &[Tool] = &[
     ready(T::EditText, "Edit"),
     ready(T::Split, "Split"),
-    later(T::Animations, "Animations"),
+    ready(T::Animations, "Animations"),
     ready(T::Delete, "Delete"),
     later(T::Duplicate, "Duplicate"),
 ];

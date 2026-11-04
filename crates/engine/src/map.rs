@@ -223,7 +223,8 @@ fn sound_for(draft: &Draft, id: &SegmentId, video_id: &MaterialId) -> bool {
     matches!(
         material(draft, segment),
         Some(MaterialRef::Audio(audio))
-            if &audio.video_id == video_id && audio.kind == "video_original_sound"
+            if audio.kind == "video_original_sound"
+                && draft.materials.same_video(audio.video_id.as_str(), video_id.as_str())
     )
 }
 

@@ -673,7 +673,7 @@ fn words_box(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState) {
             .desired_width(f32::INFINITY)
             .text_color(tokens::TEXT),
     );
-    if response.lost_focus() && *text != stored {
+    if super::commits(ui, &response) && *text != stored {
         let content = text.clone();
         send(shell, |shell| shell.set_text(content));
     } else if !response.has_focus() {
@@ -697,7 +697,7 @@ fn caption_words(
         let mut edited = None;
         label_row(ui, &format!("{:.2} s", start as f64 / 1000.0), |ui| {
             let response = ui.add(TextEdit::singleline(text).desired_width(f32::INFINITY));
-            if response.lost_focus() && text != word {
+            if super::commits(ui, &response) && text != word {
                 edited = Some(text.clone());
             }
             if !response.has_focus() {
@@ -1480,7 +1480,7 @@ fn number_box(
                         .frame(egui::Frame::NONE)
                         .text_color(Color32::WHITE),
                 );
-                if response.lost_focus() {
+                if super::commits(ui, &response) {
                     edited = text
                         .trim()
                         .parse::<f64>()

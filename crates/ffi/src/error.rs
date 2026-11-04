@@ -117,6 +117,11 @@ fn edit_cause(error: EditError) -> String {
             "the track attribute is not mute, hide, lock, solo, or muted-by-solo".to_owned()
         }
         EditError::MissingMaterial => "the material is not on the draft".to_owned(),
+        EditError::BeforeZero => "a clip cannot start before the timeline does".to_owned(),
+        EditError::LaneKind => "that lane holds another kind of clip".to_owned(),
+        EditError::SourceBounds => {
+            "the clip cannot reach past the start or end of its media".to_owned()
+        }
         EditError::DuplicateMaterial => "the material id is already in a pool".to_owned(),
         EditError::TransitionWindow => "the split falls inside a transition window".to_owned(),
         EditError::AlreadyLinked => "the segment is already linked".to_owned(),
@@ -135,6 +140,8 @@ fn edit_cause(error: EditError) -> String {
         EditError::Opacity => "the opacity must be from zero to one".to_owned(),
         EditError::KeyTime => "a keyframe must be on its clip".to_owned(),
         EditError::NoKey => "no keyframe is there".to_owned(),
+        EditError::Graph => "that curve is not one the app offers".to_owned(),
+        EditError::Animation => "that animation is not one the app offers".to_owned(),
         EditError::NotText => "a text style belongs on text".to_owned(),
         EditError::TextSize => "the text size must be greater than zero and at most 512".to_owned(),
         EditError::TextColor => "the text color is not a hex color".to_owned(),

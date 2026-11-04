@@ -40,6 +40,11 @@ final class EditorModel {
     /// The selected clip's keyframes, and whether one is under the
     /// playhead. Clips that take none have nil.
     private(set) var keys: Keyframes?
+    /// The selected clip's in and out animations. Clips that take none
+    /// have nil.
+    private(set) var animations: ClipAnimations?
+    /// The Animations panel's presets; they never change.
+    let animationList = animationPresets()
 
     /// Points per microsecond on the timeline. Rust holds it inside what
     /// the cut allows.
@@ -435,6 +440,7 @@ final class EditorModel {
         placed = (selectedClip, box)
         if now { stage = box }
         keys = selectedClip.flatMap { clip in try? editor?.keyframes(clipId: clip, atUs: at) }
+        animations = selectedClip.flatMap { clip in try? editor?.animations(clipId: clip) }
     }
 
     /// The keyframe button: remove the keyframe under the playhead, else key
@@ -444,6 +450,23 @@ final class EditorModel {
         pause()
         let at = playheadUs
         edit { try $0.toggleKeyframe(clipId: clip, atUs: at) }
+    }
+
+    /// Ease the span the playhead is in along the named curve; an empty
+    /// name makes it straight.
+    func easeKeyframes(_ graph: String) {
+        guard let clip = selectedClip else { return }
+        pause()
+        let at = playheadUs
+        edit { try $0.easeKeyframes(clipId: clip, atUs: at, graph: graph) }
+    }
+
+    /// Give the selected clip the in (`enter`) or out animation `id`, or
+    /// clear that side with an empty id, as one undo step.
+    func setAnimation(enter: Bool, id: String, durationUs: Int64) {
+        guard let clip = selectedClip else { return }
+        pause()
+        edit { try $0.setAnimation(clipId: clip, enter: enter, id: id, durationUs: durationUs) }
     }
 
     /// Put a main clip at `place` in the main row's order.

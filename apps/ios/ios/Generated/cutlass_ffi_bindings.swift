@@ -673,6 +673,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
     func addText(content: String, face: String, atUs: Int64) throws  -> String
     
     /**
+     * The picture or title clip's in and out animations, or nil for a clip
+     * that takes none.
+     */
+    func animations(clipId: String) throws  -> ClipAnimations?
+    
+    /**
      * Add a library item at the end of its lane. Returns the clip id.
      */
     func append(materialId: String) throws  -> String
@@ -692,6 +698,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * The end of the last clip, in microseconds.
      */
     func durationUs() throws  -> Int64
+    
+    /**
+     * Ease the span between keyframes that `at_us` is in along the Graphs
+     * curve `graph`, or make it straight with an empty name. One undo step.
+     */
+    func easeKeyframes(clipId: String, atUs: Int64, graph: String) throws 
     
     /**
      * Write the whole cut to `path` as an MP4, `short_side` pixels on its
@@ -786,6 +798,12 @@ public protocol EditorProtocol: AnyObject, Sendable {
      * goes on from there.
      */
     func seek(timeUs: Int64) throws 
+    
+    /**
+     * Give the clip the in (`enter`) or out animation `id`, `duration_us`
+     * long, or clear that side with an empty id. One undo step.
+     */
+    func setAnimation(clipId: String, enter: Bool, id: String, durationUs: Int64) throws 
     
     /**
      * Fill the canvas around the main pictures, as one undo step.
@@ -1019,6 +1037,20 @@ open func addText(content: String, face: String, atUs: Int64)throws  -> String  
 }
     
     /**
+     * The picture or title clip's in and out animations, or nil for a clip
+     * that takes none.
+     */
+open func animations(clipId: String)throws  -> ClipAnimations?  {
+    return try  FfiConverterOptionTypeClipAnimations.lift(try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_animations(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Add a library item at the end of its lane. Returns the clip id.
      */
 open func append(materialId: String)throws  -> String  {
@@ -1067,6 +1099,21 @@ open func durationUs()throws  -> Int64  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Ease the span between keyframes that `at_us` is in along the Graphs
+     * curve `graph`, or make it straight with an empty name. One undo step.
+     */
+open func easeKeyframes(clipId: String, atUs: Int64, graph: String)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_ease_keyframes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterInt64.lower(atUs),
+        FfiConverterString.lower(graph),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -1301,6 +1348,22 @@ open func seek(timeUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEdi
     uniffi_cutlass_ffi_bindings_fn_method_editor_seek(
             self.uniffiCloneHandle(),
         FfiConverterInt64.lower(timeUs),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Give the clip the in (`enter`) or out animation `id`, `duration_us`
+     * long, or clear that side with an empty id. One undo step.
+     */
+open func setAnimation(clipId: String, enter: Bool, id: String, durationUs: Int64)throws   {try rustCallWithError(FfiConverterTypeEditorError_lift) {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_method_editor_set_animation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(clipId),
+        FfiConverterBool.lower(enter),
+        FfiConverterString.lower(id),
+        FfiConverterInt64.lower(durationUs),uniffiCallStatus
     )
 }
 }
@@ -1887,6 +1950,83 @@ public func FfiConverterTypeExportProgress_lower(_ value: ExportProgress) -> UIn
 
 
 /**
+ * One animation in the Animations panel.
+ */
+public struct AnimationPreset: Equatable, Hashable {
+    public var name: String
+    /**
+     * On the In tab; otherwise on Out.
+     */
+    public var enter: Bool
+    public var id: String
+    /**
+     * The length a new one starts with.
+     */
+    public var durationUs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, 
+        /**
+         * On the In tab; otherwise on Out.
+         */enter: Bool, id: String, 
+        /**
+         * The length a new one starts with.
+         */durationUs: Int64) {
+        self.name = name
+        self.enter = enter
+        self.id = id
+        self.durationUs = durationUs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AnimationPreset: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAnimationPreset: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AnimationPreset {
+        return
+            try AnimationPreset(
+                name: FfiConverterString.read(from: &buf), 
+                enter: FfiConverterBool.read(from: &buf), 
+                id: FfiConverterString.read(from: &buf), 
+                durationUs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AnimationPreset, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.enter, into: &buf)
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterInt64.write(value.durationUs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnimationPreset_lift(_ buf: RustBuffer) throws -> AnimationPreset {
+    return try FfiConverterTypeAnimationPreset.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAnimationPreset_lower(_ value: AnimationPreset) -> RustBuffer {
+    return FfiConverterTypeAnimationPreset.lower(value)
+}
+
+
+/**
  * A canvas ratio the picker shows. `ratio` is what `set_ratio` takes;
  * `width` and `height` are the frame it gives this project.
  */
@@ -2038,6 +2178,82 @@ public func FfiConverterTypeClip_lift(_ buf: RustBuffer) throws -> Clip {
 #endif
 public func FfiConverterTypeClip_lower(_ value: Clip) -> RustBuffer {
     return FfiConverterTypeClip.lower(value)
+}
+
+
+/**
+ * A clip's in and out animations, each a preset's resource id and length
+ * in microseconds; an empty id is none.
+ */
+public struct ClipAnimations: Equatable, Hashable {
+    public var inId: String
+    public var inUs: Int64
+    public var outId: String
+    public var outUs: Int64
+    /**
+     * The clip's length, which the two share.
+     */
+    public var lengthUs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(inId: String, inUs: Int64, outId: String, outUs: Int64, 
+        /**
+         * The clip's length, which the two share.
+         */lengthUs: Int64) {
+        self.inId = inId
+        self.inUs = inUs
+        self.outId = outId
+        self.outUs = outUs
+        self.lengthUs = lengthUs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ClipAnimations: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeClipAnimations: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ClipAnimations {
+        return
+            try ClipAnimations(
+                inId: FfiConverterString.read(from: &buf), 
+                inUs: FfiConverterInt64.read(from: &buf), 
+                outId: FfiConverterString.read(from: &buf), 
+                outUs: FfiConverterInt64.read(from: &buf), 
+                lengthUs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ClipAnimations, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.inId, into: &buf)
+        FfiConverterInt64.write(value.inUs, into: &buf)
+        FfiConverterString.write(value.outId, into: &buf)
+        FfiConverterInt64.write(value.outUs, into: &buf)
+        FfiConverterInt64.write(value.lengthUs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipAnimations_lift(_ buf: RustBuffer) throws -> ClipAnimations {
+    return try FfiConverterTypeClipAnimations.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeClipAnimations_lower(_ value: ClipAnimations) -> RustBuffer {
+    return FfiConverterTypeClipAnimations.lower(value)
 }
 
 
@@ -2402,8 +2618,70 @@ public func FfiConverterTypeFrame_lower(_ value: Frame) -> RustBuffer {
 
 
 /**
- * A clip's keyframes as timeline times, earliest first, and the one under
- * the playhead.
+ * A Graphs curve: its name and its line through the unit square, x the
+ * share of time and y the share of the change, y up.
+ */
+public struct GraphCurve: Equatable, Hashable {
+    public var name: String
+    public var xs: [Double]
+    public var ys: [Double]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, xs: [Double], ys: [Double]) {
+        self.name = name
+        self.xs = xs
+        self.ys = ys
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension GraphCurve: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGraphCurve: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GraphCurve {
+        return
+            try GraphCurve(
+                name: FfiConverterString.read(from: &buf), 
+                xs: FfiConverterSequenceDouble.read(from: &buf), 
+                ys: FfiConverterSequenceDouble.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GraphCurve, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterSequenceDouble.write(value.xs, into: &buf)
+        FfiConverterSequenceDouble.write(value.ys, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGraphCurve_lift(_ buf: RustBuffer) throws -> GraphCurve {
+    return try FfiConverterTypeGraphCurve.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGraphCurve_lower(_ value: GraphCurve) -> RustBuffer {
+    return FfiConverterTypeGraphCurve.lower(value)
+}
+
+
+/**
+ * A clip's keyframes as timeline times, earliest first, the one under the
+ * playhead, and the span between two of them the playhead is in.
  */
 public struct Keyframes: Equatable, Hashable {
     public var timesUs: [Int64]
@@ -2411,15 +2689,31 @@ public struct Keyframes: Equatable, Hashable {
      * A keyframe is within a frame of the playhead.
      */
     public var here: Bool
+    /**
+     * The playhead is in a span between two keyframes, which Graphs eases.
+     */
+    public var inSpan: Bool
+    /**
+     * The Graphs curve easing that span, or empty for a straight one.
+     */
+    public var graph: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(timesUs: [Int64], 
         /**
          * A keyframe is within a frame of the playhead.
-         */here: Bool) {
+         */here: Bool, 
+        /**
+         * The playhead is in a span between two keyframes, which Graphs eases.
+         */inSpan: Bool, 
+        /**
+         * The Graphs curve easing that span, or empty for a straight one.
+         */graph: String) {
         self.timesUs = timesUs
         self.here = here
+        self.inSpan = inSpan
+        self.graph = graph
     }
 
     
@@ -2439,13 +2733,17 @@ public struct FfiConverterTypeKeyframes: FfiConverterRustBuffer {
         return
             try Keyframes(
                 timesUs: FfiConverterSequenceInt64.read(from: &buf), 
-                here: FfiConverterBool.read(from: &buf)
+                here: FfiConverterBool.read(from: &buf), 
+                inSpan: FfiConverterBool.read(from: &buf), 
+                graph: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: Keyframes, into buf: inout [UInt8]) {
         FfiConverterSequenceInt64.write(value.timesUs, into: &buf)
         FfiConverterBool.write(value.here, into: &buf)
+        FfiConverterBool.write(value.inSpan, into: &buf)
+        FfiConverterString.write(value.graph, into: &buf)
     }
 }
 
@@ -4076,6 +4374,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeClipAnimations: FfiConverterRustBuffer {
+    typealias SwiftType = ClipAnimations?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeClipAnimations.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeClipAnimations.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFrame: FfiConverterRustBuffer {
     typealias SwiftType = Frame?
 
@@ -4321,6 +4643,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAnimationPreset: FfiConverterRustBuffer {
+    typealias SwiftType = [AnimationPreset]
+
+    public static func write(_ value: [AnimationPreset], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAnimationPreset.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AnimationPreset] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AnimationPreset]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAnimationPreset.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCanvasRatio: FfiConverterRustBuffer {
     typealias SwiftType = [CanvasRatio]
 
@@ -4438,6 +4785,31 @@ fileprivate struct FfiConverterSequenceTypeFont: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFont.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeGraphCurve: FfiConverterRustBuffer {
+    typealias SwiftType = [GraphCurve]
+
+    public static func write(_ value: [GraphCurve], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGraphCurve.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GraphCurve] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GraphCurve]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeGraphCurve.read(from: &buf))
         }
         return seq
     }
@@ -4593,6 +4965,16 @@ fileprivate struct FfiConverterSequenceTypeWave: FfiConverterRustBuffer {
     }
 }
 /**
+ * The Animations panel's presets, in its order after None.
+ */
+public func animationPresets() -> [AnimationPreset]  {
+    return try!  FfiConverterSequenceTypeAnimationPreset.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_animation_presets(uniffiCallStatus
+    )
+})
+}
+/**
  * The background blur strengths, weakest first.
  */
 public func backgroundBlurs() -> [Double]  {
@@ -4678,6 +5060,16 @@ public func flingStep(velocity: Double, elapsed: Double) -> Fling  {
     uniffi_cutlass_ffi_bindings_fn_func_fling_step(
         FfiConverterDouble.lower(velocity),
         FfiConverterDouble.lower(elapsed),uniffiCallStatus
+    )
+})
+}
+/**
+ * The Graphs panel's curves, in its order after None.
+ */
+public func graphCurves() -> [GraphCurve]  {
+    return try!  FfiConverterSequenceTypeGraphCurve.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_cutlass_ffi_bindings_fn_func_graph_curves(uniffiCallStatus
     )
 })
 }
@@ -4801,6 +5193,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_animation_presets() != 32729) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_func_background_blurs() != 26456) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4823,6 +5218,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_fling_step() != 37021) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_func_graph_curves() != 9398) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_func_list_projects() != 22684) {
@@ -4858,6 +5256,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_add_text() != 17542) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_animations() != 53700) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_append() != 14214) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4868,6 +5269,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_duration_us() != 41273) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_ease_keyframes() != 37443) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_export() != 5234) {
@@ -4922,6 +5326,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_seek() != 51490) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_animation() != 15913) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_cutlass_ffi_bindings_checksum_method_editor_set_background() != 52021) {

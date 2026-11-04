@@ -17,6 +17,7 @@ pub fn set_text(draft: &mut Draft, segment_id: &SegmentId, content: &str) -> Res
     if material_id.is_empty() {
         return Err(EditError::MissingMaterial);
     }
+    let material_id = super::own::own(draft, track_index, segment_index, &material_id)?;
     if let Some(text) = draft
         .materials
         .texts
@@ -98,7 +99,7 @@ pub fn set_text_size(
     size: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !size.is_finite() || size <= 0.0 || size > MAX_TEXT_SIZE {
         return Err(EditError::TextSize);
     }
@@ -116,7 +117,7 @@ pub fn set_text_color(
     color: &str,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let color = color.trim();
     if !color.is_empty() && !hex_color(color) {
         return Err(EditError::TextColor);
@@ -139,7 +140,7 @@ pub fn set_text_align(
     face: &str,
     line_width: f64,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !(0..=2).contains(&alignment) {
         return Err(EditError::TextAlign);
     }
@@ -160,7 +161,7 @@ pub fn set_letter_spacing(
     spacing: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !spacing.is_finite() || !(-1.0..=4.0).contains(&spacing) {
         return Err(EditError::LetterSpacing);
     }
@@ -178,7 +179,7 @@ pub fn set_line_spacing(
     spacing: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !spacing.is_finite() || spacing <= -1.0 || spacing > 4.0 {
         return Err(EditError::LineSpacing);
     }
@@ -197,7 +198,7 @@ pub fn set_line_width(
     width: f64,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     if !width.is_finite() || width < 0.0 || width > MAX_LINE_WIDTH {
         return Err(EditError::LineWidth);
     }
@@ -213,7 +214,7 @@ pub fn set_text_font(
     segment_id: &SegmentId,
     face: &str,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let face = face.trim();
     if !face_file(face) {
         return Err(EditError::TextFont);
@@ -237,7 +238,7 @@ pub fn set_text_outline(
     color: &str,
     width: f64,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let color = style_color(color)?;
     if !(0.0..=MAX_OUTLINE).contains(&width) {
         return Err(EditError::TextStyle);
@@ -261,7 +262,7 @@ pub fn set_text_shadow(
     color: &str,
     shape: [f64; 3],
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let color = style_color(color)?;
     let [distance, angle, blur] = shape;
     if !(0.0..=MAX_SHADOW_DISTANCE).contains(&distance)
@@ -294,7 +295,7 @@ pub fn set_text_background(
     alpha: f64,
     round: f64,
 ) -> Result<(), EditError> {
-    let index = text_index(draft, segment_id)?;
+    let index = own_text(draft, segment_id)?;
     let color = style_color(color)?;
     if !(0.0..=1.0).contains(&alpha) || !(0.0..=1.0).contains(&round) {
         return Err(EditError::TextStyle);
@@ -412,6 +413,23 @@ fn style_color(color: &str) -> Result<&str, EditError> {
 
 fn face_file(face: &str) -> bool {
     !face.is_empty() && face.len() <= 255 && !face.contains(['/', '\\', '\0'])
+}
+
+/// The index of the segment's own text material, copied first when
+/// another segment shares it.
+fn own_text(draft: &mut Draft, segment_id: &SegmentId) -> Result<usize, EditError> {
+    text_index(draft, segment_id)?;
+    let (track_index, segment_index) = locate(draft, segment_id)?;
+    let shared = draft.tracks[track_index].segments[segment_index]
+        .material_id
+        .clone();
+    let id = super::own::own(draft, track_index, segment_index, &shared)?;
+    draft
+        .materials
+        .texts
+        .iter()
+        .position(|text| text.id == id)
+        .ok_or(EditError::MissingMaterial)
 }
 
 fn text_index(draft: &Draft, segment_id: &SegmentId) -> Result<usize, EditError> {

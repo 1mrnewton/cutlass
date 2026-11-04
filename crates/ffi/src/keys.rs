@@ -1,6 +1,7 @@
-//! A clip's keyframes as the timeline shows them, and the keyframe button.
+//! A clip's keyframes as the timeline shows them, the keyframe button, and
+//! the Graphs panel's curves.
 
-use cutlass_model::{Draft, key_offsets};
+use cutlass_model::{Draft, GRAPH_PRESETS, GraphPreset, KeyframeGraph, key_offsets};
 use cutlass_session::{Micros, Request, SegmentId};
 
 /// A clip's keyframes, as timeline times.
@@ -10,6 +11,12 @@ pub struct PhoneKeys {
     pub times: Vec<Micros>,
     /// The keyframe within a frame of the time asked, when one is.
     pub here: Option<Micros>,
+    /// The later keyframe of the span the time asked is in: the one after
+    /// the key under it, or after the last key before it. None past the
+    /// last key or before the first.
+    pub span: Option<Micros>,
+    /// The Graphs panel curve easing that span, when it has one.
+    pub graph: Option<String>,
     start: Micros,
     duration: Micros,
 }
@@ -32,9 +39,40 @@ impl PhoneKeys {
             .copied()
             .filter(|key| (key.0 - time.0).abs() <= reach)
             .min_by_key(|key| (key.0 - time.0).abs());
+        let after = time.0.saturating_add(reach);
+        let span = times
+            .iter()
+            .copied()
+            .find(|key| key.0 > after)
+            .filter(|_| times.first().is_some_and(|first| first.0 <= after));
+        let graph = span.and_then(|end| {
+            let offset = Micros(end.0 - start.0);
+            segment
+                .common_keyframes
+                .iter()
+                .flat_map(|group| &group.keyframe_list)
+                .filter(|key| key.time_offset == offset && !key.graph_id.is_empty())
+                .find_map(|key| {
+                    draft
+                        .keyframe_graph_list
+                        .iter()
+                        .find(|graph| graph.id == key.graph_id)
+                })
+                .map(|graph| graph.resource_name.clone())
+                .filter(|name| !name.is_empty())
+        });
+        // Keys a split or trim left outside the clip still shape it, but
+        // only those on it are marked.
+        let end = start.0.saturating_add(segment.target.duration.0);
+        let times = times
+            .into_iter()
+            .filter(|key| (start.0..=end).contains(&key.0))
+            .collect();
         Some(Self {
             times,
             here,
+            span,
+            graph,
             start,
             duration: segment.target.duration,
         })
@@ -56,6 +94,61 @@ impl PhoneKeys {
                 segment_id: segment_id.clone(),
                 offset: Micros(offset),
             })
+    }
+}
+
+impl PhoneKeys {
+    /// The request that eases the span the playhead is in along `graph`,
+    /// or makes it straight with `None`.
+    pub(crate) fn ease(&self, segment_id: &SegmentId, graph: Option<String>) -> Option<Request> {
+        let end = self.span?;
+        Some(Request::SetKeyframeGraph {
+            segment_id: segment_id.clone(),
+            offset: Micros(end.0 - self.start.0),
+            graph,
+        })
+    }
+}
+
+/// A Graphs panel curve to show: its name and its line through the unit
+/// square, x the share of time and y the share of the change.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhoneGraph {
+    pub name: String,
+    pub points: Vec<(f64, f64)>,
+}
+
+/// Steps drawn along each Bézier piece of a curve.
+const STEPS: usize = 12;
+
+/// The Graphs panel curves, in the panel's order after None.
+#[must_use]
+pub fn graphs() -> Vec<PhoneGraph> {
+    GRAPH_PRESETS.iter().map(drawn).collect()
+}
+
+fn drawn(preset: &GraphPreset) -> PhoneGraph {
+    let graph = KeyframeGraph::of("", preset);
+    let at = |index: usize| {
+        let point = &graph.graph_points[index].point;
+        (point.x, point.y)
+    };
+    let mut points = vec![at(0)];
+    for piece in 0..(graph.graph_points.len() - 1) / 3 {
+        let [p0, p1, p2, p3] = [0, 1, 2, 3].map(|step| at(piece * 3 + step));
+        for step in 1..=STEPS {
+            #[expect(clippy::cast_precision_loss, reason = "a dozen steps")]
+            let t = step as f64 / STEPS as f64;
+            let along = |a: f64, b: f64, c: f64, d: f64| {
+                let u = 1.0 - t;
+                u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d
+            };
+            points.push((along(p0.0, p1.0, p2.0, p3.0), along(p0.1, p1.1, p2.1, p3.1)));
+        }
+    }
+    PhoneGraph {
+        name: preset.name.to_owned(),
+        points,
     }
 }
 

@@ -125,6 +125,11 @@ pub struct ViewState {
     export_open: bool,
     export_side: i32,
     export_codec: cutlass_decode::CodecId,
+    export_span: crate::shell::ExportSpan,
+    /// `None` keeps the project's rate.
+    export_rate: Option<FrameRate>,
+    export_quality: crate::shell::ExportQuality,
+    export_sound: bool,
     replace_prompt: bool,
     export_path: String,
     /// The clip panel's open tab, page, and sections, and what is typed.
@@ -142,8 +147,13 @@ pub struct ViewState {
     projects_root: Option<std::path::PathBuf>,
     listed: Vec<ListedProject>,
     listed_stamp: String,
+    /// When the projects folder was last looked at.
+    listed_checked: Option<std::time::Instant>,
     marquee_press: Option<Pos2>,
     marquee: Option<Rect>,
+    /// How far the lanes are moved down from where they center on the main
+    /// lane, in points; negative shows lanes further down.
+    lane_scroll: f32,
 }
 
 impl Default for ViewState {
@@ -152,7 +162,11 @@ impl Default for ViewState {
             preview: None,
             export_open: false,
             export_side: 1080,
-            export_codec: cutlass_decode::CodecId::Png,
+            export_codec: cutlass_decode::CodecId::H264,
+            export_span: crate::shell::ExportSpan::Whole,
+            export_rate: None,
+            export_quality: crate::shell::ExportQuality::Recommended,
+            export_sound: true,
             replace_prompt: false,
             export_path: String::new(),
             inspector: inspector::InspectorState::default(),
@@ -167,8 +181,10 @@ impl Default for ViewState {
             projects_root: None,
             listed: Vec::new(),
             listed_stamp: String::new(),
+            listed_checked: None,
             marquee_press: None,
             marquee: None,
+            lane_scroll: 0.0,
         }
     }
 }
@@ -185,6 +201,11 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     style(ui);
     shell.chrome = crate::shell::Chrome::default();
+    if shell.poll_job() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    show_imported(shell, view);
     let full = ui.max_rect();
     ui.painter()
         .rect_filled(full, CornerRadius::ZERO, tokens::GAP);
@@ -209,6 +230,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         if view.export_open {
             export_dialog(shell, ui, view, parent);
         }
+        job_strip(shell, ui, full);
         shortcuts(shell, ui);
         if shell.playing() || shell.preview_pending() {
             ui.ctx().request_repaint();
@@ -217,6 +239,92 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
     }
+}
+
+/// The running job above the foot of the window: what it is, where it has
+/// got to, and Cancel.
+fn job_strip(shell: &mut Shell, ui: &Ui, full: Rect) {
+    const WIDTH: f32 = 340.0;
+    let Some(job) = shell.job() else {
+        exported_strip(shell, ui, full, WIDTH);
+        return;
+    };
+    let top_left = Pos2::new(full.center().x - WIDTH / 2.0, full.bottom() - 72.0);
+    egui::Area::new(ui.scope_id().with("job"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(WIDTH);
+                ui.horizontal(|ui| {
+                    let line = if job.stage.is_empty() {
+                        job.label.clone()
+                    } else {
+                        format!("{}: {}", job.label, job.stage)
+                    };
+                    ui.label(line);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Cancel").clicked() {
+                            shell.cancel_job();
+                        }
+                    });
+                });
+                let bar = egui::ProgressBar::new(job.fraction.unwrap_or(0.0));
+                ui.add(match (job.fraction, job.left) {
+                    (Some(_), Some(left)) => bar.text(format!(
+                        "{:.0}%, about {} left",
+                        job.fraction.unwrap_or(0.0) * 100.0,
+                        spoken_duration(left)
+                    )),
+                    (Some(_), None) => bar.show_percentage(),
+                    (None, _) => bar.animate(true),
+                });
+            });
+        });
+}
+
+/// A wait as people say it: seconds under two minutes, then minutes.
+fn spoken_duration(left: std::time::Duration) -> String {
+    let seconds = left.as_secs().max(1);
+    if seconds < 120 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min", seconds.div_ceil(60))
+    }
+}
+
+/// The movie the last export wrote, with a way to its folder.
+fn exported_strip(shell: &mut Shell, ui: &Ui, full: Rect, width: f32) {
+    let Some(path) = shell.exported().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let top_left = Pos2::new(full.center().x - width / 2.0, full.bottom() - 72.0);
+    egui::Area::new(ui.scope_id().with("exported"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(top_left)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Exported {name}"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            shell.forget_export();
+                        }
+                        if ui.button(crate::shell::REVEAL_LABEL).clicked() {
+                            if let Err(error) = crate::shell::reveal(&path) {
+                                shell.set_notice(error.to_string());
+                            }
+                            shell.forget_export();
+                        }
+                    });
+                });
+            });
+        });
 }
 
 fn projects_root(view: &ViewState) -> std::path::PathBuf {
@@ -293,12 +401,21 @@ fn projects_home(
     paint_notice(shell, ui, bar.center().x, bar.bottom() + 12.0);
 }
 
+/// How often the projects home looks at the folder for changes.
+const PROJECTS_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn listed_projects(view: &mut ViewState) -> Vec<ListedProject> {
-    let root = projects_root(view);
-    let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
-    if view.listed_stamp != stamp {
-        view.listed = Shell::list_projects(&root);
-        view.listed_stamp = stamp;
+    let due = view
+        .listed_checked
+        .is_none_or(|checked| checked.elapsed() >= PROJECTS_CHECK);
+    if due || view.listed_stamp.is_empty() {
+        view.listed_checked = Some(std::time::Instant::now());
+        let root = projects_root(view);
+        let stamp = format!("{}|{}", root.display(), directory_stamp(&root));
+        if view.listed_stamp != stamp {
+            view.listed = Shell::list_projects(&root);
+            view.listed_stamp = stamp;
+        }
     }
     view.listed.clone()
 }
@@ -592,13 +709,14 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
 }
 
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
-    if ui.button("Undo").clicked() {
+    let (undo, redo) = (shell.can_undo(), shell.can_redo());
+    if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
         ui.close();
         if let Err(error) = shell.undo() {
             shell.set_notice(error.to_string());
         }
     }
-    if ui.button("Redo").clicked() {
+    if ui.add_enabled(redo, egui::Button::new("Redo")).clicked() {
         ui.close();
         if let Err(error) = shell.redo() {
             shell.set_notice(error.to_string());
@@ -925,21 +1043,30 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
         return text.to_owned();
     }
     let chars: Vec<char> = text.chars().collect();
-    let mut keep = chars.len();
-    while keep > 1 {
-        keep -= 1;
+    let cut = |keep: usize| -> String {
         let head = keep.div_ceil(2);
         let tail = keep / 2;
-        let cut: String = chars[..head]
+        chars[..head]
             .iter()
             .chain(std::iter::once(&'…'))
             .chain(&chars[chars.len() - tail..])
-            .collect();
-        if fits(&cut) {
-            return cut;
+            .collect()
+    };
+    // The most letters that fit, found by halving rather than one letter
+    // at a time: a cut only grows wider as it keeps more.
+    let (mut fitting, mut over) = (0, chars.len());
+    while over - fitting > 1 {
+        let keep = fitting + (over - fitting) / 2;
+        if fits(&cut(keep)) {
+            fitting = keep;
+        } else {
+            over = keep;
         }
     }
-    "…".to_owned()
+    if fitting == 0 {
+        return "…".to_owned();
+    }
+    cut(fitting)
 }
 
 /// Read each card's picture or sound from the shell, asking for what is
@@ -988,7 +1115,7 @@ fn paint_card_face(painter: &egui::Painter, rect: Rect, card: &BinCard) {
             painter.rect_filled(rect, radius, tokens::CLIP_AUDIO);
             let wave = crate::shell::ClipWave {
                 first: 0,
-                levels: levels.clone(),
+                levels: levels.to_vec(),
                 gains: Vec::new(),
                 under_picture: false,
                 muted: false,
@@ -1051,7 +1178,7 @@ enum CardLook {
     /// A file's first frame, and its size in pixels, once read.
     Picture(Option<(egui::TextureId, [u32; 2])>),
     /// A sound file's levels, one per point across the card, once read.
-    Sound(Vec<f32>),
+    Sound(std::sync::Arc<[f32]>),
 }
 
 #[derive(Clone, Debug)]
@@ -1060,17 +1187,44 @@ struct LibraryDrop {
 }
 
 fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<BinCard> {
+    // A clip that changed its own copy of a video still shows that file,
+    // so the library lists each file once and marks it by file.
+    let paths: std::collections::HashMap<&str, &str> = draft
+        .materials
+        .videos
+        .iter()
+        .map(|video| (video.id.as_str(), video.path.as_str()))
+        .chain(
+            draft
+                .materials
+                .audios
+                .iter()
+                .map(|audio| (audio.id.as_str(), audio.path.as_str())),
+        )
+        .collect();
     let used: std::collections::HashSet<&str> = draft
         .tracks
         .iter()
         .flat_map(|track| track.segments.iter())
         .map(|segment| segment.material_id.as_str())
+        .map(|id| {
+            paths
+                .get(id)
+                .copied()
+                .filter(|path| !path.is_empty())
+                .unwrap_or(id)
+        })
         .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut fresh = |path: &str| path.is_empty() || seen.insert(path.to_owned());
     let query = query.trim().to_lowercase();
     let mut cards = Vec::new();
     match shelf {
         Shelf::Media => {
             for video in &draft.materials.videos {
+                if !fresh(&video.path) {
+                    continue;
+                }
                 push_card(
                     &mut cards,
                     &used,
@@ -1084,6 +1238,9 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
         }
         Shelf::Audio => {
             for audio in &draft.materials.audios {
+                if !fresh(&audio.path) {
+                    continue;
+                }
                 push_card(
                     &mut cards,
                     &used,
@@ -1091,7 +1248,7 @@ fn bin_cards(draft: &cutlass_model::Draft, shelf: Shelf, query: &str) -> Vec<Bin
                     audio.id.as_str(),
                     &audio.path,
                     audio.duration.0,
-                    CardLook::Sound(Vec::new()),
+                    CardLook::Sound(std::sync::Arc::from([])),
                 );
             }
         }
@@ -1136,7 +1293,7 @@ fn push_card(
         id: id.to_owned(),
         name,
         meta: card_clock(duration),
-        on_timeline: used.contains(id),
+        on_timeline: used.contains(id) || (!path.is_empty() && used.contains(path)),
         look,
     });
 }
@@ -1351,6 +1508,12 @@ fn duration_label(shell: &Shell) -> String {
 }
 
 fn inspector_panel(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect) {
+    let inspected = shell
+        .selected()
+        .map(|id| id.as_str().to_owned())
+        .unwrap_or_default();
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(egui::Id::unique(INSPECTED), inspected));
     let padded = rect.shrink2(Vec2::new(16.0, 0.0));
     let mut details = ui.new_child(egui::UiBuilder::new().max_rect(padded));
     details.set_clip_rect(padded);
@@ -1465,6 +1628,31 @@ fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f3
     }
 }
 
+/// Where the inspector keeps the id of the clip it is showing this frame.
+const INSPECTED: &str = "inspector-clip";
+
+/// Whether a field's typing lands: it lost focus on the clip it was typed
+/// for, and not because Escape was pressed. A click on another clip moves
+/// the selection before the field reports losing focus, so the clip is
+/// remembered while the field has focus.
+fn commits(ui: &Ui, response: &egui::Response) -> bool {
+    let clip: String = ui
+        .ctx()
+        .data(|data| data.get_temp(egui::Id::unique(INSPECTED)))
+        .unwrap_or_default();
+    let owner = response.id.with("clip");
+    if response.has_focus() {
+        ui.ctx().data_mut(|data| data.insert_temp(owner, clip));
+        return false;
+    }
+    if !response.lost_focus() {
+        return false;
+    }
+    let typed_for: Option<String> = ui.ctx().data_mut(|data| data.remove_temp(owner));
+    let escaped = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    !escaped && typed_for.is_none_or(|typed_for| typed_for == clip)
+}
+
 fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
     let mut edited = None;
     ui.horizontal(|ui| {
@@ -1474,7 +1662,7 @@ fn name_field(ui: &mut Ui, text: &mut String, stored: &str) -> Option<String> {
             egui::Label::new(RichText::new("Name").size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text).on_hover_text("Empty shows Untitled");
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = Some(text.clone());
         }
         if !response.has_focus() {
@@ -1536,7 +1724,7 @@ fn color_field(
             egui::Label::new(RichText::new(label).size(13.0).color(tokens::MUTED)),
         );
         let response = widgets::field(ui, text);
-        if response.lost_focus() {
+        if commits(ui, &response) {
             edited = Some(text.clone());
         }
         if !response.has_focus() {
@@ -1683,8 +1871,10 @@ fn toolbar_button(
 
 fn tool_enabled(shell: &Shell, name: &str) -> bool {
     match name {
-        "undo" | "redo" | "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides"
-        | "lock" | "linkage" | "magnet" | "snap" => true,
+        "undo" => shell.can_undo(),
+        "redo" => shell.can_redo(),
+        "select" | "delete" | "zoomIn" | "zoomOut" | "zoomFit" | "guides" | "lock" | "linkage"
+        | "magnet" | "snap" => true,
         "split" | "marker" | "beat" => shell.has_clip(),
         "freeze" => shell.freeze_enabled(),
         "reverse" => shell.reverse_enabled(),
@@ -1851,7 +2041,17 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         .iter()
         .map(|lane| (lane.main, is_audio(lane)))
         .collect();
-    let boxes = lane_rects(kinds, lane_area);
+    let laid = lane_rects(kinds, lane_area);
+    let (low, high) = lane_scroll_range(&laid, lane_area);
+    let scrolls = low < high;
+    if scrolls {
+        view.lane_scroll += lane_wheel(ui, tracks);
+    }
+    view.lane_scroll = view.lane_scroll.clamp(low, high);
+    let boxes: Vec<Rect> = laid
+        .iter()
+        .map(|rect| rect.translate(Vec2::new(0.0, view.lane_scroll)))
+        .collect();
     let marquee = ui.interact(
         lane_area,
         ui.scope_id().with("marquee"),
@@ -1860,12 +2060,16 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
     if rows.is_empty() {
         paint_empty_main(ui, lane_area);
     }
+    // Lanes scrolled past the ruler or the panel's foot are cut there.
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.intersect(tracks));
     for (index, lane) in rows.iter().enumerate() {
         let Some(row) = boxes.get(index).copied() else {
             continue;
         };
         paint_lane(shell, ui, lane, row, lanes_left, index);
     }
+    ui.set_clip_rect(clip);
     shell.send_timeline_asks();
     track_marquee(shell, ui, view, &marquee, lanes_left, &rows, &boxes);
     let playhead_x = lane_x(
@@ -1981,8 +2185,45 @@ fn ruler_and_lanes(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: R
         shell.set_notice(error.to_string());
     }
     release_library_drop(shell, ui, tracks, lanes_left, &boxes);
-    pan_timeline(shell, ui, lane_area);
+    pan_timeline(shell, ui, lane_area, scrolls);
     zoom_timeline(shell, ui, lane_area);
+}
+
+/// How far the lanes may move: none while they fit, else far enough to
+/// bring the top lane or the bottom lane in with a little room.
+fn lane_scroll_range(boxes: &[Rect], area: Rect) -> (f32, f32) {
+    const ROOM: f32 = 8.0;
+    let (Some(top), Some(bottom)) = (
+        boxes.iter().map(|rect| rect.top()).reduce(f32::min),
+        boxes.iter().map(|rect| rect.bottom()).reduce(f32::max),
+    ) else {
+        return (0.0, 0.0);
+    };
+    let low = (area.bottom() - ROOM - bottom).min(0.0);
+    let high = (area.top() + ROOM - top).max(0.0);
+    (low, high)
+}
+
+/// This frame's wheel, whether the zoom modifier is held, and the pointer.
+/// egui already turns Shift and an up-and-down wheel sideways.
+fn wheel(ui: &Ui) -> (Vec2, bool, Option<Pos2>) {
+    ui.input(|input| {
+        (
+            input.smooth_scroll_delta,
+            input.modifiers.command || input.modifiers.ctrl,
+            input.pointer.hover_pos(),
+        )
+    })
+}
+
+/// The up-and-down wheel over the track area, in points to move the lanes.
+fn lane_wheel(ui: &Ui, tracks: Rect) -> f32 {
+    let (delta, command, pos) = wheel(ui);
+    let over = pos.is_some_and(|pos| tracks.contains(pos) && !over_menu(ui, pos));
+    if command || !over || delta.y.abs() <= delta.x.abs() {
+        return 0.0;
+    }
+    delta.y
 }
 
 fn secondary_click(ui: &Ui) -> Option<Pos2> {
@@ -2055,15 +2296,11 @@ fn scroll_with_drag(shell: &mut Shell, ui: &Ui, x_in_view: f64) {
     }
 }
 
-/// A wheel or a sideways swipe over the lanes moves the visible span.
-fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
-    let (delta, command, pos) = ui.input(|input| {
-        (
-            input.smooth_scroll_delta,
-            input.modifiers.command || input.modifiers.ctrl,
-            input.pointer.hover_pos(),
-        )
-    });
+/// A sideways swipe, or Shift and the wheel, over the lanes moves the
+/// visible span. While the lanes are taller than the panel the plain wheel
+/// scrolls them instead; while they fit it moves the span too.
+fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect, lanes_scroll: bool) {
+    let (delta, command, pos) = wheel(ui);
     if command || delta == Vec2::ZERO {
         return;
     }
@@ -2075,6 +2312,8 @@ fn pan_timeline(shell: &mut Shell, ui: &Ui, lane_area: Rect) {
     }
     let pixels = if delta.x.abs() >= delta.y.abs() {
         delta.x
+    } else if lanes_scroll {
+        return;
     } else {
         delta.y
     };
@@ -2230,7 +2469,7 @@ fn ghost_card(shell: &Shell, material_id: &str) -> Option<BinCard> {
         name: file_label(&audio.path),
         meta: card_clock(audio.duration.0),
         on_timeline: used.contains(audio.id.as_str()),
-        look: CardLook::Sound(Vec::new()),
+        look: CardLook::Sound(std::sync::Arc::from([])),
     })
 }
 
@@ -2710,25 +2949,45 @@ fn paint_transitions(
     }
 }
 
-/// Thumbnail textures by the picture they show, kept in egui's memory.
-#[derive(Clone, Default)]
-struct FilmTextures(std::collections::HashMap<cutlass_engine::ThumbKey, egui::TextureHandle>);
+/// Thumbnail textures by the picture they show, each with the frame it
+/// was last drawn in. egui's memory holds a shared handle, so reaching the
+/// map copies nothing.
+#[derive(Default)]
+struct FilmTextures {
+    shown: std::collections::HashMap<cutlass_engine::ThumbKey, (egui::TextureHandle, u64)>,
+    frame: u64,
+}
 
-/// Textures kept before the oldest are let go.
+type SharedFilm = std::sync::Arc<std::sync::Mutex<FilmTextures>>;
+
+/// Textures kept before the least recently drawn are let go.
 const FILM_TEXTURES: usize = 1500;
 
-/// Run `f` on the thumbnail textures, then keep them for the next frame.
+/// Run `f` on the thumbnail textures, then let go of the least recently
+/// drawn quarter when there are too many.
 fn with_film_textures<R>(ctx: &egui::Context, f: impl FnOnce(&mut FilmTextures) -> R) -> R {
     let store = egui::Id::NULL.with("film textures");
-    let mut textures = ctx
-        .data_mut(|data| data.get_temp::<FilmTextures>(store))
-        .unwrap_or_default();
-    if textures.0.len() > FILM_TEXTURES {
-        textures.0.clear();
-    }
+    let shared = ctx.data_mut(|data| data.get_temp_mut_or_default::<SharedFilm>(store).clone());
+    let mut textures = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    textures.frame = ctx.cumulative_pass_nr();
     let result = f(&mut textures);
-    ctx.data_mut(|data| data.insert_temp(store, textures));
+    evict(&mut textures, FILM_TEXTURES);
     result
+}
+
+/// Keep at most `limit` textures: past it, drop the least recently drawn
+/// until a quarter of the room is free again.
+fn evict(textures: &mut FilmTextures, limit: usize) {
+    if textures.shown.len() <= limit {
+        return;
+    }
+    let keep = limit - limit / 4;
+    let mut ages: Vec<u64> = textures.shown.values().map(|(_, used)| *used).collect();
+    ages.sort_unstable_by(|a, b| b.cmp(a));
+    let cutoff = ages[keep - 1];
+    textures.shown.retain(|_, (_, used)| *used >= cutoff);
 }
 
 /// The texture of `thumb`, loaded the first time it is shown.
@@ -2738,17 +2997,19 @@ fn film_texture(
     key: cutlass_engine::ThumbKey,
     thumb: &cutlass_engine::Thumb,
 ) -> egui::TextureId {
-    textures
-        .0
-        .entry(key)
-        .or_insert_with(|| {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [thumb.width as usize, thumb.height as usize],
-                &thumb.rgba,
-            );
-            ctx.load_texture("film", image, egui::TextureOptions::LINEAR)
-        })
-        .id()
+    let frame = textures.frame;
+    let entry = textures.shown.entry(key).or_insert_with(|| {
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [thumb.width as usize, thumb.height as usize],
+            &thumb.rgba,
+        );
+        (
+            ctx.load_texture("film", image, egui::TextureOptions::LINEAR),
+            frame,
+        )
+    });
+    entry.1 = frame;
+    entry.0.id()
 }
 
 /// The clip's filmstrip in the `film` rows of `clip_rect`, over the tiles
@@ -3686,35 +3947,134 @@ fn export_dialog(
     view: &mut ViewState,
     parent: Option<&eframe::Frame>,
 ) {
+    use crate::shell::{ExportQuality, ExportSpan};
+    use cutlass_decode::CodecId;
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
-        ui.label(RichText::new("Short side").color(tokens::MUTED));
-        for side in crate::shell::SHORT_SIDES {
-            if ui
-                .selectable_label(view.export_side == side, side.to_string())
-                .clicked()
-            {
-                view.export_side = side;
-            }
-        }
-        if view.replace_prompt {
-            ui.label("Replace the existing file?");
-        }
-        if ui.button("Export").clicked() {
-            if view.export_path.is_empty() {
-                view.dialogs.save_export(parent);
-            } else {
-                match write_export(shell, view) {
-                    Ok(()) => view.export_open = false,
-                    Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
-                    Err(error) => shell.set_notice(error.to_string()),
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                let movie = view.export_codec != CodecId::Png;
+                choice_row(ui, "Format", |ui| {
+                    if ui.selectable_label(movie, "Movie (MP4)").clicked() && !movie {
+                        view.export_codec = CodecId::H264;
+                    }
+                    if ui.selectable_label(!movie, "Still frame (PNG)").clicked() {
+                        view.export_codec = CodecId::Png;
+                    }
+                });
+                if movie {
+                    choice_row(ui, "Codec", |ui| {
+                        for (codec, name) in [(CodecId::H264, "H.264"), (CodecId::Hevc, "HEVC")] {
+                            let offered = shell.encodes(codec);
+                            let label = egui::Button::selectable(view.export_codec == codec, name);
+                            if ui.add_enabled(offered, label).clicked() {
+                                view.export_codec = codec;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Range", |ui| {
+                        let picked = !shell.selection().is_empty();
+                        if !picked {
+                            view.export_span = ExportSpan::Whole;
+                        }
+                        for (span, name) in [
+                            (ExportSpan::Whole, "Whole timeline"),
+                            (ExportSpan::Selected, "Selected clips"),
+                        ] {
+                            let offered = span == ExportSpan::Whole || picked;
+                            let label = egui::Button::selectable(view.export_span == span, name);
+                            if ui.add_enabled(offered, label).clicked() {
+                                view.export_span = span;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Frame rate", |ui| {
+                        for (rate, name) in [
+                            (None, "Project"),
+                            (Some(FrameRate::FPS_24), "24"),
+                            (Some(FrameRate::FPS_25), "25"),
+                            (Some(FrameRate::FPS_30), "30"),
+                            (Some(FrameRate::FPS_50), "50"),
+                            (Some(FrameRate::FPS_60), "60"),
+                        ] {
+                            if ui
+                                .selectable_label(view.export_rate == rate, name)
+                                .clicked()
+                            {
+                                view.export_rate = rate;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Quality", |ui| {
+                        for (quality, name) in [
+                            (ExportQuality::Lower, "Lower"),
+                            (ExportQuality::Recommended, "Recommended"),
+                            (ExportQuality::Higher, "Higher"),
+                        ] {
+                            if ui
+                                .selectable_label(view.export_quality == quality, name)
+                                .clicked()
+                            {
+                                view.export_quality = quality;
+                            }
+                        }
+                    });
+                    choice_row(ui, "Sound", |ui| {
+                        ui.checkbox(&mut view.export_sound, "Include the timeline's sound");
+                    });
                 }
-            }
-        }
+                choice_row(ui, "Short side", |ui| {
+                    for side in crate::shell::SHORT_SIDES {
+                        if ui
+                            .selectable_label(view.export_side == side, side.to_string())
+                            .clicked()
+                        {
+                            view.export_side = side;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                if view.replace_prompt {
+                    ui.label("Replace the existing file?");
+                }
+                let busy = shell.job().is_some();
+                if ui.add_enabled(!busy, egui::Button::new("Export")).clicked() {
+                    if view.export_path.is_empty() {
+                        let extension = if movie { "mp4" } else { "png" };
+                        let name = shell
+                            .draft()
+                            .map_or_else(String::new, |draft| draft.name.clone());
+                        view.dialogs.save_export(parent, &name, extension);
+                    } else {
+                        match write_export(shell, view) {
+                            Ok(()) => view.export_open = false,
+                            Err(ShellError::Overwrite(_)) => view.replace_prompt = true,
+                            Err(error) => shell.set_notice(error.to_string()),
+                        }
+                    }
+                }
+            });
+        });
     });
     if closed {
         view.export_open = false;
         view.replace_prompt = false;
     }
+}
+
+/// A dim label and its choices on one line.
+fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(84.0, 20.0), Sense::hover());
+        ui.painter().text(
+            rect.left_center(),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(12.0),
+            tokens::MUTED,
+        );
+        add(ui);
+    });
 }
 
 fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
@@ -3723,7 +4083,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     };
     let result = match finished.picker {
         Picker::OpenProject => shell.open_folder(&path),
-        Picker::Import => import_chosen(shell, view, &path),
+        Picker::Import => shell.start_import(&path),
         Picker::SaveExport => {
             view.export_path = path.display().to_string();
             write_export(shell, view)
@@ -3739,33 +4099,16 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
     }
 }
 
-fn import_chosen(
-    shell: &mut Shell,
-    view: &mut ViewState,
-    path: &std::path::Path,
-) -> Result<(), ShellError> {
-    let (videos, audios) = shell.draft().map_or((0, 0), |draft| {
-        (draft.materials.videos.len(), draft.materials.audios.len())
-    });
-    shell.import_file(path)?;
-    let added_video = shell
-        .draft()
-        .is_some_and(|draft| draft.materials.videos.len() > videos);
-    let added_audio = shell
-        .draft()
-        .is_some_and(|draft| draft.materials.audios.len() > audios);
-    if added_video {
-        view.library_shelf = Shelf::Media;
-    } else if added_audio {
-        view.library_shelf = Shelf::Audio;
-    }
+/// Open the shelf an import that just landed filled.
+fn show_imported(shell: &mut Shell, view: &mut ViewState) {
+    let Some(kind) = shell.take_imported() else {
+        return;
+    };
+    view.library_shelf = match kind {
+        crate::shell::ImportedKind::Video => Shelf::Media,
+        crate::shell::ImportedKind::Audio => Shelf::Audio,
+    };
     view.library_query.clear();
-    let label = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".to_owned());
-    shell.set_notice(format!("Imported {label}"));
-    Ok(())
 }
 
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
@@ -3774,6 +4117,10 @@ fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
         short_side: view.export_side,
         codec: view.export_codec,
         replace: view.replace_prompt,
+        span: view.export_span,
+        frame_rate: view.export_rate,
+        quality: view.export_quality,
+        sound: view.export_sound,
     })
 }
 
@@ -3886,6 +4233,32 @@ mod tests {
     use egui::Color32;
 
     #[test]
+    fn film_textures_let_go_of_the_least_recently_drawn() {
+        let ctx = egui::Context::default();
+        let thumb = cutlass_engine::Thumb {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        let key = |n: i64| cutlass_engine::ThumbKey {
+            path: "clip.mov".into(),
+            time: Micros(n),
+        };
+        let mut textures = FilmTextures::default();
+        for n in 0..8 {
+            textures.frame = n as u64;
+            film_texture(&ctx, &mut textures, key(n), &thumb);
+        }
+        // Drawing the first again makes it recent.
+        textures.frame = 9;
+        film_texture(&ctx, &mut textures, key(0), &thumb);
+        evict(&mut textures, 4);
+        let mut kept: Vec<i64> = textures.shown.keys().map(|key| key.time.0).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, [0, 6, 7]);
+    }
+
+    #[test]
     fn the_first_frame_lists_projects_and_does_not_ask_to_close() {
         let root = std::env::temp_dir().join(format!("cutlass-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -3915,6 +4288,8 @@ mod tests {
         assert!(!ctx.global_style().interaction.selectable_labels);
         output.textures_delta.clear();
         Shell::create_project(&root).unwrap();
+        // The home looks at the folder once a second; skip the wait.
+        view.listed_checked = None;
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
@@ -4782,6 +5157,14 @@ mod tests {
         assert_eq!(cards[0].meta, "00:02");
         assert_eq!(cards[0].look, CardLook::Picture(None));
         assert!(cards[0].on_timeline);
+        // A clip's own copy of that video is still the one file.
+        let mut copy = draft.materials.videos[0].clone();
+        copy.id = "seg:mat".into();
+        draft.materials.videos.push(copy);
+        draft.tracks[0].segments[0].material_id = "seg:mat".into();
+        let cards = bin_cards(&draft, Shelf::Media, "");
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].on_timeline);
         assert!(bin_cards(&draft, Shelf::Audio, "").is_empty());
         assert!(bin_cards(&draft, Shelf::Media, "nope").is_empty());
         let blends = bin_cards(&draft, Shelf::Transitions, "");
@@ -4811,6 +5194,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -4883,6 +5267,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -4951,6 +5336,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
         let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
@@ -5000,6 +5386,7 @@ mod tests {
         let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/engine/fixtures/pattern.png");
         view.dialogs.finish_for_test(Picker::Import, Some(picture));
+        land_import(&mut shell, &mut view);
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -5879,6 +6266,275 @@ mod tests {
         assert!(beats[0].source > 0);
         assert!(beats[0].source < 2_000_000);
         assert_eq!(beats[0].time.0, beats[0].source);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Draw frames until the chosen import has been copied and landed.
+    fn land_import(shell: &mut Shell, view: &mut ViewState) {
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            if shell.job().is_none() || std::time::Instant::now() > until {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The last place `wanted` is painted, so a dialog's button wins over
+    /// the same word in the bar beneath it.
+    fn last_text_pos(output: &egui::FullOutput, wanted: &str) -> Option<Pos2> {
+        output
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|clipped| shape_pos(&clipped.shape, wanted))
+            .map(|pos| pos + Vec2::new(4.0, 4.0))
+    }
+
+    #[test]
+    fn the_export_dialog_writes_a_movie_as_a_job_and_offers_its_folder() {
+        let (mut shell, temp) = open_span("movie", 1_000_000);
+        let destination = temp.join("cut.mp4");
+        let mut view = ViewState::new();
+        view.export_open = true;
+        view.export_side = 480;
+        view.export_path = destination.display().to_string();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            vec![
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            ]
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        for label in [
+            "Movie (MP4)",
+            "H.264",
+            "Whole timeline",
+            "Recommended",
+            "Frame rate",
+        ] {
+            assert!(text.contains(label), "the dialog has no {label}");
+        }
+        let export = last_text_pos(&output, "Export").expect("an Export button");
+        for events in click(export) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(
+            !view.export_open,
+            "the dialog stays open: {} at {export:?}",
+            shell.notice()
+        );
+        assert_eq!(shell.job().map(|job| job.label), Some("Export".to_owned()));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while shell.job().is_some() && std::time::Instant::now() < until {
+            frame(&mut shell, &mut view, Vec::new());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(destination.is_file(), "{}", shell.notice());
+        frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        assert!(text.contains("Exported cut.mp4"), "{text}");
+        assert!(text.contains(crate::shell::REVEAL_LABEL));
+        let close = last_text_pos(&output, "Close").expect("a Close button");
+        for events in click(close) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(shell.exported().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_running_job_shows_its_stage_and_cancel_stops_it() {
+        let (mut shell, temp) = open_span("job", 2_000_000);
+        shell
+            .start_job("Transcribe", move |progress| {
+                progress.stage("Listening");
+                while !progress.cancelled() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Box::new(|_: &mut Shell| Ok(()))
+            })
+            .unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while shell.job().is_some_and(|job| job.stage.is_empty())
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        // A new area is measured on its first frame and drawn on the next.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(painted_text(&output).contains("Transcribe: Listening"));
+        let cancel = text_pos(&output, "Cancel").expect("a Cancel button");
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: cancel,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(cancel), press(true)],
+            vec![press(false)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(&mut shell, ui, &mut view, None),
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(
+            shell.job().map(|job| job.stage),
+            Some("Stopping".to_owned()),
+            "Cancel did not stop the job"
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while shell.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(shell.job().is_none());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_lanes_that_overflow_and_shift_wheel_pans_time() {
+        let temp = std::env::temp_dir().join(format!("cutlass-trim-{}-tall", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 2;
+        draft.canvas_config.height = 1;
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "segment",
+            "color",
+            cutlass_model::TimeRange::new(0, 2_000_000),
+        ));
+        for index in 0..20 {
+            let mut track = cutlass_model::Track::main(format!("sound-{index}"));
+            track.kind = cutlass_model::TrackType::Audio;
+            track.segments.push(cutlass_model::Segment::new(
+                format!("tone-{index}"),
+                "tone",
+                cutlass_model::TimeRange::new(0, 1_000_000),
+            ));
+            draft.tracks.push(track);
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: screen,
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        let over = text_pos(&output, "segment").expect("main clip");
+        output.textures_delta.clear();
+        shell.zoom_in().unwrap();
+        shell.zoom_in().unwrap();
+        let wheel = |delta: Vec2, shift: bool| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers {
+                shift,
+                ..egui::Modifiers::default()
+            },
+        };
+        let mut spin = |delta: Vec2, shift: bool| {
+            for events in [
+                vec![egui::Event::PointerMoved(over), wheel(delta, shift)],
+                Vec::new(),
+            ] {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: screen,
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| show(&mut shell, ui, &mut view, None),
+                );
+                output.textures_delta.clear();
+            }
+            (shell.view_origin().0, view.lane_scroll)
+        };
+        let (before, _) = spin(Vec2::ZERO, false);
+        let (origin, scroll) = spin(Vec2::new(0.0, -120.0), false);
+        assert_eq!(origin, before, "the wheel moved time, not the lanes");
+        assert!(scroll < 0.0, "the lanes did not scroll: {scroll}");
+        let (origin, after) = spin(Vec2::new(0.0, -120.0), true);
+        assert!(origin > before, "shift and the wheel did not pan time");
+        assert_eq!(after, scroll, "shift and the wheel moved the lanes");
+        // However far the wheel goes, the last lane stops inside the panel.
+        for _ in 0..40 {
+            spin(Vec2::new(0.0, -120.0), false);
+        }
+        let (_, deepest) = spin(Vec2::new(0.0, -120.0), false);
+        let (_, still) = spin(Vec2::new(0.0, -120.0), false);
+        assert_eq!(deepest, still);
         let _ = std::fs::remove_dir_all(&temp);
     }
 

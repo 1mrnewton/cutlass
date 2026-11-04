@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod atomic;
 mod backup;
 mod folder;
 mod hold;

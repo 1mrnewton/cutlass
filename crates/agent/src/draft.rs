@@ -463,6 +463,8 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::SetKeyframes { .. } => "set_keyframes",
         Request::AddKeyframe { .. } => "add_keyframe",
         Request::RemoveKeyframe { .. } => "remove_keyframe",
+        Request::SetKeyframeGraph { .. } => "set_keyframe_graph",
+        Request::SetAnimation { .. } => "set_animation",
         Request::KeyPose { .. } => "key_pose",
         Request::Import { .. } => "import",
         Request::InsertTrack { .. } => "insert_track",

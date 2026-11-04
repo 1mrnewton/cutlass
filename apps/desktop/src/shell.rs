@@ -11,6 +11,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
@@ -235,6 +236,37 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
+/// Each lane with its clips, in drawing order.
+fn build_lanes(draft: &Draft) -> Vec<LaneView> {
+    lanes(draft)
+        .into_iter()
+        .filter_map(|lane| {
+            let track = draft.tracks.get(lane.track_index)?;
+            let clips = track
+                .segments
+                .iter()
+                .map(|segment| ClipSpan {
+                    id: segment.id.clone(),
+                    name: clip_name(draft, segment),
+                    start: segment.target.start,
+                    duration: segment.target.duration,
+                })
+                .collect();
+            Some(LaneView {
+                track_id: lane.track_id,
+                kind: lane.kind,
+                main: lane.main,
+                mute: bit(track.attribute, TrackAttribute::MUTE),
+                hide: bit(track.attribute, TrackAttribute::HIDE),
+                lock: bit(track.attribute, TrackAttribute::LOCK),
+                solo: bit(track.attribute, TrackAttribute::SOLO),
+                mute_by_solo: bit(track.attribute, TrackAttribute::MUTE_BY_SOLO),
+                clips,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaneView {
     pub track_id: TrackId,
@@ -291,8 +323,67 @@ pub struct Inspection {
 pub struct ExportRequest {
     pub path: PathBuf,
     pub short_side: i32,
+    /// PNG writes the frame at the playhead; H.264 or HEVC a movie.
     pub codec: CodecId,
     pub replace: bool,
+    pub span: ExportSpan,
+    /// `None` keeps the project's rate.
+    pub frame_rate: Option<FrameRate>,
+    pub quality: ExportQuality,
+    /// The movie carries the timeline's sound.
+    pub sound: bool,
+}
+
+impl Default for ExportRequest {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            short_side: 1080,
+            codec: CodecId::H264,
+            replace: false,
+            span: ExportSpan::Whole,
+            frame_rate: None,
+            quality: ExportQuality::Recommended,
+            sound: true,
+        }
+    }
+}
+
+/// How much of the timeline a movie holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportSpan {
+    #[default]
+    Whole,
+    /// From the first selected clip's start to the last one's end.
+    Selected,
+}
+
+/// How many bits a second a movie spends, around the recommended rate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExportQuality {
+    Lower,
+    #[default]
+    Recommended,
+    Higher,
+}
+
+impl ExportQuality {
+    /// The bitrate for an H.264 or HEVC picture `short_side` pixels on its
+    /// short side. HEVC gets the same picture from fewer bits.
+    #[must_use]
+    pub fn bitrate(self, short_side: u32, codec: CodecId) -> u32 {
+        let base = cutlass_export::video_bitrate(short_side);
+        let base = if codec == CodecId::Hevc {
+            base / 10 * 6
+        } else {
+            base
+        };
+        match self {
+            Self::Lower => base / 2,
+            Self::Recommended => base,
+            Self::Higher => base.saturating_mul(2),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -410,6 +501,8 @@ pub struct Shell {
     readers: ReaderFactory,
     transport: Transport,
     preview_cache: RefCell<FrameCache>,
+    /// The lanes as last built, with the revision they were built at.
+    lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
     settings: Settings,
     session: Option<Session>,
     folder: Option<Folder>,
@@ -462,6 +555,14 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// Work running off the window thread, and the project it was started in.
+    job: Option<RunningJob>,
+    /// The movie the last export wrote.
+    exported: Option<PathBuf>,
+    /// What the last import that landed added, until the window looks.
+    imported: Option<ImportedKind>,
+    /// An autosave writing on its own thread.
+    saving: Option<Saving>,
     /// Timeline thumbnails, once the window starts them.
     thumbnails: Option<Thumbnails>,
     /// Thumbnails this frame's clips asked for, nearest the view first.
@@ -470,7 +571,11 @@ pub struct Shell {
     waveforms: Option<Waveforms>,
     /// Files this frame's clips asked for peaks of.
     wave_asks: Vec<PathBuf>,
-    face: FaceTable,
+    /// Library card waves by material id, with the peaks, length and width
+    /// they were spread from.
+    card_waves: std::collections::HashMap<String, CardWave>,
+    /// Shared so an export job reads the same faces.
+    face: Arc<FaceTable>,
     /// The preview canvas on eframe's GPU device, once the window has one.
     gpu: Option<crate::gpu::Preview>,
     /// The canvas shows a clip's earlier picture while the asked one decodes.
@@ -512,6 +617,7 @@ impl Shell {
             ),
             transport: Transport::new(),
             preview_cache: RefCell::new(FrameCache::new()),
+            lanes_cache: RefCell::new(None),
             settings,
             session: None,
             folder: None,
@@ -551,11 +657,16 @@ impl Shell {
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
+            job: None,
+            exported: None,
+            imported: None,
+            saving: None,
             thumbnails: None,
             film_asks: Vec::new(),
             waveforms: None,
             wave_asks: Vec::new(),
-            face: crate::face::installed(),
+            card_waves: std::collections::HashMap::new(),
+            face: Arc::new(crate::face::installed()),
             gpu: None,
             preview_stale: false,
             chrome: Chrome::default(),
@@ -657,7 +768,7 @@ impl Shell {
     /// The library poster of material `id`: a thumbnail of its first frame,
     /// with the key it is stored under. Asked for when the frame ends while
     /// missing. Sound has no poster.
-    pub fn poster(&mut self, id: &str) -> Option<(ThumbKey, Option<std::sync::Arc<Thumb>>)> {
+    pub fn poster(&mut self, id: &str) -> Option<(ThumbKey, Option<Arc<Thumb>>)> {
         let thumbnails = self.thumbnails.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
         let Some(MaterialRef::Video(video)) = draft.materials.get(id) else {
@@ -678,7 +789,8 @@ impl Shell {
     /// The library waveform of audio material `id`: `columns` levels, 0 to
     /// 1, across the whole file, once any of it is read. Asked for when the
     /// frame ends while missing or still being read.
-    pub fn material_wave(&mut self, id: &str, columns: usize) -> Option<Vec<f32>> {
+    /// Spread again only when the peaks, length or width moved.
+    pub fn material_wave(&mut self, id: &str, columns: usize) -> Option<Arc<[f32]>> {
         let waveforms = self.waveforms.as_ref()?;
         let draft = self.session.as_ref().map(Session::draft)?;
         let Some(MaterialRef::Audio(audio)) = draft.materials.get(id) else {
@@ -693,7 +805,24 @@ impl Shell {
         if !peaks.complete {
             self.wave_asks.push(path);
         }
-        Some(spread_peaks(&peaks, duration, columns))
+        if let Some(kept) = self.card_waves.get(id)
+            && Arc::ptr_eq(&kept.peaks, &peaks)
+            && kept.duration == duration
+            && kept.columns == columns
+        {
+            return Some(Arc::clone(&kept.levels));
+        }
+        let levels: Arc<[f32]> = spread_peaks(&peaks, duration, columns).into();
+        self.card_waves.insert(
+            id.to_owned(),
+            CardWave {
+                peaks,
+                duration,
+                columns,
+                levels: Arc::clone(&levels),
+            },
+        );
+        Some(levels)
     }
 
     /// A stored media path as a file: inside the project when relative.
@@ -778,6 +907,8 @@ impl Shell {
             self.save()?;
         }
         self.session = None;
+        self.lanes_cache.replace(None);
+        self.card_waves.clear();
         self.folder = None;
         self.hold = None;
         self.saved = None;
@@ -898,6 +1029,7 @@ impl Shell {
         session.set_linkage(linkage);
         self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
+        self.lanes_cache.replace(None);
         self.folder = Some(opened.folder);
         self.hold = Some(hold);
         self.playhead = Micros(0);
@@ -922,22 +1054,25 @@ impl Shell {
     }
 
     pub fn save(&mut self) -> Result<(), ShellError> {
+        // A write already under way finishes first, so two never overlap.
+        self.finish_background_save();
+        let (path, folder, revision) = self.save_snapshot()?;
+        folder.save(&path).map_err(ShellError::Store)?;
+        self.saved = Some((revision, Instant::now()));
+        Ok(())
+    }
+
+    /// Bring the folder up to the open draft, and hand back where to write
+    /// it, a copy to write, and the revision that copy holds.
+    fn save_snapshot(&mut self) -> Result<(PathBuf, Folder, u64), ShellError> {
         let path = self.path.clone().ok_or(ShellError::NoProject)?;
         if !path.is_dir() {
             return Err(ShellError::MissingFolder(path));
         }
-        let enabled = self
-            .session
-            .as_ref()
-            .ok_or(ShellError::NoProject)?
-            .linkage()
-            .enabled;
-        let draft = self
-            .session
-            .as_ref()
-            .ok_or(ShellError::NoProject)?
-            .draft()
-            .clone();
+        let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
+        let enabled = session.linkage().enabled;
+        let revision = session.revision();
+        let draft = session.draft().clone();
         let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
         let main = folder.project.main_timeline_id.clone();
         let name = draft.name.clone();
@@ -961,31 +1096,93 @@ impl Shell {
             }
         }
         folder.set_linkage_enabled(enabled);
-        folder.save(&path).map_err(ShellError::Store)?;
-        let revision = self.session.as_ref().map_or(0, Session::revision);
-        self.saved = Some((revision, Instant::now()));
-        Ok(())
+        Ok((path, folder.clone(), revision))
+    }
+
+    /// Wait for the background write, if one is under way, and record how
+    /// it went.
+    fn finish_background_save(&mut self) {
+        if let Some(saving) = self.saving.take() {
+            let written = saving.handle.join();
+            if self.path.as_ref() == Some(&saving.project) {
+                self.record_background_save(saving.revision, written);
+            } else if let Ok(Err(error)) = written {
+                cutlass_logger::error!("autosave of {}: {error}", saving.project.display());
+            }
+        }
+    }
+
+    fn record_background_save(
+        &mut self,
+        revision: u64,
+        written: std::thread::Result<Result<(), StoreError>>,
+    ) {
+        let error = match written {
+            Ok(Ok(())) => {
+                self.saved = Some((revision, Instant::now()));
+                return;
+            }
+            Ok(Err(error)) => ShellError::Store(error),
+            Err(_) => ShellError::Io("the save stopped unexpectedly".to_owned()),
+        };
+        self.autosave_failed(&error);
+    }
+
+    /// The edits stay unsaved, so quitting still writes them; the clock
+    /// restarts so a failing disk is tried once per gap.
+    fn autosave_failed(&mut self, error: &ShellError) {
+        cutlass_logger::error!("autosave: {error}");
+        if let Some((saved, _)) = self.saved {
+            self.saved = Some((saved, Instant::now()));
+        }
+        self.set_notice(format!("Could not save: {error}"));
     }
 
     /// Write the project when an edit has landed since the last write, at
-    /// most once per [`AUTOSAVE_GAP`]. Returns how long until a held-back
-    /// write is due, so the window can wake for it.
+    /// most once per [`AUTOSAVE_GAP`]. The write runs on its own thread, so
+    /// the window does not wait for the disk. Returns how long until the
+    /// window should look again.
     pub fn autosave(&mut self) -> Option<Duration> {
+        const LOOK_AGAIN: Duration = Duration::from_millis(50);
+        if let Some(saving) = self.saving.as_ref() {
+            if !saving.handle.is_finished() {
+                return Some(LOOK_AGAIN);
+            }
+            self.finish_background_save();
+        }
         if !self.unsaved() {
             return None;
         }
         let (_, at) = self.saved?;
-        let revision = self.session.as_ref()?.revision();
         let wait = AUTOSAVE_GAP.saturating_sub(at.elapsed());
         if !wait.is_zero() {
             return Some(wait);
         }
-        if let Err(error) = self.save() {
-            cutlass_logger::error!("autosave: {error}");
-            self.saved = Some((revision, Instant::now()));
-            self.set_notice(format!("Could not save: {error}"));
+        let (path, folder, revision) = match self.save_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.autosave_failed(&error);
+                return Some(AUTOSAVE_GAP);
+            }
+        };
+        let project = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("cutlass autosave".to_owned())
+            .spawn(move || folder.save(&path));
+        match spawned {
+            Ok(handle) => {
+                self.saving = Some(Saving {
+                    revision,
+                    project,
+                    handle,
+                });
+                Some(LOOK_AGAIN)
+            }
+            Err(error) => {
+                self.autosave_failed(&ShellError::Io(error.to_string()));
+                Some(AUTOSAVE_GAP)
+            }
         }
-        None
     }
 
     /// An edit has landed since the folder was last written.
@@ -1009,7 +1206,7 @@ impl Shell {
     fn import_file_in(&mut self, path: &Path) -> Result<(), ShellError> {
         let probed = probe::probe(path).map_err(|error| ShellError::Probe(error.to_string()))?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
-        let (stored, copied) = place_in_project(&project, path)?;
+        let (stored, copied) = place_in_project(&project, path, None)?;
         let imported = self.import_medium(probed, stored);
         if imported.is_err()
             && let Some(copied) = copied
@@ -1019,37 +1216,66 @@ impl Shell {
         imported
     }
 
-    pub fn lanes(&self) -> Vec<LaneView> {
-        let Some(draft) = self.draft() else {
-            return Vec::new();
-        };
-        lanes(draft)
-            .into_iter()
-            .filter_map(|lane| {
-                let track = draft.tracks.get(lane.track_index)?;
-                let clips = track
-                    .segments
-                    .iter()
-                    .map(|segment| ClipSpan {
-                        id: segment.id.clone(),
-                        name: clip_name(draft, segment),
-                        start: segment.target.start,
-                        duration: segment.target.duration,
-                    })
-                    .collect();
-                Some(LaneView {
-                    track_id: lane.track_id,
-                    kind: lane.kind,
-                    main: lane.main,
-                    mute: bit(track.attribute, TrackAttribute::MUTE),
-                    hide: bit(track.attribute, TrackAttribute::HIDE),
-                    lock: bit(track.attribute, TrackAttribute::LOCK),
-                    solo: bit(track.attribute, TrackAttribute::SOLO),
-                    mute_by_solo: bit(track.attribute, TrackAttribute::MUTE_BY_SOLO),
-                    clips,
-                })
+    /// Import `path` as a job: read it, copy it into the project with a
+    /// progress bar, then add it to the library when the job lands. A
+    /// cancelled import leaves no copy behind.
+    pub fn start_import(&mut self, path: &Path) -> Result<(), ShellError> {
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        self.refuse_busy()?;
+        let source = path.to_path_buf();
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        self.start_job("Import", move |progress| {
+            progress.stage(&format!("Reading {name}"));
+            let placed = probe::probe(&source)
+                .map_err(|error| ShellError::Probe(error.to_string()))
+                .and_then(|probed| {
+                    progress.stage(&format!("Copying {name}"));
+                    let (stored, copied) = place_in_project(&project, &source, Some(progress))?;
+                    Ok((probed, stored, CopyGuard(copied)))
+                });
+            Box::new(move |shell: &mut Shell| {
+                let (probed, stored, mut copy) = placed.inspect_err(|error| {
+                    cutlass_logger::error!("import {name}: {error}");
+                })?;
+                let before = shell.draft().map(|draft| draft.materials.videos.len());
+                shell.import_medium(probed, stored)?;
+                copy.keep();
+                let video = shell.draft().map(|draft| draft.materials.videos.len()) != before;
+                shell.imported = Some(if video {
+                    ImportedKind::Video
+                } else {
+                    ImportedKind::Audio
+                });
+                shell.set_notice(format!("Imported {name}"));
+                Ok(())
             })
-            .collect()
+        })
+    }
+
+    /// What the last import that landed added, once: the window opens that
+    /// shelf.
+    pub fn take_imported(&mut self) -> Option<ImportedKind> {
+        self.imported.take()
+    }
+
+    /// The lanes to draw, built again only when the revision moves.
+    pub fn lanes(&self) -> Arc<[LaneView]> {
+        let Some(session) = self.session.as_ref() else {
+            return Arc::from([]);
+        };
+        let revision = session.revision();
+        if let Some((built, lanes)) = self.lanes_cache.borrow().as_ref()
+            && *built == revision
+        {
+            return Arc::clone(lanes);
+        }
+        let built: Arc<[LaneView]> = build_lanes(session.draft()).into();
+        self.lanes_cache
+            .replace(Some((revision, Arc::clone(&built))));
+        built
     }
 
     pub fn seek_ruler(&mut self, x: f64) -> Result<Micros, ShellError> {
@@ -1260,7 +1486,7 @@ impl Shell {
                 Micros(time),
                 &self.readers,
                 self.path.as_deref(),
-                &self.face,
+                &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         let stale = cache.take_stale();
@@ -1298,7 +1524,7 @@ impl Shell {
                 time,
                 &self.readers,
                 root.as_deref(),
-                &self.face,
+                &*self.face,
             )
             .map_err(|error| ShellError::Eval(error.to_string()))?;
         Ok(Picture {
@@ -1306,6 +1532,16 @@ impl Shell {
             height: picture.height,
             rgba: picture.rgba,
         })
+    }
+
+    /// An edit is there to undo.
+    pub fn can_undo(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::can_undo)
+    }
+
+    /// An undone edit is there to redo.
+    pub fn can_redo(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::can_redo)
     }
 
     pub fn undo(&mut self) -> Result<(), ShellError> {
@@ -2860,22 +3096,141 @@ impl Shell {
     }
 
     /// Hear the selected clip and place the words on a text track, lined up
-    /// with that clip. One undo removes the caption. The window waits while
-    /// the local speech model runs.
+    /// with that clip. One undo removes the caption. The local speech model
+    /// runs as a job; the caption lands when it finishes, unless the clip
+    /// changed meanwhile.
     pub fn transcribe(&mut self) -> Result<(), ShellError> {
         let clip = self.selected_speech()?;
-        self.ensure_speech()?;
-        let mut source = FileSource::new(&clip.path);
-        let words = {
-            let cell = self.speech.borrow();
-            let Some(recognizer) = cell.as_ref() else {
-                return Err(ShellError::Unavailable(
-                    "the speech model is not on this machine".to_owned(),
-                ));
+        self.refuse_busy()?;
+        let loaded = self.speech.borrow_mut().take();
+        if loaded.is_none() && !speech_model_dir().join(SPEECH_MODEL).is_file() {
+            return Err(ShellError::Unavailable(
+                "the speech model is not on this machine".to_owned(),
+            ));
+        }
+        self.start_job("Transcribe", move |progress| {
+            let recognizer = match loaded {
+                Some(recognizer) => Ok(recognizer),
+                None => {
+                    progress.stage("Loading the speech model");
+                    load_speech()
+                }
             };
-            heard_words(recognizer, &mut source, &clip)?
+            let (recognizer, words) = match recognizer {
+                Ok(recognizer) => {
+                    progress.stage("Listening");
+                    let words = heard_words(&recognizer, &mut FileSource::new(&clip.path), &clip);
+                    (Some(recognizer), words)
+                }
+                Err(error) => (None, Err(error)),
+            };
+            Box::new(move |shell: &mut Shell| {
+                if recognizer.is_some() {
+                    shell.speech.replace(recognizer);
+                }
+                let words = words?;
+                shell.still_heard(&clip)?;
+                shell.write_caption(&clip, words)
+            })
+        })
+    }
+
+    /// The clip a transcript was heard from is still the same length and
+    /// speed, so the words still line up with it.
+    fn still_heard(&self, heard: &HeardClip) -> Result<(), ShellError> {
+        let now = self.heard_clip(&heard.source_id)?;
+        if now.range != heard.range
+            || now.target.duration != heard.target.duration
+            || now.reverse != heard.reverse
+            || now.path != heard.path
+        {
+            return Err(ShellError::Unavailable(
+                "the clip changed while it was heard".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuse a second job while one runs, or is still stopping.
+    fn refuse_busy(&self) -> Result<(), ShellError> {
+        match &self.job {
+            Some(running) => Err(ShellError::Unavailable(format!(
+                "{} is still running",
+                running.job.view().label
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Run `work` on its own thread. Its landing runs at a later
+    /// [`Self::poll_job`], in the project it was started in.
+    pub(crate) fn start_job(
+        &mut self,
+        label: &str,
+        work: impl FnOnce(&crate::jobs::Progress) -> Landing + Send + 'static,
+    ) -> Result<(), ShellError> {
+        self.refuse_busy()?;
+        let job = crate::jobs::Job::start(label, work)
+            .map_err(|_| ShellError::Unavailable(format!("{label} could not start")))?;
+        self.job = Some(RunningJob {
+            job,
+            project: self.path.clone(),
+            stopping: false,
+        });
+        Ok(())
+    }
+
+    /// The job running now, for the window to show. A cancelled job says
+    /// so until its thread has stopped.
+    pub fn job(&self) -> Option<crate::jobs::JobView> {
+        self.job.as_ref().map(|running| {
+            let mut view = running.job.view();
+            if running.stopping {
+                "Stopping".clone_into(&mut view.stage);
+                view.fraction = None;
+                view.left = None;
+            }
+            view
+        })
+    }
+
+    /// Ask the running job to stop. Whatever it was making is dropped; the
+    /// job stays until its thread ends, so a new one waits for it.
+    pub fn cancel_job(&mut self) {
+        if let Some(running) = self.job.as_mut() {
+            running.job.cancel();
+            running.stopping = true;
+        }
+    }
+
+    /// Land the job if it finished. True while one still runs.
+    pub fn poll_job(&mut self) -> bool {
+        let Some(running) = self.job.as_ref() else {
+            return false;
         };
-        self.write_caption(&clip, words)
+        let landing = match running.job.poll() {
+            crate::jobs::Poll::Running => return true,
+            crate::jobs::Poll::Finished(landing) => Some(landing),
+            crate::jobs::Poll::Lost => None,
+        };
+        let label = running.job.view().label;
+        let same_project = running.project == self.path;
+        let stopping = running.stopping;
+        self.job = None;
+        let result = match landing {
+            _ if stopping => Ok(()),
+            Some(_) if !same_project => Err(ShellError::Unavailable(format!(
+                "{label} finished after its project closed"
+            ))),
+            Some(landing) => landing(self),
+            None => Err(ShellError::Unavailable(format!(
+                "{label} stopped unexpectedly"
+            ))),
+        };
+        if let Err(error) = result {
+            self.set_notice(error.to_string());
+        }
+        false
     }
 
     /// Hear `source` with `recognizer` and place the caption. Tests pass a
@@ -2900,6 +3255,12 @@ impl Shell {
             });
         };
         self.refuse_locked(&segment_id)?;
+        self.heard_clip(&segment_id)
+    }
+
+    /// The sound of clip `segment_id`, and how it maps onto the timeline.
+    fn heard_clip(&self, segment_id: &SegmentId) -> Result<HeardClip, ShellError> {
+        let segment_id = segment_id.clone();
         let draft = self.session_draft()?;
         let Some((segment, _)) = locate(draft, &segment_id) else {
             return Err(ShellError::Unavailable(
@@ -2938,23 +3299,6 @@ impl Shell {
             speed_holds: segment.speed.is_finite() && segment.speed > 0.0,
             target: segment.target.clone(),
         })
-    }
-
-    fn ensure_speech(&self) -> Result<(), ShellError> {
-        if self.speech.borrow().is_some() {
-            return Ok(());
-        }
-        let dir = speech_model_dir();
-        if !dir.join("parakeet-unified-en-0.6b.nemo").is_file() {
-            return Err(ShellError::Unavailable(
-                "the speech model is not on this machine".to_owned(),
-            ));
-        }
-        let model = ParakeetUnified::cpu(&dir).map_err(|_| {
-            ShellError::Unavailable("the speech model could not be loaded".to_owned())
-        })?;
-        *self.speech.borrow_mut() = Some(model);
-        Ok(())
     }
 
     fn write_caption(&mut self, clip: &HeardClip, words: WordColumns) -> Result<(), ShellError> {
@@ -3104,7 +3448,8 @@ impl Shell {
     }
 
     /// Cut the selected video where its picture changes. One undo restores
-    /// the clip. The window waits while the pictures are read.
+    /// the clip. The pictures are read as a job; the cuts land when it
+    /// finishes, unless the clip changed meanwhile.
     pub fn split_scenes(&mut self) -> Result<(), ShellError> {
         let segment_id = self.scene_segment()?;
         let (path, range) = {
@@ -3136,12 +3481,33 @@ impl Shell {
             (video.path.clone(), range)
         };
         let file = self.opened_media(&path)?;
-        let cuts = scene_cuts(&self.readers, &file, &range).map_err(scene_message)?;
-        let times = {
-            let draft = self.session_draft()?;
-            timeline_cuts(draft, &segment_id, &range, &cuts)
-        };
-        self.split_at_times(&segment_id, &times)
+        self.refuse_busy()?;
+        let readers = self.readers.clone();
+        self.start_job("Split scenes", move |progress| {
+            progress.stage("Looking for cuts");
+            let cuts = scene_cuts(&readers, &file, &range).map_err(scene_message);
+            Box::new(move |shell: &mut Shell| {
+                let cuts = cuts?;
+                // The cuts are in the file's time; the clip must still show
+                // the same stretch of it for them to land where they belong.
+                let times = {
+                    let draft = shell.session_draft()?;
+                    let still = locate(draft, &segment_id).is_some_and(|(segment, _)| {
+                        segment
+                            .source_range
+                            .as_ref()
+                            .is_none_or(|now| *now == range)
+                    });
+                    if !still {
+                        return Err(ShellError::Unavailable(
+                            "the clip changed while its scenes were found".to_owned(),
+                        ));
+                    }
+                    timeline_cuts(draft, &segment_id, &range, &cuts)
+                };
+                shell.split_at_times(&segment_id, &times)
+            })
+        })
     }
 
     /// Cut the selected video at `times` on the timeline. Tests pass known
@@ -3527,17 +3893,17 @@ impl Shell {
     /// on a font file outside the repo.
     #[cfg(test)]
     pub fn use_face(&mut self, name: &str, bytes: Vec<u8>) {
-        self.face = FaceTable::named(name, bytes);
+        self.face = Arc::new(FaceTable::named(name, bytes));
     }
 
     #[cfg(test)]
     pub fn use_faces(&mut self, faces: Vec<(&str, Vec<u8>)>) {
-        self.face = FaceTable::from_pairs(
+        self.face = Arc::new(FaceTable::from_pairs(
             faces
                 .into_iter()
                 .map(|(name, bytes)| (name.to_owned(), bytes))
                 .collect(),
-        );
+        ));
     }
 
     pub fn remove_selected(&mut self) -> Result<(), ShellError> {
@@ -4156,6 +4522,9 @@ impl Shell {
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
         }
+        if matches!(request.codec, CodecId::H264 | CodecId::Hevc) {
+            return self.export_movie(request);
+        }
         if request.codec != CodecId::Png {
             return Err(ShellError::ExportUnavailable);
         }
@@ -4191,7 +4560,7 @@ impl Shell {
                 mux: &mut mux,
                 destination: None,
                 root: root.as_deref(),
-                fonts: &self.face,
+                fonts: &*self.face,
                 // The preview's device, so an effect clip is in the file.
                 renderer: self.gpu.as_ref().map(crate::gpu::Preview::renderer),
                 progress: None,
@@ -4205,6 +4574,133 @@ impl Shell {
             ));
         };
         write_replaced(&request.path, bytes)
+    }
+
+    /// Write the movie as a job. The window shows its progress; Cancel
+    /// leaves no file. When it lands, [`Self::exported`] names the file.
+    fn export_movie(&mut self, request: ExportRequest) -> Result<(), ShellError> {
+        self.refuse_busy()?;
+        let draft = self.session_draft()?.clone();
+        let range = self.export_range(&draft, request.span)?;
+        let Ok(short_side) = u32::try_from(request.short_side) else {
+            return Err(ShellError::Unavailable(
+                "the short side is not one of the steps".to_owned(),
+            ));
+        };
+        let name = request
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|_| cutlass_export::part_path(&request.path).is_some())
+            .ok_or_else(|| ShellError::Io("the export has no file name".to_owned()))?;
+        if request.path.is_dir() {
+            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        }
+        let movie = cutlass_export::ExportRequest {
+            range,
+            short_side,
+            codec: request.codec,
+            bitrate: request.quality.bitrate(short_side, request.codec),
+            frame_rate: request
+                .frame_rate
+                .or_else(|| draft.frame_rate())
+                .unwrap_or(FrameRate::FPS_30),
+            container: cutlass_codec::ContainerId::Isobmff,
+            audio: request.sound.then_some(cutlass_export::MOVIE_SOUND),
+            sidecar: None,
+            late_by: 0,
+        };
+        cutlass_export::validate(&movie).map_err(export_failure)?;
+        let root = self.path.clone();
+        let readers = self.readers.clone();
+        let encoders = self.encoders.clone();
+        let fonts = Arc::clone(&self.face);
+        // The preview's device, so an effect clip is in the file.
+        let gpu = self.gpu.as_ref().map(|preview| {
+            let renderer = preview.renderer();
+            (renderer.device().clone(), renderer.queue().clone())
+        });
+        let destination = request.path;
+        self.exported = None;
+        self.start_job("Export", move |progress| {
+            progress.stage(&format!("Writing {name}"));
+            let renderer = gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
+            let mut report = |done: u64, total: u64| {
+                if total > 0 {
+                    progress.fraction(done as f32 / total as f32);
+                }
+                !progress.cancelled()
+            };
+            let written = cutlass_export::write_movie(
+                &cutlass_export::MovieSources {
+                    draft: &draft,
+                    root: root.as_deref(),
+                    readers: &readers,
+                    fonts: &*fonts,
+                    renderer: renderer.as_ref(),
+                    encoders: &encoders,
+                },
+                &movie,
+                &destination,
+                &mut report,
+            );
+            Box::new(move |shell: &mut Shell| {
+                written.map_err(export_failure)?;
+                shell.set_notice(format!("Exported {name}"));
+                shell.exported = Some(destination);
+                Ok(())
+            })
+        })
+    }
+
+    /// The stretch of the timeline `span` names.
+    fn export_range(&self, draft: &Draft, span: ExportSpan) -> Result<TimeRange, ShellError> {
+        let range = match span {
+            // The stored length can lag the clips, so the end is where the
+            // timeline shows the cut ending.
+            ExportSpan::Whole => TimeRange::new(0, self.cut_duration().0),
+            ExportSpan::Selected => {
+                let picked = draft
+                    .tracks
+                    .iter()
+                    .flat_map(|track| &track.segments)
+                    .filter(|segment| self.selection.contains(&segment.id))
+                    .map(|segment| {
+                        (
+                            segment.target.start.0,
+                            segment.target.start.0 + segment.target.duration.0,
+                        )
+                    })
+                    .reduce(|(start, end), (from, to)| (start.min(from), end.max(to)));
+                let Some((start, end)) = picked else {
+                    return Err(ShellError::Unavailable("no clip is selected".to_owned()));
+                };
+                TimeRange::new(start, end - start)
+            }
+        };
+        if range.duration.0 <= 0 {
+            return Err(ShellError::Unavailable(
+                "there is nothing to export".to_owned(),
+            ));
+        }
+        Ok(range)
+    }
+
+    /// An encoder for `codec` opens on this machine.
+    pub fn encodes(&self, codec: CodecId) -> bool {
+        self.encoders
+            .open(&CodecParams::video(codec, 1280, 720))
+            .is_ok()
+    }
+
+    /// The movie the last export wrote, until the next export starts.
+    pub fn exported(&self) -> Option<&Path> {
+        self.exported.as_deref()
+    }
+
+    /// Stop offering the last export.
+    pub fn forget_export(&mut self) {
+        self.exported = None;
     }
 
     pub fn drag_timeline(&mut self, delta_y: f32, window_height: f32) {
@@ -4883,6 +5379,49 @@ fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId
         .map(|segment| segment.id.clone())
 }
 
+/// What the button that opens a file's folder says on this system.
+#[cfg(target_os = "macos")]
+pub const REVEAL_LABEL: &str = "Show in Finder";
+#[cfg(target_os = "windows")]
+pub const REVEAL_LABEL: &str = "Show in Explorer";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const REVEAL_LABEL: &str = "Show in folder";
+
+/// Open `path`'s folder in the system's file manager, with the file picked
+/// where the system can do that.
+pub fn reveal(path: &Path) -> Result<(), ShellError> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut open = std::process::Command::new("open");
+        open.arg("-R").arg(path);
+        open
+    } else if cfg!(target_os = "windows") {
+        let mut explorer = std::process::Command::new("explorer");
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(path);
+        explorer.arg(select);
+        explorer
+    } else {
+        let mut open = std::process::Command::new("xdg-open");
+        open.arg(path.parent().unwrap_or(path));
+        open
+    };
+    command
+        .spawn()
+        .map(drop)
+        .map_err(|error| ShellError::Io(format!("the folder could not be shown: {error}")))
+}
+
+/// A job in flight, the project it started in, and whether it was asked
+/// to stop.
+struct RunningJob {
+    job: crate::jobs::Job<Landing>,
+    project: Option<PathBuf>,
+    stopping: bool,
+}
+
+/// What a finished job does on the window thread.
+pub(crate) type Landing = Box<dyn FnOnce(&mut Shell) -> Result<(), ShellError> + Send>;
+
 struct HeardClip {
     source_id: SegmentId,
     path: String,
@@ -4892,6 +5431,15 @@ struct HeardClip {
     reverse: bool,
     speed_holds: bool,
     target: TimeRange,
+}
+
+/// The speech model's file inside [`speech_model_dir`].
+const SPEECH_MODEL: &str = "parakeet-unified-en-0.6b.nemo";
+
+/// Load the speech model; slow, so a job does it.
+fn load_speech() -> Result<ParakeetUnified, ShellError> {
+    ParakeetUnified::cpu(&speech_model_dir())
+        .map_err(|_| ShellError::Unavailable("the speech model could not be loaded".to_owned()))
 }
 
 fn speech_model_dir() -> PathBuf {
@@ -5292,9 +5840,79 @@ fn format_timecode(label: TimecodeLabel) -> String {
     )
 }
 
+/// An autosave in flight and the revision it writes.
+struct Saving {
+    revision: u64,
+    /// The project it writes; a different one may be open when it lands.
+    project: PathBuf,
+    handle: std::thread::JoinHandle<Result<(), StoreError>>,
+}
+
+/// A file copied into the project for an import, removed unless the import
+/// keeps it.
+struct CopyGuard(Option<PathBuf>);
+
+impl CopyGuard {
+    fn keep(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CopyGuard {
+    fn drop(&mut self) {
+        if let Some(copied) = self.0.take() {
+            let _ = std::fs::remove_file(copied);
+        }
+    }
+}
+
+/// What an import added to the library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportedKind {
+    Video,
+    Audio,
+}
+
+/// Copy `source` to `destination` a piece at a time, telling `progress`
+/// how far it is and stopping when asked. A stopped copy is removed.
+fn copy_reporting(
+    source: &Path,
+    destination: &Path,
+    progress: &crate::jobs::Progress,
+) -> Result<(), ShellError> {
+    use std::io::{Read, Write};
+    const PIECE: usize = 4 << 20;
+    let io = |error: std::io::Error| ShellError::Io(error.to_string());
+    let copied = (|| {
+        let mut from = std::fs::File::open(source).map_err(io)?;
+        let total = from.metadata().map_err(io)?.len().max(1);
+        let mut to = std::fs::File::create(destination).map_err(io)?;
+        let mut piece = vec![0; PIECE];
+        let mut done = 0_u64;
+        loop {
+            if progress.cancelled() {
+                return Err(ShellError::Unavailable("the import was stopped".to_owned()));
+            }
+            let read = from.read(&mut piece).map_err(io)?;
+            let Some(bytes) = piece.get(..read).filter(|bytes| !bytes.is_empty()) else {
+                break;
+            };
+            to.write_all(bytes).map_err(io)?;
+            done += read as u64;
+            progress.fraction(done as f32 / total as f32);
+        }
+        to.sync_all().map_err(io)
+    })();
+    if copied.is_err() {
+        let _ = std::fs::remove_file(destination);
+    }
+    copied
+}
+
 fn place_in_project(
     project: &Path,
     source: &Path,
+    progress: Option<&crate::jobs::Progress>,
 ) -> Result<(String, Option<PathBuf>), ShellError> {
     let project = project
         .canonicalize()
@@ -5314,7 +5932,13 @@ fn place_in_project(
         .file_name()
         .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
     let destination = unique_file(&resources, name)?;
-    std::fs::copy(source, &destination).map_err(|error| ShellError::Io(error.to_string()))?;
+    match progress {
+        Some(progress) => copy_reporting(source, &destination, progress)?,
+        None => {
+            std::fs::copy(source, &destination)
+                .map_err(|error| ShellError::Io(error.to_string()))?;
+        }
+    }
     let stored = destination
         .file_name()
         .map(|file| format!("Resources/{}", file.to_string_lossy()))
@@ -5357,6 +5981,14 @@ fn unique_file(directory: &Path, name: &std::ffi::OsStr) -> Result<PathBuf, Shel
 
 /// `peaks` spread over `columns`: the loudest level in each column's share
 /// of `duration`, the file's length. Past what was read is silence.
+/// A library card's wave and what it was spread from.
+struct CardWave {
+    peaks: Arc<cutlass_engine::Peaks>,
+    duration: i64,
+    columns: usize,
+    levels: Arc<[f32]>,
+}
+
 fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) -> Vec<f32> {
     let length = if duration > 0 {
         duration
@@ -5773,6 +6405,183 @@ mod tests {
         }
     }
 
+    /// Poll until the job lands, or ten seconds pass.
+    fn land(desktop: &mut Shell) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_job_lands_on_the_window_thread_and_one_runs_at_a_time() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        desktop
+            .start_job("Wait", move |progress| {
+                progress.stage("Waiting");
+                let _ = gate.recv();
+                Box::new(|shell: &mut Shell| {
+                    shell.set_notice("landed");
+                    Ok(())
+                })
+            })
+            .unwrap();
+        assert_eq!(desktop.job().map(|job| job.label), Some("Wait".to_owned()));
+        assert!(desktop.poll_job(), "still waiting");
+        assert_eq!(
+            desktop
+                .start_job("Second", |_| Box::new(|_: &mut Shell| Ok(())))
+                .unwrap_err()
+                .to_string(),
+            "Wait is still running"
+        );
+        go.send(()).unwrap();
+        land(&mut desktop);
+        assert!(desktop.job().is_none());
+        assert_eq!(desktop.notice(), "landed");
+    }
+
+    #[test]
+    fn a_cancelled_job_or_one_from_a_closed_project_does_not_land() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let landing = || -> super::Landing {
+            Box::new(|shell: &mut Shell| {
+                shell.set_notice("landed");
+                Ok(())
+            })
+        };
+        desktop
+            .start_job("Cancel me", move |progress| {
+                while !progress.cancelled() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                landing()
+            })
+            .unwrap();
+        desktop.cancel_job();
+        assert_eq!(
+            desktop.job().map(|job| job.stage),
+            Some("Stopping".to_owned())
+        );
+        land(&mut desktop);
+        assert!(desktop.job().is_none());
+        assert_ne!(desktop.notice(), "landed");
+
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        desktop
+            .start_job("Late", move |_| {
+                let _ = gate.recv();
+                landing()
+            })
+            .unwrap();
+        desktop.close_project().unwrap();
+        go.send(()).unwrap();
+        land(&mut desktop);
+        assert_eq!(desktop.notice(), "Late finished after its project closed");
+    }
+
+    #[test]
+    fn transcribe_runs_as_a_job_and_the_caption_lands_when_it_finishes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let sound = root.join("Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !sound.is_file()
+            || !super::speech_model_dir()
+                .join(super::SPEECH_MODEL)
+                .is_file()
+        {
+            eprintln!("skipped: the sound or the speech model is missing");
+            return;
+        }
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.materials.audios.push(MaterialAudio {
+            id: MaterialId::new("talk"),
+            path: sound.display().to_string(),
+            duration: Micros(6_000_000),
+            ..MaterialAudio::default()
+        });
+        let mut track = Track::main("sound");
+        track.kind = TrackType::Audio;
+        let mut segment = Segment::new("talk", "talk", TimeRange::new(0, 6_000_000));
+        segment.source_range = Some(TimeRange::new(0, 6_000_000));
+        track.segments.push(segment);
+        draft.tracks.push(track);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("talk")));
+        let revision = desktop.revision();
+        desktop.transcribe().unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Transcribe".to_owned())
+        );
+        // The window is free while the model runs: nothing has landed yet.
+        assert_eq!(desktop.revision(), revision);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the transcript took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        let draft = desktop.draft().unwrap();
+        assert!(
+            draft
+                .tracks
+                .iter()
+                .any(|track| track.kind == TrackType::Text && !track.segments.is_empty()),
+            "no caption landed"
+        );
+        // The model stays loaded for the next transcript.
+        assert!(desktop.speech.borrow().is_some());
+    }
+
+    #[test]
+    fn split_scenes_runs_as_a_job_and_cuts_a_real_movie_when_it_lands() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../local-files");
+        let movie =
+            root.join("Fireship - 5 open source tools that replaced my $320 mo AI stack.mp4");
+        let Ok(movie) = movie.canonicalize() else {
+            eprintln!("skipped: {} is missing", movie.display());
+            return;
+        };
+        let temp = Temp::new();
+        let mut draft = crate::open_movie::movie_draft(&movie, 1920, 1080, false).unwrap();
+        draft.tracks[0].segments[0].target = TimeRange::new(0, 30_000_000);
+        draft.tracks[0].segments[0].source_range = Some(TimeRange::new(0, 30_000_000));
+        draft.duration = Micros(30_000_000);
+        let clip = draft.tracks[0].segments[0].id.clone();
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(clip));
+        let revision = desktop.revision();
+        desktop.split_scenes().unwrap();
+        assert_eq!(
+            desktop.revision(),
+            revision,
+            "nothing lands before the job ends"
+        );
+        assert!(desktop.split_scenes().is_err(), "a second job waits");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(desktop.job().is_none(), "the scenes took too long");
+        assert_eq!(desktop.notice(), "", "{}", desktop.notice());
+        let clips = desktop.draft().unwrap().tracks[0].segments.len();
+        assert!(clips > 1, "30 s of a fast-cut video has a scene change");
+        desktop.undo().unwrap();
+        assert_eq!(desktop.draft().unwrap().tracks[0].segments.len(), 1);
+    }
+
     fn empty_project(dir: &Path) {
         let mut draft = Draft::empty("draft");
         draft.config.maintrack_adsorb = false;
@@ -6026,6 +6835,14 @@ mod tests {
         assert!(levels.iter().all(|level| (0.0..=1.0).contains(level)));
         let loud = levels.iter().filter(|level| **level > 0.05).count();
         assert!(loud > 100, "{loud} of {} columns have sound", levels.len());
+
+        // The library card's wave is spread once and kept while the peaks
+        // and width stay; a new width spreads again.
+        let card = desktop.material_wave("song", 64).expect("card wave");
+        assert_eq!(card.len(), 64);
+        let again = desktop.material_wave("song", 64).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&card, &again));
+        assert_eq!(desktop.material_wave("song", 32).unwrap().len(), 32);
     }
 
     #[test]
@@ -6255,7 +7072,17 @@ mod tests {
         desktop.import_file(&picture).unwrap();
         let wait = desktop.autosave().expect("the write waits for the gap");
         std::thread::sleep(wait);
-        assert_eq!(desktop.autosave(), None);
+        // The write runs on its own thread; the window looks again until it
+        // has landed.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Some(wait) = desktop.autosave() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the autosave never landed"
+            );
+            std::thread::sleep(wait);
+        }
+        assert!(!desktop.unsaved());
         drop(desktop);
 
         let mut reopened = shell();
@@ -6268,6 +7095,60 @@ mod tests {
             videos[0].path
         );
         assert_eq!(reopened.autosave(), None);
+    }
+
+    #[test]
+    fn an_autosave_writes_on_its_own_thread_and_a_save_waits_for_it() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        let wait = desktop.autosave().expect("the write waits for the gap");
+        std::thread::sleep(wait);
+        // The write starts and the window is told to look again soon.
+        assert_eq!(
+            desktop.autosave(),
+            Some(std::time::Duration::from_millis(50))
+        );
+        assert!(desktop.saving.is_some());
+        // An explicit save, or quitting, waits for it rather than writing
+        // the same files at once.
+        desktop.save().unwrap();
+        assert!(desktop.saving.is_none());
+        assert!(!desktop.unsaved());
+        assert_eq!(desktop.autosave(), None);
+
+        // A write still under way when another project opens counts for
+        // the project it wrote, not the new one.
+        desktop.import_file(&picture).unwrap();
+        std::thread::sleep(super::AUTOSAVE_GAP);
+        assert!(desktop.autosave().is_some());
+        let other = Temp::new();
+        empty_project(&other.path);
+        desktop.open_folder(&other.path).unwrap();
+        assert!(!desktop.unsaved());
+        let mut reopened = shell();
+        reopened.open_folder(&temp.path).unwrap();
+        assert_eq!(reopened.draft().unwrap().materials.videos.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_autosave_keeps_the_edits_unsaved_for_quit() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.import_file(&picture).unwrap();
+        std::fs::remove_dir_all(&temp.path).unwrap();
+        let wait = desktop.autosave().expect("the write waits for the gap");
+        std::thread::sleep(wait);
+        assert_eq!(desktop.autosave(), Some(super::AUTOSAVE_GAP));
+        assert!(desktop.unsaved());
     }
 
     #[test]
@@ -6430,7 +7311,11 @@ mod tests {
             .unwrap();
         assert_eq!(desktop.draft().unwrap().tracks.len(), 1);
         assert_eq!(desktop.lanes()[0].clips.len(), 2);
+        // Nothing changed, so the lanes are the ones already built.
+        assert!(std::sync::Arc::ptr_eq(&desktop.lanes(), &desktop.lanes()));
+        let before = desktop.lanes();
         desktop.undo().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&before, &desktop.lanes()));
         assert_eq!(desktop.lanes()[0].clips.len(), 1);
         desktop.undo().unwrap();
         assert!(desktop.lanes().iter().all(|lane| lane.clips.is_empty()));
@@ -7443,11 +8328,12 @@ mod tests {
 
         let audio = desktop
             .lanes()
-            .into_iter()
+            .iter()
             .find(|lane| !lane.main)
+            .map(|lane| lane.track_id.clone())
             .expect("audio lane");
         desktop
-            .toggle_attribute(audio.track_id, TrackAttribute::MUTE)
+            .toggle_attribute(audio, TrackAttribute::MUTE)
             .unwrap();
         desktop.play();
         assert!(desktop.queued_preview().is_empty());
@@ -8781,13 +9667,14 @@ mod tests {
     }
 
     #[test]
-    fn export_writes_the_playhead_png_and_refuses_a_codec_it_cannot_mux() {
+    fn export_writes_the_playhead_png_and_refuses_a_codec_it_cannot_encode() {
         let temp = Temp::new();
         let missing = shell().export(ExportRequest {
             path: temp.path.join("missing.png"),
             short_side: 480,
             codec: CodecId::Png,
             replace: false,
+            ..ExportRequest::default()
         });
         assert!(matches!(missing, Err(ShellError::NoProject)));
         assert!(!temp.path.join("missing.png").exists());
@@ -8802,6 +9689,7 @@ mod tests {
             short_side: 480,
             codec: CodecId::Vp8,
             replace: false,
+            ..ExportRequest::default()
         });
         assert!(matches!(declined, Err(ShellError::CodecDeclined(_))));
         assert!(!destination.exists());
@@ -8813,6 +9701,7 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
+                ..ExportRequest::default()
             })
             .unwrap();
         let written = std::fs::read(&destination).unwrap();
@@ -8832,6 +9721,7 @@ mod tests {
             short_side: 480,
             codec: CodecId::Png,
             replace: false,
+            ..ExportRequest::default()
         });
         assert!(matches!(overwrite, Err(ShellError::Overwrite(_))));
         assert_eq!(std::fs::read(&destination).unwrap(), kept);
@@ -8843,33 +9733,198 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: true,
+                ..ExportRequest::default()
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
         assert_eq!((width, height), (960, 480));
         assert!(samples.iter().all(|sample| *sample == 0));
         assert_eq!(desktop.draft().unwrap(), &before);
-        let clear = std::fs::read(&destination).unwrap();
-        let movie = desktop.export(ExportRequest {
-            path: destination.clone(),
-            short_side: 480,
-            codec: CodecId::H264,
-            replace: true,
-        });
-        assert!(matches!(
-            movie,
-            Err(ShellError::CodecDeclined(_) | ShellError::ExportUnavailable)
-        ));
-        assert_eq!(std::fs::read(&destination).unwrap(), clear);
 
         let step = desktop.export(ExportRequest {
             path: destination.clone(),
             short_side: 1000,
             codec: CodecId::Png,
             replace: true,
+            ..ExportRequest::default()
         });
         assert!(matches!(step, Err(ShellError::Unavailable(_))));
         assert_eq!(SHORT_SIDES, [480, 720, 1080, 1440, 2160, 4320]);
+    }
+
+    /// A two-second color project, 64 by 32, at 30 frames a second.
+    fn movie_project(dir: &Path) {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft.materials.material_colors.push(MaterialColorConfig {
+            id: "color".into(),
+            is_color_clip: true,
+            solid_color: "0xFF336699".to_owned(),
+            ..MaterialColorConfig::default()
+        });
+        draft.tracks[0]
+            .segments
+            .push(Segment::new("one", "color", TimeRange::new(0, 1_000_000)));
+        draft.tracks[0].segments.push(Segment::new(
+            "two",
+            "color",
+            TimeRange::new(1_000_000, 1_000_000),
+        ));
+        draft.duration = Micros(2_000_000);
+        Folder::new(draft).save(dir).unwrap();
+    }
+
+    fn land_job(desktop: &mut Shell) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while desktop.poll_job() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(desktop.job().is_none(), "the job did not finish");
+    }
+
+    #[test]
+    fn an_import_job_copies_the_file_and_lands_it_in_the_library() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.start_import(&picture).unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Import".to_owned())
+        );
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Imported pattern.png");
+        assert!(temp.path.join("Resources/pattern.png").is_file());
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+        assert_eq!(desktop.take_imported(), Some(super::ImportedKind::Video));
+        assert_eq!(desktop.take_imported(), None);
+    }
+
+    #[test]
+    fn a_cancelled_import_leaves_no_copy_in_the_project() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        desktop.start_import(&picture).unwrap();
+        desktop.cancel_job();
+        land_job(&mut desktop);
+        assert!(!temp.path.join("Resources/pattern.png").exists());
+        assert!(desktop.draft().unwrap().materials.videos.is_empty());
+        assert_eq!(desktop.take_imported(), None);
+
+        // A file that is not media is refused when the job lands, and
+        // nothing is copied.
+        let text = temp.path.join("notes.txt");
+        std::fs::write(&text, "not a picture").unwrap();
+        let outside = Temp::new();
+        let moved = outside.path.join("notes.txt");
+        std::fs::rename(&text, &moved).unwrap();
+        desktop.start_import(&moved).unwrap();
+        land_job(&mut desktop);
+        assert!(!desktop.notice().is_empty());
+        assert!(!temp.path.join("Resources/notes.txt").exists());
+    }
+
+    #[test]
+    fn a_movie_export_runs_as_a_job_and_lands_an_mp4() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let destination = temp.path.join("cut.mp4");
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Export".to_owned())
+        );
+        land_job(&mut desktop);
+        assert_eq!(desktop.notice(), "Exported cut.mp4");
+        assert_eq!(desktop.exported(), Some(destination.as_path()));
+        let bytes = std::fs::read(&destination).unwrap();
+        assert_eq!(&bytes[4..8], b"ftyp");
+        assert!(!temp.path.join(".cut.mp4.part").exists());
+
+        // The selected clip alone is half as long, so the file is smaller.
+        desktop.select(Some(SegmentId::new("two")));
+        let half = temp.path.join("half.mp4");
+        desktop
+            .export(ExportRequest {
+                path: half.clone(),
+                short_side: 480,
+                span: super::ExportSpan::Selected,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        assert!(
+            desktop.exported().is_none(),
+            "a new export forgets the last"
+        );
+        land_job(&mut desktop);
+        assert_eq!(desktop.exported(), Some(half.as_path()));
+        assert!(std::fs::metadata(&half).unwrap().len() < bytes.len() as u64);
+
+        // HEVC is offered only where an encoder opens, and then it writes.
+        if desktop.encodes(CodecId::Hevc) {
+            let hevc = temp.path.join("hevc.mp4");
+            desktop
+                .export(ExportRequest {
+                    path: hevc.clone(),
+                    short_side: 480,
+                    codec: CodecId::Hevc,
+                    ..ExportRequest::default()
+                })
+                .unwrap();
+            land_job(&mut desktop);
+            assert_eq!(desktop.notice(), "Exported hevc.mp4");
+            assert_eq!(&std::fs::read(&hevc).unwrap()[4..8], b"ftyp");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_movie_export_leaves_no_file_and_nothing_selected_is_refused() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(None);
+        let destination = temp.path.join("cut.mp4");
+        let nothing = desktop.export(ExportRequest {
+            path: destination.clone(),
+            short_side: 480,
+            span: super::ExportSpan::Selected,
+            ..ExportRequest::default()
+        });
+        assert_eq!(nothing.unwrap_err().to_string(), "no clip is selected");
+        assert!(desktop.job().is_none());
+
+        desktop
+            .export(ExportRequest {
+                path: destination.clone(),
+                short_side: 480,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        desktop.cancel_job();
+        // The worker sees the cancel at its next frame and removes its part;
+        // the job stays until then.
+        land_job(&mut desktop);
+        assert!(!temp.path.join(".cut.mp4.part").exists());
+        assert!(!destination.exists());
+        assert!(desktop.exported().is_none());
     }
 
     #[test]
@@ -8959,6 +10014,7 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
+                ..ExportRequest::default()
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
@@ -8993,6 +10049,7 @@ mod tests {
                 short_side: 480,
                 codec: CodecId::Png,
                 replace: false,
+                ..ExportRequest::default()
             })
             .unwrap();
         let (width, height, samples) = png_samples(&std::fs::read(&destination).unwrap());
@@ -9315,7 +10372,15 @@ mod tests {
         assert!(!desktop.cropped());
         desktop.toggle_crop().unwrap();
         assert!(desktop.cropped());
-        let video = &desktop.draft().unwrap().materials.videos[0];
+        // "again" shows the same video; the crop is this clip's alone.
+        let draft = desktop.draft().unwrap();
+        let own = &draft.tracks[0].segments[0].material_id;
+        let video = draft
+            .materials
+            .videos
+            .iter()
+            .find(|video| &video.id == own)
+            .unwrap();
         assert_eq!(video.crop, super::center_crop());
         assert_eq!(video.crop_ratio, "16:9");
         assert_eq!(video.crop_scale, 2.0);
@@ -9324,10 +10389,12 @@ mod tests {
             TimeRange::new(0, 2_000_000)
         );
         desktop.select(Some(SegmentId::new("again")));
-        assert!(desktop.cropped());
+        assert!(!desktop.cropped());
+        desktop.select(Some(SegmentId::new("picture")));
         desktop.undo().unwrap();
         assert!(!desktop.cropped());
         desktop.redo().unwrap();
+        assert!(desktop.cropped());
         desktop.toggle_crop().unwrap();
         assert!(!desktop.cropped());
         assert_eq!(
@@ -9353,7 +10420,8 @@ mod tests {
             desktop.draft().unwrap().materials.drafts[0].crop,
             super::center_crop()
         );
-        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+        // The shared video and the picture's own copy; a compound adds none.
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 2);
         desktop.toggle_crop().unwrap();
         assert_eq!(
             desktop.draft().unwrap().materials.drafts[0].crop,

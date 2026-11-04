@@ -1,3 +1,4 @@
+mod animation;
 mod beat;
 mod canvas;
 mod color;
@@ -8,12 +9,14 @@ mod fade;
 mod freeze;
 mod import;
 mod keyframe;
+mod lane;
 mod linkage;
 mod magnet;
 mod mark;
 mod mirror;
 mod move_segment;
 mod name;
+mod own;
 mod place;
 mod placement;
 mod rate;
@@ -70,6 +73,13 @@ pub enum EditError {
     /// The bit is not mute, hide, lock, solo, or muted-by-solo.
     UnknownAttribute,
     MissingMaterial,
+    /// A trim reaches before the media's first frame or past its last.
+    SourceBounds,
+    /// A clip would start before the timeline does.
+    BeforeZero,
+    /// The lane holds another kind of clip: sound on a picture lane, a
+    /// title on a sound lane, and so on.
+    LaneKind,
     /// The material id is already in a pool.
     DuplicateMaterial,
     /// The split time falls inside a blend window.
@@ -106,6 +116,10 @@ pub enum EditError {
     KeyTime,
     /// No key is at that time.
     NoKey,
+    /// The curve is not one the Graphs panel offers.
+    Graph,
+    /// The animation is not one the Animations panel offers for that side.
+    Animation,
     /// The segment is not a text clip.
     NotText,
     /// Text size is not finite, or it is outside zero to 512.
@@ -348,6 +362,17 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::RemoveKeyframe { segment_id, offset } => {
             keyframe::remove_keyframe(draft, segment_id, *offset)
         }
+        Request::SetKeyframeGraph {
+            segment_id,
+            offset,
+            graph,
+        } => keyframe::set_keyframe_graph(draft, segment_id, *offset, graph.as_deref()),
+        Request::SetAnimation {
+            segment_id,
+            kind,
+            animation,
+            duration,
+        } => animation::set_animation(draft, segment_id, *kind, animation.as_deref(), *duration),
         Request::KeyPose {
             segment_id,
             offset,

@@ -293,11 +293,6 @@ impl Folder {
         validate(self)?;
         fs::create_dir_all(path).map_err(|error| io_error(path, error))?;
         let root = canonicalize_root(path)?;
-        for entry in &self.project.timelines {
-            if entry.is_marked_delete {
-                remove_timeline(&root, &entry.id)?;
-            }
-        }
         let main_id = &self.project.main_timeline_id;
         let bytes = write_draft(&self.draft)?;
         let main_path = root.join(TIMELINES_DIR).join(main_id).join(DRAFT_FILE);
@@ -327,6 +322,12 @@ impl Folder {
         let resources = root.join(RESOURCES_DIR);
         stay_inside(&root, &resources)?;
         fs::create_dir_all(&resources).map_err(|error| io_error(&resources, error))?;
+        // Deleted timelines go only once everything else is safely written.
+        for entry in &self.project.timelines {
+            if entry.is_marked_delete {
+                remove_timeline(&root, &entry.id)?;
+            }
+        }
         Ok(())
     }
 }
@@ -666,7 +667,7 @@ fn write_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), StoreError>
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     }
-    fs::write(path, bytes).map_err(|error| io_error(path, error))
+    crate::atomic::write_atomic(path, bytes).map_err(|error| io_error(path, error))
 }
 
 /// A single path component. `.`, `..`, a separator, or a null byte cannot be joined.

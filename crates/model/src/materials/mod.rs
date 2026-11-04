@@ -295,6 +295,37 @@ impl Materials {
         None
     }
 
+    /// Take the material `id` out of whichever pool holds it. Whether one did.
+    pub fn remove(&mut self, id: &str) -> bool {
+        if id.is_empty() {
+            return false;
+        }
+        macro_rules! drop_from {
+            ($($field:ident, $wrap:path);* $(;)?) => {
+                $(
+                    if let Some(index) = self.$field.iter().position(|item| item.id.as_str() == id) {
+                        self.$field.remove(index);
+                        return true;
+                    }
+                )*
+            };
+        }
+        each_pool!(drop_from);
+        for pool in self.extra_pools.values_mut() {
+            let Some(items) = pool.as_array_mut() else {
+                continue;
+            };
+            if let Some(index) = items
+                .iter()
+                .position(|item| item.get("id").and_then(Value::as_str) == Some(id))
+            {
+                items.remove(index);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Add a copy of the material `id` under `new_id`, in the same pool.
     /// Returns `false` when there is no material `id`, or `new_id` is
     /// empty or taken.

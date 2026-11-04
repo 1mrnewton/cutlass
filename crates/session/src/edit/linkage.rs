@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use cutlass_model::{
-    Draft, LinkPair, LinkageSettings, Micros, Relationship, Segment, SegmentId, TimeRange,
+    Draft, LinkPair, LinkageSettings, MaterialRef, Micros, Relationship, Segment, SegmentId,
+    TimeRange,
 };
 
 use super::speed::locate;
@@ -78,18 +79,17 @@ fn on_removed(
     removed_id: &SegmentId,
     settings: &LinkageSettings,
 ) -> Result<(), EditError> {
-    if !settings.enabled {
-        return Ok(());
-    }
-    let dependents = dependent_ids(draft, removed_id);
-    for dependent_id in dependents {
-        if !follow_allows(draft, &dependent_id, settings) {
-            continue;
+    if settings.enabled {
+        for dependent_id in dependent_ids(draft, removed_id) {
+            if follow_allows(draft, &dependent_id, settings) {
+                remove_segment(draft, &dependent_id)?;
+            }
         }
-        remove_segment(draft, &dependent_id)?;
-        drop_pair(draft, removed_id, &dependent_id);
     }
-    drop_pairs_where(draft, |pair| &pair.dependent == removed_id);
+    // No pair may name a clip that is gone, even with linkage off.
+    drop_pairs_where(draft, |pair| {
+        &pair.owner == removed_id || &pair.dependent == removed_id
+    });
     Ok(())
 }
 
@@ -439,9 +439,21 @@ fn remove_segment(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditE
         &draft.materials,
         &draft.tracks[track_index].segments[segment_index],
     );
-    draft.tracks[track_index].segments.remove(segment_index);
+    let removed = draft.tracks[track_index].segments.remove(segment_index);
     super::mark::drop_unreferenced_time_marks(draft, &mark_ids);
     super::beat::drop_unreferenced_beats(draft, &beat_ids);
+    // A title's words and every attachment go with the last clip that
+    // names them. Pictures, sounds and compounds stay in the library.
+    let title = matches!(
+        draft.materials.get(removed.material_id.as_str()),
+        Some(MaterialRef::Text(_))
+    );
+    let attached = removed.extra_material_refs.iter();
+    for id in attached.chain(title.then_some(&removed.material_id)) {
+        if super::own::users(draft, id) == 0 {
+            draft.materials.remove(id.as_str());
+        }
+    }
     Ok(())
 }
 
@@ -956,6 +968,53 @@ mod tests {
             session.draft().relationships[0].id_to_id,
             vec![pair("a", "u"), pair("a-right", "t")]
         );
+    }
+
+    #[test]
+    fn a_removed_clip_takes_its_attachments_and_pairs_but_not_its_media() {
+        let (session, main, over) = open();
+        let mut draft = session.draft().clone();
+        draft.materials.videos.push(cutlass_model::MaterialVideo {
+            id: "media".into(),
+            ..cutlass_model::MaterialVideo::default()
+        });
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[
+                    place(&main, "a", 0, 1_000_000),
+                    place(&over, "b", 0, 500_000),
+                    Request::Link {
+                        owner: "a".into(),
+                        dependent: "b".into(),
+                    },
+                    Request::SetFade {
+                        segment_id: "a".into(),
+                        fade_id: "fade".into(),
+                        fade_in: Micros(100_000),
+                        fade_out: Micros(0),
+                    },
+                ],
+            )
+            .unwrap();
+        let mut settings = session.linkage();
+        settings.enabled = false;
+        session.set_linkage(settings);
+        session
+            .apply(
+                1,
+                &[Request::Remove {
+                    segment_id: "a".into(),
+                }],
+            )
+            .unwrap();
+        let draft = session.draft();
+        assert!(draft.materials.audio_fades.is_empty());
+        assert_eq!(draft.materials.videos.len(), 1);
+        // With linkage off "b" stays, and no pair names the clip that went.
+        assert_eq!(draft.tracks[1].segments.len(), 1);
+        assert!(draft.relationships[0].id_to_id.is_empty());
     }
 
     #[test]

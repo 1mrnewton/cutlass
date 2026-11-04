@@ -965,21 +965,30 @@ fn middle_ellipsis(ctx: &egui::Context, text: &str, font: &FontId, width: f32) -
         return text.to_owned();
     }
     let chars: Vec<char> = text.chars().collect();
-    let mut keep = chars.len();
-    while keep > 1 {
-        keep -= 1;
+    let cut = |keep: usize| -> String {
         let head = keep.div_ceil(2);
         let tail = keep / 2;
-        let cut: String = chars[..head]
+        chars[..head]
             .iter()
             .chain(std::iter::once(&'…'))
             .chain(&chars[chars.len() - tail..])
-            .collect();
-        if fits(&cut) {
-            return cut;
+            .collect()
+    };
+    // The most letters that fit, found by halving rather than one letter
+    // at a time: a cut only grows wider as it keeps more.
+    let (mut fitting, mut over) = (0, chars.len());
+    while over - fitting > 1 {
+        let keep = fitting + (over - fitting) / 2;
+        if fits(&cut(keep)) {
+            fitting = keep;
+        } else {
+            over = keep;
         }
     }
-    "…".to_owned()
+    if fitting == 0 {
+        return "…".to_owned();
+    }
+    cut(fitting)
 }
 
 /// Read each card's picture or sound from the shell, asking for what is

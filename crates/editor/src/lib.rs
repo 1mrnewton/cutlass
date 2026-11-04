@@ -20,13 +20,14 @@ mod ripple;
 mod ruler;
 mod snap;
 mod stage;
+mod title;
 mod tools;
 mod transport;
 mod view_zoom;
 mod zoom;
 
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
-pub use append::{Append, AppendLane, append_placement, material_span};
+pub use append::{Append, AppendLane, append_placement, free_row, material_span};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use filmstrip::{FilmTile, MAX_TILES, film_tiles};
 pub use fling::{
@@ -52,6 +53,10 @@ pub use stage::{
     MAX_SCALE, MIN_SCALE, NoText, Pose, SCALE_REACH, SNAP_REACH, StageAlign, StageBox,
     StageGesture, StageGuides, StageStep, TURN_REACH, TextSizes, canvas_size, keyed_pose,
     stage_align, stage_box, stage_gesture, stage_pick,
+};
+pub use title::{
+    TITLE_CARD_PREFIX, TITLE_LENGTH, TITLE_STYLES, TitlePlace, TitleStyle, title_requests,
+    title_style,
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};

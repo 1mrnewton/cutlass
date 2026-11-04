@@ -25,6 +25,28 @@ pub struct Append {
     pub start: Micros,
 }
 
+/// The first unlocked `kind` row with nothing between `at` and `at +
+/// length`, or `None` when a new row must open. A clip added at the
+/// playhead, such as a title or an effect, goes here.
+#[must_use]
+pub fn free_row(draft: &Draft, kind: TrackType, at: Micros, length: Micros) -> Option<TrackId> {
+    let at = at.0.max(0);
+    let end = at.saturating_add(length.0);
+    draft
+        .tracks
+        .iter()
+        .find(|track| {
+            track.kind == kind
+                && !track.attribute.contains(TrackAttribute::LOCK)
+                && track.segments.iter().all(|segment| {
+                    let start = segment.target.start.0;
+                    let stop = start.saturating_add(segment.target.duration.0);
+                    stop <= at || start >= end
+                })
+        })
+        .map(|track| track.id.clone())
+}
+
 /// The lane kind and length of a library item, or `None` when the draft
 /// has no video or audio material with that id.
 ///

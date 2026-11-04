@@ -38,6 +38,7 @@ use crate::request::Request;
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
 pub use move_segment::move_segment;
 pub use place::place;
+pub use text::NEW_TEXT_SIZE;
 pub use trim::trim;
 pub use words::set_words;
 

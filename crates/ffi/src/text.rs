@@ -10,7 +10,7 @@ use cutlass_session::{Micros, Request, SegmentId};
 use crate::media::{fresh, ids, room};
 
 /// How long a new text clip lasts.
-pub const NEW_TEXT_LENGTH: Micros = Micros(3_000_000);
+pub const NEW_TEXT_LENGTH: Micros = cutlass_editor::TITLE_LENGTH;
 
 /// A face the phone can set text in. `name` is what the draft stores.
 #[derive(Clone, Debug, PartialEq, Eq)]

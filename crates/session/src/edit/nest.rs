@@ -327,6 +327,79 @@ pub fn ungroup(draft: &mut Draft, segment_id: &SegmentId) -> Result<(), EditErro
     Ok(())
 }
 
+/// Where the last clip of `draft` ends.
+fn length_of(draft: &Draft) -> i64 {
+    draft
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .map(|segment| end(&segment.target))
+        .max()
+        .unwrap_or_default()
+}
+
+/// Store `inside` as the draft the compound material `material_id` plays.
+/// A compound clip that showed the whole inside follows its new length
+/// where its row has room; one cut shorter keeps its cut, ending no later
+/// than the inside does.
+pub fn set_inside(
+    draft: &mut Draft,
+    material_id: &MaterialId,
+    inside: &Draft,
+) -> Result<(), EditError> {
+    let Some(material) = draft
+        .materials
+        .drafts
+        .iter_mut()
+        .find(|material| &material.id == material_id)
+    else {
+        return Err(EditError::Compound);
+    };
+    let old = material.draft.as_deref().map_or(0, length_of);
+    let mut inside = inside.clone();
+    let new = length_of(&inside);
+    inside.duration = Micros(new);
+    material.draft = Some(Box::new(inside));
+    for track_index in 0..draft.tracks.len() {
+        let mut row = draft.tracks[track_index].clone();
+        let mut changed = false;
+        for segment in &mut row.segments {
+            if &segment.material_id != material_id {
+                continue;
+            }
+            let window = segment
+                .source_range
+                .clone()
+                .unwrap_or_else(|| TimeRange::new(0, segment.target.duration.0));
+            let whole = window.start.0 == 0 && window.duration.0 == old;
+            let length = if whole {
+                new
+            } else {
+                window.duration.0.min(new - window.start.0)
+            };
+            if length <= 0 {
+                return Err(EditError::SourceBounds);
+            }
+            if length == window.duration.0 {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let shown = (length as f64 / segment.speed).round() as i64;
+            segment.source_range = Some(TimeRange::new(window.start.0, length));
+            segment.target.duration = Micros(shown.max(1));
+            changed = true;
+        }
+        if !changed {
+            continue;
+        }
+        row.segments.sort_by_key(|segment| segment.target.start.0);
+        if ensure_apart(&row).is_ok() {
+            draft.tracks[track_index] = row;
+        }
+    }
+    Ok(())
+}
+
 /// The material `id` alone, written out, to compare two pools' copies.
 fn one_material(materials: &Materials, id: &str) -> Option<serde_json::Value> {
     let mut one = materials.clone();
@@ -528,6 +601,52 @@ mod tests {
         assert_eq!(draft.tracks[1].id.as_str(), "nest-music");
         assert_eq!(ids(&draft.tracks[1]), [("s".into(), 3_000_000, 1_000_000)]);
         assert_eq!(draft.tracks[1].kind, TrackType::Audio);
+    }
+
+    #[test]
+    fn an_edited_inside_is_stored_and_the_whole_clip_follows_its_length() {
+        let mut session = session();
+        session.apply(0, &[create()]).unwrap();
+        let inside = |session: &Session| {
+            let Some(MaterialRef::Draft(material)) = session.draft().materials.get("inside") else {
+                panic!("no compound material");
+            };
+            material.draft.as_deref().unwrap().clone()
+        };
+        let mut shorter = inside(&session);
+        shorter.tracks[0].segments.truncate(1);
+        shorter.tracks[1].segments.clear();
+        session
+            .apply(
+                1,
+                &[Request::SetInside {
+                    material_id: "inside".into(),
+                    inside: Box::new(shorter.clone()),
+                }],
+            )
+            .unwrap();
+        assert_eq!(inside(&session).tracks[0].segments.len(), 1);
+        assert_eq!(inside(&session).duration, Micros(2_000_000));
+        let nest = &session.draft().tracks[0].segments[0];
+        assert_eq!(nest.target.duration, Micros(2_000_000));
+        assert_eq!(nest.source_range, Some(TimeRange::new(0, 2_000_000)));
+        session.undo().unwrap();
+        assert_eq!(
+            session.draft().tracks[0].segments[0].target.duration,
+            Micros(5_000_000)
+        );
+        assert_eq!(
+            session
+                .apply(
+                    session.revision(),
+                    &[Request::SetInside {
+                        material_id: "v1".into(),
+                        inside: Box::new(shorter),
+                    }],
+                )
+                .unwrap_err(),
+            EditError::Compound
+        );
     }
 
     #[test]

@@ -503,6 +503,7 @@ pub fn request_name(request: &Request) -> &'static str {
         Request::ReplaceMedia { .. } => "replace_media",
         Request::CreateCompound { .. } => "create_compound",
         Request::Ungroup { .. } => "ungroup",
+        Request::SetInside { .. } => "set_inside",
         Request::InsertTrack { .. } => "insert_track",
         Request::RemoveTrack { .. } => "remove_track",
         Request::RenameTrack { .. } => "rename_track",

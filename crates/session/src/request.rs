@@ -429,6 +429,12 @@ pub enum Request {
     /// Put the clips the compound clip `segment_id` shows back on the
     /// timeline in its place.
     Ungroup { segment_id: SegmentId },
+    /// Store `inside` as the draft the compound material `material_id`
+    /// plays. A compound clip that showed all of it follows its length.
+    SetInside {
+        material_id: MaterialId,
+        inside: Box<cutlass_model::Draft>,
+    },
     /// Play `material_id` in `segment_id` in place of its media, keeping
     /// the clip's edits. A picture takes a picture, a sound a sound.
     ReplaceMedia {

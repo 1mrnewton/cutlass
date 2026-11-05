@@ -523,6 +523,10 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
         } => nest::create_compound(draft, segment_ids, segment_id, material_id),
         Request::Ungroup { segment_id } => nest::ungroup(draft, segment_id),
+        Request::SetInside {
+            material_id,
+            inside,
+        } => nest::set_inside(draft, material_id, inside),
         Request::ReplaceMedia {
             segment_id,
             material_id,

@@ -177,3 +177,39 @@ jobs:
         with:
           name: Cutlass.dmg
           path: dist/Cutlass.dmg
+
+  windows-installer:
+    # The Windows release build as a per-user NSIS installer, unsigned until
+    # a code signing certificate is set up (SIGNTOOL_CERT). The installer is
+    # run silently, the installed binary runs the smoke test, and the
+    # uninstaller removes it and its registry keys; the installer is kept.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p cutlass
+      - name: NSIS
+        shell: bash
+        run: |
+          command -v makensis || choco install nsis -y --no-progress
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+      - name: Package
+        run: python scripts/windows_installer.py target/release/cutlass.exe dist/Cutlass-setup.exe
+      - name: Install, smoke test and uninstall
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\CutlassInstall"
+          Start-Process -Wait -FilePath dist\Cutlass-setup.exe -ArgumentList "/S", "/D=$dir"
+          if (!(Test-Path "$dir\cutlass.exe")) { throw "nothing was installed" }
+          if (!(Test-Path "HKCU:\Software\Classes\Directory\shell\Cutlass\command")) { throw "no Open in Cutlass" }
+          python scripts/smoke.py "$dir\cutlass.exe"
+          if ($LASTEXITCODE -ne 0) { throw "the smoke test failed" }
+          Start-Process -Wait -FilePath "$dir\uninstall.exe" -ArgumentList "/S", "_?=$dir"
+          if (Test-Path "$dir\cutlass.exe") { throw "the uninstaller left cutlass.exe" }
+          if (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Cutlass") { throw "the uninstaller left its key" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cutlass-setup.exe
+          path: dist/Cutlass-setup.exe

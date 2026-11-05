@@ -251,9 +251,7 @@ where
                 .frame_start(*index)
                 .ok_or(ExportError::FrameRate)?;
             let mut samples = mix_window(draft, settings, request, time, &mut audio)?;
-            if integer_sound(settings.codec) {
-                samples = to_i16(samples)?;
-            }
+            samples = coded_pcm(settings.codec, samples)?;
             let packets = encoder
                 .push(&AudioInput { pcm: samples })
                 .map_err(ExportError::Encoder)?;
@@ -410,6 +408,10 @@ fn open_audio(
     if integer_sound(audio.codec) {
         // A WAV holds 16-bit samples, and so does an exported FLAC.
         params.sample_format = Some(cutlass_encode::SampleFormat::I16);
+    }
+    if audio.codec == cutlass_codec::CodecId::Alac {
+        // Lossless keeps the float mix at 24 bits.
+        params.sample_format = Some(cutlass_encode::SampleFormat::F32);
     }
     factory
         .open(&params)
@@ -588,9 +590,7 @@ where
             .frame_start(*index)
             .ok_or(ExportError::FrameRate)?;
         let mut samples = mix_window(run.draft, settings, run.request, time, audio)?;
-        if integer_sound(settings.codec) {
-            samples = to_i16(samples)?;
-        }
+        samples = coded_pcm(settings.codec, samples)?;
         let packets = encoder
             .push(&AudioInput { pcm: samples })
             .map_err(ExportError::Encoder)?;
@@ -782,6 +782,32 @@ fn integer_sound(codec: cutlass_codec::CodecId) -> bool {
 }
 
 /// `pcm` as 16-bit samples, clipped at full scale.
+/// The mix as `codec` takes it: 16-bit for PCM and FLAC, and for ALAC
+/// floats clipped to full scale, which a lossless encoder cannot do itself.
+fn coded_pcm(codec: cutlass_codec::CodecId, pcm: Pcm) -> Result<Pcm, ExportError> {
+    match codec {
+        _ if integer_sound(codec) => to_i16(pcm),
+        cutlass_codec::CodecId::Alac => match pcm.as_f32() {
+            Some(samples) if samples.iter().any(|sample| !(-1.0..=1.0).contains(sample)) => {
+                let clipped = samples
+                    .iter()
+                    .map(|sample| {
+                        if sample.is_nan() {
+                            0.0
+                        } else {
+                            sample.clamp(-1.0, 1.0)
+                        }
+                    })
+                    .collect();
+                Pcm::from_f32(pcm.rate, pcm.layout.clone(), clipped)
+                    .map_err(|_| ExportError::AudioLayout)
+            }
+            _ => Ok(pcm),
+        },
+        _ => Ok(pcm),
+    }
+}
+
 fn to_i16(pcm: Pcm) -> Result<Pcm, ExportError> {
     if pcm.as_i16().is_some() {
         return Ok(pcm);

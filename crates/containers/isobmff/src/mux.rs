@@ -10,6 +10,7 @@
 //! offset. Edit durations use `MuxOptions::movie_timescale` when the caller
 //! sets it, and the least common multiple of the track timescales otherwise.
 
+use crate::alac;
 use crate::legacy::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
 use crate::limits::{
     DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_PACKET_BYTES, MAX_TRACKS,
@@ -851,7 +852,13 @@ fn stsd(track: &TrackOut) -> Result<Vec<u8>, Error> {
             entry.extend_from_slice(&(-1i16).to_be_bytes());
             entry.extend(config_boxes(track)?);
         }
-        MediaKind::Audio(audio) => {
+        MediaKind::Audio(mut audio) => {
+            if &code == b"alac"
+                && let Some(facts) = alac::facts(&track.params.extradata)
+            {
+                audio.channels = facts.channels;
+                audio.bits_per_sample = facts.bits;
+            }
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
             entry.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
             entry.extend_from_slice(&audio.channels.to_be_bytes());
@@ -885,7 +892,15 @@ fn config_boxes(track: &TrackOut) -> Result<Vec<u8>, Error> {
     } else if &code == b"Opus" {
         out.extend(box_bytes(b"dOps", &track.params.extradata));
     } else if &code == b"alac" {
-        out.extend(box_bytes(b"alac", &track.params.extradata));
+        // Extradata is the bare cookie; the entry holds its config in an
+        // `alac` box and its layout in a sibling `chan` box, as Apple writes.
+        let (config, chan) = alac::split(&track.params.extradata).ok_or(Error::Missing {
+            what: "alac cookie",
+        })?;
+        out.extend(box_bytes(b"alac", &config));
+        if let Some(chan) = chan {
+            out.extend(box_bytes(b"chan", &chan));
+        }
     } else if matches!(&code, b"ac-3" | b"sac3") {
         out.extend(box_bytes(b"dac3", &track.params.extradata));
     } else if &code == b"ec-3" {

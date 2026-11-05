@@ -34,11 +34,14 @@ pub fn register_codecs_with(
 ) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
-    // FLAC is the Rust codec on every platform, ahead of the platform audio
-    // codecs: it is bit-exact, and its encoder hands the muxer the
-    // STREAMINFO (sample count and MD5) a FLAC file is finished with.
+    // Rust audio codecs go ahead of the platform ones, so a file decodes
+    // and encodes the same on every platform. FLAC's encoder hands the muxer
+    // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
+    // ALAC's hands it the final cookie.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_flac::register_encoders(&mut encoders);
+    cutlass_alac::register_decoders(&mut decoders);
+    cutlass_alac::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -234,6 +237,50 @@ mod tests {
         let packets = encoder.push(&AudioInput { pcm }).expect("encode");
         assert_eq!(packets.len(), 1);
         assert!(!packets[0].data.is_empty());
+    }
+
+    #[test]
+    fn alac_opens_for_import_and_export() {
+        use cutlass_decode::{ChannelLayout, SampleFormat};
+
+        let (decoders, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Alac, 48_000, ChannelLayout::stereo());
+        spec.sample_format = Some(SampleFormat::F32);
+        let encoder = encoders.open(&spec).expect("alac encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(encoder.as_ref()),
+            CodecId::Alac
+        );
+        spec.extra = cutlass_alac::Cookie::new(cutlass_alac::AlacConfig::new(48_000, 2, 24, 4096))
+            .to_bytes();
+        let decoder = decoders.open(&spec).expect("alac decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(decoder.as_ref()),
+            CodecId::Alac
+        );
+    }
+
+    #[test]
+    fn the_rust_alac_encoder_goes_ahead_of_the_platform_one() {
+        use cutlass_decode::{ChannelLayout, Pcm, SampleFormat};
+        use cutlass_encode::{AudioInput, Encoder};
+
+        let (_, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Alac, 48_000, ChannelLayout::stereo());
+        spec.sample_format = Some(SampleFormat::F32);
+        let samples: Vec<f32> = (0..2 * 5000)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.5)
+            .collect();
+        let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), samples).expect("pcm");
+        let input = AudioInput { pcm };
+        let encode = |encoder: &mut dyn Encoder| {
+            let mut packets = encoder.push(&input).expect("push");
+            packets.extend(encoder.drain().expect("drain"));
+            packets
+        };
+        let mut app = encoders.open(&spec).expect("app alac encoder");
+        let mut rust = cutlass_alac::AlacEncoder::open(&spec).expect("rust alac encoder");
+        assert_eq!(encode(app.as_mut()), encode(&mut rust));
     }
 
     #[test]

@@ -5969,6 +5969,12 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             {
                 audio.codec = CodecId::Aac;
             }
+            if ui
+                .selectable_label(audio.codec == CodecId::Alac, "ALAC")
+                .clicked()
+            {
+                audio.codec = CodecId::Alac;
+            }
             let pcm = egui::Button::selectable(audio.codec == CodecId::Pcm, "PCM");
             if ui.add_enabled(pcm_fits, pcm).clicked() {
                 audio.codec = CodecId::Pcm;
@@ -5999,6 +6005,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 }
             }
         });
+        // Lossless sound has no bitrate to choose.
         if !audio.lossless() {
             choice_row(ui, "Bitrate", |ui| {
                 for rate in SoundFormat::BITRATES {
@@ -10392,6 +10399,8 @@ mod tests {
         view.export_mov = true;
         assert_eq!(export_extension(&view), "mov");
         view.export.picture = false;
+        assert_eq!(export_extension(&view), "m4a");
+        view.export.audio.codec = cutlass_decode::CodecId::Alac;
         assert_eq!(export_extension(&view), "m4a");
         view.export.audio.codec = cutlass_decode::CodecId::Pcm;
         assert_eq!(export_extension(&view), "wav");

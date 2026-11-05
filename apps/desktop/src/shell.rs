@@ -394,7 +394,7 @@ pub struct SoundFormat {
     pub codec: CodecId,
     pub sample_rate: u32,
     pub channels: u16,
-    /// Bits a second; PCM and FLAC ignore it.
+    /// Bits a second; the lossless codecs (PCM, FLAC and ALAC) ignore it.
     pub bitrate: u32,
 }
 
@@ -433,10 +433,10 @@ impl SoundFormat {
         }
     }
 
-    /// PCM and FLAC keep every sample; a bitrate means nothing to them.
+    /// PCM, FLAC and ALAC keep every sample; a bitrate means nothing to them.
     #[must_use]
     pub fn lossless(self) -> bool {
-        matches!(self.codec, CodecId::Pcm | CodecId::Flac)
+        matches!(self.codec, CodecId::Pcm | CodecId::Flac | CodecId::Alac)
     }
 }
 

@@ -113,7 +113,7 @@ const PRORES_ENTRIES: [[u8; 4]; 4] = [*b"apco", *b"apcs", *b"apcn", *b"apch"];
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
         return Err(rejected(
-            "mp4 export writes H.264, HEVC, ProRes, AAC, and PCM",
+            "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, and PCM",
         ));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
@@ -146,9 +146,29 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
             };
             StreamParams::audio(codec, scale, rate, channels, 16, SampleFormat::S16Le)
         }
+        Id::Alac => {
+            let rate = stream
+                .params
+                .sample_rate()
+                .ok_or_else(|| rejected("a sound track needs a rate"))?;
+            let channels = stream
+                .params
+                .channels()
+                .ok_or_else(|| rejected("a sound track needs channels"))?;
+            // The entry's depth and count come from the cookie at finish;
+            // this is the depth until it arrives.
+            StreamParams::audio(
+                CodecId::Alac,
+                scale,
+                rate,
+                channels,
+                16,
+                SampleFormat::Unknown,
+            )
+        }
         _ => {
             return Err(rejected(
-                "mp4 export writes H.264, HEVC, ProRes, AAC, and PCM",
+                "mp4 export writes H.264, HEVC, ProRes, AAC, ALAC, and PCM",
             ));
         }
     };
@@ -421,6 +441,75 @@ mod tests {
         assert_eq!(last_end, 2400);
         assert_eq!(sound_bytes.len(), 2400 * 4);
         assert_eq!(sound_bytes[1600 * 4], 7);
+    }
+
+    #[test]
+    fn an_alac_cookie_set_late_comes_back_whole_with_its_layout() {
+        // 6 channels, 24 bits, 96 kHz, then the 5.1 `chan` atom.
+        let mut cookie = vec![
+            0x00, 0x00, 0x10, 0x00, 0x00, 0x18, 0x28, 0x0a, 0x0e, 0x06, 0x00, 0xff, 0x00, 0x00,
+            0x47, 0x0d, 0x00, 0x10, 0xc1, 0x2d, 0x00, 0x01, 0x77, 0x00,
+        ];
+        cookie.extend([0, 0, 0, 24, b'c', b'h', b'a', b'n', 0, 0, 0, 0]);
+        cookie.extend([0x00, 0x7c, 0x00, 0x06, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(
+                    StreamCodec::Known(Id::Alac),
+                    96_000,
+                    6,
+                    Vec::new(),
+                )
+                .unwrap(),
+                timescale: Timescale::new(96_000),
+                language: None,
+            })
+            .unwrap();
+        mux.set_config(sound, &cookie).unwrap();
+        mux.write_packet(&packet(sound.get(), vec![1; 40], 0, 4096, 96_000))
+            .unwrap();
+        mux.finish(&[TrackDuration {
+            track: sound,
+            timescale: Timescale::new(96_000),
+            ticks: 4096,
+        }])
+        .unwrap();
+        let bytes = mux.into_writer().unwrap().into_inner();
+        assert!(bytes.windows(4).any(|w| w == b"chan"));
+        let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+        let params = cutlass_container::Demux::streams(&file)[0].params().clone();
+        assert_eq!(params.extradata(), cookie.as_slice());
+        assert_eq!(params.channels(), Some(6));
+        assert_eq!(params.sample_rate(), Some(96_000));
+    }
+
+    #[test]
+    fn an_alac_track_without_a_cookie_fails_at_finish() {
+        let mut mux = Mp4Mux::new(Cursor::new(Vec::new()));
+        let sound = mux
+            .add_stream(NewStream {
+                params: StreamParams::try_audio(
+                    StreamCodec::Known(Id::Alac),
+                    44_100,
+                    2,
+                    Vec::new(),
+                )
+                .unwrap(),
+                timescale: Timescale::new(44_100),
+                language: None,
+            })
+            .unwrap();
+        mux.write_packet(&packet(sound.get(), vec![1; 40], 0, 4096, 44_100))
+            .unwrap();
+        assert!(
+            mux.finish(&[TrackDuration {
+                track: sound,
+                timescale: Timescale::new(44_100),
+                ticks: 4096,
+            }])
+            .is_err()
+        );
     }
 
     #[test]

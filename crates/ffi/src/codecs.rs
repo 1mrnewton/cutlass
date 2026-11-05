@@ -28,7 +28,7 @@ pub fn readers() -> ReaderFactory {
 }
 
 /// WebP, the platform decoders for this OS, then PNG, GIF, JPEG, AAC,
-/// H.264, and PCM.
+/// H.264, HEVC, and PCM.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -42,6 +42,8 @@ pub fn decoders() -> DecodeFactory {
     cutlass_jpeg::register_decoders(&mut decoders);
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
+    // HEVC in Rust, after the platform decoders.
+    cutlass_hevc::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
     decoders
 }

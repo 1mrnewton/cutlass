@@ -64,6 +64,9 @@ pub fn register_codecs_with(
     cutlass_pcm::register_encoders(&mut encoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
+    // After the platform decoders: the Rust HEVC decoder serves Linux, and
+    // the other platforms when hardware decode is off.
+    cutlass_hevc::register_decoders(&mut decoders);
     (decoders, encoders)
 }
 
@@ -148,7 +151,25 @@ mod tests {
             ..Hardware::default()
         };
         let (decoders, encoders) = super::register_codecs_with(&off);
-        assert!(decoders.open(&hevc).is_err(), "hevc has no rust decoder");
+        // The HEVC decoder left is the Rust one: it decodes an Annex B frame
+        // with no extradata into CPU samples, which VideoToolbox would not.
+        let frame = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/codecs/hevc/tests/fixtures/testsrc-64x48.hevc"),
+        )
+        .expect("fixture");
+        let mut rust = decoders.open(&hevc).expect("rust hevc");
+        let mut outputs = rust
+            .push(&cutlass_decode::Packet::audio(frame, 0, 0, 1))
+            .expect("decode");
+        outputs.extend(rust.drain().expect("drain"));
+        let [cutlass_decode::Output::Picture(decoded)] = outputs.as_slice() else {
+            panic!("one picture, got {}", outputs.len());
+        };
+        assert!(matches!(
+            decoded.samples(),
+            cutlass_decode::PictureSamples::Cpu(_)
+        ));
         let h264 = CodecParams::with_format(CodecId::H264, 64, 48, PixelFormat::Yuv420p);
         decoders.open(&h264).expect("rust h264");
         encoders

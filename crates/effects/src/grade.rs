@@ -392,7 +392,9 @@ fn straight(points: &[(f32, f32)]) -> bool {
 
 /// The curve through `points`, sampled at 256 steps. Before the first
 /// point and after the last the curve is flat; between, a monotone cubic.
-fn curve_table(points: &[(f32, f32)]) -> [f32; 256] {
+/// Fewer than two points is the straight line.
+#[must_use]
+pub fn curve_table(points: &[(f32, f32)]) -> [f32; 256] {
     let points = if points.len() < 2 {
         vec![(0.0, 0.0), (1.0, 1.0)]
     } else {

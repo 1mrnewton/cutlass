@@ -33,7 +33,8 @@ pub use catalog::{
 };
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
-    Wheel, WheelSetting, points_json, segment_colour, segment_grade, tidy_points, wheel_json,
+    Wheel, WheelSetting, curve_table, points_json, segment_colour, segment_grade, tidy_points,
+    wheel_json,
 };
 pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, look_poster, segment_look};
 pub use package::{

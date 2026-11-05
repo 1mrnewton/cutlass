@@ -281,6 +281,18 @@ pub enum Request {
         start: Micros,
         duration: Micros,
     },
+    /// Put the bundled filter `filter_id`, such as `look/warm`, from `start`
+    /// for `duration` on `track_id`, a filter row made when it is missing.
+    /// It runs over every picture below it; its strength is set with
+    /// [`Request::SetEffectStrength`].
+    AddFilter {
+        track_id: TrackId,
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        start: Micros,
+        duration: Micros,
+        filter_id: String,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

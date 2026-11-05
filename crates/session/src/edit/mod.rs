@@ -376,6 +376,21 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             TimeRange::new(start.0, duration.0),
         ),
+        Request::AddFilter {
+            track_id,
+            segment_id,
+            material_id,
+            start,
+            duration,
+            filter_id,
+        } => adjust::add_filter(
+            draft,
+            track_id,
+            segment_id,
+            material_id,
+            TimeRange::new(start.0, duration.0),
+            filter_id,
+        ),
         Request::SetAdjust {
             segment_id,
             material_id,

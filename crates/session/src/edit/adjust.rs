@@ -4,7 +4,7 @@
 //! materials, with the slider's reference name as its `type` and the setting
 //! in `value`. A slider at zero has no material.
 
-use cutlass_effects::{ADJUSTMENT, AdjustKey};
+use cutlass_effects::{ADJUSTMENT, AdjustKey, FILTER, bundled_look};
 use cutlass_model::{
     Draft, MaterialEffect, MaterialId, MaterialRef, Segment, SegmentId, TimeRange, TrackId,
     TrackType,
@@ -44,6 +44,41 @@ pub fn add_adjustment(
     Ok(())
 }
 
+/// Put the bundled filter `filter_id` (such as `look/warm`) over `target`
+/// on `track_id`, a filter row made when it is missing, at full strength.
+pub fn add_filter(
+    draft: &mut Draft,
+    track_id: &TrackId,
+    segment_id: &SegmentId,
+    material_id: &MaterialId,
+    target: TimeRange,
+    filter_id: &str,
+) -> Result<(), EditError> {
+    let look = bundled_look(filter_id).ok_or(EditError::UnknownEffect)?;
+    if material_id.is_empty() || draft.materials.get(material_id.as_str()).is_some() {
+        return Err(EditError::DuplicateMaterial);
+    }
+    if let Some(track) = draft.tracks.iter().find(|track| &track.id == track_id) {
+        if !matches!(track.kind, TrackType::Filter) {
+            return Err(EditError::TrackKind);
+        }
+        ensure_unlocked(track.attribute)?;
+    } else {
+        super::track::insert_track(draft, track_id, &TrackType::Filter)?;
+    }
+    let mut segment = Segment::new(segment_id.clone(), material_id.clone(), target);
+    segment.render_index = TrackType::Filter.render_floor().unwrap_or(0);
+    super::place::place(draft, track_id, segment)?;
+    draft.materials.effects.push(MaterialEffect {
+        kind: FILTER.to_owned(),
+        effect_id: look.effect_id(),
+        name: look.name.to_owned(),
+        value: Some(1.0),
+        ..MaterialEffect::new(material_id.clone())
+    });
+    Ok(())
+}
+
 /// Set the slider named `key` (such as `temperature` or `light_sensation`)
 /// on `segment_id` to `value`, from -1 to 1 (0 to 1 for fade, sharpen and
 /// grain). Zero takes the slider off. A new material is named
@@ -62,10 +97,7 @@ pub fn set_adjust(
     let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
-    if matches!(
-        track.kind,
-        TrackType::Audio | TrackType::Effect | TrackType::Filter
-    ) {
+    if matches!(track.kind, TrackType::Audio | TrackType::Effect) {
         return Err(EditError::EffectTarget);
     }
     let current = draft.tracks[track_index].segments[segment_index]
@@ -131,7 +163,7 @@ mod tests {
         Draft, MaterialId, Segment, SegmentId, TimeRange, Track, TrackAttribute, TrackType,
     };
 
-    use super::{add_adjustment, set_adjust};
+    use super::{add_adjustment, add_filter, set_adjust};
     use crate::edit::EditError;
 
     fn draft() -> Draft {
@@ -211,6 +243,47 @@ mod tests {
             ),
             Err(EditError::DuplicateMaterial)
         ));
+    }
+
+    #[test]
+    fn a_filter_goes_on_a_filter_row_and_takes_its_own_temperature() {
+        let mut draft = draft();
+        let row = cutlass_model::TrackId::new("looks");
+        let clip = SegmentId::new("warm");
+        assert!(matches!(
+            add_filter(
+                &mut draft,
+                &row,
+                &clip,
+                &MaterialId::new("f"),
+                TimeRange::new(0, 1),
+                "look/none",
+            ),
+            Err(EditError::UnknownEffect)
+        ));
+        add_filter(
+            &mut draft,
+            &row,
+            &clip,
+            &MaterialId::new("f"),
+            TimeRange::new(0, 500_000),
+            "look/warm",
+        )
+        .unwrap();
+        set_adjust(
+            &mut draft,
+            &clip,
+            &MaterialId::new("t"),
+            "temperature",
+            -0.35,
+        )
+        .unwrap();
+        let track = draft.tracks.iter().find(|track| track.id == row).unwrap();
+        assert_eq!(track.kind, TrackType::Filter);
+        assert_eq!(track.segments[0].render_index, 10_000);
+        let look = cutlass_effects::segment_look(&draft, &track.segments[0]).unwrap();
+        assert!(look.get(AdjustKey::Temperature).abs() < 1e-6);
+        assert!(look.get(AdjustKey::Saturation) > 0.0);
     }
 
     #[test]

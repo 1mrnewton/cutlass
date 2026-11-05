@@ -104,8 +104,8 @@ fn rejected(message: &str) -> MuxError {
 }
 
 /// ProRes profiles a picture track may name in its extradata: Proxy, LT,
-/// 422 and HQ, by their sample entry.
-const PRORES_ENTRIES: [[u8; 4]; 4] = [*b"apco", *b"apcs", *b"apcn", *b"apch"];
+/// 422, HQ, 4444 and 4444 XQ, by their sample entry.
+const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
 /// The box writer's parameters for `stream`: H.264, HEVC or ProRes
 /// pictures, or AAC or 16-bit PCM sound. A ProRes track whose extradata is
@@ -421,6 +421,39 @@ mod tests {
         assert_eq!(last_end, 2400);
         assert_eq!(sound_bytes.len(), 2400 * 4);
         assert_eq!(sound_bytes[1600 * 4], 7);
+    }
+
+    #[test]
+    fn every_prores_profile_survives_a_movie_round_trip() {
+        for code in [b"apco", b"apcs", b"apcn", b"apch", b"ap4h", b"ap4x"] {
+            let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::Mov);
+            let picture = mux
+                .add_stream(NewStream {
+                    params: StreamParams::video(
+                        StreamCodec::Known(Id::Prores),
+                        FrameSize::try_new(32, 16).unwrap(),
+                        code.to_vec(),
+                    ),
+                    timescale: Timescale::new(25),
+                    language: None,
+                })
+                .unwrap();
+            mux.write_packet(&packet(picture.get(), vec![3; 40], 0, 1, 25))
+                .unwrap();
+            mux.finish(&[TrackDuration {
+                track: picture,
+                timescale: Timescale::new(25),
+                ticks: 1,
+            }])
+            .unwrap();
+            let bytes = mux.into_writer().unwrap().into_inner();
+            assert!(bytes.windows(4).any(|w| w == code.as_slice()));
+            let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let streams = cutlass_container::Demux::streams(&file);
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].params().codec(), &StreamCodec::Known(Id::Prores));
+            assert_eq!(streams[0].params().extradata(), code.as_slice());
+        }
     }
 
     #[test]

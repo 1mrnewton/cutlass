@@ -100,11 +100,19 @@ fn parse_visual(
     let height = u32::from(read_u16(&payload[26..28]));
     let children = payload.get(78..).unwrap_or(&[]);
     let configured = configuration(children, budget, depth)?;
+    let codec = map_codec(fourcc, configured.object_type);
+    // A ProRes entry has no configuration box. Its code names the profile,
+    // which sets the decoder's output depth, so it rides as the extradata.
+    let extradata = if codec == CodecId::ProRes && configured.extradata.is_empty() {
+        fourcc.to_vec()
+    } else {
+        configured.extradata
+    };
     Ok(SampleDesc {
-        codec: map_codec(fourcc, configured.object_type),
+        codec,
         fourcc,
         kind: MediaKind::Video(VideoParams { width, height }),
-        extradata: configured.extradata,
+        extradata,
         color: configured.color,
         data_reference,
     })

@@ -332,6 +332,33 @@ fn mutate(rng: &mut Rng, frame: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// A seed written in decimal or `0x` hex, with optional `_` separators.
+fn parse_seed(text: &str) -> Option<u64> {
+    let text = text.trim().replace('_', "");
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
+/// The fuzz seed in `name`; a value that does not parse fails the run
+/// instead of silently using `default`.
+fn env_seed(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(text) => parse_seed(&text).unwrap_or_else(|| panic!("{name}={text} is not a seed")),
+        Err(_) => default,
+    }
+}
+
+#[test]
+fn seeds_read_decimal_and_hex() {
+    assert_eq!(parse_seed("0x5650_384b_4559"), Some(0x5650_384b_4559));
+    assert_eq!(parse_seed("0X1f"), Some(31));
+    assert_eq!(parse_seed(" 1234 "), Some(1234));
+    assert_eq!(parse_seed("0xzz"), None);
+    assert_eq!(parse_seed("seed"), None);
+}
+
 /// `VP8_FUZZ_SECS` (default 2) and `VP8_FUZZ_SEED`.
 #[test]
 fn decoder_fuzz_does_not_panic() {
@@ -339,10 +366,7 @@ fn decoder_fuzz_does_not_panic() {
         .ok()
         .and_then(|t| t.parse::<u64>().ok())
         .unwrap_or(2);
-    let seed = std::env::var("VP8_FUZZ_SEED")
-        .ok()
-        .and_then(|t| t.parse::<u64>().ok())
-        .unwrap_or(0x5650_3800_f22d);
+    let seed = env_seed("VP8_FUZZ_SEED", 0x5650_3800_f22d);
     let corpus = fuzz_corpus();
     let mut rng = Rng(seed.max(1));
     let started = std::time::Instant::now();
@@ -425,10 +449,7 @@ fn encoder_fuzz_does_not_panic() {
         .ok()
         .and_then(|t| t.parse::<u64>().ok())
         .unwrap_or(2);
-    let seed = std::env::var("VP8_ENC_FUZZ_SEED")
-        .ok()
-        .and_then(|t| t.parse::<u64>().ok())
-        .unwrap_or(0x5650_3845_4e43);
+    let seed = env_seed("VP8_ENC_FUZZ_SEED", 0x5650_3845_4e43);
     let mut rng = Rng(seed.max(1));
     let started = std::time::Instant::now();
     let limit = std::time::Duration::from_secs(secs);

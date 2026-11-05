@@ -43,7 +43,8 @@ use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
-    FileSource, ParakeetUnified, PcmSource, PrepareError, RecognizeError, Recognizer, columns, fit,
+    FileSource, HeardClip, HeardMiss, ParakeetUnified, PcmSource, PrepareError, RecognizeError,
+    Recognizer, caption_request, columns, fit, words_on_timeline,
 };
 
 mod inspector;
@@ -3634,65 +3635,19 @@ impl Shell {
 
     /// The sound of clip `segment_id`, and how it maps onto the timeline.
     fn heard_clip(&self, segment_id: &SegmentId) -> Result<HeardClip, ShellError> {
-        let segment_id = segment_id.clone();
-        let draft = self.session_draft()?;
-        let Some((segment, _)) = locate(draft, &segment_id) else {
-            return Err(ShellError::Unavailable(
-                "the clip is not on the timeline".to_owned(),
-            ));
-        };
-        let path = match draft.materials.get(segment.material_id.as_str()) {
-            Some(MaterialRef::Video(video)) => video.path.clone(),
-            Some(MaterialRef::Audio(audio)) => audio.path.clone(),
-            _ => {
-                return Err(ShellError::Unavailable(
-                    "a transcript belongs on a picture or a sound".to_owned(),
-                ));
-            }
-        };
-        if path.is_empty() {
-            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
-        }
-        let range = segment
-            .source_range
-            .clone()
-            .filter(|range| range.duration.0 > 0 && range.start.0 >= 0)
-            .unwrap_or_else(|| TimeRange::new(0, segment.target.duration.0));
-        if range.duration.0 <= 0 || segment.target.duration.0 <= 0 {
-            return Err(ShellError::Unavailable("the clip has no sound".to_owned()));
-        }
-        let source_us = range.duration.0;
-        let target_us = segment.target.duration.0;
-        Ok(HeardClip {
-            source_id: segment_id,
-            path,
-            range,
-            source_us,
-            target_us,
-            reverse: segment.reverse,
-            speed_holds: segment.speed.is_finite() && segment.speed > 0.0,
-            target: segment.target.clone(),
-        })
+        cutlass_transcription::heard_clip(self.session_draft()?, segment_id).map_err(heard_error)
     }
 
     fn write_caption(&mut self, clip: &HeardClip, words: WordColumns) -> Result<(), ShellError> {
-        if words.text.is_empty() {
-            return Err(ShellError::Unavailable("nothing was heard".to_owned()));
-        }
-        let existing = {
-            let draft = self.session_draft()?;
-            caption_track(draft, &clip.target)
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
         };
-        let track_id = existing.unwrap_or_else(|| TrackId::new(self.fresh("captions")));
-        let segment_id = SegmentId::new(self.fresh("caption"));
-        let material_id = MaterialId::new(self.fresh("caption"));
-        self.apply(Request::AddCaption {
-            source_id: clip.source_id.clone(),
-            track_id,
-            segment_id,
-            material_id,
-            words,
-        })
+        let request =
+            caption_request(self.session_draft()?, clip, words, &mut fresh).map_err(heard_error);
+        self.next_id = next_id;
+        self.apply(request?)
     }
 
     /// The selected clip is a video, so its sound can be placed on its own clip.
@@ -5622,6 +5577,19 @@ fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
 }
 
+fn heard_error(miss: HeardMiss) -> ShellError {
+    ShellError::Unavailable(
+        match miss {
+            HeardMiss::UnknownSegment => "the clip is not on the timeline",
+            HeardMiss::NotHeard => "a transcript belongs on a picture or a sound",
+            HeardMiss::NoSound => "the clip has no sound",
+            HeardMiss::NothingHeard => "nothing was heard",
+            HeardMiss::BadClock => "a word clock does not fit the clip",
+        }
+        .to_owned(),
+    )
+}
+
 fn clipboard_error(miss: ClipboardMiss) -> ShellError {
     match miss {
         ClipboardMiss::Empty => ShellError::Unavailable("nothing to paste".to_owned()),
@@ -5714,17 +5682,6 @@ struct RunningJob {
 /// What a finished job does on the window thread.
 pub(crate) type Landing = Box<dyn FnOnce(&mut Shell) -> Result<(), ShellError> + Send>;
 
-struct HeardClip {
-    source_id: SegmentId,
-    path: String,
-    range: TimeRange,
-    source_us: i64,
-    target_us: i64,
-    reverse: bool,
-    speed_holds: bool,
-    target: TimeRange,
-}
-
 /// The speech model's file inside [`speech_model_dir`].
 const SPEECH_MODEL: &str = "parakeet-unified-en-0.6b.nemo";
 
@@ -5748,89 +5705,7 @@ fn heard_words(
     let utterances = recognizer.recognize(&pcm).map_err(recognize_message)?;
     let words = columns(&utterances)
         .map_err(|_| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))?;
-    map_words(words, clip)
-}
-
-fn map_words(words: WordColumns, clip: &HeardClip) -> Result<WordColumns, ShellError> {
-    if words.text.is_empty() {
-        return Err(ShellError::Unavailable("nothing was heard".to_owned()));
-    }
-    let mut start_time = Vec::with_capacity(words.text.len());
-    let mut end_time = Vec::with_capacity(words.text.len());
-    for (start_ms, end_ms) in words.start_time.iter().zip(&words.end_time) {
-        let (start, end) = timeline_millis(*start_ms, *end_ms, clip)?;
-        start_time.push(start);
-        end_time.push(end);
-    }
-    Ok(WordColumns {
-        start_time,
-        end_time,
-        text: words.text,
-        rest: words.rest,
-    })
-}
-
-fn timeline_millis(start_ms: i64, end_ms: i64, clip: &HeardClip) -> Result<(i64, i64), ShellError> {
-    let start_us = millis_to_us(start_ms)?;
-    let end_us = millis_to_us(end_ms)?;
-    let (start_us, end_us) = if clip.reverse {
-        let flipped_start = clip.source_us.checked_sub(end_us).ok_or_else(|| {
-            ShellError::Unavailable("a word clock does not fit the clip".to_owned())
-        })?;
-        let flipped_end = clip.source_us.checked_sub(start_us).ok_or_else(|| {
-            ShellError::Unavailable("a word clock does not fit the clip".to_owned())
-        })?;
-        (flipped_start, flipped_end)
-    } else {
-        (start_us, end_us)
-    };
-    let (start_us, end_us) = if clip.speed_holds {
-        (
-            scale_us(start_us, clip.source_us, clip.target_us)?,
-            scale_us(end_us, clip.source_us, clip.target_us)?,
-        )
-    } else {
-        (start_us, end_us)
-    };
-    let start_ms = start_us / 1_000;
-    let end_ms = (end_us / 1_000).max(start_ms);
-    Ok((start_ms, end_ms))
-}
-
-fn millis_to_us(millis: i64) -> Result<i64, ShellError> {
-    millis
-        .checked_mul(1_000)
-        .ok_or_else(|| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))
-}
-
-fn scale_us(value: i64, source_us: i64, target_us: i64) -> Result<i64, ShellError> {
-    if source_us <= 0 {
-        return Err(ShellError::Unavailable(
-            "a word clock does not fit the clip".to_owned(),
-        ));
-    }
-    let scaled = i128::from(value)
-        .checked_mul(i128::from(target_us))
-        .ok_or_else(|| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))?;
-    i64::try_from(scaled / i128::from(source_us))
-        .map_err(|_| ShellError::Unavailable("a word clock does not fit the clip".to_owned()))
-}
-
-fn caption_track(draft: &Draft, range: &TimeRange) -> Option<TrackId> {
-    draft
-        .tracks
-        .iter()
-        .find(|track| {
-            matches!(track.kind, TrackType::Text | TrackType::TextToVideoText)
-                && !bit(track.attribute, TrackAttribute::LOCK)
-                && track.segments.iter().all(|segment| {
-                    segment
-                        .target
-                        .overlaps(range)
-                        .is_ok_and(|overlaps| !overlaps)
-                })
-        })
-        .map(|track| track.id.clone())
+    words_on_timeline(words, clip).map_err(heard_error)
 }
 
 fn prepare_message(error: PrepareError) -> ShellError {

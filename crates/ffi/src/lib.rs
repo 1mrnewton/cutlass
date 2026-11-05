@@ -1944,6 +1944,100 @@ mod tests {
         assert!(host.waves(Micros(0), Micros(1), f64::NAN).is_empty());
     }
 
+    /// A 16-bit 5.1 wave file (WAVEFORMATEXTENSIBLE, mask 0x3F): `seconds`
+    /// of a loud tone on the center channel and silence on the other five.
+    fn surround_tone(path: &Path, seconds: u32) {
+        let frames = 48_000 * seconds;
+        let data = frames * 12;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(60 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&40_u32.to_le_bytes());
+        bytes.extend_from_slice(&0xFFFE_u16.to_le_bytes());
+        bytes.extend_from_slice(&6_u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&(48_000_u32 * 12).to_le_bytes());
+        bytes.extend_from_slice(&12_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(&22_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(&0x3F_u32.to_le_bytes());
+        // KSDATAFORMAT_SUBTYPE_PCM.
+        bytes.extend_from_slice(&[
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+            0x9B, 0x71,
+        ]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        for frame in 0..frames {
+            let center = if frame / 50 % 2 == 0 {
+                24_000_i16
+            } else {
+                -24_000
+            };
+            // FL, FR, FC, LFE, BL, BR.
+            for sample in [0, 0, center, 0, 0, 0] {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// A 5.1 file used to open as nothing past stereo. It now imports, its
+    /// waveform draws from every channel, and the mix folds its center onto
+    /// both sides of the exported stereo sound.
+    #[test]
+    fn a_surround_wave_imports_draws_and_exports_folded_to_stereo() {
+        let temp = Temp::new();
+        let roots = Roots::new(&temp);
+        let mut host = roots.create();
+        two_stills(&mut host);
+        let file = temp.path.join("surround.wav");
+        surround_tone(&file, 1);
+        let material = host.import(&file).unwrap();
+        let sound = host.append(&material).unwrap();
+        let size = 100.0 / 1e6;
+        let ready = |waves: &[crate::PhoneWave]| {
+            waves
+                .iter()
+                .find(|wave| wave.id == sound)
+                .is_some_and(|wave| wave.ready)
+        };
+        let mut waves = host.waves(Micros(0), Micros(3_000_000), size);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready(&waves) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            waves = host.waves(Micros(0), Micros(3_000_000), size);
+        }
+        let wave = waves.iter().find(|wave| wave.id == sound).expect("a wave");
+        assert!(wave.ready);
+        assert_eq!(wave.levels.len(), 100);
+        assert!(wave.levels.iter().all(|level| (0.6..=1.0).contains(level)));
+
+        let out = temp.path.join("cut.mp4");
+        host.export(&out, 720, &mut |_, _| true).unwrap();
+        let mut media = crate::readers().open(&out).unwrap();
+        let heard = media.audio_from(Micros(250_000), 4_800).unwrap();
+        assert_eq!(heard.layout.len(), 2);
+        let samples = heard.as_f32().unwrap();
+        let peak = |side: usize| {
+            samples
+                .iter()
+                .skip(side)
+                .step_by(2)
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+        };
+        // The center at -3 dB: 0.73 x 0.707, give or take the AAC encode.
+        for side in [0, 1] {
+            assert!(
+                (0.4..0.7).contains(&peak(side)),
+                "side {side}: {}",
+                peak(side)
+            );
+        }
+    }
+
     #[test]
     fn the_cut_exports_as_an_mp4_with_picture_and_sound() {
         let temp = Temp::new();

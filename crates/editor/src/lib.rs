@@ -17,6 +17,7 @@ mod hit;
 mod keys;
 mod lane;
 mod library;
+mod media_place;
 mod reorder;
 mod ripple;
 mod ruler;
@@ -24,6 +25,7 @@ mod snap;
 mod stage;
 mod title;
 mod tools;
+mod transition_shelf;
 mod transport;
 mod view_zoom;
 mod zoom;
@@ -52,6 +54,7 @@ pub use library::{
     delete_folder, folder_trail, hide_file, library_files, library_folders, next_folder_name,
     parent_of, place, rename_folder,
 };
+pub use media_place::{MediaPlace, media_requests};
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};
@@ -66,6 +69,10 @@ pub use title::{
     title_style,
 };
 pub use tools::{Bar, Tool, ToolId, clip_bar, tools};
+pub use transition_shelf::{
+    MainCut, TRANSITION_OFFERS, TransitionMiss, TransitionOffer, fit_transition, main_cut,
+    transition_of_card, transition_request,
+};
 pub use transport::{Marks, SHUTTLE_TOP, Shuttle, shuttle_rate};
 pub use view_zoom::{ACTION_SAFE, PREVIEW_ZOOMS, TITLE_SAFE, preview_zoom_step, safe_box};
 pub use zoom::{

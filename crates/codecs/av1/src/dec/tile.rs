@@ -491,6 +491,73 @@ pub fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
     }
 }
 
+/// The bytes of the first `n` (at most 16) of 16 lanes.
+#[inline(always)]
+fn lane_mask(n: usize) -> u128 {
+    u128::MAX
+        .checked_shr(128 - 8 * n.min(16) as u32)
+        .unwrap_or(0)
+}
+
+/// Entries `at..at + n` (`n` at most 16) of a context array as the bytes of
+/// a `u128`, the bytes from `n` on 0: a load and a mask rather than a loop
+/// whose length changes from one transform block to the next. Entries past
+/// the end of `d` read as 0.
+#[inline(always)]
+fn ctx_lanes(d: &[u8], at: usize, n: usize) -> u128 {
+    match d.get(at..).and_then(|s| s.first_chunk::<16>()) {
+        Some(c) => u128::from_le_bytes(*c) & lane_mask(n),
+        None => (0..n.min(16)).fold(0, |x, i| {
+            x | u128::from(d.get(at + i).copied().unwrap_or(0)) << (8 * i)
+        }),
+    }
+}
+
+/// Left context entries `ly0..ly0 + n` (wrapping at 32) as in
+/// [`ctx_lanes`].
+#[inline(always)]
+fn left_lanes(d: &[u8; 32], ly0: usize, n: usize) -> u128 {
+    if ly0 + n <= 32 {
+        ctx_lanes(d, ly0, n)
+    } else {
+        (0..n.min(16)).fold(0, |x, i| x | u128::from(d[(ly0 + i) & 31]) << (8 * i))
+    }
+}
+
+/// The sum of the bytes of `x` (each at most 15).
+#[inline(always)]
+fn byte_sum(x: u128) -> u32 {
+    let h = |v: u64| (v.wrapping_mul(0x0101_0101_0101_0101) >> 56) as u32;
+    h(x as u64) + h((x >> 64) as u64)
+}
+
+/// The dc_sign context weight of DC categories `x` (bytes 0, 1 or 2): the
+/// number of 2s less the number of 1s.
+#[inline(always)]
+fn dc_weight(x: u128) -> i32 {
+    // With S the sum and N the number of nonzero bytes: 2S - 3N.
+    let nz = (x | x >> 1) & 0x0101_0101_0101_0101_0101_0101_0101_0101;
+    2 * byte_sum(x) as i32 - 3 * byte_sum(nz) as i32
+}
+
+/// Sets entries `at..at + n` (`n` at most 16) of a context array to `v`,
+/// those before the end of `d`.
+#[inline(always)]
+fn ctx_set(d: &mut [u8], at: usize, n: usize, v: u8) {
+    match d.get_mut(at..).and_then(|s| s.first_chunk_mut::<16>()) {
+        Some(c) => {
+            let m = lane_mask(n);
+            let x = (u128::from_le_bytes(*c) & !m) | ((u128::from(v) * (u128::MAX / 255)) & m);
+            *c = x.to_le_bytes();
+        }
+        None => {
+            for x in d.iter_mut().skip(at).take(n) {
+                *x = v;
+            }
+        }
+    }
+}
+
 /// Fills `h` rows of `w` entries of a map of stride `stride` from `at`
 /// with `v`: one dispatch on the width for all the rows, and no library
 /// call for the power-of-two widths.
@@ -3800,46 +3867,36 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let w = tx_w(tx);
         let h = tx_h(tx);
         let ly0 = y4 & sb_mask;
+        // The context entries inside the frame.
+        let (na, nl) = (
+            w4.min(max_x4.saturating_sub(x4)),
+            h4.min(max_y4.saturating_sub(y4)),
+        );
         let ctx = if plane == 0 {
-            let mut top = 0u8;
-            let mut left = 0u8;
-            for k in 0..w4 {
-                if x4 + k < max_x4 {
-                    top = top.max(self.above_level[plane][x4 + k]);
-                }
-            }
-            for k in 0..h4 {
-                if y4 + k < max_y4 {
-                    left = left.max(self.left_level[plane][(ly0 + k) & 31]);
-                }
-            }
+            // Only whether the largest level is 0 or above 3 matters.
+            const ABOVE3: u128 = 0xFC * (u128::MAX / 255);
+            let top = ctx_lanes(&self.above_level[plane], x4, na);
+            let left = left_lanes(&self.left_level[plane], ly0, nl);
+            let (tz, lz) = (top == 0, left == 0);
+            let (tg, lg) = (top & ABOVE3 != 0, left & ABOVE3 != 0);
             if bw == w && bh == h {
                 0
-            } else if top == 0 && left == 0 {
+            } else if tz && lz {
                 1
-            } else if top == 0 || left == 0 {
-                2 + usize::from(top.max(left) > 3)
-            } else if top.max(left) <= 3 {
+            } else if tz || lz {
+                2 + usize::from(tg || lg)
+            } else if !tg && !lg {
                 4
-            } else if top.min(left) <= 3 {
+            } else if !tg || !lg {
                 5
             } else {
                 6
             }
         } else {
-            let mut above = 0u8;
-            let mut left = 0u8;
-            for i in 0..w4 {
-                if x4 + i < max_x4 {
-                    above |= self.above_level[plane][x4 + i] | self.above_dc[plane][x4 + i];
-                }
-            }
-            for i in 0..h4 {
-                if y4 + i < max_y4 {
-                    left |= self.left_level[plane][(ly0 + i) & 31]
-                        | self.left_dc[plane][(ly0 + i) & 31];
-                }
-            }
+            let above = ctx_lanes(&self.above_level[plane], x4, na)
+                | ctx_lanes(&self.above_dc[plane], x4, na);
+            let left = left_lanes(&self.left_level[plane], ly0, nl)
+                | left_lanes(&self.left_dc[plane], ly0, nl);
             let mut c = usize::from(above != 0) + usize::from(left != 0) + 7;
             if bw * bh > w * h {
                 c += 3;
@@ -4033,25 +4090,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                     let cbwl = bwl.min(5);
                     // dc_sign ctx
                     let dc_ctx = || {
-                        let mut dc_sign = 0i32;
-                        for k in 0..w4 {
-                            if x4 + k < max_x4 {
-                                match above_dc[x4 + k] {
-                                    1 => dc_sign -= 1,
-                                    2 => dc_sign += 1,
-                                    _ => {}
-                                }
-                            }
-                        }
-                        for k in 0..h4 {
-                            if y4 + k < max_y4 {
-                                match left_dc[(ly0 + k) & 31] {
-                                    1 => dc_sign -= 1,
-                                    2 => dc_sign += 1,
-                                    _ => {}
-                                }
-                            }
-                        }
+                        let dc_sign = dc_weight(ctx_lanes(above_dc, x4, na))
+                            + dc_weight(left_lanes(left_dc, ly0, nl));
                         match dc_sign.cmp(&0) {
                             std::cmp::Ordering::Less => 1,
                             std::cmp::Ordering::Greater => 2,
@@ -4076,14 +4116,28 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                                 let out = &mut log.coefs;
                                 out.reserve(nz.len());
                                 *logged = true;
-                                Some(signs_dec(m, nz, levels, dc_cdf, dc_ctx, &deq, |_, p, v| {
-                                    out.push((v << 10) | p as i32);
-                                }))
+                                Some(signs_dec(
+                                    m,
+                                    nz,
+                                    levels,
+                                    dc_cdf,
+                                    dc_ctx,
+                                    &deq,
+                                    #[inline(always)]
+                                    |_, p, v| out.push((v << 10) | p as i32),
+                                ))
                             } else {
                                 let dq = dq.first_chunk_mut::<1024>()?;
-                                Some(signs_dec(m, nz, levels, dc_cdf, dc_ctx, &deq, |_, p, v| {
-                                    dq[p & 1023] = v;
-                                }))
+                                Some(signs_dec(
+                                    m,
+                                    nz,
+                                    levels,
+                                    dc_cdf,
+                                    dc_ctx,
+                                    &deq,
+                                    #[inline(always)]
+                                    |_, p, v| dq[p & 1023] = v,
+                                ))
                             }
                         })
                         .flatten()
@@ -4146,19 +4200,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             cul_level = cul;
             dc_category = dcc;
         }
-        let an = self.above_level[plane].len();
-        if x4 + w4 <= an {
-            fill_small(&mut self.above_level[plane][x4..x4 + w4], cul_level as u8);
-            fill_small(&mut self.above_dc[plane][x4..x4 + w4], dc_category);
-        } else {
-            for i in x4..an {
-                self.above_level[plane][i] = cul_level as u8;
-                self.above_dc[plane][i] = dc_category;
-            }
-        }
+        ctx_set(&mut self.above_level[plane], x4, w4, cul_level as u8);
+        ctx_set(&mut self.above_dc[plane], x4, w4, dc_category);
         if ly0 + h4 <= 32 {
-            fill_small(&mut self.left_level[plane][ly0..ly0 + h4], cul_level as u8);
-            fill_small(&mut self.left_dc[plane][ly0..ly0 + h4], dc_category);
+            ctx_set(&mut self.left_level[plane], ly0, h4, cul_level as u8);
+            ctx_set(&mut self.left_dc[plane], ly0, h4, dc_category);
         } else {
             for i in 0..h4 {
                 let ly = (ly0 + i) & 31;

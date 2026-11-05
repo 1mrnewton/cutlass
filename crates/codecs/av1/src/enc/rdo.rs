@@ -85,6 +85,9 @@ pub struct ModeParams {
     /// Inter frames: inter is taken without the transform-coded comparison
     /// when the intra SATD cost exceeds this multiple of the inter one (0: never).
     pub inter_clear_ratio: f64,
+    /// Partition estimates transform-code an intra or inter candidate only
+    /// when its SATD cost is within this factor of the other one (0: always).
+    pub est_skip_ratio: f64,
 }
 
 impl Default for ModeParams {
@@ -121,6 +124,7 @@ impl Default for ModeParams {
             intra_refine_ratio: 0.0,
             intra_sweep_ratio: 0.0,
             inter_clear_ratio: 0.0,
+            est_skip_ratio: 0.0,
         }
     }
 }
@@ -417,8 +421,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         let mut res = take_buf(&mut self.scratch.enc_i32[2], 64 * 64, 0);
-        self.residual_of(&best_pred, pw, x, y, pw, ph, &mut res);
-        let mut cost = self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * best.1;
+        let mut inter = None;
         if self.mode.inter_frame
             && let Some(rv) = self.refs[LAST_FRAME as usize].as_ref()
         {
@@ -473,8 +476,29 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     pred[i * pw + j] = rp.data[ry * rp.stride + rx];
                 }
             }
-            self.residual_of(&pred, pw, x, y, pw, ph, &mut res);
             let mvb = 2.0 + bits(me.mv.0) + bits(me.mv.1);
+            let d = f64::from(satd(
+                &sp.data[y * sp.stride + x..],
+                sp.stride,
+                &pred,
+                pw,
+                pw,
+                ph,
+            ));
+            inter = Some((d + lam * mvb, mvb));
+        }
+        // Transform-code only the candidates whose SATD cost is not far
+        // behind the other's.
+        let t = self.mode.est_skip_ratio;
+        let mut cost = f64::MAX;
+        if inter.is_none_or(|(s, _)| t <= 0.0 || s * t >= best.0) {
+            self.residual_of(&best_pred, pw, x, y, pw, ph, &mut res);
+            cost = self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * best.1;
+        }
+        if let Some((s, mvb)) = inter
+            && (t <= 0.0 || s <= best.0 * t)
+        {
+            self.residual_of(&pred, pw, x, y, pw, ph, &mut res);
             cost = cost.min(self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * mvb);
         }
         self.scratch.enc_px[1] = pred;

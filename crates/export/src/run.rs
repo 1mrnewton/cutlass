@@ -25,7 +25,9 @@ use cutlass_gpu::Extent;
 use cutlass_model::{Draft, FrameRate, Micros, SegmentId, TimeRange};
 use cutlass_render::{RenderError, Renderer, frame_layers};
 
-use crate::config::{AudioExport, ExportError, ExportRequest, coded_size, output_size, validate};
+use crate::config::{
+    AudioExport, ExportError, ExportRequest, check_audio, coded_size, output_size, validate,
+};
 use crate::sidecars::{file_name, sidecar_text, write_sidecar};
 
 const MAX_SAMPLES_PER_FRAME: u32 = 480_000;
@@ -232,9 +234,7 @@ where
 {
     let settings = request.audio.as_ref().ok_or(ExportError::AudioLayout)?;
     validate_rate(request.frame_rate)?;
-    if settings.sample_rate == 0 || !matches!(settings.channels, 1 | 2) {
-        return Err(ExportError::AudioLayout);
-    }
+    check_audio(settings)?;
     if mux.family() != request.container {
         return Err(ExportError::Container);
     }

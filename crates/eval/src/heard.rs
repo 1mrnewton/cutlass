@@ -209,6 +209,7 @@ mod tests {
     use std::fs::File;
     use std::path::{Path, PathBuf};
 
+    use cutlass_codec::access::ChannelLayout;
     use cutlass_container::{Demux, OpenError};
     use cutlass_engine::{ClipPcm, ClockKind};
     use cutlass_model::{
@@ -417,5 +418,181 @@ mod tests {
         assert_eq!(mixed.contributed, 1);
         assert_eq!(mixed.pcm.as_f32(), Some(&[0.5; 4][..]));
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Surround files against `ffmpeg -ac 2` ------------------------------
+
+    fn has_ffmpeg() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn ffmpeg(args: &[&str]) -> bool {
+        std::process::Command::new("ffmpeg")
+            .args(["-y", "-hide_banner", "-loglevel", "error"])
+            .args(args)
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn f32le(path: &Path) -> Vec<f32> {
+        std::fs::read(path)
+            .expect("raw")
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect()
+    }
+
+    /// `frames` of the playback mix at `time`, read through [`Heard`].
+    fn heard_window(draft: &Draft, time: i64, frames: u32) -> cutlass_engine::MixResult {
+        let readers = readers();
+        let mut heard = Heard::new();
+        audio_slice(
+            &Snapshot::new(draft),
+            Micros(time),
+            MixWindow {
+                rate: 48_000,
+                limiter: 0,
+                frames,
+            },
+            ClockKind::Playback,
+            |segment, time, frames, rate| {
+                heard.clip(ClipAsk {
+                    readers: &readers,
+                    draft,
+                    revision: 1,
+                    segment,
+                    time,
+                    frames,
+                    rate,
+                    root: None,
+                })
+            },
+        )
+        .expect("mix")
+    }
+
+    /// The playback mix of `wav` beside ffmpeg's default stereo downmix of
+    /// the same file. `scale` is what one of our samples is in ffmpeg's
+    /// units: an s16 file is full scale at 32767 here and 32768 there.
+    fn worst_against_ffmpeg(name: &str, wav: &Path, scale: f32) -> f32 {
+        let reference = temp(&format!("{name}-reference"));
+        assert!(ffmpeg(&[
+            "-i",
+            wav.to_str().unwrap(),
+            "-ac",
+            "2",
+            "-f",
+            "f32le",
+            reference.to_str().unwrap(),
+        ]));
+        let theirs = f32le(&reference);
+        let _ = std::fs::remove_file(&reference);
+        let draft = audio_draft(&wav.display().to_string(), 1.0, false);
+        // A tenth of a second in, so the window is not the file's start.
+        let mixed = heard_window(&draft, 100_000, 4_800);
+        assert_eq!(mixed.contributed, 1, "{name}");
+        assert_eq!(mixed.pcm.layout, ChannelLayout::stereo(), "{name}");
+        let ours = mixed.pcm.as_f32().expect("f32");
+        assert_eq!(ours.len(), 9_600, "{name}");
+        let theirs = &theirs[9_600..19_200];
+        let worst = ours
+            .iter()
+            .zip(theirs)
+            .map(|(ours, theirs)| (ours * scale - theirs).abs())
+            .fold(0.0_f32, f32::max);
+        let peak = theirs.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        eprintln!("{name}: peak {peak:.4}, worst difference from ffmpeg {worst:e}");
+        worst
+    }
+
+    /// 5.1 and 7.1 wave files from ffmpeg play through the mix as the same
+    /// stereo `ffmpeg -ac 2` makes of them. The 5.1 file is 16-bit with
+    /// side surrounds (mask 0x60F); the 7.1 file is float (mask 0x63F).
+    #[test]
+    fn a_surround_wave_plays_as_ffmpeg_folds_it() {
+        let six = temp("five-one.wav");
+        let eight = temp("seven-one.wav");
+        let tones = |channels: usize| {
+            (0..channels)
+                .map(|index| format!("0.{}*sin(2*PI*{}*t)", 9 - index, 110 * (index + 2)))
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        let five_one = format!("aevalsrc=exprs={}:c=5.1(side):s=48000:d=1", tones(6));
+        let seven_one = format!("aevalsrc=exprs={}:c=7.1:s=48000:d=1", tones(8));
+        if !has_ffmpeg() {
+            eprintln!("not available: ffmpeg");
+            return;
+        }
+        assert!(ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &five_one,
+            "-c:a",
+            "pcm_s16le",
+            "-f",
+            "wav",
+            six.to_str().unwrap(),
+        ]));
+        assert!(ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &seven_one,
+            "-c:a",
+            "pcm_f32le",
+            "-f",
+            "wav",
+            eight.to_str().unwrap(),
+        ]));
+        let tolerance = 1e-6;
+        assert!(worst_against_ffmpeg("5.1 s16", &six, 32_767.0 / 32_768.0) <= tolerance);
+        assert!(worst_against_ffmpeg("7.1 f32", &eight, 1.0) <= tolerance);
+        let _ = std::fs::remove_file(&six);
+        let _ = std::fs::remove_file(&eight);
+    }
+
+    /// Real sound from `../local-files`, spread by ffmpeg over 5.1, folds
+    /// back the way ffmpeg folds it.
+    #[test]
+    fn real_sound_spread_over_five_one_folds_as_ffmpeg_does() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../local-files/Expo - You Don't Need a Mac to Build iOS Apps Anymore.m4a");
+        if !source.is_file() {
+            eprintln!("skipped: {} is missing", source.display());
+            return;
+        }
+        if !has_ffmpeg() {
+            eprintln!("not available: ffmpeg");
+            return;
+        }
+        let wav = temp("real-five-one.wav");
+        let spread = "pan=5.1|FL=c0|FR=c1|FC=0.5*c0+0.5*c1|LFE=c0|BL=0.8*c0|BR=0.8*c1";
+        assert!(ffmpeg(&[
+            "-ss",
+            "30",
+            "-t",
+            "1",
+            "-i",
+            source.to_str().unwrap(),
+            "-af",
+            spread,
+            "-ar",
+            "48000",
+            "-c:a",
+            "pcm_f32le",
+            "-f",
+            "wav",
+            wav.to_str().unwrap(),
+        ]));
+        assert!(worst_against_ffmpeg("real 5.1", &wav, 1.0) <= 1e-6);
+        let _ = std::fs::remove_file(&wav);
     }
 }

@@ -133,6 +133,9 @@ pub enum ExportError {
     Audio(AudioError),
     /// The channel count is not mono or stereo, or the sample rate is zero.
     AudioLayout,
+    /// The request asked for more than two channels. A surround source is
+    /// mixed down to stereo; writing surround is not supported yet.
+    SurroundExport { channels: u16 },
     /// The mux trait refused the stream or a packet.
     Mux(MuxError),
     /// A packet timestamp could not be stored in the file timescale.
@@ -178,6 +181,11 @@ impl fmt::Display for ExportError {
             Self::Encoder(error) => write!(formatter, "{error}"),
             Self::Audio(error) => write!(formatter, "{error}"),
             Self::AudioLayout => formatter.write_str("the audio layout is not mono or stereo"),
+            Self::SurroundExport { channels } => write!(
+                formatter,
+                "surround export is not supported yet: export writes mono or stereo, \
+                 not {channels} channels"
+            ),
             Self::Mux(error) => write!(formatter, "{error}"),
             Self::Packet => formatter.write_str("the packet clock does not fit the file"),
             Self::SideData => formatter.write_str("export does not store packet side data"),
@@ -236,9 +244,21 @@ pub fn validate(request: &ExportRequest) -> Result<(), ExportError> {
     {
         return Err(ExportError::Range);
     }
-    if let Some(audio) = &request.audio
-        && (audio.sample_rate == 0 || (audio.channels != 1 && audio.channels != 2))
-    {
+    if let Some(audio) = &request.audio {
+        check_audio(audio)?;
+    }
+    Ok(())
+}
+
+/// Export writes one or two channels at a rate above zero. More than two is
+/// surround, which is named on its own so the refusal says so.
+pub(crate) fn check_audio(audio: &AudioExport) -> Result<(), ExportError> {
+    if audio.channels > 2 {
+        return Err(ExportError::SurroundExport {
+            channels: audio.channels,
+        });
+    }
+    if audio.sample_rate == 0 || audio.channels == 0 {
         return Err(ExportError::AudioLayout);
     }
     Ok(())
@@ -364,8 +384,23 @@ mod tests {
         });
         assert_eq!(validate(&audio), Err(ExportError::AudioLayout));
         audio.audio.as_mut().expect("audio").sample_rate = 48_000;
-        audio.audio.as_mut().expect("audio").channels = 6;
+        audio.audio.as_mut().expect("audio").channels = 0;
         assert_eq!(validate(&audio), Err(ExportError::AudioLayout));
+        for channels in [1, 2] {
+            audio.audio.as_mut().expect("audio").channels = channels;
+            assert_eq!(validate(&audio), Ok(()));
+        }
+        for channels in [3, 6, 8, u16::MAX] {
+            audio.audio.as_mut().expect("audio").channels = channels;
+            let refused = validate(&audio).expect_err("surround");
+            assert_eq!(refused, ExportError::SurroundExport { channels });
+            let message = refused.to_string();
+            assert!(message.starts_with("surround export is not supported yet"));
+            assert!(
+                message.contains(&format!("{channels} channels")),
+                "{message}"
+            );
+        }
     }
 
     #[test]

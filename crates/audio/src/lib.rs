@@ -1,6 +1,6 @@
 //! Turns decoded PCM into samples the mix can add.
 //!
-//! Each clip is resampled to the mix rate the caller chooses. Speed goes
+//! A surround clip is folded into stereo by [`downmix`]. Each clip is resampled to the mix rate the caller chooses. Speed goes
 //! through [`stretch`]: keeping pitch uses overlap-add, and letting the
 //! pitch follow the speed is a resample. Fades are per clip. The limiter
 //! runs on the mixed buffer.
@@ -11,11 +11,13 @@
 #![forbid(unsafe_code)]
 
 mod buffer;
+mod downmix;
 mod fade;
 mod limit;
 mod resample;
 mod stretch;
 
+pub use downmix::{downmix, downmix_into};
 pub use fade::{FadeCurve, fade};
 pub use limit::limit;
 pub use resample::resample;

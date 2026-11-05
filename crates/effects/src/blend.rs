@@ -10,7 +10,26 @@
 //! [`BLEND_WGSL`] is the same arithmetic for a GPU pass; the two are kept
 //! side by side so they change together.
 
+use cutlass_model::{Draft, MaterialEffect, MaterialRef, Segment};
+
 use crate::catalog::BlendMode;
+
+/// The blend a clip mixes with, from its `mix_mode` extra material. A clip
+/// with none, or with source over, blends normally and gives `None`.
+#[must_use]
+pub fn segment_blend(draft: &Draft, segment: &Segment) -> Option<BlendMode> {
+    segment
+        .extra_material_refs
+        .iter()
+        .find_map(|id| match draft.materials.get(id.as_str()) {
+            Some(MaterialRef::Effect(effect)) if effect.kind == MaterialEffect::MIX_MODE => {
+                crate::package::package_id(effect)
+                    .and_then(BlendMode::from_package)
+                    .filter(|mode| *mode != BlendMode::SourceOver)
+            }
+            _ => None,
+        })
+}
 
 impl BlendMode {
     /// Every mode, in the order a picker lists them.

@@ -1,5 +1,6 @@
 mod animation;
 mod beat;
+mod blend;
 mod canvas;
 mod color;
 mod crop;
@@ -356,6 +357,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
         Request::BindEffect { segment_id, clip } => {
             effect::bind_effect(draft, segment_id, clip.as_ref())
         }
+        Request::SetBlend {
+            segment_id,
+            material_id,
+            mode,
+        } => blend::set_blend(draft, segment_id, material_id, mode),
         Request::SetEffectStrength {
             segment_id,
             material_id,

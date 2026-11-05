@@ -263,6 +263,14 @@ pub enum Request {
         segment_id: SegmentId,
         clip: Option<SegmentId>,
     },
+    /// Blend the clip with the picture below by `mode`, a blend package id
+    /// such as `blend-multiply`. Normal or empty takes the blend off.
+    /// `material_id` names the new `mix_mode` material.
+    SetBlend {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mode: String,
+    },
     /// Store `value`, from 0 to 1, as the strength of the effect, filter,
     /// or adjustment the clip uses. When another clip uses that material too,
     /// a copy named `material_id` takes its place on this clip only.

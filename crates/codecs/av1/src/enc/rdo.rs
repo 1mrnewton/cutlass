@@ -70,6 +70,8 @@ pub struct ModeParams {
     pub skip_mode: bool,
     /// Mode bits a skip-mode block saves over a skipped regular inter block.
     pub skip_mode_sse: f64,
+    /// Estimate transform distortion in the transform domain (no inverse).
+    pub fast_tx_dist: bool,
 }
 
 impl Default for ModeParams {
@@ -100,6 +102,7 @@ impl Default for ModeParams {
             obmc: true,
             skip_mode: true,
             skip_mode_sse: 4.0,
+            fast_tx_dist: true,
         }
     }
 }
@@ -719,6 +722,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let mut blk = take_buf(&mut self.scratch.enc_i32[0], 64 * 64, 0);
         let mut coefs = take_buf(&mut self.scratch.enc_i32[1], 64 * 64, 0);
         let mut rec = take_buf(&mut self.scratch.enc_px[0], 64 * 64, mid);
+        let fast = self.mode.fast_tx_dist;
+        // Squared gain from the transform domain to samples (see quant.rs).
+        let gain_log2 = ((crate::dec::types::tx_w_log2(tx) + crate::dec::types::tx_h_log2(tx)) / 2)
+            as i32
+            - 1
+            - i32::from(crate::spec::tables::TRANSFORM_ROW_SHIFT[tx as usize])
+            - 4;
+        let g2 = 2f64.powi(2 * gain_log2);
         let round = 48i64;
         let mut y0 = 0;
         while y0 < h {
@@ -732,6 +743,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 let mut nz = (0, 0);
                 let cw = tw.min(32);
                 let ch = th.min(32);
+                let mut kept = 0f64;
+                let mut qerr = 0f64;
                 for i in 0..ch {
                     for j in 0..cw {
                         let pos = i * cw + j;
@@ -744,10 +757,28 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                             nz = (nz.0.max(i + 1), nz.1.max(j + 1));
                         }
                         let v = l * q / i64::from(qi.denom);
+                        if fast {
+                            let cf = f64::from(c.unsigned_abs());
+                            kept += cf * cf;
+                            qerr += (cf - v as f64) * (cf - v as f64);
+                        }
                         coefs[pos] = if c < 0 { -v as i32 } else { v as i32 };
                     }
                 }
                 bits += 1.0;
+                if fast {
+                    // Transform-domain distortion; what a 64-point transform
+                    // drops is the residual energy it does not keep.
+                    let mut e = 0f64;
+                    for i in 0..th {
+                        for &r in &res[(y0 + i) * w + x0..(y0 + i) * w + x0 + tw] {
+                            e += f64::from(r * r);
+                        }
+                    }
+                    d += qerr * g2 + (e - kept * g2).max(0.0);
+                    x0 += tw;
+                    continue;
+                }
                 for v in rec[..tw * th].iter_mut() {
                     *v = mid;
                 }

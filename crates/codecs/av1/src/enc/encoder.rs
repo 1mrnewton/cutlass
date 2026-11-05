@@ -855,6 +855,7 @@ impl Av1Enc {
             obmc: hdr.is_motion_mode_switchable && ev("AV1_OBMC", 1.0) > 0.0,
             skip_mode: true,
             skip_mode_sse: ev("AV1_SMS", 6.0),
+            fast_tx_dist: ev("AV1_FTD", 1.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 6 {

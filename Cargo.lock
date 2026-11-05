@@ -818,6 +818,7 @@ name = "cutlass-export"
 version = "0.1.0"
 dependencies = [
  "cutlass-aac",
+ "cutlass-alac",
  "cutlass-codec",
  "cutlass-container",
  "cutlass-encode",

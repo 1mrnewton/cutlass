@@ -134,7 +134,8 @@ fn write_part(
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
-/// AAC in an M4A file, or PCM in a WAV file, as `request.audio` names.
+/// AAC or ALAC in an M4A file, or PCM in a WAV file, as `request.audio`
+/// names.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -152,7 +153,7 @@ pub fn write_sound(
     let written = (|| {
         let out = BufWriter::new(File::create(&part).map_err(file)?);
         let out = match (codec, request.container) {
-            (CodecId::Aac, ContainerId::Isobmff) => {
+            (CodecId::Aac | CodecId::Alac, ContainerId::Isobmff) => {
                 let mut mux = Mp4Mux::with_brand(out, FileBrand::M4a);
                 export_sound(
                     sources.draft,
@@ -299,6 +300,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut encoders = EncodeFactory::new();
         cutlass_aac::register_encoders(&mut encoders);
+        cutlass_alac::register_encoders(&mut encoders);
         cutlass_pcm::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
@@ -336,6 +338,23 @@ mod tests {
         let (_, wav) = written(CodecId::Pcm, ContainerId::Riff, "cut.wav");
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn sound_alone_writes_a_lossless_m4a() {
+        let (_, m4a) = written(CodecId::Alac, ContainerId::Isobmff, "lossless.m4a");
+        assert_eq!(&m4a[4..12], b"ftypM4A ");
+        let file = cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(m4a)).unwrap();
+        let streams = cutlass_container::Demux::streams(&file);
+        let params = streams[0].params();
+        assert_eq!(
+            params.codec(),
+            &cutlass_codec::StreamCodec::Known(CodecId::Alac)
+        );
+        assert_eq!(params.channels(), Some(2));
+        assert_eq!(params.sample_rate(), Some(44_100));
+        // The cookie: 24-bit, as the float mix is kept.
+        assert_eq!(params.extradata()[5], 24);
     }
 
     #[test]

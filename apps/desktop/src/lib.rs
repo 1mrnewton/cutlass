@@ -58,6 +58,8 @@ pub fn register_codecs_with(
     cutlass_pcm::register_encoders(&mut encoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
+    cutlass_prores::register_decoders(&mut decoders);
+    cutlass_prores::register_encoders(&mut encoders);
     (decoders, encoders)
 }
 
@@ -148,6 +150,32 @@ mod tests {
         encoders
             .open(&picture(CodecId::H264, 64, 64))
             .expect("hardware encode stays on");
+    }
+
+    #[test]
+    fn prores_opens_in_rust_when_the_platform_is_off() {
+        use cutlass_settings::Hardware;
+
+        let off = Hardware {
+            decode: false,
+            encode: false,
+            ..Hardware::default()
+        };
+        let (decoders, encoders) = super::register_codecs_with(&off);
+        let mut read = CodecParams::with_format(CodecId::Prores, 64, 48, PixelFormat::Yuv420p);
+        read.extra = b"ap4h".to_vec();
+        let decoder = decoders.open(&read).expect("rust prores decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(decoder.as_ref()),
+            CodecId::Prores
+        );
+        let mut write = picture(CodecId::Prores, 64, 48);
+        write.extra = b"apch".to_vec();
+        let encoder = encoders.open(&write).expect("rust prores encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(encoder.as_ref()),
+            CodecId::Prores
+        );
     }
 
     #[test]

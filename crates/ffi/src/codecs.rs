@@ -25,7 +25,7 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// The platform decoders for this OS, then PNG, JPEG, AAC, H.264, and PCM.
+/// The platform decoders for this OS, then PNG, JPEG, AAC, H.264, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -36,6 +36,7 @@ pub fn decoders() -> DecodeFactory {
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
+    cutlass_prores::register_decoders(&mut decoders);
     decoders
 }
 

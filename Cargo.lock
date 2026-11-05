@@ -857,6 +857,7 @@ dependencies = [
  "cutlass-playback",
  "cutlass-png",
  "cutlass-probe",
+ "cutlass-prores",
  "cutlass-render",
  "cutlass-renderer-software",
  "cutlass-riff",

@@ -11747,6 +11747,56 @@ mod tests {
         }
     }
 
+    /// With the platform encoder off, ProRes export runs the Rust encoder,
+    /// and the movie it writes reads back through the Rust decoder.
+    #[test]
+    fn a_prores_export_without_the_platform_reads_back() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let off = cutlass_settings::Hardware {
+            decode: false,
+            encode: false,
+            ..cutlass_settings::Hardware::default()
+        };
+        let (decoders, encoders) = crate::register_codecs_with(&off);
+        let mut desktop = Shell::new(decoders, encoders, Settings::default());
+        desktop.open_folder(&temp.path).unwrap();
+        assert!(desktop.encodes(CodecId::Prores));
+        let path = temp.path.join("proxy.mov");
+        desktop
+            .export(ExportRequest {
+                path: path.clone(),
+                short_side: 480,
+                codec: CodecId::Prores,
+                prores: ProresProfile::Proxy,
+                sound: false,
+                ..ExportRequest::default()
+            })
+            .unwrap();
+        land_job(&mut desktop);
+        assert!(
+            desktop.notice().starts_with("Exported"),
+            "{}",
+            desktop.notice()
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"apco"));
+        let mut file = cutlass_isobmff::IsoBmffFile::open(std::io::Cursor::new(bytes)).unwrap();
+        let stream = file.streams()[0].clone();
+        assert_eq!(stream.params().extradata(), b"apco");
+        let mut params = CodecParams::with_format(CodecId::Prores, 0, 0, PixelFormat::Yuv420p);
+        params.extra = stream.params().extradata().to_vec();
+        let mut decoder = cutlass_prores::ProresDecoder::open(&params).unwrap();
+        let mut frames = 0;
+        while let Some(packet) = file.read_packet().unwrap() {
+            let decoded = decoder.decode(packet.bytes()).unwrap();
+            assert_eq!(decoded.header.encoder, *b"ctls");
+            assert_eq!(decoded.frame.height, 480);
+            frames += 1;
+        }
+        assert!(frames > 0);
+    }
+
     #[test]
     fn an_export_writes_a_mov_the_sound_alone_a_gif_and_a_caption_file() {
         let temp = Temp::new();

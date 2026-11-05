@@ -16,5 +16,9 @@ cutlass-codec = { path = "../../codec", version = "0.1.0" }
 cutlass-container = { path = "../../container", version = "0.1.0" }
 cutlass-isobmff = { path = "../../containers/isobmff", version = "0.1.0" }
 
+[[bench]]
+name = "throughput"
+harness = false
+
 [lints]
 workspace = true

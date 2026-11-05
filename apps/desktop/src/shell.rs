@@ -305,6 +305,8 @@ pub struct Inspection {
     pub chroma: Option<cutlass_effects::Chroma>,
     /// The clip's mask.
     pub mask: Option<cutlass_effects::Mask>,
+    /// Where the clip's colour work, or the adjustment layer, shows.
+    pub color_mask: Option<cutlass_effects::Mask>,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3402,6 +3404,7 @@ impl Shell {
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
             chroma: cutlass_effects::segment_chroma(draft, segment),
             mask: cutlass_effects::segment_mask(draft, segment),
+            color_mask: cutlass_effects::segment_color_mask(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4518,6 +4521,22 @@ impl Shell {
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("mask"));
         self.apply(Request::SetMask {
+            segment_id,
+            material_id,
+            mask,
+        })
+    }
+
+    /// Keep the selected picture's colour work, or the selected adjustment
+    /// layer, inside `mask`, or take that limit off.
+    pub fn set_color_mask(
+        &mut self,
+        mask: Option<cutlass_effects::Mask>,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.adjust_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("color-mask"));
+        self.apply(Request::SetColorMask {
             segment_id,
             material_id,
             mask,

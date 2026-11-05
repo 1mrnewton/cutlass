@@ -157,7 +157,7 @@ fn video_panel(
                 return;
             }
             if state.page == 2 {
-                mask_page(shell, ui, state, inspection);
+                mask_page(shell, ui, state, inspection.mask, false);
                 return;
             }
             if state.page != 0 {
@@ -926,7 +926,7 @@ fn colour_page(
         1 => super::grade::hsl_page(shell, ui, state, inspection),
         2 => super::grade::curves_page(shell, ui, state, inspection),
         3 => super::grade::wheels_page(shell, ui, state, inspection),
-        _ => later_note(ui, "Mask"),
+        _ => mask_page(shell, ui, state, inspection.color_mask, true),
     }
     true
 }
@@ -1007,11 +1007,23 @@ fn cutout_page(
     });
 }
 
-/// The Mask page: a shape cuts the clip in its own frame. None takes the
-/// mask off; the sliders place, size, turn and soften it.
-fn mask_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspection: &Inspection) {
+/// The Mask page: a shape cuts the clip in its own frame, or with `colour`
+/// limits where its colour work shows. None takes the mask off; the
+/// sliders place, size, turn and soften it.
+fn mask_page(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    mask: Option<cutlass_effects::Mask>,
+    colour: bool,
+) {
     use cutlass_effects::{Mask, MaskShape};
-    let mask = inspection.mask;
+    let set: fn(&mut Shell, Option<Mask>) -> Result<(), ShellError> = if colour {
+        Shell::set_color_mask
+    } else {
+        Shell::set_mask
+    };
+    let prefix = if colour { "color-" } else { "" };
     body(ui, |ui| {
         let mut picked: Option<Option<MaskShape>> = None;
         ui.horizontal_wrapped(|ui| {
@@ -1032,19 +1044,23 @@ fn mask_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspect
             }
         });
         match picked {
-            Some(None) if mask.is_some() => send(shell, |shell| shell.set_mask(None)),
+            Some(None) if mask.is_some() => send(shell, |shell| set(shell, None)),
             Some(Some(shape)) if mask.is_none_or(|mask| mask.shape != shape) => {
                 let next = mask.map_or_else(|| Mask::new(shape), |mask| Mask { shape, ..mask });
-                send(shell, |shell| shell.set_mask(Some(next)));
+                send(shell, |shell| set(shell, Some(next)));
             }
             _ => {}
         }
         let Some(mask) = mask else {
             ui.add_space(6.0);
             ui.label(
-                RichText::new("Pick a shape to mask the clip.")
-                    .size(11.0)
-                    .color(tokens::MUTED),
+                RichText::new(if colour {
+                    "Pick a shape to keep the colour work inside it."
+                } else {
+                    "Pick a shape to mask the clip."
+                })
+                .size(11.0)
+                .color(tokens::MUTED),
             );
             return;
         };
@@ -1063,7 +1079,7 @@ fn mask_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspect
             if let Some(value) = slider(
                 ui,
                 state,
-                key,
+                &format!("{prefix}{key}"),
                 label,
                 (f64::from(stored) * scale).round(),
                 range,
@@ -1179,7 +1195,7 @@ fn mask_page(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspect
             });
         }
         if let Some(next) = changed {
-            send(shell, |shell| shell.set_mask(Some(next)));
+            send(shell, |shell| set(shell, Some(next)));
         }
     });
 }

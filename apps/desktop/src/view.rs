@@ -6665,6 +6665,33 @@ mod tests {
             shell.inspection().unwrap().mask.map(|mask| mask.shape),
             Some(cutlass_effects::MaskShape::Rectangle)
         );
+        // The Adjust tab's Mask page keeps the colour work inside a shape,
+        // apart from the clip's own mask.
+        view.inspector.focus(inspector::Focus {
+            tab: 4,
+            page: 4,
+            section: None,
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(
+            galleys(&output)
+                .iter()
+                .any(|line| line == "Pick a shape to keep the colour work inside it.")
+        );
+        let star = text_pos(&output, "Star").expect("star shape") + Vec2::new(4.0, 4.0);
+        let _ = frame(&mut shell, &mut view, vec![egui::Event::PointerMoved(star)]);
+        let _ = frame(&mut shell, &mut view, vec![press(star, true)]);
+        let _ = frame(&mut shell, &mut view, vec![press(star, false)]);
+        let inspection = shell.inspection().unwrap();
+        assert_eq!(
+            inspection.color_mask.map(|mask| mask.shape),
+            Some(cutlass_effects::MaskShape::Star)
+        );
+        assert_eq!(
+            inspection.mask.map(|mask| mask.shape),
+            Some(cutlass_effects::MaskShape::Rectangle)
+        );
         let _ = std::fs::remove_dir_all(&temp);
     }
 

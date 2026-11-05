@@ -14,7 +14,9 @@ use cutlass_container::{
     TrackDuration, TrackId,
 };
 
+use crate::crc::page_crc;
 use crate::error::OggError;
+use crate::limits::PAGE_HEADER_BYTES;
 use crate::mux::{FIRST_SERIAL, OggMux};
 use crate::page::{FLAG_BOS, FLAG_CONTINUED, FLAG_EOS, encode, lacing_for, parse_header};
 use crate::{OggDemux, OpusTags};
@@ -222,8 +224,35 @@ fn a_cropped_start_keeps_granule_time_and_moves_the_edit() {
     let edit = demux.streams()[0].edits()[0];
     assert_eq!(edit.media_time(), Some(48_000 + 3_840));
     assert_eq!(edit.duration(), 10 * 960 - 3_840);
-    // A stream shorter than its pre-skip does not open.
-    let short = mux_one(3_840, 48_000, &[100; 3], 960);
+    // The muxer refuses a stream shorter than its pre-skip, and the
+    // demuxer does not open one written by hand.
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux
+        .add_stream(opus_stream(2, head(2, 3_840)))
+        .expect("stream");
+    for index in 0..3 {
+        mux.write_packet(&packet(
+            track.get(),
+            payload(100, index),
+            48_000 + i64::from(index) * 960,
+            960,
+        ))
+        .expect("write");
+    }
+    let refused = mux.finish(&[TrackDuration {
+        track,
+        timescale: Timescale::new(48_000),
+        ticks: 3 * 960,
+    }]);
+    assert!(refused.is_err());
+    assert_eq!(mux.status(), MuxStatus::Failed);
+    let mut short = mux_one(0, 48_000, &[100; 3], 960);
+    // OpusHead's pre-skip sits at body bytes 10..12 of the first page,
+    // whose lacing table has one value.
+    let body = PAGE_HEADER_BYTES + 1;
+    short[body + 10..body + 12].copy_from_slice(&3_840_u16.to_le_bytes());
+    let checksum = page_crc(&short[..body], &short[body..body + 19]);
+    short[22..26].copy_from_slice(&checksum.to_le_bytes());
     assert!(matches!(
         try_open(&short),
         Err(OpenError::Source { message }) if message.contains("pre-skip")

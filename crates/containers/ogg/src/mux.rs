@@ -14,7 +14,8 @@
 //! last packet completed on it, or -1 when none completes. The last page of
 //! each stream is written by [`Mux::finish`] with the end-of-stream flag, so
 //! a final packet shorter than its TOC duration becomes RFC 7845 end
-//! trimming.
+//! trimming. A stream whose packets last less than its pre-skip is refused
+//! at finish, because no reader can play it.
 //!
 //! Serial numbers are deterministic: the first stream takes
 //! [`FIRST_SERIAL`] (or the value given to [`OggMux::with_first_serial`])
@@ -46,6 +47,7 @@ struct Track {
     channels: u16,
     head: Option<Vec<u8>>,
     streams: u8,
+    pre_skip: u16,
     sequence: u32,
     /// Lacing values and body of the page being filled.
     lacing: Vec<u8>,
@@ -314,6 +316,7 @@ impl<W: Write> OggMux<W> {
             )));
         }
         self.tracks[index].streams = parsed.streams;
+        self.tracks[index].pre_skip = parsed.pre_skip;
         self.tracks[index].head = Some(head);
         Ok(())
     }
@@ -336,6 +339,16 @@ impl<W: Write> OggMux<W> {
                 return Err(MuxError::DurationMismatch {
                     track: track.id.get(),
                 });
+            }
+            // RFC 7845 section 4.5: the pre-skip is decoded and dropped, so a
+            // stream must last at least that long.
+            if track.next.is_some() && track.sum < i64::from(track.pre_skip) {
+                return Err(rejected(format!(
+                    "Opus stream {} lasts {} samples, less than its pre-skip of {}",
+                    track.id.get(),
+                    track.sum,
+                    track.pre_skip
+                )));
             }
         }
         if durations.len() != self.tracks.len() {
@@ -428,6 +441,7 @@ impl<W: Write> Mux for OggMux<W> {
             channels,
             head: None,
             streams: 1,
+            pre_skip: 0,
             sequence: 0,
             lacing: Vec::new(),
             body: Vec::new(),

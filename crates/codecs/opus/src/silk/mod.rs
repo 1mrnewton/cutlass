@@ -2,7 +2,9 @@
 //! its 8, 12, or 16 kHz output to the API rate.
 
 mod fixed;
+mod indices;
 mod nlsf;
+mod pulses;
 mod tables;
 
 use crate::range::RangeDecoder;

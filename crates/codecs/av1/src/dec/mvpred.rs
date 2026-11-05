@@ -23,21 +23,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         for v in [&mut mv.row, &mut mv.col] {
             let x = i32::from(*v);
-            if self.hdr.force_integer_mv {
+            *v = if self.hdr.force_integer_mv {
                 let a = x.abs();
                 let a_int = (a + 3) >> 3;
-                *v = if x > 0 {
+                if x > 0 {
                     (a_int << 3) as i16
                 } else {
                     (-(a_int << 3)) as i16
-                };
-            } else if x & 1 != 0 {
-                *v = if x > 0 {
-                    (x - 1) as i16
-                } else {
-                    (x + 1) as i16
-                };
-            }
+                }
+            } else {
+                // An odd component moves one towards zero.
+                ((x + i32::from(x < 0)) & !1) as i16
+            };
         }
     }
 
@@ -354,11 +351,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let h4 = bh4(self.b.bsize);
         let step_w = if w4 >= 16 { 4 } else { 2 };
         let step_h = if h4 >= 16 { 4 } else { 2 };
+        let dist = self.b.ref_frame.map(|rf| {
+            relative_dist(
+                self.seq,
+                self.hdr.order_hint,
+                self.hdr.order_hints[rf.max(0) as usize],
+            )
+        });
         let mut dr = 0;
         while dr < h4.min(16) {
             let mut dc = 0;
             while dc < w4.min(16) {
-                self.add_tpl_ref_mv(dr as isize, dc as isize, is_compound);
+                self.add_tpl_ref_mv(dr as isize, dc as isize, is_compound, dist);
                 dc += step_w;
             }
             dr += step_h;
@@ -374,13 +378,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 let row = (self.b.mi_row & 15) as isize + dr;
                 let col = (self.b.mi_col & 15) as isize + dc;
                 if (0..16).contains(&row) && (0..16).contains(&col) {
-                    self.add_tpl_ref_mv(dr, dc, is_compound);
+                    self.add_tpl_ref_mv(dr, dc, is_compound, dist);
                 }
             }
         }
     }
 
-    fn add_tpl_ref_mv(&mut self, dr: isize, dc: isize, is_compound: bool) {
+    /// `dist`: the distances from this frame to the block's references.
+    fn add_tpl_ref_mv(&mut self, dr: isize, dc: isize, is_compound: bool, dist: [i32; 2]) {
         let r = (self.b.mi_row as isize + dr) | 1;
         let c = (self.b.mi_col as isize + dc) | 1;
         if !self.inside(r, c) {
@@ -398,16 +403,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             .get(y8 * w8 + x8)
             .copied()
             .unwrap_or_default();
-        let field = |rf: i8| -> Mv {
-            let d = relative_dist(
-                self.seq,
-                self.hdr.order_hint,
-                self.hdr.order_hints[rf as usize],
-            );
-            field_mv(entry, d)
-        };
+        let field = |l: usize| -> Mv { field_mv(entry, dist[l]) };
         if !is_compound {
-            let mut cand = field(self.b.ref_frame[0]);
+            let mut cand = field(0);
             if cand.row == i16::MIN {
                 return;
             }
@@ -428,11 +426,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.b.num_mv_found += 1;
             }
         } else {
-            let mut c0 = field(self.b.ref_frame[0]);
+            let mut c0 = field(0);
             if c0.row == i16::MIN {
                 return;
             }
-            let mut c1 = field(self.b.ref_frame[1]);
+            let mut c1 = field(1);
             if c1.row == i16::MIN {
                 return;
             }

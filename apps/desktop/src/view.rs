@@ -6723,8 +6723,8 @@ mod tests {
             ),
             (
                 "sticker",
-                &["Sticker", "Animation", "Opacity"],
-                &["Position & Size", "Volume"],
+                &["Sticker", "Animation", "Position & Size", "Opacity"],
+                &["Volume", "Speed"],
             ),
         ] {
             shell.select(Some(SegmentId::new(id)));

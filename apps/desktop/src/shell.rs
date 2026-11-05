@@ -9555,6 +9555,48 @@ mod tests {
     }
 
     #[test]
+    fn a_sticker_opens_its_panel_and_slides_in_and_pulses() {
+        use cutlass_model::AnimType;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 64;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.add_sticker("sticker:heart").unwrap();
+        assert_eq!(desktop.panel(), Some(cutlass_editor::Panel::Sticker));
+        let middle = |desktop: &mut Shell, time: i64| {
+            desktop.seek(Micros(time));
+            let picture = desktop.preview_bytes().unwrap();
+            let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+            [picture.rgba[at], picture.rgba[at + 1], picture.rgba[at + 2]]
+        };
+        let red = middle(&mut desktop, 0);
+        desktop
+            .set_animation(
+                AnimType::In,
+                Some("cutlass-anim-in-slide-left".to_owned()),
+                Micros(500_000),
+            )
+            .unwrap();
+        desktop
+            .set_animation(
+                AnimType::Loop,
+                Some("cutlass-anim-loop-pulse".to_owned()),
+                Micros(1_000_000),
+            )
+            .unwrap();
+        let animations = desktop.animations().unwrap();
+        assert!(animations.enter.is_some() && animations.looped.is_some());
+        // At its first frame the heart is still off to the side.
+        assert_ne!(middle(&mut desktop, 0), red);
+        // Once in, it is back in the middle.
+        let landed = middle(&mut desktop, 1_000_000);
+        assert!(landed[0] > 200 && landed[1] < 120, "{landed:?}");
+    }
+
+    #[test]
     fn a_title_card_lands_at_the_playhead_styled_and_undoes_in_one_step() {
         let temp = Temp::new();
         touching_cut(&temp.path);

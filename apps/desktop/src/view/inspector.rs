@@ -292,7 +292,11 @@ fn sticker_panel(
     state: &mut InspectorState,
     inspection: &Inspection,
 ) {
+    let tab = state.tab;
     tabs(ui, &["Sticker", "Animation"], &mut state.tab);
+    if tab != state.tab {
+        state.page = 0;
+    }
     if state.tab == 1 {
         animation_tab(
             shell,
@@ -307,6 +311,7 @@ fn sticker_panel(
         );
         return;
     }
+    position_size(shell, ui, state, inspection, "Rotate");
     body(ui, |ui| opacity_slider(shell, ui, state, inspection));
 }
 

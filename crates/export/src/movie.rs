@@ -14,6 +14,7 @@ use cutlass_encode::EncodeFactory;
 use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_isobmff::{FileBrand, Mp4Mux};
 use cutlass_model::Draft;
+use cutlass_mp3_container::Mp3Mux;
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_riff::WavMux;
@@ -176,6 +177,19 @@ pub fn write_sound(
                 )?;
                 mux.into_inner()
             }
+            (CodecId::Mp3, ContainerId::Mp3) => {
+                let mut mux = Mp3Mux::new(out);
+                export_sound(
+                    sources.draft,
+                    request,
+                    sources.encoders,
+                    &mut mux,
+                    audio,
+                    Some(progress),
+                )?;
+                mux.into_inner()
+                    .map_err(|error| ExportError::File(error.to_string()))?
+            }
             _ => return Err(ExportError::Container),
         };
         finish(out)?;
@@ -300,6 +314,7 @@ mod tests {
         let mut encoders = EncodeFactory::new();
         cutlass_aac::register_encoders(&mut encoders);
         cutlass_pcm::register_encoders(&mut encoders);
+        cutlass_mp3::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
         let sources = MovieSources {
@@ -336,6 +351,18 @@ mod tests {
         let (_, wav) = written(CodecId::Pcm, ContainerId::Riff, "cut.wav");
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
+        let (_, mp3) = written(CodecId::Mp3, ContainerId::Mp3, "cut.mp3");
+        assert_eq!(&mp3[..2], &[0xFF, 0xFB], "an MPEG-1 Layer III frame");
+        // The first frame is the Info tag (constant bitrate) with the LAME
+        // delay and padding of what was coded.
+        let at = 4 + 32;
+        assert_eq!(&mp3[at..at + 4], b"Info");
+        let packed = u32::from_be_bytes([0, mp3[at + 141], mp3[at + 142], mp3[at + 143]]);
+        assert_eq!(packed >> 12, cutlass_mp3::ENCODER_DELAY);
+        let padding = packed & 0xFFF;
+        let frames = u32::from_be_bytes([mp3[at + 8], mp3[at + 9], mp3[at + 10], mp3[at + 11]]);
+        // Half a second at 44.1 kHz.
+        assert_eq!(frames * 1152 - cutlass_mp3::ENCODER_DELAY - padding, 22_050);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use cutlass_codec::access::SideData;
 use cutlass_codec::{
     FrameSize, Packet as FilePacket, StreamCodec, StreamParams, Timescale, Timestamp,
 };
-use cutlass_container::{Mux, MuxStatus, NewStream, TrackDuration, TrackId};
+use cutlass_container::{Mux, MuxStatus, NewStream, TrackDuration, TrackId, Trim};
 use cutlass_encode::{
     AudioInput, ChannelLayout, CodecParams, CpuFrame, EncodeFactory, Encoder, FrameInput,
     FrameTime, Packet as AccessPacket, Pcm, PixelFormat,
@@ -407,6 +407,8 @@ fn open_audio(
     };
     let mut params = CodecParams::audio(audio.codec, audio.sample_rate, layout(audio.channels)?);
     params.bitrate = audio.bitrate;
+    // An MP3 at a named bitrate is that bitrate in every frame.
+    params.constant_rate = audio.codec == cutlass_codec::CodecId::Mp3;
     if audio.codec == cutlass_codec::CodecId::Pcm {
         // A WAV holds 16-bit samples.
         params.sample_format = Some(cutlass_encode::SampleFormat::I16);
@@ -924,8 +926,20 @@ fn write_packets<M: Mux>(
                     mux.set_config(TrackId::new(stream), config)
                         .map_err(|_| ExportError::SideData)?;
                 }
-                // The priming the encoder adds is left in the file.
-                SideData::Gapless { .. } => {}
+                // A container with a gapless field records the priming and
+                // padding; the others leave it in the file.
+                SideData::Gapless {
+                    encoder_delay,
+                    trailing_padding,
+                    ..
+                } => {
+                    let trim = Trim::new(
+                        Some(u64::from(*encoder_delay)),
+                        Some(u64::from(*trailing_padding)),
+                    );
+                    mux.set_trim(TrackId::new(stream), trim)
+                        .map_err(ExportError::Mux)?;
+                }
                 _ => return Err(ExportError::SideData),
             }
         }

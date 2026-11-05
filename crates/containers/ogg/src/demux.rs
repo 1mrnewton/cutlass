@@ -97,6 +97,9 @@ pub struct OggDemux<R> {
     last_error: Option<OggError>,
     counters: Counters,
     ignored_pages: u64,
+    /// Checksum failures and skipped bytes met by packet reads.
+    crc_failures: u64,
+    skipped: u64,
     seek_read: u64,
     last_seek: SeekCost,
 }
@@ -110,6 +113,8 @@ struct Snapshot {
     gaps: usize,
     counters: Counters,
     ignored_pages: u64,
+    crc_failures: u64,
+    skipped: u64,
 }
 
 impl<R: Read + Seek> OggDemux<R> {
@@ -144,6 +149,7 @@ impl<R: Read + Seek> OggDemux<R> {
         if !first.bos() {
             return Err(OggError::NotBos.into());
         }
+        let leading = source.skipped();
 
         // Beginning-of-stream pages come first, one per logical stream.
         let mut kinds = Vec::new();
@@ -174,7 +180,10 @@ impl<R: Read + Seek> OggDemux<R> {
             let first_piece = pieces
                 .first()
                 .map_or(&[][..], |piece| &page.body[piece.start..piece.end]);
-            if first_piece.starts_with(HEAD_MAGIC) {
+            // "Opus" begins both Opus header magics, so a stream that starts
+            // with it and has no valid `OpusHead` is a broken Opus stream,
+            // not another mapping.
+            if first_piece.starts_with(&HEAD_MAGIC[..4]) {
                 if pieces.len() != 1 || !pieces[0].complete {
                     return Err(OggError::BadBosPage {
                         serial: page.serial,
@@ -256,6 +265,8 @@ impl<R: Read + Seek> OggDemux<R> {
             last_error: None,
             counters: Counters::default(),
             ignored_pages: 0,
+            crc_failures: 0,
+            skipped: leading,
             seek_read: 0,
             last_seek: SeekCost::default(),
         };
@@ -643,6 +654,8 @@ impl<R: Read + Seek> OggDemux<R> {
             gaps: self.gaps.len(),
             counters: self.counters,
             ignored_pages: self.ignored_pages,
+            crc_failures: self.crc_failures,
+            skipped: self.skipped,
         }
     }
 
@@ -658,6 +671,8 @@ impl<R: Read + Seek> OggDemux<R> {
         self.gaps.truncate(snapshot.gaps);
         self.counters = snapshot.counters;
         self.ignored_pages = snapshot.ignored_pages;
+        self.crc_failures = snapshot.crc_failures;
+        self.skipped = snapshot.skipped;
     }
 
     fn seek_inner(&mut self, to: SeekTo, cost: &mut SeekCost) -> Result<SeekLanding, Fault> {
@@ -893,16 +908,18 @@ impl<R: Read> OggDemux<R> {
         self.audio_start
     }
 
-    /// Pages skipped because their checksum failed.
+    /// Candidate pages packet reads skipped because their checksum failed.
+    /// Open and seek re-read pages; those reads are not counted here.
     #[must_use]
     pub const fn crc_failures(&self) -> u64 {
-        self.source.crc_failures()
+        self.crc_failures
     }
 
-    /// Bytes skipped while searching for a capture pattern.
+    /// Bytes skipped before the first page and by packet reads while
+    /// searching for a capture pattern.
     #[must_use]
     pub const fn skipped_bytes(&self) -> u64 {
-        self.source.skipped()
+        self.skipped
     }
 
     /// Pages missing from sequence numbers since open or the last seek.
@@ -945,7 +962,16 @@ impl<R: Read> OggDemux<R> {
         if let Some(page) = self.replay.pop_front() {
             return Ok(PageRead::Page(page));
         }
-        self.source.read_page()
+        let crc = self.source.crc_failures();
+        let skipped = self.source.skipped();
+        let read = self.source.read_page();
+        self.crc_failures = self
+            .crc_failures
+            .saturating_add(self.source.crc_failures().saturating_sub(crc));
+        self.skipped = self
+            .skipped
+            .saturating_add(self.source.skipped().saturating_sub(skipped));
+        read
     }
 
     /// Reads one page into the ready queue. False at the end of the link.

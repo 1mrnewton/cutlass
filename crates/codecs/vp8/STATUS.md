@@ -6,7 +6,7 @@ Request: a full VP8 decoder and encoder, end to end, built, tested, fixed, and b
 
 ## Rules and skills that were followed
 
-- Every file in `.cursor/rules` of this checkout: `codec-shipping`, `commit-often`, `container-shipping`, `development-worktree`, `local-media`, `merge-pull-request`, `no-capcut-names`, `perf`, `platforms`, `pull-request`, `rust-standards`, `source-of-truth`, `tests`, `think-like-a-pro`, `worktree-names`.
+- Every file in `.cursor/rules` of this checkout: `codec-shipping`, `commit-often`, `container-shipping`, `development-worktree`, `local-media`, `merge-pull-request`, the product-name ban, `perf`, `platforms`, `pull-request`, `rust-standards`, `source-of-truth`, `tests`, `think-like-a-pro`, `worktree-names`.
 - Skill `ship-codec` (`.cursor/skills/ship-codec/SKILL.md`) with `references/implementation.md`, `verification.md`, `deliverables.md`, and `video-image.md`. This file is that skill's scope record, capability matrix, fixture manifest, and validation report.
 - Skills `think-like-a-pro` and `cutlass-worktree`.
 - There is no `AGENTS.md` in this tree.
@@ -109,7 +109,7 @@ All numbers are from this machine (Apple M5 Pro, macOS 27): release builds, one 
 | Encoder fuzz | 1800 s on the final encoder: 41,235 rounds, 211,533 frames, findings 0 | `encoder_fuzz_does_not_panic` | Pass |
 | `cargo fmt --all -- --check` | Clean for every file this branch touches. `crates/codecs/gif/src/quant.rs` already differs on `development` and is not touched here. | | Pass for this branch |
 | `cargo clippy` with the workspace lints | Clean for `cutlass-vp8`, `cutlass-isobmff`, and the desktop app on macOS. `cutlass-vp8` and `cutlass-isobmff` are also clean with `--target x86_64-unknown-linux-gnu`. | | Pass, except the desktop Linux cross-lint, which cannot run here (see Not done) |
-| `cargo test` | `cutlass-vp8`: 60 unit, oracle, and lifecycle tests and 2 integration tests pass in debug and in release; the gate is ignored by default and passes when run. `cutlass-isobmff`: 49 pass. Desktop `cutlass`: 250 pass, 2 ignored (a 4K HDR playback test and a test that needs `CUTLASS_MOVIE`, neither about VP8). | | Pass |
+| `cargo test` | `cutlass-vp8`: 61 unit, oracle, and lifecycle tests and 2 integration tests pass in debug and in release; the gate is ignored by default and passes when run. `cutlass-isobmff`: 49 pass. Desktop `cutlass`: 250 pass, 2 ignored (a 4K HDR playback test and a test that needs `CUTLASS_MOVIE`, neither about VP8). | | Pass |
 
 ### Quality at 1 Mb/s, 640×360, 150 frames
 

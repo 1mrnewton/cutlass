@@ -47,7 +47,7 @@ pub use keyframe::{
 };
 pub use linkage::{KindSwitches, LinkageSettings, linkage_from_biz};
 pub use materials::{
-    BloomParams, ConstantSpeedError, Crop, CurveSpeed, FreezeInfo, MaterialAnimations,
+    BloomParams, Bubble, ConstantSpeedError, Crop, CurveSpeed, FreezeInfo, MaterialAnimations,
     MaterialAudio, MaterialAudioFade, MaterialCanvas, MaterialColorConfig, MaterialDraft,
     MaterialEffect, MaterialHsl, MaterialPictureAdjust, MaterialPluginEffect, MaterialRef,
     MaterialShape, MaterialSpeed, MaterialText, MaterialTransition, MaterialVideo,

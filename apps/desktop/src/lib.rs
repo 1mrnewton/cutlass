@@ -33,6 +33,11 @@ pub fn register_codecs_with(
 ) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
+    // WebP goes ahead of the platform: an animated file's later packets are
+    // bare frames only the Rust decoder composes, and a file then decodes
+    // and encodes the same everywhere.
+    cutlass_webp::register_decoders(&mut decoders);
+    cutlass_webp::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -127,6 +132,31 @@ mod tests {
         encoders
             .open(&picture(CodecId::H264, 64, 64))
             .expect("h264 encoder");
+    }
+
+    #[test]
+    fn the_desktop_codes_webp_in_rust_ahead_of_the_platform() {
+        let (decoders, encoders) = super::register_codecs();
+        let mut encoder = encoders
+            .open(&picture(CodecId::Webp, 0, 0))
+            .expect("webp encoder");
+        assert_eq!(encoder.codec(), CodecId::Webp);
+        let image = cutlass_encode::StillImage::from_samples(
+            2,
+            2,
+            cutlass_encode::ColorType::Rgb,
+            cutlass_encode::BitDepth::Eight,
+            vec![200; 12],
+        );
+        let packets = encoder
+            .push_picture(&cutlass_encode::PictureInput { image })
+            .expect("encode");
+        let packet = cutlass_decode::Packet::video(packets[0].data.clone(), 0, 0, 0, true);
+        let mut decoder = decoders
+            .open(&picture(CodecId::Webp, 2, 2))
+            .expect("webp decoder");
+        let pictures = decoder.decode_picture(&packet).expect("decode");
+        assert_eq!((pictures[0].image.width, pictures[0].image.height), (2, 2));
     }
 
     #[cfg(target_os = "macos")]

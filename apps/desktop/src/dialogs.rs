@@ -96,8 +96,8 @@ impl Dialogs {
         });
     }
 
-    /// Ask where to save a still, as PNG or JPEG. A name with neither
-    /// ending is saved as PNG.
+    /// Ask where to save a still, as PNG, JPEG or WebP. A name with none
+    /// of those endings is saved as PNG.
     pub(crate) fn save_still(&mut self, parent: Option<&eframe::Frame>, name: &str) {
         let stem = if name.trim().is_empty() {
             "Still"
@@ -107,12 +107,13 @@ impl Dialogs {
         let dialog = dialog(parent)
             .set_file_name(format!("{stem}.png"))
             .add_filter("PNG", &["png"])
-            .add_filter("JPEG", &["jpg", "jpeg"]);
+            .add_filter("JPEG", &["jpg", "jpeg"])
+            .add_filter("WebP", &["webp"]);
         self.start(Picker::SaveStill, async move {
             dialog.save_file().await.map(|file| {
                 let path = file.path();
                 let known = path.extension().is_some_and(|typed| {
-                    ["png", "jpg", "jpeg"]
+                    ["png", "jpg", "jpeg", "webp"]
                         .iter()
                         .any(|known| typed.eq_ignore_ascii_case(known))
                 });

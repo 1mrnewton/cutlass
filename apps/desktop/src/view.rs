@@ -5816,6 +5816,14 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         export.gif = gif_on.then(GifExport::default);
     }
     if let Some(gif) = &mut export.gif {
+        choice_row(ui, "Format", |ui| {
+            if ui.selectable_label(!gif.webp, "GIF").clicked() {
+                gif.webp = false;
+            }
+            if ui.selectable_label(gif.webp, "WebP").clicked() {
+                gif.webp = true;
+            }
+        });
         choice_row(ui, "Size", |ui| {
             for side in GIF_SHORT_SIDES {
                 if ui
@@ -5870,7 +5878,7 @@ fn export_extension(view: &ViewState) -> &'static str {
     } else if view.export.sound {
         view.export.audio.extension()
     } else {
-        "gif"
+        view.export.gif.map_or("gif", |gif| gif.extension())
     }
 }
 
@@ -9563,6 +9571,11 @@ mod tests {
         assert_eq!(export_extension(&view), "wav");
         view.export.sound = false;
         assert_eq!(export_extension(&view), "gif");
+        view.export.gif = Some(crate::shell::GifExport {
+            webp: true,
+            ..crate::shell::GifExport::default()
+        });
+        assert_eq!(export_extension(&view), "webp");
         assert_eq!(parse_mbps("16"), Some(16_000_000));
         assert_eq!(parse_mbps(" 7.5 "), Some(7_500_000));
         for bad in ["", "0", "-3", "fast", "401", "NaN"] {

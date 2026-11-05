@@ -410,7 +410,7 @@ impl SoundFormat {
     }
 }
 
-/// An animated GIF beside the export.
+/// An animated GIF, or WebP, beside the export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GifExport {
     /// One of [`cutlass_export::GIF_SHORT_SIDES`].
@@ -418,6 +418,16 @@ pub struct GifExport {
     pub frame_rate: FrameRate,
     /// Plays over and over; otherwise once.
     pub looped: bool,
+    /// An animated WebP instead of a GIF: full colour and alpha.
+    pub webp: bool,
+}
+
+impl GifExport {
+    /// The animation's file extension, without the dot.
+    #[must_use]
+    pub fn extension(&self) -> &'static str {
+        if self.webp { "webp" } else { "gif" }
+    }
 }
 
 impl Default for GifExport {
@@ -429,6 +439,7 @@ impl Default for GifExport {
                 denominator: 1,
             },
             looped: true,
+            webp: false,
         }
     }
 }
@@ -5447,11 +5458,15 @@ impl Shell {
             });
         }
         let gif = request.gif.map(|gif| ExportOutput::Gif {
-            path: request.path.with_extension("gif"),
+            path: request.path.with_extension(gif.extension()),
             looped: gif.looped,
             request: cutlass_export::ExportRequest {
                 short_side: gif.short_side,
-                codec: CodecId::Gif,
+                codec: if gif.webp {
+                    CodecId::Webp
+                } else {
+                    CodecId::Gif
+                },
                 frame_rate: gif.frame_rate,
                 container: cutlass_codec::ContainerId::Still,
                 ..base.clone()
@@ -5572,10 +5587,11 @@ impl Shell {
         self.exported = None;
         self.start_job("Export", move |progress| {
             let renderer = gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
-            // GIF pictures come from the Rust encoder, whose packets the
-            // GIF file is built from.
+            // GIF and WebP pictures come from the Rust encoders, whose
+            // packets the animation is built from.
             let mut gifs = EncodeFactory::new();
             cutlass_gif::register_encoders(&mut gifs);
+            cutlass_webp::register_encoders(&mut gifs);
             let steps = plan.outputs.len().max(1);
             let mut written = Ok(());
             for (step, output) in plan.outputs.iter().enumerate() {
@@ -5610,7 +5626,7 @@ impl Shell {
                     }
                     ExportOutput::Gif {
                         request, looped, ..
-                    } => cutlass_export::write_gif(
+                    } => cutlass_export::write_animation(
                         &cutlass_export::MovieSources {
                             encoders: &gifs,
                             ..sources
@@ -5707,7 +5723,8 @@ impl Shell {
     }
 
     /// Save the picture at the playhead to `path` at the canvas size, as
-    /// JPEG for a `.jpg` or `.jpeg` name and PNG otherwise. It runs as a
+    /// JPEG for a `.jpg` or `.jpeg` name, WebP for `.webp`, and PNG
+    /// otherwise. It runs as a
     /// job; when it lands it is offered like a finished export.
     /// Write a copy of the log, the previous file then the current one, to
     /// `path`. Before the log opened, it is the Cutlass root's logs folder.
@@ -5723,11 +5740,14 @@ impl Shell {
     pub fn export_still(&mut self, path: &Path) -> Result<(), ShellError> {
         self.refuse_busy()?;
         let draft = self.session_draft()?.clone();
-        let jpeg = path.extension().is_some_and(|typed| {
-            typed.eq_ignore_ascii_case("jpg") || typed.eq_ignore_ascii_case("jpeg")
-        });
-        let format = if jpeg {
+        let typed = |names: &[&str]| {
+            path.extension()
+                .is_some_and(|typed| names.iter().any(|name| typed.eq_ignore_ascii_case(name)))
+        };
+        let format = if typed(&["jpg", "jpeg"]) {
             cutlass_export::StillFormat::Jpeg
+        } else if typed(&["webp"]) {
+            cutlass_export::StillFormat::Webp
         } else {
             cutlass_export::StillFormat::Png
         };
@@ -11890,6 +11910,24 @@ mod tests {
             ..ExportRequest::default()
         });
         assert!(matches!(taken, Err(ShellError::Overwrite(path)) if path.ends_with("loop.gif")));
+
+        // The same animation as a WebP.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("loop.webp"),
+                picture: false,
+                sound: false,
+                gif: Some(super::GifExport { webp: true, ..gif }),
+                ..ExportRequest::default()
+            },
+        );
+        let bytes = std::fs::read(temp.path.join("loop.webp")).unwrap();
+        assert_eq!(
+            (&bytes[..4], &bytes[8..16]),
+            (&b"RIFF"[..], &b"WEBPVP8X"[..])
+        );
+        assert!(bytes.windows(4).any(|w| w == b"ANMF"));
         let nothing = desktop.export(ExportRequest {
             path: temp.path.join("none.mp4"),
             picture: false,
@@ -11929,6 +11967,26 @@ mod tests {
         land_job(&mut desktop);
         let bytes = std::fs::read(&jpeg).unwrap();
         assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+
+        let webp = temp.path.join("frame.webp");
+        desktop.export_still(&webp).unwrap();
+        land_job(&mut desktop);
+        let bytes = std::fs::read(&webp).unwrap();
+        assert_eq!((&bytes[..4], &bytes[8..12]), (&b"RIFF"[..], &b"WEBP"[..]));
+        let params = CodecParams::video(CodecId::Webp, 64, 32);
+        let mut decoder = cutlass_webp::WebpDecoder::open(&params).unwrap();
+        let packet = Packet::video(bytes, 0, 0, 0, true);
+        let pictures = decoder.decode_picture(&packet).unwrap();
+        let image = &pictures[0].image;
+        assert_eq!((image.width, image.height), (64, 32));
+        let channels = image.samples.len() / (64 * 32);
+        let at = (16 * 64 + 32) * channels;
+        let near = |got: u16, want: u16| got.abs_diff(want) <= 8;
+        let pixel = &image.samples[at..at + 3];
+        assert!(
+            near(pixel[0], 0x33) && near(pixel[1], 0x66) && near(pixel[2], 0x99),
+            "{pixel:?}"
+        );
 
         assert_eq!(
             desktop.export_still(&temp.path).unwrap_err().to_string(),

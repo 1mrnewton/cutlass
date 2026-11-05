@@ -27,6 +27,7 @@ use cutlass_editor::{
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{ReaderFactory, SceneError, scene_cuts};
+use cutlass_export::{ProresProfile, SidecarKind};
 use cutlass_model::{
     Crop, Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType,
     Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
@@ -299,17 +300,32 @@ pub struct Inspection {
 
 #[derive(Clone, Debug)]
 pub struct ExportRequest {
+    /// The main file: a movie (`.mp4`, `.mov`), the sound alone (`.m4a`,
+    /// `.wav`), or a GIF when only the GIF is asked for. A GIF or a caption
+    /// file asked for beside it takes the same name and folder.
     pub path: PathBuf,
     pub short_side: i32,
-    /// PNG writes the frame at the playhead; H.264 or HEVC a movie.
+    /// PNG writes the frame at the playhead; H.264, HEVC or ProRes a movie.
     pub codec: CodecId,
     pub replace: bool,
     pub span: ExportSpan,
     /// `None` keeps the project's rate.
     pub frame_rate: Option<FrameRate>,
     pub quality: ExportQuality,
-    /// The movie carries the timeline's sound.
+    /// Typed bits a second. `None` takes the rate from `quality`.
+    pub bitrate: Option<u32>,
+    /// Hold the bitrate over each second instead of on average.
+    pub constant_rate: bool,
+    pub prores: ProresProfile,
+    /// The file has pictures. Off with `sound` on writes the sound alone.
+    pub picture: bool,
+    /// The file carries the timeline's sound.
     pub sound: bool,
+    pub audio: SoundFormat,
+    /// Also write an animated GIF.
+    pub gif: Option<GifExport>,
+    /// Also write the captions as a file.
+    pub captions: Option<SidecarKind>,
 }
 
 impl Default for ExportRequest {
@@ -322,10 +338,97 @@ impl Default for ExportRequest {
             span: ExportSpan::Whole,
             frame_rate: None,
             quality: ExportQuality::Recommended,
+            bitrate: None,
+            constant_rate: false,
+            prores: ProresProfile::Standard,
+            picture: true,
             sound: true,
+            audio: SoundFormat::default(),
+            gif: None,
+            captions: None,
         }
     }
 }
+
+/// The sound of an export: AAC (in an MP4, a movie or an M4A) or 16-bit PCM
+/// (in a movie or a WAV).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoundFormat {
+    pub codec: CodecId,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Bits a second; PCM ignores it.
+    pub bitrate: u32,
+}
+
+impl Default for SoundFormat {
+    fn default() -> Self {
+        Self {
+            codec: CodecId::Aac,
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate: 192_000,
+        }
+    }
+}
+
+impl SoundFormat {
+    pub const SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
+    pub const BITRATES: [u32; 3] = [128_000, 192_000, 320_000];
+
+    fn export(self) -> cutlass_export::AudioExport {
+        cutlass_export::AudioExport {
+            codec: self.codec,
+            bitrate: if self.codec == CodecId::Pcm {
+                0
+            } else {
+                self.bitrate
+            },
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            limiter: 0,
+        }
+    }
+
+    /// The extension of a file of this sound alone.
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        if self.codec == CodecId::Pcm {
+            "wav"
+        } else {
+            "m4a"
+        }
+    }
+}
+
+/// An animated GIF beside the export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GifExport {
+    /// One of [`cutlass_export::GIF_SHORT_SIDES`].
+    pub short_side: u32,
+    pub frame_rate: FrameRate,
+    /// Plays over and over; otherwise once.
+    pub looped: bool,
+}
+
+impl Default for GifExport {
+    fn default() -> Self {
+        Self {
+            short_side: 320,
+            frame_rate: FrameRate {
+                numerator: 15,
+                denominator: 1,
+            },
+            looped: true,
+        }
+    }
+}
+
+/// GIF frame rates the dialog offers.
+pub const GIF_RATES: [u32; 3] = [10, 15, 24];
+
+/// The fastest typed bitrate an export takes, in bits a second.
+pub const MAX_BITRATE: u32 = 400_000_000;
 
 /// How much of the timeline a movie holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4835,13 +4938,27 @@ impl Shell {
         }
     }
 
-    /// Writes a PNG of the frame at the playhead.
+    /// Writes the export `request` names.
     ///
-    /// The short side is one of [`SHORT_SIDES`]. A PNG is one picture, so the
-    /// export range is that frame. The software encoder writes it, and the
-    /// still mux checks the file before it replaces `request.path`. A codec
-    /// this shell cannot mux is refused after the encoder probe.
+    /// PNG writes the frame at the playhead at once. Anything else runs as a
+    /// job: a movie, or the sound alone when the pictures are off, then a
+    /// GIF and a caption file beside it when asked. The window shows the
+    /// job's progress; Cancel leaves no file. A codec this machine cannot
+    /// encode is refused before anything is written.
     pub fn export(&mut self, request: ExportRequest) -> Result<(), ShellError> {
+        if request.codec == CodecId::Png {
+            return self.export_png(request);
+        }
+        let plan = self.export_plan(&request)?;
+        if !request.replace
+            && let Some(taken) = plan.paths().into_iter().find(|path| path.exists())
+        {
+            return Err(ShellError::Overwrite(taken));
+        }
+        self.run_export(plan)
+    }
+
+    fn export_png(&mut self, request: ExportRequest) -> Result<(), ShellError> {
         if !SHORT_SIDES.contains(&request.short_side) {
             return Err(ShellError::Unavailable(
                 "the short side is not one of the steps".to_owned(),
@@ -4856,12 +4973,6 @@ impl Shell {
         let params = CodecParams::video(request.codec, width, height);
         if let Err(error) = self.encoders.open(&params) {
             return Err(ShellError::CodecDeclined(error.to_string()));
-        }
-        if matches!(request.codec, CodecId::H264 | CodecId::Hevc) {
-            return self.export_movie(request);
-        }
-        if request.codec != CodecId::Png {
-            return Err(ShellError::ExportUnavailable);
         }
         let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
@@ -4881,7 +4992,7 @@ impl Shell {
             sidecar: None,
             late_by: 0,
             constant_rate: false,
-            prores: cutlass_export::ProresProfile::Standard,
+            prores: ProresProfile::Standard,
         };
         let mut encoders = EncodeFactory::new();
         cutlass_png::register_encoders(&mut encoders);
@@ -4913,43 +5024,176 @@ impl Shell {
         write_replaced(&request.path, bytes)
     }
 
-    /// Write the movie as a job. The window shows its progress; Cancel
-    /// leaves no file. When it lands, [`Self::exported`] names the file.
-    fn export_movie(&mut self, request: ExportRequest) -> Result<(), ShellError> {
-        self.refuse_busy()?;
+    /// What a job export writes, checked before it starts.
+    fn export_plan(&mut self, request: &ExportRequest) -> Result<ExportPlan, ShellError> {
+        if !request.picture && !request.sound && request.gif.is_none() {
+            return Err(ShellError::Unavailable(
+                "turn on the video, the audio or the GIF".to_owned(),
+            ));
+        }
+        if request.path.is_dir() {
+            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        }
+        if request.path.file_stem().is_none_or(|stem| stem.is_empty())
+            || cutlass_export::part_path(&request.path).is_none()
+        {
+            return Err(ShellError::Io("the export has no file name".to_owned()));
+        }
         let draft = self.session_draft()?.clone();
         let range = self.export_range(&draft, request.span)?;
+        let frame_rate = request
+            .frame_rate
+            .or_else(|| draft.frame_rate())
+            .unwrap_or(FrameRate::FPS_30);
+        let base = cutlass_export::ExportRequest {
+            range: range.clone(),
+            short_side: 0,
+            codec: request.codec,
+            bitrate: 0,
+            frame_rate,
+            container: cutlass_codec::ContainerId::Isobmff,
+            audio: None,
+            sidecar: None,
+            late_by: 0,
+            constant_rate: request.constant_rate,
+            prores: request.prores,
+        };
+        let captions = request.captions.map(|kind| cutlass_export::SidecarRequest {
+            kind,
+            name: request
+                .path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        });
+        let mut main = None;
+        if request.picture {
+            main = Some(self.movie_output(request, &base, captions.clone())?);
+        } else if request.sound {
+            let audio = request.audio.export();
+            let container = if audio.codec == CodecId::Pcm {
+                cutlass_codec::ContainerId::Riff
+            } else {
+                cutlass_codec::ContainerId::Isobmff
+            };
+            main = Some(ExportOutput::Sound {
+                path: request.path.with_extension(request.audio.extension()),
+                request: cutlass_export::ExportRequest {
+                    audio: Some(audio),
+                    container,
+                    ..base.clone()
+                },
+            });
+        }
+        let gif = request.gif.map(|gif| ExportOutput::Gif {
+            path: request.path.with_extension("gif"),
+            looped: gif.looped,
+            request: cutlass_export::ExportRequest {
+                short_side: gif.short_side,
+                codec: CodecId::Gif,
+                frame_rate: gif.frame_rate,
+                container: cutlass_codec::ContainerId::Still,
+                ..base.clone()
+            },
+        });
+        if let Some(ExportOutput::Gif { request, .. }) = &gif {
+            cutlass_export::validate(request).map_err(export_failure)?;
+        }
+        // Without a movie to carry them, the captions are written alone.
+        let captions = match (&main, captions) {
+            (Some(ExportOutput::Movie { .. }), _) | (_, None) => None,
+            (_, Some(sidecar)) => {
+                let body = cutlass_export::sidecar_text(&draft, &range, sidecar.kind)
+                    .map_err(export_failure)?;
+                Some((sidecar, body))
+            }
+        };
+        Ok(ExportPlan {
+            draft,
+            outputs: main.into_iter().chain(gif).collect(),
+            captions,
+            folder: request
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// The movie a request names, with its encoder probed on this machine.
+    fn movie_output(
+        &self,
+        request: &ExportRequest,
+        base: &cutlass_export::ExportRequest,
+        captions: Option<cutlass_export::SidecarRequest>,
+    ) -> Result<ExportOutput, ShellError> {
         let Ok(short_side) = u32::try_from(request.short_side) else {
             return Err(ShellError::Unavailable(
                 "the short side is not one of the steps".to_owned(),
             ));
         };
-        let name = request
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|_| cutlass_export::part_path(&request.path).is_some())
-            .ok_or_else(|| ShellError::Io("the export has no file name".to_owned()))?;
-        if request.path.is_dir() {
-            return Err(ShellError::Io("the export path is a folder".to_owned()));
+        if !SHORT_SIDES.contains(&request.short_side) {
+            return Err(ShellError::Unavailable(
+                "the short side is not one of the steps".to_owned(),
+            ));
+        }
+        let mov = is_mov(&request.path);
+        if request.codec == CodecId::Prores && !mov {
+            return Err(ShellError::Unavailable(
+                "ProRes is written in a MOV".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Pcm && !mov {
+            return Err(ShellError::Unavailable(
+                "PCM sound is written in a MOV".to_owned(),
+            ));
+        }
+        let bitrate = match request.bitrate {
+            Some(0) => {
+                return Err(ShellError::Unavailable(
+                    "the bitrate is not a number of bits a second".to_owned(),
+                ));
+            }
+            Some(rate) => rate.min(MAX_BITRATE),
+            None => request.quality.bitrate(short_side, request.codec),
+        };
+        let (width, height) = self.scaled_canvas(request.short_side)?;
+        let mut params = CodecParams::with_format(
+            request.codec,
+            width,
+            height,
+            cutlass_decode::PixelFormat::Rgba8,
+        );
+        if request.codec == CodecId::Prores {
+            params.extra = request.prores.code().to_vec();
+        }
+        if let Err(error) = self.encoders.open(&params) {
+            return Err(ShellError::CodecDeclined(error.to_string()));
+        }
+        if !matches!(
+            request.codec,
+            CodecId::H264 | CodecId::Hevc | CodecId::Prores
+        ) {
+            return Err(ShellError::ExportUnavailable);
         }
         let movie = cutlass_export::ExportRequest {
-            range,
             short_side,
-            codec: request.codec,
-            bitrate: request.quality.bitrate(short_side, request.codec),
-            frame_rate: request
-                .frame_rate
-                .or_else(|| draft.frame_rate())
-                .unwrap_or(FrameRate::FPS_30),
-            container: cutlass_codec::ContainerId::Isobmff,
-            audio: request.sound.then_some(cutlass_export::MOVIE_SOUND),
-            sidecar: None,
-            late_by: 0,
-            constant_rate: false,
-            prores: cutlass_export::ProresProfile::Standard,
+            bitrate,
+            audio: request.sound.then(|| request.audio.export()),
+            sidecar: captions,
+            ..base.clone()
         };
         cutlass_export::validate(&movie).map_err(export_failure)?;
+        Ok(ExportOutput::Movie {
+            path: request.path.clone(),
+            request: movie,
+        })
+    }
+
+    /// Write `plan` as a job. When it lands, [`Self::exported`] names the
+    /// main file.
+    fn run_export(&mut self, plan: ExportPlan) -> Result<(), ShellError> {
+        self.refuse_busy()?;
         let root = self.path.clone();
         let readers = self.readers.clone();
         let encoders = self.encoders.clone();
@@ -4959,34 +5203,86 @@ impl Shell {
             let renderer = preview.renderer();
             (renderer.device().clone(), renderer.queue().clone())
         });
-        let destination = request.path;
+        let first = plan.paths().into_iter().next().unwrap_or_default();
+        let name = first
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.exported = None;
         self.start_job("Export", move |progress| {
-            progress.stage(&format!("Writing {name}"));
             let renderer = gpu.map(|(device, queue)| cutlass_render::Renderer::new(device, queue));
-            let mut report = |done: u64, total: u64| {
-                if total > 0 {
-                    progress.fraction(done as f32 / total as f32);
-                }
-                !progress.cancelled()
-            };
-            let written = cutlass_export::write_movie(
-                &cutlass_export::MovieSources {
-                    draft: &draft,
+            // GIF pictures come from the Rust encoder, whose packets the
+            // GIF file is built from.
+            let mut gifs = EncodeFactory::new();
+            cutlass_gif::register_encoders(&mut gifs);
+            let steps = plan.outputs.len().max(1);
+            let mut written = Ok(());
+            for (step, output) in plan.outputs.iter().enumerate() {
+                let path = output.path();
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                progress.stage(&format!("Writing {file}"));
+                let mut report = |done: u64, total: u64| {
+                    if total > 0 {
+                        let part = done as f32 / total as f32;
+                        progress.fraction((step as f32 + part) / steps as f32);
+                    }
+                    !progress.cancelled()
+                };
+                let sources = cutlass_export::MovieSources {
+                    draft: &plan.draft,
                     root: root.as_deref(),
                     readers: &readers,
                     fonts: &*fonts,
                     renderer: renderer.as_ref(),
                     encoders: &encoders,
-                },
-                &movie,
-                &destination,
-                &mut report,
-            );
+                };
+                written = match output {
+                    ExportOutput::Movie { request, .. } => {
+                        cutlass_export::write_movie(&sources, request, path, &mut report)
+                            .map(|_| ())
+                    }
+                    ExportOutput::Sound { request, .. } => {
+                        cutlass_export::write_sound(&sources, request, path, &mut report)
+                    }
+                    ExportOutput::Gif {
+                        request, looped, ..
+                    } => cutlass_export::write_gif(
+                        &cutlass_export::MovieSources {
+                            encoders: &gifs,
+                            ..sources
+                        },
+                        request,
+                        *looped,
+                        path,
+                        &mut report,
+                    )
+                    .map(|_| ()),
+                };
+                if written.is_err() {
+                    break;
+                }
+            }
+            if written.is_ok()
+                && let Some((sidecar, body)) = &plan.captions
+            {
+                let extension = match sidecar.kind {
+                    SidecarKind::Plain => "txt",
+                    _ => "srt",
+                };
+                written = cutlass_export::write_sidecar(
+                    &plan.folder,
+                    &format!("{}.{extension}", sidecar.name),
+                    body,
+                )
+                .map(|_| ());
+            }
             Box::new(move |shell: &mut Shell| {
                 written.map_err(export_failure)?;
                 shell.set_notice(format!("Exported {name}"));
-                shell.exported = Some(destination);
+                shell.exported = Some(first);
                 Ok(())
             })
         })
@@ -5033,8 +5329,14 @@ impl Shell {
 
     /// An encoder for `codec` opens on this machine.
     pub fn encodes(&self, codec: CodecId) -> bool {
+        // Export hands the encoder RGBA pictures, so ask for those.
         self.encoders
-            .open(&CodecParams::video(codec, 1280, 720))
+            .open(&CodecParams::with_format(
+                codec,
+                1280,
+                720,
+                cutlass_decode::PixelFormat::Rgba8,
+            ))
             .is_ok()
     }
 
@@ -5453,6 +5755,73 @@ impl Shell {
     fn stored_zoom(&self) -> Result<Zoom, ShellError> {
         Zoom::new(self.pixel_size).ok_or(ShellError::Zoom)
     }
+}
+
+/// What one export job writes.
+struct ExportPlan {
+    draft: Draft,
+    /// The main file first, then a GIF beside it.
+    outputs: Vec<ExportOutput>,
+    /// A caption file written alone, when there is no movie to carry it.
+    captions: Option<(cutlass_export::SidecarRequest, String)>,
+    folder: PathBuf,
+}
+
+impl ExportPlan {
+    fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .outputs
+            .iter()
+            .map(|output| output.path().to_path_buf())
+            .collect();
+        let captions = self
+            .outputs
+            .iter()
+            .find_map(|output| match output {
+                ExportOutput::Movie { request, .. } => request.sidecar.as_ref(),
+                _ => None,
+            })
+            .or(self.captions.as_ref().map(|(sidecar, _)| sidecar));
+        if let Some(sidecar) = captions {
+            let extension = match sidecar.kind {
+                SidecarKind::Plain => "txt",
+                _ => "srt",
+            };
+            paths.push(self.folder.join(format!("{}.{extension}", sidecar.name)));
+        }
+        paths
+    }
+}
+
+enum ExportOutput {
+    Movie {
+        path: PathBuf,
+        request: cutlass_export::ExportRequest,
+    },
+    Sound {
+        path: PathBuf,
+        request: cutlass_export::ExportRequest,
+    },
+    Gif {
+        path: PathBuf,
+        looped: bool,
+        request: cutlass_export::ExportRequest,
+    },
+}
+
+impl ExportOutput {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Movie { path, .. } | Self::Sound { path, .. } | Self::Gif { path, .. } => path,
+        }
+    }
+}
+
+/// A `.mov` name writes a QuickTime movie.
+fn is_mov(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mov"))
 }
 
 fn playhead_frame(rate: FrameRate, playhead: Micros) -> Result<TimeRange, ShellError> {
@@ -6062,6 +6431,7 @@ mod tests {
         PictureOutput, PixelFormat, Transfer,
     };
     use cutlass_eval::ReaderFactory;
+    use cutlass_export::{ProresProfile, SidecarKind};
     use cutlass_model::{
         Crop, Draft, FrameRate, FreezeInfo, MaterialAudio, MaterialColorConfig, MaterialDraft,
         MaterialId, MaterialText, MaterialTransition, MaterialVideo, Micros, RawMaterial, Segment,
@@ -10709,6 +11079,159 @@ mod tests {
             assert_eq!(desktop.notice(), "Exported hevc.mp4");
             assert_eq!(&std::fs::read(&hevc).unwrap()[4..8], b"ftyp");
         }
+    }
+
+    #[test]
+    fn an_export_writes_a_mov_the_sound_alone_a_gif_and_a_caption_file() {
+        let temp = Temp::new();
+        movie_project(&temp.path);
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        let run = |desktop: &mut Shell, request: ExportRequest| {
+            desktop.export(request).unwrap();
+            land_job(desktop);
+            assert!(
+                desktop.notice().starts_with("Exported"),
+                "{}",
+                desktop.notice()
+            );
+        };
+
+        // A QuickTime movie with PCM sound, a typed bitrate held each
+        // second, and its captions beside it.
+        let mov = temp.path.join("cut.mov");
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: mov.clone(),
+                short_side: 480,
+                bitrate: Some(3_000_000),
+                constant_rate: true,
+                audio: super::SoundFormat {
+                    codec: CodecId::Pcm,
+                    ..super::SoundFormat::default()
+                },
+                captions: Some(SidecarKind::Srt),
+                ..ExportRequest::default()
+            },
+        );
+        let bytes = std::fs::read(&mov).unwrap();
+        assert_eq!(&bytes[4..12], b"ftypqt  ");
+        assert!(bytes.windows(4).any(|w| w == b"sowt"));
+        assert!(temp.path.join("cut.srt").is_file());
+
+        // PCM and ProRes are refused in an MP4.
+        let pcm_mp4 = desktop.export(ExportRequest {
+            path: temp.path.join("pcm.mp4"),
+            short_side: 480,
+            audio: super::SoundFormat {
+                codec: CodecId::Pcm,
+                ..super::SoundFormat::default()
+            },
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            pcm_mp4.unwrap_err().to_string(),
+            "PCM sound is written in a MOV"
+        );
+        let prores_mp4 = desktop.export(ExportRequest {
+            path: temp.path.join("prores.mp4"),
+            short_side: 480,
+            codec: CodecId::Prores,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            prores_mp4.unwrap_err().to_string(),
+            "ProRes is written in a MOV"
+        );
+        if desktop.encodes(CodecId::Prores) {
+            let prores = temp.path.join("prores.mov");
+            run(
+                &mut desktop,
+                ExportRequest {
+                    path: prores.clone(),
+                    short_side: 480,
+                    codec: CodecId::Prores,
+                    prores: ProresProfile::High,
+                    ..ExportRequest::default()
+                },
+            );
+            assert!(
+                std::fs::read(&prores)
+                    .unwrap()
+                    .windows(4)
+                    .any(|w| w == b"apch")
+            );
+        }
+
+        // With the pictures off, the sound alone: an M4A for AAC, a WAV for
+        // PCM, whatever extension the name had.
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                ..ExportRequest::default()
+            },
+        );
+        let m4a = std::fs::read(temp.path.join("sound.m4a")).unwrap();
+        assert_eq!(&m4a[4..12], b"ftypM4A ");
+        assert_eq!(
+            desktop.exported(),
+            Some(temp.path.join("sound.m4a").as_path())
+        );
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.wav"),
+                picture: false,
+                audio: super::SoundFormat {
+                    codec: CodecId::Pcm,
+                    sample_rate: 44_100,
+                    channels: 1,
+                    bitrate: 0,
+                },
+                ..ExportRequest::default()
+            },
+        );
+        assert_eq!(
+            &std::fs::read(temp.path.join("sound.wav")).unwrap()[..4],
+            b"RIFF"
+        );
+
+        // A GIF alone, and then again beside a movie, which finds it taken.
+        let gif = super::GifExport {
+            short_side: 240,
+            ..super::GifExport::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("loop.gif"),
+                picture: false,
+                sound: false,
+                gif: Some(gif),
+                ..ExportRequest::default()
+            },
+        );
+        let bytes = std::fs::read(temp.path.join("loop.gif")).unwrap();
+        assert_eq!(&bytes[..6], b"GIF89a");
+        assert!(bytes.windows(11).any(|w| w == b"NETSCAPE2.0"));
+        let taken = desktop.export(ExportRequest {
+            path: temp.path.join("loop.mp4"),
+            short_side: 480,
+            gif: Some(gif),
+            ..ExportRequest::default()
+        });
+        assert!(matches!(taken, Err(ShellError::Overwrite(path)) if path.ends_with("loop.gif")));
+        let nothing = desktop.export(ExportRequest {
+            path: temp.path.join("none.mp4"),
+            picture: false,
+            sound: false,
+            ..ExportRequest::default()
+        });
+        assert!(nothing.is_err());
+        assert!(!temp.path.join("loop.mp4").exists());
     }
 
     #[test]

@@ -134,13 +134,12 @@ enum LibraryTarget {
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     export_open: bool,
-    export_side: i32,
-    export_codec: cutlass_decode::CodecId,
-    export_span: crate::shell::ExportSpan,
-    /// `None` keeps the project's rate.
-    export_rate: Option<FrameRate>,
-    export_quality: crate::shell::ExportQuality,
-    export_sound: bool,
+    /// The dialog's choices; its path is `export_path`.
+    export: ExportRequest,
+    /// Write a MOV rather than an MP4.
+    export_mov: bool,
+    /// A typed bitrate in Mbps, used instead of the quality step.
+    export_mbps: Option<String>,
     replace_prompt: bool,
     export_path: String,
     /// The camera button was pressed; ask where to save the still.
@@ -210,12 +209,9 @@ impl Default for ViewState {
         Self {
             preview: None,
             export_open: false,
-            export_side: 1080,
-            export_codec: cutlass_decode::CodecId::H264,
-            export_span: crate::shell::ExportSpan::Whole,
-            export_rate: None,
-            export_quality: crate::shell::ExportQuality::Recommended,
-            export_sound: true,
+            export: ExportRequest::default(),
+            export_mov: false,
+            export_mbps: None,
             replace_prompt: false,
             export_path: String::new(),
             ask_still: false,
@@ -2885,7 +2881,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "export" => {
-                view.export_span = crate::shell::ExportSpan::Selected;
+                view.export.span = crate::shell::ExportSpan::Selected;
                 view.export_open = true;
                 Ok(())
             }
@@ -5001,99 +4997,11 @@ fn export_dialog(
     view: &mut ViewState,
     parent: Option<&eframe::Frame>,
 ) {
-    use crate::shell::{ExportQuality, ExportSpan};
-    use cutlass_decode::CodecId;
     let ((), closed) = widgets::dialog(ui, "Export", |ui| {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.vertical(|ui| {
-                let movie = view.export_codec != CodecId::Png;
-                choice_row(ui, "Format", |ui| {
-                    if ui.selectable_label(movie, "Movie (MP4)").clicked() && !movie {
-                        view.export_codec = CodecId::H264;
-                    }
-                    if ui.selectable_label(!movie, "Still frame (PNG)").clicked() {
-                        view.export_codec = CodecId::Png;
-                    }
-                });
-                if movie {
-                    choice_row(ui, "Codec", |ui| {
-                        for (codec, name) in [(CodecId::H264, "H.264"), (CodecId::Hevc, "HEVC")] {
-                            let offered = shell.encodes(codec);
-                            let label = egui::Button::selectable(view.export_codec == codec, name);
-                            if ui.add_enabled(offered, label).clicked() {
-                                view.export_codec = codec;
-                            }
-                        }
-                    });
-                    choice_row(ui, "Range", |ui| {
-                        let picked = !shell.selection().is_empty();
-                        let marked = shell.marked_span().is_some();
-                        let offered = |span| match span {
-                            ExportSpan::Whole => true,
-                            ExportSpan::Selected => picked,
-                            ExportSpan::Marked => marked,
-                        };
-                        if !offered(view.export_span) {
-                            view.export_span = ExportSpan::Whole;
-                        }
-                        for (span, name) in [
-                            (ExportSpan::Whole, "Whole timeline"),
-                            (ExportSpan::Marked, "In to out"),
-                            (ExportSpan::Selected, "Selected clips"),
-                        ] {
-                            let offered = offered(span);
-                            let label = egui::Button::selectable(view.export_span == span, name);
-                            if ui.add_enabled(offered, label).clicked() {
-                                view.export_span = span;
-                            }
-                        }
-                    });
-                    choice_row(ui, "Frame rate", |ui| {
-                        for (rate, name) in [
-                            (None, "Project"),
-                            (Some(FrameRate::FPS_24), "24"),
-                            (Some(FrameRate::FPS_25), "25"),
-                            (Some(FrameRate::FPS_30), "30"),
-                            (Some(FrameRate::FPS_50), "50"),
-                            (Some(FrameRate::FPS_60), "60"),
-                        ] {
-                            if ui
-                                .selectable_label(view.export_rate == rate, name)
-                                .clicked()
-                            {
-                                view.export_rate = rate;
-                            }
-                        }
-                    });
-                    choice_row(ui, "Quality", |ui| {
-                        for (quality, name) in [
-                            (ExportQuality::Lower, "Lower"),
-                            (ExportQuality::Recommended, "Recommended"),
-                            (ExportQuality::Higher, "Higher"),
-                        ] {
-                            if ui
-                                .selectable_label(view.export_quality == quality, name)
-                                .clicked()
-                            {
-                                view.export_quality = quality;
-                            }
-                        }
-                    });
-                    choice_row(ui, "Sound", |ui| {
-                        ui.checkbox(&mut view.export_sound, "Include the timeline's sound");
-                    });
-                }
-                choice_row(ui, "Short side", |ui| {
-                    for side in crate::shell::SHORT_SIDES {
-                        if ui
-                            .selectable_label(view.export_side == side, side.to_string())
-                            .clicked()
-                        {
-                            view.export_side = side;
-                        }
-                    }
-                });
+                export_choices(shell, ui, view);
                 ui.add_space(8.0);
                 if view.replace_prompt {
                     ui.label("Replace the existing file?");
@@ -5101,11 +5009,11 @@ fn export_dialog(
                 let busy = shell.job().is_some();
                 if ui.add_enabled(!busy, egui::Button::new("Export")).clicked() {
                     if view.export_path.is_empty() {
-                        let extension = if movie { "mp4" } else { "png" };
                         let name = shell
                             .draft()
                             .map_or_else(String::new, |draft| draft.name.clone());
-                        view.dialogs.save_export(parent, &name, extension);
+                        view.dialogs
+                            .save_export(parent, &name, export_extension(view));
                     } else {
                         match write_export(shell, view) {
                             Ok(()) => view.export_open = false,
@@ -5120,6 +5028,254 @@ fn export_dialog(
     if closed {
         view.export_open = false;
         view.replace_prompt = false;
+    }
+}
+
+/// The Video, Audio, GIF and Caption sections of the export dialog.
+fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
+    use crate::shell::{ExportQuality, ExportSpan, GIF_RATES, GifExport, SoundFormat};
+    use cutlass_decode::CodecId;
+    use cutlass_export::{GIF_SHORT_SIDES, ProresProfile, SidecarKind};
+    let export = &mut view.export;
+    choice_row(ui, "Range", |ui| {
+        let picked = !shell.selection().is_empty();
+        let marked = shell.marked_span().is_some();
+        let offered = |span| match span {
+            ExportSpan::Whole => true,
+            ExportSpan::Selected => picked,
+            ExportSpan::Marked => marked,
+        };
+        if !offered(export.span) {
+            export.span = ExportSpan::Whole;
+        }
+        for (span, name) in [
+            (ExportSpan::Whole, "Whole timeline"),
+            (ExportSpan::Marked, "In to out"),
+            (ExportSpan::Selected, "Selected clips"),
+        ] {
+            let label = egui::Button::selectable(export.span == span, name);
+            if ui.add_enabled(offered(span), label).clicked() {
+                export.span = span;
+            }
+        }
+    });
+    ui.checkbox(&mut export.picture, "Video");
+    if export.picture {
+        choice_row(ui, "Format", |ui| {
+            if ui.selectable_label(!view.export_mov, "MP4").clicked() {
+                view.export_mov = false;
+            }
+            if ui.selectable_label(view.export_mov, "MOV").clicked() {
+                view.export_mov = true;
+            }
+        });
+        if !view.export_mov && export.codec == CodecId::Prores {
+            export.codec = CodecId::H264;
+        }
+        choice_row(ui, "Codec", |ui| {
+            for (codec, name) in [
+                (CodecId::H264, "H.264"),
+                (CodecId::Hevc, "HEVC"),
+                (CodecId::Prores, "ProRes"),
+            ] {
+                if codec == CodecId::Prores && !view.export_mov {
+                    continue;
+                }
+                let label = egui::Button::selectable(export.codec == codec, name);
+                if ui.add_enabled(shell.encodes(codec), label).clicked() {
+                    export.codec = codec;
+                }
+            }
+        });
+        if export.codec == CodecId::Prores {
+            choice_row(ui, "Profile", |ui| {
+                for profile in ProresProfile::ALL {
+                    if ui
+                        .selectable_label(export.prores == profile, profile.label())
+                        .clicked()
+                    {
+                        export.prores = profile;
+                    }
+                }
+            });
+        } else {
+            choice_row(ui, "Quality", |ui| {
+                for (quality, name) in [
+                    (ExportQuality::Lower, "Lower"),
+                    (ExportQuality::Recommended, "Recommended"),
+                    (ExportQuality::Higher, "Higher"),
+                ] {
+                    let on = view.export_mbps.is_none() && export.quality == quality;
+                    if ui.selectable_label(on, name).clicked() {
+                        export.quality = quality;
+                        view.export_mbps = None;
+                    }
+                }
+                if ui
+                    .selectable_label(view.export_mbps.is_some(), "Custom")
+                    .clicked()
+                    && view.export_mbps.is_none()
+                {
+                    let side = u32::try_from(export.short_side).unwrap_or(1080);
+                    let rate = export.quality.bitrate(side, export.codec);
+                    view.export_mbps = Some(format!("{}", rate / 1_000_000));
+                }
+                if let Some(text) = &mut view.export_mbps {
+                    ui.add(egui::TextEdit::singleline(text).desired_width(48.0));
+                    ui.label("Mbps");
+                }
+            });
+            choice_row(ui, "Rate", |ui| {
+                if ui.selectable_label(!export.constant_rate, "VBR").clicked() {
+                    export.constant_rate = false;
+                }
+                if ui.selectable_label(export.constant_rate, "CBR").clicked() {
+                    export.constant_rate = true;
+                }
+            });
+        }
+        choice_row(ui, "Frame rate", |ui| {
+            for (rate, name) in [
+                (None, "Project"),
+                (Some(FrameRate::FPS_24), "24"),
+                (Some(FrameRate::FPS_25), "25"),
+                (Some(FrameRate::FPS_30), "30"),
+                (Some(FrameRate::FPS_50), "50"),
+                (Some(FrameRate::FPS_60), "60"),
+            ] {
+                if ui
+                    .selectable_label(export.frame_rate == rate, name)
+                    .clicked()
+                {
+                    export.frame_rate = rate;
+                }
+            }
+        });
+        choice_row(ui, "Short side", |ui| {
+            for side in crate::shell::SHORT_SIDES {
+                if ui
+                    .selectable_label(export.short_side == side, side.to_string())
+                    .clicked()
+                {
+                    export.short_side = side;
+                }
+            }
+        });
+    }
+    ui.checkbox(&mut export.sound, "Audio");
+    // PCM goes in a MOV or a WAV, never an MP4.
+    let pcm_fits = view.export_mov || !export.picture;
+    if !pcm_fits && export.audio.codec == CodecId::Pcm {
+        export.audio.codec = CodecId::Aac;
+    }
+    if export.sound {
+        let audio = &mut export.audio;
+        choice_row(ui, "Codec", |ui| {
+            if ui
+                .selectable_label(audio.codec == CodecId::Aac, "AAC")
+                .clicked()
+            {
+                audio.codec = CodecId::Aac;
+            }
+            let pcm = egui::Button::selectable(audio.codec == CodecId::Pcm, "PCM");
+            if ui.add_enabled(pcm_fits, pcm).clicked() {
+                audio.codec = CodecId::Pcm;
+            }
+        });
+        choice_row(ui, "Sample rate", |ui| {
+            for rate in SoundFormat::SAMPLE_RATES {
+                let name = if rate == 44_100 { "44.1 kHz" } else { "48 kHz" };
+                if ui
+                    .selectable_label(audio.sample_rate == rate, name)
+                    .clicked()
+                {
+                    audio.sample_rate = rate;
+                }
+            }
+        });
+        choice_row(ui, "Channels", |ui| {
+            for (channels, name) in [(2, "Stereo"), (1, "Mono")] {
+                if ui
+                    .selectable_label(audio.channels == channels, name)
+                    .clicked()
+                {
+                    audio.channels = channels;
+                }
+            }
+        });
+        if audio.codec != CodecId::Pcm {
+            choice_row(ui, "Bitrate", |ui| {
+                for rate in SoundFormat::BITRATES {
+                    if ui
+                        .selectable_label(audio.bitrate == rate, format!("{} kbps", rate / 1000))
+                        .clicked()
+                    {
+                        audio.bitrate = rate;
+                    }
+                }
+            });
+        }
+    }
+    let mut gif_on = export.gif.is_some();
+    if ui.checkbox(&mut gif_on, "GIF").changed() {
+        export.gif = gif_on.then(GifExport::default);
+    }
+    if let Some(gif) = &mut export.gif {
+        choice_row(ui, "Size", |ui| {
+            for side in GIF_SHORT_SIDES {
+                if ui
+                    .selectable_label(gif.short_side == side, side.to_string())
+                    .clicked()
+                {
+                    gif.short_side = side;
+                }
+            }
+        });
+        choice_row(ui, "Frame rate", |ui| {
+            for rate in GIF_RATES {
+                if ui
+                    .selectable_label(gif.frame_rate.numerator == rate, rate.to_string())
+                    .clicked()
+                {
+                    gif.frame_rate = FrameRate {
+                        numerator: rate,
+                        denominator: 1,
+                    };
+                }
+            }
+        });
+        choice_row(ui, "Loop", |ui| {
+            if ui.selectable_label(!gif.looped, "Once").clicked() {
+                gif.looped = false;
+            }
+            if ui.selectable_label(gif.looped, "Loop").clicked() {
+                gif.looped = true;
+            }
+        });
+    }
+    let mut captions_on = export.captions.is_some();
+    if ui.checkbox(&mut captions_on, "Caption file").changed() {
+        export.captions = captions_on.then_some(SidecarKind::Srt);
+    }
+    if let Some(kind) = &mut export.captions {
+        choice_row(ui, "File", |ui| {
+            for (choice, name) in [(SidecarKind::Srt, "SRT"), (SidecarKind::Plain, "TXT")] {
+                if ui.selectable_label(*kind == choice, name).clicked() {
+                    *kind = choice;
+                }
+            }
+        });
+    }
+}
+
+/// The extension of the export's main file.
+fn export_extension(view: &ViewState) -> &'static str {
+    if view.export.picture {
+        if view.export_mov { "mov" } else { "mp4" }
+    } else if view.export.sound {
+        view.export.audio.extension()
+    } else {
+        "gif"
     }
 }
 
@@ -5174,16 +5330,28 @@ fn show_imported(shell: &mut Shell, view: &mut ViewState) {
 }
 
 fn write_export(shell: &mut Shell, view: &ViewState) -> Result<(), ShellError> {
+    let bitrate = match &view.export_mbps {
+        Some(text) => Some(parse_mbps(text).ok_or_else(|| {
+            ShellError::Unavailable("type the bitrate in Mbps, like 16".to_owned())
+        })?),
+        None => None,
+    };
     shell.export(ExportRequest {
-        path: std::path::PathBuf::from(&view.export_path),
-        short_side: view.export_side,
-        codec: view.export_codec,
+        path: std::path::PathBuf::from(&view.export_path).with_extension(export_extension(view)),
         replace: view.replace_prompt,
-        span: view.export_span,
-        frame_rate: view.export_rate,
-        quality: view.export_quality,
-        sound: view.export_sound,
+        bitrate,
+        ..view.export.clone()
     })
+}
+
+/// Bits a second from a typed Mbps figure such as `16` or `7.5`.
+fn parse_mbps(text: &str) -> Option<u32> {
+    let mbps: f64 = text.trim().parse().ok()?;
+    if !mbps.is_finite() || mbps <= 0.0 || mbps > 400.0 {
+        return None;
+    }
+    // At most 400 Mbps, so the product fits.
+    Some((mbps * 1_000_000.0).round() as u32)
 }
 
 fn shortcuts(shell: &mut Shell, ui: &Ui) {
@@ -8176,12 +8344,31 @@ mod tests {
     }
 
     #[test]
+    fn the_export_dialog_names_its_file_by_what_it_writes_and_reads_a_typed_bitrate() {
+        let mut view = ViewState::new();
+        assert_eq!(export_extension(&view), "mp4");
+        view.export_mov = true;
+        assert_eq!(export_extension(&view), "mov");
+        view.export.picture = false;
+        assert_eq!(export_extension(&view), "m4a");
+        view.export.audio.codec = cutlass_decode::CodecId::Pcm;
+        assert_eq!(export_extension(&view), "wav");
+        view.export.sound = false;
+        assert_eq!(export_extension(&view), "gif");
+        assert_eq!(parse_mbps("16"), Some(16_000_000));
+        assert_eq!(parse_mbps(" 7.5 "), Some(7_500_000));
+        for bad in ["", "0", "-3", "fast", "401", "NaN"] {
+            assert_eq!(parse_mbps(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn the_export_dialog_writes_a_movie_as_a_job_and_offers_its_folder() {
         let (mut shell, temp) = open_span("movie", 1_000_000);
         let destination = temp.join("cut.mp4");
         let mut view = ViewState::new();
         view.export_open = true;
-        view.export_side = 480;
+        view.export.short_side = 480;
         view.export_path = destination.display().to_string();
         let ctx = egui::Context::default();
         let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
@@ -8219,7 +8406,7 @@ mod tests {
         let output = frame(&mut shell, &mut view, Vec::new());
         let text = painted_text(&output);
         for label in [
-            "Movie (MP4)",
+            "MP4",
             "H.264",
             "Whole timeline",
             "Recommended",

@@ -136,6 +136,8 @@ pub struct ViewState {
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
+    /// The third-party notices, read when the Licenses window opens.
+    licenses: Option<cutlass_licenses::Notices>,
     /// The dialog's choices; its path is `export_path`.
     export: ExportRequest,
     /// Write a MOV rather than an MP4.
@@ -212,6 +214,7 @@ impl Default for ViewState {
             preview: None,
             export_open: false,
             project_dialog: None,
+            licenses: None,
             export: ExportRequest::default(),
             export_mov: false,
             export_mbps: None,
@@ -322,6 +325,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
+    }
+    if view.licenses.is_some() {
+        licenses_window(ui, view);
     }
     dropped_files(shell, ui);
 }
@@ -476,12 +482,15 @@ fn projects_home(
     window_buttons(shell, ui, bar);
     let menu = Rect::from_min_size(
         bar.min + Vec2::new(78.0, 0.0),
-        Vec2::new(80.0, bar.height()),
+        Vec2::new(120.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
             ui.menu_button(RichText::new("File").color(tokens::FAINT), |ui| {
                 file_menu(shell, ui, view, parent);
+            });
+            ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
+                help_menu(ui, view, parent);
             });
         });
     });
@@ -815,7 +824,7 @@ fn menus(
 ) {
     let menu = Rect::from_min_size(
         bar.min + Vec2::new(78.0, 0.0),
-        Vec2::new(240.0, bar.height()),
+        Vec2::new(280.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
@@ -830,6 +839,9 @@ fn menus(
             });
             ui.menu_button(RichText::new("Edit").color(tokens::FAINT), |ui| {
                 edit_menu(shell, ui);
+            });
+            ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
+                help_menu(ui, view, parent);
             });
         });
     });
@@ -852,6 +864,59 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     if ui.button("Import…").clicked() {
         ui.close();
         view.dialogs.import(parent);
+    }
+}
+
+fn help_menu(ui: &mut Ui, view: &mut ViewState, parent: Option<&eframe::Frame>) {
+    if ui.button("Licenses").clicked() {
+        ui.close();
+        view.licenses = Some(cutlass_licenses::notices());
+    }
+    if ui.button("Export log…").clicked() {
+        ui.close();
+        view.dialogs.save_log(parent);
+    }
+}
+
+/// Cutlass's license and every crate it is built with. A crate opens to
+/// show its license files.
+fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
+    let Some(notices) = view.licenses.as_ref() else {
+        return;
+    };
+    let ((), closed) = widgets::dialog(ui, "Licenses", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Cutlass is licensed {}. It is built with these {} crates.",
+                        cutlass_licenses::CUTLASS_LICENSE,
+                        notices.crates.len()
+                    ))
+                    .color(tokens::MUTED),
+                );
+                ui.add_space(8.0);
+                for krate in &notices.crates {
+                    egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
+                        .id_salt(("license", &krate.name, &krate.version))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&krate.license).color(tokens::MUTED));
+                            if !krate.repository.is_empty() {
+                                ui.label(RichText::new(&krate.repository).color(tokens::FAINT));
+                            }
+                            for text in notices.texts_of(krate) {
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(text).monospace().size(10.0));
+                            }
+                        });
+                }
+            });
+        });
+    });
+    if closed || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        view.licenses = None;
     }
 }
 
@@ -5459,6 +5524,9 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             write_export(shell, view)
         }
         Picker::SaveStill => shell.export_still(&path),
+        Picker::SaveLog => Shell::export_log(&path).map(|()| {
+            shell.set_notice(format!("Saved the log to {}", path.display()));
+        }),
     };
     match result {
         Ok(()) if finished.picker == Picker::SaveExport => view.export_open = false,
@@ -6741,6 +6809,52 @@ mod tests {
             notice.y > tick.y,
             "notice {notice:?} overlaps tick {tick:?}"
         );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn the_licenses_window_lists_the_crates_and_the_log_exports() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        view.licenses = Some(cutlass_licenses::notices());
+        let ctx = egui::Context::default();
+        let run = |shell: &mut Shell, view: &mut ViewState, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        assert!(painted.contains("Cutlass is licensed MIT OR Apache-2.0"), "{painted}");
+        assert!(painted.contains("accesskit "), "{painted}");
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&mut shell, &mut view, vec![escape]);
+        assert!(view.licenses.is_none());
+
+        let temp = std::env::temp_dir().join(format!("cutlass-log-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let out = temp.join("log.txt");
+        view.dialogs.finish_for_test(Picker::SaveLog, Some(out.clone()));
+        run(&mut shell, &mut view, Vec::new());
+        assert!(out.is_file());
+        assert!(shell.notice().starts_with("Saved the log"), "{}", shell.notice());
+        view.dialogs.finish_for_test(Picker::SaveLog, Some(temp.clone()));
+        run(&mut shell, &mut view, Vec::new());
+        assert_eq!(shell.notice(), "the log path is a folder");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

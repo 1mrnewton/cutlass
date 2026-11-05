@@ -27,6 +27,7 @@ cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
 cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
 cutlass-logger = { path = "../../crates/logger", version = "0.1.0" }
+cutlass-licenses = { path = "../../crates/licenses", version = "0.1.0" }
 cutlass-renderer-software = { path = "../../crates/renderer-software", version = "0.1.0" }
 cutlass-render = { path = "../../crates/render", version = "0.1.0" }
 cutlass-isobmff = { path = "../../crates/containers/isobmff", version = "0.1.0" }

@@ -564,6 +564,7 @@ dependencies = [
  "cutlass-icons",
  "cutlass-isobmff",
  "cutlass-jpeg",
+ "cutlass-licenses",
  "cutlass-logger",
  "cutlass-matroska",
  "cutlass-mjpeg",

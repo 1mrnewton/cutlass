@@ -5477,6 +5477,17 @@ impl Shell {
     /// Save the picture at the playhead to `path` at the canvas size, as
     /// JPEG for a `.jpg` or `.jpeg` name and PNG otherwise. It runs as a
     /// job; when it lands it is offered like a finished export.
+    /// Write a copy of the log, the previous file then the current one, to
+    /// `path`. Before the log opened, it is the Cutlass root's logs folder.
+    pub fn export_log(path: &Path) -> Result<(), ShellError> {
+        if path.is_dir() {
+            return Err(ShellError::Io("the log path is a folder".to_owned()));
+        }
+        let directory = cutlass_logger::directory().unwrap_or_else(|| Self::home().logs());
+        cutlass_logger::export(&directory, path)
+            .map_err(|error| ShellError::Io(format!("the log was not saved: {error}")))
+    }
+
     pub fn export_still(&mut self, path: &Path) -> Result<(), ShellError> {
         self.refuse_busy()?;
         let draft = self.session_draft()?.clone();

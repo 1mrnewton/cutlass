@@ -17,6 +17,7 @@ pub(crate) enum Picker {
     Import,
     SaveExport,
     SaveStill,
+    SaveLog,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,6 +111,19 @@ impl Dialogs {
                     with_extension(path, "png")
                 }
             })
+        });
+    }
+
+    /// Ask where to write a copy of the log, as text.
+    pub(crate) fn save_log(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent)
+            .set_file_name("Cutlass log.txt")
+            .add_filter("Text", &["txt", "log"]);
+        self.start(Picker::SaveLog, async move {
+            dialog
+                .save_file()
+                .await
+                .map(|file| file.path().to_path_buf())
         });
     }
 

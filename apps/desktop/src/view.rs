@@ -5707,6 +5707,11 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     if !pcm_fits && export.audio.codec == CodecId::Pcm {
         export.audio.codec = CodecId::Aac;
     }
+    // FLAC is written alone, in a FLAC file.
+    let flac_fits = !export.picture;
+    if !flac_fits && export.audio.codec == CodecId::Flac {
+        export.audio.codec = CodecId::Aac;
+    }
     if export.sound {
         let audio = &mut export.audio;
         choice_row(ui, "Codec", |ui| {
@@ -5719,6 +5724,10 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             let pcm = egui::Button::selectable(audio.codec == CodecId::Pcm, "PCM");
             if ui.add_enabled(pcm_fits, pcm).clicked() {
                 audio.codec = CodecId::Pcm;
+            }
+            let flac = egui::Button::selectable(audio.codec == CodecId::Flac, "FLAC");
+            if ui.add_enabled(flac_fits, flac).clicked() {
+                audio.codec = CodecId::Flac;
             }
         });
         choice_row(ui, "Sample rate", |ui| {
@@ -5742,7 +5751,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 }
             }
         });
-        if audio.codec != CodecId::Pcm {
+        if !audio.lossless() {
             choice_row(ui, "Bitrate", |ui| {
                 for rate in SoundFormat::BITRATES {
                     if ui

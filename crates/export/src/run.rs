@@ -251,7 +251,7 @@ where
                 .frame_start(*index)
                 .ok_or(ExportError::FrameRate)?;
             let mut samples = mix_window(draft, settings, request, time, &mut audio)?;
-            if settings.codec == cutlass_codec::CodecId::Pcm {
+            if integer_sound(settings.codec) {
                 samples = to_i16(samples)?;
             }
             let packets = encoder
@@ -407,8 +407,8 @@ fn open_audio(
     };
     let mut params = CodecParams::audio(audio.codec, audio.sample_rate, layout(audio.channels)?);
     params.bitrate = audio.bitrate;
-    if audio.codec == cutlass_codec::CodecId::Pcm {
-        // A WAV holds 16-bit samples.
+    if integer_sound(audio.codec) {
+        // A WAV holds 16-bit samples, and so does an exported FLAC.
         params.sample_format = Some(cutlass_encode::SampleFormat::I16);
     }
     factory
@@ -588,7 +588,7 @@ where
             .frame_start(*index)
             .ok_or(ExportError::FrameRate)?;
         let mut samples = mix_window(run.draft, settings, run.request, time, audio)?;
-        if settings.codec == cutlass_codec::CodecId::Pcm {
+        if integer_sound(settings.codec) {
             samples = to_i16(samples)?;
         }
         let packets = encoder
@@ -771,6 +771,14 @@ where
     } else {
         to_channels(mixed.pcm, settings.channels)
     }
+}
+
+/// PCM and FLAC take the mix as 16-bit integers, clipped at full scale.
+fn integer_sound(codec: cutlass_codec::CodecId) -> bool {
+    matches!(
+        codec,
+        cutlass_codec::CodecId::Pcm | cutlass_codec::CodecId::Flac
+    )
 }
 
 /// `pcm` as 16-bit samples, clipped at full scale.
@@ -1088,7 +1096,7 @@ mod tests {
 
     impl Encoder for CopyAudio {
         fn codec(&self) -> CodecId {
-            CodecId::Flac
+            CodecId::Opus
         }
 
         fn push(&mut self, input: &AudioInput) -> Result<Vec<Packet>, CodecError> {
@@ -1137,8 +1145,8 @@ mod tests {
     }
 
     fn open_pcm(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
-        if params.codec != CodecId::Flac || params.bitrate != 128_000 {
-            return Err(CodecError::Unsupported { what: "flac" });
+        if params.codec != CodecId::Opus || params.bitrate != 128_000 {
+            return Err(CodecError::Unsupported { what: "opus" });
         }
         Ok(Box::new(CopyAudio {
             pts: 0,
@@ -1155,7 +1163,7 @@ mod tests {
         factory.register(CodecId::Gif, open_rgba);
         factory.register(CodecId::H264, open_rgba);
         factory.register(CodecId::Vp9, open_rgba);
-        factory.register(CodecId::Flac, open_pcm);
+        factory.register(CodecId::Opus, open_pcm);
         factory.register(CodecId::Mjpeg, decline);
         factory
     }
@@ -1740,7 +1748,7 @@ mod tests {
 
     fn audio_settings() -> AudioExport {
         AudioExport {
-            codec: CodecId::Flac,
+            codec: CodecId::Opus,
             bitrate: 128_000,
             sample_rate: 4_000,
             channels: 1,
@@ -2194,7 +2202,7 @@ mod tests {
             denominator: 1,
         };
         request.audio = Some(AudioExport {
-            codec: CodecId::Flac,
+            codec: CodecId::Opus,
             bitrate: 128_000,
             sample_rate: u32::MAX,
             channels: 1,

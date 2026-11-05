@@ -13,7 +13,7 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, WAV, AIFF, and stills, decoded with [`decoders`].
+/// ISOBMFF, WAV, AIFF, MP3, and stills, decoded with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
@@ -21,11 +21,12 @@ pub fn readers() -> ReaderFactory {
     readers.register_container(cutlass_riff::probe, open_wav);
     readers.register_container(cutlass_aiff::probe, open_aiff);
     readers.register_container(cutlass_still::probe, open_still);
+    readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders();
     readers
 }
 
-/// The platform decoders for this OS, then PNG, JPEG, AAC, H.264, and PCM.
+/// The platform decoders for this OS, then PNG, JPEG, AAC, H.264, PCM, and MP3.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
@@ -36,7 +37,43 @@ pub fn decoders() -> DecodeFactory {
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
+    cutlass_mp3::register_decoders(&mut decoders);
     decoders
+}
+
+/// An ID3v2 tag longer than the header window, which cover art often makes,
+/// is taken as MP3: the demuxer skips the tag and refuses the file when no
+/// Layer III frame follows it. MP3 is registered last, so a family that
+/// names the header itself still wins.
+fn probe_mp3(header: &[u8]) -> ProbeResult {
+    let accept = ProbeResult::Accept {
+        family: ContainerId::Mp3,
+        examined: header.len(),
+    };
+    match cutlass_mp3_container::probe(header) {
+        cutlass_mp3_container::Probe::Matched => accept,
+        cutlass_mp3_container::Probe::NeedMore { .. } if header.starts_with(b"ID3") => accept,
+        cutlass_mp3_container::Probe::NeedMore { minimum } => ProbeResult::NeedBytes {
+            have: header.len(),
+            need: usize::try_from(minimum).unwrap_or(usize::MAX),
+        },
+        cutlass_mp3_container::Probe::Reject => ProbeResult::Refuse {
+            examined: header.len(),
+        },
+    }
+}
+
+fn open_mp3(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let demux =
+        cutlass_mp3_container::Mp3Demux::open(std::io::BufReader::new(file)).map_err(|error| {
+            OpenError::Source {
+                message: error.to_string(),
+            }
+        })?;
+    Ok(Box::new(demux))
 }
 
 fn probe_isobmff(header: &[u8]) -> ProbeResult {
@@ -87,4 +124,17 @@ fn open_still(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         length,
         still_limits(),
     ))?))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_phone_opens_and_hears_an_mp3() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codecs/mp3/tests/fixtures/sweep_22050_mono64.mp3");
+        let mut media = super::readers().open(&path).expect("open");
+        let ready = media.pull_audio().expect("pull").expect("pcm");
+        assert_eq!(ready.pcm.rate, 22_050);
+        assert_eq!(ready.pcm.layout.len(), 1);
+    }
 }

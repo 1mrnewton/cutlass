@@ -30,12 +30,14 @@ cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
 cutlass-aiff = { path = "../containers/aiff", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }
+cutlass-mp3-container = { path = "../containers/mp3", version = "0.1.0" }
 cutlass-probe = { path = "../probe", version = "0.1.0" }
 cutlass-png = { path = "../codecs/png", version = "0.1.0" }
 cutlass-jpeg = { path = "../codecs/jpeg", version = "0.1.0" }
 cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
 cutlass-h264 = { path = "../codecs/h264", version = "0.1.0" }
 cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }
+cutlass-mp3 = { path = "../codecs/mp3", version = "0.1.0" }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 cutlass-platform-apple = { path = "../platform-apple", version = "0.1.0" }

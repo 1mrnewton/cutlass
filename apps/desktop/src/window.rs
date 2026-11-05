@@ -31,9 +31,11 @@ pub fn run() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|creation| {
-            let settings = crate::load_settings(&Shell::settings_path());
-            let (decoders, encoders) = crate::register_codecs_with(&settings.hardware);
-            let mut shell = Shell::new(decoders, encoders, settings);
+            let file = Shell::settings_path();
+            let loaded = crate::load_settings_file(&file);
+            let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
+            let mut shell = Shell::new(decoders, encoders, loaded.settings);
+            shell.keep_settings_file(file, loaded.generation);
             if let Some(state) = creation.wgpu_render_state.as_ref() {
                 shell.attach_gpu(state);
             }

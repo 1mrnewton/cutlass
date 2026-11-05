@@ -464,6 +464,26 @@ fn projects_home(
                 open_created(shell, &root);
             }
             ui.add_space(20.0);
+            let recent = shell.recent_projects(&root);
+            if !recent.is_empty() {
+                ui.label(
+                    RichText::new("Recent, elsewhere")
+                        .size(tokens::TYPE_SIZE)
+                        .color(tokens::MUTED),
+                );
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(16.0, 16.0);
+                    for project in &recent {
+                        if project_card(ui, project)
+                            && let Err(error) = shell.open_folder(&project.path)
+                        {
+                            shell.set_notice(error.to_string());
+                        }
+                    }
+                });
+                ui.add_space(20.0);
+            }
             if projects.is_empty() {
                 ui.label(
                     RichText::new("No projects yet.")

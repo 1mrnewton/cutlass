@@ -94,6 +94,9 @@ impl std::fmt::Display for ShellError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoProject => formatter.write_str("no project is open"),
+            Self::Store(StoreError::Held { .. }) => formatter.write_str(
+                "this project is open in another Cutlass window, or another app is holding it",
+            ),
             Self::Store(error) => write!(formatter, "{error}"),
             Self::Edit(EditError::EmptyUndo) => formatter.write_str("the undo stack is empty"),
             Self::Edit(EditError::EmptyRedo) => formatter.write_str("the redo stack is empty"),
@@ -430,6 +433,10 @@ pub const GIF_RATES: [u32; 3] = [10, 15, 24];
 /// The fastest typed bitrate an export takes, in bits a second.
 pub const MAX_BITRATE: u32 = 400_000_000;
 
+/// Said when a project opens that the last app holding it did not close.
+pub const RECOVERED_NOTICE: &str =
+    "Cutlass did not close last time; this is the project as it was last saved";
+
 /// How much of the timeline a movie holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExportSpan {
@@ -576,6 +583,8 @@ pub struct Shell {
     /// The lanes as last built, with the revision they were built at.
     lanes_cache: RefCell<Option<(u64, Arc<[LaneView]>)>>,
     settings: Settings,
+    /// Where the settings are saved, and the generation on disk.
+    settings_file: Option<(PathBuf, u64)>,
     session: Option<Session>,
     folder: Option<Folder>,
     /// Library folder edits made, and how many the folder on disk holds.
@@ -716,6 +725,7 @@ impl Shell {
             preview_cache: RefCell::new(FrameCache::new()),
             lanes_cache: RefCell::new(None),
             settings,
+            settings_file: None,
             session: None,
             folder: None,
             library_edits: 0,
@@ -952,6 +962,48 @@ impl Shell {
         &self.settings
     }
 
+    /// Save the settings to `path` from now on. `generation` is what the
+    /// file held when it was read.
+    pub fn keep_settings_file(&mut self, path: PathBuf, generation: u64) {
+        self.settings_file = Some((path, generation));
+    }
+
+    /// Write the settings, when they have a file. Another window's write
+    /// since the read is taken as the base, and ours is written over it.
+    fn save_settings(&mut self) {
+        let Some((path, generation)) = self.settings_file.clone() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut written = cutlass_settings::save(&path, generation, &self.settings);
+        if let Err(cutlass_settings::SettingsError::GenerationMismatch { actual, .. }) = written {
+            written = cutlass_settings::save(&path, actual, &self.settings);
+        }
+        match written {
+            Ok(next) => self.settings_file = Some((path, next)),
+            Err(error) => cutlass_logger::warn!("settings: {error}"),
+        }
+    }
+
+    /// Recent projects that are still there, newest first, leaving out those
+    /// under `root`, which the launch list already shows.
+    pub fn recent_projects(&self, root: &Path) -> Vec<ListedProject> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.settings
+            .recent_projects
+            .iter()
+            .filter(|path| {
+                !path
+                    .canonicalize()
+                    .unwrap_or_else(|_| path.to_path_buf())
+                    .starts_with(&root)
+            })
+            .filter_map(|path| cutlass_store::listed_project(path))
+            .collect()
+    }
+
     pub fn set_seek_during_playback(&mut self, value: SeekDuringPlayback) {
         self.settings.playback.seek_during_playback = value;
     }
@@ -1139,7 +1191,11 @@ impl Shell {
         self.folder = Some(opened.folder);
         self.library_edits = 0;
         self.library_saved = 0;
+        let unclean = hold.unclean();
         self.hold = Some(hold);
+        let recent = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.settings.note_recent(&recent);
+        self.save_settings();
         self.playhead = Micros(0);
         self.playing = false;
         self.marks.clear();
@@ -1157,6 +1213,9 @@ impl Shell {
         self.pixel_size = opening_pixel_size(rate);
         self.fitted = false;
         self.notice.clear();
+        if unclean {
+            self.set_notice(RECOVERED_NOTICE.to_owned());
+        }
         self.transport.forget_files();
         self.silence();
         Ok(())
@@ -7147,8 +7206,44 @@ mod tests {
         assert!(temp.path.join(".locked").is_file());
         let mut second = shell();
         let error = second.open_folder(&temp.path).unwrap_err();
-        assert!(error.to_string().contains("already held"), "{error}");
+        assert!(
+            error.to_string().contains("open in another Cutlass window"),
+            "{error}"
+        );
         assert!(second.draft().is_none());
+    }
+
+    #[test]
+    fn opening_a_project_notes_it_as_recent_and_says_when_the_last_app_did_not_close() {
+        let temp = Temp::new();
+        let elsewhere = temp.path.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        draft_only(&elsewhere);
+        let settings_file = temp.path.join("settings").join("settings.json");
+        let mut desktop = shell();
+        desktop.keep_settings_file(settings_file.clone(), 0);
+        desktop.open_folder(&elsewhere).unwrap();
+        assert!(desktop.notice().is_empty(), "{}", desktop.notice());
+        let saved = cutlass_settings::load(&settings_file).unwrap();
+        let canonical = elsewhere.canonicalize().unwrap();
+        assert_eq!(saved.settings.recent_projects, vec![canonical.clone()]);
+        let projects_root = temp.path.join("projects");
+        let recent = desktop.recent_projects(&projects_root);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].path, canonical);
+        // A project under the projects folder is already on the launch list.
+        assert!(desktop.recent_projects(&temp.path).is_empty());
+        desktop.close_project().unwrap();
+
+        // A shell that stopped without closing leaves the folder saying it
+        // is open; the next open says so.
+        std::fs::write(
+            elsewhere.join(".locked"),
+            b"{\"address\":null,\"open\":true}\n",
+        )
+        .unwrap();
+        desktop.open_folder(&elsewhere).unwrap();
+        assert_eq!(desktop.notice(), super::RECOVERED_NOTICE);
     }
 
     #[test]

@@ -66,14 +66,26 @@ pub fn register_codecs_with(
 /// left as it was, and the defaults are used.
 #[must_use]
 pub fn load_settings(path: &Path) -> cutlass_settings::Settings {
+    load_settings_file(path).settings
+}
+
+/// As [`load_settings`], with the generation a later save sends. A file
+/// that cannot be read gives generation `u64::MAX`, so a save leaves it as
+/// it was.
+#[must_use]
+pub fn load_settings_file(path: &Path) -> cutlass_settings::Loaded {
     match cutlass_settings::load(path) {
-        Ok(loaded) => loaded.settings,
-        Err(cutlass_settings::SettingsError::Missing { .. }) => {
-            cutlass_settings::Settings::default()
-        }
+        Ok(loaded) => loaded,
+        Err(cutlass_settings::SettingsError::Missing { .. }) => cutlass_settings::Loaded {
+            generation: 0,
+            settings: cutlass_settings::Settings::default(),
+        },
         Err(error) => {
             cutlass_logger::warn!("{error}");
-            cutlass_settings::Settings::default()
+            cutlass_settings::Loaded {
+                generation: u64::MAX,
+                settings: cutlass_settings::Settings::default(),
+            }
         }
     }
 }

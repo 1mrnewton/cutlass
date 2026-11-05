@@ -3,7 +3,8 @@
 //! A hidden alt-ref frame is predicted from by many frames, so coding a
 //! denoised version of it pays off: each 16x16 luma block (and the matching
 //! chroma) is averaged with the best-matching block of nearby frames,
-//! weighted by how well they match.
+//! weighted by how well the blocks match and, per sample, by how well the
+//! luma around the sample matches.
 
 use crate::dec::frame::Picture;
 use crate::dsp::Pixel;
@@ -48,7 +49,8 @@ pub fn temporal_filter<P: Pixel>(
         (0, 0)
     };
     let mut acc = vec![0f64; BLOCK * BLOCK];
-    let mut wsum = [0f64; 1];
+    let mut wtot = vec![0f64; BLOCK * BLOCK];
+    let mut wpix = vec![0f64; BLOCK * BLOCK];
     for br in 0..rows {
         for bc in 0..cols {
             let x0 = bc * BLOCK;
@@ -109,31 +111,55 @@ pub fn temporal_filter<P: Pixel>(
                 let ys = y0 >> py;
                 let tp = &target.planes[p];
                 acc[..bw * bh].fill(0.0);
-                wsum[0] = 1.0;
+                wtot[..bw * bh].fill(1.0);
                 for i in 0..bh {
                     for j in 0..bw {
                         acc[i * bw + j] =
                             f64::from(tp.data[(ys + i) * tp.stride + xs + j].to_i32());
                     }
                 }
-                for &(k, dy, dx, w) in &matches {
+                for &(k, ldy, ldx, w) in &matches {
                     let op = &others[k].0.planes[p];
-                    let (dy, dx) = (dy >> py, dx >> px);
+                    let (dy, dx) = (ldy >> py, ldx >> px);
+                    // Per-sample weights: the block weight, lowered where the
+                    // luma around the sample (3x3) does not match.
+                    let lp = &others[k].0.planes[0];
+                    for i in 0..bh {
+                        for j in 0..bw {
+                            let (ly, lx) = ((ys + i) << py, (xs + j) << px);
+                            let mut e = 0f64;
+                            for di in -1i32..=1 {
+                                let sy0 = clampi(ly as i32 + di, y.h);
+                                let ry = clampi(ly as i32 + di + ldy, lp.alloc_h);
+                                for dj in -1i32..=1 {
+                                    let sx0 = clampi(lx as i32 + dj, y.w);
+                                    let rx = clampi(lx as i32 + dj + ldx, lp.stride);
+                                    let d = f64::from(
+                                        y.data[sy0 * y.stride + sx0].to_i32()
+                                            - lp.data[ry * lp.stride + rx].to_i32(),
+                                    );
+                                    e += d * d;
+                                }
+                            }
+                            wpix[i * bw + j] = w * (-(e / 9.0) / h2).exp();
+                        }
+                    }
                     for i in 0..bh {
                         let ry = clampi((ys + i) as i32 + dy, op.alloc_h);
                         for j in 0..bw {
                             let rx = clampi((xs + j) as i32 + dx, op.stride);
-                            acc[i * bw + j] += w * f64::from(op.data[ry * op.stride + rx].to_i32());
+                            let wp = wpix[i * bw + j];
+                            acc[i * bw + j] +=
+                                wp * f64::from(op.data[ry * op.stride + rx].to_i32());
+                            wtot[i * bw + j] += wp;
                         }
                     }
-                    wsum[0] += w;
                 }
                 let dst = &mut out.planes[p];
-                let inv = 1.0 / wsum[0];
                 for i in 0..bh {
                     for j in 0..bw {
                         dst.data[(ys + i) * dst.stride + xs + j] =
-                            P::from_i32((acc[i * bw + j] * inv).round() as i32);
+                            P::from_i32((acc[i * bw + j] / wtot[i * bw + j]).round() as i32);
                     }
                 }
             }

@@ -172,6 +172,9 @@ pub struct Av1Enc {
     /// Temporal importance of the frames of the current mini-GOP (display
     /// index, importance), from the TPL model.
     tpl_imp: Vec<(u64, f64)>,
+    /// The current mini-GOP was found static: its alt-ref is temporally
+    /// filtered.
+    static_gop: bool,
     /// The model's block statistics and the display index of each of its
     /// frames, for per-superblock quantizers.
     tpl: Option<TplGroup>,
@@ -351,6 +354,7 @@ impl Av1Enc {
             next_disp: 0,
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
+            static_gop: false,
             tpl: None,
         })
     }
@@ -383,7 +387,7 @@ impl Av1Enc {
     }
 
     fn use_tf(&self) -> bool {
-        self.cfg.gop > 1 && self.cfg.temporal_filter
+        self.cfg.gop > 1 && (self.cfg.temporal_filter || (self.static_gop && self.cfg.speed < 8))
     }
 
     fn is_key_disp(&self, d: u64) -> bool {
@@ -444,10 +448,12 @@ impl Av1Enc {
             }
             let mut n = gop.min(to_key).min(self.lookahead.len() as u64);
             let mut long = longest;
+            self.static_gop = false;
             while long > gop {
                 let ln = long.min(to_key).min(self.lookahead.len() as u64);
                 if ln > gop && self.is_static::<P>(d - 1, ln) {
                     n = ln;
+                    self.static_gop = true;
                     break;
                 }
                 long /= 2;

@@ -11,7 +11,7 @@ use cutlass_codec::CodecId;
 use cutlass_model::Micros;
 
 use super::{ExportRequest, Shell};
-use crate::mcp::{NoSandbox, Probe, Unbuilt};
+use crate::mcp::{Bundled, NoSandbox, Probe, Unbuilt};
 
 /// Where the tools this window does not hand the assistant yet are.
 const IN_THE_WINDOW: &str = "not open to the assistant yet; use the window for it";
@@ -124,7 +124,7 @@ impl Shell {
             Moves::default(),
             Probe,
             Unbuilt(IN_THE_WINDOW),
-            Unbuilt(IN_THE_WINDOW),
+            Bundled,
             (
                 Unbuilt(IN_THE_WINDOW),
                 Exports::default(),

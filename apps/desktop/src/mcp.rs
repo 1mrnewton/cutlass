@@ -5,9 +5,14 @@
 //! the lock is let go when stdin closes. The model loop stays in the
 //! client. Approvals need a person, so this host refuses them, and the
 //! client sees the refusal as a tool error.
+//!
+//! With no window there is no screen to play on: seek moves the playhead a
+//! `.png` export draws, and an export runs to the end before it answers.
 
+use std::cell::RefCell;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use cutlass_agent::{
     ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpError, McpServer,
@@ -15,7 +20,7 @@ use cutlass_agent::{
     SettingsTool, Speech, ToolSink,
 };
 
-use crate::shell::{Shell, ShellError};
+use crate::shell::{ExportRequest, Shell, ShellError};
 
 /// Serve the project at `path` on stdin and stdout until stdin closes.
 pub fn run(path: Option<&Path>) -> Result<(), String> {
@@ -57,16 +62,17 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         .ok_or_else(|| "the project did not open".to_owned())?;
     let mut saved = session.revision();
     let settings = SettingsTool::open(&settings_path).map_err(|error| error.to_string())?;
+    let shell = Rc::new(RefCell::new(shell));
     let registry = Registry::new(
         DraftTools::new(session),
         settings,
-        NoPlayer,
+        Headless(Rc::clone(&shell)),
         Probe,
         Unbuilt(NOT_HERE),
-        Unbuilt(NOT_HERE),
+        Bundled,
         (
             Unbuilt(NOT_HERE),
-            Unbuilt(NOT_HERE),
+            Headless(Rc::clone(&shell)),
             NoSandbox,
             Refuse,
             McpClient::new(NoServers),
@@ -78,6 +84,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         let session = server.sink().draft.session();
         if session.revision() != saved {
             saved = session.revision();
+            let mut shell = shell.borrow_mut();
             shell
                 .adopt_session(session.clone())
                 .and_then(|()| shell.save())
@@ -116,19 +123,61 @@ fn pump<S: ToolSink>(
 
 const NOT_HERE: &str = "not available from cutlass mcp; open the project in the Cutlass window";
 
-struct NoPlayer;
+/// The player and export on the project this host holds.
+struct Headless(Rc<RefCell<Shell>>);
 
-impl Player for NoPlayer {
-    fn seek(&mut self, _time_us: i64) -> Result<(), String> {
-        Err(format!("the player is {NOT_HERE}"))
+impl Player for Headless {
+    fn seek(&mut self, time_us: i64) -> Result<(), String> {
+        if time_us < 0 {
+            return Err("the time is before the start".to_owned());
+        }
+        self.0.borrow_mut().seek(cutlass_model::Micros(time_us));
+        Ok(())
     }
 
     fn play(&mut self) -> Result<(), String> {
-        Err(format!("the player is {NOT_HERE}"))
+        Err(NO_SCREEN.to_owned())
     }
 
     fn pause(&mut self) -> Result<(), String> {
-        Err(format!("the player is {NOT_HERE}"))
+        Err(NO_SCREEN.to_owned())
+    }
+}
+
+const NO_SCREEN: &str = "cutlass mcp has no screen to play on; seek moves the playhead that a .png export draws, and the Cutlass window plays";
+
+impl Export for Headless {
+    /// Writes the file before it answers: a `.png` is the frame at the
+    /// playhead, anything else the whole project as H.264. An existing
+    /// file is not replaced, as no one is here to allow it.
+    fn start(&mut self, path: &str) -> Result<String, String> {
+        if path.trim().is_empty() {
+            return Err("name the file to export to".to_owned());
+        }
+        let path = PathBuf::from(path);
+        let codec = if path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        {
+            cutlass_codec::CodecId::Png
+        } else {
+            cutlass_codec::CodecId::H264
+        };
+        let mut shell = self.0.borrow_mut();
+        shell
+            .export(ExportRequest {
+                path: path.clone(),
+                codec,
+                ..ExportRequest::default()
+            })
+            .map_err(|error| error.to_string())?;
+        while shell.poll_job() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if codec != cutlass_codec::CodecId::Png && shell.exported() != Some(path.as_path()) {
+            return Err(shell.notice().to_owned());
+        }
+        Ok(format!("finished, wrote {}", path.display()))
     }
 }
 
@@ -159,8 +208,8 @@ impl Media for Probe {
     }
 }
 
-/// Transcription, the catalog, packages and export, which this host does
-/// not run yet; the text says where they are.
+/// Transcription and packages, which this host does not run yet; the
+/// text says where they are.
 pub(crate) struct Unbuilt(pub(crate) &'static str);
 
 impl Speech for Unbuilt {
@@ -173,9 +222,12 @@ impl Speech for Unbuilt {
     }
 }
 
-impl Catalog for Unbuilt {
-    fn search(&mut self, _query: &str) -> Result<Vec<String>, String> {
-        Err(format!("the catalog is {}", self.0))
+/// The effects, filters, transitions and animations Cutlass ships.
+pub(crate) struct Bundled;
+
+impl Catalog for Bundled {
+    fn search(&mut self, query: &str) -> Result<Vec<String>, String> {
+        Ok(cutlass_editor::catalog_search(query))
     }
 }
 
@@ -307,6 +359,86 @@ mod tests {
         assert_eq!(opened.folder.draft.tracks[0].segments.len(), 1);
         // The lock was let go when stdin closed.
         assert!(cutlass_store::hold(&project.0).is_ok());
+    }
+
+    fn answers(output: Vec<u8>) -> Vec<Value> {
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn with_no_window_seek_and_export_write_files() {
+        let project = Project::new("export");
+        // A fifth of a second of blue, 64 by 32.
+        let mut draft = cutlass_model::Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 32;
+        draft
+            .materials
+            .material_colors
+            .push(cutlass_model::MaterialColorConfig {
+                id: "color".into(),
+                is_color_clip: true,
+                solid_color: "0xFF336699".to_owned(),
+                ..cutlass_model::MaterialColorConfig::default()
+            });
+        draft.tracks[0].segments.push(cutlass_model::Segment::new(
+            "blue",
+            "color",
+            cutlass_model::TimeRange::new(0, 200_000),
+        ));
+        draft.duration = cutlass_model::Micros(200_000);
+        cutlass_store::Folder::new(draft).save(&project.0).unwrap();
+        let still = project.0.join("still.png");
+        let movie = project.0.join("cut.mp4");
+        let call = |id: i64, name: &str, arguments: Value| {
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{"name":name,"arguments":arguments}})
+        };
+        let input = lines(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            call(2, "player_seek", json!({"input": "100000"})),
+            call(
+                3,
+                "export_start",
+                json!({"input": format!("new {}", still.display())}),
+            ),
+            call(
+                4,
+                "export_start",
+                json!({"input": format!("new {}", movie.display())}),
+            ),
+            call(
+                5,
+                "export_start",
+                json!({"input": format!("new {}", movie.display())}),
+            ),
+            call(6, "player_play", json!({})),
+            call(7, "catalog_search", json!({"input": "dissolve"})),
+        ]);
+        let mut output = Vec::new();
+        serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
+        let answers = answers(output);
+        let text = |at: usize| {
+            answers[at]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(answers.len(), 7);
+        assert!(text(6).contains("transition cutlass-"), "{}", text(6));
+        assert_eq!(answers[1]["result"]["isError"], false, "{}", text(1));
+        assert!(text(2).contains("still.png"), "{}", text(2));
+        assert_eq!(&std::fs::read(&still).unwrap()[1..4], b"PNG");
+        assert!(text(3).contains("cut.mp4"), "{}", text(3));
+        assert_eq!(&std::fs::read(&movie).unwrap()[4..8], b"ftyp");
+        // An existing file needs an allow no one can give here.
+        assert_eq!(answers[4]["result"]["isError"], true, "{}", text(4));
+        assert_eq!(answers[5]["result"]["isError"], true);
+        assert!(text(5).contains("no screen"), "{}", text(5));
     }
 
     #[test]

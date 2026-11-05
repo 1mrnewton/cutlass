@@ -491,6 +491,46 @@ pub fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
     }
 }
 
+/// Fills `h` rows of `w` entries of a map of stride `stride` from `at`
+/// with `v`: one dispatch on the width for all the rows, and no library
+/// call for the power-of-two widths.
+#[inline(always)]
+pub(crate) fn fill_rect<T: Copy>(d: &mut [T], stride: usize, at: usize, w: usize, h: usize, v: T) {
+    if size_of::<T>() > 2 {
+        // Larger values (mode info): a store per entry.
+        for y in 0..h {
+            for m in &mut d[at + y * stride..][..w] {
+                *m = v;
+            }
+        }
+        return;
+    }
+    macro_rules! rows {
+        ($n:literal) => {
+            for y in 0..h {
+                d[at + y * stride..][..$n].copy_from_slice(&[v; $n]);
+            }
+        };
+    }
+    match w {
+        1 => {
+            for y in 0..h {
+                d[at + y * stride] = v;
+            }
+        }
+        2 => rows!(2),
+        4 => rows!(4),
+        8 => rows!(8),
+        16 => rows!(16),
+        32 => rows!(32),
+        _ => {
+            for y in 0..h {
+                d[at + y * stride..][..w].fill(v);
+            }
+        }
+    }
+}
+
 /// `d.fill(v)` without a library call for the short power-of-two runs of
 /// 4x4 unit maps.
 #[inline(always)]
@@ -1244,12 +1284,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
-        for y in 0..h4 {
-            fill_small(
-                &mut self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4],
-                b.segment_id,
-            );
-        }
+        let at = b.mi_row * stride + b.mi_col;
+        fill_rect(&mut self.fs.segment_ids, stride, at, w4, h4, b.segment_id);
         // Palette colors for later palette caches.
         if self.hdr.allow_screen_content_tools {
             let sb_mask = self.sb_size4 - 1;
@@ -1276,18 +1312,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
-        let o0 = b.mi_row * stride + b.mi_col;
-        for m in &mut self.fs.mi[o0..o0 + w4] {
-            *m = *info;
-        }
-        for y in 0..h4 {
-            let o = (b.mi_row + y) * stride + b.mi_col;
-            if y > 0 {
-                self.fs.mi.copy_within(o0..o0 + w4, o);
-            }
-            if set_uv {
-                fill_small(&mut self.fs.uv_modes[o..o + w4], b.uv_mode);
-            }
+        let at = b.mi_row * stride + b.mi_col;
+        // Stores of the value, not a library copy per row.
+        fill_rect(&mut self.fs.mi, stride, at, w4, h4, *info);
+        if set_uv {
+            fill_rect(&mut self.fs.uv_modes, stride, at, w4, h4, b.uv_mode);
         }
     }
 
@@ -2195,11 +2224,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         } else {
             self.read_tx_size(!self.b.skip || !self.b.is_inter);
             let t = self.b.tx_size;
-            for row in self.b.mi_row..self.b.mi_row + h4 {
-                for v in &mut self.fs.inter_tx_sizes[row * st + self.b.mi_col..][..w4] {
-                    *v = t;
-                }
-            }
+            let at = self.b.mi_row * st + self.b.mi_col;
+            fill_rect(&mut self.fs.inter_tx_sizes, st, at, w4, h4, t);
         }
         Ok(())
     }
@@ -3438,11 +3464,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
         let st = self.fs.mi_stride;
-        let lf = &mut self.fs.lf_tx[plane];
-        for i in 0..step_y {
-            let r = (row >> sy) + i;
-            fill_small(&mut lf[r * st + (col >> sx)..][..step_x], tx);
-        }
+        let at = (row >> sy) * st + (col >> sx);
+        fill_rect(&mut self.fs.lf_tx[plane], st, at, step_x, step_y, tx);
         if let Some(log) = self.rec.as_deref_mut() {
             let sc = &mut self.scratch;
             let (nz_rows, nz_cols) = if coded {
@@ -3752,12 +3775,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             }
         }
         let st = self.fs.mi_stride;
-        for j in 0..(tx_h(tx) >> 2) {
-            fill_small(
-                &mut self.fs.tx_types[(y4 + j) * st + x4..][..tx_w(tx) >> 2],
-                t,
-            );
-        }
+        let (w4, h4) = (tx_w(tx) >> 2, tx_h(tx) >> 2);
+        fill_rect(&mut self.fs.tx_types, st, y4 * st + x4, w4, h4, t);
     }
 
     /// coeffs() — reads one transform block's coefficients into the
@@ -3857,9 +3876,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if all_zero {
             if plane == 0 {
                 let st = self.fs.mi_stride;
-                for j in 0..h4 {
-                    fill_small(&mut self.fs.tx_types[(y4 + j) * st + x4..][..w4], 0);
-                }
+                fill_rect(&mut self.fs.tx_types, st, y4 * st + x4, w4, h4, 0);
             }
         } else {
             if plane == 0 {
@@ -4056,12 +4073,11 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                             if let Some(log) = rec {
                                 // Recording: the coefficients go straight
                                 // to the log (see `TxOp`).
-                                let at = log.coefs.len();
-                                log.coefs.resize(at + nz.len(), 0);
-                                let out = &mut log.coefs[at..];
+                                let out = &mut log.coefs;
+                                out.reserve(nz.len());
                                 *logged = true;
-                                Some(signs_dec(m, nz, levels, dc_cdf, dc_ctx, &deq, |k, p, v| {
-                                    out[k] = (v << 10) | p as i32;
+                                Some(signs_dec(m, nz, levels, dc_cdf, dc_ctx, &deq, |_, p, v| {
+                                    out.push((v << 10) | p as i32);
                                 }))
                             } else {
                                 let dq = dq.first_chunk_mut::<1024>()?;

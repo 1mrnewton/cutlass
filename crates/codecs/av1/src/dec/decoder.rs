@@ -1315,29 +1315,6 @@ fn take_picture<P: Pixel>(
     Picture::new(w, h, num_planes, sub_x, sub_y, bd)
 }
 
-/// A pooled copy of `src`.
-fn copy_picture<P: Pixel>(pool: &mut Vec<Picture<P>>, src: &Picture<P>) -> Picture<P> {
-    let mut d = take_picture(
-        pool,
-        src.planes[0].w,
-        src.planes[0].h,
-        src.planes.len(),
-        src.sub_x,
-        src.sub_y,
-        src.bd,
-    );
-    for (dp, sp) in d.planes.iter_mut().zip(&src.planes) {
-        if dp.data.len() == sp.data.len() && dp.stride == sp.stride {
-            dp.data.copy_from_slice(&sp.data);
-            dp.w = sp.w;
-            dp.h = sp.h;
-        } else {
-            *dp = sp.clone();
-        }
-    }
-    d
-}
-
 const POOL_MAX: usize = 12;
 
 fn recycle<P: Pixel>(pool: &mut Vec<Picture<P>>, p: Picture<P>) {
@@ -1583,29 +1560,6 @@ impl RowMsg {
     }
 }
 
-/// Copies the sample rows of luma 4x4 rows `r0..r1` (to the bottom of the
-/// allocation when `last`) from `src` to `dst`.
-fn copy_rows<P: Pixel>(
-    src: &Picture<P>,
-    dst: &mut Picture<P>,
-    r0: usize,
-    r1: usize,
-    last: bool,
-    sub_y: bool,
-) {
-    for (p, (d, s)) in dst.planes.iter_mut().zip(&src.planes).enumerate() {
-        let sy = usize::from(p > 0 && sub_y);
-        let y0 = (4 * r0) >> sy;
-        let y1 = if last {
-            s.alloc_h
-        } else {
-            ((4 * r1) >> sy).min(s.alloc_h)
-        };
-        let r = y0 * s.stride..y1 * s.stride;
-        d.data[r.clone()].copy_from_slice(&s.data[r]);
-    }
-}
-
 /// A [`FrameState::filter_shell`] of `fs`, from `shells` when one fits.
 fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
     match shells.iter().position(|f| f.fits_filter_shell(fs)) {
@@ -1754,14 +1708,17 @@ fn recon_worker<P: PicturePixel>(
 /// The in-loop filters of a frame, run by its reconstruction thread on
 /// the superblock rows behind it: a row is deblocked in place once the
 /// row below is reconstructed (whose intra prediction reads its unfiltered
-/// bottom samples), and gets CDEF and loop restoration once the row below
-/// is deblocked (they read 2 and 3 rows past it). Final rows are published
-/// to `publish` for the frames that reference this one.
+/// bottom samples), and gets CDEF and loop restoration, also in place,
+/// once the row below is deblocked (they read 2 and 3 rows past it). Final
+/// rows are published to `publish` for the frames that reference this one.
 struct InlineFilter<'a, P> {
-    cdef: Option<&'a mut Picture<P>>,
-    lr: Option<&'a mut Picture<P>>,
+    cdef_on: bool,
+    lr_on: bool,
     lr_scratch: &'a mut LrScratch,
-    pads: [Vec<u16>; 3],
+    /// CDEF scratch, with the pre-CDEF rows next to the boundaries.
+    cdef: postfilter::CdefScratch<P>,
+    /// The deblocked rows next to the loop restoration stripe boundaries.
+    lr_bounds: postfilter::LrBounds<P>,
     lf_on: bool,
     publish: &'a FrameJob,
     /// Reconstructed luma 4x4 rows waiting for deblocking, and deblocked
@@ -1805,78 +1762,57 @@ impl<P: PicturePixel> InlineFilter<'_, P> {
         if self.lf_on {
             postfilter::loop_filter_rows(seq, hdr, fs, cur, a, b, last);
         }
-        let mut out = FilterOut {
-            deb: cur,
-            cdef: self.cdef.as_deref_mut(),
-            lr: self.lr.as_deref_mut(),
-            lr_scratch: &mut *self.lr_scratch,
-        };
         if let Some((c, d)) = self.to_filter.take() {
-            filter_ready_rows(seq, hdr, fs, &mut out, &mut self.pads, c, d, false);
+            self.filter_ready_rows(seq, hdr, fs, cur, c, d, false);
             // Luma rows above 4 * d are final: deblocking below changes
             // none of them, and the loop restoration stripes done end 8
             // rows higher.
-            let done = if out.lr.is_some() { 4 * d - 8 } else { 4 * d };
+            let done = if self.lr_on { 4 * d - 8 } else { 4 * d };
             if done > self.published {
-                let fin = match (&out.lr, &out.cdef) {
-                    (Some(p), _) | (None, Some(p)) => &**p,
-                    (None, None) => &*out.deb,
-                };
-                self.publish.publish(band_of(fin, self.published, done));
+                self.publish.publish(band_of(cur, self.published, done));
                 self.published = done;
             }
         }
         if last {
-            filter_ready_rows(seq, hdr, fs, &mut out, &mut self.pads, a, b, true);
+            self.filter_ready_rows(seq, hdr, fs, cur, a, b, true);
         } else {
             self.to_filter = Some((a, b));
         }
     }
-}
 
-/// Where [`filter_ready_rows`] writes: the deblocked picture, and the CDEF
-/// and loop restoration outputs of the stages that run.
-struct FilterOut<'a, P> {
-    deb: &'a mut Picture<P>,
-    cdef: Option<&'a mut Picture<P>>,
-    lr: Option<&'a mut Picture<P>>,
-    lr_scratch: &'a mut LrScratch,
-}
-
-/// Runs CDEF and loop restoration on luma 4x4 rows `a..b` (to the bottom
-/// of the frame when `last`), whose deblocking and that of the rows below
-/// them that these stages read is done.
-fn filter_ready_rows<P: Pixel>(
-    seq: &SequenceHeader,
-    hdr: &FrameHeader,
-    fs: &FrameState,
-    out: &mut FilterOut<'_, P>,
-    pads: &mut [Vec<u16>; 3],
-    a: usize,
-    b: usize,
-    last: bool,
-) {
-    let sub_y = seq.subsampling_y;
-    if let Some(dst) = out.cdef.as_deref_mut() {
-        copy_rows(out.deb, dst, a, b, last, sub_y);
-        postfilter::cdef_sb_rows(seq, hdr, fs, out.deb, dst, a, b, pads);
-    }
-    if let Some(lr) = out.lr.as_deref_mut() {
-        let src = out.cdef.as_deref().unwrap_or(out.deb);
-        copy_rows(src, lr, a, b, last, sub_y);
-        let units = postfilter::lr_units(seq, fs);
+    /// Runs CDEF and loop restoration on luma 4x4 rows `a..b` (to the
+    /// bottom of the frame when `last`), whose deblocking and that of the
+    /// rows below them that these stages read is done.
+    fn filter_ready_rows(
+        &mut self,
+        seq: &SequenceHeader,
+        hdr: &FrameHeader,
+        fs: &FrameState,
+        cur: &mut Picture<P>,
+        a: usize,
+        b: usize,
+        last: bool,
+    ) {
         let stripes = a / 16..if last { usize::MAX } else { b / 16 };
-        postfilter::loop_restoration_stripes(
-            seq,
-            hdr,
-            fs,
-            src,
-            out.deb,
-            lr,
-            &units,
-            out.lr_scratch,
-            stripes,
-        );
+        if self.lr_on {
+            postfilter::lr_save_frame_bounds(seq, hdr, cur, &mut self.lr_bounds, stripes.clone());
+        }
+        if self.cdef_on {
+            postfilter::cdef_sb_rows_in_place(seq, hdr, fs, cur, a, b, &mut self.cdef);
+        }
+        if self.lr_on {
+            let units = postfilter::lr_units(seq, fs);
+            postfilter::loop_restoration_stripes(
+                seq,
+                hdr,
+                fs,
+                cur,
+                &self.lr_bounds,
+                &units,
+                self.lr_scratch,
+                stripes,
+            );
+        }
     }
 }
 
@@ -1983,8 +1919,6 @@ fn decode_frame_async<P: PicturePixel>(
         )
     };
     let cur = new_pic();
-    let cdef = cdef_on.then(&mut new_pic);
-    let lr = hdr.lr.uses_lr.then(&mut new_pic);
     let rc_fs = take_shell(shells, fs);
     let lr_scratch = lock(&px.spares).lr.pop().unwrap_or_default();
     // The motion field is computed band by band on a thread of its own
@@ -2000,8 +1934,7 @@ fn decode_frame_async<P: PicturePixel>(
         ref_jobs: ref_jobs.clone(),
         ref_hdr: ref_hdr.clone(),
         cur,
-        cdef,
-        lr,
+        cdef_on,
         rc_fs,
         lr_scratch,
         lf_on,
@@ -2089,8 +2022,7 @@ struct Backend<P> {
     ref_jobs: [Option<Arc<FrameJob>>; 8],
     ref_hdr: [RefHeaderState; 8],
     cur: Picture<P>,
-    cdef: Option<Picture<P>>,
-    lr: Option<Picture<P>>,
+    cdef_on: bool,
     rc_fs: FrameState,
     lr_scratch: LrScratch,
     lf_on: bool,
@@ -2109,8 +2041,7 @@ impl<P: PicturePixel> Backend<P> {
             ref_jobs,
             ref_hdr,
             mut cur,
-            mut cdef,
-            mut lr,
+            cdef_on,
             mut rc_fs,
             mut lr_scratch,
             lf_on,
@@ -2187,10 +2118,11 @@ impl<P: PicturePixel> Backend<P> {
                 })
             });
             let mut filt = InlineFilter {
-                cdef: cdef.as_mut(),
-                lr: lr.as_mut(),
+                cdef_on,
+                lr_on: hdr.lr.uses_lr,
                 lr_scratch: &mut lr_scratch,
-                pads: postfilter::cdef_pads(),
+                cdef: postfilter::cdef_pads(),
+                lr_bounds: postfilter::LrBounds::default(),
                 lf_on,
                 publish: &job,
                 to_deblock: None,
@@ -2203,23 +2135,10 @@ impl<P: PicturePixel> Backend<P> {
         };
         drop(held);
         let res = res.map(|mirrors| lock(&spares).pics.extend(mirrors));
-        let mut back = Vec::new();
-        let mut fin = match (cdef, lr) {
-            (c, Some(l)) => {
-                back.push(cur);
-                back.extend(c);
-                l
-            }
-            (Some(c), None) => {
-                back.push(cur);
-                c
-            }
-            (None, None) => cur,
-        };
+        let mut fin = cur;
         set_visible_size(&seq, &hdr, &mut fin);
         {
             let mut sp = lock(&spares);
-            sp.pics.extend(back);
             sp.shells.push(rc_fs);
             sp.lr.push(lr_scratch);
         }
@@ -2256,7 +2175,7 @@ fn decode_frame_sync<P: PicturePixel>(
     if let Some(p) = mf {
         fs.motion_field = p.run(threads);
     }
-    let (saved, cur, cdef_pic) = {
+    let saved = {
         let saved = decode_tiles(
             seq,
             hdr,
@@ -2275,54 +2194,44 @@ fn decode_frame_sync<P: PicturePixel>(
                   _: usize,
                   _: bool| {},
         )?;
-        // decode_frame_wrapup: in-loop filters.
+        // decode_frame_wrapup: in-loop filters, CDEF and loop restoration
+        // in place.
         postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);
-        let cdef_pic = if cdef_on {
-            let mut d = copy_picture(pool, &cur);
-            postfilter::cdef(seq, hdr, fs, &cur, &mut d, threads);
-            Some(d)
-        } else {
-            None
-        };
-        (saved, cur, cdef_pic)
+        saved
     };
-    let (up_cdef, up_deblocked) = if hdr.use_superres {
-        let c = postfilter::superres(seq, hdr, cdef_pic.as_ref().unwrap_or(&cur));
-        let d = if hdr.lr.uses_lr {
-            Some(postfilter::superres(seq, hdr, &cur))
-        } else {
-            None
-        };
+    let lr = hdr.lr.uses_lr;
+    let mut bounds = postfilter::LrBounds::default();
+    let mut final_pic = if hdr.use_superres {
+        if lr {
+            let d = postfilter::superres(seq, hdr, &cur);
+            postfilter::lr_save_frame_bounds(seq, hdr, &d, &mut bounds, 0..usize::MAX);
+        }
+        if cdef_on {
+            postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads);
+        }
+        let up = postfilter::superres(seq, hdr, &cur);
         recycle(pool, cur);
-        if let Some(p) = cdef_pic {
-            recycle(pool, p);
-        }
-        (c, d)
+        up
     } else {
-        match cdef_pic {
-            Some(c) => (c, Some(cur)),
-            None => (cur, None),
+        if lr {
+            postfilter::lr_save_frame_bounds(seq, hdr, &cur, &mut bounds, 0..usize::MAX);
         }
+        if cdef_on {
+            postfilter::cdef_in_place(seq, hdr, fs, &mut cur, threads);
+        }
+        cur
     };
-    let mut final_pic = if hdr.lr.uses_lr {
-        let mut out = copy_picture(pool, &up_cdef);
-        {
-            let deblocked = up_deblocked.as_ref().unwrap_or(&up_cdef);
-            postfilter::loop_restoration(
-                seq, hdr, fs, &up_cdef, deblocked, &mut out, lr_scratch, threads,
-            );
-        }
-        recycle(pool, up_cdef);
-        if let Some(p) = up_deblocked {
-            recycle(pool, p);
-        }
-        out
-    } else {
-        if let Some(p) = up_deblocked {
-            recycle(pool, p);
-        }
-        up_cdef
-    };
+    if lr {
+        postfilter::loop_restoration_in_place(
+            seq,
+            hdr,
+            fs,
+            &mut final_pic,
+            &bounds,
+            lr_scratch,
+            threads,
+        );
+    }
     set_visible_size(seq, hdr, &mut final_pic);
     Ok((final_pic, saved))
 }

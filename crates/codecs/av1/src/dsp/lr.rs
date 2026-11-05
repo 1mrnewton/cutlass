@@ -68,6 +68,45 @@ pub fn count_units_in_frame(unit_size: usize, frame_size: usize) -> usize {
     ((frame_size + (unit_size >> 1)) / unit_size).max(1)
 }
 
+/// Number of loop restoration stripes of a plane `plane_h` rows high
+/// (stripe `k` starts at plane row `(64 k - 8) >> sy`).
+pub fn lr_stripe_count(plane_h: usize, sy: u32) -> usize {
+    let mut n = 0usize;
+    while ((n as isize * 64 - 8) >> sy) < plane_h as isize {
+        n += 1;
+    }
+    n
+}
+
+/// Saves into `bounds` the rows of the deblocked plane `src` that loop
+/// restoration reads across the bottom boundary of each stripe in `ks`
+/// (stripe `k` ends above plane row `b = (64 k + 56) >> sy`): rows
+/// `b - 2 ..= b + 1`, `plane_w` samples each, at rows `4 k ..` of `bounds`.
+/// Each stripe's rows must be saved before CDEF or loop restoration
+/// changes them in place.
+pub fn lr_save_bounds<P: Pixel>(
+    bounds: &mut Vec<P>,
+    src: &[P],
+    stride: usize,
+    plane_w: usize,
+    plane_h: usize,
+    sy: u32,
+    ks: core::ops::Range<usize>,
+) {
+    let n = lr_stripe_count(plane_h, sy);
+    if bounds.len() < 4 * n * plane_w {
+        bounds.resize(4 * n * plane_w, P::default());
+    }
+    for k in ks.start..ks.end.min(n) {
+        let b = (64 * k + 56) >> sy;
+        for i in 0..4 {
+            let y = (b + i).saturating_sub(2).min(plane_h - 1);
+            let o = (4 * k + i) * plane_w;
+            bounds[o..o + plane_w].copy_from_slice(&src[y * stride..y * stride + plane_w]);
+        }
+    }
+}
+
 /// Applies 7.17 to one plane.
 ///
 /// * `cdef` is the plane of UpscaledCdefFrame, `deblocked` the plane of
@@ -104,11 +143,21 @@ pub fn lr_plane<P: Pixel>(
     bd: u32,
     scratch: &mut LrScratch,
 ) {
-    let _ = sub_x;
+    let _ = (sub_x, cdef);
+    let mut bounds = Vec::new();
+    let sy = u32::from(sub_y);
+    lr_save_bounds(
+        &mut bounds,
+        deblocked,
+        stride,
+        plane_w,
+        plane_h,
+        sy,
+        0..lr_stripe_count(plane_h, sy),
+    );
     let plane = LrPlane {
         dst,
-        cdef,
-        deblocked,
+        bounds: &bounds,
         stride,
         plane_w,
         plane_h,
@@ -124,9 +173,11 @@ pub fn lr_plane<P: Pixel>(
 
 /// The arguments of [`lr_plane`] for one plane of [`lr_planes`].
 pub struct LrPlane<'a, P> {
+    /// The plane of UpscaledCdefFrame, filtered in place into LrFrame.
     pub dst: &'a mut [P],
-    pub cdef: &'a [P],
-    pub deblocked: &'a [P],
+    /// The rows of UpscaledCurrFrame next to the stripe boundaries, from
+    /// [`lr_save_bounds`].
+    pub bounds: &'a [P],
     pub stride: usize,
     pub plane_w: usize,
     pub plane_h: usize,
@@ -144,8 +195,7 @@ struct LrWork<'a, P> {
     g: LrGeom,
     dst: &'a mut [P],
     row0: usize,
-    cdef: &'a [P],
-    deblocked: &'a [P],
+    bounds: &'a [P],
     units: &'a [LrUnit],
     stripes: core::ops::Range<usize>,
 }
@@ -223,8 +273,7 @@ pub fn lr_planes<P: Pixel>(planes: Vec<LrPlane<'_, P>>, scratch: &mut LrScratch,
                 g,
                 dst,
                 row0: row,
-                cdef: p.cdef,
-                deblocked: p.deblocked,
+                bounds: p.bounds,
                 units: p.units,
                 stripes: k0..k1,
             });
@@ -233,16 +282,7 @@ pub fn lr_planes<P: Pixel>(planes: Vec<LrPlane<'_, P>>, scratch: &mut LrScratch,
     }
     let run = |items: Vec<LrWork<'_, P>>, s: &mut LrScratch| {
         for w in items {
-            lr_stripes(
-                w.dst,
-                w.row0,
-                w.cdef,
-                w.deblocked,
-                w.units,
-                &w.g,
-                w.stripes,
-                s,
-            );
+            lr_stripes(w.dst, w.row0, w.bounds, w.units, &w.g, w.stripes, s);
         }
     };
     if t == 1 {
@@ -295,16 +335,7 @@ pub fn lr_planes_stripes<P: Pixel>(
             sy: p.sub_y as u32,
             bd: p.bd,
         };
-        lr_stripes(
-            p.dst,
-            0,
-            p.cdef,
-            p.deblocked,
-            p.units,
-            &g,
-            stripes.clone(),
-            scratch,
-        );
+        lr_stripes(p.dst, 0, p.bounds, p.units, &g, stripes.clone(), scratch);
     }
 }
 
@@ -348,8 +379,7 @@ struct LrGeom {
 fn lr_stripes<P: Pixel>(
     dst: &mut [P],
     dst_row0: usize,
-    cdef: &[P],
-    deblocked: &[P],
+    bounds: &[P],
     units: &[LrUnit],
     g: &LrGeom,
     stripes: core::ops::Range<usize>,
@@ -391,17 +421,20 @@ fn lr_stripes<P: Pixel>(
         // Stripe source rows y0 - 3 ..= y1 + 3 per the get source sample
         // process, padded by edge replication horizontally.
         for r in 0..h + 2 * CTX {
-            let mut y = (y0 - CTX as isize + r as isize).clamp(0, end_y);
-            let plane = if y < start {
-                y = y.max(start - 2);
-                deblocked
+            let y = (y0 - CTX as isize + r as isize).clamp(0, end_y);
+            // Rows past the stripe come from the saved deblocked rows:
+            // boundary `stripe - 1` holds rows start - 2 ..= start + 1,
+            // boundary `stripe` rows stripe_end - 1 ..= stripe_end + 2.
+            let row = if y < start {
+                let i = 4 * (stripe - 1) + (y.max(start - 2) - (start - 2)) as usize;
+                &bounds[i * plane_w..(i + 1) * plane_w]
             } else if y > stripe_end {
-                y = y.min(stripe_end + 2);
-                deblocked
+                let i = 4 * stripe + 1 + (y.min(stripe_end + 2) - stripe_end) as usize;
+                &bounds[i * plane_w..(i + 1) * plane_w]
             } else {
-                cdef
+                let o = (y as usize - dst_row0) * stride;
+                &dst[o..o + plane_w]
             };
-            let row = &plane[y as usize * stride..y as usize * stride + plane_w];
             let out = &mut scratch.src[r * sw..(r + 1) * sw];
             let (first, last) = (row[0].to_i32(), row[plane_w - 1].to_i32());
             out[..PAD].fill(first);
@@ -429,7 +462,7 @@ fn lr_stripes<P: Pixel>(
             };
             match unit.kind as i32 {
                 RESTORE_WIENER => wiener(dst, stride, &mut *scratch, sw, rect, unit, bd),
-                RESTORE_SGRPROJ => sgr(dst, cdef, stride, &mut *scratch, sw, rect, unit, bd),
+                RESTORE_SGRPROJ => sgr(dst, stride, &mut *scratch, sw, rect, unit, bd),
                 _ => {}
             }
         }
@@ -525,9 +558,7 @@ const A2_TABLE: [i32; 256] = {
 
 /// Box filter process (7.17.3) for one pass on one rectangle; writes
 /// `w x h` values to `flt`.
-fn box_filter<P: Pixel>(
-    cdef: &[P],
-    stride: usize,
+fn box_filter(
     src: &[i32],
     sw: usize,
     a_buf: &mut Vec<i32>,
@@ -603,7 +634,8 @@ fn box_filter<P: Pixel>(
     let sgr = SGRPROJ_SGR_BITS as u32;
     for i in 0..h {
         let gi = i + 1;
-        let crow = &cdef[(rc.y0 + i) * stride + rc.x0..(rc.y0 + i) * stride + rc.x0 + w];
+        let c0 = (CTX + i) * sw + PAD + rc.x0;
+        let crow = &src[c0..c0 + w];
         let out = &mut flt[i * w..(i + 1) * w];
         if pass == 0 {
             if i & 1 == 1 {
@@ -613,7 +645,7 @@ fn box_filter<P: Pixel>(
                 for j in 0..w {
                     let a = 6 * ar[j + 1] + 5 * (ar[j] + ar[j + 2]);
                     let b = 6 * br[j + 1] + 5 * (br[j] + br[j + 2]);
-                    out[j] = round2(a * crow[j].to_i32() + b, sh);
+                    out[j] = round2(a * crow[j] + b, sh);
                 }
             } else {
                 let au = &a_buf[(gi - 1) * gw..gi * gw];
@@ -626,7 +658,7 @@ fn box_filter<P: Pixel>(
                         6 * (au[j + 1] + ad[j + 1]) + 5 * (au[j] + au[j + 2] + ad[j] + ad[j + 2]);
                     let b = 6 * (bu[j + 1] + bd_[j + 1])
                         + 5 * (bu[j] + bu[j + 2] + bd_[j] + bd_[j + 2]);
-                    out[j] = round2(a * crow[j].to_i32() + b, sh);
+                    out[j] = round2(a * crow[j] + b, sh);
                 }
             }
         } else {
@@ -642,7 +674,7 @@ fn box_filter<P: Pixel>(
                     + 3 * (au[j] + au[j + 2] + ad[j] + ad[j + 2]);
                 let b = 4 * (bm[j] + bm[j + 1] + bm[j + 2] + bu[j + 1] + bd_[j + 1])
                     + 3 * (bu[j] + bu[j + 2] + bd_[j] + bd_[j + 2]);
-                out[j] = round2(a * crow[j].to_i32() + b, sh);
+                out[j] = round2(a * crow[j] + b, sh);
             }
         }
     }
@@ -651,7 +683,6 @@ fn box_filter<P: Pixel>(
 /// Self guided filter process (7.17.2) on one rectangle of a stripe.
 fn sgr<P: Pixel>(
     dst: &mut [P],
-    cdef: &[P],
     stride: usize,
     s: &mut LrScratch,
     sw: usize,
@@ -665,8 +696,6 @@ fn sgr<P: Pixel>(
     grow(&mut s.flt1, rc.w * rc.h);
     if r0 != 0 {
         box_filter(
-            cdef,
-            stride,
             &s.src,
             sw,
             &mut s.a,
@@ -683,8 +712,6 @@ fn sgr<P: Pixel>(
     }
     if r1 != 0 {
         box_filter(
-            cdef,
-            stride,
             &s.src,
             sw,
             &mut s.a,
@@ -706,14 +733,14 @@ fn sgr<P: Pixel>(
     let maxv = (1i32 << bd) - 1;
     let (w, h) = (rc.w, rc.h);
     for i in 0..h {
-        let o = (rc.y0 + i) * stride + rc.x0;
-        let crow = &cdef[o..o + w];
-        let od = o - rc.dst_row0 * stride;
+        let c0 = (CTX + i) * sw + PAD + rc.x0;
+        let crow = &s.src[c0..c0 + w];
+        let od = (rc.y0 + i - rc.dst_row0) * stride + rc.x0;
         let out = &mut dst[od..od + w];
         let f0 = &s.flt0[i * w..];
         let f1 = &s.flt1[i * w..];
         for j in 0..w {
-            let u = crow[j].to_i32() << SGRPROJ_RST_BITS;
+            let u = crow[j] << SGRPROJ_RST_BITS;
             let mut v = w1 * u;
             v += w0 * if r0 != 0 { f0[j] } else { u };
             v += w2 * if r1 != 0 { f1[j] } else { u };

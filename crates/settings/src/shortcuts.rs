@@ -36,6 +36,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("extract_audio", "Extract audio"),
     ("deactivate", "Turn a clip off or on"),
     ("compound", "Create compound clip"),
+    ("speed_curves", "Show variable speed animation"),
     ("settings", "Settings"),
 ];
 
@@ -72,6 +73,7 @@ pub fn default_keys(action: &str) -> Option<&'static str> {
         "extract_audio" => "primary+shift+s",
         "deactivate" => "v",
         "compound" => "alt+g",
+        "speed_curves" => "alt+k",
         "settings" => "primary+comma",
         _ => return None,
     })

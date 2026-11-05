@@ -234,6 +234,8 @@ fn build_lanes(draft: &Draft) -> Vec<LaneView> {
                     start: segment.target.start,
                     duration: segment.target.duration,
                     active: segment.visible,
+                    speed_curve: speed_curve(draft, segment)
+                        .map(|points| points.iter().map(|point| (point.x, point.y)).collect()),
                 })
                 .collect();
             Some(LaneView {
@@ -268,7 +270,7 @@ pub struct LaneView {
     pub clips: Vec<ClipSpan>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClipSpan {
     pub id: SegmentId,
     pub name: String,
@@ -276,6 +278,9 @@ pub struct ClipSpan {
     pub duration: Micros,
     /// Drawn and heard; a deactivated clip is dimmed on its row.
     pub active: bool,
+    /// The speed curve the clip runs on: `x` the share of the clip, `y`
+    /// the speed there.
+    pub speed_curve: Option<Vec<(f64, f64)>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -662,6 +667,8 @@ pub struct Shell {
     snapping: bool,
     /// The split tool cuts a clip at the pointer instead of moving it.
     blade: bool,
+    /// Clips on a speed curve draw it on their bar.
+    speed_curves: bool,
     /// The marker tool drops a mark on the ruler or on a clip.
     marking: bool,
     selected_marker: Option<MarkerPick>,
@@ -758,6 +765,7 @@ impl Shell {
             guides_locked: false,
             snapping: true,
             blade: false,
+            speed_curves: false,
             marking: false,
             selected_marker: None,
             beating: false,
@@ -2169,6 +2177,10 @@ impl Shell {
             Some("ripple_delete") => self.ripple_delete(),
             Some("deactivate") => self.toggle_active(),
             Some("compound") => self.create_compound(),
+            Some("speed_curves") => {
+                self.toggle_speed_curves();
+                Ok(())
+            }
             Some("shuttle_back") => {
                 self.shuttle(cutlass_editor::Shuttle::Back);
                 Ok(())
@@ -5295,6 +5307,15 @@ impl Shell {
     #[must_use]
     pub fn blade(&self) -> bool {
         self.blade
+    }
+
+    /// Clips on a speed curve draw it on their bar.
+    pub fn speed_curves_shown(&self) -> bool {
+        self.speed_curves
+    }
+
+    pub fn toggle_speed_curves(&mut self) {
+        self.speed_curves = !self.speed_curves;
     }
 
     pub fn toggle_blade(&mut self) {

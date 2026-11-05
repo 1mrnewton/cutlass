@@ -3549,6 +3549,10 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 Ok(())
             }
             "compound" => shell.create_compound(),
+            "variable-speed" => {
+                shell.toggle_speed_curves();
+                Ok(())
+            }
             "open-compound" => shell.open_compound(),
             "ungroup" => shell.ungroup_compound(),
             "range-in" => shell.mark_clip_in(),
@@ -4974,6 +4978,50 @@ fn paint_header(ui: &Ui, header: Rect, clip: Rect, chips: &[String], fill: Color
     }
 }
 
+/// Where a curve clip runs fast and slow, drawn over its bar in timeline
+/// time: 1× is the faint middle line, 10× the top and 0.1× the bottom.
+fn paint_speed_curve(ui: &Ui, area: Rect, visible: Rect, curve: &[(f64, f64)]) {
+    if area.height() < 6.0 || area.width() < 4.0 {
+        return;
+    }
+    let points: Vec<cutlass_model::SpeedPoint> = curve
+        .iter()
+        .map(|&(x, y)| cutlass_model::SpeedPoint::new(x, y))
+        .collect();
+    // Timeline time is the sum of dx / speed over the source.
+    const STEPS: usize = 96;
+    let mut along = vec![(0.0, cutlass_model::curve_speed_at(&points, 0.0))];
+    let mut time = 0.0;
+    for step in 1..=STEPS {
+        #[allow(clippy::cast_precision_loss)]
+        let (x0, x1) = ((step - 1) as f64 / STEPS as f64, step as f64 / STEPS as f64);
+        let speed = cutlass_model::curve_speed_at(&points, (x0 + x1) / 2.0).max(0.01);
+        time += (x1 - x0) / speed;
+        along.push((time, cutlass_model::curve_speed_at(&points, x1)));
+    }
+    let total = time.max(f64::EPSILON);
+    #[allow(clippy::cast_possible_truncation)]
+    let at = |(time, speed): (f64, f64)| {
+        let up = (speed.clamp(0.1, 10.0).log10() + 1.0) / 2.0;
+        Pos2::new(
+            area.left() + (time / total) as f32 * area.width(),
+            area.bottom() - up as f32 * area.height(),
+        )
+    };
+    let painter = ui.painter().with_clip_rect(visible.intersect(area));
+    let middle = area.center().y;
+    painter.hline(
+        area.x_range(),
+        middle,
+        egui::Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.25)),
+    );
+    let line: Vec<Pos2> = along.into_iter().map(at).collect();
+    painter.add(egui::Shape::line(
+        line,
+        egui::Stroke::new(1.5, Color32::from_rgb(0xff, 0xc8, 0x3a)),
+    ));
+}
+
 fn paint_clip(
     shell: &mut Shell,
     ui: &mut Ui,
@@ -5078,6 +5126,18 @@ fn paint_clip(
                 Color32::WHITE
             },
         );
+    }
+    if shell.speed_curves_shown()
+        && let Some(curve) = &clip.speed_curve
+    {
+        let below = parts
+            .header
+            .map_or(clip_rect.top(), |header| header.bottom());
+        let area = Rect::from_min_max(
+            Pos2::new(clip_rect.left(), below + 2.0),
+            Pos2::new(clip_rect.right(), clip_rect.bottom() - 2.0),
+        );
+        paint_speed_curve(ui, area, visible, curve);
     }
     let span = format!(
         "{} · {}–{}",
@@ -6693,6 +6753,29 @@ mod tests {
             shell.inspection().unwrap().speed_curve,
             Some(SpeedPreset::Hero.points())
         );
+        // ⌥K draws the curve on the clip's bar, and only then.
+        let curve_lines = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter(|clipped| match &clipped.shape {
+                    egui::Shape::Path(path) => {
+                        matches!(
+                            path.stroke.color,
+                            egui::epaint::ColorMode::Solid(color)
+                                if color == egui::Color32::from_rgb(0xff, 0xc8, 0x3a)
+                        )
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(curve_lines(&output), 0);
+        shell.toggle_speed_curves();
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert_eq!(curve_lines(&output), 1);
+        shell.toggle_speed_curves();
         // None goes back to the constant speed and its length.
         let none = text_pos(&output, "None").unwrap();
         let _ = click(&mut shell, &mut view, none);

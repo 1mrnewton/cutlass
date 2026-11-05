@@ -120,7 +120,7 @@ const VIDEO: &[Entry] = &[
     done("open-file", "Open file location", ""),
     SEP,
     done("edit-effects", "Edit effects", ""),
-    todo("variable-speed", "Show variable speed animation", "⌥K"),
+    done("variable-speed", "Show variable speed animation", "⌥K"),
     sub(
         "range",
         "Range",
@@ -777,12 +777,14 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
-        let row = label_at(&output, "Show variable speed animation")
-            .expect("the variable speed row")
-            + Vec2::new(4.0, 6.0);
+        let render = label_at(&output, "Render").expect("the Render row") + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(render)]);
+        let (_, output) = frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(render)]);
+        let row = label_at(&output, "Preview").expect("the Preview row") + Vec2::new(4.0, 6.0);
+        frame(&ctx, 1000.0, vec![egui::Event::PointerMoved(row)]);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("variable-speed", false));
+        assert_eq!((picked.id, picked.built), ("render-preview", false));
     }
 
     #[test]

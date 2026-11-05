@@ -236,14 +236,7 @@ impl MsacEnc {
     pub fn bool_adapt(&mut self, cdf: &mut [u16; 2], bit: bool) {
         self.bool_prob(u32::from(cdf[0]), bit);
         if self.allow_update {
-            let count = cdf[1];
-            let rate = 4 + (count >> 4);
-            if bit {
-                cdf[0] += (32768 - cdf[0]) >> rate;
-            } else {
-                cdf[0] -= cdf[0] >> rate;
-            }
-            cdf[1] = count + u16::from(count < 32);
+            adapt_bool(cdf, bit);
         }
     }
 
@@ -272,15 +265,7 @@ impl MsacEnc {
         }
         self.encode(u, v);
         if self.allow_update {
-            let count = cdf[n];
-            let rate = 4 + (count >> 4) + u16::from(n > 2);
-            for i in 0..s.min(n) {
-                cdf[i] += (32768 - cdf[i]) >> rate;
-            }
-            for i in s..n {
-                cdf[i] -= cdf[i] >> rate;
-            }
-            cdf[n] = count + u16::from(count < 32);
+            adapt_symbol(cdf, s);
         }
     }
 
@@ -414,6 +399,35 @@ pub fn symbol_cost(icdf: &[u16], symbol: usize) -> u32 {
         u32::from(icdf[symbol])
     };
     prob_cost(hi.saturating_sub(lo))
+}
+
+/// The adaptation of an N-entry inverted CDF (N - 1 symbols and the
+/// counter) after coding symbol `s`, as the decoder does it.
+#[inline(always)]
+pub fn adapt_symbol<const N: usize>(cdf: &mut [u16; N], s: usize) {
+    let n = N - 1;
+    let count = cdf[n];
+    let rate = 4 + (count >> 4) + u16::from(n > 2);
+    for i in 0..s.min(n) {
+        cdf[i] += (32768 - cdf[i]) >> rate;
+    }
+    for i in s..n {
+        cdf[i] -= cdf[i] >> rate;
+    }
+    cdf[n] = count + u16::from(count < 32);
+}
+
+/// The adaptation of a 2-entry inverted CDF after coding `bit`.
+#[inline(always)]
+pub fn adapt_bool(cdf: &mut [u16; 2], bit: bool) {
+    let count = cdf[1];
+    let rate = 4 + (count >> 4);
+    if bit {
+        cdf[0] += (32768 - cdf[0]) >> rate;
+    } else {
+        cdf[0] -= cdf[0] >> rate;
+    }
+    cdf[1] = count + u16::from(count < 32);
 }
 
 /// Cost of a boolean coded with inverted probability `f` (as `bool_prob`),

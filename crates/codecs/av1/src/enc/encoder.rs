@@ -19,7 +19,6 @@ use crate::dec::obu::{
     OBU_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OperatingPoint,
     PRIMARY_REF_NONE, Quant, SequenceHeader, TX_MODE_SELECT, parse_frame_header,
 };
-use crate::dec::tile::{RefView, TileDec};
 use crate::dsp::Pixel;
 use crate::spec::tables::{AC_QLOOKUP, DC_QLOOKUP};
 
@@ -188,11 +187,16 @@ const DELTA_Q_RES: u8 = 2;
 /// TPL block statistics and the display index of each frame they cover.
 type TplGroup = (super::tpl::TplStats, Vec<u64>);
 
+/// Threads per automatic tile. Superblock rows run in a wavefront inside
+/// each tile, so fewer tiles than threads still keep the threads busy, but
+/// a frame whose work sits in a few superblock rows parallelizes better
+/// across tiles. One tile per thread is the fastest at 1080p; a single
+/// tile (any value above the thread count) costs about 2% less rate there
+/// but takes about 10% longer on content whose motion is concentrated.
+const TILE_THREADS: usize = 1;
+
 /// A global motion type and its parameters.
 type GmModel = (u8, [i32; 6]);
-
-/// A coded tile and, for the context tile, the CDFs it ended with.
-type TileCoded = (MsacEnc, Option<Box<CdfContext>>);
 
 /// What a decoder makes of a coded frame, for [`Av1Core::install_frame`].
 struct FrameRecon {
@@ -325,20 +329,19 @@ impl Av1Enc {
         };
         let mut cfg = cfg;
         let mut auto_tiles = false;
-        if cfg.threads > 1
-            && cfg.tile_cols_log2 == 0
-            && cfg.tile_rows_log2 == 0
-            && cfg.width >= 1280
-        {
-            // One tile per thread: columns at least 512 samples wide, then
-            // rows at least 512 samples high.
+        // Tiles per thread (their superblock rows are coded side by side
+        // too, see `rowmt`).
+        let tiles = cfg.threads / TILE_THREADS;
+        if tiles >= 2 && cfg.tile_cols_log2 == 0 && cfg.tile_rows_log2 == 0 && cfg.width >= 1280 {
+            // Columns at least 512 samples wide, then rows at least 512
+            // samples high.
             let mut l = 0;
-            while (2usize << l) <= cfg.threads && (cfg.width >> (l + 1)) >= 512 && l < 6 {
+            while (2usize << l) <= tiles && (cfg.width >> (l + 1)) >= 512 && l < 6 {
                 l += 1;
             }
             cfg.tile_cols_log2 = l;
             let mut r = 0;
-            while (2usize << (l + r)) <= cfg.threads && (cfg.height >> (r + 1)) >= 512 && r < 6 {
+            while (2usize << (l + r)) <= tiles && (cfg.height >> (r + 1)) >= 512 && r < 6 {
                 r += 1;
             }
             cfg.tile_rows_log2 = r;
@@ -1243,7 +1246,7 @@ impl Av1Enc {
         };
         let _ = dcq;
         let ti = hdr.tile_info.clone();
-        let n_above = fs.mi_stride + 64;
+        let ctx_tile = ti.context_update_tile_id as usize;
         // Per-64x64 CDEF strengths are chosen after coding: the tiles log
         // their symbols and are coded again with the cdef_idx values.
         let cdef_fb = self.cfg.speed < 8
@@ -1258,159 +1261,37 @@ impl Av1Enc {
             && !hdr.coded_lossless
             && !hdr.allow_intrabc
             && !hdr.use_superres;
-        let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
-        // The CDFs the context tile ends with (saved with the frame).
-        let ctx_tile = ti.context_update_tile_id as usize;
-        let mut saved_cdf: Option<Box<CdfContext>> = None;
-        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<TileCoded> {
-            let tile_row = tile / ti.cols;
-            let tile_col = tile % ti.cols;
-            let mut tile_cdf = Box::new((*cdf).clone());
-            let ref_views: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
+        // The tiles, superblock rows in a wavefront (see `rowmt`).
+        let job = super::rowmt::TileJob {
+            seq: &seq,
+            hdr: &hdr,
+            refs: std::array::from_fn(|i| {
                 if i == 0 || hdr.frame_is_intra {
                     return None;
                 }
                 let slot = hdr.ref_frame_idx[i - 1] as usize;
                 let pic = ref_pics[slot].as_deref()?;
-                let p = P::view(pic)?;
-                Some(RefView {
-                    pic: p,
-                    mirror: None,
+                Some(super::rowmt::RefInfo {
+                    pic: P::view(pic)?,
                     upscaled_width: refs_hdr[slot].upscaled_width as usize,
                     frame_height: refs_hdr[slot].frame_height as usize,
                     frame_width: refs_hdr[slot].frame_width as usize,
                 })
-            });
-            let mut td = TileDec {
-                seq: &seq,
-                hdr: &hdr,
-                fs,
-                cur,
-                refs: ref_views,
-                mirrors: Vec::new(),
-                msac: {
-                    let mut m = MsacEnc::new(!hdr.disable_cdf_update);
-                    if cdef_fb || lr_on {
-                        m.record();
-                    }
-                    m
-                },
-                pb: Default::default(),
-                plan: crate::dec::tile::EncPlan {
-                    sb_q: sb_q.clone(),
-                    sb_cols,
-                    base_lambda: (qp.lambda, mode.lambda_satd, mode.skip_sse_per_px),
-                    ..Default::default()
-                },
-                plan_q: 0,
-                cfl_choice: (0, 0),
-                intra_choice: (0, None),
-                est_hint: (0, 0),
-                cur_filters: [0, 0],
-                plan_delta_lf: [0; 4],
-                src: Some(src),
-                enc: qp,
-                mode,
-                me_scratch: Default::default(),
-                cdf: &mut tile_cdf,
-                mi_row_start: ti.mi_row_starts[tile_row] as usize,
-                mi_row_end: ti.mi_row_starts[tile_row + 1] as usize,
-                mi_col_start: ti.mi_col_starts[tile_col] as usize,
-                mi_col_end: ti.mi_col_starts[tile_col + 1] as usize,
-                sb_size: if seq.use_128x128_superblock { 15 } else { 12 },
-                sb_size4: if seq.use_128x128_superblock { 32 } else { 16 },
-                bd: seq.bit_depth,
-                sub_x: seq.subsampling_x,
-                sub_y: seq.subsampling_y,
-                num_planes: seq.num_planes(),
-                above_level: std::array::from_fn(|_| vec![0u8; n_above]),
-                above_dc: std::array::from_fn(|_| vec![0u8; n_above]),
-                above_seg_pred: vec![0u8; n_above],
-                left_level: [[0; 32]; 3],
-                left_dc: [[0; 32]; 3],
-                left_seg_pred: [0; 32],
-                above_palette: std::array::from_fn(|_| vec![[0u16; 8]; n_above]),
-                left_palette: [[[0; 8]; 32]; 2],
-                delta_lf: [0; 4],
-                current_q_index: i32::from(hdr.quant.base_q_idx),
-                read_deltas: false,
-                ref_lr_wiener: [[[0; 3]; 2]; 3],
-                ref_sgr_xqd: [[0; 2]; 3],
-                block_decoded: [[[false; 35]; 35]; 3],
-                b: Default::default(),
-                color_map_y: vec![0u8; 128 * 128],
-                color_map_uv: vec![0u8; 128 * 128],
-                scratch: Default::default(),
-                rec: None,
-            };
-            td.decode_tile()?;
-            let TileDec { msac, .. } = td;
-            Ok((msac, (tile == ctx_tile).then_some(tile_cdf)))
+            }),
+            src,
+            init_cdf: &cdf,
+            qp,
+            mode,
+            sb_q: &sb_q,
+            sb_cols,
+            record: cdef_fb || lr_on,
+            threads: self.cfg.threads.max(1),
         };
-        let n_tiles = ti.cols * ti.rows;
-        let threads = self.cfg.threads.max(1).min(n_tiles);
-        if threads <= 1 {
-            for tile in 0..n_tiles {
-                let (m, c) = run_tile(tile, &mut fs, &mut cur)?;
-                tile_bytes.push(m);
-                saved_cdf = saved_cdf.or(c);
-            }
-        } else {
-            // Tiles are independent: each thread codes its tiles into its own
-            // frame state and picture, whose tile areas are merged afterwards.
-            let proto = &fs;
-            let mk_pic = || {
-                Picture::<P>::new(
-                    hdr.frame_width as usize,
-                    hdr.frame_height as usize,
-                    seq.num_planes(),
-                    seq.subsampling_x,
-                    seq.subsampling_y,
-                    seq.bit_depth,
-                )
-            };
-            type TileOut<P> = (Vec<(usize, TileCoded)>, FrameState, Picture<P>);
-            let outs: Vec<R<TileOut<P>>> = std::thread::scope(|sc| {
-                let handles: Vec<_> = (0..threads)
-                    .map(|t| {
-                        let run_tile = &run_tile;
-                        let mk_pic = &mk_pic;
-                        let (seq, hdr) = (&seq, &hdr);
-                        sc.spawn(move || -> R<TileOut<P>> {
-                            let mut f = FrameState::new(seq, hdr);
-                            f.motion_field = proto.motion_field.clone();
-                            let mut c = mk_pic();
-                            let mut out = Vec::new();
-                            for tile in (t..n_tiles).step_by(threads) {
-                                out.push((tile, run_tile(tile, &mut f, &mut c)?));
-                            }
-                            Ok((out, f, c))
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| {
-                        h.join().unwrap_or(Err(CodecError::InvalidApi {
-                            what: "tile thread",
-                        }))
-                    })
-                    .collect()
-            });
-            let mut bytes: Vec<Option<MsacEnc>> = (0..n_tiles).map(|_| None).collect();
-            for o in outs {
-                let (tiles, f, c) = o?;
-                for (tile, (b, cdfs)) in tiles {
-                    let r0 = ti.mi_row_starts[tile / ti.cols] as usize;
-                    let r1 = ti.mi_row_starts[tile / ti.cols + 1] as usize;
-                    let c0 = ti.mi_col_starts[tile % ti.cols] as usize;
-                    let c1 = ti.mi_col_starts[tile % ti.cols + 1] as usize;
-                    merge_tile(&mut fs, &f, &mut cur, &c, r0, r1, c0, c1);
-                    bytes[tile] = Some(b);
-                    saved_cdf = saved_cdf.or(cdfs);
-                }
-            }
-            tile_bytes = bytes.into_iter().flatten().collect();
+        let mut saved_cdf: Option<Box<CdfContext>> = None;
+        let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
+        for (m, c) in super::rowmt::code_tiles(&job, &mut fs, &mut cur)? {
+            tile_bytes.push(m);
+            saved_cdf = saved_cdf.or(c);
         }
         let use_wiener_cdf = cdf.use_wiener;
         let init_cdf = cdf;
@@ -1721,53 +1602,6 @@ pub(crate) fn ev(_name: &str, default: f64) -> f64 {
     default
 }
 
-/// Copies the tile area (mode info rows r0..r1, columns c0..c1, in 4x4
-/// units) of a tile's frame state and picture into the frame's.
-fn merge_tile<P: Pixel>(
-    fs: &mut FrameState,
-    tf: &FrameState,
-    cur: &mut Picture<P>,
-    tc: &Picture<P>,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) {
-    let st = fs.mi_stride;
-    for r in r0..r1 {
-        let (a, b) = (r * st + c0, r * st + c1);
-        fs.mi[a..b].copy_from_slice(&tf.mi[a..b]);
-        fs.uv_modes[a..b].copy_from_slice(&tf.uv_modes[a..b]);
-        fs.tx_types[a..b].copy_from_slice(&tf.tx_types[a..b]);
-        fs.inter_tx_sizes[a..b].copy_from_slice(&tf.inter_tx_sizes[a..b]);
-        fs.segment_ids[a..b].copy_from_slice(&tf.segment_ids[a..b]);
-    }
-    for (p, pl) in cur.planes.iter_mut().enumerate() {
-        let sx = usize::from(pl.w < tc.planes[0].w && p > 0);
-        let sy = usize::from(pl.h < tc.planes[0].h && p > 0);
-        let (pr0, pr1) = (r0 >> sy, r1.div_ceil(1 << sy));
-        let (pc0, pc1) = (c0 >> sx, c1.div_ceil(1 << sx));
-        for r in pr0..pr1 {
-            let (a, b) = (r * st + pc0, r * st + pc1);
-            fs.lf_tx[p][a..b].copy_from_slice(&tf.lf_tx[p][a..b]);
-        }
-        let tp = &tc.planes[p];
-        let (y0, y1) = ((pr0 * 4).min(pl.alloc_h), (pr1 * 4).min(pl.alloc_h));
-        let (x0, x1) = ((pc0 * 4).min(pl.stride), (pc1 * 4).min(pl.stride));
-        for y in y0..y1 {
-            pl.data[y * pl.stride + x0..y * pl.stride + x1]
-                .copy_from_slice(&tp.data[y * tp.stride + x0..y * tp.stride + x1]);
-        }
-    }
-    let cs = fs.cdef_stride;
-    for r in r0 / 16..r1.div_ceil(16) {
-        let (a, b) = (r * cs + c0 / 16, r * cs + c1.div_ceil(16));
-        if b <= fs.cdef_idx.len() {
-            fs.cdef_idx[a..b].copy_from_slice(&tf.cdef_idx[a..b]);
-        }
-    }
-}
-
 /// Squared error over the visible area of every plane.
 fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
     a.planes
@@ -1876,19 +1710,22 @@ fn source_picture<P: Pixel>(
 mod tests {
     use super::{AnyPicture, Av1Core, Av1Enc, EncConfig, InputFrame, RateControl};
 
-    fn encode(threads: usize) -> Vec<u8> {
-        let (w, h) = (160usize, 96usize);
+    fn encode(threads: usize, tiles_log2: u32) -> Vec<u8> {
+        let (w, h) = (320usize, 192usize);
         let mut cfg = EncConfig::new(w, h);
         cfg.rc = RateControl::Qindex(90);
-        cfg.tile_cols_log2 = 1;
-        cfg.tile_rows_log2 = 1;
+        cfg.tile_cols_log2 = tiles_log2;
+        cfg.tile_rows_log2 = tiles_log2;
         cfg.threads = threads;
         cfg.gop = 4;
         let mut enc = Av1Enc::new(cfg).expect("encoder");
         let mut out = Vec::new();
         for f in 0..5usize {
             let y: Vec<u8> = (0..w * h)
-                .map(|i| ((i % w) * 3 + (i / w) * 2 + f * 5) as u8)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    ((x * 3 + y * 2 + f * 5) ^ (x * y / 7 + f)) as u8
+                })
                 .collect();
             let c = vec![100u8; (w / 2) * (h / 2)];
             for u in enc
@@ -1909,7 +1746,13 @@ mod tests {
 
     #[test]
     fn tile_threads_do_not_change_the_bitstream() {
-        assert_eq!(encode(1), encode(3));
+        assert_eq!(encode(1, 1), encode(3, 1));
+    }
+
+    #[test]
+    fn row_threads_do_not_change_the_bitstream() {
+        assert_eq!(encode(1, 0), encode(2, 0));
+        assert_eq!(encode(1, 0), encode(4, 0));
     }
 
     /// Visible samples of every plane.
@@ -1939,7 +1782,8 @@ mod tests {
         for (speed, lr, tiles, threads, bd) in [
             (6u8, false, 0u32, 1usize, 8u32),
             (6, true, 1, 2, 8),
-            (3, true, 0, 1, 10),
+            (3, true, 0, 2, 10),
+            (6, true, 0, 3, 8),
             (8, false, 1, 2, 8),
             (10, false, 0, 1, 8),
         ] {

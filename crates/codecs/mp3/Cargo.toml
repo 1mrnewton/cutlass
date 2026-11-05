@@ -13,5 +13,9 @@ cutlass-encode = { path = "../../encode", version = "0.1.0" }
 [dev-dependencies]
 cutlass-mp3-container = { path = "../../containers/mp3", version = "0.1.0" }
 
+[[bench]]
+name = "speed"
+harness = false
+
 [lints]
 workspace = true

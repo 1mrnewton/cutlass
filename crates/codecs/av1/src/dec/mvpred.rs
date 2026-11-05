@@ -787,13 +787,13 @@ pub fn motion_field_estimation(
 /// The projections of motion field estimation (7.9) for one frame. Every
 /// band of 8 rows of 8x8 positions only receives projections from the same
 /// rows of the references, so bands can be computed separately.
-pub struct MfPlan<'a> {
-    passes: Vec<Projection<'a>>,
+pub struct MfPlan {
+    passes: Vec<Projection>,
     pub w8: usize,
     pub h8: usize,
 }
 
-impl MfPlan<'_> {
+impl MfPlan {
     /// Number of bands of 8 rows.
     pub fn bands(&self) -> usize {
         if self.passes.is_empty() || self.w8 == 0 {
@@ -846,11 +846,11 @@ impl MfPlan<'_> {
 }
 
 /// The [`MfPlan`] of the frame `hdr`.
-pub fn motion_field_plan<'a>(
+pub fn motion_field_plan(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
-    refs: &'a [Option<std::sync::Arc<RefData>>; 8],
-) -> MfPlan<'a> {
+    refs: &[Option<std::sync::Arc<RefData>>; 8],
+) -> MfPlan {
     let mi_cols = hdr.mi_cols as usize;
     let mi_rows = hdr.mi_rows as usize;
     let w8 = mi_cols >> 1;
@@ -862,10 +862,10 @@ pub fn motion_field_plan<'a>(
         .map_or(0, |r| r.saved_order_hints[7]);
     // The projections to run, in order. `project` returns false when the
     // reference cannot be projected (the spec's early return 0).
-    let mut passes: Vec<Projection<'_>> = Vec::new();
+    let mut passes: Vec<Projection> = Vec::new();
     let mut project = |src: usize, dst_sign: i32| -> bool {
         let src_idx = hdr.ref_frame_idx[src - 1] as usize;
-        let Some(rd) = refs[src_idx].as_deref() else {
+        let Some(rd) = refs[src_idx].clone() else {
             return false;
         };
         if rd.mi_rows != mi_rows
@@ -911,19 +911,19 @@ pub fn motion_field_plan<'a>(
 }
 
 /// One reference's projection in [`motion_field_estimation`].
-struct Projection<'a> {
-    rd: &'a RefData,
+struct Projection {
+    rd: std::sync::Arc<RefData>,
     dst_sign: i32,
     ref_to_cur: i32,
     offsets: [i32; 8],
 }
 
-impl Projection<'_> {
+impl Projection {
     /// Projects the source rows of `band`, which holds the field rows from
     /// `y0` on (whole groups of 8 rows).
     fn run(&self, band: &mut [MfEntry], y0: usize, w8: usize, h8: usize) {
         let rows = band.len() / w8;
-        let rd = self.rd;
+        let rd = &*self.rd;
         let dst_sign = self.dst_sign;
         let num = self.ref_to_cur * dst_sign;
         for y8 in y0..y0 + rows {

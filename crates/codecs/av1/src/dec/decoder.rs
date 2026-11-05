@@ -465,6 +465,9 @@ fn visible_rows<P>(pl: &Plane<P>, y0: usize, y1: usize, sy: usize) -> (usize, us
     (a, b.max(a), pl.w.min(pl.stride))
 }
 
+/// Luma rows the buffers of a [`Band`] have room for.
+const BAND_ROWS: usize = 136;
+
 /// Copies the visible samples of luma rows `y0..y1` of every plane of
 /// `src` into a [`Band`], in the buffers `bufs`.
 fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize, bufs: [Vec<P>; 3]) -> Band {
@@ -481,6 +484,9 @@ fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize, bufs: [Vec<P
         strides[p] = pl.stride;
         let (a, b, w) = visible_rows(pl, y0, y1, sy);
         widths[p] = w;
+        // Room for the largest band (a superblock row and the 8 rows loop
+        // restoration holds back), so that pooled buffers stop growing.
+        v.reserve(((b - a).max(BAND_ROWS >> sy) * w).saturating_sub(v.len()));
         for r in a..b {
             v.extend_from_slice(&pl.data[r * pl.stride..r * pl.stride + w]);
         }
@@ -691,7 +697,12 @@ struct Spares<P> {
     bands: Vec<[Vec<P>; 3]>,
     /// Reconstruction scratch of the backends.
     scratch: Vec<Scratch<P>>,
+    /// The saved boundary rows of the in-loop filters of the backends.
+    filters: Vec<FilterRows<P>>,
 }
+
+/// The CDEF scratch and loop restoration boundaries of an [`InlineFilter`].
+type FilterRows<P> = (postfilter::CdefScratch<P>, postfilter::LrBounds<P>);
 
 /// Band buffers kept for reuse, at most.
 const MAX_BANDS: usize = 96;
@@ -714,6 +725,7 @@ impl<P> Default for PixState<P> {
                 states: Vec::new(),
                 bands: Vec::new(),
                 scratch: Vec::new(),
+                filters: Vec::new(),
             })),
         }
     }
@@ -727,6 +739,7 @@ impl<P: Pixel> PixState<P> {
         sp.lr.truncate(4);
         sp.states.truncate(8);
         sp.scratch.truncate(8);
+        sp.filters.truncate(8);
     }
 }
 
@@ -1571,7 +1584,7 @@ impl<P: PicturePixel> FrameTask<P> {
         // Motion field estimation runs in decode_frame.
         let mf_plan = hdr
             .use_ref_frame_mvs
-            .then(|| motion_field_plan(seq, hdr, &refs_data));
+            .then(|| Arc::new(motion_field_plan(seq, hdr, &refs_data)));
         if hdr.primary_ref_frame != PRIMARY_REF_NONE {
             let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;
             if let Some(rd) = &refs_data[slot_idx]
@@ -2356,7 +2369,7 @@ fn decode_frame<P: PicturePixel>(
     spares: &Arc<Mutex<Spares<P>>>,
     workers: &Arc<Workers>,
     threads: usize,
-    mf: Option<&MfPlan<'_>>,
+    mf: Option<&Arc<MfPlan>>,
 ) -> R<Box<CdfContext>> {
     let lf_on = hdr.loop_filter.level[0] != 0 || hdr.loop_filter.level[1] != 0;
     let cdef_on = seq.enable_cdef
@@ -2401,7 +2414,7 @@ fn decode_frame<P: PicturePixel>(
         cur,
         spares,
         threads,
-        mf,
+        mf.map(|p| &**p),
         cdef_on,
     );
     lock(spares).lr.push(lr_scratch);
@@ -2442,7 +2455,7 @@ fn decode_frame_async<P: PicturePixel>(
     rows: &Arc<Mutex<RowPools>>,
     spares: &Arc<Mutex<Spares<P>>>,
     workers: &Arc<Workers>,
-    mf: Option<&MfPlan<'_>>,
+    mf: Option<&Arc<MfPlan>>,
     lf_on: bool,
     cdef_on: bool,
 ) -> R<Box<CdfContext>> {
@@ -2495,22 +2508,26 @@ fn decode_frame_async<P: PicturePixel>(
     let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
     let sub_y = seq.subsampling_y;
     let rows = &**rows;
-    let saved = std::thread::scope(|s| {
-        let mut feed = mf.filter(|p| p.bands() > 0).map(|plan| {
-            let (mtx, rx) = std::sync::mpsc::channel::<(usize, Vec<MfEntry>)>();
-            s.spawn(move || {
-                for k in 0..plan.bands() {
-                    let rows = (plan.h8 - 8 * k).min(8);
-                    let mut band = vec![MfEntry::default(); rows * plan.w8];
-                    plan.run_band(k, &mut band);
-                    if mtx.send((k, band)).is_err() {
-                        break;
-                    }
+    // The motion field bands come from a job on the pool (it stops once
+    // the parse no longer listens).
+    let mut feed = mf.filter(|p| p.bands() > 0).map(|plan| {
+        let (mtx, rx) = std::sync::mpsc::channel::<(usize, Vec<MfEntry>)>();
+        let plan = plan.clone();
+        workers.run(Box::new(move || {
+            let t = prof::thread_cpu();
+            for k in 0..plan.bands() {
+                let rows = (plan.h8 - 8 * k).min(8);
+                let mut band = vec![MfEntry::default(); rows * plan.w8];
+                plan.run_band(k, &mut band);
+                if mtx.send((k, band)).is_err() {
+                    break;
                 }
-                prof::cpu(prof::CPU_MF);
-            });
-            MfFeed { rx, have: 0 }
-        });
+            }
+            prof::cpu_since(prof::CPU_MF, t);
+        }));
+        MfFeed { rx, have: 0 }
+    });
+    let saved = {
         decode_tiles(
             seq,
             hdr,
@@ -2548,7 +2565,8 @@ fn decode_frame_async<P: PicturePixel>(
                 let _ = rtx.send((m, log));
             },
         )
-    });
+    };
+    drop(feed);
     // A failed parse fails the job before reconstruction sees the end of
     // its input.
     if let Err(e) = &saved {
@@ -2648,7 +2666,11 @@ impl<P: PicturePixel> Backend<P> {
             sub_x: seq.subsampling_x,
             sub_y: seq.subsampling_y,
         };
-        let res = {
+        let (cdef, lr_bounds) = lock(&spares)
+            .filters
+            .pop()
+            .unwrap_or_else(|| (postfilter::cdef_pads(), postfilter::LrBounds::default()));
+        let (res, filter_rows) = {
             let refs: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
                 if i == 0 {
                     return None;
@@ -2670,8 +2692,8 @@ impl<P: PicturePixel> Backend<P> {
                 cdef_on,
                 lr_on: hdr.lr.uses_lr,
                 lr_scratch: &mut lr_scratch,
-                cdef: postfilter::cdef_pads(),
-                lr_bounds: postfilter::LrBounds::default(),
+                cdef,
+                lr_bounds,
                 lf_on,
                 publish: &job,
                 spares: &spares,
@@ -2680,10 +2702,11 @@ impl<P: PicturePixel> Backend<P> {
                 published: 0,
             };
             let scratch = lock(&spares).scratch.pop().unwrap_or_else(Scratch::new);
-            recon_worker(
+            let res = recon_worker(
                 &seq, &hdr, &mut rc_fs, &mut cur, refs, mirrors, &finals, scratch, fills, rx,
                 &mut filt, &rows,
-            )
+            );
+            (res, (filt.cdef, filt.lr_bounds))
         };
         drop(held);
         let res = res.map(|(mirrors, scratch)| {
@@ -2701,6 +2724,7 @@ impl<P: PicturePixel> Backend<P> {
             let mut sp = lock(&spares);
             sp.shells.push(rc_fs);
             sp.lr.push(lr_scratch);
+            sp.filters.push(filter_rows);
         }
         let bands = job.finish_take(res.map(|()| Arc::new(P::wrap(fin))));
         // The buffers of the bands no other thread holds go back.
@@ -2729,7 +2753,7 @@ fn decode_frame_sync<P: PicturePixel>(
     mut cur: Picture<P>,
     spares: &Mutex<Spares<P>>,
     threads: usize,
-    mf: Option<&MfPlan<'_>>,
+    mf: Option<&MfPlan>,
     cdef_on: bool,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
     if let Some(p) = mf {

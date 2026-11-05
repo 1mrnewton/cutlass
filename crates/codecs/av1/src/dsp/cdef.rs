@@ -40,56 +40,118 @@ const CDEF_W_DIAG: [i32; 16] = [
     840, 420, 280, 210, 168, 140, 120, 105, 120, 140, 168, 210, 280, 420, 840, 0,
 ];
 /// Weights of the `partial[1, 3, 5, 7]` sums, as [`CDEF_W_DIAG`].
-const CDEF_W_ALT: [i32; 12] = [420, 210, 140, 105, 105, 105, 105, 105, 140, 210, 420, 0];
+const CDEF_W_ALT: [i32; 16] = [
+    420, 210, 140, 105, 105, 105, 105, 105, 140, 210, 420, 0, 0, 0, 0, 0,
+];
+
+/// Eight 16-bit lanes.
+type Lanes = [i16; 8];
+
+/// Adds `r` to lanes `i..i + 8` of the 16 lanes `acc`.
+#[inline(always)]
+fn add_at(acc: &mut [Lanes; 2], r: &Lanes, i: usize) {
+    let mut lo = [0i16; 8];
+    let mut hi = [0i16; 8];
+    lo[i..].copy_from_slice(&r[..8 - i]);
+    hi[..i].copy_from_slice(&r[8 - i..]);
+    for l in 0..8 {
+        acc[0][l] = acc[0][l].wrapping_add(lo[l]);
+        acc[1][l] = acc[1][l].wrapping_add(hi[l]);
+    }
+}
+
+/// Sum of `v[l]^2 * w[l]` over the 16 lanes.
+#[inline(always)]
+fn weighted_squares(v: &[Lanes; 2], w: &[i32; 16]) -> i32 {
+    let mut f = [0i32; 16];
+    for l in 0..8 {
+        f[l] = i32::from(v[0][l]);
+        f[l + 8] = i32::from(v[1][l]);
+    }
+    let mut s = 0i32;
+    for l in 0..16 {
+        s = s.wrapping_add(f[l].wrapping_mul(f[l]).wrapping_mul(w[l]));
+    }
+    s
+}
 
 /// Direction search on the 8x8 luma block at `src` (7.15.2). Returns
 /// `(yDir, var)`.
+///
+/// The partial sums run on 16-bit lanes (a sum covers at most 16 samples
+/// of `-128..=127`): every row is added at its own lane offset, so the
+/// sums along the diagonals become sums of whole lane vectors.
 pub fn cdef_direction<P: Pixel>(src: &[P], stride: usize, bd: u32) -> (u8, i32) {
     let sh = bd - 8;
-    let mut img = [[0i32; 8]; 8];
+    let mut img = [[0i16; 8]; 8];
     for (i, r) in img.iter_mut().enumerate() {
         let row = &src[i * stride..i * stride + 8];
         for (d, s) in r.iter_mut().zip(row) {
-            *d = (s.to_i32() >> sh) - 128;
+            *d = ((s.to_i32() >> sh) - 128) as i16;
         }
     }
-    // partial[k] of the spec: hv[0] = partial[2], hv[1] = partial[6],
-    // diag[0] = partial[0], diag[1] = partial[4], alt = partial[1, 3, 5, 7].
-    let mut hv = [[0i32; 8]; 2];
-    let mut diag = [[0i32; 16]; 2];
-    let mut alt = [[0i32; 12]; 4];
-    for (i, r) in img.iter().enumerate() {
-        hv[0][i] = r.iter().sum();
-        for j in 0..8 {
-            hv[1][j] += r[j];
-            diag[0][i + j] += r[j];
-            diag[1][7 + i - j] += r[j];
-        }
-        for k in 0..4 {
-            let pair = r[2 * k] + r[2 * k + 1];
-            alt[0][i + k] += pair;
-            alt[1][3 + i - k] += pair;
-        }
+    // partial[k] of the spec: hv0 = partial[2], hv1 = partial[6],
+    // d0 = partial[0], d1 = partial[4], a0..a3 = partial[1, 3, 5, 7].
+    let z = [[0i16; 8]; 2];
+    let (mut d0, mut d1, mut a0, mut a1, mut a2, mut a3) = (z, z, z, z, z, z);
+    let mut hv0 = [0i32; 8];
+    let mut hv1 = [0i16; 8];
+    macro_rules! row {
+        ($i:literal) => {{
+            let r = &img[$i];
+            for l in 0..8 {
+                hv1[l] = hv1[l].wrapping_add(r[l]);
+            }
+            add_at(&mut d0, r, $i);
+            add_at(&mut d1, &std::array::from_fn(|l| r[7 - l]), $i);
+            // Sums of column pairs, in lanes 0..4.
+            let mut p = [0i16; 8];
+            for k in 0..4 {
+                p[k] = r[2 * k].wrapping_add(r[2 * k + 1]);
+            }
+            hv0[$i] = i32::from(p[0]) + i32::from(p[1]) + i32::from(p[2]) + i32::from(p[3]);
+            add_at(&mut a0, &p, $i);
+            let mut q = [0i16; 8];
+            for k in 0..4 {
+                q[k] = p[3 - k];
+            }
+            add_at(&mut a1, &q, $i);
+        }};
     }
-    for m in 0..4 {
-        for j in 0..8 {
-            let pair = img[2 * m][j] + img[2 * m + 1][j];
-            alt[2][3 - m + j] += pair;
-            alt[3][m + j] += pair;
-        }
+    row!(0);
+    row!(1);
+    row!(2);
+    row!(3);
+    row!(4);
+    row!(5);
+    row!(6);
+    row!(7);
+    // Sums of row pairs.
+    macro_rules! pair {
+        ($m:literal) => {{
+            let mut p = [0i16; 8];
+            for l in 0..8 {
+                p[l] = img[2 * $m][l].wrapping_add(img[2 * $m + 1][l]);
+            }
+            add_at(&mut a2, &p, 3 - $m);
+            add_at(&mut a3, &p, $m);
+        }};
     }
+    pair!(0);
+    pair!(1);
+    pair!(2);
+    pair!(3);
     let div8 = DIV_TABLE[8] as i32;
-    let sq = |v: &[i32], w: &[i32]| -> i32 { v.iter().zip(w).map(|(&a, &b)| a * a * b).sum() };
-    let sq8 = |v: &[i32; 8]| -> i32 { v.iter().map(|&a| a * a).sum::<i32>() * div8 };
+    let sq8 = |v: [i32; 8]| -> i32 { v.iter().map(|&a| a * a).sum::<i32>() * div8 };
     let cost = [
-        sq(&diag[0], &CDEF_W_DIAG),
-        sq(&alt[0], &CDEF_W_ALT),
-        sq8(&hv[0]),
-        sq(&alt[1], &CDEF_W_ALT),
-        sq(&diag[1], &CDEF_W_DIAG),
-        sq(&alt[2], &CDEF_W_ALT),
-        sq8(&hv[1]),
-        sq(&alt[3], &CDEF_W_ALT),
+        weighted_squares(&d0, &CDEF_W_DIAG),
+        weighted_squares(&a0, &CDEF_W_ALT),
+        sq8(hv0),
+        weighted_squares(&a1, &CDEF_W_ALT),
+        weighted_squares(&d1, &CDEF_W_DIAG),
+        weighted_squares(&a2, &CDEF_W_ALT),
+        sq8(hv1.map(i32::from)),
+        weighted_squares(&a3, &CDEF_W_ALT),
     ];
     let mut best_cost = 0;
     let mut y_dir = 0usize;

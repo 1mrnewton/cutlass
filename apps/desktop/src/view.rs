@@ -10884,7 +10884,8 @@ mod tests {
             shell.notice()
         );
         assert_eq!(shell.job().map(|job| job.label), Some("Export".to_owned()));
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        // A debug Rust encoder on a small CI runner takes well over a minute.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while shell.job().is_some() && std::time::Instant::now() < until {
             frame(&mut shell, &mut view, Vec::new());
             std::thread::sleep(std::time::Duration::from_millis(5));

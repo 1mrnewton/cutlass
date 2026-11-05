@@ -166,7 +166,7 @@ pub(crate) fn present<D: Device>(
             batch.clear();
             let bytes = cpu_of(frame, pass.extent)?;
             base = Some(match mark.adjust.as_ref() {
-                Some(adjust) => adjusted(adjust, bytes, pass.time),
+                Some(adjust) => adjusted_in(adjust, bytes, pass.time, pass.draft, mark.segment),
                 None => apply_unary(
                     pass.store,
                     pass.draft,
@@ -206,7 +206,7 @@ fn push_visual<'a, D: Device>(
     let sample = |time| {
         let input = sample_cpu(layer.source, time)?;
         let input = match adjust.as_ref() {
-            Some(adjust) => adjusted(adjust, input, time),
+            Some(adjust) => adjusted_in(adjust, input, time, draft, segment),
             None => input,
         };
         Some(match mask.as_ref() {
@@ -515,6 +515,36 @@ fn masked(
         Some((u as f32, v as f32))
     });
     CpuBytes::new(width, height, rgba).unwrap_or(input)
+}
+
+/// `input` with `colour` run over it where `segment`'s colour mask keeps,
+/// in the segment's frame at `time`; all over without one.
+fn adjusted_in(
+    colour: &Colour,
+    input: CpuBytes,
+    time: Micros,
+    draft: &Draft,
+    segment: &Segment,
+) -> CpuBytes {
+    let (width, height) = (input.width(), input.height());
+    let limit = cutlass_effects::segment_color_mask(draft, segment).zip(clip_frame(
+        draft,
+        segment,
+        time,
+        (width, height),
+    ));
+    let Some((mask, frame)) = limit else {
+        return adjusted(colour, input, time);
+    };
+    let before = input.rgba().to_vec();
+    let after = adjusted(colour, input, time);
+    let mut rgba = after.rgba().to_vec();
+    #[allow(clippy::cast_possible_truncation)]
+    mask.limit(&before, &mut rgba, width, |x, y| {
+        let (u, v) = frame.apply(f64::from(x), f64::from(y));
+        Some((u as f32, v as f32))
+    });
+    CpuBytes::new(width, height, rgba).unwrap_or(after)
 }
 
 /// `input` with `adjust` run over it. The grain moves once a frame at 30

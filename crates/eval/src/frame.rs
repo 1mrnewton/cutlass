@@ -802,6 +802,79 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_mask_limits_a_clip_and_an_adjustment_layer_to_its_shape() {
+        // Turned a quarter, a linear mask keeps the right half.
+        let right = cutlass_effects::Mask {
+            rotation: 90.0,
+            ..cutlass_effects::Mask::new(cutlass_effects::MaskShape::Linear)
+        };
+        let draft = color_clip("0xFF404040", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let clip = cutlass_model::SegmentId::new("segment");
+        session
+            .apply(
+                0,
+                &[
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: clip.clone(),
+                        material_id: "bright".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                    cutlass_session::Request::SetColorMask {
+                        segment_id: clip.clone(),
+                        material_id: "where".into(),
+                        mask: Some(right),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            pixels(session.draft(), 0),
+            [[64, 64, 64, 255], [128, 128, 128, 255]].concat()
+        );
+        let layer = cutlass_model::SegmentId::new("layer");
+        session
+            .apply(
+                1,
+                &[
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: clip,
+                        material_id: "off".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.0,
+                    },
+                    cutlass_session::Request::AddAdjustment {
+                        track_id: "look".into(),
+                        segment_id: layer.clone(),
+                        material_id: "adj".into(),
+                        start: Micros(0),
+                        duration: Micros(1_000),
+                    },
+                    cutlass_session::Request::SetAdjust {
+                        segment_id: layer.clone(),
+                        material_id: "bright2".into(),
+                        key: "exposure".to_owned(),
+                        value: 0.5,
+                    },
+                    cutlass_session::Request::SetColorMask {
+                        segment_id: layer,
+                        material_id: "where2".into(),
+                        mask: Some(cutlass_effects::Mask {
+                            invert: true,
+                            ..right
+                        }),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            pixels(session.draft(), 0),
+            [[128, 128, 128, 255], [64, 64, 64, 255]].concat()
+        );
+    }
+
+    #[test]
     fn a_bundled_filter_runs_its_look_at_its_strength() {
         let draft = color_clip("0xFF404040", false);
         let mut session = cutlass_session::Session::open(draft);

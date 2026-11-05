@@ -38,7 +38,7 @@ use cutlass_playback::{
 };
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_session::{EditError, ImportedMedium, Request, Session, TrimEdge};
-use cutlass_settings::{SeekDuringPlayback, Settings, Shortcut};
+use cutlass_settings::{SeekDuringPlayback, Settings};
 use cutlass_storage::Home;
 use cutlass_store::{Folder, Hold, StoreError};
 use cutlass_transcription::{
@@ -685,38 +685,7 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(decoders: DecodeFactory, encoders: EncodeFactory, mut settings: Settings) -> Self {
-        ensure_shortcut(&mut settings, "undo", "primary+z");
-        ensure_shortcut(&mut settings, "redo", "primary+shift+z");
-        ensure_shortcut(&mut settings, "play", "space");
-        ensure_shortcut(&mut settings, "frame_back", "left");
-        ensure_shortcut(&mut settings, "frame_forward", "right");
-        ensure_shortcut(&mut settings, "delete", "delete");
-        ensure_shortcut(&mut settings, "split", "s");
-        ensure_shortcut(&mut settings, "copy", "primary+c");
-        ensure_shortcut(&mut settings, "cut", "primary+x");
-        ensure_shortcut(&mut settings, "paste", "primary+v");
-        ensure_shortcut(&mut settings, "extract_audio", "primary+shift+s");
-        ensure_shortcut(&mut settings, "ripple_delete", "shift+delete");
-        ensure_shortcut(&mut settings, "shuttle_back", "j");
-        ensure_shortcut(&mut settings, "shuttle_stop", "k");
-        ensure_shortcut(&mut settings, "shuttle_forward", "l");
-        ensure_shortcut(&mut settings, "mark_in", "i");
-        ensure_shortcut(&mut settings, "mark_out", "o");
-        ensure_shortcut(&mut settings, "clear_marks", "alt+x");
-        // Control-Y is the second redo. On Windows and Linux Control is the primary key.
-        ensure_shortcut(
-            &mut settings,
-            "redo_y",
-            if cfg!(target_os = "macos") {
-                "ctrl+y"
-            } else {
-                "primary+y"
-            },
-        );
-        ensure_shortcut(&mut settings, "select_all", "primary+a");
-        ensure_shortcut(&mut settings, "delete_left", "q");
-        ensure_shortcut(&mut settings, "delete_right", "w");
-        ensure_shortcut(&mut settings, "deactivate", "v");
+        settings.ensure_default_shortcuts();
         Self {
             decoders,
             encoders,
@@ -1008,11 +977,11 @@ impl Shell {
     }
 
     pub fn set_seek_during_playback(&mut self, value: SeekDuringPlayback) {
-        self.settings.playback.seek_during_playback = value;
+        self.update_settings(|settings| settings.playback.seek_during_playback = value);
     }
 
     pub fn set_scrub_audio(&mut self, value: bool) {
-        self.settings.playback.scrub_audio = value;
+        self.update_settings(|settings| settings.playback.scrub_audio = value);
     }
 
     pub fn project_folder(&self) -> Option<&Path> {
@@ -2083,12 +2052,7 @@ impl Shell {
     }
 
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
-        let action = self
-            .settings
-            .shortcuts
-            .iter()
-            .find(|shortcut| shortcut.keys == keys)
-            .map(|shortcut| shortcut.action.clone());
+        let action = self.settings.action_for(keys).map(str::to_owned);
         match action.as_deref() {
             Some("undo") => self.undo(),
             Some("redo" | "redo_y") => self.redo(),
@@ -2137,14 +2101,20 @@ impl Shell {
         }
     }
 
-    pub fn set_shortcut(&mut self, action: &str, keys: &str) {
-        if let Some(shortcut) = self
-            .settings
-            .shortcuts
-            .iter_mut()
-            .find(|shortcut| shortcut.action == action)
-        {
-            shortcut.keys = keys.to_owned();
+    /// Bind `keys` to `action` and save. Another action that held the
+    /// keys loses them; its name comes back.
+    pub fn set_shortcut(&mut self, action: &str, keys: &str) -> Option<String> {
+        let displaced = self.settings.bind(action, keys);
+        self.save_settings();
+        displaced
+    }
+
+    /// Change the settings and save them.
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings)) {
+        let before = self.settings.clone();
+        change(&mut self.settings);
+        if self.settings != before {
+            self.save_settings();
         }
     }
 
@@ -6038,21 +6008,6 @@ fn empty_pixel_size(lane_width: f64, rate: FrameRate) -> Option<f64> {
         return None;
     }
     Some(size.min(last_accuracy_step(rate)?))
-}
-
-fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
-    if settings
-        .shortcuts
-        .iter()
-        .any(|shortcut| shortcut.action == action)
-    {
-        return;
-    }
-    settings.shortcuts.push(Shortcut {
-        action: action.to_owned(),
-        keys: keys.to_owned(),
-        ..Shortcut::default()
-    });
 }
 
 fn bit(attribute: TrackAttribute, flag: i32) -> bool {

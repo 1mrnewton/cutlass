@@ -138,6 +138,9 @@ pub struct ViewState {
     project_dialog: Option<cutlass_editor::ProjectSettings>,
     /// The third-party notices, read when the Licenses window opens.
     licenses: Option<cutlass_licenses::Notices>,
+    settings_open: bool,
+    /// The action whose new keys the settings window waits for.
+    recording: Option<&'static str>,
     /// The dialog's choices; its path is `export_path`.
     export: ExportRequest,
     /// Write a MOV rather than an MP4.
@@ -215,6 +218,8 @@ impl Default for ViewState {
             export_open: false,
             project_dialog: None,
             licenses: None,
+            settings_open: false,
+            recording: None,
             export: ExportRequest::default(),
             export_mov: false,
             export_mbps: None,
@@ -289,7 +294,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         panel(ui, full);
         preview_panel(shell, ui, view, full);
         job_strip(shell, ui, full);
-        shortcuts(shell, ui);
+        shortcuts(shell, ui, view);
         if shell.playing() || shell.preview_pending() {
             ui.ctx().request_repaint();
         }
@@ -318,7 +323,7 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
             project_dialog(shell, ui, view);
         }
         job_strip(shell, ui, full);
-        shortcuts(shell, ui);
+        shortcuts(shell, ui, view);
         if shell.playing() || shell.preview_pending() || !shell.meter_resting() {
             ui.ctx().request_repaint();
         }
@@ -328,6 +333,10 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     if view.licenses.is_some() {
         licenses_window(ui, view);
+    }
+    settings_keys(shell, ui, view);
+    if view.settings_open {
+        settings_window(shell, ui, view);
     }
     dropped_files(shell, ui);
 }
@@ -704,6 +713,10 @@ struct Sizes {
     preview: f32,
 }
 
+/// The side panels the settings can hide, by their id in the settings file.
+const PANEL_LIBRARY: &str = "library";
+const PANEL_INSPECTOR: &str = "inspector";
+
 fn sizes(shell: &Shell, window: Vec2) -> Sizes {
     let head = tokens::HEAD_HEIGHT;
     let timeline = shell.timeline_height().clamp(
@@ -711,9 +724,20 @@ fn sizes(shell: &Shell, window: Vec2) -> Sizes {
         (window.y - head - tokens::SPLIT - tokens::PREVIEW_MIN_HEIGHT).max(tokens::TIMELINE_MIN),
     );
     let row = (window.y - head - tokens::SPLIT - timeline).max(0.0);
-    let library = shell.library_width();
-    let inspector = shell.inspector_width();
-    let preview = (window.x - library - inspector - tokens::SPLIT * 2.0).max(0.0);
+    let side = |id: &str, width: f32| {
+        if shell.settings().panel_open(id) {
+            width
+        } else {
+            0.0
+        }
+    };
+    let library = side(PANEL_LIBRARY, shell.library_width());
+    let inspector = side(PANEL_INSPECTOR, shell.inspector_width());
+    let gaps = [library, inspector]
+        .iter()
+        .filter(|width| **width > 0.0)
+        .count() as f32;
+    let preview = (window.x - library - inspector - tokens::SPLIT * gaps).max(0.0);
     Sizes {
         head,
         row,
@@ -852,6 +876,10 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
         ui.close();
         view.dialogs.open_project(parent);
     }
+    if ui.button("Settings…").clicked() {
+        ui.close();
+        view.settings_open = true;
+    }
     if shell.draft().is_none() {
         return;
     }
@@ -920,6 +948,147 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
     }
 }
 
+/// The settings keys on every screen: the keys bound to Settings open the
+/// window, and while a shortcut is being changed the next chord is its new
+/// keys. Escape stops the change.
+fn settings_keys(shell: &mut Shell, ui: &Ui, view: &mut ViewState) {
+    if ui.ctx().text_edit_focused() {
+        return;
+    }
+    if let Some(action) = view.recording {
+        if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            view.recording = None;
+            return;
+        }
+        let Some(chord) = ui.input(pressed_chord) else {
+            return;
+        };
+        view.recording = None;
+        if let Some(displaced) = shell.set_shortcut(action, &chord) {
+            shell.set_notice(format!(
+                "{} took {} from {}",
+                cutlass_settings::action_label(action),
+                cutlass_settings::keys_label(&chord, MAC),
+                cutlass_settings::action_label(&displaced)
+            ));
+        }
+        return;
+    }
+    if !view.settings_open
+        && view.licenses.is_none()
+        && let Some(chord) = ui.input(pressed_chord)
+        && shell.settings().action_for(&chord) == Some("settings")
+    {
+        view.settings_open = true;
+    }
+}
+
+const MAC: bool = cfg!(target_os = "macos");
+
+/// Playback, the side panels, the platform codecs and the shortcuts. A
+/// change saves at once.
+fn settings_window(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let mut settings = shell.settings().clone();
+    let mut reset = false;
+    let mut record = None;
+    let mut clear = None;
+    let ((), closed) = widgets::dialog(ui, "Settings", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(372.0);
+                settings_heading(ui, "Playback");
+                ui.checkbox(&mut settings.playback.loop_playback, "Loop at the end");
+                ui.checkbox(
+                    &mut settings.playback.scrub_audio,
+                    "Play sound while the playhead is dragged",
+                );
+                choice_row(ui, "A seek", |ui| {
+                    let seek = &mut settings.playback.seek_during_playback;
+                    for (value, name) in [
+                        (cutlass_settings::SeekDuringPlayback::KeepPlaying, "keeps playing"),
+                        (cutlass_settings::SeekDuringPlayback::Pause, "pauses"),
+                    ] {
+                        if ui.selectable_label(*seek == value, name).clicked() {
+                            *seek = value;
+                        }
+                    }
+                });
+                settings_heading(ui, "Panels");
+                for (id, name) in [(PANEL_LIBRARY, "Library"), (PANEL_INSPECTOR, "Inspector")] {
+                    let mut open = settings.panel_open(id);
+                    if ui.checkbox(&mut open, name).changed() {
+                        settings.set_panel_open(id, open);
+                    }
+                }
+                settings_heading(ui, "Hardware codecs");
+                ui.checkbox(&mut settings.hardware.decode, "Decode with the system codecs");
+                ui.checkbox(&mut settings.hardware.encode, "Encode with the system codecs");
+                ui.label(
+                    RichText::new("These take effect when Cutlass opens again.")
+                        .color(tokens::FAINT),
+                );
+                settings_heading(ui, "Shortcuts");
+                for (action, label) in cutlass_settings::ACTIONS {
+                    ui.horizontal(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::new(200.0, 20.0), Sense::hover());
+                        ui.painter().text(
+                            rect.left_center(),
+                            Align2::LEFT_CENTER,
+                            *label,
+                            FontId::proportional(tokens::TYPE_SIZE),
+                            tokens::MUTED,
+                        );
+                        let keys = settings.keys_for(action);
+                        let shown = if view.recording == Some(*action) {
+                            "Press keys…".to_owned()
+                        } else if keys.is_empty() {
+                            "None".to_owned()
+                        } else {
+                            cutlass_settings::keys_label(keys, MAC)
+                        };
+                        if ui
+                            .add(egui::Button::new(shown).min_size(Vec2::new(110.0, 20.0)))
+                            .on_hover_text("Click, then press the new keys")
+                            .clicked()
+                        {
+                            record = Some(*action);
+                        }
+                        if !keys.is_empty() && ui.small_button("Clear").clicked() {
+                            clear = Some(*action);
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+                reset = ui.button("Reset shortcuts").clicked();
+            });
+        });
+    });
+    if let Some(action) = clear {
+        settings.bind(action, "");
+    }
+    if reset {
+        settings.reset_shortcuts();
+        view.recording = None;
+    }
+    if record.is_some() {
+        view.recording = record;
+    }
+    shell.update_settings(|current| *current = settings);
+    let escape = view.recording.is_none() && ui.input(|input| input.key_pressed(egui::Key::Escape));
+    if closed || escape {
+        view.settings_open = false;
+        view.recording = None;
+    }
+}
+
+fn settings_heading(ui: &mut Ui, text: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(text).color(tokens::TEXT).strong());
+    ui.add_space(2.0);
+}
+
 fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     let (undo, redo) = (shell.can_undo(), shell.can_redo());
     if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() {
@@ -936,23 +1105,32 @@ fn edit_menu(shell: &mut Shell, ui: &mut Ui) {
     }
 }
 
+/// The library, the preview and the inspector. A side panel the settings
+/// hide takes no room, and the preview grows into it.
 fn regions(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, row: Rect, sizes: Sizes) {
-    let library = Rect::from_min_size(row.min, Vec2::new(sizes.library, row.height()));
-    panel(ui, library);
-    library_panel(shell, ui, view, library);
-    shell.chrome.library = true;
-    let gap = Rect::from_min_size(
-        Pos2::new(library.max.x, row.min.y),
-        Vec2::new(tokens::SPLIT, row.height()),
-    );
-    drag_gap(ui, gap, |delta| shell.drag_library(delta.x, row.width()));
+    let mut left = row.min.x;
+    if sizes.library > 0.0 {
+        let library = Rect::from_min_size(row.min, Vec2::new(sizes.library, row.height()));
+        panel(ui, library);
+        library_panel(shell, ui, view, library);
+        shell.chrome.library = true;
+        let gap = Rect::from_min_size(
+            Pos2::new(library.max.x, row.min.y),
+            Vec2::new(tokens::SPLIT, row.height()),
+        );
+        drag_gap(ui, gap, |delta| shell.drag_library(delta.x, row.width()));
+        left = gap.max.x;
+    }
     let preview = Rect::from_min_size(
-        Pos2::new(gap.max.x, row.min.y),
+        Pos2::new(left, row.min.y),
         Vec2::new(sizes.preview, row.height()),
     );
     panel(ui, preview);
     preview_panel(shell, ui, view, preview);
     shell.chrome.preview = true;
+    if sizes.inspector <= 0.0 {
+        return;
+    }
     let gap = Rect::from_min_size(
         Pos2::new(preview.max.x, row.min.y),
         Vec2::new(tokens::SPLIT, row.height()),
@@ -5575,8 +5753,8 @@ fn parse_mbps(text: &str) -> Option<u32> {
     Some((mbps * 1_000_000.0).round() as u32)
 }
 
-fn shortcuts(shell: &mut Shell, ui: &Ui) {
-    if ui.ctx().text_edit_focused() {
+fn shortcuts(shell: &mut Shell, ui: &Ui, view: &ViewState) {
+    if ui.ctx().text_edit_focused() || view.settings_open || view.licenses.is_some() {
         return;
     }
     if let Some(chord) = ui.input(pressed_chord)
@@ -5587,66 +5765,64 @@ fn shortcuts(shell: &mut Shell, ui: &Ui) {
     }
 }
 
+/// The chord a key press makes, like `primary+shift+s`, whatever it is
+/// bound to. Modifier keys alone make none.
 fn pressed_chord(input: &egui::InputState) -> Option<String> {
     let key = input
         .keys_down
         .iter()
         .find(|key| input.key_pressed(**key))?;
-    let name = match key {
-        egui::Key::Z => "z",
-        egui::Key::Y => "y",
-        egui::Key::Space => "space",
-        egui::Key::ArrowLeft => "left",
-        egui::Key::ArrowRight => "right",
-        egui::Key::Delete | egui::Key::Backspace => "delete",
-        egui::Key::S => "s",
-        egui::Key::C => "c",
-        egui::Key::X => "x",
-        egui::Key::V => "v",
-        egui::Key::A => "a",
-        egui::Key::Q => "q",
-        egui::Key::W => "w",
-        egui::Key::J => "j",
-        egui::Key::K => "k",
-        egui::Key::L => "l",
-        egui::Key::I => "i",
-        egui::Key::O => "o",
-        _ => return None,
-    };
+    let name = key_name(*key)?;
     let modifiers = input.modifiers;
-    // Control apart from the primary key, as on a Mac.
-    let control = modifiers.ctrl && !modifiers.command;
-    let plain = !(modifiers.command || modifiers.alt || modifiers.shift || control);
-    let blocked = match name {
-        "space" | "left" | "right" | "q" | "w" | "j" | "k" | "l" | "i" | "o" => !plain,
-        // Shift-Delete is the ripple delete.
-        "delete" => {
-            !plain && !(modifiers.shift && !modifiers.command && !modifiers.alt && !control)
-        }
-        // Option-X clears the marks.
-        "x" if modifiers.alt => modifiers.command || modifiers.shift || control,
-        // S splits, and Shift-Command-S extracts the audio.
-        "s" => !plain && !(modifiers.command && modifiers.shift && !modifiers.alt),
-        _ => false,
-    };
-    if blocked {
-        return None;
-    }
     let mut parts = Vec::new();
-    if control {
+    // Control apart from the primary key, as on a Mac.
+    if modifiers.ctrl && !modifiers.command {
         parts.push("ctrl");
     }
-    if input.modifiers.command {
+    if modifiers.command {
         parts.push("primary");
     }
-    if input.modifiers.shift {
+    if modifiers.shift {
         parts.push("shift");
     }
-    if input.modifiers.alt {
+    if modifiers.alt {
         parts.push("alt");
     }
-    parts.push(name);
+    parts.push(&name);
     Some(parts.join("+"))
+}
+
+/// A key's name in a chord. Escape, Tab and Enter are left to the window.
+fn key_name(key: egui::Key) -> Option<String> {
+    use egui::Key;
+    Some(
+        match key {
+            Key::Space => "space",
+            Key::ArrowLeft => "left",
+            Key::ArrowRight => "right",
+            Key::ArrowUp => "up",
+            Key::ArrowDown => "down",
+            Key::Delete | Key::Backspace => "delete",
+            Key::Comma => "comma",
+            Key::Period => "period",
+            Key::Home => "home",
+            Key::End => "end",
+            Key::Escape | Key::Tab | Key::Enter => return None,
+            other => {
+                let name = other.name();
+                let single = name.chars().count() == 1
+                    && name.chars().all(|letter| letter.is_ascii_alphanumeric());
+                let function = name.starts_with('F')
+                    && name.len() > 1
+                    && name[1..].chars().all(|digit| digit.is_ascii_digit());
+                if !(single || function) {
+                    return None;
+                }
+                return Some(name.to_ascii_lowercase());
+            }
+        }
+        .to_owned(),
+    )
 }
 
 fn panel(ui: &mut Ui, rect: Rect) {
@@ -6812,6 +6988,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp);
     }
 
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn the_settings_window_opens_on_its_keys_and_rebinds_a_shortcut() {
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let run = |shell: &mut Shell, view: &mut ViewState, keys: Vec<egui::Event>| {
+            let mut events = Vec::new();
+            for event in keys {
+                if let egui::Event::Key { modifiers, .. } = &event {
+                    events.push(egui::Event::ModifiersChanged(*modifiers));
+                }
+                events.push(event);
+            }
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        run(&mut shell, &mut view, vec![key(egui::Key::Comma, egui::Modifiers::COMMAND)]);
+        assert!(view.settings_open);
+        let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
+        for text in ["Settings", "Playback", "Panels", "Shortcuts", "Play or pause"] {
+            assert!(painted.contains(text), "{text} in {painted}");
+        }
+        view.recording = Some("split");
+        run(&mut shell, &mut view, vec![key(egui::Key::Space, egui::Modifiers::NONE)]);
+        assert_eq!(view.recording, None);
+        assert_eq!(shell.settings().keys_for("split"), "space");
+        assert_eq!(shell.settings().keys_for("play"), "");
+        assert!(shell.notice().contains("took Space from Play or pause"), "{}", shell.notice());
+        view.recording = Some("play");
+        run(&mut shell, &mut view, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert_eq!(view.recording, None);
+        assert!(view.settings_open);
+        assert_eq!(shell.settings().keys_for("play"), "");
+        run(&mut shell, &mut view, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!view.settings_open);
+    }
+
+    #[test]
+    fn a_hidden_side_panel_gives_its_room_to_the_preview() {
+        let temp = std::env::temp_dir().join(format!("cutlass-hide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        cutlass_store::Folder::new(cutlass_model::Draft::empty("draft"))
+            .save(&temp)
+            .unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        let mut view = ViewState::new();
+        let window = Vec2::new(1280.0, 800.0);
+        let shown = sizes(&shell, window);
+        shell.update_settings(|settings| {
+            settings.set_panel_open(PANEL_LIBRARY, false);
+            settings.set_panel_open(PANEL_INSPECTOR, false);
+        });
+        let hidden = sizes(&shell, window);
+        assert_eq!(hidden.library, 0.0);
+        assert_eq!(hidden.inspector, 0.0);
+        assert_eq!(hidden.preview, window.x);
+        assert!(hidden.preview > shown.preview);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, window)),
+                ..Default::default()
+            },
+            |ui| show(&mut shell, ui, &mut view, None),
+        );
+        output.textures_delta.clear();
+        assert!(!shell.chrome.library);
+        assert!(!shell.chrome.inspector);
+        assert!(shell.chrome.preview);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
     #[test]
     fn the_licenses_window_lists_the_crates_and_the_log_exports() {
         let (decoders, encoders) = crate::register_codecs();
@@ -6834,14 +7103,7 @@ mod tests {
         let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
         assert!(painted.contains("Cutlass is licensed MIT OR Apache-2.0"), "{painted}");
         assert!(painted.contains("accesskit "), "{painted}");
-        let escape = egui::Event::Key {
-            key: egui::Key::Escape,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        run(&mut shell, &mut view, vec![escape]);
+        run(&mut shell, &mut view, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
         assert!(view.licenses.is_none());
 
         let temp = std::env::temp_dir().join(format!("cutlass-log-export-{}", std::process::id()));
@@ -7425,7 +7687,7 @@ mod tests {
     }
 
     #[test]
-    fn s_splits_and_shift_command_s_extracts_but_other_s_chords_do_nothing() {
+    fn every_s_chord_is_named_with_its_modifiers() {
         let chord = |modifiers: egui::Modifiers| {
             let ctx = egui::Context::default();
             let mut chord = None;
@@ -7453,8 +7715,11 @@ mod tests {
             chord(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT).as_deref(),
             Some("primary+shift+s")
         );
-        assert_eq!(chord(egui::Modifiers::COMMAND), None);
-        assert_eq!(chord(egui::Modifiers::SHIFT), None);
+        assert_eq!(
+            chord(egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+s")
+        );
+        assert_eq!(chord(egui::Modifiers::SHIFT).as_deref(), Some("shift+s"));
     }
 
     #[test]
@@ -7498,8 +7763,18 @@ mod tests {
             chord(egui::Key::W, egui::Modifiers::default()).as_deref(),
             Some("w")
         );
-        assert_eq!(chord(egui::Key::Q, egui::Modifiers::COMMAND), None);
-        assert_eq!(chord(egui::Key::Space, control), None);
+        assert_eq!(
+            chord(egui::Key::Q, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+q")
+        );
+        assert_eq!(chord(egui::Key::Space, control).as_deref(), Some("ctrl+space"));
+        assert_eq!(
+            chord(egui::Key::Comma, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+comma")
+        );
+        assert_eq!(chord(egui::Key::F5, egui::Modifiers::default()).as_deref(), Some("f5"));
+        assert_eq!(chord(egui::Key::Num3, egui::Modifiers::default()).as_deref(), Some("3"));
+        assert_eq!(chord(egui::Key::Escape, egui::Modifiers::default()), None);
         for (key, name) in [
             (egui::Key::J, "j"),
             (egui::Key::K, "k"),
@@ -7511,7 +7786,10 @@ mod tests {
                 chord(key, egui::Modifiers::default()).as_deref(),
                 Some(name)
             );
-            assert_eq!(chord(key, egui::Modifiers::COMMAND), None);
+            assert_eq!(
+                chord(key, egui::Modifiers::COMMAND),
+                Some(format!("primary+{name}"))
+            );
         }
         assert_eq!(
             chord(egui::Key::X, egui::Modifiers::ALT).as_deref(),
@@ -7521,13 +7799,17 @@ mod tests {
             chord(egui::Key::Delete, egui::Modifiers::SHIFT).as_deref(),
             Some("shift+delete")
         );
-        assert_eq!(chord(egui::Key::Delete, egui::Modifiers::COMMAND), None);
+        assert_eq!(
+            chord(egui::Key::Delete, egui::Modifiers::COMMAND).as_deref(),
+            Some("primary+delete")
+        );
         assert_eq!(
             chord(
                 egui::Key::X,
                 egui::Modifiers::ALT | egui::Modifiers::COMMAND
-            ),
-            None
+            )
+            .as_deref(),
+            Some("primary+alt+x")
         );
         assert_eq!(
             chord(egui::Key::X, egui::Modifiers::COMMAND).as_deref(),

@@ -33,6 +33,12 @@ pub fn register_codecs_with(
 ) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
+    // Rust audio codecs go ahead of the platform ones, so a file decodes
+    // and encodes the same on every platform. The Opus decoder matches the
+    // RFC vectors, plays multistream and every API rate, and the encoder
+    // hands the muxer the OpusHead and the end trim.
+    cutlass_opus::register_decoders(&mut decoders);
+    cutlass_opus::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -228,6 +234,74 @@ mod tests {
         let packets = encoder.push(&AudioInput { pcm }).expect("encode");
         assert_eq!(packets.len(), 1);
         assert!(!packets[0].data.is_empty());
+    }
+
+    /// Half a second of a stereo chord through `encoder`, in uneven pushes.
+    fn opus_packets(encoder: &mut dyn cutlass_encode::Encoder) -> Vec<cutlass_encode::Packet> {
+        use cutlass_decode::{ChannelLayout, Pcm};
+        let samples: Vec<f32> = (0..2 * 24_000)
+            .map(|i| ((i as f32) * 0.013).sin() * 0.4 + ((i as f32) * 0.002).sin() * 0.2)
+            .collect();
+        let mut packets = Vec::new();
+        for chunk in samples.chunks(2 * 1500) {
+            let pcm = Pcm::from_f32(48_000, ChannelLayout::stereo(), chunk.to_vec()).expect("pcm");
+            let input = cutlass_encode::AudioInput { pcm };
+            packets.extend(encoder.push(&input).expect("push"));
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        packets
+    }
+
+    /// Every sample `decoder` gives for `packets`.
+    fn opus_samples(
+        decoder: &mut dyn cutlass_decode::Decoder,
+        packets: &[cutlass_encode::Packet],
+    ) -> Vec<f32> {
+        let mut out = Vec::new();
+        for packet in packets {
+            for output in decoder.push(packet).expect("push") {
+                if let cutlass_decode::Output::Audio(audio) = output {
+                    out.extend(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_rust_opus_codec_goes_ahead_of_the_platform_one() {
+        use cutlass_decode::ChannelLayout;
+
+        let (decoders, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Opus, 48_000, ChannelLayout::stereo());
+        spec.bitrate = 96_000;
+        let mut app = encoders.open(&spec).expect("app opus encoder");
+        let mut rust = cutlass_opus::OpusEncoder::open(&spec).expect("rust opus encoder");
+        let packets = opus_packets(&mut rust);
+        assert_eq!(opus_packets(app.as_mut()), packets);
+
+        let listen = CodecParams::audio(CodecId::Opus, 48_000, ChannelLayout::stereo());
+        let mut app = decoders.open(&listen).expect("app opus decoder");
+        let mut rust = cutlass_opus::OpusDecoder::open(&listen).expect("rust opus decoder");
+        let decoded = opus_samples(&mut rust, &packets);
+        assert_eq!(opus_samples(app.as_mut(), &packets), decoded);
+
+        // Platform first, the Apple codecs take Opus and give other bytes
+        // and samples: the checks above would fail in that order.
+        #[cfg(target_os = "macos")]
+        {
+            let mut reversed = cutlass_encode::EncodeFactory::new();
+            cutlass_platform_apple::register_encoders_with(&mut reversed, true);
+            cutlass_opus::register_encoders(&mut reversed);
+            let mut platform = reversed.open(&spec).expect("platform opus encoder");
+            assert_ne!(opus_packets(platform.as_mut()), packets);
+
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_surface_decoders_with(&mut reversed, true);
+            cutlass_opus::register_decoders(&mut reversed);
+            let mut platform = reversed.open(&listen).expect("platform opus decoder");
+            assert_ne!(opus_samples(platform.as_mut(), &packets), decoded);
+        }
     }
 
     #[test]

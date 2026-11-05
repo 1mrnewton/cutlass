@@ -5763,6 +5763,11 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
     if !pcm_fits && export.audio.codec == CodecId::Pcm {
         export.audio.codec = CodecId::Aac;
     }
+    // Opus is written alone, in an Ogg file.
+    let opus_fits = !export.picture;
+    if !opus_fits && export.audio.codec == CodecId::Opus {
+        export.audio.codec = CodecId::Aac;
+    }
     if export.sound {
         let audio = &mut export.audio;
         choice_row(ui, "Codec", |ui| {
@@ -5776,14 +5781,19 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
             if ui.add_enabled(pcm_fits, pcm).clicked() {
                 audio.codec = CodecId::Pcm;
             }
+            let opus = egui::Button::selectable(audio.codec == CodecId::Opus, "Opus");
+            if ui.add_enabled(opus_fits, opus).clicked() {
+                audio.codec = CodecId::Opus;
+                audio.sample_rate = 48_000;
+            }
         });
         choice_row(ui, "Sample rate", |ui| {
             for rate in SoundFormat::SAMPLE_RATES {
                 let name = if rate == 44_100 { "44.1 kHz" } else { "48 kHz" };
-                if ui
-                    .selectable_label(audio.sample_rate == rate, name)
-                    .clicked()
-                {
+                // Opus is coded at 48 kHz only.
+                let fits = rate == 48_000 || audio.codec != CodecId::Opus;
+                let button = egui::Button::selectable(audio.sample_rate == rate, name);
+                if ui.add_enabled(fits, button).clicked() {
                     audio.sample_rate = rate;
                 }
             }

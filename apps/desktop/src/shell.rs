@@ -359,8 +359,8 @@ impl Default for ExportRequest {
     }
 }
 
-/// The sound of an export: AAC (in an MP4, a movie or an M4A) or 16-bit PCM
-/// (in a movie or a WAV).
+/// The sound of an export: AAC (in an MP4, a movie or an M4A), 16-bit PCM
+/// (in a movie or a WAV), or Opus (alone, in an Ogg `.opus` file).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SoundFormat {
     pub codec: CodecId,
@@ -393,7 +393,12 @@ impl SoundFormat {
             } else {
                 self.bitrate
             },
-            sample_rate: self.sample_rate,
+            // Opus is coded at 48 kHz whatever rate was picked.
+            sample_rate: if self.codec == CodecId::Opus {
+                48_000
+            } else {
+                self.sample_rate
+            },
             channels: self.channels,
             limiter: 0,
         }
@@ -402,10 +407,10 @@ impl SoundFormat {
     /// The extension of a file of this sound alone.
     #[must_use]
     pub fn extension(self) -> &'static str {
-        if self.codec == CodecId::Pcm {
-            "wav"
-        } else {
-            "m4a"
+        match self.codec {
+            CodecId::Pcm => "wav",
+            CodecId::Opus => "opus",
+            _ => "m4a",
         }
     }
 }
@@ -5432,10 +5437,10 @@ impl Shell {
             main = Some(self.movie_output(request, &base, captions.clone())?);
         } else if request.sound {
             let audio = request.audio.export();
-            let container = if audio.codec == CodecId::Pcm {
-                cutlass_codec::ContainerId::Riff
-            } else {
-                cutlass_codec::ContainerId::Isobmff
+            let container = match audio.codec {
+                CodecId::Pcm => cutlass_codec::ContainerId::Riff,
+                CodecId::Opus => cutlass_codec::ContainerId::Ogg,
+                _ => cutlass_codec::ContainerId::Isobmff,
             };
             main = Some(ExportOutput::Sound {
                 path: request.path.with_extension(request.audio.extension()),
@@ -5507,6 +5512,11 @@ impl Shell {
         if request.sound && request.audio.codec == CodecId::Pcm && !mov {
             return Err(ShellError::Unavailable(
                 "PCM sound is written in a MOV".to_owned(),
+            ));
+        }
+        if request.sound && request.audio.codec == CodecId::Opus {
+            return Err(ShellError::Unavailable(
+                "Opus sound is written alone, in an Opus file".to_owned(),
             ));
         }
         let bitrate = match request.bitrate {
@@ -11863,6 +11873,45 @@ mod tests {
         assert_eq!(
             &std::fs::read(temp.path.join("sound.wav")).unwrap()[..4],
             b"RIFF"
+        );
+
+        // Opus alone is an Ogg file the readers open again, at 48 kHz
+        // whatever rate was picked; in a movie it is refused.
+        let opus_sound = super::SoundFormat {
+            codec: CodecId::Opus,
+            sample_rate: 44_100,
+            bitrate: 128_000,
+            ..super::SoundFormat::default()
+        };
+        run(
+            &mut desktop,
+            ExportRequest {
+                path: temp.path.join("sound.mp4"),
+                picture: false,
+                audio: opus_sound,
+                ..ExportRequest::default()
+            },
+        );
+        let opus = temp.path.join("sound.opus");
+        let bytes = std::fs::read(&opus).unwrap();
+        assert_eq!(&bytes[..4], b"OggS");
+        assert_eq!(&bytes[28..36], b"OpusHead");
+        let info = crate::readers::installed_readers().probe(&opus).unwrap();
+        assert!(info.duration.is_some_and(|duration| duration.0 > 0));
+        assert!(
+            info.streams
+                .iter()
+                .any(|stream| stream.sample_rate == Some(48_000))
+        );
+        let opus_movie = desktop.export(ExportRequest {
+            path: temp.path.join("opus.mp4"),
+            short_side: 480,
+            audio: opus_sound,
+            ..ExportRequest::default()
+        });
+        assert_eq!(
+            opus_movie.unwrap_err().to_string(),
+            "Opus sound is written alone, in an Opus file"
         );
 
         // A GIF alone, and then again beside a movie, which finds it taken.

@@ -26,12 +26,11 @@ use cutlass_editor::{
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
-use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
+use cutlass_eval::{ReaderFactory, SceneError, scene_cuts};
 use cutlass_model::{
     Crop, Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType,
     Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
-    WordColumns, blend_window, linkage_from_biz, source_time_at, track_holds_beats, visible_beats,
-    visible_marks,
+    WordColumns, linkage_from_biz, source_time_at, track_holds_beats, visible_beats, visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
@@ -3878,7 +3877,7 @@ impl Shell {
                             "the clip changed while its scenes were found".to_owned(),
                         ));
                     }
-                    timeline_cuts(draft, &segment_id, &range, &cuts)
+                    cutlass_eval::scene_split_times(draft, &segment_id, &range, &cuts)
                 };
                 shell.split_at_times(&segment_id, &times)
             })
@@ -3948,7 +3947,7 @@ impl Shell {
             let (segment, _) = locate(draft, segment_id).ok_or_else(|| {
                 ShellError::Unavailable("the clip is not on the timeline".to_owned())
             })?;
-            kept_cuts(draft, segment, times)
+            cutlass_eval::kept_cuts(draft, segment, times)
         };
         if kept.is_empty() {
             return Err(ShellError::Unavailable(
@@ -5670,93 +5669,6 @@ fn scene_message(error: SceneError) -> ShellError {
         SceneError::Decode => "the clip's picture could not be read",
     };
     ShellError::Unavailable(message.to_owned())
-}
-
-fn timeline_cuts(draft: &Draft, id: &SegmentId, range: &TimeRange, cuts: &[Micros]) -> Vec<Micros> {
-    let Some((segment, _)) = locate(draft, id) else {
-        return Vec::new();
-    };
-    let mut times = Vec::new();
-    for cut in cuts {
-        let time = source_on_timeline(draft, segment, *cut)
-            .or_else(|| proportional(&segment.target, range, cut.0).map(Micros));
-        if let Some(time) = time {
-            times.push(time);
-        }
-    }
-    times
-}
-
-fn proportional(target: &TimeRange, range: &TimeRange, source: i64) -> Option<i64> {
-    let into = source.checked_sub(range.start.0)?;
-    if range.duration.0 <= 0 || into < 0 || into >= range.duration.0 {
-        return None;
-    }
-    let scaled =
-        i128::from(into).checked_mul(i128::from(target.duration.0))? / i128::from(range.duration.0);
-    target.start.0.checked_add(i64::try_from(scaled).ok()?)
-}
-
-fn kept_cuts(draft: &Draft, segment: &Segment, times: &[Micros]) -> Vec<Micros> {
-    let start = segment.target.start.0;
-    let end = start.saturating_add(segment.target.duration.0);
-    let margin = cutlass_editor::frame_margin(draft).0;
-    let mut ordered: Vec<i64> = times.iter().map(|time| time.0).collect();
-    ordered.sort_unstable();
-    ordered.dedup();
-    let mut kept = Vec::new();
-    let mut last = start;
-    for time in ordered {
-        if time < start.saturating_add(margin) || time > end.saturating_sub(margin) {
-            continue;
-        }
-        if time < last.saturating_add(margin) {
-            continue;
-        }
-        if blend_blocks(draft, &segment.id, time) {
-            continue;
-        }
-        kept.push(Micros(time));
-        last = time;
-    }
-    kept
-}
-
-fn blend_blocks(draft: &Draft, segment_id: &SegmentId, at: i64) -> bool {
-    let Some(track) = draft.tracks.iter().find(|track| {
-        track
-            .segments
-            .iter()
-            .any(|segment| &segment.id == segment_id)
-    }) else {
-        return false;
-    };
-    for segment in &track.segments {
-        let Some(cut) = segment
-            .target
-            .start
-            .0
-            .checked_add(segment.target.duration.0)
-        else {
-            continue;
-        };
-        for material_id in &segment.extra_material_refs {
-            let Some(MaterialRef::Transition(transition)) =
-                draft.materials.get(material_id.as_str())
-            else {
-                continue;
-            };
-            let Some((window_start, window_end)) =
-                blend_window(Micros(cut), transition.duration, transition.is_overlap)
-            else {
-                continue;
-            };
-            if at >= window_start.0 && at < window_end.0 {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// What the button that opens a file's folder says on this system.

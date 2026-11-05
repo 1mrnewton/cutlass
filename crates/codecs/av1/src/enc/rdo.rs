@@ -155,7 +155,7 @@ pub struct PredKey {
 }
 
 /// Predictions kept per block by the mode search.
-const PRED_CACHE: usize = 6;
+const PRED_CACHE: usize = 12;
 
 const PARTITION_NONE: usize = 0;
 const PARTITION_HORZ: usize = 1;
@@ -1585,23 +1585,49 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.scratch.obmc[..n].copy_from_slice(&e.1[..n]);
             return true;
         }
-        if self
-            .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
-            .is_err()
-        {
-            return false;
-        }
         if refs[1] > INTRA_FRAME {
-            let first: Vec<P> = self.scratch.obmc[..n].to_vec();
-            if self
-                .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], filters)
-                .is_err()
-            {
-                return false;
+            // The average of the two single predictions, which the search
+            // has often made already.
+            let single = |k: usize| PredKey {
+                refs: [refs[k], NONE],
+                mv: [mv[k], Mv::ZERO],
+                ..key
+            };
+            let (k0, k1) = (single(0), single(1));
+            let c0 = cache.iter().position(|e| e.0 == k0);
+            let c1 = cache.iter().position(|e| e.0 == k1);
+            let first: Vec<P> = match c0 {
+                Some(i) => cache[i].1[..n].to_vec(),
+                None => {
+                    if self
+                        .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    self.scratch.obmc[..n].to_vec()
+                }
+            };
+            let cache = &self.me_scratch.pred_cache;
+            match c1 {
+                Some(i) => self.scratch.obmc[..n].copy_from_slice(&cache[i].1[..n]),
+                None => {
+                    if self
+                        .predict_into_scratch(plane, refs[1], x, y, w, h, mv[1], filters)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
             }
             for (d, s) in self.scratch.obmc[..n].iter_mut().zip(&first) {
                 *d = P::from_i32((d.to_i32() + s.to_i32() + 1) >> 1);
             }
+        } else if self
+            .predict_into_scratch(plane, refs[0], x, y, w, h, mv[0], filters)
+            .is_err()
+        {
+            return false;
         }
         // Keep the last few predictions; the oldest buffer is reused.
         let cache = &mut self.me_scratch.pred_cache;

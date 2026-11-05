@@ -3,22 +3,28 @@
 //! Open reads the folder. This hold is the separate step that keeps a second
 //! process out. The file stores a socket address. The socket framing is not
 //! open yet, so the address is null. The exclusive lock is what "held" means.
-//! Dropping the hold releases the lock and leaves the file in place.
+//! While held the file also says `"open":true`; dropping the hold writes it
+//! without, releases the lock and leaves the file in place. A file still
+//! saying open when the next hold takes it was left by a process that did
+//! not close: an app that crashed.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::StoreError;
 
 const LOCK_FILE: &str = ".locked";
 const ABSENT_ADDRESS: &[u8] = b"{\"address\":null}\n";
+const OPEN_MARK: &[u8] = b"\"open\":true";
+const HELD_OPEN: &[u8] = b"{\"address\":null,\"open\":true}\n";
 
 /// A process that currently holds `.locked`.
 #[derive(Debug)]
 pub struct Hold {
     file: File,
     path: PathBuf,
+    unclean: bool,
 }
 
 impl Hold {
@@ -27,12 +33,27 @@ impl Hold {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The last process to hold this folder did not let go of it: it
+    /// stopped without closing, and the folder is as its last save left it.
+    #[must_use]
+    pub fn unclean(&self) -> bool {
+        self.unclean
+    }
 }
 
 impl Drop for Hold {
     fn drop(&mut self) {
+        let _ = rewrite(&mut self.file, ABSENT_ADDRESS);
         let _ = self.file.unlock();
     }
+}
+
+fn rewrite(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(bytes)?;
+    file.flush()
 }
 
 /// Take `.locked` in `path`. A folder that is already held is refused.
@@ -79,23 +100,20 @@ pub fn hold(path: &Path) -> Result<Hold, StoreError> {
             });
         }
     }
-    file.set_len(0).map_err(|error| StoreError::Io {
+    let mut before = Vec::new();
+    // A file that cannot be read is no sign of a crash.
+    let _ = file.read_to_end(&mut before);
+    let unclean = before
+        .windows(OPEN_MARK.len())
+        .any(|window| window == OPEN_MARK);
+    rewrite(&mut file, HELD_OPEN).map_err(|error| StoreError::Io {
         path: lock_path.clone(),
         message: error.to_string(),
     })?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|error| StoreError::Io {
-            path: lock_path.clone(),
-            message: error.to_string(),
-        })?;
-    file.write_all(ABSENT_ADDRESS)
-        .map_err(|error| StoreError::Io {
-            path: lock_path.clone(),
-            message: error.to_string(),
-        })?;
     Ok(Hold {
         file,
         path: lock_path,
+        unclean,
     })
 }
 
@@ -147,10 +165,28 @@ mod tests {
         assert_eq!(path, root.canonicalize().unwrap());
         let message = StoreError::Held { path: path.clone() }.to_string();
         assert!(message.contains("already held"));
-        assert_eq!(fs::read(first.path()).unwrap(), b"{\"address\":null}\n");
+        assert_eq!(fs::read(first.path()).unwrap(), HELD_OPEN);
+        assert!(!first.unclean());
         drop(first);
+        assert_eq!(
+            fs::read(root.join(".locked")).unwrap(),
+            b"{\"address\":null}\n"
+        );
         let second = hold(&root).unwrap();
-        assert_eq!(fs::read(second.path()).unwrap(), b"{\"address\":null}\n");
+        assert!(!second.unclean(), "a hold let go is a clean close");
+        assert_eq!(fs::read(second.path()).unwrap(), HELD_OPEN);
+    }
+
+    #[test]
+    fn a_hold_that_was_never_let_go_is_an_unclean_close() {
+        let temp = Temp::new();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        // A process that stopped without closing leaves the lock free and
+        // the file still saying open.
+        fs::write(root.join(".locked"), HELD_OPEN).unwrap();
+        let next = hold(&root).unwrap();
+        assert!(next.unclean());
     }
 
     #[test]

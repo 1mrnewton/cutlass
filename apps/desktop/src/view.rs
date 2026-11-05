@@ -323,6 +323,49 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     if let Some(finished) = view.dialogs.poll(ui.ctx()) {
         apply_dialog(shell, view, finished);
     }
+    dropped_files(shell, ui);
+}
+
+/// Files dragged over the window are named on a scrim; dropped, a project
+/// folder opens and files import into the open project.
+fn dropped_files(shell: &mut Shell, ui: &Ui) {
+    let (hovered, dropped) = ui.input(|input| {
+        (
+            input.raw.hovered_files.len(),
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_path_buf())
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect::<Vec<_>>(),
+        )
+    });
+    if hovered > 0 {
+        let rect = ui.ctx().content_rect();
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("drop-scrim"),
+        ));
+        painter.rect_filled(rect, CornerRadius::ZERO, tokens::SCRIM);
+        let words = if shell.project_folder().is_some() {
+            "Drop to import"
+        } else {
+            "Drop a project folder to open it"
+        };
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            words,
+            FontId::proportional(18.0),
+            tokens::TEXT,
+        );
+    }
+    if !dropped.is_empty()
+        && let Err(error) = shell.drop_files(&dropped)
+    {
+        shell.set_notice(error.to_string());
+    }
 }
 
 /// The running job above the foot of the window: what it is, where it has

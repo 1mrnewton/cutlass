@@ -585,6 +585,8 @@ pub struct Shell {
     settings: Settings,
     /// Where the settings are saved, and the generation on disk.
     settings_file: Option<(PathBuf, u64)>,
+    /// Files dropped on the window, imported one job after another.
+    waiting_imports: std::collections::VecDeque<PathBuf>,
     session: Option<Session>,
     folder: Option<Folder>,
     /// Library folder edits made, and how many the folder on disk holds.
@@ -726,6 +728,7 @@ impl Shell {
             lanes_cache: RefCell::new(None),
             settings,
             settings_file: None,
+            waiting_imports: std::collections::VecDeque::new(),
             session: None,
             folder: None,
             library_edits: 0,
@@ -1064,6 +1067,7 @@ impl Shell {
             self.save()?;
         }
         self.session = None;
+        self.waiting_imports.clear();
         self.lanes_cache.replace(None);
         self.card_waves.clear();
         self.folder = None;
@@ -1193,6 +1197,7 @@ impl Shell {
         self.library_saved = 0;
         let unclean = hold.unclean();
         self.hold = Some(hold);
+        self.waiting_imports.clear();
         let recent = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.settings.note_recent(&recent);
         self.save_settings();
@@ -3773,7 +3778,53 @@ impl Shell {
         if let Err(error) = result {
             self.set_notice(error.to_string());
         }
+        if stopping {
+            self.waiting_imports.clear();
+        } else if let Some(next) = self.waiting_imports.pop_front() {
+            if let Err(error) = self.start_import(&next) {
+                self.waiting_imports.clear();
+                self.set_notice(error.to_string());
+            }
+            return self.job.is_some();
+        }
         false
+    }
+
+    /// What files dropped on the window do: a project folder opens, and
+    /// files go into the open project one import after another.
+    pub fn drop_files(&mut self, paths: &[PathBuf]) -> Result<(), ShellError> {
+        let Some(first) = paths.first() else {
+            return Ok(());
+        };
+        if first.is_dir() && cutlass_store::listed_project(first).is_some() {
+            return self.open_folder(first);
+        }
+        if self.path.is_none() {
+            return Err(ShellError::Unavailable(
+                "open a project to import into first".to_owned(),
+            ));
+        }
+        let files: Vec<PathBuf> = paths
+            .iter()
+            .filter(|path| path.is_file())
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            return Err(ShellError::Unavailable(
+                "only files and project folders can be dropped".to_owned(),
+            ));
+        }
+        self.waiting_imports.extend(files);
+        if self.job.is_none()
+            && let Some(next) = self.waiting_imports.pop_front()
+        {
+            let started = self.start_import(&next);
+            if started.is_err() {
+                self.waiting_imports.clear();
+            }
+            return started;
+        }
+        Ok(())
     }
 
     /// Hear `source` with `recognizer` and place the caption. Tests pass a
@@ -7709,6 +7760,43 @@ mod tests {
             videos[0].path
         );
         assert_eq!(reopened.autosave(), None);
+    }
+
+    #[test]
+    fn dropped_files_import_one_after_another_and_a_dropped_project_opens() {
+        let temp = Temp::new();
+        let project = temp.path.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        empty_project(&project);
+        let picture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.png");
+        let second = temp.path.join("second.png");
+        std::fs::copy(&picture, &second).unwrap();
+
+        let mut desktop = shell();
+        let refused = desktop.drop_files(std::slice::from_ref(&picture));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "open a project to import into first"
+        );
+        desktop.drop_files(std::slice::from_ref(&project)).unwrap();
+        assert_eq!(desktop.project_folder(), Some(project.as_path()));
+
+        desktop
+            .drop_files(&[picture.clone(), second.clone()])
+            .unwrap();
+        assert_eq!(
+            desktop.job().map(|job| job.label),
+            Some("Import".to_owned())
+        );
+        land_job(&mut desktop);
+        let videos = &desktop.draft().unwrap().materials.videos;
+        assert_eq!(videos.len(), 2, "{}", desktop.notice());
+        assert!(
+            desktop
+                .drop_files(&[temp.path.join("missing.png")])
+                .is_err()
+        );
     }
 
     #[test]

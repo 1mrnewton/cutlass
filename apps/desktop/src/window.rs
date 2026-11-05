@@ -36,6 +36,15 @@ pub fn run() -> eframe::Result {
             let (decoders, encoders) = crate::register_codecs_with(&loaded.settings.hardware);
             let mut shell = Shell::new(decoders, encoders, loaded.settings);
             shell.keep_settings_file(file, loaded.generation);
+            // A project folder or files named on the command line, as a
+            // file association passes them.
+            let named: Vec<std::path::PathBuf> = std::env::args_os()
+                .skip(1)
+                .map(std::path::PathBuf::from)
+                .collect();
+            if let Err(error) = shell.drop_files(&named) {
+                shell.set_notice(error.to_string());
+            }
             if let Some(state) = creation.wgpu_render_state.as_ref() {
                 shell.attach_gpu(state);
             }

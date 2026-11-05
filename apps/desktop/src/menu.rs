@@ -106,7 +106,8 @@ const VIDEO: &[Entry] = &[
     done("extract-audio", "Extract audio", "⇧⌘S"),
     done("sync", "Sync video and audio", ""),
     SEP,
-    todo("compound", "Create compound clip", "⌥G"),
+    done("compound", "Create compound clip", "⌥G"),
+    done("open-compound", "Open compound clip", ""),
     done("multicam", "Create multi-camera clip", ""),
     done("group", "Group", ""),
     done("ungroup", "Ungroup", ""),
@@ -242,7 +243,6 @@ pub const CLIP_OFF: &[&str] = &[
     "sync",
     "multicam",
     "group",
-    "ungroup",
     "trim",
     "link-media",
     "edit-effects",
@@ -649,6 +649,7 @@ mod tests {
                 "extract-audio",
                 "sync",
                 "compound",
+                "open-compound",
                 "multicam",
                 "group",
                 "ungroup",
@@ -776,11 +777,12 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
-        let row = label_at(&output, "Create compound clip").expect("the compound row")
+        let row = label_at(&output, "Show variable speed animation")
+            .expect("the variable speed row")
             + Vec2::new(4.0, 6.0);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("compound", false));
+        assert_eq!((picked.id, picked.built), ("variable-speed", false));
     }
 
     #[test]

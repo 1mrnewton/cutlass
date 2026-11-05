@@ -47,6 +47,7 @@ use cutlass_transcription::{
 };
 
 mod assistant;
+mod compound;
 mod inspector;
 pub use assistant::AgentRun;
 
@@ -613,6 +614,8 @@ pub struct Shell {
     /// Files dropped on the window, imported one job after another.
     waiting_imports: std::collections::VecDeque<PathBuf>,
     session: Option<Session>,
+    /// The levels above an open compound clip, the project first.
+    outer: Vec<compound::Outer>,
     folder: Option<Folder>,
     /// Library folder edits made, and how many the folder on disk holds.
     /// They are not undo steps, so they count apart from the session.
@@ -724,6 +727,7 @@ impl Shell {
             settings_file: None,
             waiting_imports: std::collections::VecDeque::new(),
             session: None,
+            outer: Vec::new(),
             folder: None,
             library_edits: 0,
             library_saved: 0,
@@ -1199,6 +1203,7 @@ impl Shell {
         );
         let mut session = Session::open(opened.folder.draft.clone());
         session.set_linkage(linkage);
+        self.outer.clear();
         self.saved = Some((session.revision(), Instant::now()));
         self.session = Some(session);
         self.lanes_cache.replace(None);
@@ -1257,7 +1262,7 @@ impl Shell {
         let session = self.session.as_ref().ok_or(ShellError::NoProject)?;
         let enabled = session.linkage().enabled;
         let revision = session.revision();
-        let draft = session.draft().clone();
+        let draft = self.root_draft().ok_or(ShellError::NoProject)?;
         let folder = self.folder.as_mut().ok_or(ShellError::NoProject)?;
         let main = folder.project.main_timeline_id.clone();
         let name = draft.name.clone();
@@ -2163,6 +2168,7 @@ impl Shell {
             Some("delete_right") => self.delete_side(TrimEdge::End),
             Some("ripple_delete") => self.ripple_delete(),
             Some("deactivate") => self.toggle_active(),
+            Some("compound") => self.create_compound(),
             Some("shuttle_back") => {
                 self.shuttle(cutlass_editor::Shuttle::Back);
                 Ok(())
@@ -6953,6 +6959,7 @@ fn clip_name(draft: &Draft, segment: &Segment) -> String {
         Some(MaterialRef::Video(video)) if !video.path.is_empty() => file_name(&video.path),
         Some(MaterialRef::Audio(audio)) if !audio.path.is_empty() => file_name(&audio.path),
         Some(MaterialRef::Text(text)) if !text.content.is_empty() => text.content.clone(),
+        Some(MaterialRef::Draft(compound)) if !compound.name.is_empty() => compound.name.clone(),
         _ => segment.id.as_str().to_owned(),
     }
 }

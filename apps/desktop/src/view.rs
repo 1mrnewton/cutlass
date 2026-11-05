@@ -3011,6 +3011,18 @@ fn paint_toolbar(shell: &mut Shell, ui: &mut Ui, rect: Rect) {
         .show(&mut bar, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                if shell.compound_depth() > 0 {
+                    if ui
+                        .button(RichText::new("‹ Back").size(12.0))
+                        .on_hover_text("Back to the timeline the compound clip is on")
+                        .clicked()
+                        && let Err(error) = shell.close_compound()
+                    {
+                        shell.set_notice(error.to_string());
+                    }
+                    ui.label(RichText::new(COMPOUND_TITLE).size(12.0).color(tokens::TEXT));
+                    toolbar_separator(ui);
+                }
                 for item in TOOLS {
                     match item {
                         None => toolbar_separator(ui),
@@ -3177,6 +3189,9 @@ fn tool_clicked(shell: &mut Shell, name: &str) {
         shell.set_notice(error.to_string());
     }
 }
+
+/// What the toolbar says while a compound clip is open.
+const COMPOUND_TITLE: &str = "Compound clip";
 
 const TOOLS: &[Option<(&str, &str)>] = &[
     Some(("undo", "Undo")),
@@ -3501,6 +3516,7 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
         "extract-audio" => shell.extract_audio_enabled(),
         "flip" => shell.mirror_enabled(),
         "open-file" => shell.selected_has_file(),
+        "open-compound" | "ungroup" => shell.compound_selected(),
         id if crate::menu::CLIP_OFF.contains(&id) => false,
         _ => true,
     };
@@ -3532,6 +3548,9 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 view.wants_replace = true;
                 Ok(())
             }
+            "compound" => shell.create_compound(),
+            "open-compound" => shell.open_compound(),
+            "ungroup" => shell.ungroup_compound(),
             "range-in" => shell.mark_clip_in(),
             "range-out" => shell.mark_clip_out(),
             "beat" => {
@@ -5132,6 +5151,22 @@ fn paint_clip(
             Sense::drag(),
         );
         response.clone().on_hover_text(span.clone());
+        // A double-click on a compound clip opens it.
+        if response.hovered()
+            && ui.input(|input| {
+                input
+                    .pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            })
+        {
+            shell.select(Some(clip.id.clone()));
+            if shell.compound_selected() {
+                if let Err(error) = shell.open_compound() {
+                    shell.set_notice(error.to_string());
+                }
+                return;
+            }
+        }
         if response.drag_started()
             && let Some(pos) = pointer_pos(ui, &response)
         {
@@ -7880,6 +7915,78 @@ mod tests {
         assert_eq!(filters[0].name, "Warm");
         assert_eq!(filters[0].look, CardLook::Picture(None));
         assert_eq!(top_cards(&draft, Shelf::Filters, "noir").len(), 1);
+    }
+
+    #[test]
+    fn a_double_click_opens_a_compound_clip_and_back_leaves_it() {
+        let temp = std::env::temp_dir().join(format!("cutlass-compound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut video = cutlass_model::MaterialVideo::new("movie");
+        video.kind = "photo".to_owned();
+        video.path = "gone.png".to_owned();
+        draft.materials.videos.push(video);
+        for (id, start) in [("a", 0), ("b", 3_000_000)] {
+            draft.tracks[0].segments.push(cutlass_model::Segment::new(
+                id,
+                "movie",
+                cutlass_model::TimeRange::new(start, 3_000_000),
+            ));
+        }
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("a")));
+        shell.toggle_selected(SegmentId::new("b"));
+        shell.create_compound().unwrap();
+        shell.select(None);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let output = frame(&mut shell, &mut view, Vec::new());
+        assert!(text_pos(&output, "‹ Back").is_none());
+        let clip = text_pos(&output, COMPOUND_TITLE).expect("the compound clip on its row")
+            + Vec2::new(4.0, 4.0);
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(clip), press(clip, true)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(clip, false)]);
+        let _ = frame(&mut shell, &mut view, vec![press(clip, true)]);
+        let _ = frame(&mut shell, &mut view, vec![press(clip, false)]);
+        assert_eq!(shell.compound_depth(), 1);
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 2);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let back = text_pos(&output, "‹ Back").expect("the Back button");
+        let _ = frame(
+            &mut shell,
+            &mut view,
+            vec![egui::Event::PointerMoved(back), press(back, true)],
+        );
+        let _ = frame(&mut shell, &mut view, vec![press(back, false)]);
+        assert_eq!(shell.compound_depth(), 0);
+        assert_eq!(shell.draft().unwrap().tracks[0].segments.len(), 1);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

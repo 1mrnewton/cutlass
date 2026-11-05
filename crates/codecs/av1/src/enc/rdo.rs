@@ -1656,8 +1656,23 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 options.push((NEARMV, stack[1], 1, self.mode_bits(false, NEARMV, 1)));
             }
             options.push((GLOBALMV, global, 0, self.mode_bits(false, GLOBALMV, 0)));
-            let r = self.mode_bits(false, NEWMV, 0) + self.mv_bits((dr, dc));
-            options.push((NEWMV, mv_new, 0, r));
+            // The new vector is coded against the stack entry (drl index)
+            // that makes it cheapest.
+            let mut best_new = (self.mode_bits(false, NEWMV, 0) + self.mv_bits((dr, dc)), 0);
+            if self.mode.compound_modes {
+                for i in 1..self.b.num_mv_found.min(3) {
+                    let p = stack[i];
+                    let d = (
+                        i32::from(mv_new.row) - i32::from(p.row),
+                        i32::from(mv_new.col) - i32::from(p.col),
+                    );
+                    let r = self.mode_bits(false, NEWMV, i) + self.mv_bits(d);
+                    if r < best_new.0 {
+                        best_new = (r, i);
+                    }
+                }
+            }
+            options.push((NEWMV, mv_new, best_new.1, best_new.0));
         } else {
             options.push((NEARESTMV, stack[0], 0, 1.0));
             if self.b.num_mv_found > 1 {
@@ -2169,15 +2184,24 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 self.mode_bits(true, NEAREST_NEARESTMV, 0) + rb,
                 0,
             ));
-            opts.push((
-                NEW_NEWMV,
-                [fmv, bmv],
+            let mut best_new = (
                 self.mode_bits(true, NEW_NEWMV, 0)
                     + self.mv_bits(dm(fmv, s0[0]))
-                    + self.mv_bits(dm(bmv, s0[1]))
-                    + rb,
+                    + self.mv_bits(dm(bmv, s0[1])),
                 0,
-            ));
+            );
+            if self.mode.compound_modes {
+                for i in 1..self.b.num_mv_found.min(3) {
+                    let si = self.b.ref_stack_mv[i];
+                    let r = self.mode_bits(true, NEW_NEWMV, i)
+                        + self.mv_bits(dm(fmv, si[0]))
+                        + self.mv_bits(dm(bmv, si[1]));
+                    if r < best_new.0 {
+                        best_new = (r, i);
+                    }
+                }
+            }
+            opts.push((NEW_NEWMV, [fmv, bmv], best_new.0 + rb, best_new.1));
             if self.mode.compound_modes {
                 // One new vector against the other's nearest.
                 opts.push((

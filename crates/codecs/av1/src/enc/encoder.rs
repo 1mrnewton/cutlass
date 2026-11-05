@@ -1167,7 +1167,7 @@ impl Av1Enc {
             est_skip_ratio: ev("AV1_EST", if speed >= 5 { 2.0 } else { 0.0 }),
             exact_rates: ev("AV1_XR", 1.0) > 0.0,
             inter_rd_cands: ev("AV1_IRK", if speed >= 8 { 1.0 } else { 2.0 }) as usize,
-            inter_rd_ratio: ev("AV1_IRKR", 1.5),
+            inter_rd_ratio: ev("AV1_IRKR", 1.1),
             inter_rd_modes: ev("AV1_IRM", 1.0) as usize,
             intra_split_pred: ev("AV1_ITXP", 1.0) > 0.0,
             inter_flag_bits: ev("AV1_IIB", 1.0) > 0.0,

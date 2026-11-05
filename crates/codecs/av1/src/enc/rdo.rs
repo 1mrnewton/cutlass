@@ -143,7 +143,7 @@ impl Default for ModeParams {
             est_skip_ratio: 0.0,
             exact_rates: true,
             inter_rd_cands: 1,
-            inter_rd_ratio: 1.5,
+            inter_rd_ratio: 1.1,
             inter_rd_modes: 1,
             intra_split_pred: true,
             inter_flag_bits: true,

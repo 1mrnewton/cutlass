@@ -854,6 +854,8 @@ dependencies = [
  "cutlass-jpeg",
  "cutlass-logger",
  "cutlass-model",
+ "cutlass-ogg",
+ "cutlass-opus",
  "cutlass-pcm",
  "cutlass-platform-apple",
  "cutlass-playback",
@@ -1136,6 +1138,7 @@ dependencies = [
  "cutlass-jpeg",
  "cutlass-model",
  "cutlass-mp3-container",
+ "cutlass-ogg",
  "cutlass-riff",
  "cutlass-still",
 ]

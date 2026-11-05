@@ -2686,6 +2686,62 @@ impl Shell {
         self.place_effect(card_id, track_id, start, EFFECT_LENGTH, None)
     }
 
+    /// Add an adjustment layer at the playhead, on the first adjust row
+    /// with room, else on a new one. It runs over every picture below.
+    pub fn add_adjustment(&mut self) -> Result<(), ShellError> {
+        let start = self.playhead;
+        let track_id = free_row(
+            self.session_draft()?,
+            TrackType::Adjust,
+            start,
+            EFFECT_LENGTH,
+        )
+        .unwrap_or_else(|| TrackId::new(self.fresh("track")));
+        self.place_adjustment(track_id, start)
+    }
+
+    /// Place an adjustment layer where the card was dropped on the lanes.
+    pub fn drop_adjustment(&mut self, x: f64, y: f64) -> Result<(), ShellError> {
+        let x = self.time_zero_x(x);
+        let outcome = {
+            let gesture = DropGesture {
+                kind: TrackType::Adjust,
+                duration: EFFECT_LENGTH,
+                pointer: Pointer { x, y },
+                scale: self.scale(),
+                playhead: self.playhead,
+                snap_threshold: self.snap_threshold(),
+                guides: self.guide_times(),
+            };
+            drop_gesture(self.session_draft()?, &gesture)
+                .map_err(|_| ShellError::Unavailable("the drag could not be read".to_owned()))?
+        };
+        let (track_id, start) = match outcome {
+            DropOutcome::Miss => {
+                return Err(ShellError::Unavailable(
+                    "the drag missed the lanes".to_owned(),
+                ));
+            }
+            DropOutcome::Place { track_id, start } => (track_id, start),
+            DropOutcome::NewLane { start, .. } => (TrackId::new(self.fresh("track")), start),
+        };
+        self.place_adjustment(track_id, start)
+    }
+
+    fn place_adjustment(&mut self, track_id: TrackId, start: Micros) -> Result<(), ShellError> {
+        let segment_id = SegmentId::new(self.fresh("seg"));
+        let material_id = MaterialId::new(self.fresh("adjustment"));
+        self.apply(Request::AddAdjustment {
+            track_id,
+            segment_id: segment_id.clone(),
+            material_id,
+            start,
+            duration: EFFECT_LENGTH,
+        })?;
+        self.select(Some(segment_id));
+        Ok(())
+    }
+
     fn place_effect(
         &mut self,
         card_id: &str,
@@ -4289,7 +4345,7 @@ impl Shell {
         key: cutlass_effects::AdjustKey,
         value: f64,
     ) -> Result<(), ShellError> {
-        let segment_id = self.picture_segment("adjustments belong on a picture")?;
+        let segment_id = self.adjust_segment()?;
         self.refuse_locked(&segment_id)?;
         let material_id = MaterialId::new(self.fresh("adjust"));
         self.apply(Request::SetAdjust {
@@ -4303,7 +4359,7 @@ impl Shell {
     /// Put every adjust slider on the selected picture back to zero, as one
     /// undo step. Nothing set is nothing done.
     pub fn reset_adjust(&mut self) -> Result<(), ShellError> {
-        let segment_id = self.picture_segment("adjustments belong on a picture")?;
+        let segment_id = self.adjust_segment()?;
         self.refuse_locked(&segment_id)?;
         let Some(adjust) = self.inspection().map(|inspection| inspection.adjust) else {
             return Ok(());
@@ -4402,6 +4458,17 @@ impl Shell {
             ));
         }
         Ok(segment_id)
+    }
+
+    /// The selected picture or adjustment layer, the clips that take adjust
+    /// sliders.
+    fn adjust_segment(&self) -> Result<SegmentId, ShellError> {
+        if let Some(segment_id) = self.selected()
+            && let Some((_, TrackType::Adjust)) = placed(self.session_draft()?, segment_id)
+        {
+            return Ok(segment_id.clone());
+        }
+        self.picture_segment("adjustments belong on a picture")
     }
 
     fn picture_segment(&self, refusal: &str) -> Result<SegmentId, ShellError> {
@@ -10385,6 +10452,64 @@ mod tests {
                 - 0.4)
                 .abs()
                 < 1e-6
+        );
+    }
+
+    #[test]
+    fn an_adjustment_layer_is_added_at_the_playhead_and_adjusted() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let mut draft = Draft::empty("draft");
+        let mut video = MaterialVideo::new("picture");
+        video.path = "clip.mp4".to_owned();
+        draft.materials.videos.push(video);
+        draft.tracks[0].segments.push(Segment::new(
+            "picture",
+            "picture",
+            TimeRange::new(0, 5_000_000),
+        ));
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.seek(Micros(1_000_000));
+        desktop.add_adjustment().unwrap();
+        let layer = desktop.selected().cloned().unwrap();
+        let draft = desktop.draft().unwrap();
+        let (segment, kind) = super::placed(draft, &layer).unwrap();
+        assert_eq!(*kind, TrackType::Adjust);
+        assert_eq!(segment.target.start, Micros(1_000_000));
+        assert_eq!(desktop.panel(), Some(cutlass_editor::Panel::Adjust));
+        desktop.set_adjust(AdjustKey::Exposure, 0.3).unwrap();
+        assert!(
+            (desktop
+                .inspection()
+                .unwrap()
+                .adjust
+                .get(AdjustKey::Exposure)
+                - 0.3)
+                .abs()
+                < 1e-6
+        );
+        // A second layer at the same time takes a row of its own.
+        desktop.add_adjustment().unwrap();
+        let rows = desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .filter(|track| track.kind == TrackType::Adjust)
+            .count();
+        assert_eq!(rows, 2);
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        desktop.undo().unwrap();
+        assert!(
+            !desktop
+                .draft()
+                .unwrap()
+                .tracks
+                .iter()
+                .any(|track| track.kind == TrackType::Adjust)
         );
     }
 

@@ -108,7 +108,7 @@ pub(super) fn clip_panel(
         Panel::Sticker => sticker_panel(shell, ui, state, inspection),
         Panel::Effect => effect_panel(shell, ui, state, "Effect", false),
         Panel::Filter => effect_panel(shell, ui, state, "Filter", true),
-        Panel::Adjust => adjust_panel(ui, state),
+        Panel::Adjust => adjust_panel(shell, ui, state, inspection),
         Panel::Other => {
             tabs(ui, &["Clip"], &mut 0);
             note(ui, &inspection.material);
@@ -314,7 +314,12 @@ fn effect_panel(
     });
 }
 
-fn adjust_panel(ui: &mut Ui, state: &mut InspectorState) {
+fn adjust_panel(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
     tabs(ui, &["Adjust"], &mut 0);
     pages(
         ui,
@@ -325,11 +330,8 @@ fn adjust_panel(ui: &mut Ui, state: &mut InspectorState) {
         later_note(ui, ["", "HSL", "Curves", "Color wheel", "Mask"][state.page]);
         return;
     }
-    body(ui, |ui| {
-        for label in ["Temp", "Exposure", "Contrast"] {
-            later_slider(ui, label, 0.0, "0");
-        }
-    });
+    state.open.insert("adjust".to_owned());
+    adjust_sliders(shell, ui, state, inspection);
 }
 
 // Sections shared by panels.

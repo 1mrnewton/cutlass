@@ -1519,6 +1519,8 @@ fn asset_column(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, rect: Rect
                     shell.add_title(&id)
                 } else if id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
                     shell.add_effect(&id)
+                } else if id == cutlass_editor::ADJUSTMENT_CARD {
+                    shell.add_adjustment()
                 } else {
                     shell.add_medium(&id)
                 };
@@ -2178,7 +2180,18 @@ fn bin_cards(
                 cards.push(effect_card(effect));
             }
         }
-        Shelf::Stickers | Shelf::Filters | Shelf::Adjustments | Shelf::Templates => {}
+        Shelf::Adjustments => {
+            if query.is_empty() || "adjustment".contains(&query) {
+                cards.push(BinCard {
+                    id: cutlass_editor::ADJUSTMENT_CARD.to_owned(),
+                    name: "Adjustment".to_owned(),
+                    meta: card_meta(cutlass_editor::EFFECT_LENGTH.0),
+                    on_timeline: false,
+                    look: CardLook::Swatch,
+                });
+            }
+        }
+        Shelf::Stickers | Shelf::Filters | Shelf::Templates => {}
     }
     cards
 }
@@ -3845,6 +3858,8 @@ fn release_library_drop(
         shell.drop_title(&material_id, x, y)
     } else if material_id.starts_with(cutlass_editor::EFFECT_CARD_PREFIX) {
         shell.drop_effect(&material_id, x, y)
+    } else if material_id == cutlass_editor::ADJUSTMENT_CARD {
+        shell.drop_adjustment(x, y)
     } else {
         shell.drop_medium(&material_id, x, y)
     };
@@ -7217,6 +7232,12 @@ mod tests {
         assert_eq!(blends[0].meta, "0.5s");
         assert!(!blends[0].on_timeline);
         assert_eq!(top_cards(&draft, Shelf::Transitions, "dip").len(), 1);
+        let layers = top_cards(&draft, Shelf::Adjustments, "");
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].id, cutlass_editor::ADJUSTMENT_CARD);
+        assert_eq!(layers[0].name, "Adjustment");
+        assert!(top_cards(&draft, Shelf::Adjustments, "adj").len() == 1);
+        assert!(top_cards(&draft, Shelf::Adjustments, "nope").is_empty());
     }
 
     #[test]

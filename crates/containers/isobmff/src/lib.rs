@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alac;
 mod brand;
 mod demux;
 mod file_mux;

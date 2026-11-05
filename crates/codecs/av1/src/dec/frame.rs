@@ -93,6 +93,8 @@ pub struct FrameState {
     pub mi_rows: usize,
     pub mi_stride: usize,
     pub mi: Vec<MiInfo>,
+    /// uv_mode of the last intra block with chroma at each 4x4.
+    pub uv_modes: Vec<u8>,
     pub tx_types: Vec<u8>,
     pub inter_tx_sizes: Vec<u8>,
     /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units with `mi_stride`.
@@ -142,6 +144,7 @@ impl FrameState {
             mi_rows,
             mi_stride,
             mi: vec![MiInfo::default(); n],
+            uv_modes: vec![0; n],
             tx_types: vec![0; n],
             inter_tx_sizes: vec![0; n],
             lf_tx: [vec![0; n], vec![0; n], vec![0; n]],

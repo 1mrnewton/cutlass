@@ -1040,7 +1040,6 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             },
             bsize: b.bsize,
             y_mode: b.y_mode,
-            uv_mode: b.uv_mode,
             is_inter: b.is_inter,
             skip: b.skip,
             skip_mode: b.skip_mode,
@@ -1056,16 +1055,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let stride = self.fs.mi_stride;
         let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
         for y in 0..h4 {
-            let row = &mut self.fs.mi[(b.mi_row + y) * stride + b.mi_col..][..w4];
+            let o = (b.mi_row + y) * stride + b.mi_col;
+            self.fs.mi[o..o + w4].fill(info);
             if set_uv {
-                row.fill(info);
-            } else {
-                for m in row.iter_mut() {
-                    *m = MiInfo {
-                        uv_mode: m.uv_mode,
-                        ..info
-                    };
-                }
+                self.fs.uv_modes[o..o + w4].fill(b.uv_mode);
             }
         }
         for y in 0..h4 {

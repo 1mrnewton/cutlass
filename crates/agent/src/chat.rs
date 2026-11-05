@@ -35,9 +35,19 @@ pub struct ChatModel<T> {
 
 /// What the model is told before the user's first words.
 pub const SYSTEM_PROMPT: &str = "You edit a video project in Cutlass with tools. \
-Read with draft_query first: every draft_apply sends the revision it read. \
-Times are microseconds. draft_apply runs its requests as one undo step. \
-Say briefly what you changed.";
+Act with the tools; do not ask the user for ids you can read. \
+Read with draft_query first (\"project\" lists the tracks, \"track <id>\" lists its clips as id@start+length): \
+every draft_apply sends the revision it read, and a stale revision is refused, so read again. \
+Times are microseconds: 1 second is 1000000. draft_apply runs its requests as one undo step. \
+Requests, each with its kind in op: \
+{\"op\":\"split\",\"segment_id\":\"a\",\"at\":1000000,\"right_id\":\"a-2\"} (at is on the timeline; right_id names the new right piece); \
+{\"op\":\"move\",\"segment_id\":\"a\",\"track_id\":\"main\",\"start\":0}; \
+{\"op\":\"trim\",\"segment_id\":\"a\",\"edge\":\"start\",\"time\":500000} (edge start or end); \
+{\"op\":\"remove\",\"segment_id\":\"a\"}; \
+{\"op\":\"set_constant_speed\",\"segment_id\":\"a\",\"speed\":2.0}; \
+{\"op\":\"set_volume\",\"segment_id\":\"a\",\"volume\":0.5}; \
+{\"op\":\"set_opacity\",\"segment_id\":\"a\",\"opacity\":0.5}. \
+When done, say briefly what you changed.";
 
 impl<T: ChatTransport> ChatModel<T> {
     /// Talks to `model` through `transport`.
@@ -590,5 +600,20 @@ mod tests {
             error.to_string().contains("no local model answered"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn each_request_the_prompt_shows_is_one_the_session_reads() {
+        let mut shown = 0;
+        let mut rest = super::SYSTEM_PROMPT;
+        while let Some(at) = rest.find("{\"op\"") {
+            let tail = &rest[at..];
+            let end = tail.find('}').unwrap() + 1;
+            let request: Result<cutlass_session::Request, _> = serde_json::from_str(&tail[..end]);
+            assert!(request.is_ok(), "{}: {request:?}", &tail[..end]);
+            shown += 1;
+            rest = &tail[end..];
+        }
+        assert!(shown >= 7, "{shown}");
     }
 }

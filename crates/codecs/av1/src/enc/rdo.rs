@@ -67,6 +67,9 @@ pub struct ModeParams {
     pub local_warp: bool,
     /// Try overlapped block motion compensation.
     pub obmc: bool,
+    pub skip_mode: bool,
+    /// Mode bits a skip-mode block saves over a skipped regular inter block.
+    pub skip_mode_sse: f64,
 }
 
 impl Default for ModeParams {
@@ -95,6 +98,8 @@ impl Default for ModeParams {
             me_filter: 0,
             local_warp: true,
             obmc: true,
+            skip_mode: true,
+            skip_mode_sse: 4.0,
         }
     }
 }
@@ -692,6 +697,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         // Skip when the prediction is already close to the source.
         pb.skip = self.block_is_skip(&pb);
+        if self.hdr.skip_mode_present && self.mode.skip_mode {
+            self.try_skip_mode(&mut pb);
+        }
         self.pb = pb;
         self.plan_q = self.current_q_index;
         self.plan_delta_lf = self.delta_lf;
@@ -1337,6 +1345,98 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         true
+    }
+
+    /// Skip mode: compound NEAREST from the two skip-mode references with no
+    /// residual, signalled by one flag. Taken when its prediction is about as
+    /// good as the chosen mode's (when that is skipped too) or simply close
+    /// enough to the source.
+    fn try_skip_mode(&mut self, pb: &mut Block) {
+        let Some(src) = self.src else { return };
+        let bs = pb.bsize;
+        let (bw, bh) = (block_width(bs), block_height(bs));
+        let x = pb.mi_col * 4;
+        let y = pb.mi_row * 4;
+        if bw < 8 || bh < 8 || x + bw > self.fs.mi_cols * 4 || y + bh > self.fs.mi_rows * 4 {
+            return;
+        }
+        let refs = [
+            self.hdr.skip_mode_frame[0] as i8,
+            self.hdr.skip_mode_frame[1] as i8,
+        ];
+        let saved = self.b.clone();
+        self.b.ref_frame = refs;
+        self.b.is_inter = true;
+        self.b.use_intrabc = false;
+        self.find_mv_stack(true);
+        let mv = self.b.ref_stack_mv[0];
+        self.b = saved;
+        // Only a block already coded without residual is a candidate: skip
+        // mode then just trades its mode bits for a different prediction.
+        if !(pb.is_inter && pb.skip) || pb.motion_mode != 0 {
+            return;
+        }
+        let planes = if self.num_planes > 1 && pb.has_chroma {
+            3
+        } else {
+            1
+        };
+        let mut sse_sm = 0f64;
+        let mut sse_cur = 0f64;
+        let (cur_refs, cur_mv, cur_f) = (pb.ref_frame, pb.mv, pb.interp_filter);
+        for plane in 0..planes {
+            let (sx, sy) = if plane == 0 {
+                (0, 0)
+            } else {
+                (usize::from(self.sub_x), usize::from(self.sub_y))
+            };
+            let (px, py, pw, ph) = (
+                (pb.mi_col >> sx) * 4,
+                (pb.mi_row >> sy) * 4,
+                bw >> sx,
+                bh >> sy,
+            );
+            let sp = &src.planes[plane];
+            if !self.pred_plane_f(plane, refs, mv, px, py, pw, ph, [0, 0]) {
+                return;
+            }
+            sse_sm += sse(
+                &sp.data[py * sp.stride + px..],
+                sp.stride,
+                &self.scratch.obmc,
+                pw,
+                pw,
+                ph,
+            ) as f64;
+            if !self.pred_plane_f(plane, cur_refs, cur_mv, px, py, pw, ph, cur_f) {
+                return;
+            }
+            sse_cur += sse(
+                &sp.data[py * sp.stride + px..],
+                sp.stride,
+                &self.scratch.obmc,
+                pw,
+                pw,
+                ph,
+            ) as f64;
+        }
+        // Bits a skipped inter block spends on its mode, references and vectors.
+        let saved_bits = self.mode.skip_mode_sse;
+        if sse_sm <= sse_cur + self.enc.lambda * saved_bits {
+            pb.skip_mode = true;
+            pb.skip = true;
+            pb.is_inter = true;
+            pb.ref_frame = refs;
+            pb.y_mode = NEAREST_NEARESTMV;
+            pb.mv = mv;
+            pb.ref_mv_idx = 0;
+            pb.interp_filter = [0, 0];
+            pb.motion_mode = 0;
+            pb.compound_idx = 1;
+            pb.palette_size_y = 0;
+            pb.use_filter_intra = false;
+            pb.uv_mode = DC_PRED;
+        }
     }
 
     /// SIMPLE or LOCALWARP, whichever predicts the luma with less SATD.

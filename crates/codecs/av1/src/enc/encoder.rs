@@ -662,6 +662,7 @@ impl Av1Enc {
             primary_ref_frame: if key { PRIMARY_REF_NONE } else { 0 },
             refresh_frame_flags: spec.refresh,
             reference_select: spec.reference_select,
+            skip_mode_present: spec.reference_select && ev("AV1_SM", 1.0) > 0.0,
             use_ref_frame_mvs: !key && ev("AV1_RFMV", 1.0) > 0.0,
             allow_warped_motion: !key && self.cfg.speed < 7 && ev("AV1_WARP", 1.0) > 0.0,
             is_motion_mode_switchable: !key && self.cfg.speed < 7 && ev("AV1_WARP", 1.0) > 0.0,
@@ -830,6 +831,8 @@ impl Av1Enc {
             me_filter: ev("AV1_MEF", 0.0) as u8,
             local_warp: hdr.allow_warped_motion,
             obmc: hdr.is_motion_mode_switchable && ev("AV1_OBMC", 1.0) > 0.0,
+            skip_mode: true,
+            skip_mode_sse: ev("AV1_SMS", 6.0),
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 8 {

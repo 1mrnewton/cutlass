@@ -9,7 +9,7 @@
 //! The caption's style pages the words and sets each word's color, box,
 //! size and lift; rotation is not applied.
 
-use cutlass_captions::{CaptionQuery, PageLimits, RangeStyles, Rgba, sample_caption};
+use cutlass_captions::{CaptionQuery, KeywordRange, PageLimits, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
 use std::collections::HashMap;
 
@@ -334,9 +334,9 @@ fn caption_picture(
         timeline: time,
         placed_at: segment.target.start,
         limits,
-        keywords: &[],
+        keywords: &caption_keywords(material),
         styles: &styles,
-        stagger_shift_ms: 0,
+        stagger_shift_ms: material.caption_stagger_ms.max(0),
     })
     .ok()?;
     let looks = caption_looks(&frame, text_fill(material).ok()?)?;
@@ -375,6 +375,28 @@ fn caption_picture(
         return Some(drawn);
     }
     draw(1.0)
+}
+
+/// The caption's marked words, each whole. A mark past its words is left
+/// out.
+fn caption_keywords(material: &MaterialText) -> Vec<KeywordRange> {
+    let columns = if columns_present(&material.current_words) {
+        &material.current_words
+    } else {
+        &material.words
+    };
+    material
+        .caption_keywords
+        .iter()
+        .filter_map(|word| {
+            let text = columns.text.get(*word)?;
+            Some(KeywordRange {
+                word: *word,
+                char_start: 0,
+                char_end: text.chars().count(),
+            })
+        })
+        .collect()
 }
 
 /// How each glyph of the caption's page looks, by its place in the page's
@@ -974,5 +996,39 @@ mod tests {
                 .any(|pixel| pixel[1] > 100 && pixel[0] < 50 && pixel[3] > 100),
             "a green shadow"
         );
+    }
+
+    #[test]
+    fn a_keyword_takes_the_spoken_look_and_a_stagger_runs_across_its_letters() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].font_size = 32.0;
+        draft.materials.texts[0].caption_style = "karaoke".to_owned();
+        draft.materials.texts[0].words = words(&[("AB", 0, 200), ("BA", 200, 400)]);
+        let yellow = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| {
+                    pixel[0] > 200 && pixel[1] > 180 && pixel[2] < 120 && pixel[3] == 255
+                })
+                .count()
+        };
+        // Before either word is spoken nothing is yellow, unless it is marked.
+        let unmarked = pixels(&draft, 0);
+        draft.materials.texts[0].caption_keywords = vec![1];
+        let marked = pixels(&draft, 0);
+        assert!(
+            yellow(&marked) > yellow(&unmarked),
+            "the keyword is drawn yellow"
+        );
+        // A mark past the words is left out.
+        draft.materials.texts[0].caption_keywords = vec![9];
+        assert_eq!(pixels(&draft, 0), unmarked);
+
+        // Pop grows the spoken word; with a stagger its letters grow in turn.
+        draft.materials.texts[0].caption_keywords.clear();
+        draft.materials.texts[0].caption_style = "pop".to_owned();
+        let together = pixels(&draft, 210_000);
+        draft.materials.texts[0].caption_stagger_ms = 150;
+        let staggered = pixels(&draft, 210_000);
+        assert_ne!(together, staggered);
     }
 }

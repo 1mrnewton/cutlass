@@ -427,10 +427,18 @@ impl Av1Enc {
             rd_partition: ev("AV1_RDP", 1.0) > 0.0,
         };
         let qp = QuantParams {
-            lambda: ev("AV1_QL", 0.02) * qstep * qstep,
+            // Per bit; inter frames trade residual for rate more readily.
+            lambda: ev("AV1_QL", if key { 0.15 } else { 0.9 }) * qstep * qstep,
             round_intra: ev("AV1_RI", 56.0) as i32,
             round_inter: ev("AV1_RN", 44.0) as i32,
             tx_type_search: u8::from(speed < 9),
+            rdoq: if speed >= 9 {
+                0
+            } else if speed >= 7 {
+                1
+            } else {
+                2
+            },
         };
         let _ = dcq;
         let ti = hdr.tile_info.clone();

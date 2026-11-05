@@ -398,7 +398,7 @@ pub fn get_tx_class(tx_type: u8) -> usize {
     }
 }
 
-fn get_scan(tx: u8, tx_type: u8) -> &'static [u16] {
+pub(crate) fn get_scan(tx: u8, tx_type: u8) -> &'static [u16] {
     if tx == TX_16X64 {
         return &DEFAULT_SCAN_16X32;
     }

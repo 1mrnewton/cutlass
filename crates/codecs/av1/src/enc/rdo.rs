@@ -79,7 +79,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     /// The cost of the extra signalling a split brings, in the units `est_block` returns.
     fn split_penalty(&self, bits: f64) -> f64 {
         if self.mode.rd_partition {
-            self.enc.lambda * 8.0 * bits
+            self.enc.lambda * bits
         } else {
             self.mode.lambda_satd * bits
         }
@@ -177,7 +177,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let tx = (0..19u8)
             .find(|&t| tx_w(t) == tw && tx_h(t) == th)
             .unwrap_or(0);
-        let lam_bits = self.enc.lambda * 8.0;
+        let lam_bits = self.enc.lambda;
         let sp = &src.planes[0];
         let bd = self.bd;
         let base = 1i32 << (bd - 1);
@@ -474,7 +474,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let th = tx_h(tx);
         let qi = self.dequant_info(0, 0, tx);
         let bd = self.bd;
-        let lam = self.enc.lambda * 8.0;
+        let lam = self.enc.lambda;
         let mut d = 0f64;
         let mut bits = 0f64;
         let mut blk = [0i32; 64 * 64];

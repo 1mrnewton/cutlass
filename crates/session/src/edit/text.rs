@@ -199,7 +199,7 @@ pub fn set_line_width(
     face: &str,
 ) -> Result<(), EditError> {
     let index = own_text(draft, segment_id)?;
-    if !width.is_finite() || width < 0.0 || width > MAX_LINE_WIDTH {
+    if !width.is_finite() || !(0.0..=MAX_LINE_WIDTH).contains(&width) {
         return Err(EditError::LineWidth);
     }
     let text = &mut draft.materials.texts[index];

@@ -1303,6 +1303,8 @@ fn recycle<P: Pixel>(pool: &mut Vec<Picture<P>>, p: Picture<P>) {
 
 /// Decodes the tiles of a frame into `cur`, calling `on_row(fs, cur, r0,
 /// r1)` after each superblock row of each tile (luma 4x4 rows `r0..r1`).
+/// With `logs`, the tiles record what reconstruction needs (see
+/// [`ReconLog`]) in logs taken from and given back to that pool.
 /// Returns the CDFs saved from the context tile.
 fn decode_tiles<P: Pixel>(
     seq: &SequenceHeader,
@@ -1313,7 +1315,7 @@ fn decode_tiles<P: Pixel>(
     refs: &[Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     cur: &mut Picture<P>,
-    record: bool,
+    logs: Option<&Mutex<RowPools>>,
     mut feed: Option<&mut MfFeed>,
     on_row: &mut RowHook<'_, P>,
 ) -> R<Box<CdfContext>> {
@@ -1395,7 +1397,7 @@ fn decode_tiles<P: Pixel>(
             color_map_y: std::mem::take(&mut color_map_y),
             color_map_uv: std::mem::take(&mut color_map_uv),
             scratch: std::mem::replace(&mut scratch, Scratch::empty()),
-            rec: if record { Some(Box::default()) } else { None },
+            rec: logs.map(|l| Box::new(lock(l).logs.pop().unwrap_or_default())),
         };
         let res = td.decode_tile_rows(&mut *on_row, &mut |fs: &mut FrameState, r1: usize| {
             if let Some(f) = feed.as_deref_mut() {
@@ -1409,6 +1411,11 @@ fn decode_tiles<P: Pixel>(
         color_map_y = std::mem::take(&mut td.color_map_y);
         color_map_uv = std::mem::take(&mut td.color_map_uv);
         scratch = std::mem::replace(&mut td.scratch, Scratch::empty());
+        // The log left holds the buffers of a spare: back to the pool.
+        if let (Some(l), Some(mut log)) = (logs, td.rec.take()) {
+            log.clear();
+            lock(l).logs.push(*log);
+        }
         drop(td);
         res?;
         if *tile_num == ti.context_update_tile_id as usize {
@@ -1990,7 +1997,7 @@ fn decode_frame_async<P: PicturePixel>(
             &parse_refs,
             ref_hdr,
             &mut no_pixels,
-            true,
+            Some(rows),
             feed.as_mut(),
             &mut |fs: &FrameState,
                   _: &Picture<P>,
@@ -2201,7 +2208,7 @@ fn decode_frame_sync<P: PicturePixel>(
             &refs,
             ref_hdr,
             &mut cur,
-            false,
+            None,
             None,
             &mut |_: &FrameState,
                   _: &Picture<P>,

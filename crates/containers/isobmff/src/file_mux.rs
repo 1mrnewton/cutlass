@@ -16,7 +16,7 @@ use cutlass_container::{
 };
 
 use crate::legacy::{self, CodecId, Error, SampleFormat, StreamParams, Timescale as BoxScale};
-use crate::mux::{IsoBmffMux, MuxOptions};
+use crate::mux::{FileBrand, IsoBmffMux, MuxOptions};
 
 /// One track: the id handed out, the box writer's id, and the next decode
 /// time in the track's timescale.
@@ -41,8 +41,19 @@ pub struct Mp4Mux<W: Write + Seek> {
 impl<W: Write + Seek> Mp4Mux<W> {
     #[must_use]
     pub fn new(writer: W) -> Self {
+        Self::with_brand(writer, FileBrand::Mp4)
+    }
+
+    /// A file of brand `brand`: `Mov` writes a QuickTime movie, `M4a` a
+    /// sound-only MPEG-4 file.
+    #[must_use]
+    pub fn with_brand(writer: W, brand: FileBrand) -> Self {
+        let options = MuxOptions {
+            brand,
+            ..MuxOptions::default()
+        };
         Self {
-            inner: IsoBmffMux::new(writer, MuxOptions::default()),
+            inner: IsoBmffMux::new(writer, options),
             tracks: Vec::new(),
             status: MuxStatus::Building,
             payload: 0,
@@ -96,19 +107,19 @@ fn rejected(message: &str) -> MuxError {
 /// AAC sound.
 fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
     let StreamCodec::Known(codec) = stream.params.codec() else {
-        return Err(rejected("mp4 export writes H.264, HEVC, and AAC"));
+        return Err(rejected("mp4 export writes H.264, HEVC, ProRes, and AAC"));
     };
     let scale = BoxScale(stream.timescale.ticks_per_second());
     let mut params = match codec {
-        Id::H264 | Id::Hevc => {
+        Id::H264 | Id::Hevc | Id::Prores => {
             let size = stream
                 .params
                 .size()
                 .ok_or_else(|| rejected("a picture track needs a size"))?;
-            let codec = if *codec == Id::H264 {
-                CodecId::H264
-            } else {
-                CodecId::Hevc
+            let codec = match codec {
+                Id::H264 => CodecId::H264,
+                Id::Hevc => CodecId::Hevc,
+                _ => CodecId::ProRes,
             };
             StreamParams::video(codec, scale, size.width(), size.height())
         }
@@ -123,7 +134,7 @@ fn box_params(stream: &NewStream) -> Result<StreamParams, MuxError> {
                 .ok_or_else(|| rejected("a sound track needs channels"))?;
             StreamParams::audio(CodecId::Aac, scale, rate, channels, 16, SampleFormat::S16Le)
         }
-        _ => return Err(rejected("mp4 export writes H.264, HEVC, and AAC")),
+        _ => return Err(rejected("mp4 export writes H.264, HEVC, ProRes, and AAC")),
     };
     params.extradata = stream.params.extradata().to_vec();
     Ok(params)

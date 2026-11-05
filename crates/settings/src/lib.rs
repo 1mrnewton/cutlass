@@ -16,7 +16,7 @@ mod file;
 mod shortcuts;
 
 pub use file::{Loaded, SettingsError, load, save};
-pub use shortcuts::Shortcut;
+pub use shortcuts::{ACTIONS, Shortcut, action_label, default_keys, keys_label};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -96,6 +96,27 @@ impl Default for Settings {
 pub const RECENT_LIMIT: usize = 10;
 
 impl Settings {
+    /// Whether the panel `id` shows. A panel the file does not name shows.
+    #[must_use]
+    pub fn panel_open(&self, id: &str) -> bool {
+        self.panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .is_none_or(|panel| panel.open)
+    }
+
+    /// Show or hide the panel `id`.
+    pub fn set_panel_open(&mut self, id: &str, open: bool) {
+        match self.panels.iter_mut().find(|panel| panel.id == id) {
+            Some(panel) => panel.open = open,
+            None => self.panels.push(Panel {
+                id: id.to_owned(),
+                open,
+                ..Panel::default()
+            }),
+        }
+    }
+
     /// Put `path` first among the recent projects, once, and drop the
     /// oldest past [`RECENT_LIMIT`].
     pub fn note_recent(&mut self, path: &std::path::Path) {
@@ -294,6 +315,17 @@ mod tests {
         DEFAULT_STEP_CAP, Hardware, McpServer, ModelChoice, Playback, SandboxChoice,
         SeekDuringPlayback, Settings,
     };
+
+    #[test]
+    fn a_panel_shows_until_it_is_hidden() {
+        let mut settings = Settings::default();
+        assert!(settings.panel_open("library"));
+        settings.set_panel_open("library", false);
+        assert!(!settings.panel_open("library"));
+        settings.set_panel_open("library", true);
+        assert!(settings.panel_open("library"));
+        assert_eq!(settings.panels.len(), 1);
+    }
 
     #[test]
     fn defaults_match_an_empty_object() {

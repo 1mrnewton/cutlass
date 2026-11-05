@@ -303,7 +303,7 @@ fn corpus_animations_match_libwebp() {
     check_animations(&scratch("anim-corpus"), &files);
 }
 
-fn check_animations(dir: &Path, files: &[PathBuf]) {
+pub(super) fn check_animations(dir: &Path, files: &[PathBuf]) {
     let mut compared = 0;
     for path in files {
         let file = std::fs::read(path).expect("read");

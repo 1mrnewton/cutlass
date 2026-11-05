@@ -100,7 +100,6 @@ impl<'a> BitReader<'a> {
 }
 
 /// Writer with the same bit order as [`BitReader`].
-#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
@@ -108,8 +107,15 @@ pub(crate) struct BitWriter {
     held: u32,
 }
 
-#[cfg(test)]
 impl BitWriter {
+    pub(crate) fn with_capacity(bytes: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(bytes),
+            window: 0,
+            held: 0,
+        }
+    }
+
     /// Write the low `count` bits of `value`, `count <= 32`.
     #[inline]
     pub(crate) fn write(&mut self, value: u32, count: u32) {
@@ -123,22 +129,20 @@ impl BitWriter {
         };
         self.window |= masked << self.held;
         self.held += count;
-        while self.held >= 8 {
-            self.bytes.push((self.window & 0xff) as u8);
-            self.window >>= 8;
-            self.held -= 8;
+        if self.held >= 32 {
+            self.bytes
+                .extend_from_slice(&((self.window & 0xffff_ffff) as u32).to_le_bytes());
+            self.window >>= 32;
+            self.held -= 32;
         }
-    }
-
-    /// Bits written so far.
-    pub(crate) fn bit_len(&self) -> u64 {
-        (self.bytes.len() as u64) * 8 + u64::from(self.held)
     }
 
     /// The bytes, the last one padded with zero bits.
     pub(crate) fn finish(mut self) -> Vec<u8> {
-        if self.held > 0 {
+        while self.held > 0 {
             self.bytes.push((self.window & 0xff) as u8);
+            self.window >>= 8;
+            self.held = self.held.saturating_sub(8);
         }
         self.bytes
     }
@@ -162,7 +166,6 @@ mod tests {
         for (value, count) in values {
             writer.write(value, count);
         }
-        assert_eq!(writer.bit_len(), 60);
         let bytes = writer.finish();
         let mut reader = BitReader::new(&bytes);
         for (value, count) in values {

@@ -205,15 +205,34 @@ pub(crate) fn read_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
         .decode_picture(&Packet::video(bytes.to_vec(), 0, 0, 0, true))
         .expect("png decode");
     let image = &outputs[0].image;
-    assert_eq!(image.depth, BitDepth::Eight);
+    // Sixteen-bit samples keep their high byte, as libpng's strip does for
+    // cwebp.
+    let shift = if image.depth == BitDepth::Sixteen {
+        8
+    } else {
+        0
+    };
+    let s = |v: u16| (v >> shift) as u8;
     let rgba = match image.color {
-        ColorType::Rgba => image.samples.iter().map(|&s| s as u8).collect(),
+        ColorType::Rgba => image.samples.iter().map(|&v| s(v)).collect(),
         ColorType::Rgb => image
             .samples
             .as_chunks::<3>()
             .0
             .iter()
-            .flat_map(|p| [p[0] as u8, p[1] as u8, p[2] as u8, 255])
+            .flat_map(|p| [s(p[0]), s(p[1]), s(p[2]), 255])
+            .collect(),
+        ColorType::GrayAlpha => image
+            .samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|p| [s(p[0]), s(p[0]), s(p[0]), s(p[1])])
+            .collect(),
+        ColorType::Gray => image
+            .samples
+            .iter()
+            .flat_map(|&v| [s(v), s(v), s(v), 255])
             .collect(),
         other => panic!("png color {other:?}"),
     };

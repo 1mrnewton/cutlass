@@ -9,6 +9,9 @@
 
 mod alpha;
 mod animation;
+mod encoder;
+mod lossless_encode;
 mod lossy;
 mod oracle;
+pub(crate) use oracle::synthetic_rgba as oracle_synthetic;
 mod stills;

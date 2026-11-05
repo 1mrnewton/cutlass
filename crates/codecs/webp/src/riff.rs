@@ -379,7 +379,6 @@ fn frame<'a>(chunk: &Chunk<'a>) -> Result<Frame<'a>, CodecError> {
 }
 
 /// Append one chunk, padded to an even length.
-#[cfg(test)]
 pub(crate) fn put_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
     out.extend_from_slice(fourcc);
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -390,7 +389,6 @@ pub(crate) fn put_chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], payload: &[u8]) {
 }
 
 /// A whole file of `chunks`.
-#[cfg(test)]
 pub(crate) fn file(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     let mut body = Vec::new();
     for (fourcc, payload) in chunks {
@@ -414,11 +412,61 @@ pub(crate) fn chunks(data: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
 }
 
 /// The ten-byte `VP8X` payload.
-#[cfg(test)]
 pub(crate) fn vp8x(flags: u8, width: u32, height: u32) -> [u8; 10] {
     let w = (width - 1).to_le_bytes();
     let h = (height - 1).to_le_bytes();
     [flags, 0, 0, 0, w[0], w[1], w[2], h[0], h[1], h[2]]
+}
+
+/// `VP8X` flag bits.
+pub(crate) const FLAG_ICC: u8 = 0x20;
+pub(crate) const FLAG_ALPHA: u8 = 0x10;
+pub(crate) const FLAG_ANIMATION: u8 = 0x02;
+
+/// A still file. It is the simple form, one bitstream chunk, unless an
+/// ICC profile or a lossy alpha plane needs the extended form.
+pub(crate) fn write_still(
+    bitstream: Bitstream<'_>,
+    width: u32,
+    height: u32,
+    alpha: bool,
+    icc: Option<&[u8]>,
+) -> Vec<u8> {
+    let lossy_alpha = matches!(bitstream, Bitstream::Lossy { alpha: Some(_), .. });
+    let mut chunks: Vec<(&[u8; 4], &[u8])> = Vec::with_capacity(4);
+    let header;
+    if icc.is_some() || lossy_alpha {
+        let mut flags = 0;
+        if icc.is_some() {
+            flags |= FLAG_ICC;
+        }
+        if alpha {
+            flags |= FLAG_ALPHA;
+        }
+        header = vp8x(flags, width, height);
+        chunks.push((b"VP8X", &header));
+    }
+    if let Some(icc) = icc {
+        chunks.push((b"ICCP", icc));
+    }
+    push_bitstream(&mut chunks, bitstream);
+    file(&chunks)
+}
+
+/// The `ALPH` and `VP8 `, or the `VP8L`, chunk of a bitstream.
+pub(crate) fn push_bitstream<'a>(
+    chunks: &mut Vec<(&'static [u8; 4], &'a [u8])>,
+    bitstream: Bitstream<'a>,
+) {
+    match bitstream {
+        Bitstream::Lossy { vp8, alpha } => {
+            if let Some(alpha) = alpha {
+                chunks.push((b"ALPH", alpha));
+            }
+            chunks.push((b"VP8 ", vp8));
+        }
+        Bitstream::Lossless(vp8l) => chunks.push((b"VP8L", vp8l)),
+    }
 }
 
 #[cfg(test)]

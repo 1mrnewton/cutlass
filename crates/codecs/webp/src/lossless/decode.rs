@@ -482,7 +482,7 @@ pub(crate) fn plane_distance(width: usize, code: usize) -> usize {
 }
 
 /// Read one prefix code over `alphabet` symbols.
-fn read_code(reader: &mut BitReader<'_>, alphabet: usize) -> Result<Code, CodecError> {
+pub(crate) fn read_code(reader: &mut BitReader<'_>, alphabet: usize) -> Result<Code, CodecError> {
     let at_bit = reader.position();
     let mut lengths = vec![0u8; alphabet];
     if reader.flag()? {

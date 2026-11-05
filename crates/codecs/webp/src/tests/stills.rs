@@ -74,7 +74,7 @@ fn corpus_stills_match_dwebp_exactly() {
 /// Sources for the lossless checks: a synthetic picture with every alpha
 /// level, and, when this machine has them, a frame of a real video and the
 /// real PNG in `local-files`.
-fn lossless_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+pub(super) fn lossless_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut sources = Vec::new();
     let synthetic = dir.join("synthetic.png");
     write_png(&synthetic, 97, 61, &synthetic_rgba(97, 61));

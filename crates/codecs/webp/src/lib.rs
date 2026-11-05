@@ -13,6 +13,7 @@
 mod alpha;
 mod animation;
 mod decoder;
+mod encoder;
 mod limits;
 mod lossless;
 mod lossy;
@@ -23,8 +24,10 @@ mod riff;
 mod tests;
 
 pub use decoder::WebpDecoder;
+pub use encoder::{WebpEncoder, WebpOptions};
 
 use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
+use cutlass_encode::{EncodeFactory, Encoder};
 
 /// Register this crate as the software WebP decoder.
 pub fn register_decoders(factory: &mut DecodeFactory) {
@@ -33,4 +36,13 @@ pub fn register_decoders(factory: &mut DecodeFactory) {
 
 fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
     Ok(Box::new(WebpDecoder::open(params)?))
+}
+
+/// Register this crate as the software WebP encoder.
+pub fn register_encoders(factory: &mut EncodeFactory) {
+    factory.register(CodecId::Webp, open_encoder);
+}
+
+fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
+    Ok(Box::new(WebpEncoder::open(params)?))
 }

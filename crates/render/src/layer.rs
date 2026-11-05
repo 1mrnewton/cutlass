@@ -149,6 +149,12 @@ pub enum Layer<'a> {
         outgoing: Rgba<'a>,
         incoming: Rgba<'a>,
     },
+    /// A Lottie frame drawn from its edges onto its own canvas, then that
+    /// canvas placed like a picture.
+    Vector {
+        scene: &'a cutlass_lottie::Scene,
+        placement: Placement,
+    },
 }
 
 /// A layer's textures once uploaded: three views (the same one three times

@@ -26,6 +26,7 @@ mod layer;
 mod mix;
 mod target;
 mod transition;
+mod vector;
 
 pub use cutlass_decode::Surface;
 pub use cutlass_effects::{Block, Recipe, Step};
@@ -82,6 +83,7 @@ pub struct Renderer {
     effects: effect::Effects,
     mix: mix::Mix,
     transition: transition::Transition,
+    vector: vector::Vector,
     import: Option<SurfaceImport>,
 }
 
@@ -102,6 +104,7 @@ impl Renderer {
         let effects = effect::Effects::new(&device);
         let mix = mix::Mix::new(&device);
         let transition = transition::Transition::new(&device);
+        let vector = vector::Vector::new(&device);
         Self {
             device,
             queue,
@@ -110,6 +113,7 @@ impl Renderer {
             effects,
             mix,
             transition,
+            vector,
             import: None,
         }
     }
@@ -313,6 +317,26 @@ impl Renderer {
                         interleaved: false,
                     };
                     bound.push(self.layers.bind(device, queue, &uploaded, canvas));
+                }
+                Layer::Vector { scene, placement } => {
+                    let inner = (scene.width, scene.height);
+                    let limit = device.limits().max_texture_dimension_2d;
+                    if inner.0 == 0 || inner.1 == 0 || inner.0 > limit || inner.1 > limit {
+                        return Err(RenderError::Size {
+                            width: inner.0,
+                            height: inner.1,
+                        });
+                    }
+                    let view = blur::scratch(device, inner);
+                    self.vector.draw(device, queue, encoder, scene, &view)?;
+                    let uploaded = layer::Uploaded {
+                        views: [view.clone(), view.clone(), view],
+                        size: inner,
+                        yuv: false,
+                        tone: cutlass_gpu::YuvTone::NONE,
+                        interleaved: false,
+                    };
+                    bound.push(self.layers.bind(device, queue, &uploaded, *placement));
                 }
                 Layer::Effect(steps) => {
                     if steps.is_empty() {

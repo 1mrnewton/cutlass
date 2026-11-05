@@ -819,6 +819,7 @@ dependencies = [
  "cutlass-generated",
  "cutlass-gpu",
  "cutlass-logger",
+ "cutlass-lottie",
  "cutlass-model",
  "cutlass-pcm",
  "cutlass-picture",
@@ -1189,8 +1190,10 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-h264",
  "cutlass-isobmff",
+ "cutlass-lottie",
  "cutlass-model",
  "cutlass-picture",
+ "cutlass-renderer-software",
  "pollster",
  "wgpu",
 ]

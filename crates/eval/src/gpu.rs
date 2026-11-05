@@ -42,6 +42,9 @@ pub enum GpuSource {
         mode: BlendMode,
         layers: Box<FrameLayers>,
     },
+    /// A Lottie frame as geometry, drawn on a canvas of the scene's size
+    /// by the renderer's vector pass, then placed like a picture.
+    Vector(Arc<cutlass_lottie::Scene>),
     /// Moment `t` of a built-in transition between two canvas-sized
     /// premultiplied pictures.
     Transition {

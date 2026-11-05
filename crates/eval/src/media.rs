@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use cutlass_codec::access::{ColorPrimaries, PixelFormat, Transfer};
 use cutlass_color::{Matrix, Signal, SignalCurve};
@@ -72,6 +73,8 @@ pub struct OpenClips {
     texts: HashMap<SegmentId, (f64, CpuBytes)>,
     /// Off, a clip whose picture is not decoded yet shows its last one.
     patient: bool,
+    /// Lottie files by stored path; `None` is a file that did not read.
+    lotties: HashMap<String, Option<Arc<cutlass_lottie::Animation>>>,
 }
 
 impl OpenClips {
@@ -87,6 +90,7 @@ impl OpenClips {
             images: HashMap::new(),
             texts: HashMap::new(),
             patient: true,
+            lotties: HashMap::new(),
         }
     }
 
@@ -121,9 +125,38 @@ impl OpenClips {
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.lotties.clear();
         self.draft = None;
         self.revision = 0;
         self.bound = false;
+    }
+
+    /// The Lottie animation stored at `stored`, read once per revision. A
+    /// relative path stays inside the project folder. A file past
+    /// [`cutlass_lottie::limits::MAX_BYTES`], unreadable or not an animation
+    /// is `None`.
+    pub(crate) fn lottie(&mut self, stored: &str) -> Option<Arc<cutlass_lottie::Animation>> {
+        if let Some(known) = self.lotties.get(stored) {
+            return known.clone();
+        }
+        let path = if Path::new(stored).is_absolute() {
+            Some(std::path::PathBuf::from(stored))
+        } else {
+            match &self.root {
+                Some(root) => cutlass_engine::media_in_project(root, stored),
+                None => Some(std::path::PathBuf::from(stored)),
+            }
+        };
+        let read = path.and_then(|path| {
+            let size = std::fs::metadata(&path).ok()?.len();
+            if size > cutlass_lottie::limits::MAX_BYTES as u64 {
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok()?;
+            cutlass_lottie::Animation::parse(&bytes).ok().map(Arc::new)
+        });
+        self.lotties.insert(stored.to_owned(), read.clone());
+        read
     }
 
     /// Title rasters kept for this revision.
@@ -178,7 +211,7 @@ impl OpenClips {
                     || start > until
                     || !matches!(
                         draft.materials.get(segment.material_id.as_str()),
-                        Some(MaterialRef::Video(_))
+                        Some(MaterialRef::Video(video)) if !cutlass_lottie::is_lottie_path(&video.path)
                     )
                 {
                     continue;
@@ -210,6 +243,7 @@ impl OpenClips {
         self.nests.clear();
         self.images.clear();
         self.texts.clear();
+        self.lotties.clear();
         self.draft = Some(draft.id.clone());
         self.revision = revision;
         self.bound = true;
@@ -384,6 +418,10 @@ pub(crate) fn video_layers<'a>(
             else {
                 continue;
             };
+            // A Lottie sticker is drawn from its geometry, not decoded.
+            if cutlass_lottie::is_lottie_path(&video.path) {
+                continue;
+            }
             let crop = video.crop;
             let crop_scale = video.crop_scale;
             let Some((clip, uniform)) = cutlass_model::animated_at(draft, segment, time) else {

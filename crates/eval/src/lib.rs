@@ -23,6 +23,7 @@ mod frame;
 mod freeze;
 mod gpu;
 mod heard;
+mod lottie;
 mod media;
 mod nest;
 mod sample;

@@ -12,6 +12,7 @@ cutlass-compositor = { path = "../compositor", version = "0.1.0" }
 cutlass-engine = { path = "../engine", version = "0.1.0" }
 cutlass-text = { path = "../text", version = "0.1.0" }
 cutlass-generated = { path = "../generated", version = "0.1.0" }
+cutlass-lottie = { path = "../lottie", version = "0.1.0" }
 cutlass-captions = { path = "../captions", version = "0.1.0" }
 cutlass-effects = { path = "../effects", version = "0.1.0" }
 cutlass-picture = { path = "../picture", version = "0.1.0" }

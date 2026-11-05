@@ -125,6 +125,36 @@ pub fn init(directory: &Path) -> Result<PathBuf, InitError> {
     result
 }
 
+/// Copy the log in `directory`, the previous file first, into one file at
+/// `destination`. The logger is held meanwhile, so no record is cut in half
+/// and a rotation cannot move a file away mid-copy. The copy is written
+/// beside the destination and renamed over it, so a failed export leaves
+/// no partial file. A directory with no log gives an empty file.
+pub fn export(directory: &Path, destination: &Path) -> std::io::Result<()> {
+    let _guard = lock();
+    let mut bytes = Vec::new();
+    for name in [PREVIOUS_NAME, FILE_NAME] {
+        match fs::read(directory.join(name)) {
+            Ok(part) => bytes.extend_from_slice(&part),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let name = destination
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "no file name"))?;
+    let mut partial = name.to_os_string();
+    partial.push(".partial");
+    let partial = destination.with_file_name(partial);
+    let written = File::create(&partial)
+        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| fs::rename(&partial, destination));
+    if written.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    written
+}
+
 /// Write one record. Before [`init`], this does nothing.
 pub fn record(level: Level, target: &str, message: &str) {
     let line = format_line(level, target, message);
@@ -515,8 +545,8 @@ mod tests {
 
     use super::{
         FILE_NAME, InitError, Level, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, PREVIOUS_NAME,
-        console_bytes, console_enabled, console_kind, init, init_capture, installed_max_bytes,
-        record, reset,
+        console_bytes, console_enabled, console_kind, export, init, init_capture,
+        installed_max_bytes, record, reset,
     };
 
     struct Temp {
@@ -621,6 +651,26 @@ mod tests {
         for line in text.lines() {
             assert!(valid_record(line), "{line}");
         }
+    }
+
+    #[test]
+    fn export_joins_the_previous_file_and_the_current_one() {
+        let env = Env::new();
+        let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        fs::write(env.temp.path.join(PREVIOUS_NAME), "older\n").unwrap();
+        info!("newer-token");
+        let out = env.temp.path.join("export").join("all.log");
+        assert!(export(&env.temp.path, &out).is_err());
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        export(&env.temp.path, &out).unwrap();
+        let text = fs::read_to_string(&out).unwrap();
+        assert!(text.starts_with("older\n"));
+        assert!(text.ends_with(&fs::read_to_string(&path).unwrap()));
+        assert!(text.contains("newer-token"));
+        assert!(!out.with_file_name("all.log.partial").exists());
+        let empty = Temp::new();
+        export(&empty.path, &out).unwrap();
+        assert!(fs::read(&out).unwrap().is_empty());
     }
 
     #[test]

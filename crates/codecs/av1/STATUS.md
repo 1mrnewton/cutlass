@@ -82,7 +82,10 @@ parallel yet. At 4 threads the parsing thread is the critical path (about
 times from `av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
-6.3G instructions single threaded.
+5.4G instructions single threaded, and the parsing thread at 2.17G with
+4 threads. CDEF filters fixed-stride padded blocks one 8-lane vector at a
+time (0.46G of the total), and the motion field projection is shared by
+runs of equal motion vectors.
 
 ## Encoder
 

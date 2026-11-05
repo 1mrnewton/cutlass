@@ -33,8 +33,15 @@ pub struct LrUnit {
 /// it grows to the largest plane it has seen.
 #[derive(Clone, Debug, Default)]
 pub struct LrScratch {
-    src: Vec<i32>,
-    inter: Vec<i32>,
+    /// The stripe source (samples fit in 16 bits).
+    src: Vec<i16>,
+    /// The Wiener filter's horizontal output (fits in 16 bits); for 8-bit
+    /// samples split as `64 hi + lo`, `inter` holding `hi`, `inter_lo` `lo`.
+    inter: Vec<i16>,
+    inter_lo: Vec<i16>,
+    /// One source row of [`wiener8`], split.
+    xh: Vec<i16>,
+    xl: Vec<i16>,
     a: Vec<i32>,
     b: Vec<i32>,
     flt0: Vec<i32>,
@@ -56,9 +63,9 @@ const PAD: usize = 4;
 /// Rows of context above and below a stripe in the stripe source.
 const CTX: usize = 3;
 
-fn grow(v: &mut Vec<i32>, n: usize) {
+fn grow<T: Copy + Default>(v: &mut Vec<T>, n: usize) {
     if v.len() < n {
-        v.resize(n, 0);
+        v.resize(n, T::default());
     }
 }
 
@@ -436,10 +443,10 @@ fn lr_stripes<P: Pixel>(
                 &dst[o..o + plane_w]
             };
             let out = &mut scratch.src[r * sw..(r + 1) * sw];
-            let (first, last) = (row[0].to_i32(), row[plane_w - 1].to_i32());
+            let (first, last) = (row[0].to_i32() as i16, row[plane_w - 1].to_i32() as i16);
             out[..PAD].fill(first);
             for (o, s) in out[PAD..PAD + plane_w].iter_mut().zip(row) {
-                *o = s.to_i32();
+                *o = s.to_i32() as i16;
             }
             out[PAD + plane_w..].fill(last);
         }
@@ -503,10 +510,14 @@ fn wiener<P: Pixel>(
     bd: u32,
 ) {
     let (round0, round1) = if bd == 12 { (5u32, 9u32) } else { (3, 11) };
-    let vf = wiener_taps(unit.wiener[0]);
-    let hf = wiener_taps(unit.wiener[1]);
+    let vf = wiener_taps(unit.wiener[0]).map(|t| t as i16);
+    let hf = wiener_taps(unit.wiener[1]).map(|t| t as i16);
+    if !P::HBD {
+        return wiener8(dst, stride, s, sw, rc, &hf, &vf);
+    }
     let offset = 1i32 << (bd + 7 - round0 - 1);
     let limit = (1i32 << (bd + 1 + 7 - round0)) - 1;
+    let (lo0, hi0) = (-offset as i16, (limit - offset) as i16);
     let (w, h) = (rc.w, rc.h);
     grow(&mut s.inter, w * (h + 6));
     let rnd0 = 1i32 << (round0 - 1);
@@ -517,23 +528,95 @@ fn wiener<P: Pixel>(
         for c in 0..w {
             let mut acc = 0;
             for t in 0..7 {
-                acc += hf[t] * row[c + t];
+                acc += i32::from(hf[t]) * i32::from(row[c + t]);
             }
-            out[c] = ((acc + rnd0) >> round0).clamp(-offset, limit - offset);
+            // Saturated to 16 bits first: the clamps then take 16-bit
+            // min / max (the bounds fit).
+            let v = ((acc + rnd0) >> round0).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+            out[c] = (v as i16).clamp(lo0, hi0);
         }
     }
     let rnd1 = 1i32 << (round1 - 1);
-    let maxv = (1i32 << bd) - 1;
+    let maxv = ((1i32 << bd) - 1) as i16;
     for r in 0..h {
-        let rows: [&[i32]; 7] = core::array::from_fn(|t| &s.inter[(r + t) * w..(r + t + 1) * w]);
+        let rows: [&[i16]; 7] = core::array::from_fn(|t| &s.inter[(r + t) * w..(r + t + 1) * w]);
         let o = (rc.y0 - rc.dst_row0 + r) * stride + rc.x0;
         let out = &mut dst[o..o + w];
         for c in 0..w {
             let mut acc = 0;
             for t in 0..7 {
-                acc += vf[t] * rows[t][c];
+                acc += i32::from(vf[t]) * i32::from(rows[t][c]);
             }
-            out[c] = P::from_i32(((acc + rnd1) >> round1).clamp(0, maxv));
+            let v = ((acc + rnd1) >> round1).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+            out[c] = P::from_i32(i32::from((v as i16).clamp(0, maxv)));
+        }
+    }
+}
+
+/// [`wiener`] for 8-bit samples, in 16-bit arithmetic.
+///
+/// The taps sum to 128 and each lies in -218..=218, with at most 90 below
+/// zero in all. Each pass splits its input `x` as `k hi + lo`
+/// (`0 <= lo < k`) and sums `A = sum(f * hi)` and `B = sum(f * lo)`
+/// separately: both fit in 16 bits (wrapping partial sums are exact as
+/// the totals fit), and `Round2(k A + B, n)` follows from them:
+/// * horizontal: `x` in 0..=255, `k = 16`, `n = 3`: `2 A + ((B + 4) >> 3)`;
+/// * vertical: `x` in -2048..=6143, `k = 64`, `n = 11`:
+///   `(A + ((B + 1024) >> 6)) >> 5`, with `|A| <= 128 * 95 + 127 * 90`.
+fn wiener8<P: Pixel>(
+    dst: &mut [P],
+    stride: usize,
+    s: &mut LrScratch,
+    sw: usize,
+    rc: Rect,
+    hf: &[i16; 7],
+    vf: &[i16; 7],
+) {
+    let (w, h) = (rc.w, rc.h);
+    grow(&mut s.inter, w * (h + 6));
+    grow(&mut s.inter_lo, w * (h + 6));
+    grow(&mut s.xh, w + 6);
+    grow(&mut s.xl, w + 6);
+    let (xh, xl) = (&mut s.xh, &mut s.xl);
+    for r in 0..h + 6 {
+        let base = r * sw + PAD + rc.x0 - 3;
+        let row = &s.src[base..base + w + 6];
+        for ((a, b), &x) in xh.iter_mut().zip(xl.iter_mut()).zip(row) {
+            *a = x >> 4;
+            *b = x & 15;
+        }
+        let (xh, xl) = (&xh[..w + 6], &xl[..w + 6]);
+        let oh = &mut s.inter[r * w..(r + 1) * w];
+        let ol = &mut s.inter_lo[r * w..(r + 1) * w];
+        for c in 0..w {
+            let mut a = 0i16;
+            let mut b = 0i16;
+            for t in 0..7 {
+                a = a.wrapping_add(hf[t].wrapping_mul(xh[c + t]));
+                b = b.wrapping_add(hf[t].wrapping_mul(xl[c + t]));
+            }
+            let v = a
+                .wrapping_mul(2)
+                .wrapping_add(b.wrapping_add(4) >> 3)
+                .clamp(-2048, 6143);
+            oh[c] = v >> 6;
+            ol[c] = v & 63;
+        }
+    }
+    for r in 0..h {
+        let hi: [&[i16]; 7] = core::array::from_fn(|t| &s.inter[(r + t) * w..(r + t + 1) * w]);
+        let lo: [&[i16]; 7] = core::array::from_fn(|t| &s.inter_lo[(r + t) * w..(r + t + 1) * w]);
+        let o = (rc.y0 - rc.dst_row0 + r) * stride + rc.x0;
+        let out = &mut dst[o..o + w];
+        for c in 0..w {
+            let mut a = 0i16;
+            let mut b = 0i16;
+            for t in 0..7 {
+                a = a.wrapping_add(vf[t].wrapping_mul(hi[t][c]));
+                b = b.wrapping_add(vf[t].wrapping_mul(lo[t][c]));
+            }
+            let v = a.wrapping_add(b.wrapping_add(1024) >> 6) >> 5;
+            out[c] = P::from_i32(i32::from(v.clamp(0, 255)));
         }
     }
 }
@@ -559,7 +642,7 @@ const A2_TABLE: [i32; 256] = {
 /// Box filter process (7.17.3) for one pass on one rectangle; writes
 /// `w x h` values to `flt`.
 fn box_filter(
-    src: &[i32],
+    src: &[i16],
     sw: usize,
     a_buf: &mut Vec<i32>,
     b_buf: &mut Vec<i32>,
@@ -587,6 +670,11 @@ fn box_filter(
     let sh_b = bd - 8;
     let ncol = gw + 2 * r;
     // A / B rows i = -1 ..= h (grid row i + 1).
+    let col0 = PAD + rc.x0 - 1 - r;
+    let src_row = |y: usize| &src[y * sw + col0..y * sw + col0 + ncol];
+    // The column sums of source rows `top ..= top + 2 r` of the last row
+    // done (`None` before the first).
+    let mut sums_top: Option<usize> = None;
     for gi in 0..h + 2 {
         // Pass 0 only uses odd rows i (gi even).
         if pass == 0 && gi & 1 == 1 {
@@ -594,21 +682,41 @@ fn box_filter(
         }
         // Source rows i - r ..= i + r: stripe-source row index i + dy + 3.
         let top = gi + CTX - 1 - r;
-        let col0 = PAD + rc.x0 - 1 - r;
-        {
-            let first = &src[top * sw + col0..top * sw + col0 + ncol];
-            for k in 0..ncol {
-                colsum[k] = first[k];
-                colsq[k] = first[k] * first[k];
+        match sums_top {
+            // Slide the window down: drop the rows above `top`, add those
+            // below the old window.
+            Some(t) if top - t <= 2 * r => {
+                for y in t..top {
+                    for ((s, q), &x) in colsum.iter_mut().zip(colsq.iter_mut()).zip(src_row(y)) {
+                        let x = i32::from(x);
+                        *s -= x;
+                        *q -= x * x;
+                    }
+                }
+                for y in t + 2 * r + 1..top + 2 * r + 1 {
+                    for ((s, q), &x) in colsum.iter_mut().zip(colsq.iter_mut()).zip(src_row(y)) {
+                        let x = i32::from(x);
+                        *s += x;
+                        *q += x * x;
+                    }
+                }
+            }
+            _ => {
+                for ((s, q), &x) in colsum.iter_mut().zip(colsq.iter_mut()).zip(src_row(top)) {
+                    let x = i32::from(x);
+                    *s = x;
+                    *q = x * x;
+                }
+                for y in top + 1..=top + 2 * r {
+                    for ((s, q), &x) in colsum.iter_mut().zip(colsq.iter_mut()).zip(src_row(y)) {
+                        let x = i32::from(x);
+                        *s += x;
+                        *q += x * x;
+                    }
+                }
             }
         }
-        for dy in 1..=2 * r {
-            let row = &src[(top + dy) * sw + col0..(top + dy) * sw + col0 + ncol];
-            for k in 0..ncol {
-                colsum[k] += row[k];
-                colsq[k] += row[k] * row[k];
-            }
-        }
+        sums_top = Some(top);
         let arow = &mut a_buf[gi * gw..(gi + 1) * gw];
         let brow = &mut b_buf[gi * gw..(gi + 1) * gw];
         for j in 0..gw {
@@ -621,7 +729,11 @@ fn box_filter(
             let a = round2(a, sh_a);
             let d = round2(b, sh_b);
             let p = (a * n - d * d).max(0);
-            let z = ((p as u64 * s as u64 + (1 << (SGRPROJ_MTABLE_BITS - 1)))
+            // 32-bit, as libaom and libdav1d compute it (the product of a
+            // conformant stream fits).
+            let z = ((p as u32)
+                .wrapping_mul(s as u32)
+                .wrapping_add(1 << (SGRPROJ_MTABLE_BITS - 1))
                 >> SGRPROJ_MTABLE_BITS)
                 .min(255) as usize;
             let a2 = A2_TABLE[z];
@@ -635,7 +747,7 @@ fn box_filter(
     for i in 0..h {
         let gi = i + 1;
         let c0 = (CTX + i) * sw + PAD + rc.x0;
-        let crow = &src[c0..c0 + w];
+        let crow: &[i16] = &src[c0..c0 + w];
         let out = &mut flt[i * w..(i + 1) * w];
         if pass == 0 {
             if i & 1 == 1 {
@@ -645,7 +757,7 @@ fn box_filter(
                 for j in 0..w {
                     let a = 6 * ar[j + 1] + 5 * (ar[j] + ar[j + 2]);
                     let b = 6 * br[j + 1] + 5 * (br[j] + br[j + 2]);
-                    out[j] = round2(a * crow[j] + b, sh);
+                    out[j] = round2(a * i32::from(crow[j]) + b, sh);
                 }
             } else {
                 let au = &a_buf[(gi - 1) * gw..gi * gw];
@@ -658,7 +770,7 @@ fn box_filter(
                         6 * (au[j + 1] + ad[j + 1]) + 5 * (au[j] + au[j + 2] + ad[j] + ad[j + 2]);
                     let b = 6 * (bu[j + 1] + bd_[j + 1])
                         + 5 * (bu[j] + bu[j + 2] + bd_[j] + bd_[j + 2]);
-                    out[j] = round2(a * crow[j] + b, sh);
+                    out[j] = round2(a * i32::from(crow[j]) + b, sh);
                 }
             }
         } else {
@@ -674,7 +786,7 @@ fn box_filter(
                     + 3 * (au[j] + au[j + 2] + ad[j] + ad[j + 2]);
                 let b = 4 * (bm[j] + bm[j + 1] + bm[j + 2] + bu[j + 1] + bd_[j + 1])
                     + 3 * (bu[j] + bu[j + 2] + bd_[j] + bd_[j + 2]);
-                out[j] = round2(a * crow[j] + b, sh);
+                out[j] = round2(a * i32::from(crow[j]) + b, sh);
             }
         }
     }
@@ -740,7 +852,7 @@ fn sgr<P: Pixel>(
         let f0 = &s.flt0[i * w..];
         let f1 = &s.flt1[i * w..];
         for j in 0..w {
-            let u = crow[j] << SGRPROJ_RST_BITS;
+            let u = i32::from(crow[j]) << SGRPROJ_RST_BITS;
             let mut v = w1 * u;
             v += w0 * if r0 != 0 { f0[j] } else { u };
             v += w2 * if r1 != 0 { f1[j] } else { u };

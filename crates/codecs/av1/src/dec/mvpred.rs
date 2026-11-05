@@ -9,7 +9,7 @@ use super::frame::RefData;
 use super::obu::{FrameHeader, SequenceHeader, TRANSLATION, relative_dist};
 use super::tile::TileDec;
 use super::types::{
-    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, Mv, NONE, bh4, block_height, block_width, bw4,
+    GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, MiInfo, Mv, NONE, bh4, block_height, block_width, bw4,
     has_newmv,
 };
 
@@ -205,62 +205,73 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             && r < self.mi_row_end as isize
     }
 
+    /// The row scan of 7.10.2.2 (`delta_row` is -1, -3 or -5).
     fn scan_row(&mut self, delta_row: isize, is_compound: bool, found: &mut bool) {
+        let (mi_row, mi_col) = (self.b.mi_row, self.b.mi_col);
         let w4 = bw4(self.b.bsize);
-        let end4 = w4.min(self.fs.mi_cols - self.b.mi_col).min(16);
-        let mut delta_col = 0isize;
-        let use_step16 = w4 >= 16;
+        let mut delta_col = 0usize;
         let mut delta_row = delta_row;
-        if delta_row.abs() > 1 {
-            delta_row += (self.b.mi_row & 1) as isize;
-            delta_col = 1 - (self.b.mi_col & 1) as isize;
+        let mut min_len = 1;
+        if delta_row < -1 {
+            delta_row += (mi_row & 1) as isize;
+            delta_col = 1 - (mi_col & 1);
+            min_len = 2;
         }
+        if w4 >= 16 {
+            min_len = 4;
+        }
+        let r = mi_row as isize + delta_row;
+        // The positions inside the tile: rows are checked once, columns
+        // only end on the right (they start at the block's).
+        if r < self.mi_row_start as isize || r >= self.mi_row_end as isize {
+            return;
+        }
+        let c0 = mi_col + delta_col;
+        let end4 = w4
+            .min(self.fs.mi_cols - mi_col)
+            .min(16)
+            .min(self.mi_col_end.saturating_sub(c0));
+        let row = r as usize * self.fs.mi_stride + c0;
         let mut i = 0usize;
         while i < end4 {
-            let r = self.b.mi_row as isize + delta_row;
-            let c = self.b.mi_col as isize + delta_col + i as isize;
-            if !self.inside(r, c) {
-                break;
-            }
-            let mut len = w4.min(bw4(self.mi(r as usize, c as usize).bsize));
-            if delta_row.abs() > 1 {
-                len = len.max(2);
-            }
-            if use_step16 {
-                len = len.max(4);
-            }
-            let weight = len as u32 * 2;
-            self.add_ref_mv_candidate(r as usize, c as usize, is_compound, weight, found);
+            let m = self.fs.mi[row + i];
+            let len = w4.min(bw4(m.bsize)).max(min_len);
+            self.add_ref_mv_candidate(&m, is_compound, len as u32 * 2, found);
             i += len;
         }
     }
 
+    /// The column scan of 7.10.2.3 (`delta_col` is -1, -3 or -5).
     fn scan_col(&mut self, delta_col: isize, is_compound: bool, found: &mut bool) {
+        let (mi_row, mi_col) = (self.b.mi_row, self.b.mi_col);
         let h4 = bh4(self.b.bsize);
-        let end4 = h4.min(self.fs.mi_rows - self.b.mi_row).min(16);
-        let mut delta_row = 0isize;
-        let use_step16 = h4 >= 16;
+        let mut delta_row = 0usize;
         let mut delta_col = delta_col;
-        if delta_col.abs() > 1 {
-            delta_row = 1 - (self.b.mi_row & 1) as isize;
-            delta_col += (self.b.mi_col & 1) as isize;
+        let mut min_len = 1;
+        if delta_col < -1 {
+            delta_row = 1 - (mi_row & 1);
+            delta_col += (mi_col & 1) as isize;
+            min_len = 2;
         }
+        if h4 >= 16 {
+            min_len = 4;
+        }
+        let c = mi_col as isize + delta_col;
+        if c < self.mi_col_start as isize || c >= self.mi_col_end as isize {
+            return;
+        }
+        let r0 = mi_row + delta_row;
+        let end4 = h4
+            .min(self.fs.mi_rows - mi_row)
+            .min(16)
+            .min(self.mi_row_end.saturating_sub(r0));
+        let stride = self.fs.mi_stride;
+        let at = r0 * stride + c as usize;
         let mut i = 0usize;
         while i < end4 {
-            let r = self.b.mi_row as isize + delta_row + i as isize;
-            let c = self.b.mi_col as isize + delta_col;
-            if !self.inside(r, c) {
-                break;
-            }
-            let mut len = h4.min(bh4(self.mi(r as usize, c as usize).bsize));
-            if delta_col.abs() > 1 {
-                len = len.max(2);
-            }
-            if use_step16 {
-                len = len.max(4);
-            }
-            let weight = len as u32 * 2;
-            self.add_ref_mv_candidate(r as usize, c as usize, is_compound, weight, found);
+            let m = self.fs.mi[at + i * stride];
+            let len = h4.min(bh4(m.bsize)).max(min_len);
+            self.add_ref_mv_candidate(&m, is_compound, len as u32 * 2, found);
             i += len;
         }
     }
@@ -275,19 +286,19 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let r = self.b.mi_row as isize + delta_row;
         let c = self.b.mi_col as isize + delta_col;
         if self.inside(r, c) && self.decoded(r, c) {
-            self.add_ref_mv_candidate(r as usize, c as usize, is_compound, 4, found);
+            let m = *self.mi(r as usize, c as usize);
+            self.add_ref_mv_candidate(&m, is_compound, 4, found);
         }
     }
 
+    #[inline(always)]
     fn add_ref_mv_candidate(
         &mut self,
-        r: usize,
-        c: usize,
+        m: &MiInfo,
         is_compound: bool,
         weight: u32,
         found: &mut bool,
     ) {
-        let m = *self.mi(r, c);
         if !m.is_inter {
             return;
         }
@@ -360,11 +371,34 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         });
         // Neighbouring positions often hold the same field entry.
         let mut memo = None;
+        // The grid positions below and right of the block's corner: only
+        // the bottom and right tile edges bound them.
+        let (mi_row, mi_col) = (self.b.mi_row, self.b.mi_col);
+        let w8 = self.fs.mi_cols >> 1;
         let mut dr = 0;
         while dr < h4.min(16) {
+            let r = (mi_row + dr) | 1;
+            if r >= self.mi_row_end {
+                break;
+            }
             let mut dc = 0;
             while dc < w4.min(16) {
-                self.add_tpl_ref_mv(dr as isize, dc as isize, is_compound, dist, &mut memo);
+                let c = (mi_col + dc) | 1;
+                if c >= self.mi_col_end {
+                    break;
+                }
+                if dr == 0 && dc == 0 {
+                    self.b.zero_mv_ctx = 1;
+                }
+                let entry = self
+                    .fs
+                    .motion_field
+                    .get((r >> 1) * w8 + (c >> 1))
+                    .copied()
+                    .unwrap_or_default();
+                if entry.offset != 0 {
+                    self.add_tpl_entry(dr == 0 && dc == 0, entry, is_compound, dist, &mut memo);
+                }
                 dc += step_w;
             }
             dr += step_h;
@@ -417,6 +451,20 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if entry.offset == 0 {
             return;
         }
+        self.add_tpl_entry(dr == 0 && dc == 0, entry, is_compound, dist, memo);
+    }
+
+    /// The rest of [`Self::add_tpl_ref_mv`] for a field entry `entry` with
+    /// a motion vector (`first`: the position is the block's corner).
+    #[inline(always)]
+    fn add_tpl_entry(
+        &mut self,
+        first: bool,
+        entry: MfEntry,
+        is_compound: bool,
+        dist: [i32; 2],
+        memo: &mut Option<(MfEntry, [Mv; 2])>,
+    ) {
         let cands = match *memo {
             Some((e, c)) if e == entry => c,
             _ => {
@@ -433,7 +481,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         };
         if !is_compound {
             let cand = cands[0];
-            if dr == 0 && dc == 0 {
+            if first {
                 let g = self.b.global_mvs[0];
                 self.b.zero_mv_ctx = usize::from(
                     (i32::from(cand.row) - i32::from(g.row)).abs() >= 16
@@ -450,7 +498,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         } else {
             let [c0, c1] = cands;
-            if dr == 0 && dc == 0 {
+            if first {
                 let g = self.b.global_mvs;
                 let far = |a: Mv, b: Mv| {
                     (i32::from(a.row) - i32::from(b.row)).abs() >= 16

@@ -580,21 +580,21 @@ fn plane_sub(seq: &SequenceHeader, p: usize) -> (u32, u32) {
     }
 }
 
-/// Working buffers of the CDEF of a run of areas: the padded copy of the
-/// current 64x64 area per plane, and the last two columns of the area to
-/// the left as they were before it was filtered.
+/// Working buffers of the CDEF of a run of areas: per plane, the padded
+/// copy of the current 64x64 area and that of the last area filtered (its
+/// columns are the pre-CDEF left columns of the next area).
 struct CdefWork<P> {
-    pads: [Vec<u16>; 3],
-    /// Per plane: the pre-CDEF columns of the area to the left (two per
-    /// row) and those of the current area.
-    left: [[Vec<P>; 2]; 3],
+    pads: [[Vec<u16>; 2]; 3],
+    _p: core::marker::PhantomData<P>,
 }
 
 impl<P: Pixel> CdefWork<P> {
     fn new() -> Self {
         Self {
-            pads: core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE]),
-            left: core::array::from_fn(|_| core::array::from_fn(|_| vec![P::default(); 2 * 64])),
+            pads: core::array::from_fn(|_| {
+                core::array::from_fn(|_| vec![0u16; CDEF_PAD_STRIDE * CDEF_PAD_STRIDE])
+            }),
+            _p: core::marker::PhantomData,
         }
     }
 }
@@ -819,8 +819,8 @@ fn cdef_rows<P: Pixel>(
     let uv_damping = cdef_damping(i32::from(hdr.cdef.damping), bd, true);
     let ls = out.stride[0];
     for sbr in mi_rows.step_by(16) {
-        // Whether the area to the left was filtered (its pre-CDEF columns
-        // are then in `sc.left[p][0]`).
+        // Whether the area to the left was filtered (its padded copy, with
+        // the pre-CDEF columns, is then in `sc.pads[p][1]`).
         let mut left_saved = [false; 3];
         for sbc in (0..fs.mi_cols).step_by(16) {
             let mut padded = [false; 3];
@@ -910,11 +910,11 @@ fn cdef_rows<P: Pixel>(
                     }
                 }
             }
-            // A filtered plane saved its pre-CDEF right columns in
-            // `left[p][1]`: they become the left columns of the next area.
+            // The padded copy of a filtered plane holds the pre-CDEF left
+            // columns of the next area.
             for p in 0..3 {
                 if padded[p] {
-                    sc.left[p].swap(0, 1);
+                    sc.pads[p].swap(0, 1);
                 }
                 left_saved[p] = padded[p];
             }
@@ -923,8 +923,7 @@ fn cdef_rows<P: Pixel>(
 }
 
 /// One 64x64 area of [`cdef_rows`]: its position in luma 4x4 units, and
-/// per plane whether the pre-CDEF columns of the area to its left are in
-/// [`CdefScratch::left`].
+/// per plane whether the area to its left was filtered (see [`CdefWork`]).
 struct CdefArea {
     sbr: usize,
     sbc: usize,
@@ -935,6 +934,7 @@ struct CdefArea {
 /// Filters the 8x8 block (subsampled for chroma) at luma 4x4 position
 /// `(r, c)` of `plane` in place. `strength` is `(pri, sec, dir, damping)`.
 /// Pads the area holding the block first, unless `padded`.
+#[inline(always)]
 fn cdef_plane_block<P: Pixel>(
     dst: &mut [&mut [P]],
     out: &CdefOut,
@@ -954,20 +954,11 @@ fn cdef_plane_block<P: Pixel>(
     let sb_x = (area.sbc * 4) >> sx;
     let sb_y = (area.sbr * 4) >> sy;
     let (aw, ah) = (64 >> sx, 64 >> sy);
-    let pad = &mut sc.pads[plane];
+    let [pad, prev] = &mut sc.pads[plane];
     if !*padded {
         let avail_w = (fs.mi_cols * 4) >> sx;
         let avail_h = (fs.mi_rows * 4) >> sy;
-        let [prev, cur] = &mut sc.left[plane];
         let chunk = &dst[plane][..];
-        // The pre-CDEF right columns of this area, for the next one.
-        let h = ah.min(avail_h - sb_y);
-        let xr = sb_x + aw - 2;
-        for i in 0..h {
-            let o = (sb_y + i - row0) * ds + xr;
-            cur[2 * i] = chunk[o];
-            cur[2 * i + 1] = chunk[o + 1];
-        }
         let k = area.sbr >> 4;
         let lw = lines.w[plane];
         let lr = &lines.rows[plane];
@@ -1009,8 +1000,9 @@ fn cdef_plane_block<P: Pixel>(
 /// and columns `x0 - 2 ..= x0 + w + 1`, [`CDEF_UNAVAILABLE`] outside
 /// `avail_w x avail_h`. The two rows above come from `top(i)`, the two
 /// below from `bottom(i)` (whole saved rows), the others from `chunk`
-/// (stride `stride`, first row `row0`), with their two columns left of
-/// the area from `left` (two per row) when that area was filtered.
+/// (stride `stride`, first row `row0`). When the area to the left was
+/// filtered, its padded copy `left` gives the two columns left of the area.
+#[inline(never)]
 fn pad_area<'a, P: Pixel>(
     pad: &mut [u16],
     chunk: &'a [P],
@@ -1018,7 +1010,7 @@ fn pad_area<'a, P: Pixel>(
     row0: usize,
     top: impl Fn(usize) -> &'a [P],
     bottom: impl Fn(usize) -> &'a [P],
-    left: Option<&[P]>,
+    left: Option<&[u16]>,
     (x0, y0, w, h): (usize, usize, usize, usize),
     (avail_w, avail_h): (usize, usize),
 ) {
@@ -1035,33 +1027,25 @@ fn pad_area<'a, P: Pixel>(
             out.fill(CDEF_UNAVAILABLE);
             continue;
         }
-        let (row, rx, lcols) = if r < b {
-            (top(r), xs, None)
+        let row = if r < b {
+            top(r)
         } else if r >= h + b {
-            (bottom(r - h - b), xs, None)
+            bottom(r - h - b)
         } else {
             let o = (y - row0) * stride;
-            match left {
-                Some(l) if xs < x0 => (
-                    &chunk[o..o + xe],
-                    x0,
-                    Some(&l[2 * (r - b)..2 * (r - b) + 2]),
-                ),
-                _ => (&chunk[o..o + xe], xs, None),
-            }
+            &chunk[o..o + xe]
         };
         let (lpad, rest) = out.split_at_mut(lead);
         lpad.fill(CDEF_UNAVAILABLE);
         let (mid, right) = rest.split_at_mut(n);
-        let mid = match lcols {
-            Some(l) => {
-                let (a, m) = mid.split_at_mut(x0 - xs);
-                for (o, s) in a.iter_mut().zip(l) {
-                    *o = s.to_i32() as u16;
-                }
-                m
+        let (mid, rx) = match left {
+            Some(l) if xs < x0 => {
+                // Columns w, w + 1 of the left area's copy.
+                let (a, m) = mid.split_at_mut(b);
+                a.copy_from_slice(&l[r * ps + w..r * ps + w + b]);
+                (m, x0)
             }
-            None => mid,
+            _ => (mid, xs),
         };
         for (o, s) in mid.iter_mut().zip(&row[rx..xe]) {
             *o = s.to_i32() as u16;

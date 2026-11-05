@@ -12,6 +12,7 @@ mod effect_shelf;
 mod filmstrip;
 mod fling;
 mod gesture;
+mod group_move;
 mod hit;
 mod keys;
 mod lane;
@@ -42,6 +43,7 @@ pub use gesture::{
     DropGesture, DropOutcome, GestureError, GestureOutcome, MoveGesture, Placement, TrimGesture,
     TrimPlan, drop_gesture, move_gesture, placement, trim_gesture,
 };
+pub use group_move::{ClipMove, MovePlan, move_requests, plan_move};
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key};
 pub use lane::{Lane, lane_category, lanes, lanes_for};

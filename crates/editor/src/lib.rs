@@ -17,6 +17,7 @@ mod fling;
 mod gesture;
 mod group_move;
 mod hit;
+mod inspector;
 mod keys;
 mod lane;
 mod library;
@@ -54,6 +55,12 @@ pub use gesture::{
 };
 pub use group_move::{ClipMove, MovePlan, move_requests, plan_move};
 pub use hit::{BadScale, Hit, Pointer, TimelineScale, hit_test};
+pub use inspector::{
+    BACKGROUND_ALPHA_START, BACKGROUND_ROUND_START, GLOW_RANGE_START, GLOW_STRENGTH_START,
+    LetterCase, OUTLINE_START, Panel, SHADOW_ANGLE, SHADOW_BLUR_START, SHADOW_DISTANCE_START,
+    SILENT_DB, TEXT_PRESETS, TextLook, canvas_pixels, gain_of_db, panel_of, starting,
+    stored_position, text_look, volume_db,
+};
 pub use keys::{ClipKeys, KeyGraph, clip_keys, key_graphs, move_key};
 pub use lane::{Lane, lane_category, lanes, lanes_for};
 pub use library::{

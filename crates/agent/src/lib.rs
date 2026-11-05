@@ -12,6 +12,7 @@ mod approval;
 mod draft;
 mod r#loop;
 mod mcp;
+mod mcp_server;
 mod model;
 mod sandbox;
 mod settings_tool;
@@ -26,6 +27,7 @@ pub use draft::{
 };
 pub use r#loop::{LoopError, ToolOutcome, ToolSink, Turn, cap_from_settings, run};
 pub use mcp::{McpClient, McpError, McpTransport};
+pub use mcp_server::{MCP_PROTOCOL_VERSION, McpServer};
 pub use model::{
     CloudModel, Completion, CompletionRequest, LocalModel, Message, Model, ModelError, ToolCall,
     ToolDefinition,

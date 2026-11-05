@@ -1769,25 +1769,26 @@ fn is_screen_content<P: Pixel>(src: &Picture<P>, bd: u32) -> bool {
     let p = &src.planes[0];
     let thr = 32 << (bd - 8);
     let (mut few, mut total) = (0u32, 0u32);
-    let mut vals = [0i32; 256];
     for by in (0..p.h.saturating_sub(15)).step_by(16) {
         for bx in (0..p.w.saturating_sub(15)).step_by(16) {
-            let mut n = 0;
-            for i in 0..16 {
-                for j in 0..16 {
-                    vals[n] = p.data[(by + i) * p.stride + bx + j].to_i32();
-                    n += 1;
+            // The distinct values, up to one more than 8.
+            let mut seen = [0i32; 9];
+            let mut distinct = 0;
+            'block: for i in 0..16 {
+                for &px in &p.data[(by + i) * p.stride + bx..][..16] {
+                    let v = px.to_i32();
+                    if !seen[..distinct].contains(&v) {
+                        seen[distinct] = v;
+                        distinct += 1;
+                        if distinct > 8 {
+                            break 'block;
+                        }
+                    }
                 }
             }
-            let v = &mut vals[..n];
-            v.sort_unstable();
-            let (lo, hi) = (v[0], v[n - 1]);
-            let mut distinct = 1;
-            for k in 1..n {
-                if v[k] != v[k - 1] {
-                    distinct += 1;
-                }
-            }
+            let seen = &seen[..distinct];
+            let lo = seen.iter().copied().min().unwrap_or(0);
+            let hi = seen.iter().copied().max().unwrap_or(0);
             total += 1;
             if (2..=8).contains(&distinct) && hi - lo >= thr {
                 few += 1;

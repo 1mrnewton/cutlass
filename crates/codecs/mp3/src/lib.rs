@@ -18,6 +18,8 @@ mod psy;
 mod quantize;
 mod sideinfo;
 mod synth;
+#[cfg(test)]
+mod synthetic;
 mod tables;
 
 pub use decode::{DECODER_DELAY, Mp3Decoder};

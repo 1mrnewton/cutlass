@@ -192,7 +192,7 @@ pub(crate) fn read_scalefactors(
 }
 
 /// LSF `slen` per partition and the partition table row.
-fn lsf_slen(info: &mut GranuleInfo, intensity_right: bool) -> ([u8; 4], usize) {
+pub(crate) fn lsf_slen(info: &mut GranuleInfo, intensity_right: bool) -> ([u8; 4], usize) {
     let compress = u32::from(info.scalefac_compress);
     if intensity_right {
         let isc = compress >> 1;

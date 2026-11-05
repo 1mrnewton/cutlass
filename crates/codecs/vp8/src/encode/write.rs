@@ -1,6 +1,6 @@
 //! Writing a coded frame: macroblock modes, vectors, and tokens.
 
-use crate::bool_coder::BoolEncoder;
+use crate::bool_coder::{BoolEncoder, cost};
 use crate::header::{CoeffProbs, FrameHeader};
 use crate::modes::{
     ALTREF, Bounds, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEWMV, SPLITMV, SubInfo, find_near,
@@ -9,8 +9,8 @@ use crate::modes::{
 use crate::predict::B_PRED;
 use crate::tables::{
     B_MODE_PROBS, B_MODE_TREE, KF_B_MODE_PROBS, KF_UV_MODE_PROBS, KF_Y_MODE_PROBS, KF_Y_MODE_TREE,
-    MV_PARTITIONS, MV_REF_TREE, SMALL_MV_TREE, SPLIT_COUNTS, SPLIT_MV_PROBS, SPLIT_MV_TREE,
-    SUB_MV_REF_PROBS, SUB_MV_REF_TREE, UV_MODE_TREE, Y_MODE_TREE,
+    MV_PARTITIONS, MV_REF_TREE, MV_UPDATE_PROBS, SMALL_MV_TREE, SPLIT_COUNTS, SPLIT_MV_PROBS,
+    SPLIT_MV_TREE, SUB_MV_REF_PROBS, SUB_MV_REF_TREE, UV_MODE_TREE, Y_MODE_TREE,
 };
 use crate::tokens::{Context, TYPE_CHROMA, TYPE_Y_AFTER_Y2, TYPE_Y_WITH_DC, TYPE_Y2, skip_mb};
 
@@ -18,32 +18,63 @@ use super::cost::{NEW_4X4, split_mode, tree_path};
 use super::frame::Coded;
 use super::residual::{Counts, QBlock, best_prob, branch_cost, count_block, write_block};
 
-/// Writes one vector component difference (Section 17.2).
-fn write_component(w: &mut BoolEncoder, p: &[u8; 19], d: i32) {
+/// Branch counts of the vector probabilities: `[component][index]`.
+pub type MvCounts = [[[u32; 2]; 19]; 2];
+
+/// Calls `f(probability index, bit)` for each branch that codes one vector
+/// component difference (Section 17.2).
+fn walk_component(d: i32, mut f: impl FnMut(usize, bool)) {
     let x = d.unsigned_abs();
     if x < 8 {
-        w.write(p[0], false);
-        w.tree(&SMALL_MV_TREE, &p[2..9], x as u8);
+        f(0, false);
+        for (node, bit) in tree_path(&SMALL_MV_TREE, x as u8) {
+            f(2 + node, bit);
+        }
     } else {
-        w.write(p[0], true);
+        f(0, true);
         for i in 0..3 {
-            w.write(p[9 + i], (x >> i) & 1 == 1);
+            f(9 + i, (x >> i) & 1 == 1);
         }
         for i in (4..10).rev() {
-            w.write(p[9 + i], (x >> i) & 1 == 1);
+            f(9 + i, (x >> i) & 1 == 1);
         }
         if x & 0xfff0 != 0 {
-            w.write(p[12], (x >> 3) & 1 == 1);
+            f(12, (x >> 3) & 1 == 1);
         }
     }
     if x != 0 {
-        w.write(p[1], d < 0);
+        f(1, d < 0);
     }
 }
 
-fn write_mv(w: &mut BoolEncoder, probs: &[[u8; 19]; 2], d: Mv) {
-    write_component(w, &probs[0], d.row);
-    write_component(w, &probs[1], d.col);
+fn write_mv(w: &mut BoolEncoder, probs: &[[u8; 19]; 2], d: Mv, counts: &mut MvCounts) {
+    for (c, v) in [d.row, d.col].into_iter().enumerate() {
+        walk_component(v, |i, bit| {
+            w.write(probs[c][i], bit);
+            counts[c][i][usize::from(bit)] += 1;
+        });
+    }
+}
+
+/// Picks vector probabilities from the counts where a new one pays for
+/// its update flag and seven bits.
+#[must_use]
+pub fn choose_mv_probs(old: &[[u8; 19]; 2], counts: &MvCounts) -> [[u8; 19]; 2] {
+    let mut out = *old;
+    for c in 0..2 {
+        for i in 0..19 {
+            let n = counts[c][i];
+            let v = best_prob(n) >> 1;
+            let new = if v == 0 { 1 } else { v << 1 };
+            let flag = MV_UPDATE_PROBS[c][i];
+            let price = u64::from(cost(flag, true)) + 7 * 256;
+            let saved = branch_cost(old[c][i], n) + u64::from(cost(flag, false));
+            if new != old[c][i] && branch_cost(new, n) + price < saved {
+                out[c][i] = new;
+            }
+        }
+    }
+    out
 }
 
 /// Walks the macroblocks the way the decoder reads them and calls `f` with
@@ -79,7 +110,14 @@ struct Neighbours<'a> {
 
 /// Writes every macroblock's modes into the first partition after the
 /// header (Sections 11, 16, 17).
-pub fn write_modes(w: &mut BoolEncoder, h: &FrameHeader, coded: &Coded, mbw: usize, mbh: usize) {
+pub fn write_modes(
+    w: &mut BoolEncoder,
+    h: &FrameHeader,
+    coded: &Coded,
+    mbw: usize,
+    mbh: usize,
+    counts: &mut MvCounts,
+) {
     let sign_bias = [false, false, h.sign_bias_golden, h.sign_bias_altref];
     for_each_mb(coded, mbw, mbh, |mbx, mby, i, n| {
         let mb = &coded.mbs[i];
@@ -145,6 +183,7 @@ pub fn write_modes(w: &mut BoolEncoder, h: &FrameHeader, coded: &Coded, mbw: usi
                 w,
                 &h.probs.mv,
                 Mv::new(mb.mv.row - best.row, mb.mv.col - best.col),
+                counts,
             );
         } else if mb.y_mode == SPLITMV {
             let partition = usize::from(mb.partition & 3);
@@ -176,6 +215,7 @@ pub fn write_modes(w: &mut BoolEncoder, h: &FrameHeader, coded: &Coded, mbw: usi
                         w,
                         &h.probs.mv,
                         Mv::new(mv.row - best.row, mv.col - best.col),
+                        counts,
                     );
                 }
             }

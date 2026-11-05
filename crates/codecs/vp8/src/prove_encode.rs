@@ -418,3 +418,26 @@ fn gate_quality_and_rate_against_libvpx() {
         );
     }
 }
+
+/// Moving content makes the encoder send new vector probabilities, and the
+/// coefficient and mode probabilities follow the counts.
+#[test]
+fn probability_updates_are_sent() {
+    let opts = Vp8Options {
+        quantizer: 20,
+        ..Vp8Options::default()
+    };
+    let (frames, _) = encode_synthetic(160, 96, 8, opts);
+    let mut state = crate::header::Persist::default();
+    let (mut mv, mut coeff) = (0, 0);
+    for frame in &frames {
+        let parsed = crate::header::parse(frame, &state).expect("parse");
+        mv += usize::from(!parsed.header.tag.key && parsed.next.probs.mv != state.probs.mv);
+        coeff += usize::from(parsed.next.probs.coeff != state.probs.coeff);
+        state = parsed.next;
+    }
+    assert!(
+        mv > 0 && coeff > 0,
+        "mv updates {mv}, coefficient updates {coeff}"
+    );
+}

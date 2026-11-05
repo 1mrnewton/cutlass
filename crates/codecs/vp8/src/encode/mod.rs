@@ -35,7 +35,9 @@ use crate::tokens::Dequant;
 use self::cost::{ModeCosts, MvCosts};
 use self::frame::{Coded, Setup, Source, code_frame};
 use self::residual::{Costs, choose_coeff_probs};
-use self::write::{choose_tree_probs, count_tokens, flag_prob, write_modes, write_tokens};
+use self::write::{
+    choose_mv_probs, choose_tree_probs, count_tokens, flag_prob, write_modes, write_tokens,
+};
 
 /// Encoder settings beyond the codec parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,6 +301,12 @@ impl Vp8Encoder {
             };
             filter::filter_frame(&mut planes, &filters, false);
         }
+        if !key {
+            // A dry run counts the vector branches the frame codes.
+            let mut counts = [[[0u32; 2]; 19]; 2];
+            write_modes(&mut BoolEncoder::new(), &h, &coded, mbw, mbh, &mut counts);
+            h.probs.mv = choose_mv_probs(&base.mv, &counts);
+        }
         let mut first = BoolEncoder::new();
         HeaderWriter {
             header: &h,
@@ -306,7 +314,7 @@ impl Vp8Encoder {
             previous_deltas: &self.persist.deltas,
         }
         .write(&mut first);
-        write_modes(&mut first, &h, &coded, mbw, mbh);
+        write_modes(&mut first, &h, &coded, mbw, mbh, &mut [[[0; 2]; 19]; 2]);
         let tokens = write_tokens(&coded, mbw, mbh, &h.probs.coeff, h.partitions);
         let data = header::assemble(&h.tag, &first.finish(), &tokens)?;
 

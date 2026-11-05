@@ -10,6 +10,7 @@
 mod campaign;
 mod decode_oracle;
 mod encode_oracle;
+mod end_to_end;
 mod hostile;
 mod lifecycle;
 

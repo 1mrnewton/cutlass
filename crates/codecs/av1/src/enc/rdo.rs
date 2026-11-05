@@ -1273,10 +1273,20 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let lam = self.mode.lambda_satd;
         let hp = self.hdr.allow_high_precision_mv;
         // Motion search seeded with the stack.
-        let cands: Vec<(i32, i32)> = stack
+        let mut cands: Vec<(i32, i32)> = stack
             .iter()
             .map(|m| (i32::from(m.row), i32::from(m.col)))
             .collect();
+        // The partition estimate searched LAST for this area.
+        if rf == LAST_FRAME
+            && let Some(e) = self
+                .me_scratch
+                .est_memo
+                .iter()
+                .find(|e| e.0 == [x, y, bw, bh])
+        {
+            cands.push(e.2);
+        }
         let pred0 = stack[0];
         let params = MeParams {
             // Secondary references only refine around their predicted vectors.

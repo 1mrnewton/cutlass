@@ -827,7 +827,7 @@ impl Av1Enc {
             max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep,
             inter_frame: !key,
-            me_range: if speed >= 8 { 16 } else { 48 },
+            me_range: ev("AV1_MER", if speed >= 8 { 16.0 } else { 48.0 }) as i32,
             subpel: ev(
                 "AV1_SUBPEL",
                 if speed >= 9 {
@@ -1127,7 +1127,7 @@ impl Av1Enc {
 /// A tuning constant; with the `tune` feature an environment variable of
 /// the same name overrides it (for parameter sweeps).
 #[cfg(feature = "tune")]
-fn ev(name: &str, default: f64) -> f64 {
+pub(crate) fn ev(name: &str, default: f64) -> f64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1136,7 +1136,7 @@ fn ev(name: &str, default: f64) -> f64 {
 
 #[cfg(not(feature = "tune"))]
 #[inline(always)]
-fn ev(_name: &str, default: f64) -> f64 {
+pub(crate) fn ev(_name: &str, default: f64) -> f64 {
     default
 }
 

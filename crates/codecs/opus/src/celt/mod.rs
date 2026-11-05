@@ -39,6 +39,8 @@ use tables::{
 use crate::range::RangeDecoder;
 use cutlass_decode::CodecError;
 
+pub(crate) use encoder::{CeltConfig, CeltEncoder, RateMode};
+
 /// Samples of decoded history kept per channel (`DECODE_BUFFER_SIZE`).
 const DECODE_BUFFER_SIZE: usize = 2048;
 /// Longest pitch period the concealment looks back (`MAX_PERIOD`).

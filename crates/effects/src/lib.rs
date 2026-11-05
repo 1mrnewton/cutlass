@@ -28,7 +28,8 @@ pub mod recipe;
 pub mod source;
 
 pub use adjust::{
-    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, adjust_rgba, auto_adjust, segment_adjust,
+    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, PictureStats, adjust_rgba, auto_adjust, match_adjust,
+    segment_adjust,
 };
 pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend};
 pub use catalog::{

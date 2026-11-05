@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, MaterialAudioFade, MaterialId, MaterialRef, Micros, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// A straight ramp. Curve 0 skips the durations, so a fade that would

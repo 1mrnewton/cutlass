@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, MaterialId, MaterialRef, MaterialTransition, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store a blend on the outgoing segment. Target ranges are not moved.

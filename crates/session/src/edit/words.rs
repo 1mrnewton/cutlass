@@ -90,7 +90,7 @@ pub fn add_caption(
     if words.text.is_empty() {
         return Err(EditError::WordShape);
     }
-    let (source_track, source_index) = super::speed::locate(draft, source_id)?;
+    let (source_track, source_index) = super::locate(draft, source_id)?;
     super::ensure_unlocked(draft.tracks[source_track].attribute)?;
     let target = draft.tracks[source_track].segments[source_index]
         .target

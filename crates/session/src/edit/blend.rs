@@ -22,7 +22,7 @@ pub fn set_blend(
     } else {
         BlendMode::from_package(mode).ok_or(EditError::UnknownEffect)?
     };
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
     if matches!(

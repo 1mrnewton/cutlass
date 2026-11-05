@@ -3,7 +3,7 @@ use cutlass_model::{
     segment_time_mark, set_time_mark_items, time_mark_items,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store a marker. `None` is the ruler. `Some` is a clip, and the time is

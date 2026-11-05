@@ -56,14 +56,14 @@ pub fn bind_effect(
     segment_id: &SegmentId,
     clip: Option<&SegmentId>,
 ) -> Result<(), EditError> {
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     if !matches!(track.kind, TrackType::Effect) {
         return Err(EditError::EffectTarget);
     }
     ensure_unlocked(track.attribute)?;
     if let Some(clip) = clip {
-        let (clip_track, _) = super::speed::locate(draft, clip)?;
+        let (clip_track, _) = super::locate(draft, clip)?;
         if !matches!(draft.tracks[clip_track].kind, TrackType::Video) {
             return Err(EditError::EffectTarget);
         }
@@ -85,7 +85,7 @@ pub fn set_effect_strength(
     if !(0.0..=1.0).contains(&value) {
         return Err(EditError::EffectStrength);
     }
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
     let current = draft.tracks[track_index].segments[segment_index]
         .material_id

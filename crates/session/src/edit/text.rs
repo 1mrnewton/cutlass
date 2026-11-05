@@ -3,7 +3,7 @@ use cutlass_model::{
     TrackType, segment_bloom,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Replace the text material's words. A rich title keeps its styled

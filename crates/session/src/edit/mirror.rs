@@ -1,6 +1,6 @@
 use cutlass_model::{Draft, SegmentId};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store whether the clip is active: drawn and heard. The clip stays where

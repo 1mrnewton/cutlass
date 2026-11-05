@@ -3,7 +3,7 @@ use cutlass_model::{
     segment_beats, set_user_beats, track_holds_beats, user_beats,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Store a beat on an audio segment. `source` is the source time.

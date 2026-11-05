@@ -14,7 +14,8 @@ use cutlass_model::{
 };
 
 use super::linkage::drop_pairs_where;
-use super::speed::{curve_points, locate};
+use super::locate;
+use super::speed::curve_points;
 use super::{EditError, ensure_unlocked};
 
 /// What a new compound clip is called.

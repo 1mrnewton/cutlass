@@ -631,3 +631,42 @@ pub fn ensure_unlocked(attribute: TrackAttribute) -> Result<(), EditError> {
         Ok(())
     }
 }
+
+/// Where segment `segment_id` is: its track and its place on that track.
+pub(super) fn locate(
+    draft: &Draft,
+    segment_id: &cutlass_model::SegmentId,
+) -> Result<(usize, usize), EditError> {
+    for (track_index, track) in draft.tracks.iter().enumerate() {
+        if let Some(segment_index) = track
+            .segments
+            .iter()
+            .position(|segment| &segment.id == segment_id)
+        {
+            return Ok((track_index, segment_index));
+        }
+    }
+    Err(EditError::MissingSegment)
+}
+
+/// `candidate` overlaps a segment on `track` other than `ignore`. Touching
+/// is not overlapping.
+pub(super) fn overlaps_except(
+    track: &cutlass_model::Track,
+    candidate: &cutlass_model::Segment,
+    ignore: &cutlass_model::SegmentId,
+) -> Result<bool, EditError> {
+    for segment in &track.segments {
+        if &segment.id == ignore {
+            continue;
+        }
+        if candidate
+            .target
+            .overlaps(&segment.target)
+            .map_err(EditError::Range)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

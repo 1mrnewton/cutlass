@@ -2,7 +2,7 @@ use cutlass_model::{
     CommonKeyframeGroup, Draft, GRAPH_PRESETS, KeyframeGraph, Micros, POSE_KEYS, Segment, SegmentId,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked, placement, rotate};
 
 /// Replace the segment's keyframe groups and leave every other field.

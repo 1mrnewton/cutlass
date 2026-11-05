@@ -5,7 +5,7 @@ use cutlass_model::{
     TimeRange,
 };
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// Record a pair. The request names the owner. A dependent has one owner.

@@ -94,7 +94,7 @@ pub fn set_adjust(
     if !value.is_finite() || value < f64::from(key.min()) || value > 1.0 {
         return Err(EditError::EffectStrength);
     }
-    let (track_index, segment_index) = super::speed::locate(draft, segment_id)?;
+    let (track_index, segment_index) = super::locate(draft, segment_id)?;
     let track = &draft.tracks[track_index];
     ensure_unlocked(track.attribute)?;
     if matches!(track.kind, TrackType::Audio | TrackType::Effect) {

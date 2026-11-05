@@ -2,7 +2,8 @@ use cutlass_model::{
     Draft, MaterialId, MaterialRef, Micros, Segment, SegmentId, TimeRange, blend_window,
 };
 
-use crate::edit::speed::{curve_points, locate, map_timeline_to_source, timeline_speed};
+use crate::edit::locate;
+use crate::edit::speed::{curve_points, map_timeline_to_source, timeline_speed};
 
 use super::{EditError, ensure_unlocked};
 

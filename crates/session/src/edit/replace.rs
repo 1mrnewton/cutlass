@@ -3,7 +3,7 @@
 
 use cutlass_model::{Draft, MaterialId, MaterialRef, MetaType, Micros, SegmentId, TimeRange};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 
 /// What a material plays, and for how long; `None` for a still.

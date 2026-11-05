@@ -8,7 +8,7 @@
 
 use cutlass_model::{Draft, SegmentId, TrackType};
 
-use super::speed::locate;
+use super::locate;
 use super::{EditError, ensure_unlocked};
 use crate::request::Arrange;
 

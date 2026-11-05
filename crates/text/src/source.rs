@@ -6,9 +6,14 @@
 //! keeps its color. A gray or mono strike is coverage under the text color.
 //! The title's outline, shadow, and background are drawn with the letters,
 //! so the picture grows to hold them. The picture is premultiplied.
+//!
+//! A letter animation poses each letter: its opacity, a shift in ems and a
+//! size around its own middle. A posed letter stays inside the picture
+//! drawn at rest, so a letter shifted past its edge is cut there. A color
+//! letter (an emoji) shows whole while its opacity is above nothing.
 
 use cutlass_font::Font;
-use cutlass_model::{BloomParams, MaterialText, Micros, Segment, TimeRange};
+use cutlass_model::{BloomParams, Letter, LetterPose, MaterialText, Micros, Segment, TimeRange};
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample, rgba_len};
 
 use crate::TextError;
@@ -58,6 +63,11 @@ pub struct TextSource {
     style: Style,
     /// How each glyph in the mesh looks, in its order.
     looks: Vec<Look>,
+    /// Which letter and word each glyph in the mesh is.
+    letters: Vec<Letter>,
+    /// How each glyph is posed by a letter animation; empty is at rest.
+    poses: Vec<LetterPose>,
+    font_size: f32,
     /// The box behind the letters, in picture pixels.
     background: Option<Area>,
     origin_x: f32,
@@ -173,6 +183,7 @@ impl TextSource {
         }
         let (origin_x, origin_y, width, height, background) =
             picture_bounds(&mesh, &style, laid.font_size, &shadows)?;
+        let letters = letters_of(&crate::richtext::read(material)?.text, &mesh.glyphs);
         Ok(Self {
             range: segment.target.clone(),
             material_id: material.id.clone(),
@@ -181,6 +192,9 @@ impl TextSource {
             mesh,
             style,
             looks,
+            letters,
+            poses: Vec::new(),
+            font_size: laid.font_size,
             background,
             origin_x,
             origin_y,
@@ -210,6 +224,40 @@ impl TextSource {
         &self.mesh.glyphs
     }
 
+    /// Which letter and word each glyph is, in the order of [`Self::records`].
+    #[must_use]
+    pub fn letters(&self) -> &[Letter] {
+        &self.letters
+    }
+
+    /// Pose each glyph, in the order of [`Self::records`], for the next
+    /// sample; an empty list draws every letter at rest.
+    pub fn set_poses(&mut self, poses: Vec<LetterPose>) {
+        self.poses = poses;
+    }
+
+    /// A glyph's place and opacity under its pose: `None` when it is not
+    /// drawn at all.
+    fn posed(&self, at: usize, record: &GlyphRecord) -> Option<(GlyphRecord, f32)> {
+        let Some(pose) = self.poses.get(at) else {
+            return Some((record.clone(), 1.0));
+        };
+        let alpha = pose.alpha.clamp(0.0, 1.0) as f32;
+        let scale = pose.scale.max(0.0) as f32;
+        if alpha <= 0.0 || scale <= 0.0 {
+            return None;
+        }
+        let mut moved = record.clone();
+        moved.width = record.width * scale;
+        moved.height = record.height * scale;
+        moved.x = record.x + (record.width - moved.width) / 2.0 + pose.dx as f32 * self.font_size;
+        moved.y = record.y + (record.height - moved.height) / 2.0 + pose.dy as f32 * self.font_size;
+        [moved.x, moved.y, moved.width, moved.height]
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some((moved, alpha))
+    }
+
     /// Replace the ink color. The material id and the atlas stay as they are.
     pub fn set_fill(&mut self, fill: [u8; 4]) {
         self.fill = fill;
@@ -232,17 +280,21 @@ impl TextSource {
         let mut rings = vec![[0_u8; 4]; if grown.is_some() { pixels } else { 0 }];
         let mut shadows: Vec<(Shadow, Vec<f32>)> = Vec::new();
         let mut shape = vec![0.0_f32; pixels];
-        for (record, look) in self.mesh.glyphs.iter().zip(&self.looks) {
+        for (at, (record, look)) in self.mesh.glyphs.iter().zip(&self.looks).enumerate() {
             let Some(image) = self.image(record) else {
+                continue;
+            };
+            let Some((record, alpha)) = self.posed(at, record) else {
                 continue;
             };
             let draw = Mask {
                 width: self.width,
                 height: self.height,
-                record,
+                record: &record,
                 image,
                 origin_x: self.origin_x,
                 origin_y: self.origin_y,
+                alpha,
             };
             let reach = look.outline.as_ref().map_or(0.0, |outline| outline.width);
             if let Some(shadow) = &look.shadow {
@@ -291,12 +343,13 @@ impl TextSource {
             },
             &mut rgba,
         );
-        for record in &self.mesh.glyphs {
+        for (at, record) in self.mesh.glyphs.iter().enumerate() {
             if self
                 .image(record)
                 .is_some_and(|image| image.kind == GlyphKind::Color)
+                && let Some((record, _)) = self.posed(at, record)
             {
-                self.splat(&mut rgba, record);
+                self.splat(&mut rgba, &record);
             }
         }
         let bytes = CpuBytes::new(self.width, self.height, rgba).map_err(|_| TextError::Limit)?;
@@ -343,6 +396,8 @@ struct Mask<'a> {
     image: &'a crate::GlyphImage,
     origin_x: f32,
     origin_y: f32,
+    /// The letter's opacity under its pose.
+    alpha: f32,
 }
 
 impl Mask<'_> {
@@ -366,6 +421,7 @@ impl Mask<'_> {
             image,
             origin_x,
             origin_y,
+            alpha,
         } = *self;
         if record.width <= 0.0 || record.height <= 0.0 {
             return;
@@ -393,7 +449,7 @@ impl Mask<'_> {
                     continue;
                 };
                 if let Ok(index) = usize::try_from(y * width + x) {
-                    put(index, cover);
+                    put(index, cover * alpha);
                 }
             }
         }
@@ -467,6 +523,41 @@ impl PictureSource for TextSource {
             Err(_) => Sample::Miss,
         }
     }
+}
+
+/// Which letter and word each glyph is. A letter is a glyph that draws
+/// something; a word is a run of characters between white space.
+fn letters_of(text: &str, glyphs: &[GlyphRecord]) -> Vec<Letter> {
+    let mut starts = Vec::new();
+    let mut inside = false;
+    for (byte, character) in text.char_indices() {
+        let space = character.is_whitespace();
+        if !space && !inside {
+            starts.push(byte);
+        }
+        inside = !space;
+    }
+    let drawn = |record: &GlyphRecord| record.width > 0.0 && record.height > 0.0;
+    let count = glyphs.iter().filter(|record| drawn(record)).count();
+    let words = starts.len();
+    let mut index = 0;
+    glyphs
+        .iter()
+        .map(|record| {
+            let letter = Letter {
+                index,
+                count,
+                word: starts
+                    .partition_point(|start| *start <= record.source)
+                    .saturating_sub(1),
+                words,
+            };
+            if drawn(record) {
+                index += 1;
+            }
+            letter
+        })
+        .collect()
 }
 
 fn covers(range: &TimeRange, time: Micros) -> bool {
@@ -779,7 +870,7 @@ mod tests {
     use super::TextSource;
     use crate::TextError;
     use cutlass_font::FontError;
-    use cutlass_model::{BloomParams, Draft, MaterialText, Micros, Segment, TimeRange};
+    use cutlass_model::{BloomParams, Draft, LetterPose, MaterialText, Micros, Segment, TimeRange};
     use cutlass_picture::{Picture, PictureSource, Sample};
 
     const TTF: &[u8] = include_bytes!("../../font/fixtures/sample.ttf");
@@ -1135,6 +1226,50 @@ mod tests {
         // Style 0 is no background, whatever its color.
         boxed.background_style = 0;
         assert_eq!(picture(&boxed).0, plain_w);
+    }
+
+    #[test]
+    fn letters_are_counted_by_glyph_and_word_and_a_pose_hides_or_moves_one() {
+        let text = material("AB AB");
+        let mut source = TextSource::open(TTF, None, &text, &segment()).unwrap();
+        let letters = source.letters().to_vec();
+        let drawn: Vec<(usize, usize)> = letters
+            .iter()
+            .zip(source.records())
+            .filter(|(_, record)| record.width > 0.0)
+            .map(|(letter, _)| (letter.index, letter.word))
+            .collect();
+        assert_eq!(drawn, [(0, 0), (1, 0), (2, 1), (3, 1)]);
+        assert!(
+            letters
+                .iter()
+                .all(|letter| letter.count == 4 && letter.words == 2)
+        );
+        let rest = cpu(source.sample(Micros(1_000)));
+        let (width, _) = source.size();
+        let hidden = letters
+            .iter()
+            .map(|letter| LetterPose {
+                alpha: if letter.word == 1 { 0.0 } else { 1.0 },
+                ..LetterPose::REST
+            })
+            .collect();
+        source.set_poses(hidden);
+        let half = cpu(source.sample(Micros(1_000)));
+        let (left, right) = halves(width, &half, [255, 255, 255, 255]);
+        assert!(left && !right, "the second word is hidden");
+        let raised = letters
+            .iter()
+            .map(|_| LetterPose {
+                dy: -0.2,
+                ..LetterPose::REST
+            })
+            .collect();
+        source.set_poses(raised);
+        let up = cpu(source.sample(Micros(1_000)));
+        assert_ne!(up, rest);
+        source.set_poses(Vec::new());
+        assert_eq!(cpu(source.sample(Micros(1_000))), rest);
     }
 
     #[test]

@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use cutlass_gpu::{Affine, Placement};
 use cutlass_model::{
-    BloomParams, Clip, Draft, MaterialEffect, MaterialRef, MaterialText, Micros, Segment,
-    SegmentId, TrackAttribute, UniformScale, WordColumns, segment_bloom,
+    BloomParams, Clip, Draft, LetterPose, LetterStep, MaterialEffect, MaterialRef, MaterialText,
+    Micros, Segment, SegmentId, TrackAttribute, UniformScale, WordColumns, segment_bloom,
 };
 use cutlass_picture::{CpuBytes, Picture, PictureSource, Sample};
 use cutlass_text::{DrawnGlyph, Layout, PlacedGlyph, TextSource, paint_glyphs, text_fill};
@@ -134,9 +134,11 @@ pub(crate) fn text_layers(
             } else {
                 let wanted = density(&clip, &uniform, material.font_size);
                 let glow = glow(draft, segment);
+                // Letters on the move are drawn for each frame and not kept.
+                let steps = cutlass_model::letters_at(draft, segment, time);
                 let kept = rasters
                     .get(&segment.id)
-                    .filter(|(drawn, _)| *drawn == wanted)
+                    .filter(|(drawn, _)| *drawn == wanted && steps.is_empty())
                     .cloned();
                 let Some((drawn, bytes)) = kept.or_else(|| {
                     title_picture(
@@ -146,11 +148,14 @@ pub(crate) fn text_layers(
                         segment,
                         time,
                         wanted,
+                        &steps,
                     )
                 }) else {
                     continue;
                 };
-                rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
+                if steps.is_empty() {
+                    rasters.insert(segment.id.clone(), (drawn, bytes.clone()));
+                }
                 (bytes, transform.dense(drawn))
             };
             layers.push(TextLayer {
@@ -170,7 +175,8 @@ pub(crate) fn text_layers(
 }
 
 /// A title drawn with `density` pixels to each shown pixel, and that
-/// density; at 1 when it cannot be drawn larger.
+/// density; at 1 when it cannot be drawn larger. Its letters are posed by
+/// the letter animations at `time`, `steps`.
 fn title_picture(
     faces: Faces<'_>,
     material: &MaterialText,
@@ -178,16 +184,29 @@ fn title_picture(
     segment: &Segment,
     time: Micros,
     density: f64,
+    steps: &[LetterStep],
 ) -> Option<(f64, CpuBytes)> {
     let draw = |density: f64| {
         let mut larger = material.clone();
         larger.font_size *= density;
         larger.line_max_width *= density;
-        let source =
+        let mut source =
             TextSource::open_with_faces(faces.face, None, &larger, glow, segment, &|path| {
                 faces.named(path)
             })
             .ok()?;
+        if !steps.is_empty() {
+            let poses = source
+                .letters()
+                .iter()
+                .map(|letter| {
+                    steps
+                        .iter()
+                        .fold(LetterPose::REST, |pose, step| pose.then(step.pose(*letter)))
+                })
+                .collect();
+            source.set_poses(poses);
+        }
         match source.sample(time) {
             Sample::Ready(Picture::Cpu(bytes)) => Some((density, bytes)),
             _ => None,
@@ -500,6 +519,37 @@ mod tests {
         let (width, height) = inked_span(&pixels(&small, 0), 256);
         assert!(width < 128 && height < 128, "{width}x{height}");
         assert_eq!(inked_span(&pixels(&large, 0), 512), (width, height));
+    }
+
+    #[test]
+    fn a_typewriter_title_shows_its_letters_one_by_one() {
+        let mut draft = text_segment("AAAA", false);
+        draft
+            .materials
+            .material_animations
+            .push(cutlass_model::MaterialAnimations {
+                id: MaterialId::new("moves"),
+                kind: "sticker_animation".to_owned(),
+                animations: vec![cutlass_model::StickerAnimation {
+                    kind: "in".to_owned(),
+                    resource_id: "cutlass-anim-in-typewriter".to_owned(),
+                    start: Micros(0),
+                    duration: Some(Micros(800_000)),
+                    ..cutlass_model::StickerAnimation::default()
+                }],
+                ..cutlass_model::MaterialAnimations::default()
+            });
+        draft.tracks[0].segments[0]
+            .extra_material_refs
+            .push(MaterialId::new("moves"));
+        assert!(!ink(&pixels(&draft, 0)));
+        let (one, _) = inked_span(&pixels(&draft, 250_000), 256);
+        let (three, _) = inked_span(&pixels(&draft, 650_000), 256);
+        let (all, _) = inked_span(&pixels(&draft, 900_000), 256);
+        assert!(one < three && three < all, "{one} {three} {all}");
+        // At rest it is the title without an animation.
+        let still = text_segment("AAAA", false);
+        assert_eq!(pixels(&draft, 900_000), pixels(&still, 900_000));
     }
 
     /// Pixels drawn part covered, at the letters' edges.

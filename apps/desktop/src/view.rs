@@ -5664,16 +5664,23 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 view.export_mov = true;
             }
         });
-        if !view.export_mov && export.codec == CodecId::Prores {
+        // ProRes is written in a MOV, VP8 in an MP4.
+        let fits = |codec: CodecId| match codec {
+            CodecId::Prores => view.export_mov,
+            CodecId::Vp8 => !view.export_mov,
+            _ => true,
+        };
+        if !fits(export.codec) {
             export.codec = CodecId::H264;
         }
         choice_row(ui, "Codec", |ui| {
             for (codec, name) in [
                 (CodecId::H264, "H.264"),
                 (CodecId::Hevc, "HEVC"),
+                (CodecId::Vp8, "VP8"),
                 (CodecId::Prores, "ProRes"),
             ] {
-                if codec == CodecId::Prores && !view.export_mov {
+                if !fits(codec) {
                     continue;
                 }
                 let label = egui::Button::selectable(export.codec == codec, name);

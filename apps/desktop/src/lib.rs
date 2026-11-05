@@ -58,6 +58,8 @@ pub fn register_codecs_with(
     cutlass_pcm::register_encoders(&mut encoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
+    cutlass_vp8::register_engine_decoders(&mut decoders);
+    cutlass_vp8::register_engine_encoders(&mut encoders);
     (decoders, encoders)
 }
 

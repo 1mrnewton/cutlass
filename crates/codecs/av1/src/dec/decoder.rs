@@ -35,6 +35,7 @@ pub enum AnyPicture {
 /// A sample type that can be viewed inside an [`AnyPicture`].
 pub trait PicturePixel: Pixel {
     fn view(p: &AnyPicture) -> Option<&Picture<Self>>;
+    fn wrap(p: Picture<Self>) -> AnyPicture;
 }
 
 impl PicturePixel for u8 {
@@ -44,6 +45,9 @@ impl PicturePixel for u8 {
             AnyPicture::U16(_) => None,
         }
     }
+    fn wrap(p: Picture<u8>) -> AnyPicture {
+        AnyPicture::U8(p)
+    }
 }
 
 impl PicturePixel for u16 {
@@ -52,6 +56,9 @@ impl PicturePixel for u16 {
             AnyPicture::U16(x) => Some(x),
             AnyPicture::U8(_) => None,
         }
+    }
+    fn wrap(p: Picture<u16>) -> AnyPicture {
+        AnyPicture::U16(p)
     }
 }
 

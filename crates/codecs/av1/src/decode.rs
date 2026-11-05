@@ -249,6 +249,49 @@ mod tests {
     }
 
     #[test]
+    fn a_reordered_gop_decodes_every_picture_in_order() {
+        use cutlass_encode::Encoder as _;
+        let params = CodecParams::video(CodecId::Av1, 48, 32);
+        let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(4);
+        encoder.set_quality(60);
+        let mut packets = Vec::new();
+        for i in 0..11u8 {
+            packets.extend(
+                encoder
+                    .push_picture(&input(solid(48, 32, 20 + 15 * i), i64::from(i)))
+                    .expect("push"),
+            );
+        }
+        packets.extend(encoder.drain().expect("drain"));
+        assert_eq!(packets.len(), 11);
+        let mut decoder = Av1Decoder::open(&params).expect("decoder");
+        let mut lumas = Vec::new();
+        for (i, p) in packets.iter().enumerate() {
+            assert_eq!(p.pts, i as i64);
+            for f in decoder.push(p).expect("decode") {
+                let v = f.as_video().expect("video");
+                lumas.push(v.picture.y.samples()[0]);
+            }
+        }
+        lumas.extend(
+            decoder
+                .drain()
+                .expect("drain")
+                .iter()
+                .map(|f| f.as_video().expect("video").picture.y.samples()[0]),
+        );
+        assert_eq!(lumas.len(), 11);
+        for (i, l) in lumas.iter().enumerate() {
+            let want = 20 + 15 * i as i32;
+            assert!(
+                (i32::from(*l) - want).abs() <= 3,
+                "picture {i}: {l} vs {want}"
+            );
+        }
+    }
+
+    #[test]
     fn the_factory_opens_the_rust_decoder() {
         let mut factory = DecodeFactory::new();
         register_decoders(&mut factory);
@@ -303,6 +346,7 @@ mod tests {
     fn a_repeated_picture_shows_the_stored_reference() {
         let params = CodecParams::video(CodecId::Av1, 32, 32);
         let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(1);
         encoder.set_quality(40);
         let picture = solid(32, 32, 40);
         let first = encoder
@@ -323,6 +367,7 @@ mod tests {
     fn a_bad_packet_keeps_the_reference() {
         let params = CodecParams::video(CodecId::Av1, 32, 32);
         let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(1);
         let picture = solid(32, 32, 90);
         let first = encoder
             .push_picture(&input(picture.clone(), 0))
@@ -344,6 +389,7 @@ mod tests {
     fn reset_drops_the_reference() {
         let params = CodecParams::video(CodecId::Av1, 32, 32);
         let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(1);
         let picture = solid(32, 32, 70);
         let first = encoder
             .push_picture(&input(picture.clone(), 0))
@@ -360,6 +406,7 @@ mod tests {
     fn hostile_bytes_do_not_panic() {
         let params = CodecParams::video(CodecId::Av1, 32, 32);
         let mut encoder = Av1Encoder::open(&params).expect("encoder");
+        encoder.set_gop(1);
         let picture = solid(32, 32, 50);
         let first = encoder
             .push_picture(&input(picture.clone(), 0))

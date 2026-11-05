@@ -15,8 +15,8 @@ use crate::dec::decoder::{AnyPicture, Av1Core, PicturePixel};
 use crate::dec::frame::{FrameState, Picture};
 use crate::dec::obu::{
     Cdef, FrameHeader, HeaderContext, INTER_FRAME, KEY_FRAME, LoopFilter, OBU_FRAME,
-    OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OperatingPoint, PRIMARY_REF_NONE, Quant,
-    SequenceHeader, TX_MODE_SELECT, parse_frame_header,
+    OBU_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OperatingPoint,
+    PRIMARY_REF_NONE, Quant, SequenceHeader, TX_MODE_SELECT, parse_frame_header,
 };
 use crate::dec::tile::{RefView, TileDec};
 use crate::dsp::Pixel;
@@ -92,6 +92,11 @@ pub struct EncConfig {
     pub rc: RateControl,
     /// Distance between key frames.
     pub keyint: u32,
+    /// Mini-GOP length: frames coded as a hierarchical pyramid behind a
+    /// hidden alt-ref (1 = each frame predicts from the previous one only).
+    pub gop: u32,
+    /// Denoise alt-refs with their neighbours (coded with an overlay frame).
+    pub temporal_filter: bool,
     pub tile_cols_log2: u32,
     pub tile_rows_log2: u32,
     pub color_primaries: u8,
@@ -112,6 +117,8 @@ impl EncConfig {
             speed: 6,
             rc: RateControl::Qindex(120),
             keyint: 120,
+            gop: 8,
+            temporal_filter: false,
             tile_cols_log2: 0,
             tile_rows_log2: 0,
             color_primaries: 2,
@@ -139,6 +146,70 @@ pub struct Av1Enc {
     bits_total: u64,
     /// Last reconstructed frame (shown output of the internal decoder).
     last_recon: Option<Arc<AnyPicture>>,
+    /// Source pictures waiting to be coded, in display order from `next_disp`.
+    lookahead: std::collections::VecDeque<Arc<AnyPicture>>,
+    next_disp: u64,
+    /// Display index of the frame each reference slot holds.
+    slot_disp: [Option<u64>; 8],
+}
+
+/// One temporal unit: the packet and the reconstruction of its shown frame.
+pub struct EncodedUnit {
+    pub data: Vec<u8>,
+    pub recon: Option<Arc<AnyPicture>>,
+    pub key: bool,
+    /// Display index of the shown frame.
+    pub display: u64,
+}
+
+/// One step of a mini-GOP in coding order.
+#[derive(Clone, Copy, Debug)]
+enum GopStep {
+    /// Code the frame at a display index; `level` 0 is the top of the pyramid.
+    Code {
+        disp: u64,
+        show: bool,
+        level: u32,
+    },
+    ShowExisting {
+        disp: u64,
+    },
+}
+
+/// Coding order of frames `lo + 1 ..= hi` where `lo` is already coded and `hi`
+/// has been coded (hidden): every frame comes out in display order.
+fn gop_inner(lo: u64, hi: u64, level: u32, out: &mut Vec<GopStep>) {
+    if hi - lo == 1 {
+        out.push(GopStep::ShowExisting { disp: hi });
+        return;
+    }
+    let mid = (lo + hi) / 2;
+    if mid - lo == 1 {
+        out.push(GopStep::Code {
+            disp: mid,
+            show: true,
+            level: u32::MAX,
+        });
+    } else {
+        out.push(GopStep::Code {
+            disp: mid,
+            show: false,
+            level,
+        });
+        gop_inner(lo, mid, level + 1, out);
+    }
+    gop_inner(mid, hi, level + 1, out);
+}
+
+/// Per-frame coding parameters.
+struct FrameSpec {
+    disp: u64,
+    key: bool,
+    show: bool,
+    q: u8,
+    ref_frame_idx: [u8; 7],
+    refresh: u8,
+    reference_select: bool,
 }
 
 fn bits_for(v: usize) -> u32 {
@@ -199,7 +270,11 @@ impl Av1Enc {
         };
         let q0 = match cfg.rc {
             RateControl::Qindex(q) => f64::from(q),
-            RateControl::Bitrate { .. } => 120.0,
+            RateControl::Bitrate { bps, fps } => {
+                // Starting point from the bits per sample (fitted on natural video).
+                let bpp = bps as f64 / fps.max(1.0) / (cfg.width * cfg.height) as f64;
+                (140.0 - 36.0 * (bpp.max(1e-4) / 0.14).log2()).clamp(20.0, 240.0)
+            }
         };
         Ok(Self {
             cfg,
@@ -209,6 +284,9 @@ impl Av1Enc {
             rc_q: q0,
             bits_total: 0,
             last_recon: None,
+            lookahead: std::collections::VecDeque::new(),
+            next_disp: 0,
+            slot_disp: [None; 8],
         })
     }
 
@@ -221,55 +299,337 @@ impl Av1Enc {
         self.last_recon.as_ref()
     }
 
-    /// Encodes one picture and returns one temporal unit.
-    pub fn encode<P: PicturePixel>(&mut self, input: &InputFrame<'_, P>) -> R<Vec<u8>> {
+    /// Queues one picture and returns the temporal units that are ready
+    /// (frames are reordered within a mini-GOP, so this may be none).
+    pub fn encode<P: PicturePixel>(&mut self, input: &InputFrame<'_, P>) -> R<Vec<EncodedUnit>> {
         if P::HBD != (self.cfg.bit_depth > 8) {
             return Err(CodecError::InvalidApi {
                 what: "sample size",
             });
         }
-        let key = self
-            .frame_num
-            .is_multiple_of(u64::from(self.cfg.keyint.max(1)));
-        let q = self.rc_q.round().clamp(1.0, 255.0) as u8;
-        let mut out = Vec::new();
-        write_obu(&mut out, OBU_TEMPORAL_DELIMITER, 0, 0, false, &[]);
-        if key {
-            let sh = write_sequence_header(&self.seq);
-            write_obu(&mut out, OBU_SEQUENCE_HEADER, 0, 0, false, &sh);
-        }
-        let frame = self.encode_frame(input, key, q)?;
-        write_obu(&mut out, OBU_FRAME, 0, 0, false, &frame);
-        // Reconstruct exactly as a decoder does; this also checks the packet.
-        let shown = self.core.decode(&out)?;
-        if let Some(f) = shown.into_iter().last() {
-            self.last_recon = Some(f.picture);
-        }
-        self.frame_num += 1;
-        self.bits_total += out.len() as u64 * 8;
-        self.update_rate_control(out.len() as u64 * 8, key);
-        Ok(out)
+        let src = source_picture(&self.cfg, &self.seq, input);
+        self.lookahead.push_back(Arc::new(P::wrap(src)));
+        self.run::<P>(false)
     }
 
-    fn update_rate_control(&mut self, bits: u64, key: bool) {
+    /// Codes every queued picture.
+    pub fn flush<P: PicturePixel>(&mut self) -> R<Vec<EncodedUnit>> {
+        self.run::<P>(true)
+    }
+
+    fn use_tf(&self) -> bool {
+        self.cfg.gop > 1 && self.cfg.temporal_filter
+    }
+
+    fn is_key_disp(&self, d: u64) -> bool {
+        d.is_multiple_of(u64::from(self.cfg.keyint.max(1)))
+    }
+
+    fn run<P: PicturePixel>(&mut self, flush: bool) -> R<Vec<EncodedUnit>> {
+        let mut units = Vec::new();
+        while !self.lookahead.is_empty() {
+            let d = self.next_disp;
+            if self.is_key_disp(d) {
+                let mut tu = Vec::new();
+                let shown = self.code_step::<P>(
+                    &mut tu,
+                    GopStep::Code {
+                        disp: d,
+                        show: true,
+                        level: 0,
+                    },
+                )?;
+                let bits = tu.len() as u64 * 8;
+                units.push(self.finish_unit(tu, shown, true, d));
+                self.update_rate_control(bits, 1, true);
+                self.lookahead.pop_front();
+                self.next_disp += 1;
+                continue;
+            }
+            let gop = u64::from(self.cfg.gop.max(1));
+            let keyint = u64::from(self.cfg.keyint.max(1));
+            let to_key = keyint - d % keyint;
+            let n = gop.min(to_key).min(self.lookahead.len() as u64);
+            if n < gop.min(to_key) && !flush {
+                break;
+            }
+            // Frames d .. d + n - 1 follow the anchor d - 1.
+            let lo = d - 1;
+            let hi = lo + n;
+            let mut steps = Vec::new();
+            if n == 1 {
+                steps.push(GopStep::Code {
+                    disp: hi,
+                    show: true,
+                    level: u32::MAX,
+                });
+            } else {
+                steps.push(GopStep::Code {
+                    disp: hi,
+                    show: false,
+                    level: 0,
+                });
+                gop_inner(lo, hi, 1, &mut steps);
+                if self.use_tf() {
+                    // The filtered alt-ref is not shown; an overlay frame
+                    // codes the real picture from it.
+                    for st in steps.iter_mut() {
+                        if let GopStep::ShowExisting { disp } = *st
+                            && disp == hi
+                        {
+                            *st = GopStep::Code {
+                                disp: hi,
+                                show: true,
+                                level: u32::MAX,
+                            };
+                        }
+                    }
+                }
+            }
+            let mut tu = Vec::new();
+            let first_unit = units.len();
+            for step in steps {
+                if let Some(shown) = self.code_step::<P>(&mut tu, step)? {
+                    let disp = match step {
+                        GopStep::Code { disp, .. } | GopStep::ShowExisting { disp } => disp,
+                    };
+                    units.push(self.finish_unit(std::mem::take(&mut tu), Some(shown), false, disp));
+                }
+            }
+            let gop_bits: u64 = units[first_unit..]
+                .iter()
+                .map(|u| u.data.len() as u64 * 8)
+                .sum();
+            self.update_rate_control(gop_bits, n, false);
+            for _ in 0..n {
+                self.lookahead.pop_front();
+            }
+            self.next_disp += n;
+        }
+        Ok(units)
+    }
+
+    fn finish_unit(
+        &mut self,
+        data: Vec<u8>,
+        shown: Option<Arc<AnyPicture>>,
+        key: bool,
+        display: u64,
+    ) -> EncodedUnit {
+        self.last_recon = shown.clone();
+        self.frame_num += 1;
+        self.bits_total += data.len() as u64 * 8;
+        EncodedUnit {
+            data,
+            recon: shown,
+            key,
+            display,
+        }
+    }
+
+    /// Codes one step into `tu` and decodes it; returns the shown picture, if any.
+    fn code_step<P: PicturePixel>(
+        &mut self,
+        tu: &mut Vec<u8>,
+        step: GopStep,
+    ) -> R<Option<Arc<AnyPicture>>> {
+        let start = tu.len();
+        if tu.is_empty() {
+            write_obu(tu, OBU_TEMPORAL_DELIMITER, 0, 0, false, &[]);
+        }
+        match step {
+            GopStep::ShowExisting { disp } => {
+                let Some(slot) = self.slot_disp.iter().position(|s| *s == Some(disp)) else {
+                    return Err(CodecError::InvalidApi {
+                        what: "frame to show",
+                    });
+                };
+                // show_existing_frame = 1, frame_to_show_map_idx (3 bits), then
+                // trailing bits (the sequence has no frame ids or decoder model).
+                let bytes = [0x80 | ((slot as u8) << 4) | 0x08];
+                write_obu(tu, OBU_FRAME_HEADER, 0, 0, false, &bytes);
+            }
+            GopStep::Code { disp, show, level } => {
+                let key = self.is_key_disp(disp);
+                if key {
+                    let sh = write_sequence_header(&self.seq);
+                    write_obu(tu, OBU_SEQUENCE_HEADER, 0, 0, false, &sh);
+                }
+                let spec = self.plan_frame(disp, key, show, level);
+                let idx = (disp - self.next_disp) as usize;
+                let Some(src) = self.lookahead.get(idx).cloned() else {
+                    return Err(CodecError::InvalidApi { what: "lookahead" });
+                };
+                let Some(src) = P::view(&src) else {
+                    return Err(CodecError::InvalidApi {
+                        what: "sample size",
+                    });
+                };
+                let filtered;
+                let mut src = src;
+                if !show && level == 0 && self.use_tf() {
+                    // Denoise the alt-ref with its neighbours in the lookahead.
+                    let mut others = Vec::new();
+                    for k in idx.saturating_sub(3)..=idx + 3 {
+                        if k == idx {
+                            continue;
+                        }
+                        if let Some(o) = self.lookahead.get(k).and_then(|a| P::view(a)) {
+                            others.push((o, k.abs_diff(idx) as u32));
+                        }
+                    }
+                    let bdi = ((self.cfg.bit_depth - 8) >> 1) as usize;
+                    let qstep = f64::from(AC_QLOOKUP[bdi][spec.q as usize]) / 8.0;
+                    filtered = super::tf::temporal_filter(src, &others, qstep, self.cfg.bit_depth);
+                    src = &filtered;
+                }
+                let frame = self.encode_frame(src, &spec)?;
+                write_obu(tu, OBU_FRAME, 0, 0, false, &frame);
+                for (i, s) in self.slot_disp.iter_mut().enumerate() {
+                    if spec.refresh & (1 << i) != 0 {
+                        *s = Some(disp);
+                    }
+                }
+            }
+        }
+        // Reconstruct exactly as a decoder does; this also checks the packet.
+        let shown = self.core.decode(&tu[start..])?;
+        Ok(shown.into_iter().last().map(|f| f.picture))
+    }
+
+    /// Chooses q, references and the slot to refresh for a frame.
+    fn plan_frame(&self, disp: u64, key: bool, show: bool, level: u32) -> FrameSpec {
+        let base = self.rc_q;
+        let ev = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let off = if key {
+            ev("AV1_QK", -40.0)
+        } else if level == u32::MAX {
+            0.0
+        } else {
+            match level {
+                0 => ev("AV1_Q0", -30.0),
+                1 => ev("AV1_Q1", -20.0),
+                2 => ev("AV1_Q2", -12.0),
+                _ => ev("AV1_Q3", -6.0),
+            }
+        };
+        let q = if self.cfg.gop > 1 { base + off } else { base };
+        let q = q.round().clamp(1.0, 255.0) as u8;
+        if key {
+            return FrameSpec {
+                disp,
+                key,
+                show,
+                q,
+                ref_frame_idx: [0; 7],
+                refresh: 0xff,
+                reference_select: false,
+            };
+        }
+        // Past frames nearest first, future frames nearest first.
+        let mut past: Vec<(u64, usize)> = Vec::new();
+        let mut fut: Vec<(u64, usize)> = Vec::new();
+        for (i, s) in self.slot_disp.iter().enumerate() {
+            if let Some(sd) = *s {
+                if past.iter().chain(&fut).any(|p| p.0 == sd) {
+                    continue;
+                }
+                if sd <= disp {
+                    past.push((sd, i));
+                } else if sd > disp {
+                    fut.push((sd, i));
+                }
+            }
+        }
+        past.sort_by_key(|b| std::cmp::Reverse(b.0));
+        fut.sort_by_key(|a| a.0);
+        let any = past.first().or(fut.first()).map_or(0, |p| p.1) as u8;
+        let mut idx = [any; 7];
+        // LAST, LAST2, LAST3, GOLDEN (the oldest kept past frame).
+        for (k, p) in past.iter().take(3).enumerate() {
+            idx[k] = p.1 as u8;
+        }
+        if let Some(p) = past.last() {
+            idx[3] = p.1 as u8;
+        }
+        if past.len() < 3 {
+            for k in past.len()..3 {
+                idx[k] = idx[0];
+            }
+        }
+        // BWDREF, ALTREF2, ALTREF (the farthest future frame).
+        if !fut.is_empty() {
+            idx[4] = fut[0].1 as u8;
+            idx[5] = fut.get(1).unwrap_or(&fut[0]).1 as u8;
+            idx[6] = fut[fut.len() - 1].1 as u8;
+        } else {
+            idx[4] = idx[0];
+            idx[5] = idx[1];
+            idx[6] = idx[3];
+        }
+        // Slot to refresh: an empty one, else the oldest past frame not among
+        // the three nearest and not a frame still to be shown.
+        let shown_upto = self.next_disp.max(1) - 1;
+        let mut victim = self.slot_disp.iter().position(|s| s.is_none());
+        if victim.is_none() {
+            let keep: Vec<u64> = past.iter().take(3).map(|p| p.0).collect();
+            victim = self
+                .slot_disp
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.map(|d| (i, d)))
+                .filter(|&(_, d)| {
+                    d <= shown_upto.max(disp.saturating_sub(1)) && d < disp && !keep.contains(&d)
+                })
+                .min_by_key(|&(_, d)| d)
+                .map(|(i, _)| i);
+        }
+        if victim.is_none() {
+            // Fall back to the oldest slot of all.
+            victim = self
+                .slot_disp
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| s.map(|d| (i, d)))
+                .min_by_key(|&(_, d)| d)
+                .map(|(i, _)| i);
+        }
+        let refresh = 1u8 << victim.unwrap_or(0);
+        FrameSpec {
+            disp,
+            key,
+            show,
+            q,
+            ref_frame_idx: idx,
+            refresh,
+            reference_select: !fut.is_empty() && !past.is_empty(),
+        }
+    }
+
+    /// Adjusts the base q after a key frame or a mini-GOP of `frames` pictures.
+    fn update_rate_control(&mut self, bits: u64, frames: u64, key: bool) {
         let RateControl::Bitrate { bps, fps } = self.cfg.rc else {
             return;
         };
-        let target = bps as f64 / fps.max(1.0);
-        // Key frames are expected to cost more.
-        let expect = if key { target * 4.0 } else { target };
-        let ratio = (bits as f64 / expect.max(1.0)).max(0.05);
-        // About 6 q-index steps per doubling of the rate near the middle range.
-        self.rc_q = (self.rc_q + 12.0 * ratio.log2()).clamp(10.0, 250.0);
+        let per_frame = bps as f64 / fps.max(1.0);
+        // Key frames are expected to cost several ordinary frames.
+        let expect = per_frame * if key { 6.0 } else { frames.max(1) as f64 };
+        let ratio = (bits as f64 / expect.max(1.0)).clamp(0.1, 10.0);
+        // About 12 q-index steps per doubling of the rate.
+        let step = (12.0 * ratio.log2()).clamp(-20.0, 20.0) * if key { 0.5 } else { 1.0 };
+        // Pull the long-run average toward the target as well.
         let avg = self.bits_total as f64 / self.frame_num.max(1) as f64;
-        if avg > target * 1.1 {
-            self.rc_q = (self.rc_q + 1.0).min(250.0);
-        } else if avg < target * 0.9 {
-            self.rc_q = (self.rc_q - 1.0).max(10.0);
-        }
+        let drift = (4.0 * (avg / per_frame.max(1.0)).log2()).clamp(-4.0, 4.0);
+        self.rc_q = (self.rc_q + step + drift).clamp(10.0, 250.0);
     }
 
-    fn frame_header(&self, key: bool, q: u8) -> FrameHeader {
+    fn frame_header(&self, spec: &FrameSpec) -> FrameHeader {
+        let (key, q) = (spec.key, spec.q);
         let bd = self.cfg.bit_depth;
         let bdi = ((bd - 8) >> 1) as usize;
         let ac = i32::from(AC_QLOOKUP[bdi][q as usize]) >> (bd - 8);
@@ -291,19 +651,20 @@ impl Av1Enc {
         let mut h = FrameHeader {
             frame_type: if key { KEY_FRAME } else { INTER_FRAME },
             frame_is_intra: key,
-            show_frame: true,
-            showable_frame: !key,
+            show_frame: spec.show,
+            showable_frame: !key && !spec.show,
             error_resilient_mode: key,
-            order_hint: (self.frame_num & 127) as u32,
+            order_hint: (spec.disp & 127) as u32,
             primary_ref_frame: if key { PRIMARY_REF_NONE } else { 0 },
-            refresh_frame_flags: if key { 0xff } else { 0x01 },
+            refresh_frame_flags: spec.refresh,
+            reference_select: spec.reference_select,
             frame_width: self.cfg.width as u32,
             frame_height: self.cfg.height as u32,
             upscaled_width: self.cfg.width as u32,
             render_width: self.cfg.width as u32,
             render_height: self.cfg.height as u32,
             superres_denom: 8,
-            ref_frame_idx: [0; 7],
+            ref_frame_idx: spec.ref_frame_idx,
             allow_high_precision_mv: !key && q < 128,
             interpolation_filter: 0,
             tile_info: {
@@ -347,14 +708,11 @@ impl Av1Enc {
         h
     }
 
-    fn encode_frame<P: PicturePixel>(
-        &mut self,
-        input: &InputFrame<'_, P>,
-        key: bool,
-        q: u8,
-    ) -> R<Vec<u8>> {
+    fn encode_frame<P: PicturePixel>(&mut self, src: &Picture<P>, spec: &FrameSpec) -> R<Vec<u8>> {
         let seq = self.seq.clone();
-        let intent = self.frame_header(key, q);
+        let key = spec.key;
+        let q = spec.q;
+        let intent = self.frame_header(spec);
         let refs_hdr = self.core.ref_headers().clone();
         let ctx = HeaderContext {
             seq: &seq,
@@ -366,7 +724,6 @@ impl Av1Enc {
         let hdr_bytes = write_frame_header(&intent, &ctx, &opts);
         // The parser derives every dependent field exactly as a decoder will.
         let hdr = parse_frame_header(&hdr_bytes, &ctx)?;
-        let src = source_picture(&self.cfg, &seq, input);
         // Initial CDFs.
         let cdf: Box<CdfContext> = if hdr.primary_ref_frame == PRIMARY_REF_NONE {
             CdfContext::new(hdr.quant.base_q_idx)
@@ -408,7 +765,7 @@ impl Av1Enc {
             lambda_satd: ev("AV1_LS", 0.9) * qstep,
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 32.0) as usize,
-            skip_sse_per_px: ev("AV1_SK", 0.25) * qstep * qstep,
+            skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep,
             inter_frame: !key,
             me_range: if speed >= 8 { 16 } else { 48 },
             subpel: if speed >= 9 { 1 } else { 2 },
@@ -425,10 +782,12 @@ impl Av1Enc {
             filter_intra: speed < 7,
             tx64: ev("AV1_TX64", 0.0) > 0.0,
             rd_partition: ev("AV1_RDP", 1.0) > 0.0,
+            ref_mask: [false, true, true, true, true, true, true, true],
+            rd_inter_intra: ev("AV1_RDII", 1.0) > 0.0,
         };
         let qp = QuantParams {
             // Per bit; inter frames trade residual for rate more readily.
-            lambda: ev("AV1_QL", if key { 0.15 } else { 0.9 }) * qstep * qstep,
+            lambda: ev("AV1_QL", if key { 0.15 } else { 0.1 }) * qstep * qstep,
             round_intra: ev("AV1_RI", 56.0) as i32,
             round_inter: ev("AV1_RN", 44.0) as i32,
             tx_type_search: u8::from(speed < 9),
@@ -475,7 +834,7 @@ impl Av1Enc {
                 cfl_choice: (0, 0),
                 intra_choice: (0, None),
                 plan_delta_lf: [0; 4],
-                src: Some(&src),
+                src: Some(src),
                 enc: qp,
                 mode,
                 me_scratch: Default::default(),

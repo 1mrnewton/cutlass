@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use cutlass_decode::{CodecError, CodecId, CodecParams, Packet, PixelFormat};
 use cutlass_encode::{AudioInput, Encoder, FrameInput};
 
-use crate::enc::encoder::{Av1Enc, EncConfig, InputFrame, RateControl};
+use crate::enc::encoder::{Av1Enc, EncConfig, EncodedUnit, InputFrame, RateControl};
 use crate::yuv::VideoInput;
 
 /// Rust AV1 encoder. `bitrate` of zero keeps the quality index.
@@ -22,8 +22,11 @@ pub struct Av1Encoder {
     bitrate: u32,
     qindex: u8,
     speed: u8,
+    gop: u32,
     enc: Option<Av1Enc>,
     cancel: Arc<AtomicBool>,
+    /// Timestamps of queued pictures, by display index.
+    times: std::collections::VecDeque<(i64, i64, u32)>,
 }
 
 /// Bit depth, horizontal and vertical subsampling, and monochrome flag of a pixel format.
@@ -63,14 +66,24 @@ impl Av1Encoder {
             bitrate: params.bitrate,
             qindex: 100,
             speed: 6,
+            gop: 8,
             enc: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            times: std::collections::VecDeque::new(),
         })
     }
 
     /// Quantizer index used when `bitrate` is zero. Zero is raised to one.
     pub fn set_quality(&mut self, qindex: u8) {
         self.qindex = qindex.clamp(1, 255);
+        self.enc = None;
+    }
+
+    /// Mini-GOP length. 1 gives one packet per picture with no delay; longer
+    /// GOPs reorder frames behind a hidden alt-ref (packets come out later,
+    /// and `drain` returns the rest).
+    pub fn set_gop(&mut self, gop: u32) {
+        self.gop = gop.clamp(1, 32);
         self.enc = None;
     }
 
@@ -92,6 +105,7 @@ impl Av1Encoder {
             cfg.sub_x = sx;
             cfg.sub_y = sy;
             cfg.speed = self.speed;
+            cfg.gop = self.gop;
             if matches!(
                 self.pixel,
                 PixelFormat::Gbrp | PixelFormat::Gbrp10 | PixelFormat::Gbrp12
@@ -166,8 +180,20 @@ impl Av1Encoder {
                 strides: [w, cw, cw],
             })?
         };
-        let key = is_key(&data);
-        Ok(vec![Packet::video(data, pts, duration, timescale, key)])
+        self.times.push_back((pts, duration, timescale));
+        Ok(self.packets(data))
+    }
+
+    /// Wraps temporal units in packets with their pictures' timestamps.
+    fn packets(&mut self, units: Vec<EncodedUnit>) -> Vec<Packet> {
+        units
+            .into_iter()
+            .map(|u| {
+                let (pts, duration, timescale) = self.times.pop_front().unwrap_or((0, 0, 1));
+                let key = u.key || is_key(&u.data);
+                Packet::video(u.data, pts, duration, timescale, key)
+            })
+            .collect()
     }
 
     /// Encode one 4:2:0 picture given as separate planes.
@@ -223,11 +249,18 @@ impl Encoder for Av1Encoder {
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
-        Ok(Vec::new())
+        let wide = format_of(self.pixel).is_some_and(|f| f.0 > 8);
+        let units = match self.enc.as_mut() {
+            None => return Ok(Vec::new()),
+            Some(e) if wide => e.flush::<u16>()?,
+            Some(e) => e.flush::<u8>()?,
+        };
+        Ok(self.packets(units))
     }
 
     fn reset(&mut self) {
         self.enc = None;
+        self.times.clear();
     }
 
     fn cancel_flag(&self) -> Arc<AtomicBool> {

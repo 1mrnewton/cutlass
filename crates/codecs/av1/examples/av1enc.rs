@@ -8,7 +8,7 @@
 use std::io::Write;
 
 use cutlass_av1::dec::decoder::AnyPicture;
-use cutlass_av1::enc::encoder::{Av1Enc, EncConfig, InputFrame, RateControl};
+use cutlass_av1::enc::encoder::{Av1Enc, EncConfig, EncodedUnit, InputFrame, RateControl};
 
 struct Y4m {
     w: usize,
@@ -74,6 +74,46 @@ fn parse_y4m(data: Vec<u8>) -> Result<Y4m, String> {
     Ok(y)
 }
 
+type Recon = Option<std::io::Result<std::io::BufWriter<std::fs::File>>>;
+
+fn write_units(
+    ivf: &mut Vec<u8>,
+    recon: &mut Recon,
+    units: Vec<EncodedUnit>,
+    total: &mut usize,
+) -> Result<(), String> {
+    for u in units {
+        ivf.extend_from_slice(&(u.data.len() as u32).to_le_bytes());
+        ivf.extend_from_slice(&u.display.to_le_bytes());
+        ivf.extend_from_slice(&u.data);
+        *total += u.data.len();
+        if let Some(Ok(f)) = recon.as_mut()
+            && let Some(pic) = u.recon.as_deref()
+        {
+            match pic {
+                AnyPicture::U8(p) => {
+                    for pl in &p.planes {
+                        for r in 0..pl.h {
+                            f.write_all(&pl.data[r * pl.stride..r * pl.stride + pl.w])
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                AnyPicture::U16(p) => {
+                    for pl in &p.planes {
+                        for r in 0..pl.h {
+                            for v in &pl.data[r * pl.stride..r * pl.stride + pl.w] {
+                                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
@@ -103,6 +143,9 @@ fn main() -> Result<(), String> {
     }
     if let Some(s) = arg(&args, "--speed") {
         cfg.speed = s.parse().map_err(|_| "speed")?;
+    }
+    if let Some(s) = arg(&args, "--gop") {
+        cfg.gop = s.parse().map_err(|_| "gop")?;
     }
     if let Some(s) = arg(&args, "--keyint") {
         cfg.keyint = s.parse().map_err(|_| "keyint")?;
@@ -174,35 +217,16 @@ fn main() -> Result<(), String> {
             })
         }
         .map_err(|e| format!("frame {n}: {e}"))?;
-        ivf.extend_from_slice(&(pkt.len() as u32).to_le_bytes());
-        ivf.extend_from_slice(&n.to_le_bytes());
-        ivf.extend_from_slice(&pkt);
-        total += pkt.len();
-        if let Some(Ok(f)) = recon.as_mut()
-            && let Some(pic) = enc.last_recon()
-        {
-            match &**pic {
-                AnyPicture::U8(p) => {
-                    for pl in &p.planes {
-                        for r in 0..pl.h {
-                            f.write_all(&pl.data[r * pl.stride..r * pl.stride + pl.w])
-                                .map_err(|e| e.to_string())?;
-                        }
-                    }
-                }
-                AnyPicture::U16(p) => {
-                    for pl in &p.planes {
-                        for r in 0..pl.h {
-                            for v in &pl.data[r * pl.stride..r * pl.stride + pl.w] {
-                                f.write_all(&v.to_le_bytes()).map_err(|e| e.to_string())?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        write_units(&mut ivf, &mut recon, pkt, &mut total)?;
         n += 1;
     }
+    let rest = if y.bd > 8 {
+        enc.flush::<u16>()
+    } else {
+        enc.flush::<u8>()
+    }
+    .map_err(|e| e.to_string())?;
+    write_units(&mut ivf, &mut recon, rest, &mut total)?;
     ivf[24..28].copy_from_slice(&(n as u32).to_le_bytes());
     std::fs::write(&args[2], &ivf).map_err(|e| e.to_string())?;
     let secs = start.elapsed().as_secs_f64();

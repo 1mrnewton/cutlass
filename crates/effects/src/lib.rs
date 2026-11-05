@@ -57,4 +57,7 @@ pub use recipe::{
     RecipeError, Step, bundled, bundled_recipe,
 };
 pub use source::{AnimSpan, EffectSource, Progress, progress};
-pub use transitions::{BUILT_IN_PREFIX, TransitionKind, mix as mix_transition};
+pub use transitions::{
+    BUILT_IN_PREFIX, TRANSITION_WGSL, TransitionKind, blur_radius as transition_blur_radius,
+    mix as mix_transition,
+};

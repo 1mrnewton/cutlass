@@ -20,6 +20,7 @@ mod keys;
 mod lane;
 mod library;
 mod media_place;
+mod project_choices;
 mod reorder;
 mod ripple;
 mod ruler;
@@ -59,6 +60,10 @@ pub use library::{
     parent_of, place, rename_folder,
 };
 pub use media_place::{MediaPlace, extract_request, media_requests, sound_row};
+pub use project_choices::{
+    COLOR_SPACES, PROJECT_RATES, color_space_name, is_drop_rate, next_canvas, next_color_space,
+    next_rate, rate_fps, rate_label,
+};
 pub use reorder::{place_of, reorder_start};
 pub use ripple::{close_gap, gap_at, ripple_delete};
 pub use ruler::{RulerStep, Tick, clock, ruler_step, ruler_ticks, zoom_ceiling};

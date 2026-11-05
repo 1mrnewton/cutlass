@@ -16,9 +16,10 @@ use super::types::{
 /// Reusable buffers for one tile.
 pub struct Scratch<P> {
     pub levels: Box<[u16; super::tile::LEVELS_LEN]>,
-    /// Scan indices of the nonzero levels of the transform block being read,
+    /// [`super::tile::level_table`] entries of the nonzero levels of the
+    /// transform block being read,
     /// from the end of block back.
-    pub nz_scan: Box<[u16; 1024]>,
+    pub nz_scan: Box<[u32; 1024]>,
     /// Planned levels of the transform block being written (encoder).
     pub want: Vec<i32>,
     pub coefs: Vec<i32>,

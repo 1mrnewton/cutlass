@@ -32,9 +32,20 @@ pub trait Coder {
     fn with_local<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         f(self)
     }
+    /// Runs `f` on the decoder itself, for loops written for decoding only;
+    /// `None` when the coder writes.
+    #[inline(always)]
+    fn decoder<R>(&mut self, f: impl FnOnce(&mut Msac<'_>) -> R) -> Option<R> {
+        let _ = f;
+        None
+    }
 }
 
 impl Coder for Msac<'_> {
+    #[inline(always)]
+    fn decoder<R>(&mut self, f: impl FnOnce(&mut Msac<'_>) -> R) -> Option<R> {
+        Some(f(self))
+    }
     const WRITE: bool = false;
     #[inline(always)]
     fn bool_adapt(&mut self, cdf: &mut [u16; 2], _v: bool) -> bool {

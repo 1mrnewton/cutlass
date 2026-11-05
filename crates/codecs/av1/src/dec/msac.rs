@@ -209,13 +209,17 @@ impl<'a> Msac<'a> {
             let count = (w >> (16 * n)) as u32;
             let rate = 4 + (count >> 4) + u32::from(n > 2);
             let lanes = (1u64 << (16 * n)) - 1;
-            let x = w & lanes;
             let low = 0x0001_0001_0001_0001 & lanes;
             let keep = low * (0xFFFF >> rate);
+            // The counter counts first; `keep` is zero on its lane, so it
+            // passes through both sums unchanged. Every stored lane then
+            // comes from the one word `y`, and the stores merge into one
+            // that a later load of this CDF is forwarded from.
+            let x = w + (u64::from(count < 32) << (16 * n));
             let down = x - ((x >> rate) & keep);
-            let up = x + ((((low << 15) - x) >> rate) & keep);
+            let up = x + ((((low << 15).wrapping_sub(x)) >> rate) & keep);
             let m = (1u64 << (16 * val)) - 1;
-            let y = (up & m) | (down & !m) | (u64::from(count + u32::from(count < 32)) << (16 * n));
+            let y = down ^ ((up ^ down) & m);
             for (i, v) in cdf.iter_mut().enumerate() {
                 *v = (y >> (16 * i)) as u16;
             }
@@ -281,6 +285,147 @@ impl<'a> Msac<'a> {
         let extra = self.literal(1);
         (v << 1) - m + extra
     }
+}
+
+/// A [`Msac`] whose window, range and bit count are locals for the length of
+/// a symbol loop, with the byte buffer left behind in the decoder: only a
+/// refill, once in tens of symbols, goes there. A loop then has the
+/// registers for its own state. [`Hot::done`] writes the state back.
+pub struct Hot<'m, 'a> {
+    dif: u64,
+    rng: u32,
+    cnt: i32,
+    m: &'m mut Msac<'a>,
+}
+
+impl<'m, 'a> Hot<'m, 'a> {
+    #[inline(always)]
+    pub fn new(m: &'m mut Msac<'a>) -> Self {
+        Self {
+            dif: m.dif,
+            rng: m.rng,
+            cnt: m.cnt,
+            m,
+        }
+    }
+
+    #[inline(always)]
+    pub fn done(self) {
+        self.m.dif = self.dif;
+        self.m.rng = self.rng;
+        self.m.cnt = self.cnt;
+    }
+
+    #[inline(always)]
+    fn norm(&mut self, dif: u64, rng: u32) {
+        let d = 15 ^ (31 ^ rng.leading_zeros());
+        let cnt = self.cnt;
+        self.dif = dif << d;
+        self.rng = rng << d;
+        self.cnt = cnt - d as i32;
+        if (cnt as u32) < d {
+            (self.m.buf, self.dif, self.cnt) = hot_refill(self.m.buf, self.dif, self.cnt);
+        }
+    }
+
+    /// [`Msac::bool_equi`].
+    #[inline(always)]
+    pub fn bool_equi(&mut self) -> bool {
+        let r = self.rng;
+        let v = ((r >> 8) << 7) + MIN_PROB;
+        let vw = u64::from(v) << (WIN - 16);
+        let ret = self.dif >= vw;
+        let (dif, rng) = if ret {
+            (self.dif - vw, r - v)
+        } else {
+            (self.dif, v)
+        };
+        self.norm(dif, rng);
+        !ret
+    }
+
+    /// [`Msac::golomb`].
+    #[inline(always)]
+    pub fn golomb(&mut self) -> u32 {
+        self.m.dif = self.dif;
+        self.m.rng = self.rng;
+        self.m.cnt = self.cnt;
+        let v = self.m.golomb();
+        (self.dif, self.rng, self.cnt) = (self.m.dif, self.m.rng, self.m.cnt);
+        v
+    }
+
+    /// [`Msac::symbol`] for 4 symbols, adapting the CDF whatever
+    /// `allow_update` says: a caller checks that once.
+    #[inline(always)]
+    pub fn sym4(&mut self, cdf: &mut [u16; 4]) -> u32 {
+        // The whole CDF, counter included, in one load.
+        let w = u64::from(cdf[0])
+            | u64::from(cdf[1]) << 16
+            | u64::from(cdf[2]) << 32
+            | u64::from(cdf[3]) << 48;
+        let c = (self.dif >> (WIN - 16)) as u32;
+        let r8 = self.rng >> 8;
+        let v = |i: usize| {
+            ((r8 * ((w >> (16 * i + PROB_SHIFT as usize)) as u32 & 0x3FF)) >> (7 - PROB_SHIFT))
+                + MIN_PROB * (3 - i as u32)
+        };
+        let (v0, v1, v2) = (v(0), v(1), v(2));
+        // The thresholds decrease: `b[i]` holds exactly for the symbols
+        // below the decoded one.
+        let (b0, b1, b2) = (c < v0, c < v1, c < v2);
+        let val = u32::from(b0) + u32::from(b1) + u32::from(b2);
+        let (mut u, mut vv) = (self.rng, v0);
+        if b0 {
+            (u, vv) = (v0, v1);
+        }
+        if b1 {
+            (u, vv) = (v1, v2);
+        }
+        if b2 {
+            (u, vv) = (v2, 0);
+        }
+        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
+        // As in `Msac::symbol_small`, on one word stored at once. The
+        // counter (at most 32) picks the rate: `k = count >> 4`.
+        let k = (w >> 52) as usize & 3;
+        let rate = 5 + k as u32;
+        let x = w + SYM4_INC[k];
+        let down = x - ((x >> rate) & SYM4_KEEP[k]);
+        let up = x + (((0x8000_8000_8000u64.wrapping_sub(x)) >> rate) & SYM4_KEEP[k]);
+        let y = down ^ ((up ^ down) & SYM4_BELOW[val as usize & 3]);
+        for (i, v) in cdf.iter_mut().enumerate() {
+            *v = (y >> (16 * i)) as u16;
+        }
+        val
+    }
+}
+
+/// [`Hot::sym4`]'s lane masks of the adaptation per `count >> 4`: the bits
+/// of `x >> rate` that come from the lane itself, on the probability lanes.
+const SYM4_KEEP: [u64; 4] = [
+    0x0001_0001_0001 * (0xFFFF >> 5),
+    0x0001_0001_0001 * (0xFFFF >> 6),
+    0x0001_0001_0001 * (0xFFFF >> 7),
+    0x0001_0001_0001 * (0xFFFF >> 7),
+];
+/// The counter increment per `count >> 4` (it stops at 32).
+const SYM4_INC: [u64; 4] = [1 << 48, 1 << 48, 0, 0];
+/// The probability lanes of the symbols below the decoded one.
+const SYM4_BELOW: [u64; 4] = [0, 0xFFFF, 0xFFFF_FFFF, 0xFFFF_FFFF_FFFF];
+
+#[cold]
+#[inline(never)]
+fn hot_refill(buf: &[u8], dif: u64, cnt: i32) -> (&[u8], u64, i32) {
+    let mut m = Msac {
+        buf,
+        dif,
+        rng: 0,
+        cnt,
+        allow_update: false,
+    };
+    m.refill();
+    (m.buf, m.dif, m.cnt)
 }
 
 /// The refill near the end of the data. Takes and returns plain values, so

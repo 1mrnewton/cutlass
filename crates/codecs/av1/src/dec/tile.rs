@@ -23,7 +23,7 @@ use crate::spec::tables::{
 
 use super::cdf::CdfContext;
 use super::frame::{FrameState, Picture};
-use super::msac::Msac;
+use super::msac::{Hot, Msac};
 use super::obu::{
     FrameHeader, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, RESTORE_WIENER,
     SEG_LVL_GLOBALMV, SEG_LVL_REF_FRAME, SEG_LVL_SKIP, SWITCHABLE, SequenceHeader, TX_MODE_SELECT,
@@ -3961,41 +3961,37 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                         first,
                         want,
                     };
+                    macro_rules! levels_ls {
+                        ($class:literal, $ls:literal) => {
+                            match msac.decoder(|m| {
+                                read_levels_dec::<$class, $ls>(
+                                    m,
+                                    coeff_base_cdf,
+                                    coeff_br_cdf,
+                                    levels,
+                                    nzc,
+                                    &args,
+                                )
+                            }) {
+                                Some(n) => n,
+                                None => read_levels::<$class, $ls, C>(
+                                    msac,
+                                    coeff_base_cdf,
+                                    coeff_br_cdf,
+                                    levels,
+                                    nzc,
+                                    &args,
+                                ),
+                            }
+                        };
+                    }
                     macro_rules! levels {
                         ($class:literal) => {
                             match bwl {
-                                2 => read_levels::<$class, 8, C>(
-                                    msac,
-                                    coeff_base_cdf,
-                                    coeff_br_cdf,
-                                    levels,
-                                    nzc,
-                                    &args,
-                                ),
-                                3 => read_levels::<$class, 12, C>(
-                                    msac,
-                                    coeff_base_cdf,
-                                    coeff_br_cdf,
-                                    levels,
-                                    nzc,
-                                    &args,
-                                ),
-                                4 => read_levels::<$class, 20, C>(
-                                    msac,
-                                    coeff_base_cdf,
-                                    coeff_br_cdf,
-                                    levels,
-                                    nzc,
-                                    &args,
-                                ),
-                                _ => read_levels::<$class, 36, C>(
-                                    msac,
-                                    coeff_base_cdf,
-                                    coeff_br_cdf,
-                                    levels,
-                                    nzc,
-                                    &args,
-                                ),
+                                2 => levels_ls!($class, 8),
+                                3 => levels_ls!($class, 12),
+                                4 => levels_ls!($class, 20),
+                                _ => levels_ls!($class, 36),
                             }
                         };
                     }
@@ -4005,75 +4001,97 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                         _ => levels!(2),
                     };
                     // Signs and Golomb remainder.
-                    let dq = &mut scratch.coefs;
-                    let mut nz_rows = 0usize;
-                    let mut nz_cols = 0usize;
                     let lim = 1i64 << (7 + bd);
                     let dshift = qinfo.denom.trailing_zeros();
                     let cbwl = bwl.min(5);
-                    let mut cul_level = 0u32;
-                    let mut dc_category = 0u8;
-                    // The nonzero coefficients, in scan order.
-                    for &c in nzc[..n_nz].iter().rev() {
-                        let c = usize::from(c);
-                        let li = (tab[c] & LEVELS_MASK) as usize;
-                        let mut q = i32::from(levels[li] >> 8);
-                        levels[li] = 0;
-                        let pos = scan[c] as usize;
-                        let wpos = if C::WRITE { want[pos] } else { 0 };
-                        let sign = if c == 0 {
-                            // dc_sign ctx
-                            let mut dc_sign = 0i32;
-                            for k in 0..w4 {
-                                if x4 + k < max_x4 {
-                                    match above_dc[x4 + k] {
-                                        1 => dc_sign -= 1,
-                                        2 => dc_sign += 1,
-                                        _ => {}
-                                    }
+                    // dc_sign ctx
+                    let dc_ctx = || {
+                        let mut dc_sign = 0i32;
+                        for k in 0..w4 {
+                            if x4 + k < max_x4 {
+                                match above_dc[x4 + k] {
+                                    1 => dc_sign -= 1,
+                                    2 => dc_sign += 1,
+                                    _ => {}
                                 }
                             }
-                            for k in 0..h4 {
-                                if y4 + k < max_y4 {
-                                    match left_dc[(ly0 + k) & 31] {
-                                        1 => dc_sign -= 1,
-                                        2 => dc_sign += 1,
-                                        _ => {}
-                                    }
+                        }
+                        for k in 0..h4 {
+                            if y4 + k < max_y4 {
+                                match left_dc[(ly0 + k) & 31] {
+                                    1 => dc_sign -= 1,
+                                    2 => dc_sign += 1,
+                                    _ => {}
                                 }
                             }
-                            let ctx = match dc_sign.cmp(&0) {
-                                std::cmp::Ordering::Less => 1,
-                                std::cmp::Ordering::Greater => 2,
-                                std::cmp::Ordering::Equal => 0,
-                            };
-                            msac.bool_adapt(&mut cdf.dc_sign[ptype][ctx], wpos < 0)
-                        } else {
-                            msac.literal(1, u32::from(wpos < 0)) != 0
-                        };
-                        if q > 14 {
-                            let g = msac.golomb(wpos.unsigned_abs().saturating_sub(15));
-                            q = (g as i32).wrapping_add(15);
                         }
-                        if pos == 0 {
-                            dc_category = if sign { 1 } else { 2 };
+                        match dc_sign.cmp(&0) {
+                            std::cmp::Ordering::Less => 1,
+                            std::cmp::Ordering::Greater => 2,
+                            std::cmp::Ordering::Equal => 0,
                         }
-                        let q = q & 0xFFFFF;
-                        cul_level += q as u32;
-                        // Dequantize (7.12.3 step 1).
-                        let i = pos >> cbwl;
-                        let j = pos - (i << cbwl);
-                        let qv = if pos == 0 { qinfo.dc } else { qinfo.ac };
-                        let q2 = match qinfo.qm {
-                            Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
-                            None => qv,
+                    };
+                    let nz = &nzc[..n_nz];
+                    let fast = if qinfo.qm.is_none() {
+                        let deq = Dequant {
+                            dc: qinfo.dc,
+                            ac: qinfo.ac,
+                            shift: dshift,
+                            lim,
+                            cbwl,
                         };
-                        let dqv = ((i64::from(q) * i64::from(q2)) & 0xFFFFFF) >> dshift;
-                        let v = if sign { -dqv } else { dqv };
-                        dq[pos] = v.clamp(-lim, lim - 1) as i32;
-                        nz_rows = nz_rows.max(i + 1);
-                        nz_cols = nz_cols.max(j + 1);
-                    }
+                        let (dq, dc_cdf) = (&mut scratch.coefs, &mut cdf.dc_sign[ptype]);
+                        msac.decoder(|m| signs_dec(m, nz, levels, dq, dc_cdf, dc_ctx, &deq))
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    let (cul_level, dc_category, nz_rows, nz_cols) = match fast {
+                        Some(r) => r,
+                        None => {
+                            let dq = &mut scratch.coefs;
+                            let mut nz_rows = 0usize;
+                            let mut nz_cols = 0usize;
+                            let mut cul_level = 0u32;
+                            let mut dc_category = 0u8;
+                            // The nonzero coefficients, in scan order.
+                            for &e in nz.iter().rev() {
+                                let li = (e & LEVELS_MASK) as usize;
+                                let mut q = i32::from(levels[li] >> 8);
+                                levels[li] = 0;
+                                let pos = (e >> 22) as usize;
+                                let wpos = if C::WRITE { want[pos] } else { 0 };
+                                let sign = if pos == 0 {
+                                    msac.bool_adapt(&mut cdf.dc_sign[ptype][dc_ctx()], wpos < 0)
+                                } else {
+                                    msac.literal(1, u32::from(wpos < 0)) != 0
+                                };
+                                if q > 14 {
+                                    let g = msac.golomb(wpos.unsigned_abs().saturating_sub(15));
+                                    q = (g as i32).wrapping_add(15);
+                                }
+                                if pos == 0 {
+                                    dc_category = if sign { 1 } else { 2 };
+                                }
+                                let q = q & 0xFFFFF;
+                                cul_level += q as u32;
+                                // Dequantize (7.12.3 step 1).
+                                let i = pos >> cbwl;
+                                let j = pos - (i << cbwl);
+                                let qv = if pos == 0 { qinfo.dc } else { qinfo.ac };
+                                let q2 = match qinfo.qm {
+                                    Some(m) => crate::dsp::round2(qv * i32::from(m[pos]), 5),
+                                    None => qv,
+                                };
+                                let dqv = ((i64::from(q) * i64::from(q2)) & 0xFFFFFF) >> dshift;
+                                let v = if sign { -dqv } else { dqv };
+                                dq[pos] = v.clamp(-lim, lim - 1) as i32;
+                                nz_rows = nz_rows.max(i + 1);
+                                nz_cols = nz_cols.max(j + 1);
+                            }
+                            (cul_level, dc_category, nz_rows, nz_cols)
+                        }
+                    };
                     // Levels read as zero were never written.
                     scratch.nz_rows = nz_rows.max(1);
                     scratch.nz_cols = nz_cols.max(1);
@@ -4120,10 +4138,11 @@ struct LevelArgs<'s> {
 }
 
 /// Per transform size and class, one entry per scan index `c`: the
-/// position's index in the padded levels buffer (bits 0..16), its
-/// coeff_base context offset (bits 16..24) and its coeff_br context offset
-/// (bits 24..32). Entry 0 (the DC) has both offsets 0.
-fn level_table(tx: usize, class: usize) -> &'static [u32] {
+/// position's index in the padded levels buffer (bits 0..11, see
+/// [`LEVELS_MASK`]), its coeff_base context offset (bits 11..17), its
+/// coeff_br context offset (bits 17..22) and the position itself (bits
+/// 22..32). Entry 0 (the DC) is 0.
+pub(crate) fn level_table(tx: usize, class: usize) -> &'static [u32] {
     use std::sync::OnceLock;
     static TABLES: OnceLock<Vec<Vec<u32>>> = OnceLock::new();
     let t = TABLES.get_or_init(|| {
@@ -4156,7 +4175,7 @@ fn level_table(tx: usize, class: usize) -> &'static [u32] {
                         } else {
                             (u32::from(base), if near { 7 } else { 14 })
                         };
-                        li as u32 | base << 16 | br << 24
+                        li as u32 | base << 11 | br << 17 | (pos as u32) << 22
                     })
                     .collect();
                 out.push(v);
@@ -4209,7 +4228,7 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
     base_cdf: &mut [[u16; 4]; 42],
     br_cdf: &mut [[u16; 4]; 21],
     levels: &mut [u16; LEVELS_LEN],
-    nz: &mut [u16; 1024],
+    nz: &mut [u32; 1024],
     a: &LevelArgs<'_>,
 ) -> usize {
     debug_assert_eq!(a.lstride, LS);
@@ -4236,7 +4255,7 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
     };
     let last = a.eob - 1;
     // The eob coefficient (nonzero).
-    nz[0] = last as u16;
+    nz[0] = a.tab[last];
     let mut n = 1;
     {
         let e = a.tab[last];
@@ -4245,7 +4264,11 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
         if level > 2 {
             let (s3, _) = sums(levels, li);
             let mag = (((s3 >> 8) + 1) >> 1).min(6);
-            level = read_br(msac, &mut br_cdf[(mag + (e >> 24)) as usize], want(last));
+            level = read_br(
+                msac,
+                &mut br_cdf[(mag + ((e >> 17) & 0x1F)) as usize],
+                want(last),
+            );
         }
         levels[li] = level_entry(level);
     }
@@ -4256,15 +4279,15 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
         let li = (e & LEVELS_MASK) as usize;
         let (s3, s5) = sums(levels, li);
         let m = (((s5 & 0xFF) + 1) >> 1).min(4);
-        let ctx = (m + ((e >> 16) & 0xFF)) as usize;
+        let ctx = (m + ((e >> 11) & 0x3F)) as usize;
         let wl = want(c);
         let mut level = msac.symbol(&mut base_cdf[ctx], wl.min(3) as usize) as u32;
         if level > 2 {
             let mag = (((s3 >> 8) + 1) >> 1).min(6);
-            level = read_br(msac, &mut br_cdf[(mag + (e >> 24)) as usize], wl);
+            level = read_br(msac, &mut br_cdf[(mag + ((e >> 17) & 0x1F)) as usize], wl);
         }
         levels[li] = level_entry(level);
-        nz[n & 1023] = c as u16;
+        nz[n & 1023] = e;
         n += usize::from(level != 0);
     }
     // The DC coefficient.
@@ -4283,6 +4306,192 @@ fn read_levels<const CLASS: usize, const LS: usize, C: Coder>(
     levels[0] = level_entry(level);
     nz[n & 1023] = 0;
     n + usize::from(level != 0)
+}
+
+/// `min((x + 1) >> 1, 4)` for the coeff_base context.
+const BASE_MAG: [u8; 16] = [0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4];
+
+/// The neighbour offsets in a levels buffer of stride `LS`.
+#[inline(always)]
+fn level_offsets<const CLASS: usize, const LS: usize>() -> [usize; 5] {
+    std::array::from_fn(|i| {
+        SIG_REF_DIFF_OFFSET[CLASS][i][0] as usize * LS + SIG_REF_DIFF_OFFSET[CLASS][i][1] as usize
+    })
+}
+
+/// [`read_levels`] when decoding: the same syntax, on a [`Hot`] decoder
+/// state, with the coeff_br symbols out of line. Inside the loop live only
+/// the decoder state, the scan index, the buffers and the nonzero count.
+#[inline(never)]
+fn read_levels_dec<const CLASS: usize, const LS: usize>(
+    m: &mut Msac<'_>,
+    base_cdf: &mut [[u16; 4]; 42],
+    br_cdf: &mut [[u16; 4]; 21],
+    levels: &mut [u16; LEVELS_LEN],
+    nz: &mut [u32; 1024],
+    a: &LevelArgs<'_>,
+) -> usize {
+    if !m.allow_update {
+        return read_levels::<CLASS, LS, Msac<'_>>(m, base_cdf, br_cdf, levels, nz, a);
+    }
+    let offs = level_offsets::<CLASS, LS>();
+    let mut h = Hot::new(m);
+    let last = a.eob - 1;
+    // The eob coefficient (nonzero).
+    nz[0] = a.tab[last];
+    {
+        let e = a.tab[last];
+        let li = (e & LEVELS_MASK) as usize;
+        let mut entry = level_entry(a.first);
+        if a.first > 2 {
+            (h, entry) = br_dec::<CLASS, LS>(h, br_cdf, levels, li, (e >> 17) & 0x1F);
+        }
+        levels[li] = entry;
+    }
+    if last == 0 {
+        h.done();
+        return 1;
+    }
+    let mut n = 1;
+    let tab = &a.tab[..last];
+    for &e in tab[1..].iter().rev() {
+        let li = (e & LEVELS_MASK) as usize;
+        let s5 = u32::from(levels[li + offs[0]])
+            + u32::from(levels[li + offs[1]])
+            + u32::from(levels[li + offs[2]])
+            + u32::from(levels[li + offs[3]])
+            + u32::from(levels[li + offs[4]]);
+        let ctx = ((e >> 11) & 0x3F) as usize + usize::from(BASE_MAG[(s5 & 0xF) as usize]);
+        let level = h.sym4(&mut base_cdf[ctx]);
+        let entry = if level > 2 {
+            let entry;
+            (h, entry) = br_dec::<CLASS, LS>(h, br_cdf, levels, li, (e >> 17) & 0x1F);
+            entry
+        } else {
+            (level * 0x101) as u16
+        };
+        levels[li] = entry;
+        nz[n & 1023] = e;
+        n += usize::from(level != 0);
+    }
+    // The DC coefficient.
+    let ctx = if CLASS == 0 {
+        0
+    } else {
+        let s5: u32 = offs.iter().map(|&o| u32::from(levels[o])).sum();
+        usize::from(BASE_MAG[(s5 & 0xF) as usize] + COEFF_BASE_POS_CTX_OFFSET[0])
+    };
+    let level = h.sym4(&mut base_cdf[ctx]);
+    let mut entry = (level * 0x101) as u16;
+    if level > 2 {
+        (h, entry) = br_dec::<CLASS, LS>(h, br_cdf, levels, 0, 0);
+    }
+    levels[0] = entry;
+    nz[n & 1023] = 0;
+    h.done();
+    n + usize::from(level != 0)
+}
+
+/// Dequantization of one transform block without a quantizer matrix.
+struct Dequant {
+    dc: i32,
+    ac: i32,
+    /// log2 of the denominator.
+    shift: u32,
+    /// The coefficients are clamped to `-lim..lim`.
+    lim: i64,
+    /// log2 of the coefficient row stride.
+    cbwl: u32,
+}
+
+/// The signs and Golomb remainders of the nonzero levels `nz` (from
+/// [`read_levels_dec`]) when decoding, without a quantizer matrix: writes
+/// the dequantized coefficients to `dq` and clears their levels. Returns the
+/// cumulative level, the DC category and the rows and columns holding
+/// nonzero coefficients; `None` if `dq` is too short.
+#[inline(never)]
+fn signs_dec(
+    m: &mut Msac<'_>,
+    nz: &[u32],
+    levels: &mut [u16; LEVELS_LEN],
+    dq: &mut [i32],
+    dc_cdf: &mut [[u16; 2]; 3],
+    dc_ctx: impl FnOnce() -> usize,
+    d: &Dequant,
+) -> Option<(u32, u8, usize, usize)> {
+    let dq = dq.first_chunk_mut::<1024>()?;
+    let dequant = |q: i32, qv: i32, sign: bool| {
+        let dqv = ((i64::from(q) * i64::from(qv)) & 0xFF_FFFF) >> d.shift;
+        let v = if sign { -dqv } else { dqv };
+        v.clamp(-d.lim, d.lim - 1) as i32
+    };
+    let mut cul = 0u32;
+    let mut dc_category = 0u8;
+    let (mut rows, mut cols) = (0usize, 0usize);
+    let mut rest = nz;
+    // In scan order the DC comes first; its entry is 0.
+    if let Some((&0, more)) = nz.split_last() {
+        rest = more;
+        let sign = m.bool_adapt(&mut dc_cdf[dc_ctx()]);
+        let mut q = i32::from(levels[0] >> 8);
+        levels[0] = 0;
+        if q > 14 {
+            q = (m.golomb() as i32).wrapping_add(15);
+        }
+        let q = q & 0xF_FFFF;
+        cul += q as u32;
+        dc_category = if sign { 1 } else { 2 };
+        dq[0] = dequant(q, d.dc, sign);
+        (rows, cols) = (1, 1);
+    }
+    let cmask = (1usize << d.cbwl) - 1;
+    let mut h = Hot::new(m);
+    for &e in rest.iter().rev() {
+        let li = (e & LEVELS_MASK) as usize;
+        let pos = (e >> 22) as usize;
+        let mut q = i32::from(levels[li] >> 8);
+        levels[li] = 0;
+        let sign = h.bool_equi();
+        if q > 14 {
+            q = (h.golomb() as i32).wrapping_add(15);
+        }
+        let q = q & 0xF_FFFF;
+        cul += q as u32;
+        dq[pos & 1023] = dequant(q, d.ac, sign);
+        rows = rows.max((pos >> d.cbwl) + 1);
+        cols = cols.max((pos & cmask) + 1);
+    }
+    h.done();
+    Some((cul, dc_category, rows, cols))
+}
+
+/// The coeff_br symbols of the coefficient at `li` of the levels buffer
+/// (`br_off`: its context offset); returns its [`level_entry`]. Out of line
+/// and given the state by value, so the loop calling it keeps its registers.
+#[cold]
+#[inline(never)]
+fn br_dec<'m, 'a, const CLASS: usize, const LS: usize>(
+    mut h: Hot<'m, 'a>,
+    br_cdf: &mut [[u16; 4]; 21],
+    levels: &[u16; LEVELS_LEN],
+    li: usize,
+    br_off: u32,
+) -> (Hot<'m, 'a>, u16) {
+    let offs = level_offsets::<CLASS, LS>();
+    let s3 = u32::from(levels[li + offs[0]])
+        + u32::from(levels[li + offs[1]])
+        + u32::from(levels[li + offs[2]]);
+    let mag = (((s3 >> 8) + 1) >> 1).min(6);
+    let cdf = &mut br_cdf[(mag + br_off) as usize];
+    let mut level = 3;
+    for _ in 0..4 {
+        let br = h.sym4(cdf);
+        level += br;
+        if br < 3 {
+            break;
+        }
+    }
+    (h, level_entry(level))
 }
 
 fn ceil_log2(x: u32) -> u32 {

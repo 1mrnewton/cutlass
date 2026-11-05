@@ -853,6 +853,26 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_lut_maps_its_colours_at_its_strength() {
+        let draft = color_clip("0xFFFF0000", false);
+        let mut session = cutlass_session::Session::open(draft);
+        let swap = "LUT_3D_SIZE 2\n0 0 0\n0 1 0\n1 0 0\n1 1 0\n0 0 1\n0 1 1\n1 0 1\n1 1 1\n";
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetLut {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "lut".into(),
+                    name: "Swap".to_owned(),
+                    cube: Some(swap.to_owned()),
+                    strength: 1.0,
+                }],
+            )
+            .unwrap();
+        assert_eq!(pixels(session.draft(), 0), [0, 255, 0, 255].repeat(2));
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

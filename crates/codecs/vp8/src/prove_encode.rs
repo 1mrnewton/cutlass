@@ -306,6 +306,38 @@ pub(crate) fn psnr_y(a: &[u8], b: &[u8], width: u32, height: u32) -> f64 {
     10.0 * (255.0 * 255.0 / mse.max(1e-10)).log10()
 }
 
+/// PSNR of Y, U, and V over all frames, and the worst frame's PSNR-Y.
+fn psnr_planes(a: &[u8], b: &[u8], width: u32, height: u32) -> [f64; 4] {
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let size = w * h + 2 * cw * ch;
+    let frames = a.len().min(b.len()) / size;
+    let db = |sse: f64, n: usize| 10.0 * (255.0 * 255.0 / (sse / n as f64).max(1e-10)).log10();
+    let sse = |range: std::ops::Range<usize>| -> f64 {
+        range
+            .map(|i| {
+                let d = f64::from(a[i]) - f64::from(b[i]);
+                d * d
+            })
+            .sum()
+    };
+    let (mut planes, mut worst) = ([0f64; 3], f64::INFINITY);
+    for f in 0..frames {
+        let base = f * size;
+        let y = sse(base..base + w * h);
+        planes[0] += y;
+        planes[1] += sse(base + w * h..base + w * h + cw * ch);
+        planes[2] += sse(base + w * h + cw * ch..base + size);
+        worst = worst.min(db(y, w * h));
+    }
+    [
+        db(planes[0], frames * w * h),
+        db(planes[1], frames * cw * ch),
+        db(planes[2], frames * cw * ch),
+        worst,
+    ]
+}
+
 /// Our encoder and libvpx (good, cpu-used 4, one thread) at the same
 /// bitrate on one source. Returns (ours psnr, ours bytes, ours seconds,
 /// libvpx psnr, libvpx bytes).
@@ -403,9 +435,19 @@ pub(crate) fn compare_with_libvpx(
     let theirs_yuv = ffmpeg_yuv(&ffmpeg, &theirs, "libvpx");
     let theirs_psnr = psnr_y(&source, &theirs_yuv, width, height);
     let _ = std::fs::remove_dir_all(&dir);
+    let [_, ou, ov, ow] = psnr_planes(&source, &recon, width, height);
+    let [_, tu, tv, tw] = psnr_planes(&source, &theirs_yuv, width, height);
+    let keys = packets
+        .iter()
+        .filter(|p| p.first().is_some_and(|b| b & 1 == 0))
+        .count();
     eprintln!(
-        "{name} {width}x{height} {frames}f @{bitrate}: ours {ours_psnr:.2} dB {ours_bytes} B {:.1} fps; libvpx {theirs_psnr:.2} dB {theirs_bytes} B",
+        "{name} {width}x{height} {frames}f @{bitrate}: ours {ours_psnr:.2} dB (U {ou:.2} V {ov:.2} worst Y {ow:.2}) {ours_bytes} B {:.1} fps {keys} keys; libvpx {theirs_psnr:.2} dB (U {tu:.2} V {tv:.2} worst Y {tw:.2}) {theirs_bytes} B",
         f64::from(frames) / seconds
+    );
+    assert!(
+        ou >= tu - 2.0 && ov >= tv - 2.0,
+        "{name}: chroma U {ou:.2} V {ov:.2} dB against libvpx U {tu:.2} V {tv:.2}"
     );
     Some((ours_psnr, ours_bytes, seconds, theirs_psnr, theirs_bytes))
 }

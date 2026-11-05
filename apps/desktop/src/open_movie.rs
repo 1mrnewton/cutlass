@@ -742,7 +742,8 @@ type Edit = fn(&mut Draft);
 fn decodes_on_gpu(frame: &cutlass_eval::FrameLayers) -> bool {
     frame.layers.iter().any(|layer| match &layer.source {
         cutlass_eval::GpuSource::Yuv { .. } => true,
-        cutlass_eval::GpuSource::Nested(child) => decodes_on_gpu(child),
+        cutlass_eval::GpuSource::Nested(child)
+        | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_on_gpu(child),
         cutlass_eval::GpuSource::Rgba(_) | cutlass_eval::GpuSource::Effect(_) => false,
     })
 }
@@ -754,7 +755,8 @@ fn decodes_in_place(frame: &cutlass_eval::FrameLayers) -> bool {
         cutlass_eval::GpuSource::Yuv { samples, .. } => {
             matches!(samples, cutlass_eval::YuvSamples::Surface(_))
         }
-        cutlass_eval::GpuSource::Nested(child) => decodes_in_place(child),
+        cutlass_eval::GpuSource::Nested(child)
+        | cutlass_eval::GpuSource::Blend { layers: child, .. } => decodes_in_place(child),
         cutlass_eval::GpuSource::Rgba(_) | cutlass_eval::GpuSource::Effect(_) => false,
     })
 }

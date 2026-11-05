@@ -4423,7 +4423,7 @@ fn signs_dec(
     let dequant = |q: i32, qv: i32, sign: bool| {
         let dqv = ((i64::from(q) * i64::from(qv)) & 0xFF_FFFF) >> d.shift;
         let v = if sign { -dqv } else { dqv };
-        v.clamp(-d.lim, d.lim - 1) as i32
+        v.max(-d.lim).min(d.lim - 1) as i32
     };
     let mut cul = 0u32;
     let mut dc_category = 0u8;

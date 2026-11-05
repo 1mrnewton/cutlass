@@ -310,19 +310,23 @@ fn v_pass<S: Copy, D, const T0: usize, const T1: usize, const W: usize, const MO
     wr: impl Fn(i16, i16) -> D + Copy,
 ) {
     let w = if W != 0 { W } else { w };
+    let fh = *fh;
+    // A window of the rows the taps read, moved down one row per output
+    // row: every row is sliced (and bounds checked) once.
+    let mut rows: [&[S]; 8] = [&[]; 8];
+    let mut hrows: [&[i16]; 8] = [&[]; 8];
+    for t in T0..T1 - 1 {
+        rows[t] = &src[top + t * src_stride..][..w];
+        if MODE == V_SPLIT_HI {
+            hrows[t] = &hi[top + t * src_stride..][..w];
+        }
+    }
     for r in 0..h {
         let d = &mut dst[r * dst_stride..][..w];
-        let base = top + r * src_stride;
-        let first = &src[base + T0 * src_stride..][..w];
-        let mut rows = [first; 8];
-        for t in T0 + 1..T1 {
-            rows[t] = &src[base + t * src_stride..][..w];
-        }
-        let mut hrows: [&[i16]; 8] = [&[]; 8];
+        let last = top + (r + T1 - 1) * src_stride;
+        rows[T1 - 1] = &src[last..][..w];
         if MODE == V_SPLIT_HI {
-            for t in T0..T1 {
-                hrows[t] = &hi[base + t * src_stride..][..w];
-            }
+            hrows[T1 - 1] = &hi[last..][..w];
         }
         for c in 0..w {
             let mut a = 0i16;
@@ -337,6 +341,12 @@ fn v_pass<S: Copy, D, const T0: usize, const T1: usize, const W: usize, const MO
                 }
             }
             d[c] = wr(a, s.wrapping_sub(a << 8));
+        }
+        for t in T0..T1 - 1 {
+            rows[t] = rows[t + 1];
+            if MODE == V_SPLIT_HI {
+                hrows[t] = hrows[t + 1];
+            }
         }
     }
 }
@@ -410,11 +420,87 @@ fn hv<P: Pixel, D>(
     with_mid(2 * n, |buf| {
         let (mid, hi) = buf.split_at_mut(n);
         let rows = h + t1 - t0 - 1;
+        let start = src_off - (3 - t0) * src_stride - 3;
+        macro_rules! fixed {
+            ($w:literal, $r:literal, $l:literal) => {{
+                let m = &mut mid[t0 * $w..];
+                let a = (m, $w, src, start, src_stride, $w, rows, fh, r0 - 1);
+                match Taps::of(fh) {
+                    Taps::Eight => h_pass::<P, i16, 0, 8, $w>(
+                        a.0,
+                        a.1,
+                        a.2,
+                        a.3,
+                        a.4,
+                        a.5,
+                        a.6,
+                        a.7,
+                        a.8,
+                        |v| v,
+                    ),
+                    Taps::Six => h_pass::<P, i16, 1, 7, $w>(
+                        a.0,
+                        a.1,
+                        a.2,
+                        a.3,
+                        a.4,
+                        a.5,
+                        a.6,
+                        a.7,
+                        a.8,
+                        |v| v,
+                    ),
+                    Taps::Four => h_pass::<P, i16, 2, 6, $w>(
+                        a.0,
+                        a.1,
+                        a.2,
+                        a.3,
+                        a.4,
+                        a.5,
+                        a.6,
+                        a.7,
+                        a.8,
+                        |v| v,
+                    ),
+                    Taps::Two => h_pass::<P, i16, 3, 5, $w>(
+                        a.0,
+                        a.1,
+                        a.2,
+                        a.3,
+                        a.4,
+                        a.5,
+                        a.6,
+                        a.7,
+                        a.8,
+                        |v| v,
+                    ),
+                }
+                let (lo, end) = (t0 * $w, (t0 + rows) * $w);
+                for (h8, &m) in hi[lo..end].iter_mut().zip(&mid[lo..end]) {
+                    *h8 = m >> 8;
+                }
+                match Taps::of(fv) {
+                    Taps::Eight => {
+                        v_mid::<D, 0, 8, $w, $r, $l>(dst, dst_stride, mid, hi, h, fv, wr)
+                    }
+                    Taps::Six => v_mid::<D, 1, 7, $w, $r, $l>(dst, dst_stride, mid, hi, h, fv, wr),
+                    Taps::Four => v_mid::<D, 2, 6, $w, $r, $l>(dst, dst_stride, mid, hi, h, fv, wr),
+                    Taps::Two => v_mid::<D, 3, 5, $w, $r, $l>(dst, dst_stride, mid, hi, h, fv, wr),
+                }
+            }};
+        }
+        match (w, h % 4) {
+            (2, 0) => return fixed!(2, 4, 8),
+            (4, 0 | 2) => return fixed!(4, 2, 8),
+            (8, _) => return fixed!(8, 1, 8),
+            (16, _) => return fixed!(16, 1, 16),
+            _ => {}
+        }
         h_pass_dyn::<P, i16>(
             &mut mid[t0 * w..],
             w,
             src,
-            src_off - (3 - t0) * src_stride - 3,
+            start,
             src_stride,
             w,
             rows,
@@ -428,6 +514,51 @@ fn hv<P: Pixel, D>(
         }
         v_pass_dyn::<i16, D, V_SPLIT_HI>(dst, dst_stride, mid, hi, 0, w, w, h, fv, |v| v, wr);
     });
+}
+
+/// The vertical pass of [`hv`] (`V_SPLIT_HI` sums) for blocks `W` wide
+/// (2, 4, 8 or 16), `R` rows (`L = R * W` lanes, at least 8) at a time;
+/// `h` is a multiple of `R`. Row `k` of `mid` and `hi` is intermediate row
+/// `k` (stride `W`).
+#[inline(always)]
+fn v_mid<D, const T0: usize, const T1: usize, const W: usize, const R: usize, const L: usize>(
+    dst: &mut [D],
+    dst_stride: usize,
+    mid: &[i16],
+    hi: &[i16],
+    h: usize,
+    fv: &[i16; 8],
+    wr: impl Fn(i16, i16) -> D + Copy,
+) {
+    // The taps splat to whole vectors once (instead of once per step).
+    let fv: [[i16; L]; 8] = fv.map(|f| [f; L]);
+    // Samples the taps of one step read, from the first tap's row.
+    let span = (T1 - T0 - 1) * W + L;
+    for i in 0..h / R {
+        let b = (i * R + T0) * W;
+        let (Some(m), Some(hh)) = (mid.get(b..b + span), hi.get(b..b + span)) else {
+            return;
+        };
+        let mut a = [0i16; L];
+        let mut s = [0i16; L];
+        for t in T0..T1 {
+            let o = (t - T0) * W;
+            for l in 0..L {
+                s[l] = s[l].wrapping_add(fv[t][l].wrapping_mul(m[o + l]));
+                a[l] = a[l].wrapping_add(fv[t][l].wrapping_mul(hh[o + l]));
+            }
+        }
+        for r in 0..R {
+            let Some(d) = dst.get_mut((i * R + r) * dst_stride..(i * R + r) * dst_stride + W)
+            else {
+                return;
+            };
+            for c in 0..W {
+                let l = r * W + c;
+                d[c] = wr(a[l], s[l].wrapping_sub(a[l] << 8));
+            }
+        }
+    }
 }
 
 /// Unscaled prediction (`xStep == yStep == 1024`, spec 7.11.3.4) written as
@@ -469,11 +600,14 @@ pub fn put<P: Pixel>(
     let fh = half(&SUBPEL_FILTERS[fx][mx]);
     let fv = half(&SUBPEL_FILTERS[fy][my]);
     match (mx != 0, my != 0) {
-        (false, false) => {
-            for r in 0..h {
-                dst[r * dst_stride..][..w].copy_from_slice(&src[src_off + r * src_stride..][..w]);
-            }
-        }
+        (false, false) => match w {
+            4 => copy_w::<P, 4>(dst, dst_stride, src, src_off, src_stride, w, h),
+            8 => copy_w::<P, 8>(dst, dst_stride, src, src_off, src_stride, w, h),
+            16 => copy_w::<P, 16>(dst, dst_stride, src, src_off, src_stride, w, h),
+            32 => copy_w::<P, 32>(dst, dst_stride, src, src_off, src_stride, w, h),
+            64 => copy_w::<P, 64>(dst, dst_stride, src, src_off, src_stride, w, h),
+            _ => copy_w::<P, 0>(dst, dst_stride, src, src_off, src_stride, w, h),
+        },
         (true, false) => {
             // The vertical filter is the identity: Round2(i * 128, r1).
             let sh = r1 - 7;
@@ -711,6 +845,34 @@ pub fn prep<P: Pixel>(
             r0,
             move |a, b| (a << 2).wrapping_add((b + 32) >> 6).wrapping_sub(bias),
         ),
+    }
+}
+
+/// Copies a `w x h` block, `W` wide (0: any width), without a call to
+/// `memcpy` per row for the constant widths.
+#[inline(always)]
+fn copy_w<P: Pixel, const W: usize>(
+    dst: &mut [P],
+    dst_stride: usize,
+    src: &[P],
+    src_off: usize,
+    src_stride: usize,
+    w: usize,
+    h: usize,
+) {
+    let w = if W != 0 { W } else { w };
+    for r in 0..h {
+        let (Some(d), Some(s)) = (
+            dst.get_mut(r * dst_stride..r * dst_stride + w),
+            src.get(src_off + r * src_stride..src_off + r * src_stride + w),
+        ) else {
+            return;
+        };
+        if W != 0 {
+            d[..W].copy_from_slice(&s[..W]);
+        } else {
+            d.copy_from_slice(s);
+        }
     }
 }
 

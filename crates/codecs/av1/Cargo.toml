@@ -9,6 +9,8 @@ description = "The av1 codec."
 [features]
 # Counts which coding tools the decoder sees (for test coverage reports).
 stats = []
+# Lets environment variables override encoder tuning constants (sweeps only).
+tune = []
 
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }

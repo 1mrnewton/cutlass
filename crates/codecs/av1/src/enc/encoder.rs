@@ -259,7 +259,7 @@ impl Av1Enc {
             seq_force_integer_mv: 2,
             enable_cdef: true,
             enable_ref_frame_mvs: true,
-            enable_dual_filter: std::env::var("AV1_DUAL").is_ok(),
+            enable_dual_filter: ev("AV1_DUAL", 0.0) > 0.0,
             bit_depth: cfg.bit_depth,
             mono_chrome: cfg.mono,
             color_primaries: cfg.color_primaries,
@@ -502,12 +502,6 @@ impl Av1Enc {
     /// Chooses q, references and the slot to refresh for a frame.
     fn plan_frame(&self, disp: u64, key: bool, show: bool, level: u32) -> FrameSpec {
         let base = self.rc_q;
-        let ev = |k: &str, d: f64| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
         // Better anchors pay off in every frame predicted from them: q drops
         // by a fraction that grows toward the top of the pyramid.
         let frac = if key {
@@ -648,12 +642,6 @@ impl Av1Enc {
             (ac * 20723 + 1_015_158 - 300_000) >> 18
         }
         .clamp(0, 63) as u8;
-        let ev = |k: &str, d: f64| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
         let lvl = (f64::from(lvl) * ev("AV1_LFS", 1.0)).clamp(0.0, 63.0) as u8;
         let pri = ((f64::from(q) / 24.0) * ev("AV1_CDS", 1.0)).clamp(0.0, 15.0) as u8;
         let mut h = FrameHeader {
@@ -776,12 +764,6 @@ impl Av1Enc {
         let dcq = f64::from(DC_QLOOKUP[bdi][q as usize]);
         let qstep = ac / 8.0;
         let speed = self.cfg.speed;
-        let ev = |k: &str, d: f64| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
         let mode = ModeParams {
             lambda_satd: ev("AV1_LS", 0.9) * qstep,
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
@@ -1002,6 +984,22 @@ impl Av1Enc {
         ));
         Ok(payload)
     }
+}
+
+/// A tuning constant; with the `tune` feature an environment variable of
+/// the same name overrides it (for parameter sweeps).
+#[cfg(feature = "tune")]
+fn ev(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+#[cfg(not(feature = "tune"))]
+#[inline(always)]
+fn ev(_name: &str, default: f64) -> f64 {
+    default
 }
 
 /// Squared error over the visible area of every plane.

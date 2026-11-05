@@ -1,7 +1,7 @@
 //! The containers and codecs a phone opens.
 //!
-//! Rust audio decoders (FLAC, MP3 and Opus) go first, so a file decodes the
-//! same on every platform, and a FLAC file bit-exactly. WebP goes first too,
+//! Rust audio decoders (FLAC, ALAC, MP3 and Opus) go first, so a file
+//! decodes the same on every platform, and a lossless file bit-exactly. WebP goes first too,
 //! because an animated file's later packets are bare frames that only its
 //! Rust decoder composes. The Apple decoders come next on an Apple phone; a
 //! codec they decline falls through to the Rust decoder of the same id.
@@ -32,15 +32,16 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, MP3, Opus and WebP, the platform decoders for this OS, then PNG,
+/// FLAC, ALAC, MP3, Opus and WebP, the platform decoders for this OS, then PNG,
 /// JPEG, AAC, H.264, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
-    // Rust audio codecs go ahead of the platform ones, so FLAC, MP3 and Opus
-    // decode the same on the phone as on the desktop; WebP follows the same
-    // rule.
+    // Rust audio codecs go ahead of the platform ones, so FLAC, ALAC, MP3
+    // and Opus decode the same on the phone as on the desktop; WebP follows
+    // the same rule.
     cutlass_flac::register_decoders(&mut decoders);
+    cutlass_alac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
     cutlass_webp::register_decoders(&mut decoders);
@@ -346,6 +347,65 @@ mod tests {
             cutlass_opus::register_encoders(&mut reversed);
             let mut platform = reversed.open(&spec).expect("platform encoder");
             assert_ne!(encode(platform.as_mut()), packets);
+        }
+    }
+
+    /// The phone decodes ALAC with the Rust decoder: the same buffers as
+    /// `AlacDecoder`, a 5.1 stream in ALAC's own channel order, and the same
+    /// refusal of a damaged frame. On an Apple phone the platform decoder,
+    /// put first, decodes the same samples but hands back sound for the
+    /// damaged frame, so this fails if the order is reversed.
+    #[test]
+    fn the_rust_alac_decoder_goes_ahead_of_the_platform_one() {
+        let layout = ChannelLayout::five_one();
+        let mut spec = CodecParams::audio(CodecId::Alac, 48_000, layout.clone());
+        spec.sample_format = Some(cutlass_decode::SampleFormat::I16);
+        let samples: Vec<i16> = (0..6 * 9000)
+            .map(|i| ((((i % 6) + 1) as f32 * (i / 6) as f32 * 0.011).sin() * 9000.0) as i16)
+            .collect();
+        let input = AudioInput {
+            pcm: Pcm::from_i16(48_000, layout, samples).expect("pcm"),
+        };
+        let mut encoder = cutlass_alac::AlacEncoder::open(&spec).expect("encoder");
+        let mut packets = encoder.push(&input).expect("push");
+        packets.extend(encoder.drain().expect("drain"));
+        spec.extra = encoder.cookie().to_bytes();
+        let decode = |decoder: &mut dyn Decoder| {
+            let mut out = Vec::new();
+            for packet in &packets {
+                for output in decoder.push(packet).expect("push") {
+                    if let Output::Audio(audio) = output {
+                        out.push(audio.pcm);
+                    }
+                }
+            }
+            out
+        };
+        let damaged = cutlass_decode::Packet::audio(vec![0xff; 64], 0, 4096, 48_000);
+
+        let mut rust = cutlass_alac::AlacDecoder::open(&spec).expect("rust");
+        let expected = decode(&mut rust);
+        assert!(!expected.is_empty());
+        assert!(rust.push(&damaged).is_err(), "the Rust decoder refuses it");
+        let mut phone = super::decoders().open(&spec).expect("phone");
+        assert!(
+            decode(phone.as_mut()) == expected,
+            "the Rust decoder decodes ALAC"
+        );
+        assert!(
+            phone.push(&damaged).is_err(),
+            "the damaged frame is refused"
+        );
+        #[cfg(target_vendor = "apple")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_decoders(&mut reversed);
+            cutlass_alac::register_decoders(&mut reversed);
+            let mut platform = reversed.open(&spec).expect("platform");
+            assert!(
+                platform.push(&damaged).is_ok(),
+                "the platform decoder was not picked"
+            );
         }
     }
 

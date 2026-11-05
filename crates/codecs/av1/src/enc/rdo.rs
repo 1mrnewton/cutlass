@@ -8,12 +8,15 @@ use crate::dec::coder::Coder;
 use crate::dec::tile::{Block, TileDec};
 use crate::dec::types::{
     BLOCK_8X8, DC_PRED, GLOBALMV, INTRA_FRAME, LAST_FRAME, Mv, NEARESTMV, NEARMV, NEWMV, NONE,
-    PAETH_PRED, SMOOTH_PRED, bh4, block_height, block_width, bw4, mi_height_log2, mi_width_log2,
-    plane_residual_size, tx_h, tx_w,
+    PAETH_PRED, SMOOTH_PRED, UV_CFL_PRED, bh4, block_height, block_width, bw4, mi_height_log2,
+    mi_width_log2, plane_residual_size, tx_h, tx_w,
 };
 use crate::dsp::Pixel;
+use crate::dsp::ipred::{EDGE_LEN, EDGE_OFF, cfl_ac, cfl_pred, predict_clipped};
 use crate::dsp::itx::inv_txfm_add;
-use crate::spec::tables::{MAX_TX_SIZE_RECT, NUM_4X4_BLOCKS_WIDE, PARTITION_SUBSIZE, SPLIT_TX_SIZE};
+use crate::spec::tables::{
+    MAX_TX_SIZE_RECT, NUM_4X4_BLOCKS_WIDE, PARTITION_SUBSIZE, SPLIT_TX_SIZE,
+};
 
 use super::fwd_txfm::fwd_txfm;
 
@@ -36,6 +39,14 @@ pub struct ModeParams {
     pub intra_modes: u8,
     /// How many transform splits the size search tries (0 keeps the largest).
     pub tx_depth: u8,
+    /// Try chroma from luma.
+    pub cfl: bool,
+    pub angle_deltas: bool,
+    pub filter_intra: bool,
+    /// Allow 64-point transforms (chosen against their split by RD cost).
+    pub tx64: bool,
+    /// Partition by transform-coded RD estimates instead of SATD.
+    pub rd_partition: bool,
 }
 
 impl Default for ModeParams {
@@ -50,6 +61,11 @@ impl Default for ModeParams {
             subpel: 2,
             intra_modes: 13,
             tx_depth: 1,
+            cfl: true,
+            angle_deltas: true,
+            filter_intra: true,
+            tx64: true,
+            rd_partition: true,
         }
     }
 }
@@ -60,6 +76,15 @@ const PARTITION_VERT: usize = 2;
 const PARTITION_SPLIT: usize = 3;
 
 impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
+    /// The cost of the extra signalling a split brings, in the units `est_block` returns.
+    fn split_penalty(&self, bits: f64) -> f64 {
+        if self.mode.rd_partition {
+            self.enc.lambda * 8.0 * bits
+        } else {
+            self.mode.lambda_satd * bits
+        }
+    }
+
     /// SATD of a DC prediction formed from the source neighbors (open loop).
     fn est_intra(&self, x: usize, y: usize, w: usize, h: usize) -> f64 {
         let Some(src) = self.src else { return 0.0 };
@@ -126,7 +151,144 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         f64::from(res.cost)
     }
 
+    /// Rate-distortion estimate (squared error + lambda * bits) of coding
+    /// a `w`x`h` luma area with the best of a few intra predictions formed
+    /// from the source neighbors, and, in inter frames, with full-sample
+    /// motion from LAST.
+    fn est_block_rd(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+        let Some(src) = self.src else { return 0.0 };
+        let fw = self.fs.mi_cols * 4;
+        let fh = self.fs.mi_rows * 4;
+        if x >= fw || y >= fh {
+            return 0.0;
+        }
+        let cw = w.min(fw - x);
+        let ch = h.min(fh - y);
+        // Work on a power-of-two area and scale the cost to the clipped one.
+        let pw = 1usize << (usize::BITS - 1 - cw.leading_zeros());
+        let ph = 1usize << (usize::BITS - 1 - ch.leading_zeros());
+        let (pw, ph) = (pw.min(64).min(4 * ph), ph.min(64).min(4 * pw));
+        if pw < 4 || ph < 4 {
+            return 0.0;
+        }
+        let scale = (cw * ch) as f64 / (pw * ph) as f64;
+        let cap = if self.mode.tx64 { 64 } else { 32 };
+        let (tw, th) = (pw.min(cap), ph.min(cap));
+        let tx = (0..19u8)
+            .find(|&t| tx_w(t) == tw && tx_h(t) == th)
+            .unwrap_or(0);
+        let lam_bits = self.enc.lambda * 8.0;
+        let sp = &src.planes[0];
+        let bd = self.bd;
+        let base = 1i32 << (bd - 1);
+        let have_above = y > 0;
+        let have_left = x > 0;
+        let mut above = [P::default(); EDGE_LEN];
+        let mut left = [P::default(); EDGE_LEN];
+        let n = pw + ph;
+        for i in 0..n {
+            above[EDGE_OFF + i] = if have_above {
+                sp.data[(y - 1) * sp.stride + (x + i).min(fw - 1)]
+            } else if have_left {
+                sp.data[y * sp.stride + x - 1]
+            } else {
+                P::from_i32(base - 1)
+            };
+            left[EDGE_OFF + i] = if have_left {
+                sp.data[(y + i).min(fh - 1) * sp.stride + x - 1]
+            } else if have_above {
+                sp.data[(y - 1) * sp.stride + x]
+            } else {
+                P::from_i32(base + 1)
+            };
+        }
+        let corner = match (have_above, have_left) {
+            (true, true) => sp.data[(y - 1) * sp.stride + x - 1],
+            (true, false) => sp.data[(y - 1) * sp.stride + x],
+            (false, true) => sp.data[y * sp.stride + x - 1],
+            _ => P::from_i32(base),
+        };
+        above[EDGE_OFF - 1] = corner;
+        left[EDGE_OFF - 1] = corner;
+        let mut pred = [P::default(); 64 * 64];
+        let mut best_pred = [P::default(); 64 * 64];
+        let mut best = (f64::MAX, 0.0);
+        let lam = self.mode.lambda_satd;
+        for (mode, bits) in [
+            (DC_PRED, 1.5),
+            (1, 3.0),
+            (2, 3.0),
+            (SMOOTH_PRED, 3.0),
+            (PAETH_PRED, 3.0),
+        ] {
+            let (mut a, mut l) = (above, left);
+            predict_clipped(
+                &mut pred, pw, pw, ph, mode, 0, &mut a, &mut l, have_left, have_above, false,
+                false, pw, ph, bd,
+            );
+            let d = f64::from(satd(
+                &sp.data[y * sp.stride + x..],
+                sp.stride,
+                &pred,
+                pw,
+                pw,
+                ph,
+            ));
+            let c = d + lam * bits;
+            if c < best.0 {
+                best = (c, bits);
+                best_pred[..pw * ph].copy_from_slice(&pred[..pw * ph]);
+            }
+        }
+        let mut res = [0i32; 64 * 64];
+        self.residual_of(&best_pred, pw, x, y, pw, ph, &mut res);
+        let mut cost = self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * best.1;
+        if self.mode.inter_frame
+            && let Some(rv) = self.refs[LAST_FRAME as usize].as_ref()
+        {
+            let rp = &rv.pic.planes[0];
+            let params = MeParams {
+                max_range: self.mode.me_range / 2,
+                subpel: 0,
+                ..MeParams::default()
+            };
+            let cost_fn = |r: i32, c: i32| -> u32 { (lam * (2.0 + bits(r) + bits(c))) as u32 };
+            let me = motion_search(
+                &mut self.me_scratch,
+                &sp.data,
+                sp.stride,
+                x,
+                y,
+                pw,
+                ph,
+                &rp.data,
+                rp.stride,
+                rp.w,
+                rp.h,
+                &[(0, 0)],
+                &params,
+                &cost_fn,
+                bd,
+            );
+            let (dy, dx) = (me.mv.0 >> 3, me.mv.1 >> 3);
+            for i in 0..ph {
+                let ry = (y as i32 + i as i32 + dy).clamp(0, rp.h as i32 - 1) as usize;
+                for j in 0..pw {
+                    let rx = (x as i32 + j as i32 + dx).clamp(0, rp.w as i32 - 1) as usize;
+                    pred[i * pw + j] = rp.data[ry * rp.stride + rx];
+                }
+            }
+            self.residual_of(&pred, pw, x, y, pw, ph, &mut res);
+            let mvb = 2.0 + bits(me.mv.0) + bits(me.mv.1);
+            cost = cost.min(self.tx_cost(&res[..pw * ph], pw, ph, tx) + lam_bits * mvb);
+        }
+        cost * scale
+    }
+
     fn est_block(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+        if self.mode.rd_partition {
+            return self.est_block_rd(x, y, w, h);
+        }
         let fw = self.fs.mi_cols * 4;
         let fh = self.fs.mi_rows * 4;
         if x >= fw || y >= fh {
@@ -194,7 +356,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 } else {
                     self.est_block(x, y + half, half, half)
                 };
-            if quads + self.mode.lambda_satd * 4.0 < whole {
+            if quads + self.split_penalty(4.0) < whole {
                 return PARTITION_SPLIT;
             }
             return if !has_rows {
@@ -214,7 +376,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             + self.est_block(x + half, y, half, half)
             + self.est_block(x, y + half, half, half)
             + self.est_block(x + half, y + half, half, half)
-            + self.mode.lambda_satd * 8.0;
+            + self.split_penalty(8.0);
         if split < none {
             PARTITION_SPLIT
         } else {
@@ -244,7 +406,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let max_tx = MAX_TX_SIZE_RECT[bs as usize];
         // 64-point transforms drop all but the lowest 32x32 frequencies; start below them.
         let mut tx = max_tx;
-        while tx_w(tx) > 32 || tx_h(tx) > 32 {
+        while !self.mode.tx64 && (tx_w(tx) > 32 || tx_h(tx) > 32) {
             tx = SPLIT_TX_SIZE[tx as usize];
         }
         // Evaluate on the first transform block's area (all of a block up to 64x64).
@@ -256,6 +418,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let saved = self.b.clone();
         let (best_mode, intra_cost) = self.pick_intra_luma(x, y, w, h, tx);
         pb.y_mode = best_mode;
+        let (angle, fi) = self.intra_choice;
+        pb.angle_delta_y = angle;
+        pb.use_filter_intra = fi.is_some();
+        pb.filter_intra_mode = fi.unwrap_or(0);
         pb.tx_size = tx;
         let mut best_cost = intra_cost
             + if self.mode.inter_frame {
@@ -290,6 +456,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             } else {
                 DC_PRED
             };
+            if pb.uv_mode == UV_CFL_PRED {
+                (pb.cfl_alpha_u, pb.cfl_alpha_v) = self.cfl_choice;
+            }
         }
         // Skip when the prediction is already close to the source.
         pb.skip = self.block_is_skip(&pb);
@@ -308,17 +477,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let lam = self.enc.lambda * 8.0;
         let mut d = 0f64;
         let mut bits = 0f64;
-        let mut blk = [0i32; 32 * 32];
-        let mut coefs = [0i32; 32 * 32];
+        let mut blk = [0i32; 64 * 64];
+        let mut coefs = [0i32; 64 * 64];
         let mid = P::from_i32(1 << (bd - 1));
-        let mut rec = [mid; 32 * 32];
+        let mut rec = [mid; 64 * 64];
         let round = 48i64;
         let mut y0 = 0;
         while y0 < h {
             let mut x0 = 0;
             while x0 < w {
                 for i in 0..th {
-                    blk[i * tw..i * tw + tw].copy_from_slice(&res[(y0 + i) * w + x0..(y0 + i) * w + x0 + tw]);
+                    blk[i * tw..i * tw + tw]
+                        .copy_from_slice(&res[(y0 + i) * w + x0..(y0 + i) * w + x0 + tw]);
                 }
                 fwd_txfm(&blk, tw, &mut coefs, tx as usize, 0, bd);
                 let mut nz = (0, 0);
@@ -344,7 +514,17 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     *v = mid;
                 }
                 if nz.0 > 0 {
-                    inv_txfm_add(&mut rec, tw, &mut coefs, tx as usize, 0, nz.0, nz.1, false, bd);
+                    inv_txfm_add(
+                        &mut rec,
+                        tw,
+                        &mut coefs,
+                        tx as usize,
+                        0,
+                        nz.0,
+                        nz.1,
+                        false,
+                        bd,
+                    );
                 } else {
                     for v in coefs[..cw * ch].iter_mut() {
                         *v = 0;
@@ -352,7 +532,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 }
                 for i in 0..th {
                     for j in 0..tw {
-                        let e = res[(y0 + i) * w + x0 + j] - (rec[i * tw + j].to_i32() - (1 << (bd - 1)));
+                        let e = res[(y0 + i) * w + x0 + j]
+                            - (rec[i * tw + j].to_i32() - (1 << (bd - 1)));
                         d += f64::from(e * e);
                     }
                 }
@@ -363,12 +544,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         d + lam * bits
     }
 
-    fn residual_of(&self, pred: &[P], pred_stride: usize, x: usize, y: usize, w: usize, h: usize, out: &mut [i32]) {
+    fn residual_of(
+        &self,
+        pred: &[P],
+        pred_stride: usize,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        out: &mut [i32],
+    ) {
         let Some(src) = self.src else { return };
         let sp = &src.planes[0];
         for i in 0..h {
             for j in 0..w {
-                out[i * w + j] = sp.data[(y + i) * sp.stride + x + j].to_i32() - pred[i * pred_stride + j].to_i32();
+                out[i * w + j] = sp.data[(y + i) * sp.stride + x + j].to_i32()
+                    - pred[i * pred_stride + j].to_i32();
             }
         }
     }
@@ -379,7 +570,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let w = block_width(pb.bsize).min(self.fs.mi_cols * 4 - x);
         let h = block_height(pb.bsize).min(self.fs.mi_rows * 4 - y);
         let (w, h) = (w & !(tx_w(tx) - 1), h & !(tx_h(tx) - 1));
-        if w == 0 || h == 0 || self.predict_into_scratch(0, LAST_FRAME, x, y, w, h, pb.mv[0], [0, 0]).is_err() {
+        if w == 0
+            || h == 0
+            || self
+                .predict_into_scratch(0, LAST_FRAME, x, y, w, h, pb.mv[0], [0, 0])
+                .is_err()
+        {
             return tx;
         }
         let mut res = vec![0i32; w * h];
@@ -427,17 +623,35 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let ar = bdf[sr][sc + (w >> 2) + 1];
         let bl = bdf[sr + (h >> 2) + 1][sc];
         let saved = self.b.clone();
-        self.b.use_filter_intra = false;
-        self.b.angle_delta_y = 0;
-        self.predict_intra(0, x, y, pb.avail_l, pb.avail_u, ar, bl, pb.y_mode, w.trailing_zeros(), h.trailing_zeros());
+        self.b.use_filter_intra = pb.use_filter_intra;
+        self.b.filter_intra_mode = pb.filter_intra_mode;
+        self.b.angle_delta_y = pb.angle_delta_y;
+        self.predict_intra(
+            0,
+            x,
+            y,
+            pb.avail_l,
+            pb.avail_u,
+            ar,
+            bl,
+            pb.y_mode,
+            w.trailing_zeros(),
+            h.trailing_zeros(),
+        );
         self.b = saved;
         let cp = &self.cur.planes[0];
         let mut res = vec![0i32; w * h];
-        let pred: Vec<P> = (0..h).flat_map(|i| cp.data[(y + i) * cp.stride + x..][..w].to_vec()).collect();
+        let pred: Vec<P> = (0..h)
+            .flat_map(|i| cp.data[(y + i) * cp.stride + x..][..w].to_vec())
+            .collect();
         self.residual_of(&pred, w, x, y, w, h, &mut res);
         let whole = self.tx_cost(&res, w, h, tx);
         let s = SPLIT_TX_SIZE[tx as usize];
-        if s != tx && self.tx_cost(&res, w, h, s) < whole { s } else { tx }
+        if s != tx && self.tx_cost(&res, w, h, s) < whole {
+            s
+        } else {
+            tx
+        }
     }
 
     fn pick_intra_luma(&mut self, x: usize, y: usize, w: usize, h: usize, tx: u8) -> (u8, f64) {
@@ -484,6 +698,54 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 best = (mode, cost);
             }
         }
+        let sat = |s: &Self| -> f64 {
+            let cp = &s.cur.planes[0];
+            let sp = &src.planes[0];
+            f64::from(satd(
+                &sp.data[y * sp.stride + x..],
+                sp.stride,
+                &cp.data[y * cp.stride + x..],
+                cp.stride,
+                w,
+                h,
+            ))
+        };
+        let bs = self.b.bsize;
+        let mut angle = 0i8;
+        let mut fi: Option<u8> = None;
+        // Angle refinements of a directional winner.
+        if self.mode.angle_deltas && (1..=8).contains(&best.0) && bs >= BLOCK_8X8 {
+            let base = best.0;
+            for d in [-3i8, -2, -1, 1, 2, 3] {
+                self.b.angle_delta_y = d;
+                self.predict_intra(0, x, y, al, au, have_ar, have_bl, base, lw, lh);
+                let cost = sat(self) + lam * (3.5 + 1.0 + 0.5 * f64::from(d.unsigned_abs()));
+                if cost < best.1 {
+                    best = (base, cost);
+                    angle = d;
+                }
+            }
+            self.b.angle_delta_y = 0;
+        }
+        // Recursive filter intra (signalled as DC_PRED).
+        if self.mode.filter_intra
+            && self.seq.enable_filter_intra
+            && block_width(bs).max(block_height(bs)) <= 32
+        {
+            self.b.use_filter_intra = true;
+            for m in 0..5u8 {
+                self.b.filter_intra_mode = m;
+                self.predict_intra(0, x, y, al, au, have_ar, have_bl, DC_PRED, lw, lh);
+                let cost = sat(self) + lam * 4.5;
+                if cost < best.1 {
+                    best = (DC_PRED, cost);
+                    angle = 0;
+                    fi = Some(m);
+                }
+            }
+            self.b.use_filter_intra = false;
+        }
+        self.intra_choice = (angle, fi);
         best
     }
 
@@ -534,7 +796,97 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 best = (mode, cost);
             }
         }
+        // Chroma from luma, with the scaling fitted against the source luma.
+        let bs = pb.bsize;
+        let cfl_allowed = !self.b.lossless && block_width(bs).max(block_height(bs)) <= 32;
+        let mut cfl = (0i8, 0i8);
+        if cfl_allowed && self.mode.cfl {
+            let sp0 = &src.planes[0];
+            let lx = x << sx;
+            let ly = y << sy;
+            let fw = self.fs.mi_cols * 4;
+            let fh = self.fs.mi_rows * 4;
+            let vw = ((fw.saturating_sub(lx) + (1 << sx) - 1) >> sx).clamp(1, w);
+            let vh = ((fh.saturating_sub(ly) + (1 << sy) - 1) >> sy).clamp(1, h);
+            let mut ac = [0i32; 32 * 32];
+            cfl_ac(
+                &mut ac,
+                &sp0.data[ly * sp0.stride + lx..],
+                sp0.stride,
+                w,
+                h,
+                sx != 0,
+                sy != 0,
+                vw,
+                vh,
+            );
+            let mut d = 0u32;
+            let mut alphas = [0i8; 2];
+            for plane in 1..3 {
+                self.predict_intra(
+                    plane,
+                    x,
+                    y,
+                    al,
+                    au,
+                    false,
+                    false,
+                    DC_PRED,
+                    w.trailing_zeros(),
+                    h.trailing_zeros(),
+                );
+                let sp = &src.planes[plane];
+                let cp = &self.cur.planes[plane];
+                let mut dc = [P::default(); 32 * 32];
+                let mut num = 0f64;
+                let mut den = 0f64;
+                for i in 0..h {
+                    for j in 0..w {
+                        let p = cp.data[(y + i) * cp.stride + x + j];
+                        dc[i * w + j] = p;
+                        let r = sp.data[(y + i) * sp.stride + x + j].to_i32() - p.to_i32();
+                        let a = ac[i * w + j];
+                        num += f64::from(a) * f64::from(r);
+                        den += f64::from(a) * f64::from(a);
+                    }
+                }
+                let opt = if den > 0.0 {
+                    (64.0 * num / den).round()
+                } else {
+                    0.0
+                };
+                let a0 = opt.clamp(-16.0, 16.0) as i32;
+                let mut bp = (u32::MAX, 0i32);
+                for a in [a0 - 1, a0, a0 + 1] {
+                    if !(-16..=16).contains(&a) {
+                        continue;
+                    }
+                    let mut pr = dc;
+                    cfl_pred(&mut pr, w, w, h, &ac, a, self.bd);
+                    let dd = satd(&sp.data[y * sp.stride + x..], sp.stride, &pr, w, w, h)
+                        + (lam
+                            * if a == 0 {
+                                0.5
+                            } else {
+                                2.0 + 0.3 * f64::from(a.abs())
+                            }) as u32;
+                    if dd < bp.0 {
+                        bp = (dd, a);
+                    }
+                }
+                d = d.saturating_add(bp.0);
+                alphas[plane - 1] = bp.1 as i8;
+            }
+            if alphas != [0, 0] {
+                let cost = f64::from(d) + lam * 3.0;
+                if cost < best.1 {
+                    best = (UV_CFL_PRED, cost);
+                    cfl = (alphas[0], alphas[1]);
+                }
+            }
+        }
         self.b = saved;
+        self.cfl_choice = cfl;
         best.0
     }
 

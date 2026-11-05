@@ -280,7 +280,14 @@ impl Av1Enc {
             (ac * 20723 + 1_015_158 - 300_000) >> 18
         }
         .clamp(0, 63) as u8;
-        let pri = (i32::from(q) / 24).clamp(0, 15) as u8;
+        let ev = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let lvl = (f64::from(lvl) * ev("AV1_LFS", 1.0)).clamp(0.0, 63.0) as u8;
+        let pri = ((f64::from(q) / 24.0) * ev("AV1_CDS", 1.0)).clamp(0.0, 15.0) as u8;
         let mut h = FrameHeader {
             frame_type: if key { KEY_FRAME } else { INTER_FRAME },
             frame_is_intra: key,
@@ -391,21 +398,38 @@ impl Av1Enc {
         let dcq = f64::from(DC_QLOOKUP[bdi][q as usize]);
         let qstep = ac / 8.0;
         let speed = self.cfg.speed;
+        let ev = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
         let mode = ModeParams {
-            lambda_satd: 0.9 * qstep,
-            min_block: if speed >= 8 { 16 } else { 8 },
-            max_block: 32,
-            skip_sse_per_px: 0.25 * qstep * qstep,
+            lambda_satd: ev("AV1_LS", 0.9) * qstep,
+            min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
+            max_block: ev("AV1_MAXB", 32.0) as usize,
+            skip_sse_per_px: ev("AV1_SK", 0.25) * qstep * qstep,
             inter_frame: !key,
             me_range: if speed >= 8 { 16 } else { 48 },
             subpel: if speed >= 9 { 1 } else { 2 },
             intra_modes: if speed >= 8 { 10 } else { 13 },
-            tx_depth: if speed >= 9 { 0 } else if speed >= 5 { 1 } else { 2 },
+            tx_depth: if speed >= 9 {
+                0
+            } else if speed >= 5 {
+                1
+            } else {
+                2
+            },
+            cfl: speed < 9,
+            angle_deltas: speed < 7,
+            filter_intra: speed < 7,
+            tx64: ev("AV1_TX64", 0.0) > 0.0,
+            rd_partition: ev("AV1_RDP", 1.0) > 0.0,
         };
         let qp = QuantParams {
-            lambda: 0.08 * qstep * qstep,
-            round_intra: 56,
-            round_inter: 44,
+            lambda: ev("AV1_QL", 0.02) * qstep * qstep,
+            round_intra: ev("AV1_RI", 56.0) as i32,
+            round_inter: ev("AV1_RN", 44.0) as i32,
             tx_type_search: u8::from(speed < 9),
         };
         let _ = dcq;
@@ -440,6 +464,8 @@ impl Av1Enc {
                 pb: Default::default(),
                 plan: Default::default(),
                 plan_q: 0,
+                cfl_choice: (0, 0),
+                intra_choice: (0, None),
                 plan_delta_lf: [0; 4],
                 src: Some(&src),
                 enc: qp,

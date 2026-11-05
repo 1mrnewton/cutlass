@@ -293,6 +293,10 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub mode: crate::enc::rdo::ModeParams,
     pub me_scratch: crate::enc::me::MeScratch<P>,
     pub plan_q: i32,
+    /// CFL alphas found by the chroma mode search (encoder only).
+    pub cfl_choice: (i8, i8),
+    /// Angle delta and filter intra mode found by the luma mode search.
+    pub intra_choice: (i8, Option<u8>),
     pub plan_delta_lf: [i8; 4],
     pub cdf: &'a mut CdfContext,
     pub mi_row_start: usize,
@@ -1069,9 +1073,20 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
 
     #[cfg(feature = "stats")]
     fn count_tools(&self) {
-        use super::stats::hit;
+        use super::stats::{BSIZE, QIDX, SKIP, TXSIZE, YMODE, add, hit};
         let b = &self.b;
         hit(if b.is_inter { 1 } else { 0 });
+        let area = (bw4(b.bsize) * bh4(b.bsize)) as u64;
+        add(&BSIZE, b.bsize as usize, area);
+        add(&YMODE, b.y_mode as usize, area);
+        add(&TXSIZE, b.tx_size as usize, area);
+        if b.skip {
+            SKIP.fetch_add(area, std::sync::atomic::Ordering::Relaxed);
+        }
+        QIDX.store(
+            u64::from(self.hdr.quant.base_q_idx),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if b.ref_frame[1] > INTRA_FRAME {
             hit(2);
             match b.compound_type {

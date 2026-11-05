@@ -40,8 +40,42 @@ pub mod stats {
     pub fn hit(i: usize) {
         COUNTS[i].fetch_add(1, Ordering::Relaxed);
     }
+    /// Area (in 4x4 units) coded with each block size, luma mode and transform size.
+    pub static BSIZE: [AtomicU64; 22] = [const { AtomicU64::new(0) }; 22];
+    pub static YMODE: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+    pub static TXSIZE: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
+    pub static SKIP: AtomicU64 = AtomicU64::new(0);
+    pub static QIDX: AtomicU64 = AtomicU64::new(0);
+    pub fn add(a: &[AtomicU64], i: usize, v: u64) {
+        if let Some(c) = a.get(i) {
+            c.fetch_add(v, Ordering::Relaxed);
+        }
+    }
+    fn hist(name: &str, a: &[AtomicU64]) -> String {
+        let tot: u64 = a
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .sum::<u64>()
+            .max(1);
+        let mut s = format!("\n{name}:");
+        for (i, c) in a.iter().enumerate() {
+            let v = c.load(Ordering::Relaxed);
+            if v > 0 {
+                s.push_str(&format!(" {i}:{:.1}%", v as f64 * 100.0 / tot as f64));
+            }
+        }
+        s
+    }
     pub fn report() -> String {
         let mut s = String::new();
+        s.push_str(&hist("bsize", &BSIZE));
+        s.push_str(&hist("ymode", &YMODE));
+        s.push_str(&hist("txsize", &TXSIZE));
+        s.push_str(&format!(
+            "\nskip_area={} last_qidx={}\n",
+            SKIP.load(Ordering::Relaxed),
+            QIDX.load(Ordering::Relaxed)
+        ));
         for (i, n) in NAMES.iter().enumerate() {
             let v = COUNTS[i].load(Ordering::Relaxed);
             if v > 0 {

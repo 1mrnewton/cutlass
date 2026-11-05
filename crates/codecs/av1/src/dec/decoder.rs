@@ -17,13 +17,13 @@ use super::mvpred::{MfEntry, MfPlan, motion_field_plan};
 use super::obu::{
     FrameHeader, GrainParams, HeaderContext, KEY_FRAME, OBU_FRAME, OBU_FRAME_HEADER,
     OBU_REDUNDANT_FRAME_HEADER, OBU_SEQUENCE_HEADER, OBU_TILE_GROUP, OBU_TILE_LIST,
-    PRIMARY_REF_NONE, RefHeaderState, SequenceHeader, parse_frame_header, parse_sequence_header,
-    relative_dist, split_obus,
+    PRIMARY_REF_NONE, RefHeaderState, SequenceHeader, TRANSLATION, parse_frame_header,
+    parse_sequence_header, relative_dist, split_obus,
 };
 use super::postfilter;
 use super::recon::Scratch;
 use super::tile::{ReconLog, RefView, RowHook, TileDec, malformed};
-use super::types::{INTRA_FRAME, MiInfo, Mv};
+use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, LOCALWARP, MiInfo, Mv};
 
 type R<T> = Result<T, CodecError>;
 
@@ -34,10 +34,18 @@ pub enum AnyPicture {
     U16(Picture<u16>),
 }
 
+/// Sample rows of each plane of either sample size (see [`Band`]).
+pub enum AnyRows {
+    U8([Vec<u8>; 3]),
+    U16([Vec<u16>; 3]),
+}
+
 /// A sample type that can be viewed inside an [`AnyPicture`].
 pub trait PicturePixel: Pixel {
     fn view(p: &AnyPicture) -> Option<&Picture<Self>>;
     fn wrap(p: Picture<Self>) -> AnyPicture;
+    fn view_rows(r: &AnyRows) -> Option<&[Vec<Self>; 3]>;
+    fn wrap_rows(r: [Vec<Self>; 3]) -> AnyRows;
 }
 
 impl PicturePixel for u8 {
@@ -50,6 +58,15 @@ impl PicturePixel for u8 {
     fn wrap(p: Picture<u8>) -> AnyPicture {
         AnyPicture::U8(p)
     }
+    fn view_rows(r: &AnyRows) -> Option<&[Vec<u8>; 3]> {
+        match r {
+            AnyRows::U8(x) => Some(x),
+            AnyRows::U16(_) => None,
+        }
+    }
+    fn wrap_rows(r: [Vec<u8>; 3]) -> AnyRows {
+        AnyRows::U8(r)
+    }
 }
 
 impl PicturePixel for u16 {
@@ -61,6 +78,15 @@ impl PicturePixel for u16 {
     }
     fn wrap(p: Picture<u16>) -> AnyPicture {
         AnyPicture::U16(p)
+    }
+    fn view_rows(r: &AnyRows) -> Option<&[Vec<u16>; 3]> {
+        match r {
+            AnyRows::U16(x) => Some(x),
+            AnyRows::U8(_) => None,
+        }
+    }
+    fn wrap_rows(r: [Vec<u16>; 3]) -> AnyRows {
+        AnyRows::U16(r)
     }
 }
 
@@ -90,7 +116,7 @@ struct Slot {
 }
 
 /// Time spent in the stages of the threaded decoder (summed over threads),
-/// gathered with the `stats` feature.
+/// gathered with the `prof` feature.
 pub mod prof {
     use std::sync::atomic::{AtomicU64, Ordering};
     /// The calling thread waiting for pictures.
@@ -109,7 +135,7 @@ pub mod prof {
     /// Adds the time since `t` to stage `k`.
     #[inline]
     pub fn add(k: usize, t: std::time::Instant) {
-        if cfg!(feature = "stats") {
+        if cfg!(feature = "prof") {
             T[k].fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     }
@@ -129,56 +155,84 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Final sample rows of a frame still being decoded: luma rows `y0..y1`
+/// (chroma rows scaled by the subsampling), whole strides of each plane.
+pub struct Band {
+    y0: usize,
+    y1: usize,
+    strides: [usize; 3],
+    rows: AnyRows,
+}
+
+struct JobState {
+    result: Option<R<Arc<AnyPicture>>>,
+    /// While decoding: the final rows so far, luma rows `0..rows`.
+    bands: Vec<Arc<Band>>,
+    rows: usize,
+}
+
 /// The picture of a frame whose reconstruction and in-loop filters may
-/// still be running on other threads.
+/// still be running on other threads, and its rows as they become final.
 struct FrameJob {
-    state: Mutex<Option<R<Arc<AnyPicture>>>>,
+    state: Mutex<JobState>,
     cv: Condvar,
 }
 
 impl FrameJob {
-    fn running() -> Arc<Self> {
+    fn with(result: Option<R<Arc<AnyPicture>>>) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(None),
+            state: Mutex::new(JobState {
+                result,
+                bands: Vec::new(),
+                rows: 0,
+            }),
             cv: Condvar::new(),
         })
     }
 
+    fn running() -> Arc<Self> {
+        Self::with(None)
+    }
+
     fn ready(r: R<Arc<AnyPicture>>) -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(Some(r)),
-            cv: Condvar::new(),
-        })
+        Self::with(Some(r))
     }
 
     /// Publishes the result (only the first call counts).
     fn finish(&self, r: R<Arc<AnyPicture>>) {
         let mut s = lock(&self.state);
-        if s.is_none() {
-            *s = Some(r);
+        if s.result.is_none() {
+            s.result = Some(r);
+            s.bands = Vec::new();
+            self.cv.notify_all();
+        }
+    }
+
+    /// Publishes the next final rows.
+    fn publish(&self, band: Band) {
+        let mut s = lock(&self.state);
+        if s.result.is_none() && band.y0 == s.rows {
+            s.rows = band.y1;
+            s.bands.push(Arc::new(band));
             self.cv.notify_all();
         }
     }
 
     fn poll(&self) -> Option<R<Arc<AnyPicture>>> {
-        lock(&self.state).clone()
+        lock(&self.state).result.clone()
     }
 
     fn is_done(&self) -> bool {
-        lock(&self.state).is_some()
+        lock(&self.state).result.is_some()
     }
 
     /// Waits for the result.
     fn wait(&self) -> R<Arc<AnyPicture>> {
-        self.wait_as(prof::WAIT_OUT)
-    }
-    /// [`Self::wait`], counting the time as stage `k` of [`prof`].
-    fn wait_as(&self, k: usize) -> R<Arc<AnyPicture>> {
         let t = std::time::Instant::now();
         let mut s = lock(&self.state);
         loop {
-            if let Some(r) = &*s {
-                prof::add(k, t);
+            if let Some(r) = &s.result {
+                prof::add(prof::WAIT_OUT, t);
                 return r.clone();
             }
             s = self.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
@@ -187,16 +241,126 @@ impl FrameJob {
 
     /// Whether the job is done and nothing else holds its picture.
     fn pic_unshared(&self) -> bool {
-        matches!(&*lock(&self.state), Some(Ok(p)) if Arc::strong_count(p) == 1)
+        matches!(&lock(&self.state).result, Some(Ok(p)) if Arc::strong_count(p) == 1)
     }
 
     fn into_result(self) -> Option<R<Arc<AnyPicture>>> {
         self.state
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner)
+            .result
     }
 }
 
+/// Copies rows `y0..y1` (luma rows; to the bottom of the allocation when
+/// `y1` is `usize::MAX`) of every plane of `src` into a [`Band`].
+fn band_of<P: PicturePixel>(src: &Picture<P>, y0: usize, y1: usize) -> Band {
+    let sub_y = usize::from(src.sub_y);
+    let mut strides = [0; 3];
+    let rows = std::array::from_fn(|p| {
+        let Some(pl) = src.planes.get(p) else {
+            return Vec::new();
+        };
+        let sy = if p > 0 { sub_y } else { 0 };
+        strides[p] = pl.stride;
+        let a = (y0 >> sy).min(pl.alloc_h);
+        let b = if y1 == usize::MAX {
+            pl.alloc_h
+        } else {
+            (y1 >> sy).min(pl.alloc_h)
+        };
+        pl.data[a * pl.stride..b.max(a) * pl.stride].to_vec()
+    });
+    Band {
+        y0,
+        y1,
+        strides,
+        rows: P::wrap_rows(rows),
+    }
+}
+
+/// A copy of a reference still being decoded ([`RefView::mirror`]),
+/// brought up to the rows reconstruction reads.
+struct RefFill {
+    job: Arc<FrameJob>,
+    /// Reference frame (1..=7) of the view; other views of the same job
+    /// share the mirror.
+    ref_frame: usize,
+    /// Index of the copy in [`TileDec::mirrors`].
+    mirror: usize,
+    /// Bands of the job copied so far, and the luma rows they hold.
+    used: usize,
+    have: usize,
+    /// Every read waits for the whole picture (scaled reference).
+    whole: bool,
+}
+
+impl RefFill {
+    /// Waits until the reference has its luma rows `0..need` final (all
+    /// of it for `usize::MAX`) and copies them into `m`.
+    fn fill<P: PicturePixel>(&mut self, m: &mut Picture<P>, need: usize) -> R<()> {
+        if self.have >= need {
+            return Ok(());
+        }
+        let t = std::time::Instant::now();
+        let (bands, fin) = {
+            let mut s = lock(&self.job.state);
+            while s.result.is_none() && s.rows < need {
+                s = self.job.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
+            }
+            let bands = match s.result {
+                Some(_) => Vec::new(),
+                None => s.bands[self.used.min(s.bands.len())..].to_vec(),
+            };
+            self.used = s.bands.len();
+            (bands, s.result.clone())
+        };
+        prof::add(prof::WAIT_REFS, t);
+        for b in &bands {
+            if b.y0 != self.have || !copy_band(m, b) {
+                // Not the layout of the copy: take the whole picture.
+                let pic = self.job.wait()?;
+                return self.fill_final(m, &pic);
+            }
+            self.have = b.y1;
+        }
+        match fin {
+            Some(r) => self.fill_final(m, &*r?),
+            None => Ok(()),
+        }
+    }
+
+    /// Copies what `m` lacks of the finished picture `pic`.
+    fn fill_final<P: PicturePixel>(&mut self, m: &mut Picture<P>, pic: &AnyPicture) -> R<()> {
+        let Some(src) = P::view(pic) else {
+            return Err(malformed("reference sample size"));
+        };
+        let b = band_of(src, self.have, usize::MAX);
+        if !copy_band(m, &b) {
+            *m = src.clone();
+        }
+        self.have = usize::MAX;
+        Ok(())
+    }
+}
+
+/// Copies the rows of `b` into `m`; false when the layouts differ.
+fn copy_band<P: PicturePixel>(m: &mut Picture<P>, b: &Band) -> bool {
+    let Some(rows) = P::view_rows(&b.rows) else {
+        return false;
+    };
+    let sub_y = usize::from(m.sub_y);
+    for (p, pl) in m.planes.iter_mut().enumerate() {
+        let sy = if p > 0 { sub_y } else { 0 };
+        let o = (b.y0 >> sy).min(pl.alloc_h) * pl.stride;
+        let src = &rows[p];
+        if b.strides[p] != pl.stride || o + src.len() > pl.data.len() {
+            return false;
+        }
+        pl.data[o..o + src.len()].copy_from_slice(src);
+    }
+    true
+}
 /// Finishes a job with an error if its thread ends without a result.
 struct FinishGuard(Arc<FrameJob>);
 
@@ -1154,6 +1318,7 @@ fn decode_tiles<P: Pixel>(
             let slot = hdr.ref_frame_idx[i - 1] as usize;
             refs[i].map(|pic| RefView {
                 pic,
+                mirror: None,
                 upscaled_width: ref_hdr[slot].upscaled_width as usize,
                 frame_height: ref_hdr[slot].frame_height as usize,
                 frame_width: ref_hdr[slot].frame_width as usize,
@@ -1165,6 +1330,7 @@ fn decode_tiles<P: Pixel>(
             fs: &mut *fs,
             cur: &mut *cur,
             refs: ref_views,
+            mirrors: Vec::new(),
             msac: Msac::new(data, hdr.disable_cdf_update),
             cdf: &mut tile_cdf,
             mi_row_start: ti.mi_row_starts[tile_row] as usize,
@@ -1451,17 +1617,37 @@ fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
 /// (arriving on `rx` with their mode info) into `cur`, then passes each row
 /// with its samples on to `fwd` (the filter thread). Spent logs go back on
 /// `rows` for reuse.
-fn recon_worker<P: Pixel>(
+///
+/// References still being decoded are read from `mirrors` (see
+/// [`RefView::mirror`]), which `fills` bring up to the rows each chunk of
+/// blocks may read before it is reconstructed. Returns the mirrors.
+fn recon_worker<P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &mut FrameState,
     cur: &mut Picture<P>,
-    refs: &[Option<&Picture<P>>; 8],
-    ref_hdr: &[RefHeaderState; 8],
+    refs: [Option<RefView<'_, P>>; 8],
+    mirrors: Vec<Picture<P>>,
+    mut fills: Vec<RefFill>,
     rx: Receiver<(Option<RowMsg<P>>, ReconLog)>,
     fwd: Sender<RowMsg<P>>,
     rows: &Mutex<RowPools<P>>,
-) -> R<()> {
+) -> R<Vec<Picture<P>>> {
+    // References read through a warp or a scale may need any row.
+    let scaled = std::array::from_fn::<bool, 8, _>(|i| {
+        refs[i].as_ref().is_some_and(|rv| {
+            rv.upscaled_width != hdr.frame_width as usize
+                || rv.frame_height != hdr.frame_height as usize
+        })
+    });
+    for f in &mut fills {
+        if scaled[f.ref_frame] {
+            f.whole = true;
+        }
+    }
+    // The largest downward motion so far, in eighth samples: blocks also
+    // predict with the motion of earlier neighbours (OBMC, small chroma).
+    let mut max_down = 0i32;
     let mut cdf = CdfContext::new(hdr.quant.base_q_idx);
     let sb128 = seq.use_128x128_superblock;
     let mut td = TileDec {
@@ -1469,7 +1655,8 @@ fn recon_worker<P: Pixel>(
         hdr,
         fs,
         cur,
-        refs: ref_views(hdr, refs, ref_hdr),
+        refs,
+        mirrors,
         msac: Msac::new(&[], true),
         cdf: &mut cdf,
         mi_row_start: 0,
@@ -1519,6 +1706,34 @@ fn recon_worker<P: Pixel>(
     for (m, mut log) in rx {
         // Replay stores the mode info of each block as parsing did.
         add_mi_blocks(&mut row_blocks, td.fs, &log);
+        if !fills.is_empty() {
+            let mut bottom = 0;
+            let mut warp = false;
+            for rec in &log.blocks {
+                let b = &rec.b;
+                if !b.is_inter {
+                    continue;
+                }
+                bottom = bottom.max(4 * (b.mi_row + super::types::bh4(b.bsize)));
+                for l in 0..2 {
+                    if b.ref_frame[l] > INTRA_FRAME {
+                        max_down = max_down.max(i32::from(b.mv[l].row));
+                    }
+                }
+                warp |= b.motion_mode == LOCALWARP
+                    || ((b.y_mode == GLOBALMV || b.y_mode == GLOBAL_GLOBALMV)
+                        && hdr.gm_type.iter().any(|&t| t > TRANSLATION));
+            }
+            if bottom > 0 {
+                // The 8-tap filters read 4 rows below a sample; chroma
+                // positions round, and 16 luma rows cover both.
+                let need = bottom + (max_down.max(0) as usize).div_ceil(8) + 16;
+                for f in &mut fills {
+                    let need = if warp || f.whole { usize::MAX } else { need };
+                    f.fill(&mut td.mirrors[f.mirror], need)?;
+                }
+            }
+        }
         let tr = std::time::Instant::now();
         td.replay(&mut log)?;
         prof::add(prof::RECON, tr);
@@ -1535,27 +1750,7 @@ fn recon_worker<P: Pixel>(
         let _ = fwd.send(m);
         lock(rows).logs.push(log);
     }
-    Ok(())
-}
-
-/// The reference frames as a tile decoder sees them.
-fn ref_views<'a, P: Pixel>(
-    hdr: &FrameHeader,
-    refs: &[Option<&'a Picture<P>>; 8],
-    ref_hdr: &[RefHeaderState; 8],
-) -> [Option<RefView<'a, P>>; 8] {
-    std::array::from_fn(|i| {
-        if i == 0 {
-            return None;
-        }
-        let slot = hdr.ref_frame_idx[i - 1] as usize;
-        refs[i].map(|pic| RefView {
-            pic,
-            upscaled_width: ref_hdr[slot].upscaled_width as usize,
-            frame_height: ref_hdr[slot].frame_height as usize,
-            frame_width: ref_hdr[slot].frame_width as usize,
-        })
-    })
+    Ok(std::mem::take(&mut td.mirrors))
 }
 
 /// Where [`filter_rows_worker`] writes: the deblocked picture, and the CDEF
@@ -1607,8 +1802,10 @@ fn filter_ready_rows<P: Pixel>(
 /// Deblocks (when `lf_on`) the superblock rows arriving on `rx` into
 /// `out.deb`, and runs CDEF and loop restoration one superblock row behind,
 /// as each row's CDEF and loop restoration read deblocked samples of the
-/// next. Spent messages go back on `rows` for reuse.
-fn filter_rows_worker<P: Pixel>(
+/// next. Spent messages go back on `rows` for reuse. The rows that become
+/// final are published to `publish`, when given, for the frames that
+/// reference this one.
+fn filter_rows_worker<P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &mut FrameState,
@@ -1616,9 +1813,11 @@ fn filter_rows_worker<P: Pixel>(
     lf_on: bool,
     rx: Receiver<RowMsg<P>>,
     rows: &Mutex<RowPools<P>>,
+    publish: Option<&FrameJob>,
 ) {
     let mut pads = postfilter::cdef_pads();
     let mut pending: Option<(usize, usize)> = None;
+    let mut published = 0;
     for m in rx {
         let tf = std::time::Instant::now();
         m.apply(fs, out.deb, seq.subsampling_y);
@@ -1627,6 +1826,20 @@ fn filter_rows_worker<P: Pixel>(
         }
         if let Some((a, b)) = pending.take() {
             filter_ready_rows(seq, hdr, fs, &mut out, &mut pads, a, b, false);
+            if let Some(job) = publish {
+                // Luma rows above 4 * b are final: deblocking below changes
+                // none of them, and the loop restoration stripes done end
+                // 8 rows higher.
+                let done = if out.lr.is_some() { 4 * b - 8 } else { 4 * b };
+                if done > published {
+                    let fin = match (&out.lr, &out.cdef) {
+                        (Some(p), _) | (None, Some(p)) => &**p,
+                        (None, None) => &*out.deb,
+                    };
+                    job.publish(band_of(fin, published, done));
+                    published = done;
+                }
+            }
         }
         if m.last {
             filter_ready_rows(seq, hdr, fs, &mut out, &mut pads, m.r0, m.r1, true);
@@ -1881,21 +2094,74 @@ impl<P: PicturePixel> Backend<P> {
             rx,
         } = self;
         let _guard = FinishGuard(job.clone());
-        // Motion compensation reads whole reference pictures.
+        // References already decoded are read in place; those still
+        // decoding through a copy filled row by row (one per job).
         let mut held: [Option<Arc<AnyPicture>>; 8] = Default::default();
-        for (h, j) in held.iter_mut().zip(&ref_jobs) {
-            if let Some(j) = j {
-                match j.wait_as(prof::WAIT_REFS) {
-                    Ok(p) => *h = Some(p),
-                    Err(e) => return job.finish(Err(e)),
+        let mut fills: Vec<RefFill> = Vec::new();
+        let mut mirror_of = [None; 8];
+        let mut mirrors = Vec::new();
+        for i in 1..8 {
+            let Some(j) = &ref_jobs[i] else {
+                continue;
+            };
+            match j.poll() {
+                Some(Ok(p)) => held[i] = Some(p),
+                Some(Err(e)) => return job.finish(Err(e)),
+                None => {
+                    if let Some(f) = fills.iter().find(|f| Arc::ptr_eq(&f.job, j)) {
+                        mirror_of[i] = Some(f.mirror);
+                        continue;
+                    }
+                    let slot = hdr.ref_frame_idx[i - 1] as usize;
+                    let m = take_picture::<P>(
+                        &mut lock(&spares).pics,
+                        ref_hdr[slot].upscaled_width as usize,
+                        ref_hdr[slot].frame_height as usize,
+                        seq.num_planes(),
+                        seq.subsampling_x,
+                        seq.subsampling_y,
+                        seq.bit_depth,
+                    );
+                    mirror_of[i] = Some(mirrors.len());
+                    fills.push(RefFill {
+                        job: j.clone(),
+                        ref_frame: i,
+                        mirror: mirrors.len(),
+                        used: 0,
+                        have: 0,
+                        whole: false,
+                    });
+                    mirrors.push(m);
                 }
             }
         }
         drop(ref_jobs);
+        let placeholder = Picture::<P> {
+            planes: Vec::new(),
+            bd: seq.bit_depth,
+            sub_x: seq.subsampling_x,
+            sub_y: seq.subsampling_y,
+        };
         let res = {
-            let refs: [Option<&Picture<P>>; 8] =
-                std::array::from_fn(|i| held[i].as_deref().and_then(P::view));
+            let refs: [Option<RefView<'_, P>>; 8] = std::array::from_fn(|i| {
+                if i == 0 {
+                    return None;
+                }
+                let pic = match mirror_of[i] {
+                    Some(_) => &placeholder,
+                    None => held[i].as_deref().and_then(P::view)?,
+                };
+                let slot = hdr.ref_frame_idx[i - 1] as usize;
+                Some(RefView {
+                    pic,
+                    mirror: mirror_of[i],
+                    upscaled_width: ref_hdr[slot].upscaled_width as usize,
+                    frame_height: ref_hdr[slot].frame_height as usize,
+                    frame_width: ref_hdr[slot].frame_width as usize,
+                })
+            });
             let (seq, hdr, rows) = (&seq, &hdr, &*rows);
+            let jr = &*job;
             std::thread::scope(|s| {
                 let (tx, frx) = std::sync::mpsc::channel::<RowMsg<P>>();
                 let out = FilterOut {
@@ -1905,19 +2171,21 @@ impl<P: PicturePixel> Backend<P> {
                     lr_scratch: &mut lr_scratch,
                 };
                 let pf = &mut pf_fs;
-                let worker =
-                    s.spawn(move || filter_rows_worker(seq, hdr, pf, out, lf_on, frx, rows));
+                let worker = s.spawn(move || {
+                    filter_rows_worker(seq, hdr, pf, out, lf_on, frx, rows, Some(jr));
+                });
                 let r = recon_worker(
-                    seq, hdr, &mut rc_fs, &mut cur, &refs, &ref_hdr, rx, tx, rows,
+                    seq, hdr, &mut rc_fs, &mut cur, refs, mirrors, fills, rx, tx, rows,
                 );
                 match (r, worker.join()) {
                     (Err(e), _) => Err(e),
-                    (Ok(()), Err(_)) => Err(malformed("in-loop filter thread")),
-                    (Ok(()), Ok(())) => Ok(()),
+                    (Ok(_), Err(_)) => Err(malformed("in-loop filter thread")),
+                    (Ok(m), Ok(())) => Ok(m),
                 }
             })
         };
         drop(held);
+        let res = res.map(|mirrors| lock(&spares).pics.extend(mirrors));
         let mut back = vec![cur];
         let mut fin = match (cdef, lr) {
             (c, Some(l)) => {
@@ -1946,7 +2214,7 @@ impl<P: PicturePixel> Backend<P> {
 /// [`decode_frame`] with the references at hand: parsing and
 /// reconstruction on this thread, the in-loop filters on a second one
 /// (when `pipeline`) or after the tiles.
-fn decode_frame_sync<P: Pixel>(
+fn decode_frame_sync<P: PicturePixel>(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     fs: &mut FrameState,
@@ -2007,7 +2275,7 @@ fn decode_frame_sync<P: Pixel>(
             };
             let pf_fs = &mut pf_fs;
             let worker = s.spawn(move || {
-                filter_rows_worker(seq, hdr, pf_fs, out, lf_on, rx, rows);
+                filter_rows_worker(seq, hdr, pf_fs, out, lf_on, rx, rows, None);
             });
             let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
             let sub_y = seq.subsampling_y;

@@ -64,7 +64,7 @@ fn main() -> Result<(), String> {
         start.elapsed().as_secs_f64(),
         core.threads
     );
-    #[cfg(feature = "stats")]
+    #[cfg(feature = "prof")]
     eprintln!("{}", cutlass_av1::dec::decoder::prof::report());
     Ok(())
 }

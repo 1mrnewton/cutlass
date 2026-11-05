@@ -340,9 +340,21 @@ pub struct PlannedTx {
 /// A reference frame as the tile decoder sees it.
 pub struct RefView<'a, P> {
     pub pic: &'a Picture<P>,
+    /// The samples are in [`TileDec::mirrors`] at this index instead of
+    /// `pic`: a copy filled row by row while the reference still decodes.
+    pub mirror: Option<usize>,
     pub upscaled_width: usize,
     pub frame_height: usize,
     pub frame_width: usize,
+}
+
+/// The samples of `rv` (see [`RefView::mirror`]).
+#[inline(always)]
+pub fn ref_picture<'s, P>(rv: &'s RefView<'_, P>, mirrors: &'s [Picture<P>]) -> &'s Picture<P> {
+    match rv.mirror {
+        Some(k) => &mirrors[k],
+        None => rv.pic,
+    }
 }
 
 pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
@@ -352,6 +364,8 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub cur: &'a mut Picture<P>,
     /// Indexed by reference frame type 1..=7.
     pub refs: [Option<RefView<'a, P>>; 8],
+    /// Copies of references still being decoded (see [`RefView::mirror`]).
+    pub mirrors: Vec<Picture<P>>,
     pub msac: C,
     /// The planned block (encoder only); the source of written values.
     pub pb: Block,

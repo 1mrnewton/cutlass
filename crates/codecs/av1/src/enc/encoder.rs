@@ -910,6 +910,7 @@ impl Av1Enc {
                 let p = P::view(pic)?;
                 Some(RefView {
                     pic: p,
+                    mirror: None,
                     upscaled_width: refs_hdr[slot].upscaled_width as usize,
                     frame_height: refs_hdr[slot].frame_height as usize,
                     frame_width: refs_hdr[slot].frame_width as usize,
@@ -921,6 +922,7 @@ impl Av1Enc {
                 fs,
                 cur,
                 refs: ref_views,
+                mirrors: Vec::new(),
                 msac: MsacEnc::new(!hdr.disable_cdf_update),
                 pb: Default::default(),
                 plan: Default::default(),

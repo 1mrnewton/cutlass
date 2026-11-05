@@ -7,7 +7,7 @@ use crate::dsp::mc;
 use crate::spec::tables::{QUANT_DIST_LOOKUP, QUANT_DIST_WEIGHT};
 
 use super::obu::TRANSLATION;
-use super::tile::{R, TileDec};
+use super::tile::{R, TileDec, ref_picture};
 use super::types::{
     COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA, COMPOUND_WEDGE, DC_PRED,
     GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SMOOTH_PRED, V_PRED, bh4,
@@ -455,7 +455,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
                     return Err(super::tile::malformed("missing reference"));
                 };
-                (&rv.pic.planes[plane].data, rv.pic.planes[plane].stride)
+                let p = &ref_picture(rv, &self.mirrors).planes[plane];
+                (&p.data, p.stride)
             };
             if self.scratch.emu.len() < fw * fh {
                 self.scratch.emu.resize(fw * fh, P::default());
@@ -480,7 +481,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
                 return Err(super::tile::malformed("missing reference"));
             };
-            let p = &rv.pic.planes[plane];
+            let p = &ref_picture(rv, &self.mirrors).planes[plane];
             (&p.data, p.stride, iy as usize * p.stride + ix as usize)
         };
         let mx = (sx0 >> 6) as usize & 15;
@@ -565,7 +566,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
             return Err(super::tile::malformed("missing reference"));
         };
-        let rp = &rv.pic.planes[plane];
+        let rp = &ref_picture(rv, &self.mirrors).planes[plane];
         for i8 in 0..h.div_ceil(8) {
             for j8 in 0..w.div_ceil(8) {
                 let bx = x + j8 * 8;

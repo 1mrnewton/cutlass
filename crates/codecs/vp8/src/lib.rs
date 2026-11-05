@@ -6,4 +6,5 @@
 #![forbid(unsafe_code)]
 
 mod bool_coder;
+mod header;
 mod tables;

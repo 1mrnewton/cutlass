@@ -48,6 +48,7 @@ use cutlass_transcription::{
 
 mod assistant;
 mod compound;
+mod hear;
 mod inspector;
 mod listen;
 mod proxy;
@@ -711,6 +712,11 @@ pub struct Shell {
     next_id: u64,
     /// The local speech model, loaded on the first transcript that can hear a clip.
     speech: RefCell<Option<ParakeetUnified>>,
+    /// What each speech job heard, by id, for the assistant's tools.
+    heard: std::collections::HashMap<String, Result<String, String>>,
+    hearings: u64,
+    /// The assistant's speech jobs, carried from one tool call to the next.
+    agent_speech_jobs: std::collections::BTreeMap<String, cutlass_agent::SpeechJob>,
     /// Work running off the window thread, and the project it was started in.
     job: Option<RunningJob>,
     /// The movie the last export wrote.
@@ -808,6 +814,9 @@ impl Shell {
             saved: None,
             next_id: 0,
             speech: RefCell::new(None),
+            heard: std::collections::HashMap::new(),
+            hearings: 0,
+            agent_speech_jobs: std::collections::BTreeMap::new(),
             job: None,
             exported: None,
             imported: None,
@@ -12781,7 +12790,7 @@ mod tests {
         Folder::new(draft).save(dir).unwrap();
     }
 
-    pub(super) fn land_job(desktop: &mut Shell) {
+    pub(crate) fn land_job(desktop: &mut Shell) {
         // A debug Rust encoder on a small CI runner takes well over a minute.
         let until = std::time::Instant::now() + std::time::Duration::from_secs(300);
         while desktop.poll_job() && std::time::Instant::now() < until {

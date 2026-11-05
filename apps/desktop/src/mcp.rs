@@ -68,7 +68,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         settings,
         Headless(Rc::clone(&shell)),
         Probe,
-        Unbuilt(NOT_HERE),
+        Headless(Rc::clone(&shell)),
         Bundled,
         (
             Unbuilt(NOT_HERE),
@@ -146,6 +146,22 @@ impl Player for Headless {
 
 const NO_SCREEN: &str = "cutlass mcp has no screen to play on; seek moves the playhead that a .png export draws, and the Cutlass window plays";
 
+impl Speech for Headless {
+    fn start(&mut self, start_us: i64, duration_us: i64) -> Result<String, String> {
+        self.0
+            .borrow_mut()
+            .start_hearing(start_us, duration_us)
+            .map_err(|error| error.to_string())
+    }
+
+    fn poll(&mut self, job_id: &str) -> Result<Option<String>, String> {
+        self.0
+            .borrow_mut()
+            .hearing(job_id)
+            .map_err(|error| error.to_string())
+    }
+}
+
 impl Export for Headless {
     /// Writes the file before it answers: a `.png` is the frame at the
     /// playhead, anything else the whole project as H.264. An existing
@@ -208,19 +224,9 @@ impl Media for Probe {
     }
 }
 
-/// Transcription and packages, which this host does not run yet; the
-/// text says where they are.
+/// Packages, which this host does not run yet; the text says where they
+/// are.
 pub(crate) struct Unbuilt(pub(crate) &'static str);
-
-impl Speech for Unbuilt {
-    fn start(&mut self, _start_us: i64, _duration_us: i64) -> Result<String, String> {
-        Err(format!("transcription is {}", self.0))
-    }
-
-    fn poll(&mut self, _job_id: &str) -> Result<String, String> {
-        Err(format!("transcription is {}", self.0))
-    }
-}
 
 /// The effects, filters, transitions and animations Cutlass ships.
 pub(crate) struct Bundled;
@@ -418,6 +424,7 @@ mod tests {
             ),
             call(6, "player_play", json!({})),
             call(7, "catalog_search", json!({"input": "dissolve"})),
+            call(8, "speech_start", json!({"input": "0 100000"})),
         ]);
         let mut output = Vec::new();
         serve(Some(&project.0), input.as_bytes(), &mut output).unwrap();
@@ -428,7 +435,9 @@ mod tests {
                 .unwrap()
                 .to_owned()
         };
-        assert_eq!(answers.len(), 7);
+        assert_eq!(answers.len(), 8);
+        // A color clip has no sound to hear.
+        assert!(text(7).contains("nothing with sound"), "{}", text(7));
         assert!(text(6).contains("transition cutlass-"), "{}", text(6));
         assert_eq!(answers[1]["result"]["isError"], false, "{}", text(1));
         assert!(text(2).contains("still.png"), "{}", text(2));

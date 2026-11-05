@@ -1,7 +1,7 @@
 //! Frame-level decoding: OBU dispatch, reference frames, tiles, filters and output.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use cutlass_decode::CodecError;
@@ -23,7 +23,7 @@ use super::obu::{
 use super::postfilter;
 use super::recon::Scratch;
 use super::tile::{ReconLog, RefView, RowHook, TileDec, malformed};
-use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, LOCALWARP, MiInfo, Mv};
+use super::types::{GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, LOCALWARP, Mv};
 
 type R<T> = Result<T, CodecError>;
 
@@ -390,7 +390,7 @@ struct Spares<P> {
 /// threaded pipeline and the spares of finished jobs.
 struct PixState<P> {
     pool: Vec<Picture<P>>,
-    rows: Arc<Mutex<RowPools<P>>>,
+    rows: Arc<Mutex<RowPools>>,
     spares: Arc<Mutex<Spares<P>>>,
 }
 
@@ -1396,53 +1396,22 @@ fn decode_tiles<P: Pixel>(
     Ok(saved.unwrap_or_else(|| Box::new(cdf.clone())))
 }
 
-/// One superblock row of the frame being decoded, copied for
-/// [`filter_rows_worker`]: luma 4x4 rows `r0..r1`, their samples, mode info,
-/// loop filter transform sizes and CDEF indices.
+/// What the in-loop filters need of one parsed superblock row besides the
+/// mode info reconstruction stores: luma 4x4 rows `r0..r1`, their loop
+/// filter transform sizes and CDEF indices, and the loop restoration units.
 #[derive(Default)]
-struct RowMsg<P> {
+struct RowMsg {
     r0: usize,
     r1: usize,
     last: bool,
-    /// Per plane: first sample row and the rows (whole strides).
-    px: [(usize, Vec<P>); 3],
-    /// First 4x4 row copied and the mode info / transform size rows (the
-    /// last row reaches the end of the arrays).
+    /// First 4x4 row copied of the transform size rows (the last row
+    /// reaches the end of the arrays).
     mi_row0: usize,
-    mi: Vec<MiInfo>,
-    uv_modes: Vec<u8>,
-    /// The mode info as the blocks of the rows (in place of `mi`, which is
-    /// then empty): far less to copy than whole rows.
-    blocks: Vec<MiRect>,
     lf_tx: [Vec<u8>; 3],
     cdef_row0: usize,
     cdef: Vec<i8>,
     /// Loop restoration units of every plane (when the frame uses them).
     lr: [Vec<LrUnitParams>; 3],
-}
-
-/// The mode info `mi` of the 4x4s `row..row + h4`, `col..col + w4`.
-#[derive(Clone, Copy)]
-struct MiRect {
-    row: u32,
-    col: u32,
-    w4: u8,
-    h4: u8,
-    mi: MiInfo,
-}
-
-/// Appends the mode info of the blocks of `log` to `out`.
-fn add_mi_blocks(out: &mut Vec<MiRect>, fs: &FrameState, log: &ReconLog) {
-    out.extend(log.blocks.iter().map(|rec| {
-        let b = &rec.b;
-        MiRect {
-            row: b.mi_row as u32,
-            col: b.mi_col as u32,
-            w4: super::types::bw4(b.bsize).min(fs.mi_cols - b.mi_col) as u8,
-            h4: super::types::bh4(b.bsize).min(fs.mi_rows - b.mi_row) as u8,
-            mi: rec.mi,
-        }
-    }));
 }
 
 /// Motion field bands arriving from the thread computing them, in order.
@@ -1469,25 +1438,15 @@ impl MfFeed {
 }
 
 /// Spare [`RowMsg`]s and [`ReconLog`]s, with their buffers.
-pub(crate) struct RowPools<P> {
-    msgs: Vec<RowMsg<P>>,
+#[derive(Default)]
+pub(crate) struct RowPools {
+    msgs: Vec<RowMsg>,
     logs: Vec<ReconLog>,
 }
 
-impl<P> Default for RowPools<P> {
-    fn default() -> Self {
-        Self {
-            msgs: Vec::new(),
-            logs: Vec::new(),
-        }
-    }
-}
-
-impl<P: Pixel> RowMsg<P> {
+impl RowMsg {
     /// Copies the transform sizes, CDEF indices and loop restoration units
-    /// of luma 4x4 rows `r0..r1`, and their mode info when `with_mi`
-    /// (else [`Self::fill_mi`] adds it later).
-    #[allow(clippy::too_many_arguments)]
+    /// of luma 4x4 rows `r0..r1`.
     fn fill_meta(
         &mut self,
         fs: &FrameState,
@@ -1496,21 +1455,12 @@ impl<P: Pixel> RowMsg<P> {
         r1: usize,
         last: bool,
         sub_y: bool,
-        with_mi: bool,
     ) {
         self.r0 = r0;
         self.r1 = r1;
         self.last = last;
         let st = fs.mi_stride;
-        let end = if last { fs.mi.len() } else { r1 * st };
         self.mi_row0 = r0;
-        self.mi.clear();
-        self.uv_modes.clear();
-        self.blocks.clear();
-        if with_mi {
-            self.mi.extend_from_slice(&fs.mi[r0 * st..end]);
-            self.uv_modes.extend_from_slice(&fs.uv_modes[r0 * st..end]);
-        }
         // The transform size maps are indexed in each plane's 4x4 units.
         for (p, (d, s)) in self.lf_tx.iter_mut().zip(&fs.lf_tx).enumerate() {
             let sy = usize::from(p > 0 && sub_y);
@@ -1535,40 +1485,9 @@ impl<P: Pixel> RowMsg<P> {
         }
     }
 
-    /// Copies the samples of the rows (after [`Self::fill_meta`]).
-    fn fill_px(&mut self, cur: &Picture<P>, sub_y: bool) {
-        for (p, pl) in cur.planes.iter().enumerate().take(3) {
-            let sy = usize::from(p > 0 && sub_y);
-            let y0 = (4 * self.r0) >> sy;
-            let y1 = if self.last {
-                pl.alloc_h
-            } else {
-                ((4 * self.r1) >> sy).min(pl.alloc_h)
-            };
-            let (row0, v) = &mut self.px[p];
-            *row0 = y0;
-            v.clear();
-            v.extend_from_slice(&pl.data[y0 * pl.stride..y1 * pl.stride]);
-        }
-    }
-
-    /// Writes the copied rows into `fs` and `pic`.
-    fn apply(&self, fs: &mut FrameState, pic: &mut Picture<P>, sub_y: bool) {
-        for (pl, (row0, v)) in pic.planes.iter_mut().zip(&self.px) {
-            let o = row0 * pl.stride;
-            pl.data[o..o + v.len()].copy_from_slice(v);
-        }
-        let st = fs.mi_stride;
-        let o = self.mi_row0 * st;
-        fs.mi[o..o + self.mi.len()].copy_from_slice(&self.mi);
-        for r in &self.blocks {
-            let (w4, h4) = (usize::from(r.w4), usize::from(r.h4));
-            let o0 = r.row as usize * st + r.col as usize;
-            fs.mi[o0..o0 + w4].fill(r.mi);
-            for y in 1..h4 {
-                fs.mi.copy_within(o0..o0 + w4, o0 + y * st);
-            }
-        }
+    /// Writes the transform sizes, CDEF indices and loop restoration units
+    /// into `fs` (whose mode info reconstruction wrote).
+    fn apply_meta(&self, fs: &mut FrameState, sub_y: bool) {
         for (p, (d, s)) in fs.lf_tx.iter_mut().zip(&self.lf_tx).enumerate() {
             let o = (self.mi_row0 >> usize::from(p > 0 && sub_y)) * fs.mi_stride;
             d[o..o + s.len()].copy_from_slice(s);
@@ -1614,8 +1533,8 @@ fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
 }
 
 /// Predicts and reconstructs the superblock rows parsed on another thread
-/// (arriving on `rx` with their mode info) into `cur`, then passes each row
-/// with its samples on to `fwd` (the filter thread). Spent logs go back on
+/// (arriving on `rx` in chunks of blocks) into `cur`, and runs the in-loop
+/// filters behind them (`filt`). Spent logs and row messages go back on
 /// `rows` for reuse.
 ///
 /// References still being decoded are read from `mirrors` (see
@@ -1629,9 +1548,9 @@ fn recon_worker<P: PicturePixel>(
     refs: [Option<RefView<'_, P>>; 8],
     mirrors: Vec<Picture<P>>,
     mut fills: Vec<RefFill>,
-    rx: Receiver<(Option<RowMsg<P>>, ReconLog)>,
-    fwd: Sender<RowMsg<P>>,
-    rows: &Mutex<RowPools<P>>,
+    rx: Receiver<(Option<RowMsg>, ReconLog)>,
+    filt: &mut InlineFilter<'_, P>,
+    rows: &Mutex<RowPools>,
 ) -> R<Vec<Picture<P>>> {
     // References read through a warp or a scale may need any row.
     let scaled = std::array::from_fn::<bool, 8, _>(|i| {
@@ -1701,11 +1620,7 @@ fn recon_worker<P: PicturePixel>(
         scratch: Scratch::new(),
         rec: None,
     };
-    // The mode info of the blocks of the row so far.
-    let mut row_blocks = Vec::new();
     for (m, mut log) in rx {
-        // Replay stores the mode info of each block as parsing did.
-        add_mi_blocks(&mut row_blocks, td.fs, &log);
         if !fills.is_empty() {
             let mut bottom = 0;
             let mut warp = false;
@@ -1740,20 +1655,104 @@ fn recon_worker<P: PicturePixel>(
         log.clear();
         // The log of part of a row goes straight back; a row's message
         // comes with the last part.
-        let Some(mut m) = m else {
+        let Some(m) = m else {
             lock(rows).logs.push(log);
             continue;
         };
-        std::mem::swap(&mut m.blocks, &mut row_blocks);
-        row_blocks.clear();
-        m.fill_px(td.cur, seq.subsampling_y);
-        let _ = fwd.send(m);
-        lock(rows).logs.push(log);
+        let tf = std::time::Instant::now();
+        filt.row(seq, hdr, td.fs, td.cur, &m);
+        prof::add(prof::FILTER, tf);
+        let mut pool = lock(rows);
+        pool.msgs.push(m);
+        pool.logs.push(log);
     }
     Ok(std::mem::take(&mut td.mirrors))
 }
 
-/// Where [`filter_rows_worker`] writes: the deblocked picture, and the CDEF
+/// The in-loop filters of a frame, run by its reconstruction thread on
+/// the superblock rows behind it: a row is deblocked in place once the
+/// row below is reconstructed (whose intra prediction reads its unfiltered
+/// bottom samples), and gets CDEF and loop restoration once the row below
+/// is deblocked (they read 2 and 3 rows past it). Final rows are published
+/// to `publish` for the frames that reference this one.
+struct InlineFilter<'a, P> {
+    cdef: Option<&'a mut Picture<P>>,
+    lr: Option<&'a mut Picture<P>>,
+    lr_scratch: &'a mut LrScratch,
+    pads: [Vec<u16>; 3],
+    lf_on: bool,
+    publish: &'a FrameJob,
+    /// Reconstructed luma 4x4 rows waiting for deblocking, and deblocked
+    /// ones waiting for CDEF and loop restoration.
+    to_deblock: Option<(usize, usize)>,
+    to_filter: Option<(usize, usize)>,
+    published: usize,
+}
+
+impl<P: PicturePixel> InlineFilter<'_, P> {
+    /// Takes the reconstructed superblock row of `m`.
+    fn row(
+        &mut self,
+        seq: &SequenceHeader,
+        hdr: &FrameHeader,
+        fs: &mut FrameState,
+        cur: &mut Picture<P>,
+        m: &RowMsg,
+    ) {
+        m.apply_meta(fs, seq.subsampling_y);
+        if let Some((a, b)) = self.to_deblock.take() {
+            self.deblock(seq, hdr, fs, cur, a, b, false);
+        }
+        if m.last {
+            self.deblock(seq, hdr, fs, cur, m.r0, m.r1, true);
+        } else {
+            self.to_deblock = Some((m.r0, m.r1));
+        }
+    }
+
+    fn deblock(
+        &mut self,
+        seq: &SequenceHeader,
+        hdr: &FrameHeader,
+        fs: &FrameState,
+        cur: &mut Picture<P>,
+        a: usize,
+        b: usize,
+        last: bool,
+    ) {
+        if self.lf_on {
+            postfilter::loop_filter_rows(seq, hdr, fs, cur, a, b, last);
+        }
+        let mut out = FilterOut {
+            deb: cur,
+            cdef: self.cdef.as_deref_mut(),
+            lr: self.lr.as_deref_mut(),
+            lr_scratch: &mut *self.lr_scratch,
+        };
+        if let Some((c, d)) = self.to_filter.take() {
+            filter_ready_rows(seq, hdr, fs, &mut out, &mut self.pads, c, d, false);
+            // Luma rows above 4 * d are final: deblocking below changes
+            // none of them, and the loop restoration stripes done end 8
+            // rows higher.
+            let done = if out.lr.is_some() { 4 * d - 8 } else { 4 * d };
+            if done > self.published {
+                let fin = match (&out.lr, &out.cdef) {
+                    (Some(p), _) | (None, Some(p)) => &**p,
+                    (None, None) => &*out.deb,
+                };
+                self.publish.publish(band_of(fin, self.published, done));
+                self.published = done;
+            }
+        }
+        if last {
+            filter_ready_rows(seq, hdr, fs, &mut out, &mut self.pads, a, b, true);
+        } else {
+            self.to_filter = Some((a, b));
+        }
+    }
+}
+
+/// Where [`filter_ready_rows`] writes: the deblocked picture, and the CDEF
 /// and loop restoration outputs of the stages that run.
 struct FilterOut<'a, P> {
     deb: &'a mut Picture<P>,
@@ -1796,58 +1795,6 @@ fn filter_ready_rows<P: Pixel>(
             out.lr_scratch,
             stripes,
         );
-    }
-}
-
-/// Deblocks (when `lf_on`) the superblock rows arriving on `rx` into
-/// `out.deb`, and runs CDEF and loop restoration one superblock row behind,
-/// as each row's CDEF and loop restoration read deblocked samples of the
-/// next. Spent messages go back on `rows` for reuse. The rows that become
-/// final are published to `publish`, when given, for the frames that
-/// reference this one.
-fn filter_rows_worker<P: PicturePixel>(
-    seq: &SequenceHeader,
-    hdr: &FrameHeader,
-    fs: &mut FrameState,
-    mut out: FilterOut<'_, P>,
-    lf_on: bool,
-    rx: Receiver<RowMsg<P>>,
-    rows: &Mutex<RowPools<P>>,
-    publish: Option<&FrameJob>,
-) {
-    let mut pads = postfilter::cdef_pads();
-    let mut pending: Option<(usize, usize)> = None;
-    let mut published = 0;
-    for m in rx {
-        let tf = std::time::Instant::now();
-        m.apply(fs, out.deb, seq.subsampling_y);
-        if lf_on {
-            postfilter::loop_filter_rows(seq, hdr, fs, out.deb, m.r0, m.r1, m.last);
-        }
-        if let Some((a, b)) = pending.take() {
-            filter_ready_rows(seq, hdr, fs, &mut out, &mut pads, a, b, false);
-            if let Some(job) = publish {
-                // Luma rows above 4 * b are final: deblocking below changes
-                // none of them, and the loop restoration stripes done end
-                // 8 rows higher.
-                let done = if out.lr.is_some() { 4 * b - 8 } else { 4 * b };
-                if done > published {
-                    let fin = match (&out.lr, &out.cdef) {
-                        (Some(p), _) | (None, Some(p)) => &**p,
-                        (None, None) => &*out.deb,
-                    };
-                    job.publish(band_of(fin, published, done));
-                    published = done;
-                }
-            }
-        }
-        if m.last {
-            filter_ready_rows(seq, hdr, fs, &mut out, &mut pads, m.r0, m.r1, true);
-        } else {
-            pending = Some((m.r0, m.r1));
-        }
-        lock(rows).msgs.push(m);
-        prof::add(prof::FILTER, tf);
     }
 }
 
@@ -1954,10 +1901,8 @@ fn decode_frame_async<P: PicturePixel>(
         )
     };
     let cur = new_pic();
-    let deb = new_pic();
     let cdef = cdef_on.then(&mut new_pic);
     let lr = hdr.lr.uses_lr.then(&mut new_pic);
-    let pf_fs = take_shell(shells, fs);
     let rc_fs = take_shell(shells, fs);
     let lr_scratch = lock(&px.spares).lr.pop().unwrap_or_default();
     // The motion field is computed band by band on a thread of its own
@@ -1966,17 +1911,15 @@ fn decode_frame_async<P: PicturePixel>(
         fs.motion_field = vec![MfEntry::default(); p.w8 * p.h8];
     }
     let job = FrameJob::running();
-    let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg<P>>, ReconLog)>();
+    let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg>, ReconLog)>();
     let backend = Backend {
         seq: seq.clone(),
         hdr: hdr.clone(),
         ref_jobs: ref_jobs.clone(),
         ref_hdr: ref_hdr.clone(),
         cur,
-        deb,
         cdef,
         lr,
-        pf_fs,
         rc_fs,
         lr_scratch,
         lf_on,
@@ -2035,7 +1978,7 @@ fn decode_frame_async<P: PicturePixel>(
                   done: bool| {
                 let m = done.then(|| {
                     let mut m = lock(rows).msgs.pop().unwrap_or_default();
-                    m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y, false);
+                    m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
                     m
                 });
                 let spare = lock(rows).logs.pop().unwrap_or_default();
@@ -2059,18 +2002,16 @@ struct Backend<P> {
     ref_jobs: [Option<Arc<FrameJob>>; 8],
     ref_hdr: [RefHeaderState; 8],
     cur: Picture<P>,
-    deb: Picture<P>,
     cdef: Option<Picture<P>>,
     lr: Option<Picture<P>>,
-    pf_fs: FrameState,
     rc_fs: FrameState,
     lr_scratch: LrScratch,
     lf_on: bool,
-    rows: Arc<Mutex<RowPools<P>>>,
+    rows: Arc<Mutex<RowPools>>,
     spares: Arc<Mutex<Spares<P>>>,
     job: Arc<FrameJob>,
     /// The parsed chunks.
-    rx: Receiver<(Option<RowMsg<P>>, ReconLog)>,
+    rx: Receiver<(Option<RowMsg>, ReconLog)>,
 }
 
 impl<P: PicturePixel> Backend<P> {
@@ -2081,10 +2022,8 @@ impl<P: PicturePixel> Backend<P> {
             ref_jobs,
             ref_hdr,
             mut cur,
-            mut deb,
             mut cdef,
             mut lr,
-            mut pf_fs,
             mut rc_fs,
             mut lr_scratch,
             lf_on,
@@ -2160,50 +2099,40 @@ impl<P: PicturePixel> Backend<P> {
                     frame_width: ref_hdr[slot].frame_width as usize,
                 })
             });
-            let (seq, hdr, rows) = (&seq, &hdr, &*rows);
-            let jr = &*job;
-            std::thread::scope(|s| {
-                let (tx, frx) = std::sync::mpsc::channel::<RowMsg<P>>();
-                let out = FilterOut {
-                    deb: &mut deb,
-                    cdef: cdef.as_mut(),
-                    lr: lr.as_mut(),
-                    lr_scratch: &mut lr_scratch,
-                };
-                let pf = &mut pf_fs;
-                let worker = s.spawn(move || {
-                    filter_rows_worker(seq, hdr, pf, out, lf_on, frx, rows, Some(jr));
-                });
-                let r = recon_worker(
-                    seq, hdr, &mut rc_fs, &mut cur, refs, mirrors, fills, rx, tx, rows,
-                );
-                match (r, worker.join()) {
-                    (Err(e), _) => Err(e),
-                    (Ok(_), Err(_)) => Err(malformed("in-loop filter thread")),
-                    (Ok(m), Ok(())) => Ok(m),
-                }
-            })
+            let mut filt = InlineFilter {
+                cdef: cdef.as_mut(),
+                lr: lr.as_mut(),
+                lr_scratch: &mut lr_scratch,
+                pads: postfilter::cdef_pads(),
+                lf_on,
+                publish: &job,
+                to_deblock: None,
+                to_filter: None,
+                published: 0,
+            };
+            recon_worker(
+                &seq, &hdr, &mut rc_fs, &mut cur, refs, mirrors, fills, rx, &mut filt, &rows,
+            )
         };
         drop(held);
         let res = res.map(|mirrors| lock(&spares).pics.extend(mirrors));
-        let mut back = vec![cur];
+        let mut back = Vec::new();
         let mut fin = match (cdef, lr) {
             (c, Some(l)) => {
-                back.push(deb);
+                back.push(cur);
                 back.extend(c);
                 l
             }
             (Some(c), None) => {
-                back.push(deb);
+                back.push(cur);
                 c
             }
-            (None, None) => deb,
+            (None, None) => cur,
         };
         set_visible_size(&seq, &hdr, &mut fin);
         {
             let mut sp = lock(&spares);
             sp.pics.extend(back);
-            sp.shells.push(pf_fs);
             sp.shells.push(rc_fs);
             sp.lr.push(lr_scratch);
         }

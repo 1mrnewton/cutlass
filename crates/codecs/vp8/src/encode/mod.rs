@@ -85,6 +85,11 @@ pub struct Vp8Options {
     /// vertical, each 0..3: none, 5/4, 5/3, 2 (RFC 6386 Section 9.2).
     /// Carried on key frames only; the coded size is unchanged.
     pub scale: [u8; 2],
+    /// Code a shown inter frame as a key frame instead when at least
+    /// nine in ten of its macroblocks chose intra prediction: a scene
+    /// cut, where a key frame costs about the same and gives a new
+    /// random-access point and fresh references.
+    pub scene_cut: bool,
 }
 
 impl Default for Vp8Options {
@@ -102,6 +107,7 @@ impl Default for Vp8Options {
             error_resilient: false,
             sharpness: 0,
             scale: [0, 0],
+            scene_cut: true,
         }
     }
 }
@@ -172,6 +178,21 @@ struct Plan {
     copy_to_golden: u8,
     copy_to_altref: u8,
     sign_bias_altref: bool,
+}
+
+impl Plan {
+    /// A shown key frame, which refreshes every reference.
+    fn key() -> Self {
+        Self {
+            key: true,
+            show: true,
+            kind: KIND_KEY,
+            refresh_last: true,
+            refresh_golden: true,
+            refresh_altref: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Vp8Encoder {
@@ -355,13 +376,7 @@ impl Vp8Encoder {
             || self.force_key
             || self.since_key >= self.opts.keyframe_interval.max(1)
         {
-            return Plan {
-                key: true,
-                kind: KIND_KEY,
-                refresh_golden: true,
-                refresh_altref: true,
-                ..shown
-            };
+            return Plan::key();
         }
         if let Some(target) = self.altref_target {
             if target == self.shown {
@@ -523,6 +538,13 @@ impl Vp8Encoder {
         };
         let mut coded = code_frame(&src, &setup);
         let (mbw, mbh) = (src.mbw, src.mbh);
+        if !key && plan.show && self.opts.scene_cut {
+            let intra = coded.mbs.iter().filter(|mb| mb.ref_frame == INTRA).count();
+            if intra * 10 >= coded.mbs.len() * 9 {
+                // Nothing has been committed yet: code it again as a key.
+                return self.encode(input, Plan::key());
+            }
+        }
         let mut h = self.header(&plan, q, &base, &coded, mbw, mbh);
         if self.opts.segments {
             let mut counts = [0u32; 4];

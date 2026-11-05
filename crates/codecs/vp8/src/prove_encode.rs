@@ -115,13 +115,26 @@ fn reference_counts(width: u32, height: u32, packets: &[Vec<u8>]) -> [u64; 4] {
 /// returns the macroblocks per luma mode.
 fn check(name: &str, width: u32, height: u32, count: u32, opts: Vp8Options) -> [u64; 10] {
     let (packets, recon) = encode_synthetic(width, height, count, opts);
+    verify(name, width, height, count, packets, &recon)
+}
+
+/// Checks all three decoders against a reconstruction and returns the
+/// macroblocks per luma mode.
+fn verify(
+    name: &str,
+    width: u32,
+    height: u32,
+    count: u32,
+    packets: Vec<Vec<u8>>,
+    recon: &[u8],
+) -> [u64; 10] {
     let stream = Ivf {
         width,
         height,
         frames: packets,
     };
     let (ours, modes) = decode_counted(&stream);
-    if let Some(diff) = first_difference(&ours, &recon, width, height) {
+    if let Some(diff) = first_difference(&ours, recon, width, height) {
         panic!("{name}: our decoder differs from the reconstruction at {diff}");
     }
     assert_eq!(ours.len(), recon.len(), "{name}: bytes");
@@ -135,7 +148,7 @@ fn check(name: &str, width: u32, height: u32, count: u32, opts: Vp8Options) -> [
     write_ivf(&ivf, width, height, &stream.frames);
     for decoder in ["vp8", "libvpx"] {
         let theirs = ffmpeg_yuv(&ffmpeg, &ivf, decoder);
-        if let Some(diff) = first_difference(&theirs, &recon, width, height) {
+        if let Some(diff) = first_difference(&theirs, recon, width, height) {
             panic!("{name}: {decoder} differs at {diff}");
         }
         assert_eq!(theirs.len(), recon.len(), "{name}: {decoder} bytes");
@@ -675,4 +688,71 @@ fn header_options_decode_identically() {
     assert!(no_skip > 0, "no frame dropped the skip flag");
     assert_eq!(scaled, 2, "key frames carry the scale");
     check("header_options", 160, 96, 6, opts);
+}
+
+/// A hard cut to an unrelated picture is coded as a key frame, and only
+/// with the option on.
+#[test]
+fn scene_cuts_become_key_frames() {
+    let (width, height, count) = (160u32, 96u32, 10u32);
+    let cut = |t: u32| {
+        let mut frame = synthetic(width, height, t);
+        if t >= 5 {
+            // Mirror and invert luma, swap the chroma planes.
+            let w = width as usize;
+            for row in frame.y.samples.chunks_mut(w) {
+                row.reverse();
+                for v in row.iter_mut() {
+                    *v = 255 - *v;
+                }
+            }
+            std::mem::swap(&mut frame.u, &mut frame.v);
+        }
+        frame
+    };
+    for scene_cut in [true, false] {
+        let opts = Vp8Options {
+            scene_cut,
+            quantizer: 30,
+            ..Vp8Options::default()
+        };
+        let mut encoder = Vp8Encoder::with_options(width, height, opts).expect("open");
+        let mut packets = Vec::new();
+        let mut keys = Vec::new();
+        for t in 0..count {
+            let input = VideoInput {
+                frame: cut(t),
+                pts: i64::from(t),
+                duration: 1,
+                timescale: 30,
+            };
+            for packet in encoder.push(&input).expect("push") {
+                if packet.keyframe {
+                    keys.push(t);
+                }
+                packets.push(packet.data);
+            }
+        }
+        if scene_cut {
+            assert_eq!(keys, [0, 5], "the cut is a key frame");
+        } else {
+            assert_eq!(keys, [0], "no cut detection when off");
+        }
+        let mut recon = Vec::new();
+        for frame in &encoder.shown_recon {
+            crop(frame, width, height, &mut recon);
+        }
+        verify(
+            if scene_cut {
+                "scene_cut_on"
+            } else {
+                "scene_cut_off"
+            },
+            width,
+            height,
+            count,
+            packets,
+            &recon,
+        );
+    }
 }

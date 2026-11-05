@@ -457,6 +457,7 @@ fn encoder_fuzz_does_not_panic() {
                 pick(&mut rng, &[0, 1, 3]) as u8,
                 pick(&mut rng, &[0, 2, 3]) as u8,
             ],
+            scene_cut: rng.below(2) == 0,
         };
         let mut width = pick(&mut rng, &[1, 2, 7, 16, 17, 33, 48, 80]);
         let mut height = pick(&mut rng, &[1, 3, 15, 16, 32, 47, 64]);

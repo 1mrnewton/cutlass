@@ -1964,6 +1964,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     }
 
     fn planned_inter_tx(&self, row: usize, col: usize) -> u8 {
+        if self.plan.blocks.is_empty() {
+            // Encoder hooks: one transform size for the whole block.
+            return self.pb.tx_size;
+        }
         let Some(pbk) = self.plan.block(self.b.mi_row, self.b.mi_col) else {
             return TX_4X4;
         };

@@ -16,7 +16,7 @@ use crate::dec::frame::{FrameState, Picture};
 use crate::dec::obu::{
     Cdef, FrameHeader, HeaderContext, INTER_FRAME, KEY_FRAME, LoopFilter, OBU_FRAME,
     OBU_SEQUENCE_HEADER, OBU_TEMPORAL_DELIMITER, OperatingPoint, PRIMARY_REF_NONE, Quant,
-    SequenceHeader, TX_MODE_LARGEST, parse_frame_header,
+    SequenceHeader, TX_MODE_SELECT, parse_frame_header,
 };
 use crate::dec::tile::{RefView, TileDec};
 use crate::dsp::Pixel;
@@ -331,7 +331,7 @@ impl Av1Enc {
                 uv_pri: [pri / 2; 8],
                 uv_sec: [u8::from(q > 80); 8],
             },
-            tx_mode: TX_MODE_LARGEST,
+            tx_mode: TX_MODE_SELECT,
             ..FrameHeader::default()
         };
         if key {
@@ -400,6 +400,7 @@ impl Av1Enc {
             me_range: if speed >= 8 { 16 } else { 48 },
             subpel: if speed >= 9 { 1 } else { 2 },
             intra_modes: if speed >= 8 { 10 } else { 13 },
+            tx_depth: if speed >= 9 { 0 } else if speed >= 5 { 1 } else { 2 },
         };
         let qp = QuantParams {
             lambda: 0.08 * qstep * qstep,

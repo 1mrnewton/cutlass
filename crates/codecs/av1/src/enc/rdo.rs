@@ -12,7 +12,10 @@ use crate::dec::types::{
     plane_residual_size, tx_h, tx_w,
 };
 use crate::dsp::Pixel;
-use crate::spec::tables::{MAX_TX_SIZE_RECT, NUM_4X4_BLOCKS_WIDE, PARTITION_SUBSIZE};
+use crate::dsp::itx::inv_txfm_add;
+use crate::spec::tables::{MAX_TX_SIZE_RECT, NUM_4X4_BLOCKS_WIDE, PARTITION_SUBSIZE, SPLIT_TX_SIZE};
+
+use super::fwd_txfm::fwd_txfm;
 
 use super::me::{MeParams, motion_search, satd, sse};
 
@@ -31,6 +34,8 @@ pub struct ModeParams {
     /// 0 = full pel only, 2 = quarter pel, 3 = eighth pel.
     pub subpel: u8,
     pub intra_modes: u8,
+    /// How many transform splits the size search tries (0 keeps the largest).
+    pub tx_depth: u8,
 }
 
 impl Default for ModeParams {
@@ -44,6 +49,7 @@ impl Default for ModeParams {
             me_range: 32,
             subpel: 2,
             intra_modes: 13,
+            tx_depth: 1,
         }
     }
 }
@@ -235,7 +241,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let bs = self.b.bsize;
         let x = self.b.mi_col * 4;
         let y = self.b.mi_row * 4;
-        let tx = MAX_TX_SIZE_RECT[bs as usize];
+        let max_tx = MAX_TX_SIZE_RECT[bs as usize];
+        // 64-point transforms drop all but the lowest 32x32 frequencies; start below them.
+        let mut tx = max_tx;
+        while tx_w(tx) > 32 || tx_h(tx) > 32 {
+            tx = SPLIT_TX_SIZE[tx as usize];
+        }
         // Evaluate on the first transform block's area (all of a block up to 64x64).
         let w = tx_w(tx).min(block_width(bs));
         let h = tx_h(tx).min(block_height(bs));
@@ -271,7 +282,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             pb.ref_mv_idx = idx;
             pb.interp_filter = [0, 0];
             pb.uv_mode = DC_PRED;
+            pb.tx_size = self.pick_inter_tx(&pb, tx);
         } else {
+            pb.tx_size = self.pick_intra_tx(&pb, tx, max_tx);
             pb.uv_mode = if pb.has_chroma {
                 self.pick_intra_chroma(&pb)
             } else {
@@ -283,6 +296,148 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.pb = pb;
         self.plan_q = self.current_q_index;
         self.plan_delta_lf = self.delta_lf;
+    }
+
+    /// Estimated D + lambda * R of coding residual `res` (w x h, stride w) with
+    /// transform blocks of size `tx` (DCT, dead-zone quantization).
+    fn tx_cost(&self, res: &[i32], w: usize, h: usize, tx: u8) -> f64 {
+        let tw = tx_w(tx);
+        let th = tx_h(tx);
+        let qi = self.dequant_info(0, 0, tx);
+        let bd = self.bd;
+        let lam = self.enc.lambda * 8.0;
+        let mut d = 0f64;
+        let mut bits = 0f64;
+        let mut blk = [0i32; 32 * 32];
+        let mut coefs = [0i32; 32 * 32];
+        let mid = P::from_i32(1 << (bd - 1));
+        let mut rec = [mid; 32 * 32];
+        let round = 48i64;
+        let mut y0 = 0;
+        while y0 < h {
+            let mut x0 = 0;
+            while x0 < w {
+                for i in 0..th {
+                    blk[i * tw..i * tw + tw].copy_from_slice(&res[(y0 + i) * w + x0..(y0 + i) * w + x0 + tw]);
+                }
+                fwd_txfm(&blk, tw, &mut coefs, tx as usize, 0, bd);
+                let mut nz = (0, 0);
+                let cw = tw.min(32);
+                let ch = th.min(32);
+                for i in 0..ch {
+                    for j in 0..cw {
+                        let pos = i * cw + j;
+                        let q = i64::from(if pos == 0 { qi.dc } else { qi.ac }).max(1);
+                        let c = coefs[pos];
+                        let a = i64::from(c.unsigned_abs()) * i64::from(qi.denom);
+                        let l = ((a + q * round / 128) / q).min(1 << 15);
+                        if l != 0 {
+                            bits += 2.0 + 2.0 * f64::from(64 - (l as u64).leading_zeros());
+                            nz = (nz.0.max(i + 1), nz.1.max(j + 1));
+                        }
+                        let v = l * q / i64::from(qi.denom);
+                        coefs[pos] = if c < 0 { -v as i32 } else { v as i32 };
+                    }
+                }
+                bits += 1.0;
+                for v in rec[..tw * th].iter_mut() {
+                    *v = mid;
+                }
+                if nz.0 > 0 {
+                    inv_txfm_add(&mut rec, tw, &mut coefs, tx as usize, 0, nz.0, nz.1, false, bd);
+                } else {
+                    for v in coefs[..cw * ch].iter_mut() {
+                        *v = 0;
+                    }
+                }
+                for i in 0..th {
+                    for j in 0..tw {
+                        let e = res[(y0 + i) * w + x0 + j] - (rec[i * tw + j].to_i32() - (1 << (bd - 1)));
+                        d += f64::from(e * e);
+                    }
+                }
+                x0 += tw;
+            }
+            y0 += th;
+        }
+        d + lam * bits
+    }
+
+    fn residual_of(&self, pred: &[P], pred_stride: usize, x: usize, y: usize, w: usize, h: usize, out: &mut [i32]) {
+        let Some(src) = self.src else { return };
+        let sp = &src.planes[0];
+        for i in 0..h {
+            for j in 0..w {
+                out[i * w + j] = sp.data[(y + i) * sp.stride + x + j].to_i32() - pred[i * pred_stride + j].to_i32();
+            }
+        }
+    }
+
+    fn pick_inter_tx(&mut self, pb: &Block, tx: u8) -> u8 {
+        let x = pb.mi_col * 4;
+        let y = pb.mi_row * 4;
+        let w = block_width(pb.bsize).min(self.fs.mi_cols * 4 - x);
+        let h = block_height(pb.bsize).min(self.fs.mi_rows * 4 - y);
+        let (w, h) = (w & !(tx_w(tx) - 1), h & !(tx_h(tx) - 1));
+        if w == 0 || h == 0 || self.predict_into_scratch(0, LAST_FRAME, x, y, w, h, pb.mv[0], [0, 0]).is_err() {
+            return tx;
+        }
+        let mut res = vec![0i32; w * h];
+        let pred = std::mem::take(&mut self.scratch.obmc);
+        self.residual_of(&pred, w, x, y, w, h, &mut res);
+        self.scratch.obmc = pred;
+        let mut best = (tx, self.tx_cost(&res, w, h, tx));
+        let mut t = tx;
+        for _ in 0..self.mode.tx_depth {
+            let s = SPLIT_TX_SIZE[t as usize];
+            if s == t {
+                break;
+            }
+            t = s;
+            let c = self.tx_cost(&res, w, h, t);
+            if c < best.1 {
+                best = (t, c);
+            }
+        }
+        best.0
+    }
+
+    fn pick_intra_tx(&mut self, pb: &Block, tx: u8, max_tx: u8) -> u8 {
+        // The transform size must be reachable from the largest one in two splits.
+        let mut depth0 = 0;
+        let mut t = max_tx;
+        while t != tx {
+            t = SPLIT_TX_SIZE[t as usize];
+            depth0 += 1;
+        }
+        if self.mode.tx_depth == 0 || depth0 >= 2 || pb.bsize == crate::dec::types::BLOCK_4X4 {
+            return tx;
+        }
+        let x = pb.mi_col * 4;
+        let y = pb.mi_row * 4;
+        let w = tx_w(tx);
+        let h = tx_h(tx);
+        if x + w > self.fs.mi_cols * 4 || y + h > self.fs.mi_rows * 4 {
+            return tx;
+        }
+        // Prediction of the first transform block with the chosen mode.
+        let sb_mask = self.sb_size4 - 1;
+        let bdf = &self.block_decoded[0];
+        let (sr, sc) = (pb.mi_row & sb_mask, pb.mi_col & sb_mask);
+        let ar = bdf[sr][sc + (w >> 2) + 1];
+        let bl = bdf[sr + (h >> 2) + 1][sc];
+        let saved = self.b.clone();
+        self.b.use_filter_intra = false;
+        self.b.angle_delta_y = 0;
+        self.predict_intra(0, x, y, pb.avail_l, pb.avail_u, ar, bl, pb.y_mode, w.trailing_zeros(), h.trailing_zeros());
+        self.b = saved;
+        let cp = &self.cur.planes[0];
+        let mut res = vec![0i32; w * h];
+        let pred: Vec<P> = (0..h).flat_map(|i| cp.data[(y + i) * cp.stride + x..][..w].to_vec()).collect();
+        self.residual_of(&pred, w, x, y, w, h, &mut res);
+        let whole = self.tx_cost(&res, w, h, tx);
+        let s = SPLIT_TX_SIZE[tx as usize];
+        if s != tx && self.tx_cost(&res, w, h, s) < whole { s } else { tx }
     }
 
     fn pick_intra_luma(&mut self, x: usize, y: usize, w: usize, h: usize, tx: u8) -> (u8, f64) {

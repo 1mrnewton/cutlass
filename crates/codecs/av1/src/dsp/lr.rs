@@ -41,6 +41,8 @@ pub struct LrScratch {
     flt1: Vec<i32>,
     colsum: Vec<i32>,
     colsq: Vec<i32>,
+    /// Scratch of the extra threads of [`lr_planes`].
+    workers: Vec<LrScratch>,
 }
 
 impl LrScratch {
@@ -103,24 +105,238 @@ pub fn lr_plane<P: Pixel>(
     scratch: &mut LrScratch,
 ) {
     let _ = sub_x;
-    if plane_w == 0 || plane_h == 0 || unit_size == 0 || units_per_row == 0 || units_rows == 0 {
+    let plane = LrPlane {
+        dst,
+        cdef,
+        deblocked,
+        stride,
+        plane_w,
+        plane_h,
+        unit_size,
+        units_per_row,
+        units_rows,
+        units,
+        sub_y,
+        bd,
+    };
+    lr_planes(vec![plane], scratch, 1);
+}
+
+/// The arguments of [`lr_plane`] for one plane of [`lr_planes`].
+pub struct LrPlane<'a, P> {
+    pub dst: &'a mut [P],
+    pub cdef: &'a [P],
+    pub deblocked: &'a [P],
+    pub stride: usize,
+    pub plane_w: usize,
+    pub plane_h: usize,
+    pub unit_size: usize,
+    pub units_per_row: usize,
+    pub units_rows: usize,
+    pub units: &'a [LrUnit],
+    pub sub_y: bool,
+    pub bd: u32,
+}
+
+/// One thread's share of one plane in [`lr_planes`]: the `dst` rows from
+/// plane row `row0` on that hold `stripes`.
+struct LrWork<'a, P> {
+    g: LrGeom,
+    dst: &'a mut [P],
+    row0: usize,
+    cdef: &'a [P],
+    deblocked: &'a [P],
+    units: &'a [LrUnit],
+    stripes: core::ops::Range<usize>,
+}
+
+/// [`lr_plane`] for several planes on up to `threads` threads: each thread
+/// filters a range of stripes of every plane into its own rows of `dst`
+/// (stripes only read the shared sources).
+pub fn lr_planes<P: Pixel>(planes: Vec<LrPlane<'_, P>>, scratch: &mut LrScratch, threads: usize) {
+    let mut jobs = Vec::new();
+    for p in planes {
+        if p.plane_w == 0
+            || p.plane_h == 0
+            || p.unit_size == 0
+            || p.units_per_row == 0
+            || p.units_rows == 0
+        {
+            continue;
+        }
+        let sy = p.sub_y as u32;
+        // Stripe k starts at plane row (64 k - 8) >> subY.
+        let mut n = 0usize;
+        while ((n as isize * 64 - 8) >> sy) < p.plane_h as isize {
+            n += 1;
+        }
+        let g = LrGeom {
+            stride: p.stride,
+            plane_w: p.plane_w,
+            plane_h: p.plane_h,
+            unit_size: p.unit_size,
+            units_per_row: p.units_per_row,
+            units_rows: p.units_rows,
+            sy,
+            bd: p.bd,
+        };
+        jobs.push((g, p, n));
+    }
+    // Samples each stripe filters; threads only pay off for enough of them.
+    let weights: Vec<Vec<usize>> = jobs
+        .iter()
+        .map(|(g, p, n)| (0..*n).map(|k| stripe_work(p.units, g, k)).collect())
+        .collect();
+    let total: usize = weights.iter().flatten().sum();
+    let max_n = jobs.iter().map(|j| j.2).max().unwrap_or(1).max(1);
+    let t = threads.clamp(1, (total / LR_THREAD_WORK).clamp(1, max_n));
+    let mut work: Vec<Vec<LrWork<'_, P>>> = (0..t).map(|_| Vec::new()).collect();
+    for ((g, p, n), wts) in jobs.into_iter().zip(&weights) {
+        let start = |k: usize| ((k as isize * 64 - 8) >> g.sy).max(0) as usize;
+        // Stripe boundaries splitting the plane's work evenly.
+        let plane_total: usize = wts.iter().sum();
+        let mut bounds = vec![0usize; t + 1];
+        bounds[t] = n;
+        let mut cum = 0;
+        let mut k = 0;
+        for (i, b) in bounds.iter_mut().enumerate().take(t).skip(1) {
+            let goal = plane_total * i / t;
+            while k < n && cum + wts[k] <= goal {
+                cum += wts[k];
+                k += 1;
+            }
+            *b = k;
+        }
+        let mut rest = p.dst;
+        let mut row = 0;
+        for (i, w) in work.iter_mut().enumerate() {
+            let (k0, k1) = (bounds[i], bounds[i + 1]);
+            let dst = if i + 1 == t {
+                core::mem::take(&mut rest)
+            } else {
+                let len = ((start(k1) - row) * g.stride).min(rest.len());
+                let (a, b) = core::mem::take(&mut rest).split_at_mut(len);
+                rest = b;
+                a
+            };
+            w.push(LrWork {
+                g,
+                dst,
+                row0: row,
+                cdef: p.cdef,
+                deblocked: p.deblocked,
+                units: p.units,
+                stripes: k0..k1,
+            });
+            row = start(k1);
+        }
+    }
+    let run = |items: Vec<LrWork<'_, P>>, s: &mut LrScratch| {
+        for w in items {
+            lr_stripes(
+                w.dst,
+                w.row0,
+                w.cdef,
+                w.deblocked,
+                w.units,
+                &w.g,
+                w.stripes,
+                s,
+            );
+        }
+    };
+    if t == 1 {
+        for items in work {
+            run(items, scratch);
+        }
         return;
     }
-    let sy = sub_y as u32;
+    if scratch.workers.len() < t - 1 {
+        scratch.workers.resize_with(t - 1, LrScratch::default);
+    }
+    let mut workers = core::mem::take(&mut scratch.workers);
+    let main = &mut *scratch;
+    std::thread::scope(|s| {
+        let mut it = work.into_iter();
+        let first = it.next();
+        for (items, ws) in it.zip(workers.iter_mut()) {
+            s.spawn(move || run(items, ws));
+        }
+        if let Some(items) = first {
+            run(items, main);
+        }
+    });
+    scratch.workers = workers;
+}
+
+/// Filtered samples per extra thread below which [`lr_planes`] uses fewer
+/// threads.
+const LR_THREAD_WORK: usize = 1 << 18;
+
+/// Samples stripe `k` filters (0 when its units are all `RESTORE_NONE`).
+fn stripe_work(units: &[LrUnit], g: &LrGeom, k: usize) -> usize {
+    let start = (k as isize * 64 - 8) >> g.sy;
+    let end_y = g.plane_h as isize - 1;
+    if start > end_y {
+        return 0;
+    }
+    let y0 = start.max(0);
+    let y1 = (start + (64 >> g.sy) - 1).min(end_y);
+    let unit_row = (((y0 + (8 >> g.sy)) as usize) / g.unit_size).min(g.units_rows - 1);
+    let row_units = &units[unit_row * g.units_per_row..(unit_row + 1) * g.units_per_row];
+    let active = row_units
+        .iter()
+        .filter(|u| u.kind as i32 == RESTORE_WIENER || u.kind as i32 == RESTORE_SGRPROJ)
+        .count();
+    active.min(g.plane_w.div_ceil(g.unit_size)) * g.unit_size * (y1 - y0 + 1) as usize
+}
+
+/// Plane geometry of one plane of [`lr_planes`].
+#[derive(Clone, Copy)]
+struct LrGeom {
+    stride: usize,
+    plane_w: usize,
+    plane_h: usize,
+    unit_size: usize,
+    units_per_row: usize,
+    units_rows: usize,
+    sy: u32,
+    bd: u32,
+}
+
+/// Filters stripes `stripes` of the plane into `dst`, which starts at plane
+/// row `dst_row0` and holds (at least) every row of those stripes.
+fn lr_stripes<P: Pixel>(
+    dst: &mut [P],
+    dst_row0: usize,
+    cdef: &[P],
+    deblocked: &[P],
+    units: &[LrUnit],
+    g: &LrGeom,
+    stripes: core::ops::Range<usize>,
+    scratch: &mut LrScratch,
+) {
+    let LrGeom {
+        stride,
+        plane_w,
+        plane_h,
+        unit_size,
+        units_per_row,
+        units_rows,
+        sy,
+        bd,
+    } = *g;
     let off = 8isize >> sy;
     let stripe_h = 64isize >> sy;
     let end_y = plane_h as isize - 1;
     let sw = plane_w + 2 * PAD;
     let max_rows = stripe_h as usize + 2 * CTX;
     grow(&mut scratch.src, sw * max_rows);
-
-    let mut stripe = 0isize;
-    loop {
-        let start = (stripe * 64 - 8) >> sy;
+    for stripe in stripes {
+        let start = (stripe as isize * 64 - 8) >> sy;
         if start > end_y {
             break;
         }
-        stripe += 1;
         let stripe_end = start + stripe_h - 1;
         let y0 = start.max(0);
         let y1 = stripe_end.min(end_y);
@@ -170,6 +386,7 @@ pub fn lr_plane<P: Pixel>(
                 w: x1 - x0,
                 y0: y0 as usize,
                 h,
+                dst_row0,
             };
             match unit.kind as i32 {
                 RESTORE_WIENER => wiener(dst, stride, &mut *scratch, sw, rect, unit, bd),
@@ -186,6 +403,8 @@ struct Rect {
     w: usize,
     y0: usize,
     h: usize,
+    /// Plane row of the first row of the `dst` slice.
+    dst_row0: usize,
 }
 
 /// Wiener coefficient process (7.17.5).
@@ -235,7 +454,7 @@ fn wiener<P: Pixel>(
     let maxv = (1i32 << bd) - 1;
     for r in 0..h {
         let rows: [&[i32]; 7] = core::array::from_fn(|t| &s.inter[(r + t) * w..(r + t + 1) * w]);
-        let o = (rc.y0 + r) * stride + rc.x0;
+        let o = (rc.y0 - rc.dst_row0 + r) * stride + rc.x0;
         let out = &mut dst[o..o + w];
         for c in 0..w {
             let mut acc = 0;
@@ -450,7 +669,8 @@ fn sgr<P: Pixel>(
     for i in 0..h {
         let o = (rc.y0 + i) * stride + rc.x0;
         let crow = &cdef[o..o + w];
-        let out = &mut dst[o..o + w];
+        let od = o - rc.dst_row0 * stride;
+        let out = &mut dst[od..od + w];
         let f0 = &s.flt0[i * w..];
         let f1 = &s.flt1[i * w..];
         for j in 0..w {

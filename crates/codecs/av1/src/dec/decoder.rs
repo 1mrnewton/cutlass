@@ -95,6 +95,10 @@ pub struct Av1Core {
     /// Largest picture (upscaled width x height) accepted; larger is `Limit`.
     /// The default is the largest picture any AV1 level allows.
     pub max_pixels: u64,
+    /// Threads the in-loop filters (deblocking, CDEF, loop restoration) may
+    /// use; 1 runs them on the calling thread. Defaults to
+    /// `std::thread::available_parallelism()`.
+    pub threads: usize,
 }
 
 struct Pending {
@@ -120,16 +124,18 @@ impl Av1Core {
             pool8: Vec::new(),
             pool16: Vec::new(),
             max_pixels: 35_651_584,
+            threads: std::thread::available_parallelism().map_or(1, usize::from),
         }
     }
 
     pub fn reset(&mut self) {
         let seq = self.seq.take();
-        let (grain, max) = (self.apply_grain, self.max_pixels);
+        let (grain, max, threads) = (self.apply_grain, self.max_pixels, self.threads);
         *self = Self::new();
         self.seq = seq;
         self.apply_grain = grain;
         self.max_pixels = max;
+        self.threads = threads;
     }
 
     /// The header state of every reference slot.
@@ -456,6 +462,7 @@ impl Av1Core {
                 &self.ref_hdr,
                 &mut self.lr_scratch,
                 &mut self.pool8,
+                self.threads,
             )?;
             (AnyPicture::U8(pic), c)
         } else {
@@ -479,6 +486,7 @@ impl Av1Core {
                 &self.ref_hdr,
                 &mut self.lr_scratch,
                 &mut self.pool16,
+                self.threads,
             )?;
             (AnyPicture::U16(pic), c)
         };
@@ -775,6 +783,7 @@ fn decode_frame<P: Pixel>(
     ref_hdr: &[RefHeaderState; 8],
     lr_scratch: &mut LrScratch,
     pool: &mut Vec<Picture<P>>,
+    threads: usize,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
     let num_planes = seq.num_planes();
     let mut cur = take_picture::<P>(
@@ -874,7 +883,7 @@ fn decode_frame<P: Pixel>(
     }
     let saved = saved.unwrap_or_else(|| Box::new(cdf.clone()));
     // decode_frame_wrapup: in-loop filters.
-    postfilter::loop_filter(seq, hdr, fs, &mut cur);
+    postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);
     let cdef_on = seq.enable_cdef
         && !hdr.coded_lossless
         && !hdr.allow_intrabc
@@ -885,7 +894,7 @@ fn decode_frame<P: Pixel>(
             || hdr.cdef.uv_sec[0] != 0);
     let cdef_pic = if cdef_on {
         let mut d = copy_picture(pool, &cur);
-        postfilter::cdef(seq, hdr, fs, &cur, &mut d);
+        postfilter::cdef(seq, hdr, fs, &cur, &mut d, threads);
         Some(d)
     } else {
         None
@@ -912,7 +921,9 @@ fn decode_frame<P: Pixel>(
         let mut out = copy_picture(pool, &up_cdef);
         {
             let deblocked = up_deblocked.as_ref().unwrap_or(&up_cdef);
-            postfilter::loop_restoration(seq, hdr, fs, &up_cdef, deblocked, &mut out, lr_scratch);
+            postfilter::loop_restoration(
+                seq, hdr, fs, &up_cdef, deblocked, &mut out, lr_scratch, threads,
+            );
         }
         recycle(pool, up_cdef);
         if let Some(p) = up_deblocked {

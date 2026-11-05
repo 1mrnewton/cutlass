@@ -22,6 +22,7 @@ pub mod chroma;
 pub mod grade;
 pub mod look;
 pub mod lut;
+pub mod mask;
 pub mod package;
 pub mod recipe;
 pub mod source;
@@ -41,6 +42,7 @@ pub use grade::{
 };
 pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, look_poster, segment_look};
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};
+pub use mask::{MASK, Mask, MaskShape, segment_mask};
 pub use package::{
     Located, MAX_PACKAGE_BYTES, MissingPackages, Package, PackageError, PackageStore,
     animation_package_id, load, load_segment, load_transition, map_storage_error, package_id,

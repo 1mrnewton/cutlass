@@ -574,11 +574,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if none < self.split_penalty(self.mode.early_none) {
             return PARTITION_NONE;
         }
-        let split = self.est_block(x, y, half, half)
-            + self.est_block(x + half, y, half, half)
-            + self.est_block(x, y + half, half, half)
-            + self.est_block(x + half, y + half, half, half)
-            + self.split_penalty(8.0);
+        // The quarters' estimates are not negative: stop once their partial
+        // sum already loses to NONE (same decision, fewer estimates).
+        let pen = self.split_penalty(8.0);
+        let mut split = 0.0;
+        for (i, (qx, qy)) in [(x, y), (x + half, y), (x, y + half), (x + half, y + half)]
+            .into_iter()
+            .enumerate()
+        {
+            let e = self.est_block(qx, qy, half, half);
+            split = if i == 0 { e } else { split + e };
+            if !self.mode.rect_partitions && split + pen >= none {
+                return PARTITION_NONE;
+            }
+        }
+        let split = split + pen;
         let mut best = (PARTITION_NONE, none);
         if split < best.1 {
             best = (PARTITION_SPLIT, split);

@@ -251,6 +251,16 @@ pub enum Request {
         segment_id: SegmentId,
         style: String,
     },
+    /// Mark word `word` of the caption as a keyword, drawn in the style's
+    /// spoken look while it shows, or take the mark off.
+    SetCaptionKeyword {
+        segment_id: SegmentId,
+        word: usize,
+        on: bool,
+    },
+    /// Start each letter of a caption word `millis` after the one before
+    /// it, from 0 to [`crate::MAX_CAPTION_STAGGER_MS`].
+    SetCaptionStagger { segment_id: SegmentId, millis: i64 },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {

@@ -46,7 +46,7 @@ use crate::request::Request;
 pub use canvas::{CANVAS_SHAPES, CanvasShape, canvas_for, follow_first_picture, ratio_request};
 pub use move_segment::move_segment;
 pub use place::place;
-pub use text::NEW_TEXT_SIZE;
+pub use text::{MAX_CAPTION_STAGGER_MS, NEW_TEXT_SIZE};
 pub use trim::trim;
 pub use words::set_words;
 
@@ -332,6 +332,14 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetCaptionKeyword {
+            segment_id,
+            word,
+            on,
+        } => text::set_caption_keyword(draft, segment_id, *word, *on),
+        Request::SetCaptionStagger { segment_id, millis } => {
+            text::set_caption_stagger(draft, segment_id, *millis)
+        }
         Request::SetCaptionStyle { segment_id, style } => {
             text::set_caption_style(draft, segment_id, style)
         }

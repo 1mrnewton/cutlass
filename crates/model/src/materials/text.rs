@@ -118,6 +118,23 @@ pub struct MaterialText {
         skip_serializing_if = "String::is_empty"
     )]
     pub caption_style: String,
+    /// Words the caption marks, by index into its word columns: drawn in
+    /// the style's spoken look while they show. The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_caption_keywords",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub caption_keywords: Vec<usize>,
+    /// Milliseconds each letter of a word starts after the one before it,
+    /// so a word's look runs across its letters; 0 changes them together.
+    /// The app's own.
+    #[serde(
+        default,
+        rename = "cutlass_caption_stagger_ms",
+        skip_serializing_if = "is_zero"
+    )]
+    pub caption_stagger_ms: i64,
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
 }
@@ -135,6 +152,12 @@ impl MaterialText {
             ..Self::default()
         }
     }
+}
+
+/// Serde's skip test for a zero stagger.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 impl Default for MaterialText {
@@ -188,6 +211,8 @@ impl Default for MaterialText {
             recognize_type: 0,
             bubble: String::new(),
             caption_style: String::new(),
+            caption_keywords: Vec::new(),
+            caption_stagger_ms: 0,
             rest: Map::new(),
         }
     }

@@ -9,6 +9,14 @@
 //! same pictures our decoder makes. ffmpeg's times are its own `-benchmark`
 //! real time, without process startup; they include its raw-video reading
 //! or writing, which is small next to the codec.
+//!
+//! Each side also reports per-frame latency (p50, p95, p99, max), the
+//! hidden-altref encoder's speed and first-packet delay, and how long a
+//! raised cancel flag takes to stop an encode.
+//!
+//! `VP8_MEMORY=decode` or `VP8_MEMORY=encode` instead streams the
+//! 1080p decode or the 640×360 encode without keeping the output, for
+//! `/usr/bin/time -l` to read the peak resident size.
 
 #![allow(clippy::print_stdout)]
 
@@ -54,7 +62,28 @@ fn main() -> Result<(), String> {
         return Ok(());
     };
     let dir = WorkDir::new()?;
-    println!("VP8, one thread. ffmpeg rows are its -benchmark real time.");
+    let memory = std::env::var("VP8_MEMORY").ok();
+    if memory.as_deref() == Some("encode") {
+        let raw = encode_source(&ffmpeg, &dir)?;
+        let inputs = inputs_of(&std::fs::read(&raw).map_err(|e| e.to_string())?)?;
+        let opts = Vp8Options {
+            bitrate: BITRATE,
+            ..Vp8Options::default()
+        };
+        let mut encoder =
+            Vp8Encoder::with_options(ENCODE_W, ENCODE_H, opts).map_err(|e| e.to_string())?;
+        let mut bytes = 0;
+        for input in &inputs {
+            for packet in encoder.push(input).map_err(|e| e.to_string())? {
+                bytes += packet.data.len();
+            }
+        }
+        println!("streamed {} 640x360 frames, {bytes} B", inputs.len());
+        return Ok(());
+    }
+    if memory.is_none() {
+        println!("VP8, one thread. ffmpeg rows are its -benchmark real time.");
+    }
 
     // Decode.
     let ivf = dir.path.join("decode.ivf");
@@ -90,6 +119,11 @@ fn main() -> Result<(), String> {
         .enumerate()
         .map(|(i, f)| Packet::video(f.clone(), i as i64, 1, 30, i == 0))
         .collect();
+    if memory.as_deref() == Some("decode") {
+        let times = latencies(&packets, DECODE_W, DECODE_H)?;
+        println!("streamed {} 1080p frames", times.len());
+        return Ok(());
+    }
     let ours = pack(&decode(&packets, DECODE_W, DECODE_H)?);
     let theirs = ffmpeg_raw(&ffmpeg, "vp8", &ivf, &dir.path.join("decode.yuv"))?;
     let differ = mismatches(&ours, &theirs);
@@ -107,6 +141,10 @@ fn main() -> Result<(), String> {
         Ok(started.elapsed().as_secs_f64())
     })?;
     row("cutlass", frames.len(), ours_time);
+    percentiles(
+        "cutlass per frame",
+        &mut latencies(&packets, DECODE_W, DECODE_H)?,
+    );
     for decoder in ["vp8", "libvpx"] {
         let t = median(|| {
             ffmpeg_bench(
@@ -130,7 +168,7 @@ fn main() -> Result<(), String> {
     // A real 1080p WebM, when ../local-files has it.
     let webm = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../local-files/file_example_WEBM_1920_3_7MB.webm");
-    if webm.is_file() {
+    if webm.is_file() && memory.is_none() {
         let real = dir.path.join("real.ivf");
         run(
             &ffmpeg,
@@ -190,23 +228,7 @@ fn main() -> Result<(), String> {
     }
 
     // Encode.
-    let raw = dir.path.join("encode.yuv");
-    run(
-        &ffmpeg,
-        &[
-            "-f",
-            "lavfi",
-            "-i",
-            &format!("testsrc2=size={ENCODE_W}x{ENCODE_H}:rate=30"),
-            "-frames:v",
-            &ENCODE_FRAMES.to_string(),
-            "-pix_fmt",
-            "yuv420p",
-            "-f",
-            "rawvideo",
-            path_str(&raw)?,
-        ],
-    )?;
+    let raw = encode_source(&ffmpeg, &dir)?;
     let source = std::fs::read(&raw).map_err(|e| e.to_string())?;
     let inputs = inputs_of(&source)?;
     let opts = Vp8Options {
@@ -280,7 +302,134 @@ fn main() -> Result<(), String> {
         fps(ENCODE_FRAMES, libvpx_time),
         libvpx_bytes
     );
+    percentiles("cutlass per frame", &mut encode_latencies(&inputs, opts)?);
+
+    // Hidden altrefs: a golden group of lookahead before the first packet.
+    let hidden = Vp8Options {
+        hidden_altref: true,
+        ..opts
+    };
+    let (hidden_packets, hidden_time) = encode(&inputs, hidden)?;
+    let hidden_bytes: usize = hidden_packets.iter().map(Vec::len).sum();
+    let mut encoder =
+        Vp8Encoder::with_options(ENCODE_W, ENCODE_H, hidden).map_err(|e| e.to_string())?;
+    let first = inputs
+        .iter()
+        .position(|input| encoder.push(input).is_ok_and(|out| !out.is_empty()))
+        .unwrap_or(inputs.len());
+    println!(
+        "hidden   {:>8.3} s   {:>8.1} fps   {:>7} B  {} packets ({} hidden); first packet after frame {}",
+        hidden_time,
+        fps(ENCODE_FRAMES, hidden_time),
+        hidden_bytes,
+        hidden_packets.len(),
+        hidden_packets.len() - ENCODE_FRAMES,
+        first + 1
+    );
+
+    // Cancel: the flag is read before each frame, so a raised flag stops
+    // the encode within the frame in progress.
+    let mut encoder =
+        Vp8Encoder::with_options(ENCODE_W, ENCODE_H, opts).map_err(|e| e.to_string())?;
+    let flag = encoder.cancel_flag();
+    let raised = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let raiser = {
+        let flag = std::sync::Arc::clone(&flag);
+        let raised = std::sync::Arc::clone(&raised);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if let Ok(mut at) = raised.lock() {
+                *at = Some(Instant::now());
+            }
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+    };
+    let mut stopped = None;
+    'frames: for _ in 0..20 {
+        for input in &inputs {
+            if encoder.push(input).is_err() {
+                stopped = Some(Instant::now());
+                break 'frames;
+            }
+        }
+    }
+    raiser.join().map_err(|_| "cancel thread".to_owned())?;
+    let raised = raised
+        .lock()
+        .map_err(|_| "cancel lock".to_owned())?
+        .to_owned();
+    if let (Some(raised), Some(stopped)) = (raised, stopped) {
+        println!(
+            "cancel   stopped {:.1} ms after the flag was raised",
+            stopped.saturating_duration_since(raised).as_secs_f64() * 1000.0
+        );
+    }
     Ok(())
+}
+
+/// The 640×360 testsrc2 source as raw 4:2:0, written by ffmpeg.
+fn encode_source(ffmpeg: &Path, dir: &WorkDir) -> Result<PathBuf, String> {
+    let raw = dir.path.join("encode.yuv");
+    run(
+        ffmpeg,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={ENCODE_W}x{ENCODE_H}:rate=30"),
+            "-frames:v",
+            &ENCODE_FRAMES.to_string(),
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            path_str(&raw)?,
+        ],
+    )?;
+    Ok(raw)
+}
+
+/// Seconds each packet takes to decode, in order.
+fn latencies(packets: &[Packet], width: u32, height: u32) -> Result<Vec<f64>, String> {
+    let params = CodecParams::video(CodecId::Vp8, width, height);
+    let mut decoder = Vp8Decoder::open(&params).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(packets.len());
+    for packet in packets {
+        let started = Instant::now();
+        let pictures = decoder.push(packet).map_err(|e| e.to_string())?;
+        out.push(started.elapsed().as_secs_f64());
+        std::hint::black_box(pictures);
+    }
+    Ok(out)
+}
+
+/// Seconds each frame takes to encode, in order.
+fn encode_latencies(inputs: &[VideoInput], opts: Vp8Options) -> Result<Vec<f64>, String> {
+    let mut encoder =
+        Vp8Encoder::with_options(ENCODE_W, ENCODE_H, opts).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let started = Instant::now();
+        let packets = encoder.push(input).map_err(|e| e.to_string())?;
+        out.push(started.elapsed().as_secs_f64());
+        std::hint::black_box(packets);
+    }
+    Ok(out)
+}
+
+fn percentiles(name: &str, times: &mut [f64]) {
+    if times.is_empty() {
+        return;
+    }
+    times.sort_by(f64::total_cmp);
+    let at = |q: f64| times[((times.len() - 1) as f64 * q).round() as usize] * 1000.0;
+    println!(
+        "{name:<14} p50 {:.2} ms  p95 {:.2} ms  p99 {:.2} ms  max {:.2} ms",
+        at(0.5),
+        at(0.95),
+        at(0.99),
+        at(1.0)
+    );
 }
 
 fn row(name: &str, frames: usize, seconds: f64) {
@@ -325,6 +474,9 @@ fn encode(inputs: &[VideoInput], opts: Vp8Options) -> Result<(Vec<Vec<u8>>, f64)
         for packet in encoder.push(input).map_err(|e| e.to_string())? {
             out.push(packet.data);
         }
+    }
+    for packet in encoder.drain().map_err(|e| e.to_string())? {
+        out.push(packet.data);
     }
     Ok((out, started.elapsed().as_secs_f64()))
 }

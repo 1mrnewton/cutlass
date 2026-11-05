@@ -19,7 +19,7 @@ use crate::spec::tables::{
     MAX_TX_SIZE_RECT, NUM_4X4_BLOCKS_WIDE, PARTITION_SUBSIZE, SPLIT_TX_SIZE,
 };
 
-use super::fwd_txfm::fwd_txfm;
+use super::fwd_txfm::{fwd_dct_est, fwd_txfm};
 
 use super::me::{MeParams, motion_search, satd, sse};
 
@@ -868,7 +868,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let mut x0 = 0;
             while x0 < w {
                 let rb = &res[y0 * w + x0..];
-                fwd_txfm(rb, w, &mut coefs, tx as usize, 0, bd);
+                if fast {
+                    fwd_dct_est(
+                        rb,
+                        w,
+                        &mut coefs,
+                        &mut self.me_scratch.tx_tmp,
+                        tx as usize,
+                        bd,
+                    );
+                } else {
+                    fwd_txfm(rb, w, &mut coefs, tx as usize, 0, bd);
+                }
                 let cw = tw.min(32);
                 let ch = th.min(32);
                 if fast {

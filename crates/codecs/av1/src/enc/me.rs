@@ -590,6 +590,8 @@ pub struct MeScratch<P: Pixel> {
     pub pred_cache: Vec<(super::rdo::PredKey, Vec<P>)>,
     /// The transform cost of the chosen inter prediction and transform size.
     pub tx_memo: Option<(super::rdo::PredKey, u8, f64)>,
+    /// Intermediate of the estimate transform.
+    pub tx_tmp: Vec<i16>,
 }
 
 impl<P: Pixel> MeScratch<P> {
@@ -601,6 +603,7 @@ impl<P: Pixel> MeScratch<P> {
             win: Vec::new(),
             pred_cache: Vec::new(),
             tx_memo: None,
+            tx_tmp: vec![0; 64 * 32],
         }
     }
 }

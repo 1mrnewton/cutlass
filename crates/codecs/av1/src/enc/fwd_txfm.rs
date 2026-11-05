@@ -1138,6 +1138,334 @@ pub fn fwd_txfm(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Estimate path: an approximate 8-bit DCT in 16-bit lanes.
+
+/// Largest magnitude anywhere in the forward DCT network `ops` of length
+/// `len` (12-bit constants, rounding included) when every input is at most
+/// `b` in magnitude.
+const fn dct_bound(ops: &[Op], len: usize, b: i64) -> i64 {
+    let mut v = [0i64; 64];
+    let mut i = 0;
+    while i < len {
+        v[i] = b;
+        i += 1;
+    }
+    let mut m = b;
+    let mut k = 0;
+    while k < ops.len() {
+        let op = ops[k];
+        let (a, bb) = (op.a as usize & (len - 1), op.b as usize & (len - 1));
+        let (x, y) = if op.flip {
+            (v[bb], v[a])
+        } else {
+            (v[a], v[bb])
+        };
+        let (u, w) = if op.had {
+            (x + y, x + y)
+        } else {
+            let c = (op.cos as i64).abs();
+            let s = (op.sin as i64).abs();
+            ((x * c + y * s) / 4096 + 2, (y * c + x * s) / 4096 + 2)
+        };
+        v[a] = u;
+        v[bb] = w;
+        if u > m {
+            m = u;
+        }
+        if w > m {
+            m = w;
+        }
+        k += 1;
+    }
+    m
+}
+
+/// The forward DCT network and output permutation of length `1 << n`.
+const fn dct_net(n: usize) -> (&'static [Op], &'static [u8]) {
+    match n {
+        2 => (&FDCT4, &DCT4_PERM),
+        3 => (&FDCT8, &DCT8_PERM),
+        4 => (&FDCT16, &DCT16_PERM),
+        5 => (&FDCT32, &DCT32_PERM),
+        _ => (&FDCT64, &DCT64_PERM),
+    }
+}
+
+/// Largest 16-bit value the estimate networks may reach.
+const EST_MAX: i32 = i16::MAX as i32;
+
+/// Gain bound of the DCT network of length `1 << n` with 16 fractional bits
+/// and the rounding it may add: no value inside it exceeds
+/// `(b * gain >> 16) + slack` for inputs of at most `b`.
+const fn dct_gain(n: usize) -> (i32, i32) {
+    let (ops, _) = dct_net(n);
+    let len = 1 << n;
+    let gain = (dct_bound(ops, len, 1 << 20) + 15) >> 4;
+    (gain as i32, dct_bound(ops, len, 0) as i32 + 1)
+}
+
+static EST_GAIN: [(i32, i32); 7] = [
+    (0, 0),
+    (0, 0),
+    dct_gain(2),
+    dct_gain(3),
+    dct_gain(4),
+    dct_gain(5),
+    dct_gain(6),
+];
+
+/// Whether inputs of at most `b` keep the network of length `1 << n` in range.
+#[inline(always)]
+fn est_fits(n: usize, b: i32) -> bool {
+    let (g, s) = EST_GAIN[n];
+    ((i64::from(b) * i64::from(g)) >> 16) + i64::from(s) <= i64::from(EST_MAX)
+}
+
+/// A 12-bit constant `k` as a whole part and a 16-bit fraction:
+/// `x * k / 4096 = x * a + x * m / 65536`.
+#[inline(always)]
+fn split12(k: i32) -> (i16, i16) {
+    let a = (k + 2048) >> 12;
+    (a as i16, ((k - (a << 12)) << 4) as i16)
+}
+
+/// The high half of a 16-bit product.
+#[inline(always)]
+fn mulhi(x: i16, m: i16) -> i16 {
+    ((i32::from(x) * i32::from(m)) >> 16) as i16
+}
+
+/// The forward DCT network on 16-bit lanes (12-bit constants as a whole
+/// part and a 16-bit fraction). The callers' shifts keep every value in
+/// range.
+#[inline(always)]
+fn run_est<const L: usize, const N: usize>(t: &mut [[i16; L]; N], ops: &[Op]) {
+    let ops = core::hint::black_box(ops);
+    for op in ops {
+        let a = op.a as usize & (N - 1);
+        let b = op.b as usize & (N - 1);
+        if op.had {
+            let (a, b) = if op.flip { (b, a) } else { (a, b) };
+            let x = t[a];
+            let y = t[b];
+            let mut s = [0i16; L];
+            let mut d = [0i16; L];
+            for l in 0..L {
+                s[l] = x[l].wrapping_add(y[l]);
+                d[l] = x[l].wrapping_sub(y[l]);
+            }
+            t[a] = s;
+            t[b] = d;
+        } else {
+            let (c, s) = (i32::from(op.cos), i32::from(op.sin));
+            let ((ca, cm), (sa, sm), (na, nm)) = (split12(c), split12(s), split12(-s));
+            let (x, y) = if op.flip { (t[b], t[a]) } else { (t[a], t[b]) };
+            let mut u = [0i16; L];
+            let mut v = [0i16; L];
+            for l in 0..L {
+                let (xl, yl) = (x[l], y[l]);
+                // Each high half is floored: the 1 makes up the average.
+                u[l] = xl
+                    .wrapping_mul(ca)
+                    .wrapping_add(mulhi(xl, cm))
+                    .wrapping_add(yl.wrapping_mul(sa))
+                    .wrapping_add(mulhi(yl, sm))
+                    .wrapping_add(1);
+                v[l] = yl
+                    .wrapping_mul(ca)
+                    .wrapping_add(mulhi(yl, cm))
+                    .wrapping_add(xl.wrapping_mul(na))
+                    .wrapping_add(mulhi(xl, nm))
+                    .wrapping_add(1);
+            }
+            t[a] = u;
+            t[b] = v;
+        }
+    }
+}
+
+/// Column DCTs of length `N`, `L` columns at a time, of the input shifted up
+/// by `up`, into the column-major `tmp` (`tmp[c * th + k]`). Returns the
+/// largest magnitude written.
+#[inline(never)]
+fn col_est<const L: usize, const N: usize>(
+    src: &[i32],
+    stride: usize,
+    w: usize,
+    up: u32,
+    tmp: &mut [i16],
+) -> i32 {
+    let th = N.min(32);
+    let (ops, perm) = dct_net(N.trailing_zeros() as usize);
+    let mut m = [0i16; L];
+    let mut c0 = 0;
+    while c0 < w {
+        let mut t = [[0i16; L]; N];
+        let mut any = 0;
+        for (r, tr) in t.iter_mut().enumerate() {
+            let row = &src[r * stride + c0..][..L];
+            for l in 0..L {
+                let v = row[l].clamp(-255, 255);
+                any |= v;
+                tr[l] = (v << up) as i16;
+            }
+        }
+        if any == 0 {
+            tmp[c0 * th..][..L * th].fill(0);
+        } else {
+            run_est::<L, N>(&mut t, ops);
+            for k in 0..th {
+                let r = &t[perm[k] as usize & (N - 1)];
+                for l in 0..L {
+                    m[l] = m[l].max(r[l].wrapping_abs());
+                }
+            }
+            for l in 0..L {
+                let out = &mut tmp[(c0 + l) * th..][..th];
+                for (k, o) in out.iter_mut().enumerate() {
+                    *o = t[perm[k] as usize & (N - 1)][l];
+                }
+            }
+        }
+        c0 += L;
+    }
+    m.iter().fold(0, |a, &v| a.max(i32::from(v)))
+}
+
+/// Row DCTs of length `N`, `L` rows at a time, from the column-major `tmp`
+/// shifted down by `mid`; writes the coefficients row-major with stride
+/// `min(N, 32)`, times `fmul / 4096` and shifted down by `shift` (up by
+/// `-shift`).
+#[inline(never)]
+fn row_est<const L: usize, const N: usize>(
+    tmp: &[i16],
+    th: usize,
+    mid: u32,
+    fmul: i32,
+    shift: i32,
+    coefs: &mut [i32],
+) {
+    let tw = N.min(32);
+    let (ops, perm) = dct_net(N.trailing_zeros() as usize);
+    let (mul, sh) = if fmul == 4096 {
+        (1, shift)
+    } else {
+        (fmul, shift + 12)
+    };
+    let rnd = if sh > 0 { (1i32 << sh) >> 1 } else { 0 };
+    let mut r0 = 0;
+    while r0 < th {
+        let mut t = [[0i16; L]; N];
+        let mut any = 0;
+        for (j, tj) in t.iter_mut().enumerate() {
+            let s = &tmp[j * th + r0..][..L];
+            for l in 0..L {
+                let v = if mid == 0 {
+                    s[l]
+                } else {
+                    (s[l] >> mid) + ((s[l] >> (mid - 1)) & 1)
+                };
+                any |= v;
+                tj[l] = v;
+            }
+        }
+        if any == 0 {
+            coefs[r0 * tw..][..L * tw].fill(0);
+        } else {
+            run_est::<L, N>(&mut t, ops);
+            for l in 0..L {
+                let out = &mut coefs[(r0 + l) * tw..][..tw];
+                for (k, o) in out.iter_mut().enumerate() {
+                    let v = i32::from(t[perm[k] as usize & (N - 1)][l]) * mul;
+                    *o = if sh >= 0 { (v + rnd) >> sh } else { v << -sh };
+                }
+            }
+        }
+        r0 += L;
+    }
+}
+
+/// An approximation of `fwd_txfm(src, src_stride, coefs, tx_size, DCT_DCT,
+/// bd)` for rate-distortion estimates, in the same layout and scale: 8-bit
+/// content is transformed in 16-bit lanes, scaled to the block's range
+/// (deeper content takes the exact path). `tmp` holds at least 2048 values.
+pub fn fwd_dct_est(
+    src: &[i32],
+    src_stride: usize,
+    coefs: &mut [i32],
+    tmp: &mut [i16],
+    tx_size: usize,
+    bd: u32,
+) {
+    if bd > 8 {
+        fwd_txfm(src, src_stride, coefs, tx_size, DCT_DCT as usize, bd);
+        return;
+    }
+    let nw = TX_WIDTH_LOG2[tx_size] as usize;
+    let nh = TX_HEIGHT_LOG2[tx_size] as usize;
+    let w = 1usize << nw;
+    let h = 1usize << nh;
+    let th = h.min(32);
+    let rect = nw.abs_diff(nh) == 1;
+    let total = (nw + nh) as i32 - rect as i32 - TRANSFORM_ROW_SHIFT[tx_size] as i32 - 4;
+    // The largest input magnitude sets the up shift.
+    let mut amax = 0;
+    for r in 0..h {
+        for &v in &src[r * src_stride..][..w] {
+            amax = amax.max(v.unsigned_abs());
+        }
+    }
+    let amax = amax.min(255) as i32;
+    if amax == 0 {
+        coefs[..w.min(32) * th].fill(0);
+        return;
+    }
+    let mut up = 0;
+    while up < 8 && est_fits(nh, amax << (up + 1)) {
+        up += 1;
+    }
+    let tmp = &mut tmp[..w * th];
+    macro_rules! col {
+        ($n:literal) => {
+            if w == 4 {
+                col_est::<4, $n>(src, src_stride, w, up, tmp)
+            } else {
+                col_est::<8, $n>(src, src_stride, w, up, tmp)
+            }
+        };
+    }
+    let cmax = match nh {
+        2 => col!(4),
+        3 => col!(8),
+        4 => col!(16),
+        5 => col!(32),
+        _ => col!(64),
+    };
+    let mut mid = 0;
+    while !est_fits(nw, (cmax >> mid) + 1) {
+        mid += 1;
+    }
+    let shift = total + up as i32 - mid as i32 - U0 as i32;
+    let fmul = if rect { 2896 } else { 4096 };
+    macro_rules! row {
+        ($n:literal) => {
+            if th == 4 {
+                row_est::<4, $n>(tmp, th, mid, fmul, shift, coefs)
+            } else {
+                row_est::<8, $n>(tmp, th, mid, fmul, shift, coefs)
+            }
+        };
+    }
+    match nw {
+        2 => row!(4),
+        3 => row!(8),
+        4 => row!(16),
+        5 => row!(32),
+        _ => row!(64),
+    }
+}
+
 /// Lossless forward 4x4 Walsh-Hadamard transform (libaom's `av1_fwht4x4`):
 /// the exact inverse of the decoder's lossless path (spec 7.13.2.10), in the
 /// Dequant domain (the lossless quantizer step is 4). `coefs[..16]` is
@@ -1176,7 +1504,7 @@ pub fn fwd_wht4x4(src: &[i32], src_stride: usize, coefs: &mut [i32]) {
 #[cfg(test)]
 #[allow(clippy::print_stdout)]
 mod tests {
-    use super::{fwd_txfm, fwd_wht4x4, run_sized};
+    use super::{fwd_dct_est, fwd_txfm, fwd_wht4x4, run_sized};
     use crate::dsp::Pixel;
     use crate::dsp::itx::inv_txfm_add;
     use crate::spec::tables::{DCT_DCT, IDTX, TRANSFORM_ROW_SHIFT, TX_HEIGHT_LOG2, TX_WIDTH_LOG2};
@@ -1421,6 +1749,59 @@ mod tests {
                         "size {tx_size} v {v}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The estimate transform stays within rounding of the exact one, on
+    /// extreme and on small residuals.
+    #[test]
+    fn estimate_close_to_exact() {
+        let mut rng = Rng(777);
+        for tx_size in 0..19 {
+            let (w, h) = dims(tx_size);
+            let (cw, ch) = (w.min(32), h.min(32));
+            for it in 0..60 {
+                let amp = [255, 255, 64, 8][it % 4];
+                let src: Vec<i32> = (0..w * h)
+                    .map(|i| match it % 4 {
+                        0 => {
+                            if rng.next() & 1 == 0 {
+                                255
+                            } else {
+                                -255
+                            }
+                        }
+                        1 => 255 - ((i % w) as i32 & 1) * 510 * ((it / 4) as i32 & 1),
+                        _ => rng.range(-amp, amp),
+                    })
+                    .collect();
+                let mut a = vec![0i32; 32 * 32];
+                let mut b = vec![0i32; 32 * 32];
+                fwd_txfm(&src, w, &mut a, tx_size, DCT_DCT as usize, 8);
+                fwd_dct_est(&src, w, &mut b, &mut [0; 2048], tx_size, 8);
+                let e: f64 = a[..cw * ch]
+                    .iter()
+                    .map(|&x| f64::from(x) * f64::from(x))
+                    .sum();
+                let d: f64 = a[..cw * ch]
+                    .iter()
+                    .zip(&b)
+                    .map(|(&x, &y)| f64::from(x - y) * f64::from(x - y))
+                    .sum();
+                // Rounding noise only: an overflow would be far larger.
+                let rel = d / e.max(1.0);
+                let mx = a[..cw * ch]
+                    .iter()
+                    .zip(&b)
+                    .map(|(&x, &y)| (x - y).abs())
+                    .max()
+                    .unwrap_or(0);
+                let big = a[..cw * ch].iter().map(|x| x.abs()).max().unwrap_or(0);
+                assert!(
+                    rel < 2e-3 && mx <= 4 + big / 64,
+                    "size {tx_size} it {it}: relative error {rel}, largest {mx}"
+                );
             }
         }
     }

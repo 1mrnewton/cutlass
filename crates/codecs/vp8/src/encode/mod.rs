@@ -90,6 +90,32 @@ pub struct Vp8Options {
     /// cut, where a key frame costs about the same and gives a new
     /// random-access point and fresh references.
     pub scene_cut: bool,
+    /// Update the references by copying the previous frame instead of
+    /// coding a new one: at each golden interval GOLDEN takes the previous
+    /// frame (`copy_buffer_to_golden = 1`) and ALTREF the old golden, and
+    /// halfway through each interval ALTREF takes the previous frame
+    /// (`copy_buffer_to_alternate = 1`). A golden frame then costs no more
+    /// than any other. Groups that `hidden_altref` plans are left alone.
+    pub copy_references: bool,
+    /// With `hidden_altref`, keep the hidden frame in GOLDEN rather than
+    /// ALTREF: the hidden frame refreshes GOLDEN and moves the old golden
+    /// to ALTREF, the frames before the one it stands for mark GOLDEN as a
+    /// future reference (`sign_bias_golden = 1`), and that frame needs no
+    /// copy. Needs `hidden_altref`.
+    pub hidden_golden: bool,
+    /// Send each segment's quantizer index and loop-filter level as
+    /// absolute values (`segment_feature_mode = 1`) instead of deltas from
+    /// the frame's. The pictures are the same. Needs `segments`.
+    pub absolute_segments: bool,
+    /// The key-frame colour-space bit (RFC 6386 Section 9.2). 0 is YUV as
+    /// the specification defines it; 1 is reserved, and decoders treat it
+    /// as an unspecified colour space.
+    pub color_space: bool,
+    /// The key-frame clamping-type bit (RFC 6386 Section 9.2): 1 tells the
+    /// decoder the reconstruction needs no clamping. The encoder does not
+    /// check that promise; every decoder checked here clamps regardless,
+    /// and FFmpeg reads the bit as full-range video.
+    pub clamping_type: bool,
 }
 
 impl Default for Vp8Options {
@@ -108,6 +134,11 @@ impl Default for Vp8Options {
             sharpness: 0,
             scale: [0, 0],
             scene_cut: true,
+            copy_references: false,
+            hidden_golden: false,
+            absolute_segments: false,
+            color_space: false,
+            clamping_type: false,
         }
     }
 }
@@ -177,6 +208,7 @@ struct Plan {
     refresh_altref: bool,
     copy_to_golden: u8,
     copy_to_altref: u8,
+    sign_bias_golden: bool,
     sign_bias_altref: bool,
 }
 
@@ -249,6 +281,16 @@ impl Vp8Encoder {
         if opts.hidden_altref && !(2..=MAX_LOOKAHEAD).contains(&opts.golden_interval) {
             return Err(CodecError::InvalidApi {
                 what: "vp8 altref lookahead",
+            });
+        }
+        if opts.hidden_golden && !opts.hidden_altref {
+            return Err(CodecError::InvalidApi {
+                what: "vp8 hidden golden needs hidden_altref",
+            });
+        }
+        if opts.absolute_segments && !opts.segments {
+            return Err(CodecError::InvalidApi {
+                what: "vp8 absolute segments need segments",
             });
         }
         Ok(Self {
@@ -379,20 +421,40 @@ impl Vp8Encoder {
             return Plan::key();
         }
         if let Some(target) = self.altref_target {
+            let in_golden = self.opts.hidden_golden;
             if target == self.shown {
-                // The frame the hidden altref holds: golden takes the
-                // altref, coded at the finer quantizer.
+                // The frame the hidden frame holds. In ALTREF, golden takes
+                // it; in GOLDEN, it is already there.
                 return Plan {
-                    copy_to_golden: 2,
+                    copy_to_golden: if in_golden { 0 } else { 2 },
                     ..shown
                 };
             }
             return Plan {
-                sign_bias_altref: true,
+                sign_bias_golden: in_golden,
+                sign_bias_altref: !in_golden,
                 ..shown
             };
         }
-        if self.opts.golden_interval > 0 && self.since_golden >= self.opts.golden_interval {
+        let interval = self.opts.golden_interval;
+        if self.opts.copy_references && interval > 0 {
+            if self.since_golden >= interval {
+                // Golden takes the previous frame, altref the old golden.
+                return Plan {
+                    copy_to_golden: 1,
+                    copy_to_altref: 2,
+                    ..shown
+                };
+            }
+            if interval >= 4 && self.since_golden == interval / 2 {
+                return Plan {
+                    copy_to_altref: 1,
+                    ..shown
+                };
+            }
+            return shown;
+        }
+        if interval > 0 && self.since_golden >= interval {
             // The old golden moves to altref, a longer-term reference.
             return Plan {
                 kind: KIND_GOLDEN,
@@ -428,11 +490,21 @@ impl Vp8Encoder {
                     && let Some(source) = self.queue.get(ahead - 1).cloned()
                     && let Some(front) = self.queue.front()
                 {
-                    let hidden = Plan {
-                        show: false,
-                        kind: KIND_GOLDEN,
-                        refresh_altref: true,
-                        ..Plan::default()
+                    let hidden = if self.opts.hidden_golden {
+                        Plan {
+                            show: false,
+                            kind: KIND_GOLDEN,
+                            refresh_golden: true,
+                            copy_to_altref: 2,
+                            ..Plan::default()
+                        }
+                    } else {
+                        Plan {
+                            show: false,
+                            kind: KIND_GOLDEN,
+                            refresh_altref: true,
+                            ..Plan::default()
+                        }
                     };
                     let (pts, timescale) = (front.pts, front.timescale);
                     let mut packet = self.encode(&source, hidden)?;
@@ -531,7 +603,7 @@ impl Vp8Encoder {
                 Filter::Bilinear
             },
             full_pixel: version == 3,
-            sign_bias: [false, false, false, plan.sign_bias_altref],
+            sign_bias: [false, false, plan.sign_bias_golden, plan.sign_bias_altref],
             segments: self.opts.segments.then_some(self.segment_map.as_slice()),
             seg_dq: seg_q.map(|sq| Dequant::new(i32::from(sq), &QuantIndices::default())),
             seg_lambda16: seg_q.map(lambda_for),
@@ -576,6 +648,19 @@ impl Vp8Encoder {
             search_filter(&src, &coded, &h, q)
         };
         h.segmentation.filter = segment_filters(&h.segmentation, h.filter_level);
+        if self.opts.absolute_segments && h.segmentation.enabled {
+            // The same levels sent whole: no frame filter means none at all.
+            let level = i32::from(h.filter_level);
+            h.segmentation.absolute = true;
+            h.segmentation.quant = seg_q.map(|sq| sq as i8);
+            h.segmentation.filter = h.segmentation.filter.map(|d| {
+                if level == 0 {
+                    0
+                } else {
+                    (level + i32::from(d)).clamp(0, 63) as i8
+                }
+            });
+        }
         if h.filter_level > 0 {
             let filters: Vec<_> = coded
                 .mbs
@@ -629,8 +714,10 @@ impl Vp8Encoder {
             if plan.refresh_golden || plan.copy_to_golden != 0 {
                 self.since_golden = 0;
             }
-            if plan.copy_to_golden != 0 {
+            if self.altref_target == Some(self.shown) {
+                // The frame the hidden frame stands for ends its group.
                 self.altref_target = None;
+                self.since_golden = 0;
             }
             self.since_key = self.since_key.saturating_add(1);
             self.since_golden = self.since_golden.saturating_add(1);
@@ -740,8 +827,8 @@ impl Vp8Encoder {
                 hscale: if key { self.opts.scale[0] } else { 0 },
                 vscale: if key { self.opts.scale[1] } else { 0 },
             },
-            color_space: false,
-            clamping: false,
+            color_space: key && self.opts.color_space,
+            clamping: key && self.opts.clamping_type,
             segmentation: Segmentation::default(),
             filter_simple: self.opts.version != 0,
             filter_level: 0,
@@ -756,7 +843,7 @@ impl Vp8Encoder {
             refresh_altref: plan.refresh_altref,
             copy_to_golden: plan.copy_to_golden,
             copy_to_altref: plan.copy_to_altref,
-            sign_bias_golden: false,
+            sign_bias_golden: plan.sign_bias_golden,
             sign_bias_altref: plan.sign_bias_altref,
             // A hidden frame's probabilities stay with it.
             refresh_entropy: plan.show && !self.opts.error_resilient,

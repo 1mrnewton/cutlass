@@ -798,3 +798,144 @@ fn scene_cuts_become_key_frames() {
         );
     }
 }
+
+/// The headers of a stream, parsed in order.
+fn headers(packets: &[Vec<u8>]) -> Vec<crate::header::FrameHeader> {
+    let mut state = crate::header::Persist::default();
+    packets
+        .iter()
+        .map(|frame| {
+            let parsed = crate::header::parse(frame, &state).expect("parse");
+            state = parsed.next;
+            parsed.header
+        })
+        .collect()
+}
+
+/// Copy flag 1: golden and altref take the previous frame by copy.
+#[test]
+fn copy_flag_one_decodes_identically() {
+    for (name, version) in [("copy_last_v0", 0), ("copy_last_v1", 1)] {
+        let opts = Vp8Options {
+            copy_references: true,
+            golden_interval: 4,
+            version,
+            quantizer: 30,
+            ..Vp8Options::default()
+        };
+        let (packets, _) = encode_synthetic(160, 96, 14, opts);
+        let hs = headers(&packets);
+        let golden = hs.iter().filter(|h| h.copy_to_golden == 1).count();
+        let altref = hs.iter().filter(|h| h.copy_to_altref == 1).count();
+        assert!(golden >= 2 && altref >= 2, "{name}: {golden} {altref}");
+        assert!(
+            hs.iter()
+                .skip(1)
+                .all(|h| !h.refresh_golden && !h.refresh_altref)
+        );
+        let refs = reference_counts(160, 96, &packets);
+        assert!(refs[2] > 0 && refs[3] > 0, "{name}: {refs:?}");
+        check(name, 160, 96, 14, opts);
+    }
+}
+
+/// A hidden frame kept in GOLDEN, with the golden sign bias set on the
+/// frames before the one it stands for.
+#[test]
+fn hidden_golden_decodes_identically() {
+    for (name, bitrate, version) in [
+        ("hidden_golden_q", 0, 0),
+        ("hidden_golden_rate", 400_000, 0),
+        ("hidden_golden_v1", 0, 1),
+    ] {
+        let opts = Vp8Options {
+            hidden_altref: true,
+            hidden_golden: true,
+            golden_interval: 5,
+            bitrate,
+            version,
+            quantizer: 30,
+            ..Vp8Options::default()
+        };
+        let (packets, _) = encode_synthetic(160, 96, 16, opts);
+        let hs = headers(&packets);
+        let hidden: Vec<_> = hs.iter().filter(|h| !h.tag.show).collect();
+        assert!(hidden.len() >= 2, "{name}: {} hidden", hidden.len());
+        assert!(
+            hidden
+                .iter()
+                .all(|h| h.refresh_golden && !h.refresh_altref && h.copy_to_altref == 2)
+        );
+        let biased = hs.iter().filter(|h| h.sign_bias_golden).count();
+        assert!(biased >= 4, "{name}: {biased} frames with golden sign bias");
+        assert!(hs.iter().all(|h| !h.sign_bias_altref));
+        let refs = reference_counts(160, 96, &packets);
+        assert!(refs[2] > 0, "{name}: {refs:?}");
+        check(name, 160, 96, 16, opts);
+    }
+}
+
+/// Segment quantizers and filter levels sent as absolute values give the
+/// same pictures as the deltas.
+#[test]
+fn absolute_segments_decode_identically() {
+    for (name, q) in [
+        ("abs_seg_fine", 8),
+        ("abs_seg_mid", 40),
+        ("abs_seg_coarse", 110),
+    ] {
+        let relative = Vp8Options {
+            segments: true,
+            quantizer: q,
+            keyframe_interval: 4,
+            ..Vp8Options::default()
+        };
+        let absolute = Vp8Options {
+            absolute_segments: true,
+            ..relative
+        };
+        let (packets, recon) = encode_synthetic(176, 112, 8, absolute);
+        let hs = headers(&packets);
+        assert!(
+            hs.iter()
+                .all(|h| h.segmentation.enabled && h.segmentation.absolute)
+        );
+        assert!(
+            hs.iter()
+                .any(|h| h.segmentation.filter.iter().any(|&f| f > 0)),
+            "{name}: no absolute filter level"
+        );
+        let (_, relative_recon) = encode_synthetic(176, 112, 8, relative);
+        assert_eq!(
+            recon, relative_recon,
+            "{name}: absolute changed the pictures"
+        );
+        check(name, 176, 112, 8, absolute);
+    }
+}
+
+/// The key-frame colour-space and clamping-type bits set to 1.
+#[test]
+fn colour_space_and_clamp_bits_decode_identically() {
+    for (name, color_space, clamping_type, q) in [
+        ("colour_bit", true, false, 30),
+        ("clamp_bit", false, true, 30),
+        ("both_bits_coarse", true, true, 127),
+        ("both_bits_fine", true, true, 0),
+    ] {
+        let opts = Vp8Options {
+            color_space,
+            clamping_type,
+            quantizer: q,
+            keyframe_interval: 3,
+            ..Vp8Options::default()
+        };
+        let (packets, _) = encode_synthetic(160, 96, 7, opts);
+        let hs = headers(&packets);
+        for h in hs.iter().filter(|h| h.tag.key) {
+            assert_eq!((h.color_space, h.clamping), (color_space, clamping_type));
+        }
+        assert_eq!(hs.iter().filter(|h| h.tag.key).count(), 3);
+        check(name, 160, 96, 7, opts);
+    }
+}

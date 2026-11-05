@@ -479,7 +479,14 @@ fn encoder_fuzz_does_not_panic() {
                 pick(&mut rng, &[0, 2, 3]) as u8,
             ],
             scene_cut: rng.below(2) == 0,
+            copy_references: rng.below(3) == 0,
+            hidden_golden: false,
+            absolute_segments: false,
+            color_space: rng.below(4) == 0,
+            clamping_type: rng.below(4) == 0,
         };
+        opts.hidden_golden = opts.hidden_altref && rng.below(2) == 0;
+        opts.absolute_segments = opts.segments && rng.below(2) == 0;
         let mut width = pick(&mut rng, &[1, 2, 7, 16, 17, 33, 48, 80]);
         let mut height = pick(&mut rng, &[1, 3, 15, 16, 32, 47, 64]);
         // One round in eight breaks one setting.
@@ -496,7 +503,18 @@ fn encoder_fuzz_does_not_panic() {
                 }
                 6 => width = 0,
                 7 => height = 0,
-                _ => width = 16_384 + rng.below(4) as u32,
+                8 => match rng.below(3) {
+                    0 => width = 16_384 + rng.below(4) as u32,
+                    1 => {
+                        opts.hidden_altref = false;
+                        opts.hidden_golden = true;
+                    }
+                    _ => {
+                        opts.segments = false;
+                        opts.absolute_segments = true;
+                    }
+                },
+                _ => unreachable!(),
             }
         }
         let legal = width > 0
@@ -507,7 +525,9 @@ fn encoder_fuzz_does_not_panic() {
             && opts.version <= 3
             && opts.sharpness <= 7
             && opts.scale.iter().all(|&s| s <= 3)
-            && (!opts.hidden_altref || (2..=64).contains(&opts.golden_interval));
+            && (!opts.hidden_altref || (2..=64).contains(&opts.golden_interval))
+            && (!opts.hidden_golden || opts.hidden_altref)
+            && (!opts.absolute_segments || opts.segments);
         let mut encoder = match Vp8Encoder::with_options(width, height, opts) {
             Ok(encoder) => encoder,
             Err(_) => {

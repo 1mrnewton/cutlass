@@ -135,14 +135,22 @@ impl Settings {
     /// is left off.
     pub fn ensure_default_shortcuts(&mut self) {
         for (action, _) in ACTIONS {
-            if self.shortcuts.iter().any(|shortcut| shortcut.action == *action) {
+            if self
+                .shortcuts
+                .iter()
+                .any(|shortcut| shortcut.action == *action)
+            {
                 continue;
             }
             let keys = default_keys(action).unwrap_or_default();
             let taken = self.shortcuts.iter().any(|shortcut| shortcut.keys == keys);
             self.shortcuts.push(Shortcut {
                 action: (*action).to_owned(),
-                keys: if taken { String::new() } else { keys.to_owned() },
+                keys: if taken {
+                    String::new()
+                } else {
+                    keys.to_owned()
+                },
                 ..Shortcut::default()
             });
         }

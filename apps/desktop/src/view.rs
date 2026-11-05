@@ -1006,7 +1006,10 @@ fn settings_window(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                 choice_row(ui, "A seek", |ui| {
                     let seek = &mut settings.playback.seek_during_playback;
                     for (value, name) in [
-                        (cutlass_settings::SeekDuringPlayback::KeepPlaying, "keeps playing"),
+                        (
+                            cutlass_settings::SeekDuringPlayback::KeepPlaying,
+                            "keeps playing",
+                        ),
                         (cutlass_settings::SeekDuringPlayback::Pause, "pauses"),
                     ] {
                         if ui.selectable_label(*seek == value, name).clicked() {
@@ -1022,8 +1025,14 @@ fn settings_window(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
                     }
                 }
                 settings_heading(ui, "Hardware codecs");
-                ui.checkbox(&mut settings.hardware.decode, "Decode with the system codecs");
-                ui.checkbox(&mut settings.hardware.encode, "Encode with the system codecs");
+                ui.checkbox(
+                    &mut settings.hardware.decode,
+                    "Decode with the system codecs",
+                );
+                ui.checkbox(
+                    &mut settings.hardware.encode,
+                    "Encode with the system codecs",
+                );
                 ui.label(
                     RichText::new("These take effect when Cutlass opens again.")
                         .color(tokens::FAINT),
@@ -7023,24 +7032,50 @@ mod tests {
             output.textures_delta.clear();
             output
         };
-        run(&mut shell, &mut view, vec![key(egui::Key::Comma, egui::Modifiers::COMMAND)]);
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Comma, egui::Modifiers::COMMAND)],
+        );
         assert!(view.settings_open);
         let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
-        for text in ["Settings", "Playback", "Panels", "Shortcuts", "Play or pause"] {
+        for text in [
+            "Settings",
+            "Playback",
+            "Panels",
+            "Shortcuts",
+            "Play or pause",
+        ] {
             assert!(painted.contains(text), "{text} in {painted}");
         }
         view.recording = Some("split");
-        run(&mut shell, &mut view, vec![key(egui::Key::Space, egui::Modifiers::NONE)]);
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Space, egui::Modifiers::NONE)],
+        );
         assert_eq!(view.recording, None);
         assert_eq!(shell.settings().keys_for("split"), "space");
         assert_eq!(shell.settings().keys_for("play"), "");
-        assert!(shell.notice().contains("took Space from Play or pause"), "{}", shell.notice());
+        assert!(
+            shell.notice().contains("took Space from Play or pause"),
+            "{}",
+            shell.notice()
+        );
         view.recording = Some("play");
-        run(&mut shell, &mut view, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
         assert_eq!(view.recording, None);
         assert!(view.settings_open);
         assert_eq!(shell.settings().keys_for("play"), "");
-        run(&mut shell, &mut view, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
         assert!(!view.settings_open);
     }
 
@@ -7101,20 +7136,33 @@ mod tests {
             output
         };
         let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
-        assert!(painted.contains("Cutlass is licensed MIT OR Apache-2.0"), "{painted}");
+        assert!(
+            painted.contains("Cutlass is licensed MIT OR Apache-2.0"),
+            "{painted}"
+        );
         assert!(painted.contains("accesskit "), "{painted}");
-        run(&mut shell, &mut view, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        run(
+            &mut shell,
+            &mut view,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
         assert!(view.licenses.is_none());
 
         let temp = std::env::temp_dir().join(format!("cutlass-log-export-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
         let out = temp.join("log.txt");
-        view.dialogs.finish_for_test(Picker::SaveLog, Some(out.clone()));
+        view.dialogs
+            .finish_for_test(Picker::SaveLog, Some(out.clone()));
         run(&mut shell, &mut view, Vec::new());
         assert!(out.is_file());
-        assert!(shell.notice().starts_with("Saved the log"), "{}", shell.notice());
-        view.dialogs.finish_for_test(Picker::SaveLog, Some(temp.clone()));
+        assert!(
+            shell.notice().starts_with("Saved the log"),
+            "{}",
+            shell.notice()
+        );
+        view.dialogs
+            .finish_for_test(Picker::SaveLog, Some(temp.clone()));
         run(&mut shell, &mut view, Vec::new());
         assert_eq!(shell.notice(), "the log path is a folder");
         let _ = std::fs::remove_dir_all(&temp);
@@ -7767,13 +7815,22 @@ mod tests {
             chord(egui::Key::Q, egui::Modifiers::COMMAND).as_deref(),
             Some("primary+q")
         );
-        assert_eq!(chord(egui::Key::Space, control).as_deref(), Some("ctrl+space"));
+        assert_eq!(
+            chord(egui::Key::Space, control).as_deref(),
+            Some("ctrl+space")
+        );
         assert_eq!(
             chord(egui::Key::Comma, egui::Modifiers::COMMAND).as_deref(),
             Some("primary+comma")
         );
-        assert_eq!(chord(egui::Key::F5, egui::Modifiers::default()).as_deref(), Some("f5"));
-        assert_eq!(chord(egui::Key::Num3, egui::Modifiers::default()).as_deref(), Some("3"));
+        assert_eq!(
+            chord(egui::Key::F5, egui::Modifiers::default()).as_deref(),
+            Some("f5")
+        );
+        assert_eq!(
+            chord(egui::Key::Num3, egui::Modifiers::default()).as_deref(),
+            Some("3")
+        );
         assert_eq!(chord(egui::Key::Escape, egui::Modifiers::default()), None);
         for (key, name) in [
             (egui::Key::J, "j"),

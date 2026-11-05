@@ -329,7 +329,7 @@ mod tests {
 
     fn place_clip() -> Request {
         Request::Place {
-            track_id: "".into(),
+            track_id: "main".into(),
             segment: Box::new(Segment::new("clip", "media", TimeRange::new(0, 1_000_000))),
         }
     }
@@ -380,7 +380,7 @@ mod tests {
                 3,
                 &[Request::Move {
                     segment_id: SegmentId::new("clip"),
-                    track_id: "".into(),
+                    track_id: "main".into(),
                     start: Micros(1_000_000),
                 }],
             )
@@ -452,7 +452,7 @@ mod tests {
             .apply(
                 1,
                 &[Request::SetTrackAttribute {
-                    track_id: "".into(),
+                    track_id: "main".into(),
                     bit: TrackAttribute::LOCK,
                     on: true,
                 }],

@@ -314,7 +314,7 @@ mod tests {
             .apply(
                 0,
                 &[Request::Place {
-                    track_id: TrackId::new(""),
+                    track_id: TrackId::new("main"),
                     segment: Box::new(Segment::new("clip", "media", TimeRange::new(0, 1_000_000))),
                 }],
             )

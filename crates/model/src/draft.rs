@@ -162,7 +162,7 @@ impl Draft {
                 maintrack_adsorb: true,
                 ..DraftConfig::default()
             },
-            tracks: vec![Track::main("")],
+            tracks: vec![Track::main("main")],
             materials: Materials::default(),
             relationships: Vec::new(),
             render_index_track_mode_on: false,

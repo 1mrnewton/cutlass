@@ -88,6 +88,19 @@ pub struct ModeParams {
     /// Partition estimates transform-code an intra or inter candidate only
     /// when its SATD cost is within this factor of the other one (0: always).
     pub est_skip_ratio: f64,
+    /// Inter mode decisions charge the signalling cost from the CDFs.
+    pub exact_rates: bool,
+    /// Inter candidates (best per reference and compound) compared by
+    /// transform-coded RD, and how far behind the best SATD cost they may be.
+    pub inter_rd_cands: usize,
+    pub inter_rd_ratio: f64,
+    /// Modes per single reference offered to that comparison.
+    pub inter_rd_modes: usize,
+    /// The intra transform split is judged with each smaller transform
+    /// block predicted on its own (as coded), not cut from the whole one.
+    pub intra_split_pred: bool,
+    /// The intra/inter comparison charges the is_inter flag from its CDF.
+    pub inter_flag_bits: bool,
 }
 
 impl Default for ModeParams {
@@ -125,18 +138,31 @@ impl Default for ModeParams {
             intra_sweep_ratio: 0.0,
             inter_clear_ratio: 0.0,
             est_skip_ratio: 0.0,
+            exact_rates: true,
+            inter_rd_cands: 1,
+            inter_rd_ratio: 1.5,
+            inter_rd_modes: 1,
+            intra_split_pred: true,
+            inter_flag_bits: true,
         }
     }
 }
 
 /// An inter mode decision.
+#[derive(Clone, Copy)]
 struct InterChoice {
     refs: [i8; 2],
     mode: u8,
     mv: [Mv; 2],
     idx: usize,
     cost: f64,
+    /// Signalling bits counted in `cost`.
+    bits: f64,
 }
+
+/// A single-reference mode option: mode, vector, `ref_mv_idx`, SATD cost
+/// (with its signalling) and signalling bits.
+type ModeOpt = (u8, Mv, usize, f64, f64);
 
 /// What a translational prediction in the mode search depends on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -231,104 +257,6 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.bd,
         );
         f64::from(res.cost)
-    }
-
-    /// Best luma palette for the block at (x, y): (size, ascending colors,
-    /// SATD cost including an estimate of the palette and map bits). The
-    /// color map is left in `self.color_map_y` (stride = block width).
-    fn pick_palette_y(
-        &mut self,
-        x: usize,
-        y: usize,
-        bw: usize,
-        bh: usize,
-    ) -> Option<(u8, [u16; 8], f64)> {
-        let src = self.src?;
-        let sp = &src.planes[0];
-        let fw = self.fs.mi_cols * 4;
-        let fh = self.fs.mi_rows * 4;
-        let on_w = bw.min(fw - x);
-        let on_h = bh.min(fh - y);
-        let mut vals: Vec<u16> = Vec::with_capacity(on_w * on_h);
-        for i in 0..on_h {
-            for j in 0..on_w {
-                vals.push(sp.data[(y + i) * sp.stride + x + j].to_i32() as u16);
-            }
-        }
-        let mut sorted = vals.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        if sorted.len() < 2 {
-            return None;
-        }
-        let mut colors: Vec<u16> = if sorted.len() <= 8 {
-            sorted
-        } else {
-            // k-means over the values, started from evenly spread quantiles.
-            let mut all = vals.clone();
-            all.sort_unstable();
-            let k = 8;
-            let mut c: Vec<f64> = (0..k)
-                .map(|i| f64::from(all[(2 * i + 1) * all.len() / (2 * k)]))
-                .collect();
-            for _ in 0..6 {
-                let mut sum = vec![0f64; k];
-                let mut cnt = vec![0u32; k];
-                for &v in &vals {
-                    let v = f64::from(v);
-                    let mut bi = 0;
-                    for i in 1..k {
-                        if (v - c[i]).abs() < (v - c[bi]).abs() {
-                            bi = i;
-                        }
-                    }
-                    sum[bi] += v;
-                    cnt[bi] += 1;
-                }
-                for i in 0..k {
-                    if cnt[i] > 0 {
-                        c[i] = sum[i] / f64::from(cnt[i]);
-                    }
-                }
-            }
-            let mut cc: Vec<u16> = c.iter().map(|v| v.round() as u16).collect();
-            cc.sort_unstable();
-            cc.dedup();
-            cc
-        };
-        colors.truncate(8);
-        if colors.len() < 2 {
-            return None;
-        }
-        let n = colors.len();
-        // Map every sample (outside the frame: the nearest edge sample).
-        let mut pred = vec![P::default(); bw * bh];
-        for i in 0..bh {
-            for j in 0..bw {
-                let v = i32::from(vals[i.min(on_h - 1) * on_w + j.min(on_w - 1)]);
-                let mut bi = 0;
-                for k in 1..n {
-                    if (v - i32::from(colors[k])).abs() < (v - i32::from(colors[bi])).abs() {
-                        bi = k;
-                    }
-                }
-                self.color_map_y[i * bw + j] = bi as u8;
-                pred[i * bw + j] = P::from_i32(i32::from(colors[bi]));
-            }
-        }
-        let d = f64::from(satd(
-            &sp.data[y * sp.stride + x..],
-            sp.stride,
-            &pred,
-            bw,
-            on_w & !3,
-            on_h & !3,
-        ));
-        let map_bits = (on_w * on_h) as f64 * (n as f64).log2() * 0.45;
-        let bits = 4.0 + n as f64 * f64::from(self.bd) * 0.8 + map_bits;
-        let mut out = [0u16; 8];
-        out[..n].copy_from_slice(&colors);
-        Some((n as u8, out, d + self.mode.lambda_satd * bits))
     }
 
     /// Rate-distortion estimate (squared error + lambda * bits) of coding
@@ -684,12 +612,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.cur_filters = [0, 0];
         let saved = self.b.clone();
         // Inter first: an intra search far behind it skips its refinements.
-        let picked_inter = if self.mode.inter_frame {
-            let c = self.pick_inter(x, y, block_width(bs), block_height(bs));
+        let (picked_inter, picked_rd) = if self.mode.inter_frame {
+            let list = self.pick_inter(x, y, block_width(bs), block_height(bs));
             self.b = saved.clone();
-            c
+            self.rerank_inter(list, x, y, w, h, tx)
         } else {
-            None
+            (None, None)
         };
         let limit = |t: f64| match &picked_inter {
             Some(c) if t > 0.0 => c.cost * t,
@@ -709,7 +637,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if self.hdr.allow_screen_content_tools && bw.min(bh) >= 8 && bw.max(bh) <= 64 {
             // The mode cost was measured on the first transform block only.
             let whole = intra_cost * ((bw * bh) as f64 / (w * h) as f64);
-            if let Some((n, colors, cost)) = self.pick_palette_y(x, y, bw, bh)
+            if let Some((n, colors, cost, _)) = self.pick_palette_y(x, y, bw, bh)
                 && cost < whole
             {
                 pb.y_mode = DC_PRED;
@@ -768,9 +696,23 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                         .flat_map(|i| cp.data[(y + i) * cp.stride + x..][..w].to_vec())
                         .collect();
                     self.residual_of(&pred, w, x, y, w, h, &mut res);
-                    let intra_rd = self.tx_cost(&res, w, h, tx) + lam_b * 5.0;
+                    let ib = self.mode.inter_flag_bits;
+                    let intra_rd = self.tx_cost(&res, w, h, tx)
+                        + lam_b
+                            * if ib {
+                                self.is_inter_bits(false) + 4.0
+                            } else {
+                                5.0
+                            };
                     let mut inter_rd = f64::MAX;
-                    if self.pred_luma(c.refs, c.mv, x, y, w, h) {
+                    if let Some(rd) = picked_rd {
+                        inter_rd = rd
+                            + if ib {
+                                lam_b * self.is_inter_bits(true)
+                            } else {
+                                0.0
+                            };
+                    } else if self.pred_luma(c.refs, c.mv, x, y, w, h) {
                         let pred = std::mem::take(&mut self.scratch.obmc);
                         self.residual_of(&pred, w, x, y, w, h, &mut res);
                         self.scratch.obmc = pred;
@@ -820,13 +762,26 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             if pb.palette_size_y == 0 {
                 pb.tx_size = self.pick_intra_tx(&pb, tx, max_tx);
             }
-            pb.uv_mode = if pb.has_chroma {
+            let (uv_mode, uv_cost) = if pb.has_chroma {
                 self.pick_intra_chroma(&pb)
             } else {
-                DC_PRED
+                (DC_PRED, f64::MAX)
             };
+            pb.uv_mode = uv_mode;
             if pb.uv_mode == UV_CFL_PRED {
                 (pb.cfl_alpha_u, pb.cfl_alpha_v) = self.cfl_choice;
+            }
+            if self.hdr.allow_screen_content_tools
+                && pb.has_chroma
+                && bw.min(bh) >= 8
+                && bw.max(bh) <= 64
+                && let Some((n, u, v, cost)) = self.pick_palette_uv(&pb)
+                && cost < uv_cost
+            {
+                pb.uv_mode = DC_PRED;
+                pb.palette_size_uv = n;
+                pb.palette_u = u;
+                pb.palette_v = v;
             }
         }
         // Skip when the prediction is already close to the source.
@@ -974,7 +929,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let pred = std::mem::take(&mut self.scratch.obmc);
         self.residual_of(&pred, w, x, y, w, h, &mut res);
         self.scratch.obmc = pred;
-        let mut best = (tx, self.tx_cost(&res, w, h, tx));
+        let key = self.pred_key(0, pb.ref_frame, pb.mv, [x, y, w, h]);
+        let whole = match self.me_scratch.tx_memo {
+            Some((k, t, c)) if k == key && t == tx => c,
+            _ => self.tx_cost(&res, w, h, tx),
+        };
+        let mut best = (tx, whole);
         let mut t = tx;
         for _ in 0..self.mode.tx_depth {
             let s = SPLIT_TX_SIZE[t as usize];
@@ -987,7 +947,6 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 best = (t, c);
             }
         }
-        let key = self.pred_key(0, pb.ref_frame, pb.mv, [x, y, w, h]);
         self.me_scratch.tx_memo = Some((key, best.0, best.1));
         best.0
     }
@@ -1053,11 +1012,94 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         self.residual_of(&pred, w, x, y, w, h, &mut res);
         let whole = self.tx_cost(&res, w, h, tx);
         let s = SPLIT_TX_SIZE[tx as usize];
-        if s != tx && self.tx_cost(&res, w, h, s) < whole {
-            s
-        } else {
-            tx
+        if s == tx {
+            return tx;
         }
+        let split = if self.mode.intra_split_pred {
+            self.intra_split_cost(pb, x, y, w, h, s)
+        } else {
+            self.tx_cost(&res, w, h, s)
+        };
+        if split < whole { s } else { tx }
+    }
+
+    /// Cost of the `w` x `h` area at (`x`, `y`) coded as transform blocks of
+    /// size `s`, each predicted on its own with the block's intra mode. The
+    /// earlier transform blocks stand in with their source samples.
+    fn intra_split_cost(
+        &mut self,
+        pb: &Block,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        s: u8,
+    ) -> f64 {
+        let Some(src) = self.src else { return f64::MAX };
+        let (sw, sh) = (tx_w(s), tx_h(s));
+        let sb_mask = self.sb_size4 - 1;
+        let (sr, sc) = (pb.mi_row & sb_mask, pb.mi_col & sb_mask);
+        let (nr, nc) = (h / sh, w / sw);
+        let saved = self.b.clone();
+        self.b.use_filter_intra = pb.use_filter_intra;
+        self.b.filter_intra_mode = pb.filter_intra_mode;
+        self.b.angle_delta_y = pb.angle_delta_y;
+        let mut res = vec![0i32; sw * sh];
+        let mut total = 0.0;
+        for i in 0..nr {
+            for j in 0..nc {
+                let (px, py) = (x + j * sw, y + i * sh);
+                // Decoded state of the 4x4 at (r4, c4) relative to the superblock.
+                let decoded = |r4: isize, c4: isize, bdf: &[[bool; 35]; 35]| -> bool {
+                    let (ra, ca) = (sr as isize, sc as isize);
+                    let inside = r4 >= ra
+                        && r4 < ra + (h / 4) as isize
+                        && c4 >= ca
+                        && c4 < ca + (w / 4) as isize;
+                    if inside {
+                        let ti = ((r4 - ra) as usize * 4) / sh;
+                        let tj = ((c4 - ca) as usize * 4) / sw;
+                        ti < i || (ti == i && tj < j)
+                    } else if r4 + 1 < 0 || c4 + 1 < 0 || r4 + 1 >= 35 || c4 + 1 >= 35 {
+                        false
+                    } else {
+                        bdf[(r4 + 1) as usize][(c4 + 1) as usize]
+                    }
+                };
+                let bdf = &self.block_decoded[0];
+                let r0 = (sr + i * sh / 4) as isize;
+                let c0 = (sc + j * sw / 4) as isize;
+                let ar = decoded(r0 - 1, c0 + (sw / 4) as isize, bdf);
+                let bl = decoded(r0 + (sh / 4) as isize, c0 - 1, bdf);
+                let al = j > 0 || pb.avail_l;
+                let au = i > 0 || pb.avail_u;
+                self.predict_intra(
+                    0,
+                    px,
+                    py,
+                    al,
+                    au,
+                    ar,
+                    bl,
+                    pb.y_mode,
+                    sw.trailing_zeros(),
+                    sh.trailing_zeros(),
+                );
+                let sp = &src.planes[0];
+                let cp = &mut self.cur.planes[0];
+                for r in 0..sh {
+                    for c in 0..sw {
+                        let o = (py + r) * cp.stride + px + c;
+                        let sv = sp.data[(py + r) * sp.stride + px + c];
+                        res[r * sw + c] = sv.to_i32() - cp.data[o].to_i32();
+                        cp.data[o] = sv;
+                    }
+                }
+                total += self.tx_cost(&res, sw, sh, s);
+            }
+        }
+        self.b = saved;
+        total
     }
 
     /// Best luma intra mode by SATD (refined by transform RD, angle deltas and
@@ -1207,8 +1249,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         best
     }
 
-    fn pick_intra_chroma(&mut self, pb: &Block) -> u8 {
-        let Some(src) = self.src else { return DC_PRED };
+    fn pick_intra_chroma(&mut self, pb: &Block) -> (u8, f64) {
+        let Some(src) = self.src else {
+            return (DC_PRED, f64::MAX);
+        };
         let (sx, sy) = (u32::from(self.sub_x), u32::from(self.sub_y));
         let psz = plane_residual_size(pb.bsize, sx != 0, sy != 0);
         let uv_tx = MAX_TX_SIZE_RECT[psz as usize];
@@ -1345,7 +1389,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         self.b = saved;
         self.cfl_choice = cfl;
-        best.0
+        best
     }
 
     fn get_tx_size_for(&self, plane: usize, tx: u8, bsize: u8) -> u8 {
@@ -1374,7 +1418,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         y: usize,
         bw: usize,
         bh: usize,
-    ) -> Option<((u8, Mv, usize, f64), Mv)> {
+        out: &mut Vec<ModeOpt>,
+    ) -> Option<(ModeOpt, Mv)> {
         let src = self.src?;
         self.refs[rf as usize].as_ref()?;
         let fw = self.fs.mi_cols * 4;
@@ -1455,15 +1500,26 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             mv_new = Mv::new(me.mv.0 & !1, me.mv.1 & !1);
         }
         let mut options: Vec<(u8, Mv, usize, f64)> = Vec::with_capacity(4);
-        options.push((NEARESTMV, stack[0], 0, 1.0));
-        if self.b.num_mv_found > 1 {
-            options.push((NEARMV, stack[1], 1, 2.5));
-        }
-        options.push((GLOBALMV, global, 0, 2.0));
         let dr = i32::from(mv_new.row) - i32::from(pred0.row);
         let dc = i32::from(mv_new.col) - i32::from(pred0.col);
-        options.push((NEWMV, mv_new, 0, 3.0 + bits(dr) + bits(dc)));
+        if self.mode.exact_rates {
+            options.push((NEARESTMV, stack[0], 0, self.mode_bits(false, NEARESTMV, 0)));
+            if self.b.num_mv_found > 1 {
+                options.push((NEARMV, stack[1], 1, self.mode_bits(false, NEARMV, 1)));
+            }
+            options.push((GLOBALMV, global, 0, self.mode_bits(false, GLOBALMV, 0)));
+            let r = self.mode_bits(false, NEWMV, 0) + self.mv_bits((dr, dc));
+            options.push((NEWMV, mv_new, 0, r));
+        } else {
+            options.push((NEARESTMV, stack[0], 0, 1.0));
+            if self.b.num_mv_found > 1 {
+                options.push((NEARMV, stack[1], 1, 2.5));
+            }
+            options.push((GLOBALMV, global, 0, 2.0));
+            options.push((NEWMV, mv_new, 0, 3.0 + bits(dr) + bits(dc)));
+        }
         let mut best: Option<(u8, Mv, usize, f64)> = None;
+        let mut best_rate = 0.0;
         for (mode, mv, idx, rate) in options {
             if best.is_some_and(|b| b.1 == mv && b.0 != NEWMV) {
                 continue;
@@ -1484,9 +1540,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             let cost = f64::from(d) + lam * rate;
             if best.is_none_or(|b| cost < b.3) {
                 best = Some((mode, mv, idx, cost));
+                best_rate = rate;
             }
+            out.push((mode, mv, idx, cost, rate));
         }
-        best.map(|b| (b, mv_new))
+        out.sort_by(|a, b| a.3.total_cmp(&b.3));
+        best.map(|b| ((b.0, b.1, b.2, b.3, best_rate), mv_new))
     }
 
     /// Luma prediction of `refs`/`mv` into `scratch.obmc` (stride `w`);
@@ -1780,11 +1839,76 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
 
     /// The best inter choice over every distinct reference and, when the
     /// frame allows it, forward/backward compound pairs.
-    fn pick_inter(&mut self, x: usize, y: usize, bw: usize, bh: usize) -> Option<InterChoice> {
+    /// The best of the inter candidates (sorted by SATD cost) after a
+    /// transform-coded RD comparison of the first few on the first
+    /// transform block's area, and its RD cost when it was measured.
+    fn rerank_inter(
+        &mut self,
+        list: Vec<InterChoice>,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        tx: u8,
+    ) -> (Option<InterChoice>, Option<f64>) {
+        let k = self.mode.inter_rd_cands;
+        let first = list.first().copied();
+        let fw = self.fs.mi_cols * 4;
+        let fh = self.fs.mi_rows * 4;
+        if k < 2 || list.len() < 2 || x + w > fw || y + h > fh {
+            return (first, None);
+        }
+        let lam_b = self.enc.lambda;
+        let mut res = vec![0i32; w * h];
+        let mut best: Option<(InterChoice, f64, f64)> = None;
+        let lim = first.map_or(f64::MAX, |c| c.cost * self.mode.inter_rd_ratio);
+        for c in list.iter().take(k) {
+            if c.cost > lim {
+                break;
+            }
+            if !self.pred_luma(c.refs, c.mv, x, y, w, h) {
+                continue;
+            }
+            let pred = std::mem::take(&mut self.scratch.obmc);
+            self.residual_of(&pred, w, x, y, w, h, &mut res);
+            self.scratch.obmc = pred;
+            let e: f64 = res.iter().map(|&v| f64::from(v * v)).sum();
+            let coded = self.tx_cost(&res, w, h, tx);
+            let rd = coded.min(e + lam_b) + lam_b * c.bits;
+            if best.as_ref().is_none_or(|b| rd < b.1) {
+                best = Some((*c, rd, coded));
+            }
+        }
+        match best {
+            Some((c, rd, coded)) => {
+                // The transform size search starts from this cost.
+                let key = self.pred_key(0, c.refs, c.mv, [x, y, w, h]);
+                self.me_scratch.tx_memo = Some((key, tx, coded));
+                (Some(c), Some(rd))
+            }
+            None => (first, None),
+        }
+    }
+
+    fn pick_inter(&mut self, x: usize, y: usize, bw: usize, bh: usize) -> Vec<InterChoice> {
+        let mut all = Vec::with_capacity(8);
+        self.pick_inter_into(x, y, bw, bh, &mut all);
+        all.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        all
+    }
+
+    fn pick_inter_into(
+        &mut self,
+        x: usize,
+        y: usize,
+        bw: usize,
+        bh: usize,
+        all: &mut Vec<InterChoice>,
+    ) -> Option<()> {
         let src = self.src?;
         let lam = self.mode.lambda_satd;
-        let mut best: Option<InterChoice> = None;
         let mut seen = [false; 8];
+        let mut opts = Vec::with_capacity(4);
         // Best single result per reference: (cost, motion search vector).
         let mut single: [Option<(f64, Mv)>; 8] = [None; 8];
         for rf in LAST_FRAME..=ALTREF_FRAME {
@@ -1803,23 +1927,45 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 continue;
             }
             seen[slot] = true;
-            let Some(((mode, mv, idx, cost), me)) = self.pick_inter_ref(rf, x, y, bw, bh) else {
+            opts.clear();
+            let Some(((mode, mv, idx, cost, mbits), me)) =
+                self.pick_inter_ref(rf, x, y, bw, bh, &mut opts)
+            else {
                 continue;
             };
-            let cost = cost + lam * if rf == LAST_FRAME { 1.0 } else { 2.5 };
+            let rbits = if self.mode.exact_rates {
+                self.ref_bits([rf, NONE])
+            } else if rf == LAST_FRAME {
+                1.0
+            } else {
+                2.5
+            };
+            let cost = cost + lam * rbits;
             single[rf as usize] = Some((cost, me));
-            if best.as_ref().is_none_or(|b| cost < b.cost) {
-                best = Some(InterChoice {
-                    refs: [rf, NONE],
-                    mode,
-                    mv: [mv, Mv::ZERO],
-                    idx,
-                    cost,
-                });
+            all.push(InterChoice {
+                refs: [rf, NONE],
+                mode,
+                mv: [mv, Mv::ZERO],
+                idx,
+                cost,
+                bits: mbits + rbits,
+            });
+            // The other modes of this reference, as RD candidates.
+            for &(m2, mv2, idx2, c2, r2) in opts.iter().take(self.mode.inter_rd_modes) {
+                if m2 != mode || mv2 != mv {
+                    all.push(InterChoice {
+                        refs: [rf, NONE],
+                        mode: m2,
+                        mv: [mv2, Mv::ZERO],
+                        idx: idx2,
+                        cost: c2 + lam * rbits,
+                        bits: r2 + rbits,
+                    });
+                }
             }
         }
         if !self.hdr.reference_select || bw.min(bh) < 8 {
-            return best;
+            return Some(());
         }
         let pick = |range: std::ops::RangeInclusive<i8>| -> Option<(i8, Mv)> {
             range
@@ -1831,7 +1977,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             pick(LAST_FRAME..=GOLDEN_FRAME),
             pick(BWDREF_FRAME..=ALTREF_FRAME),
         ) else {
-            return best;
+            return Some(());
         };
         let fw = self.fs.mi_cols * 4;
         let fh = self.fs.mi_rows * 4;
@@ -1853,10 +1999,35 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let d = |a: Mv, b: Mv| {
             bits(i32::from(a.row) - i32::from(b.row)) + bits(i32::from(a.col) - i32::from(b.col))
         };
-        let opts = [
-            (NEAREST_NEARESTMV, [s0[0], s0[1]], 2.0),
-            (NEW_NEWMV, [fmv, bmv], 4.0 + d(fmv, s0[0]) + d(bmv, s0[1])),
-        ];
+        let dm = |a: Mv, b: Mv| {
+            (
+                i32::from(a.row) - i32::from(b.row),
+                i32::from(a.col) - i32::from(b.col),
+            )
+        };
+        let opts = if self.mode.exact_rates {
+            let rb = self.ref_bits([f, bk]) - 3.0;
+            [
+                (
+                    NEAREST_NEARESTMV,
+                    [s0[0], s0[1]],
+                    self.mode_bits(true, NEAREST_NEARESTMV, 0) + rb,
+                ),
+                (
+                    NEW_NEWMV,
+                    [fmv, bmv],
+                    self.mode_bits(true, NEW_NEWMV, 0)
+                        + self.mv_bits(dm(fmv, s0[0]))
+                        + self.mv_bits(dm(bmv, s0[1]))
+                        + rb,
+                ),
+            ]
+        } else {
+            [
+                (NEAREST_NEARESTMV, [s0[0], s0[1]], 2.0),
+                (NEW_NEWMV, [fmv, bmv], 4.0 + d(fmv, s0[0]) + d(bmv, s0[1])),
+            ]
+        };
         for (mode, mv, rate) in opts {
             if !self.pred_luma([f, bk], mv, x, y, w, h) {
                 continue;
@@ -1871,17 +2042,16 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 h,
             );
             let cost = f64::from(dist) + lam * (rate + 3.0);
-            if best.as_ref().is_none_or(|b| cost < b.cost) {
-                best = Some(InterChoice {
-                    refs: [f, bk],
-                    mode,
-                    mv,
-                    idx: 0,
-                    cost,
-                });
-            }
+            all.push(InterChoice {
+                refs: [f, bk],
+                mode,
+                mv,
+                idx: 0,
+                cost,
+                bits: rate + 3.0,
+            });
         }
-        best
+        Some(())
     }
 
     fn block_is_skip(&mut self, pb: &Block) -> bool {

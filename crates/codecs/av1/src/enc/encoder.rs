@@ -1114,7 +1114,7 @@ impl Av1Enc {
         };
         let speed = self.cfg.speed;
         let mode = ModeParams {
-            lambda_satd: ev("AV1_LS", 0.6) * qstep * lscale.sqrt(),
+            lambda_satd: ev("AV1_LS", 0.8) * qstep * lscale.sqrt(),
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep * lscale,
@@ -1165,6 +1165,12 @@ impl Av1Enc {
             intra_sweep_ratio: ev("AV1_IRS", if speed >= 5 { 2.0 } else { 0.0 }),
             inter_clear_ratio: ev("AV1_ICR", if speed >= 5 { 1.2 } else { 0.0 }),
             est_skip_ratio: ev("AV1_EST", if speed >= 5 { 2.0 } else { 0.0 }),
+            exact_rates: ev("AV1_XR", 1.0) > 0.0,
+            inter_rd_cands: ev("AV1_IRK", if speed >= 8 { 1.0 } else { 2.0 }) as usize,
+            inter_rd_ratio: ev("AV1_IRKR", 1.5),
+            inter_rd_modes: ev("AV1_IRM", 1.0) as usize,
+            intra_split_pred: ev("AV1_ITXP", 1.0) > 0.0,
+            inter_flag_bits: ev("AV1_IIB", 1.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 6 {

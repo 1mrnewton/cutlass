@@ -131,7 +131,7 @@ fn failure(id: &Value, code: i64, message: &str) -> String {
 }
 
 /// The registry name for an MCP tool name.
-fn registry_name(name: &str) -> Option<&'static str> {
+pub(crate) fn registry_name(name: &str) -> Option<&'static str> {
     TOOL_NAMES
         .iter()
         .copied()
@@ -152,7 +152,7 @@ fn tool_list() -> Vec<Value> {
         .collect()
 }
 
-fn input_schema(tool: &str) -> Value {
+pub(crate) fn input_schema(tool: &str) -> Value {
     if tool == "draft.apply" {
         return json!({
             "type": "object",

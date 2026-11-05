@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod approval;
+mod chat;
 mod draft;
 mod r#loop;
 mod mcp;
@@ -21,6 +22,7 @@ mod subagent;
 mod tools;
 
 pub use approval::{ApprovalAction, ApprovalError, Approver, authorize, authorize_then};
+pub use chat::{ChatModel, ChatTransport, LoopbackHttp, SYSTEM_PROMPT, parse_reply};
 pub use draft::{
     ApplyInput, ApplyMode, ApplyResult, DraftError, DraftQuery, DraftTools, FullSnapshot,
     ProjectSnapshot, QueryView, RangeSnapshot, SegmentSnapshot, TrackSnapshot, request_name,

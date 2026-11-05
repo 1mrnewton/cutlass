@@ -212,9 +212,29 @@ pub struct ModelChoice {
     /// Off until an account exists and the user enables it.
     #[serde(default)]
     pub cloud: bool,
+    /// Where the local runner answers chat completions, on this machine.
+    #[serde(default = "default_local_url")]
+    pub local_url: String,
+    /// The model the local runner loads, by its name there.
+    #[serde(default = "default_local_name")]
+    pub local_name: String,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+/// Ollama's chat completions address.
+pub const DEFAULT_LOCAL_URL: &str = "http://127.0.0.1:11434/v1/chat/completions";
+
+/// A small model that calls tools.
+pub const DEFAULT_LOCAL_NAME: &str = "qwen2.5:7b";
+
+fn default_local_url() -> String {
+    DEFAULT_LOCAL_URL.to_owned()
+}
+
+fn default_local_name() -> String {
+    DEFAULT_LOCAL_NAME.to_owned()
 }
 
 impl Default for ModelChoice {
@@ -222,6 +242,8 @@ impl Default for ModelChoice {
         Self {
             local: true,
             cloud: false,
+            local_url: default_local_url(),
+            local_name: default_local_name(),
             rest: Map::new(),
         }
     }
@@ -421,6 +443,8 @@ mod tests {
             serde_json::from_str(r#"{"model":{"cloud":true},"sandbox":{"online":true}}"#).unwrap();
         assert!(settings.model.local);
         assert!(settings.model.cloud);
+        assert_eq!(settings.model.local_url, super::DEFAULT_LOCAL_URL);
+        assert_eq!(settings.model.local_name, super::DEFAULT_LOCAL_NAME);
         assert!(settings.sandbox.local);
         assert!(settings.sandbox.online);
     }

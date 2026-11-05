@@ -118,6 +118,8 @@ pub struct VideoEncoder {
     bitrate: i32,
     /// Cap each second at the bitrate.
     constant: bool,
+    /// The VideoToolbox codec type; for ProRes, the profile's.
+    kind: u32,
     session: *mut std::ffi::c_void,
     output: Mutex<Queue>,
     drained: bool,
@@ -161,7 +163,7 @@ fn video_decoder(params: &CodecParams, surface: bool) -> Result<VideoDecoder, Co
 }
 
 pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError> {
-    let _ = codec_type(params.codec)?;
+    let kind = encoder_type(params)?;
     let (width, height) = video_size(params.width, params.height)?;
     if params.pixel == PixelFormat::Yuv420p {
         return Err(CodecError::Unsupported {
@@ -175,6 +177,7 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
         height,
         bitrate,
         constant: params.constant_rate,
+        kind,
         session: ptr::null_mut(),
         output: Mutex::new(Queue {
             packets: Vec::new(),
@@ -186,6 +189,7 @@ pub fn open_encoder(params: &CodecParams) -> Result<Box<dyn Encoder>, CodecError
     let raw = Box::into_raw(encoder);
     match create_compress(
         params.codec,
+        kind,
         width,
         height,
         bitrate,
@@ -478,6 +482,7 @@ impl Encoder for VideoEncoder {
         let raw: *mut VideoEncoder = self;
         if let Ok(session) = create_compress(
             self.codec,
+            self.kind,
             self.width,
             self.height,
             self.bitrate,
@@ -585,6 +590,25 @@ fn codec_type(codec: CodecId) -> Result<u32, CodecError> {
             what: "videotoolbox",
         }),
     }
+}
+
+/// ProRes profiles VideoToolbox writes, named by their sample entry.
+const PRORES_PROFILES: [&[u8; 4]; 4] = [b"apco", b"apcs", b"apcn", b"apch"];
+
+/// The codec type to compress with. A ProRes encoder takes its profile's
+/// four-character code from `params.extra`, and 422 when there is none.
+fn encoder_type(params: &CodecParams) -> Result<u32, CodecError> {
+    let kind = codec_type(params.codec)?;
+    if params.codec != CodecId::Prores || params.extra.is_empty() {
+        return Ok(kind);
+    }
+    PRORES_PROFILES
+        .iter()
+        .find(|code| params.extra.as_slice() == code.as_slice())
+        .map(|code| u32::from_be_bytes(**code))
+        .ok_or(CodecError::Unsupported {
+            what: "prores profile",
+        })
 }
 
 fn target_bitrate(params: &CodecParams) -> i32 {
@@ -1358,6 +1382,7 @@ fn same(tag: &Cf, name: *const std::ffi::c_void) -> bool {
 
 fn create_compress(
     codec: CodecId,
+    kind: u32,
     width: u32,
     height: u32,
     bitrate: i32,
@@ -1375,7 +1400,7 @@ fn create_compress(
             i32::try_from(height).map_err(|_| CodecError::Limit {
                 what: "picture edge",
             })?,
-            codec_type(codec)?,
+            kind,
             ptr::null(),
             attributes.as_ptr(),
             ptr::null(),
@@ -1794,6 +1819,25 @@ mod tests {
                     .unwrap(),
             );
         }
+        packets.extend(encoder.drain().unwrap());
+        assert!(!packets.is_empty());
+    }
+
+    #[test]
+    fn a_prores_profile_names_its_codec_type() {
+        let mut params = video_params(CodecId::Prores, 64, 64);
+        assert_eq!(encoder_type(&params).unwrap(), u32::from_be_bytes(*b"apcn"));
+        params.extra = b"apch".to_vec();
+        assert_eq!(encoder_type(&params).unwrap(), u32::from_be_bytes(*b"apch"));
+        params.extra = b"ap4x".to_vec();
+        assert!(encoder_type(&params).is_err());
+        params.extra = b"apco".to_vec();
+        let Ok(mut encoder) = open_encoder(&params) else {
+            return;
+        };
+        let mut packets = encoder
+            .push_frame(&solid(64, 64, [20, 200, 30, 255], 0))
+            .unwrap();
         packets.extend(encoder.drain().unwrap());
         assert!(!packets.is_empty());
     }

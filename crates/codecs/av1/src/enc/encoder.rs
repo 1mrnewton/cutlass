@@ -1322,42 +1322,139 @@ impl Av1Enc {
                 .map(|f| (f64::from(base_lvl) * f).round().clamp(0.0, 63.0) as u8)
                 .collect();
             levels.dedup();
-            let try_level = |l: u8, t: usize| -> (u64, Picture<P>) {
+            // Below speed 4 each level filters the whole frame. Else every
+            // other 64-row area is filtered and measured (of at least 4, as
+            // the CDEF search does), each area of each level a job of its
+            // own on a copy of the rows it touches, and the chosen level
+            // then filters the whole frame.
+            let sb_rows = fs.mi_rows.div_ceil(16);
+            let sampled = !full && sb_rows >= 4 && !seq.use_128x128_superblock;
+            let level_hdr = |l: u8| {
                 let mut h2 = hdr.clone();
                 h2.loop_filter.level = [l, l, l, l];
-                let mut pic = cur.clone();
-                crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut pic, t);
-                (picture_sse(&pic, src), pic)
+                h2
             };
-            // The levels are tried side by side, sharing the threads.
             let n = levels.len();
-            let tried: Vec<(u64, Picture<P>)> = if threads > 1 && n > 1 {
-                std::thread::scope(|sc| {
-                    let hs: Vec<_> = levels
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &l)| {
-                            let t = (threads / n + usize::from(i < threads % n)).max(1);
-                            let try_level = &try_level;
-                            sc.spawn(move || try_level(l, t))
-                        })
-                        .collect();
-                    hs.into_iter()
-                        .map(|h| {
-                            h.join().map_err(|_| CodecError::InvalidApi {
+            let tried: Vec<(u64, Option<Picture<P>>)> = if sampled {
+                let areas: Vec<usize> = (0..fs.mi_rows).step_by(32).collect();
+                let hdrs: Vec<FrameHeader> = levels.iter().map(|&l| level_hdr(l)).collect();
+                let n_jobs = n * areas.len();
+                let next = std::sync::atomic::AtomicUsize::new(0);
+                let job_sse = |pic: &mut Picture<P>, j: usize| -> u64 {
+                    let (h2, r0) = (&hdrs[j / areas.len()], areas[j % areas.len()]);
+                    // Two 4x4 rows more, so the edge below the area is
+                    // filtered too; the filters reach 8 rows past the rows
+                    // they filter.
+                    let r1 = (r0 + 18).min(fs.mi_rows);
+                    for (p, (d, s)) in pic.planes.iter_mut().zip(&cur.planes).enumerate() {
+                        let sy = usize::from(p > 0 && seq.subsampling_y);
+                        let y0 = ((r0 * 4) >> sy).saturating_sub(8);
+                        let y1 = (((r1 * 4) >> sy) + 8).min(d.alloc_h);
+                        d.data[y0 * d.stride..y1 * d.stride]
+                            .copy_from_slice(&s.data[y0 * s.stride..y1 * s.stride]);
+                    }
+                    crate::dec::postfilter::loop_filter_rows(
+                        &seq,
+                        h2,
+                        &fs,
+                        pic,
+                        r0,
+                        r1,
+                        r1 == fs.mi_rows,
+                    );
+                    let mut e = 0;
+                    for (p, (pa, pb)) in pic.planes.iter().zip(&src.planes).enumerate() {
+                        let sy = usize::from(p > 0 && seq.subsampling_y);
+                        e += plane_rows_sse(pa, pb, (r0 * 4) >> sy, ((r0 + 16) * 4) >> sy);
+                    }
+                    e
+                };
+                let run = || -> Vec<(usize, u64)> {
+                    let mut pic = Picture::<P>::new(
+                        hdr.frame_width as usize,
+                        hdr.frame_height as usize,
+                        seq.num_planes(),
+                        seq.subsampling_x,
+                        seq.subsampling_y,
+                        seq.bit_depth,
+                    );
+                    let mut out = Vec::new();
+                    loop {
+                        let j = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if j >= n_jobs {
+                            return out;
+                        }
+                        out.push((j, job_sse(&mut pic, j)));
+                    }
+                };
+                let t = threads.min(n_jobs);
+                let parts: Vec<(usize, u64)> = if t > 1 {
+                    std::thread::scope(|sc| {
+                        let hs: Vec<_> = (1..t).map(|_| sc.spawn(run)).collect();
+                        let mut all = run();
+                        for h in hs {
+                            all.extend(h.join().map_err(|_| CodecError::InvalidApi {
                                 what: "loop filter thread",
-                            })
-                        })
-                        .collect::<R<Vec<_>>>()
-                })?
-            } else {
-                levels.iter().map(|&l| try_level(l, threads)).collect()
-            };
-            for (l, (e, pic)) in levels.into_iter().zip(tried) {
-                if best_lf.as_ref().is_none_or(|b| e < b.0) {
-                    best_h.loop_filter.level = [l, l, l, l];
-                    best_lf = Some((e, pic));
+                            })?);
+                        }
+                        Ok::<_, CodecError>(all)
+                    })?
+                } else {
+                    run()
+                };
+                let mut sums = vec![0u64; n];
+                for (j, e) in parts {
+                    sums[j / areas.len()] += e;
                 }
+                sums.into_iter().map(|e| (e, None)).collect()
+            } else {
+                let try_level = |l: u8, t: usize| -> (u64, Option<Picture<P>>) {
+                    let mut pic = cur.clone();
+                    crate::dec::postfilter::loop_filter(&seq, &level_hdr(l), &fs, &mut pic, t);
+                    (picture_sse(&pic, src), Some(pic))
+                };
+                // The levels are tried side by side, sharing the threads.
+                if threads > 1 && n > 1 {
+                    std::thread::scope(|sc| {
+                        let hs: Vec<_> = levels
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &l)| {
+                                let t = (threads / n + usize::from(i < threads % n)).max(1);
+                                let try_level = &try_level;
+                                sc.spawn(move || try_level(l, t))
+                            })
+                            .collect();
+                        hs.into_iter()
+                            .map(|h| {
+                                h.join().map_err(|_| CodecError::InvalidApi {
+                                    what: "loop filter thread",
+                                })
+                            })
+                            .collect::<R<Vec<_>>>()
+                    })?
+                } else {
+                    levels.iter().map(|&l| try_level(l, threads)).collect()
+                }
+            };
+            let mut best: Option<(u64, u8, Option<Picture<P>>)> = None;
+            for (l, (e, pic)) in levels.into_iter().zip(tried) {
+                if best.as_ref().is_none_or(|b| e < b.0) {
+                    best = Some((e, l, pic));
+                }
+            }
+            if let Some((e, l, pic)) = best {
+                best_h.loop_filter.level = [l, l, l, l];
+                let pic = match pic {
+                    Some(p) => p,
+                    None => {
+                        let mut p = cur.clone();
+                        let h2 = level_hdr(l);
+                        crate::dec::postfilter::loop_filter(&seq, &h2, &fs, &mut p, threads);
+                        p
+                    }
+                };
+                best_lf = Some((e, pic));
             }
             if let Some((_, deblocked)) = best_lf.as_ref()
                 && cdef_fb

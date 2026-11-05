@@ -1134,6 +1134,8 @@ fn recon_worker<P: Pixel>(
         plan_q: 0,
         cfl_choice: (0, 0),
         intra_choice: (0, None),
+        est_hint: (0, 0),
+        cur_filters: [0, 0],
         plan_delta_lf: [0; 4],
         color_map_y: vec![0u8; 128 * 128],
         color_map_uv: vec![0u8; 128 * 128],

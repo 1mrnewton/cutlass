@@ -83,6 +83,9 @@ impl<P: Pixel> Scratch<P> {
             mask: Vec::new(),
             emu: Vec::new(),
             obmc: Vec::new(),
+            enc_i32: Default::default(),
+            enc_px: Default::default(),
+            enc_q: None,
         }
     }
 }

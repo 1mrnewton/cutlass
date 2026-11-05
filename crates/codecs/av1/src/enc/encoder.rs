@@ -779,7 +779,8 @@ impl Av1Enc {
             // Projected motion of the references, as the decoder builds it.
             let refs_data: [Option<Arc<crate::dec::frame::RefData>>; 8] =
                 std::array::from_fn(|i| self.core.slot_data(i));
-            fs.motion_field = crate::dec::mvpred::motion_field_estimation(&seq, &hdr, &refs_data);
+            fs.motion_field =
+                crate::dec::mvpred::motion_field_estimation(&seq, &hdr, &refs_data, 1);
         }
         let mut cur = Picture::<P>::new(
             hdr.frame_width as usize,

@@ -521,7 +521,7 @@ mod tests {
         let session = color_session(1_000_000, 1_000_000);
         let readers = ReaderFactory::default();
         let mut transport = Transport::new();
-        transport.open(AudioHost::Linux);
+        transport.open(AudioHost::Unnamed);
         assert!(transport.gap().is_some());
         transport.start(program(&session, &readers), Micros(0), Micros(1_000_000));
         assert!(!transport.is_streaming());

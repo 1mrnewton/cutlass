@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(samples(output.queued()), vec![0.5; 8]);
         assert_eq!(session.draft(), &before);
 
-        let mut silent = AudioOutput::open(AudioHost::Linux);
+        let mut silent = AudioOutput::open(AudioHost::Unnamed);
         queue_mix(
             &mut silent,
             PreviewMix {

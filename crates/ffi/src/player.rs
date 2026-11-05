@@ -174,10 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn linux_names_a_gap_and_software_has_none() {
+    fn a_host_with_no_device_names_a_gap_and_software_has_none() {
         let mut player = PhonePlayer::new();
-        player.open_output(AudioHost::Linux);
-        assert_eq!(player.gap(), Some(AudioGap::Linux));
+        player.open_output(AudioHost::Unnamed);
+        assert_eq!(player.gap(), Some(AudioGap::NoDevice));
         player.open_output(AudioHost::Software);
         assert_eq!(player.gap(), None);
     }

@@ -10105,7 +10105,7 @@ mod tests {
     }
 
     #[test]
-    fn play_queues_the_mixed_tone_and_a_mute_or_linux_host_stays_silent() {
+    fn play_queues_the_mixed_tone_and_a_mute_or_a_host_with_no_device_stays_silent() {
         let temp = Temp::new();
         write_tone(&temp.path.join("tone.wav"));
         tone_project(&temp.path, "tone.wav");
@@ -10140,7 +10140,7 @@ mod tests {
         desktop.play();
         assert!(desktop.queued_preview().is_empty());
 
-        desktop.open_preview_audio(AudioHost::Linux);
+        desktop.open_preview_audio(AudioHost::Unnamed);
         assert!(!desktop.audio_output_open());
         desktop.play();
         assert!(desktop.queued_preview().is_empty());

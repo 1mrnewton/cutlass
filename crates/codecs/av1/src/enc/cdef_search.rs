@@ -151,3 +151,220 @@ pub fn search<P: Pixel>(
         idx,
     }
 }
+
+/// How much one frame-wide CDEF strength changes the squared error, for
+/// each of `luma` (luma primary, secondary; measured in the 64-row areas
+/// `luma_rows`) and each of `chroma` (chroma primary, secondary; every
+/// row), as [`crate::dec::postfilter::cdef`] would filter `deblocked`
+/// with every coded 64x64 block at that strength. Each 8x8 block's
+/// direction is found once for all candidates, and only the blocks a
+/// candidate changes are measured. The sums do not depend on `threads`.
+#[allow(clippy::too_many_arguments)]
+pub fn strength_deltas<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &FrameState,
+    deblocked: &Picture<P>,
+    src: &Picture<P>,
+    luma: &[Strength],
+    luma_rows: &[usize],
+    chroma: &[Strength],
+    threads: usize,
+) -> (Vec<i64>, Vec<i64>) {
+    let sb_rows = fs.mi_rows.div_ceil(16);
+    let chroma = if seq.num_planes() > 1 { chroma } else { &[] };
+    let mut do_luma = vec![false; sb_rows];
+    for &r in luma_rows {
+        if let Some(d) = do_luma.get_mut(r) {
+            *d = true;
+        }
+    }
+    let rows: Vec<usize> = (0..sb_rows)
+        .filter(|&r| do_luma[r] || !chroma.is_empty())
+        .collect();
+    let job = |i: usize, acc: &mut (Vec<i64>, Vec<i64>), pads: &mut [Vec<u16>; 3]| {
+        let lu = if do_luma[i] { luma } else { &[] };
+        let rw = RowWork {
+            seq,
+            hdr,
+            fs,
+            deblocked,
+            src,
+        };
+        rw.deltas(lu, chroma, i, acc, pads);
+    };
+    let t = threads.clamp(1, rows.len().max(1));
+    let zero = || (vec![0i64; luma.len()], vec![0i64; chroma.len()]);
+    let parts: Vec<(Vec<i64>, Vec<i64>)> = if t <= 1 {
+        let mut acc = zero();
+        let mut pads = crate::dec::postfilter::cdef_pads();
+        for &i in &rows {
+            job(i, &mut acc, &mut pads);
+        }
+        vec![acc]
+    } else {
+        std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..t)
+                .map(|k| {
+                    let (job, rows, zero) = (&job, &rows, &zero);
+                    sc.spawn(move || {
+                        let mut acc = zero();
+                        let mut pads = crate::dec::postfilter::cdef_pads();
+                        for &i in rows.iter().skip(k).step_by(t) {
+                            job(i, &mut acc, &mut pads);
+                        }
+                        acc
+                    })
+                })
+                .collect();
+            hs.into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| zero()))
+                .collect()
+        })
+    };
+    let mut out = zero();
+    for (l, c) in parts {
+        out.0.iter_mut().zip(l).for_each(|(a, b)| *a += b);
+        out.1.iter_mut().zip(c).for_each(|(a, b)| *a += b);
+    }
+    out
+}
+
+/// What [`strength_deltas`] measures one 64-row area of.
+struct RowWork<'a, P> {
+    seq: &'a SequenceHeader,
+    hdr: &'a FrameHeader,
+    fs: &'a FrameState,
+    deblocked: &'a Picture<P>,
+    src: &'a Picture<P>,
+}
+
+impl<P: Pixel> RowWork<'_, P> {
+    /// Adds the error changes of the 64-row area `sbr16` to `acc`.
+    fn deltas(
+        &self,
+        luma: &[Strength],
+        chroma: &[Strength],
+        sbr16: usize,
+        acc: &mut (Vec<i64>, Vec<i64>),
+        pads: &mut [Vec<u16>; 3],
+    ) {
+        use crate::dsp::cdef::{
+            CDEF_BORDER, adjust_luma_pri_strength, cdef_damping, cdef_direction, cdef_filter,
+            cdef_pad_block, cdef_uv_dir,
+        };
+        if luma.is_empty() && chroma.is_empty() {
+            return;
+        }
+        let (fs, deblocked, src) = (self.fs, self.deblocked, self.src);
+        let ps = 64 + 2 * CDEF_BORDER;
+        let bd = deblocked.bd;
+        let shift = bd - 8;
+        let (ssx, ssy) = (self.seq.subsampling_x, self.seq.subsampling_y);
+        let np = if chroma.is_empty() { 1 } else { 3 };
+        let damping = i32::from(self.hdr.cdef.damping);
+        let y_damping = cdef_damping(damping, bd, false);
+        let uv_damping = cdef_damping(damping, bd, true);
+        let lp = &deblocked.planes[0];
+        let sbr = sbr16 * 16;
+        let mut buf = [P::from_i32(0); 64];
+        for sbc in (0..fs.mi_cols).step_by(16) {
+            if fs.cdef_idx[sbr16 * fs.cdef_stride + (sbc >> 4)] < 0 {
+                continue;
+            }
+            let mut padded = [false; 3];
+            let r_end = (sbr + 16).min(fs.mi_rows);
+            let c_end = (sbc + 16).min(fs.mi_cols);
+            for r in (sbr..r_end).step_by(2) {
+                for c in (sbc..c_end).step_by(2) {
+                    let rr = (r + 1).min(fs.mi_rows - 1);
+                    let cc = (c + 1).min(fs.mi_cols - 1);
+                    if fs.mi_at(r, c).skip
+                        && fs.mi_at(rr, c).skip
+                        && fs.mi_at(r, cc).skip
+                        && fs.mi_at(rr, cc).skip
+                    {
+                        continue;
+                    }
+                    let (ydir, var) =
+                        cdef_direction(&lp.data[r * 4 * lp.stride + c * 4..], lp.stride, bd);
+                    for plane in 0..np {
+                        let (cands, out) = if plane == 0 {
+                            (luma, &mut acc.0)
+                        } else {
+                            (chroma, &mut acc.1)
+                        };
+                        if cands.is_empty() {
+                            continue;
+                        }
+                        let (sx, sy) = if plane > 0 {
+                            (usize::from(ssx), usize::from(ssy))
+                        } else {
+                            (0, 0)
+                        };
+                        let sp = &deblocked.planes[plane];
+                        let sb_x = (sbc * 4) >> sx;
+                        let sb_y = (sbr * 4) >> sy;
+                        if !padded[plane] {
+                            cdef_pad_block(
+                                &mut pads[plane],
+                                ps,
+                                &sp.data,
+                                sp.stride,
+                                sb_x,
+                                sb_y,
+                                64 >> sx,
+                                64 >> sy,
+                                (fs.mi_cols * 4) >> sx,
+                                (fs.mi_rows * 4) >> sy,
+                            );
+                            padded[plane] = true;
+                        }
+                        let (w, h) = (8 >> sx, 8 >> sy);
+                        let (x0, y0) = ((c * 4) >> sx, (r * 4) >> sy);
+                        // The visible part of the block.
+                        let vw = sp.w.saturating_sub(x0).min(w);
+                        let vh = sp.h.saturating_sub(y0).min(h);
+                        if vw == 0 || vh == 0 {
+                            continue;
+                        }
+                        let org = &src.planes[plane];
+                        let sse = |a: &[P], a_stride: usize| -> i64 {
+                            let mut e = 0i64;
+                            for y in 0..vh {
+                                let s = &org.data[(y0 + y) * org.stride + x0..][..vw];
+                                for (p, q) in a[y * a_stride..][..vw].iter().zip(s) {
+                                    let d = i64::from(p.to_i32() - q.to_i32());
+                                    e += d * d;
+                                }
+                            }
+                            e
+                        };
+                        let base = sse(&sp.data[y0 * sp.stride + x0..], sp.stride);
+                        let pad = &pads[plane][(y0 - sb_y) * ps + (x0 - sb_x)..];
+                        for (k, &(pri, sec)) in cands.iter().enumerate() {
+                            let pri0 = i32::from(pri) << shift;
+                            let sec = i32::from(sec) << shift;
+                            let (p, dir, damping) = if plane == 0 {
+                                let dir = if pri0 == 0 { 0 } else { ydir };
+                                (adjust_luma_pri_strength(pri0, var), dir, y_damping)
+                            } else {
+                                let dir = if pri0 == 0 {
+                                    0
+                                } else {
+                                    cdef_uv_dir(ssx, ssy, ydir)
+                                };
+                                (pri0, dir, uv_damping)
+                            };
+                            if p == 0 && sec == 0 {
+                                continue;
+                            }
+                            cdef_filter(&mut buf, 8, pad, ps, w, h, p, sec, dir, damping, bd);
+                            out[k] += sse(&buf, 8) - base;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

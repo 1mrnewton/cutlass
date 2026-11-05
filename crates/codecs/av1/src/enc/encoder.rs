@@ -1450,10 +1450,9 @@ impl Av1Enc {
                     super::cdef_search::set_strength(&mut best_h, k, st);
                 }
                 cdef_choice = Some(ch);
-            } else if let Some((lf_sse, deblocked)) = best_lf.as_ref()
+            } else if let Some((_, deblocked)) = best_lf.as_ref()
                 && seq.enable_cdef
             {
-                let uv_search = seq.num_planes() > 1 && ev("AV1_CDUV", 1.0) > 0.0;
                 let p0 = intent.cdef.y_pri[0];
                 let pris: &[u8] = if full {
                     &[p0 / 2, p0, (p0 * 3 / 2).min(15), (p0 * 2).min(15)]
@@ -1469,119 +1468,39 @@ impl Av1Enc {
                         }
                     }
                 }
-                // Below speed 4 every 64-row area is measured, else every
-                // other one (of at least 4). The strengths are tried in
-                // parallel; the choice does not depend on the thread count.
+                // Below speed 4 every 64-row area is measured for luma,
+                // else every other one (of at least 4); chroma strengths
+                // are chosen on their own (the chroma filter does not touch
+                // luma) over the whole frame. The choice does not depend on
+                // the thread count.
                 let sb_rows = fs.mi_rows.div_ceil(16);
                 let step = if full || sb_rows < 4 { 1 } else { 2 };
                 let rows: Vec<usize> = (0..sb_rows).step_by(step).collect();
-                let sy = usize::from(seq.subsampling_y);
-                let mut best_c = if step == 1 {
-                    (*lf_sse, None::<(u8, u8)>)
-                } else {
-                    (sb_rows_sse(deblocked, src, &rows, sy), None)
-                };
-                let eval = |&(pri, sec): &(u8, u8), out: &mut Picture<P>| -> u64 {
-                    let mut h2 = hdr.clone();
-                    h2.cdef.y_pri = [pri; 8];
-                    h2.cdef.y_sec = [sec; 8];
-                    // With the separate chroma search, luma alone is
-                    // filtered here (chroma then adds a constant).
-                    let (up, us) = if uv_search {
-                        (0, 0)
-                    } else {
-                        (pri / 2, sec.min(2) / 2 * 2)
-                    };
-                    h2.cdef.uv_pri = [up; 8];
-                    h2.cdef.uv_sec = [us; 8];
-                    let mut pads = crate::dec::postfilter::cdef_pads();
-                    copy_sb_rows(out, deblocked, &rows, sy);
-                    for &i in &rows {
-                        crate::dec::postfilter::cdef_sb_rows(
-                            &seq,
-                            &h2,
-                            &fs,
-                            deblocked,
-                            out,
-                            i * 16,
-                            (i + 1) * 16,
-                            &mut pads,
-                        );
+                let mut uv_combos = Vec::new();
+                for up in [0u8, 1, 2, 4, 6] {
+                    for us in [0u8, 2] {
+                        uv_combos.push((up, us));
                     }
-                    sb_rows_sse(out, src, &rows, sy)
-                };
-                let nt = threads.min(combos.len()).max(1);
-                let errs: Vec<u64> = if nt <= 1 {
-                    let mut out = deblocked.clone();
-                    combos.iter().map(|c| eval(c, &mut out)).collect()
-                } else {
-                    let parts: Vec<Vec<(usize, u64)>> = std::thread::scope(|sc| {
-                        let hs: Vec<_> = (0..nt)
-                            .map(|t| {
-                                let (eval, combos) = (&eval, &combos);
-                                sc.spawn(move || {
-                                    let mut out = deblocked.clone();
-                                    (t..combos.len())
-                                        .step_by(nt)
-                                        .map(|k| (k, eval(&combos[k], &mut out)))
-                                        .collect()
-                                })
-                            })
-                            .collect();
-                        hs.into_iter()
-                            .map(|h| h.join().unwrap_or_default())
-                            .collect()
-                    });
-                    let mut e = vec![u64::MAX; combos.len()];
-                    for (k, v) in parts.into_iter().flatten() {
-                        e[k] = v;
-                    }
-                    e
-                };
-                for (&c, &e) in combos.iter().zip(&errs) {
+                }
+                let (dl, dc) = super::cdef_search::strength_deltas(
+                    &seq, &hdr, &fs, deblocked, src, &combos, &rows, &uv_combos, threads,
+                );
+                let mut best_c = (0i64, None::<(u8, u8)>);
+                for (&c, &e) in combos.iter().zip(&dl) {
                     if e < best_c.0 {
                         best_c = (e, Some(c));
                     }
                 }
-                match best_c.1 {
-                    Some((pri, sec)) => {
-                        best_h.cdef.y_pri = [pri; 8];
-                        best_h.cdef.y_sec = [sec; 8];
-                        best_h.cdef.uv_pri = [pri / 2; 8];
-                        best_h.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
-                    }
-                    None => {
-                        best_h.cdef.y_pri = [0; 8];
-                        best_h.cdef.y_sec = [0; 8];
-                        best_h.cdef.uv_pri = [0; 8];
-                        best_h.cdef.uv_sec = [0; 8];
-                    }
-                }
-                if uv_search {
-                    // Chroma strengths on their own (the chroma filter does
-                    // not touch luma).
-                    let cur_uv = (best_h.cdef.uv_pri[0], best_h.cdef.uv_sec[0]);
-                    let mut h2 = hdr.clone();
-                    h2.cdef = best_h.cdef.clone();
-                    // Luma off: only chroma is measured.
-                    h2.cdef.y_pri = [0; 8];
-                    h2.cdef.y_sec = [0; 8];
-                    let mut best_uv = (u64::MAX, cur_uv);
-                    let mut out = deblocked.clone();
-                    for up in [0u8, 1, 2, 4, 6] {
-                        for us in [0u8, 2] {
-                            h2.cdef.uv_pri = [up; 8];
-                            h2.cdef.uv_sec = [us; 8];
-                            // Chroma still holds the deblocked samples for
-                            // (0, 0), which comes first; every later
-                            // candidate rewrites the same blocks.
-                            crate::dec::postfilter::cdef(
-                                &seq, &h2, &fs, deblocked, &mut out, threads,
-                            );
-                            let e = chroma_sse(&out, src);
-                            if e < best_uv.0 {
-                                best_uv = (e, (up, us));
-                            }
+                let (pri, sec) = best_c.1.unwrap_or((0, 0));
+                best_h.cdef.y_pri = [pri; 8];
+                best_h.cdef.y_sec = [sec; 8];
+                best_h.cdef.uv_pri = [pri / 2; 8];
+                best_h.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
+                if !dc.is_empty() {
+                    let mut best_uv = (i64::MAX, (0, 0));
+                    for (&c, &e) in uv_combos.iter().zip(&dc) {
+                        if e < best_uv.0 {
+                            best_uv = (e, c);
                         }
                     }
                     best_h.cdef.uv_pri = [best_uv.1.0; 8];
@@ -1742,48 +1661,6 @@ fn plane_rows_sse<P: Pixel>(
             y1 - y0,
         );
         x += w;
-    }
-    e
-}
-
-/// SSE of the 64-row luma areas `rows` (and the chroma rows under them,
-/// `sy` the vertical chroma subsampling).
-fn sb_rows_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>, rows: &[usize], sy: usize) -> u64 {
-    let mut e = 0;
-    for (p, (pa, pb)) in a.planes.iter().zip(&b.planes).enumerate() {
-        let s = if p > 0 { sy } else { 0 };
-        for &i in rows {
-            e += plane_rows_sse(pa, pb, (i * 64) >> s, ((i + 1) * 64) >> s);
-        }
-    }
-    e
-}
-
-/// Copies the 64-row luma areas `rows` (and the chroma rows under them).
-fn copy_sb_rows<P: Pixel>(dst: &mut Picture<P>, src: &Picture<P>, rows: &[usize], sy: usize) {
-    for (p, (pd, ps)) in dst.planes.iter_mut().zip(&src.planes).enumerate() {
-        let s = if p > 0 { sy } else { 0 };
-        for &i in rows {
-            let y0 = ((i * 64) >> s).min(ps.alloc_h);
-            let y1 = (((i + 1) * 64) >> s).min(ps.alloc_h);
-            let (a, b) = (y0 * ps.stride, y1 * ps.stride);
-            pd.data[a..b].copy_from_slice(&ps.data[a..b]);
-        }
-    }
-}
-
-/// Squared error of the chroma planes.
-fn chroma_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
-    let mut e = 0u64;
-    for (pa, pb) in a.planes.iter().zip(&b.planes).skip(1) {
-        for y in 0..pa.h {
-            let ra = &pa.data[y * pa.stride..][..pa.w];
-            let rb = &pb.data[y * pb.stride..][..pa.w];
-            for (x, z) in ra.iter().zip(rb) {
-                let d = i64::from(x.to_i32() - z.to_i32());
-                e += (d * d) as u64;
-            }
-        }
     }
     e
 }

@@ -7,7 +7,7 @@ use crate::dsp::mc;
 use crate::spec::tables::{QUANT_DIST_LOOKUP, QUANT_DIST_WEIGHT};
 
 use super::obu::TRANSLATION;
-use super::tile::{R, TileDec, ref_picture};
+use super::tile::{R, TileDec, ref_rows};
 use super::types::{
     COMPOUND_AVERAGE, COMPOUND_DIFFWTD, COMPOUND_DISTANCE, COMPOUND_INTRA, COMPOUND_WEDGE, DC_PRED,
     GLOBAL_GLOBALMV, GLOBALMV, H_PRED, INTRA_FRAME, LOCALWARP, Mv, OBMC, SMOOTH_PRED, V_PRED, bh4,
@@ -274,10 +274,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         Ok(())
     }
 
-    /// The offset in plane `plane` of the reference `ref_frame` of the
-    /// block at `(x, y)` its motion vector `mv` points to, when the
-    /// reference is unscaled, the position whole samples and the block
-    /// inside the reference (the prediction is then a plain copy).
+    /// The position `(x, y)` in plane `plane` of the reference
+    /// `ref_frame` of the block at `(x, y)` its motion vector `mv` points
+    /// to, when the reference is unscaled, the position whole samples and
+    /// the block inside the reference (the prediction is then a plain copy).
     fn whole_sample_offset(
         &self,
         plane: usize,
@@ -287,7 +287,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         w: usize,
         h: usize,
         mv: Mv,
-    ) -> Option<usize> {
+    ) -> Option<(usize, usize)> {
         let (pw, ph, up_w, rh) = self.ref_geometry(plane, ref_frame);
         let (sx0, sy0, step_x, step_y) = self.scale_mv(plane, up_w, rh, x, y, mv);
         if step_x != 1024 || step_y != 1024 || (sx0 | sy0) & (15 << 6) != 0 {
@@ -297,9 +297,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if ix < 0 || iy < 0 || ix + w as i64 > pw as i64 || iy + h as i64 > ph as i64 {
             return None;
         }
-        let rv = self.refs[ref_frame as usize].as_ref()?;
-        let p = &ref_picture(rv, &self.mirrors).planes[plane];
-        Some(iy as usize * p.stride + ix as usize)
+        Some((ix as usize, iy as usize))
     }
 
     /// `COMPOUND_AVERAGE` of two predictions that are both plain copies
@@ -321,7 +319,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let (sx, sy) = self.plane_sub(plane);
         let ym = self.b.y_mode;
         let global = ym == GLOBALMV || ym == GLOBAL_GLOBALMV;
-        let mut offs = [0usize; 2];
+        let mut offs = [(0usize, 0usize); 2];
         for l in 0..2 {
             let (rf, mv) = (cand.ref_frame[l], cand.mv[l]);
             // Whole luma (1/8) or chroma (1/16) samples.
@@ -344,15 +342,19 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         ) else {
             return false;
         };
-        let p0 = &ref_picture(r0, mirrors).planes[plane];
-        let p1 = &ref_picture(r1, mirrors).planes[plane];
+        let (Some((s0, st0)), Some((s1, st1))) = (
+            ref_rows(r0, mirrors, plane, offs[0].1, offs[0].1 + h),
+            ref_rows(r1, mirrors, plane, offs[1].1, offs[1].1 + h),
+        ) else {
+            return false;
+        };
         let pl = &mut self.cur.planes[plane];
         let st = pl.stride;
         mc::avg_copy(
             &mut pl.data[y * st + x..],
             st,
-            (&p0.data[offs[0]..], p0.stride),
-            (&p1.data[offs[1]..], p1.stride),
+            (&s0[offs[0].0..], st0),
+            (&s1[offs[1].0..], st1),
             w,
             h,
         );
@@ -549,42 +551,66 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         };
         let inside =
             ix - left >= 0 && iy - top >= 0 && ix + right <= pw as i64 && iy + bottom <= ph as i64;
-        let use_emu = !inside || self.b.use_intrabc;
-        if use_emu {
-            let (src, sstride): (&[P], usize) = if self.b.use_intrabc {
-                (&self.cur.planes[plane].data, self.cur.planes[plane].stride)
-            } else {
-                let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
-                    return Err(super::tile::malformed("missing reference"));
-                };
-                let p = &ref_picture(rv, &self.mirrors).planes[plane];
-                (&p.data, p.stride)
-            };
-            if self.scratch.emu.len() < fw * fh {
-                self.scratch.emu.resize(fw * fh, P::default());
-            }
-            mc::emu_edge(
-                &mut self.scratch.emu,
-                fw,
-                src,
-                sstride,
-                pw,
-                ph,
-                (ix - 3) as isize,
-                (iy - 3) as isize,
-                fw,
-                fh,
-            );
-        }
-        let emu = &self.scratch.emu;
-        let (src, sstride, soff): (&[P], usize, usize) = if use_emu {
-            (emu, fw, 3 * fw + 3)
+        let refs = &self.refs;
+        let mirrors = &self.mirrors;
+        let rv = if self.b.use_intrabc {
+            None
         } else {
-            let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
-                return Err(super::tile::malformed("missing reference"));
-            };
-            let p = &ref_picture(rv, &self.mirrors).planes[plane];
-            (&p.data, p.stride, iy as usize * p.stride + ix as usize)
+            match refs[ref_frame as usize].as_ref() {
+                Some(rv) => Some(rv),
+                None => return Err(super::tile::malformed("missing reference")),
+            }
+        };
+        // The rows read, in place (in one band of a reference still being
+        // decoded).
+        let direct = match rv {
+            Some(rv) if inside => ref_rows(
+                rv,
+                mirrors,
+                plane,
+                (iy - top) as usize,
+                (iy + bottom) as usize,
+            ),
+            _ => None,
+        };
+        let (src, sstride, soff): (&[P], usize, usize) = match direct {
+            Some((s, st)) => (s, st, top as usize * st + ix as usize),
+            None => {
+                if self.scratch.emu.len() < fw * fh {
+                    self.scratch.emu.resize(fw * fh, P::default());
+                }
+                let emu = &mut self.scratch.emu;
+                let (ex, ey) = ((ix - 3) as isize, (iy - 3) as isize);
+                let src = match rv {
+                    None => Some(&self.cur.planes[plane]),
+                    Some(rv) if rv.mirror.is_none() => rv.pic.planes.get(plane),
+                    Some(_) => None,
+                };
+                let ok = match (src, rv.and_then(|rv| rv.mirror)) {
+                    (Some(p), _) => {
+                        mc::emu_edge(emu, fw, &p.data, p.stride, pw, ph, ex, ey, fw, fh);
+                        true
+                    }
+                    (None, Some(k)) => mirrors.get(k).is_some_and(|m| {
+                        mc::emu_edge_rows(
+                            emu,
+                            fw,
+                            |r| m.rows(plane, r, r + 1).map(|s| s.0),
+                            pw,
+                            ph,
+                            ex,
+                            ey,
+                            fw,
+                            fh,
+                        )
+                    }),
+                    (None, None) => false,
+                };
+                if !ok {
+                    return Err(super::tile::malformed("reference rows"));
+                }
+                (&self.scratch.emu[..], fw, 3 * fw + 3)
+            }
         };
         let mx = (sx0 >> 6) as usize & 15;
         let my = (sy0 >> 6) as usize & 15;
@@ -668,7 +694,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let Some(rv) = self.refs[ref_frame as usize].as_ref() else {
             return Err(super::tile::malformed("missing reference"));
         };
-        let rp = &ref_picture(rv, &self.mirrors).planes[plane];
+        // Warped blocks are reconstructed once their references are done
+        // (`recon_worker`), so the reference is never read from bands.
+        if rv.mirror.is_some() {
+            return Err(super::tile::malformed(
+                "warp from a reference still decoding",
+            ));
+        }
+        let rp = &rv.pic.planes[plane];
         for i8 in 0..h.div_ceil(8) {
             for j8 in 0..w.div_ceil(8) {
                 let bx = x + j8 * 8;

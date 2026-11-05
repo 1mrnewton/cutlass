@@ -646,6 +646,7 @@ pub fn prep<P: Pixel>(
             8 => prep_copy::<P, 8>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             16 => prep_copy::<P, 16>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             32 => prep_copy::<P, 32>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
+            64 => prep_copy::<P, 64>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
             _ => prep_copy::<P, 0>(tmp, src, src_off, src_stride, w, h, 7 - r0, bias),
         },
         (true, false) => h_pass_dyn::<P, i16>(
@@ -916,6 +917,7 @@ pub fn avg<P: Pixel>(
         8 => avg_w::<P, 8>(dst, dst_stride, t0, t1, w, h, bd),
         16 => avg_w::<P, 16>(dst, dst_stride, t0, t1, w, h, bd),
         32 => avg_w::<P, 32>(dst, dst_stride, t0, t1, w, h, bd),
+        64 => avg_w::<P, 64>(dst, dst_stride, t0, t1, w, h, bd),
         _ => avg_w::<P, 0>(dst, dst_stride, t0, t1, w, h, bd),
     }
 }
@@ -935,6 +937,7 @@ pub fn avg_copy<P: Pixel>(
         8 => avg_copy_w::<P, 8>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         16 => avg_copy_w::<P, 16>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         32 => avg_copy_w::<P, 32>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
+        64 => avg_copy_w::<P, 64>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
         _ => avg_copy_w::<P, 0>(dst, dst_stride, a, a_stride, b, b_stride, w, h),
     }
 }
@@ -1604,6 +1607,33 @@ pub fn emu_edge<P: Pixel>(
     bw: usize,
     bh: usize,
 ) {
+    emu_edge_rows(
+        dst,
+        dst_stride,
+        |sy| src.get(sy * src_stride..),
+        plane_w,
+        plane_h,
+        x,
+        y,
+        bw,
+        bh,
+    );
+}
+
+/// [`emu_edge`] with the plane's rows from `row` (the samples from the
+/// start of row `y` on). Returns false, leaving the rest of `dst`, when a
+/// row is missing or shorter than `plane_w`.
+pub fn emu_edge_rows<'a, P: Pixel + 'a>(
+    dst: &mut [P],
+    dst_stride: usize,
+    row: impl Fn(usize) -> Option<&'a [P]>,
+    plane_w: usize,
+    plane_h: usize,
+    x: isize,
+    y: isize,
+    bw: usize,
+    bh: usize,
+) -> bool {
     let pw = plane_w as isize;
     // Columns [0, left) clamp to 0, [left, right) copy, [right, bw) clamp to
     // the last column.
@@ -1611,7 +1641,9 @@ pub fn emu_edge<P: Pixel>(
     let right = (pw - x).clamp(left as isize, bw as isize) as usize;
     for r in 0..bh {
         let sy = (y + r as isize).clamp(0, plane_h as isize - 1) as usize;
-        let srow = &src[sy * src_stride..][..plane_w];
+        let Some(srow) = row(sy).and_then(|s| s.get(..plane_w)) else {
+            return false;
+        };
         let d = &mut dst[r * dst_stride..][..bw];
         d[..left].fill(srow[0]);
         if right > left {
@@ -1620,6 +1652,7 @@ pub fn emu_edge<P: Pixel>(
         }
         d[right..].fill(srow[plane_w - 1]);
     }
+    true
 }
 
 #[cfg(test)]

@@ -39,6 +39,11 @@ pub struct Scratch<P> {
     pub mask: Vec<u8>,
     pub emu: Vec<P>,
     pub obmc: Vec<P>,
+    /// Per plane: the bottom row of the superblock row above, saved before
+    /// that row was deblocked (intra prediction reads it unfiltered), and
+    /// its index (`usize::MAX`: none saved).
+    pub above_line: [Vec<P>; 3],
+    pub above_line_y: [usize; 3],
     /// Encoder work buffers (empty until the encoder first uses them).
     pub enc_i32: [Vec<i32>; 4],
     pub enc_px: [Vec<P>; 4],
@@ -65,6 +70,8 @@ impl<P: Pixel> Scratch<P> {
             mask: vec![0; 128 * 128],
             emu: vec![P::default(); (128 * 2 + 16) * (128 * 2 + 16)],
             obmc: vec![P::default(); 128 * 128],
+            above_line: Default::default(),
+            above_line_y: [usize::MAX; 3],
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
@@ -93,6 +100,8 @@ impl<P: Pixel> Scratch<P> {
             mask: Vec::new(),
             emu: Vec::new(),
             obmc: Vec::new(),
+            above_line: Default::default(),
+            above_line_y: [usize::MAX; 3],
             enc_i32: Default::default(),
             enc_px: Default::default(),
             enc_q: None,
@@ -249,6 +258,15 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let left = &mut self.scratch.left;
         let base = 1i32 << (bd - 1);
         let n = w + h;
+        // The row above: its unfiltered copy at a superblock row boundary
+        // once that row may be deblocked.
+        let up: &[P] = if !have_above {
+            &[]
+        } else if y.wrapping_sub(1) == self.scratch.above_line_y[plane] {
+            &self.scratch.above_line[plane]
+        } else {
+            &buf[(y - 1) * stride..]
+        };
         if !have_above && have_left {
             let v = buf[y * stride + x - 1];
             for i in 0..n {
@@ -261,7 +279,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         } else {
             let lim = max_x.min(x + if have_above_right { 2 * w } else { w } - 1);
-            let row = &buf[(y - 1) * stride..];
+            let row = up;
             let avail = (lim + 1).saturating_sub(x).min(n);
             above[EDGE_OFF..EDGE_OFF + avail].copy_from_slice(&row[x..x + avail]);
             let last = row[lim];
@@ -270,7 +288,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         if !have_left && have_above {
-            let v = buf[(y - 1) * stride + x];
+            let v = up[x];
             for i in 0..n {
                 left[EDGE_OFF + i] = v;
             }
@@ -286,9 +304,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         let corner = if have_above && have_left {
-            buf[(y - 1) * stride + x - 1]
+            up[x - 1]
         } else if have_above {
-            buf[(y - 1) * stride + x]
+            up[x]
         } else if have_left {
             buf[y * stride + x - 1]
         } else {

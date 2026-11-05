@@ -13,6 +13,10 @@ cutlass-encode = { path = "../../encode", version = "0.1.0" }
 [lints]
 workspace = true
 
+[[bench]]
+name = "throughput"
+harness = false
+
 [dev-dependencies]
 cutlass-png = { path = "../png", version = "0.1.0" }
 cutlass-codec = { path = "../../codec", version = "0.1.0" }

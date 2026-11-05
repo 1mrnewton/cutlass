@@ -300,6 +300,8 @@ pub struct Inspection {
     pub grade: cutlass_effects::Grade,
     /// The clip's LUT: its name and strength.
     pub lut: Option<(String, f32)>,
+    /// The clip's chroma key.
+    pub chroma: Option<cutlass_effects::Chroma>,
     /// Fade-in duration, microseconds.
     pub fade_in: i64,
     /// Fade-out duration, microseconds.
@@ -3395,6 +3397,7 @@ impl Shell {
             adjust: cutlass_effects::segment_adjust(draft, segment),
             grade: cutlass_effects::segment_grade(draft, segment),
             lut: cutlass_effects::segment_lut(draft, segment).map(|lut| (lut.name, lut.strength)),
+            chroma: cutlass_effects::segment_chroma(draft, segment),
             fade_in: fade_durations(draft, segment).0,
             fade_out: fade_durations(draft, segment).1,
             material,
@@ -4481,6 +4484,26 @@ impl Shell {
             name,
             cube: Some(text),
             strength: 1.0,
+        })
+    }
+
+    /// Key `color` (`#rrggbb`) out of the selected picture with `strength`
+    /// and `shadow`, 0 to 1; an empty colour takes the key off.
+    pub fn set_chroma(
+        &mut self,
+        color: &str,
+        strength: f64,
+        shadow: f64,
+    ) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("a chroma key belongs on a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let material_id = MaterialId::new(self.fresh("chroma"));
+        self.apply(Request::SetChroma {
+            segment_id,
+            material_id,
+            color: color.to_owned(),
+            strength,
+            shadow,
         })
     }
 

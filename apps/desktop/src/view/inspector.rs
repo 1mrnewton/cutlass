@@ -152,6 +152,10 @@ fn video_panel(
     match state.tab {
         0 => {
             pages(ui, &["Basic", "Cutout", "Mask", "Enhance"], &mut state.page);
+            if state.page == 1 {
+                cutout_page(shell, ui, state, inspection);
+                return;
+            }
             if state.page != 0 {
                 later_note(ui, ["", "Cutout", "Mask", "Enhance"][state.page]);
                 return;
@@ -921,6 +925,82 @@ fn colour_page(
         _ => later_note(ui, "Mask"),
     }
     true
+}
+
+/// The Cutout page: chroma key, with the cutouts that need a model marked
+/// for later.
+fn cutout_page(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    state: &mut InspectorState,
+    inspection: &Inspection,
+) {
+    for label in ["Remove background", "Custom cutout"] {
+        later_row(ui, label);
+    }
+    let key = inspection.chroma;
+    let header = section(
+        ui,
+        state,
+        "chroma",
+        "Chroma key",
+        Some((key.is_some(), true)),
+        false,
+    );
+    if header.toggled {
+        if key.is_some() {
+            send(shell, |shell| shell.set_chroma("", 0.0, 0.0));
+        } else {
+            state.open.insert("chroma".to_owned());
+            send(shell, |shell| shell.set_chroma("#00ff00", 0.4, 0.0));
+        }
+    }
+    let Some(key) = key else {
+        return;
+    };
+    if !header.open && !state.open.contains("chroma") {
+        return;
+    }
+    body(ui, |ui| {
+        let (strength, shadow) = (f64::from(key.strength), f64::from(key.shadow));
+        if let Some(color) = color_row(ui, state, "chroma-color", "Color", &key.hex()) {
+            send(shell, |shell| shell.set_chroma(&color, strength, shadow));
+        }
+        ui.horizontal(|ui| {
+            row_label(ui, "");
+            for (name, hex) in [("Green", "#00ff00"), ("Blue", "#0000ff")] {
+                if ui.button(RichText::new(name).size(12.0)).clicked() {
+                    send(shell, |shell| shell.set_chroma(hex, strength, shadow));
+                }
+            }
+        });
+        ui.add_space(4.0);
+        let hex = key.hex();
+        if let Some(value) = slider(
+            ui,
+            state,
+            "chroma-strength",
+            "Strength",
+            (strength * 100.0).round(),
+            0.0..=100.0,
+            |v| format!("{v:.0}"),
+        ) {
+            send(shell, |shell| shell.set_chroma(&hex, value / 100.0, shadow));
+        }
+        if let Some(value) = slider(
+            ui,
+            state,
+            "chroma-shadow",
+            "Shadow",
+            (shadow * 100.0).round(),
+            0.0..=100.0,
+            |v| format!("{v:.0}"),
+        ) {
+            send(shell, |shell| {
+                shell.set_chroma(&hex, strength, value / 100.0)
+            });
+        }
+    });
 }
 
 /// The LUT section: the switch takes the LUT off or asks for a file; the

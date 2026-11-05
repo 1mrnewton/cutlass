@@ -6593,6 +6593,29 @@ mod tests {
         for label in ["LUT", "Teal punch", "Strength", "100"] {
             assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
         }
+        // The Cutout page keys green out and shows the key's values.
+        shell.set_chroma("#00ff00", 0.4, 0.25).unwrap();
+        view.inspector.focus(inspector::Focus {
+            tab: 0,
+            page: 1,
+            section: Some("chroma"),
+        });
+        let _ = frame(&mut shell, &mut view, Vec::new());
+        let lines = galleys(&frame(&mut shell, &mut view, Vec::new()));
+        for label in [
+            "Chroma key",
+            "Color",
+            "Green",
+            "Strength",
+            "40",
+            "Shadow",
+            "25",
+        ] {
+            assert!(lines.iter().any(|line| line == label), "{label}: {lines:?}");
+        }
+        shell.set_chroma("", 0.0, 0.0).unwrap();
+        assert!(shell.inspection().unwrap().chroma.is_none());
+        assert!(shell.set_chroma("#00ff00", 2.0, 0.0).is_err());
         let _ = std::fs::remove_dir_all(&temp);
     }
 

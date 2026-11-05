@@ -23,6 +23,7 @@ pub struct Av1Encoder {
     qindex: u8,
     speed: u8,
     gop: u32,
+    threads: usize,
     enc: Option<Av1Enc>,
     cancel: Arc<AtomicBool>,
     /// Timestamps of queued pictures, by display index.
@@ -67,6 +68,7 @@ impl Av1Encoder {
             qindex: 100,
             speed: 6,
             gop: 8,
+            threads: std::thread::available_parallelism().map_or(1, usize::from),
             enc: None,
             cancel: Arc::new(AtomicBool::new(false)),
             times: std::collections::VecDeque::new(),
@@ -84,6 +86,14 @@ impl Av1Encoder {
     /// and `drain` returns the rest).
     pub fn set_gop(&mut self, gop: u32) {
         self.gop = gop.clamp(1, 32);
+        self.enc = None;
+    }
+
+    /// Worker threads (tile-parallel coding; frames 1280 wide and up are
+    /// split into tile columns automatically). Output does not depend on it
+    /// for a given tiling.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads.clamp(1, 64);
         self.enc = None;
     }
 
@@ -106,6 +116,7 @@ impl Av1Encoder {
             cfg.sub_y = sy;
             cfg.speed = self.speed;
             cfg.gop = self.gop;
+            cfg.threads = self.threads;
             if matches!(
                 self.pixel,
                 PixelFormat::Gbrp | PixelFormat::Gbrp10 | PixelFormat::Gbrp12

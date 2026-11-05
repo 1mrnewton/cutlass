@@ -95,6 +95,8 @@ pub struct EncConfig {
     /// Mini-GOP length: frames coded as a hierarchical pyramid behind a
     /// hidden alt-ref (1 = each frame predicts from the previous one only).
     pub gop: u32,
+    /// Threads for tile-parallel coding and the internal decoder.
+    pub threads: usize,
     /// Denoise alt-refs with their neighbours (coded with an overlay frame).
     pub temporal_filter: bool,
     /// Estimate a global motion model per reference (experimental: it does
@@ -122,6 +124,7 @@ impl EncConfig {
             keyint: 120,
             gop: 8,
             temporal_filter: false,
+            threads: 1,
             global_motion: false,
             tile_cols_log2: 0,
             tile_rows_log2: 0,
@@ -278,6 +281,20 @@ impl Av1Enc {
             subsampling_y: sub_y,
             ..SequenceHeader::default()
         };
+        let mut cfg = cfg;
+        if cfg.threads > 1
+            && cfg.tile_cols_log2 == 0
+            && cfg.tile_rows_log2 == 0
+            && cfg.width >= 1280
+        {
+            // One tile column per thread, each at least 512 samples wide.
+            let mut l = 0;
+            while (2usize << l) <= cfg.threads && (cfg.width >> (l + 1)) >= 512 && l < 6 {
+                l += 1;
+            }
+            cfg.tile_cols_log2 = l;
+        }
+        let threads = cfg.threads.max(1);
         let q0 = match cfg.rc {
             RateControl::Qindex(q) => f64::from(q),
             RateControl::Bitrate { bps, fps } => {
@@ -289,7 +306,11 @@ impl Av1Enc {
         Ok(Self {
             cfg,
             seq,
-            core: Av1Core::new(),
+            core: {
+                let mut c = Av1Core::new();
+                c.threads = threads;
+                c
+            },
             frame_num: 0,
             rc_q: q0,
             bits_total: 0,
@@ -863,7 +884,7 @@ impl Av1Enc {
         let ti = hdr.tile_info.clone();
         let n_above = fs.mi_stride + 64;
         let mut tile_bytes: Vec<Vec<u8>> = Vec::with_capacity(ti.cols * ti.rows);
-        for tile in 0..ti.cols * ti.rows {
+        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<Vec<u8>> {
             let tile_row = tile / ti.cols;
             let tile_col = tile % ti.cols;
             let mut tile_cdf = Box::new((*cdf).clone());
@@ -884,8 +905,8 @@ impl Av1Enc {
             let mut td = TileDec {
                 seq: &seq,
                 hdr: &hdr,
-                fs: &mut fs,
-                cur: &mut cur,
+                fs,
+                cur,
                 refs: ref_views,
                 msac: MsacEnc::new(!hdr.disable_cdf_update),
                 pb: Default::default(),
@@ -933,7 +954,69 @@ impl Av1Enc {
             };
             td.decode_tile()?;
             let TileDec { msac, .. } = td;
-            tile_bytes.push(msac.finish());
+            Ok(msac.finish())
+        };
+        let n_tiles = ti.cols * ti.rows;
+        let threads = self.cfg.threads.max(1).min(n_tiles);
+        if threads <= 1 {
+            for tile in 0..n_tiles {
+                tile_bytes.push(run_tile(tile, &mut fs, &mut cur)?);
+            }
+        } else {
+            // Tiles are independent: each thread codes its tiles into its own
+            // frame state and picture, whose tile areas are merged afterwards.
+            let proto = &fs;
+            let mk_pic = || {
+                Picture::<P>::new(
+                    hdr.frame_width as usize,
+                    hdr.frame_height as usize,
+                    seq.num_planes(),
+                    seq.subsampling_x,
+                    seq.subsampling_y,
+                    seq.bit_depth,
+                )
+            };
+            type TileOut<P> = (Vec<(usize, Vec<u8>)>, FrameState, Picture<P>);
+            let outs: Vec<R<TileOut<P>>> = std::thread::scope(|sc| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let run_tile = &run_tile;
+                        let mk_pic = &mk_pic;
+                        let (seq, hdr) = (&seq, &hdr);
+                        sc.spawn(move || -> R<TileOut<P>> {
+                            let mut f = FrameState::new(seq, hdr);
+                            f.motion_field = proto.motion_field.clone();
+                            let mut c = mk_pic();
+                            let mut out = Vec::new();
+                            for tile in (t..n_tiles).step_by(threads) {
+                                out.push((tile, run_tile(tile, &mut f, &mut c)?));
+                            }
+                            Ok((out, f, c))
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join().unwrap_or(Err(CodecError::InvalidApi {
+                            what: "tile thread",
+                        }))
+                    })
+                    .collect()
+            });
+            let mut bytes: Vec<Vec<u8>> = vec![Vec::new(); n_tiles];
+            for o in outs {
+                let (tiles, f, c) = o?;
+                for (tile, b) in tiles {
+                    let r0 = ti.mi_row_starts[tile / ti.cols] as usize;
+                    let r1 = ti.mi_row_starts[tile / ti.cols + 1] as usize;
+                    let c0 = ti.mi_col_starts[tile % ti.cols] as usize;
+                    let c1 = ti.mi_col_starts[tile % ti.cols + 1] as usize;
+                    merge_tile(&mut fs, &f, &mut cur, &c, r0, r1, c0, c1);
+                    bytes[tile] = b;
+                }
+            }
+            tile_bytes = bytes;
         }
         drop(cdf);
         // Choose the in-loop filter strengths on the reconstruction. Tile
@@ -1041,6 +1124,53 @@ fn ev(_name: &str, default: f64) -> f64 {
     default
 }
 
+/// Copies the tile area (mode info rows r0..r1, columns c0..c1, in 4x4
+/// units) of a tile's frame state and picture into the frame's.
+fn merge_tile<P: Pixel>(
+    fs: &mut FrameState,
+    tf: &FrameState,
+    cur: &mut Picture<P>,
+    tc: &Picture<P>,
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
+) {
+    let st = fs.mi_stride;
+    for r in r0..r1 {
+        let (a, b) = (r * st + c0, r * st + c1);
+        fs.mi[a..b].copy_from_slice(&tf.mi[a..b]);
+        fs.uv_modes[a..b].copy_from_slice(&tf.uv_modes[a..b]);
+        fs.tx_types[a..b].copy_from_slice(&tf.tx_types[a..b]);
+        fs.inter_tx_sizes[a..b].copy_from_slice(&tf.inter_tx_sizes[a..b]);
+        fs.segment_ids[a..b].copy_from_slice(&tf.segment_ids[a..b]);
+    }
+    for (p, pl) in cur.planes.iter_mut().enumerate() {
+        let sx = usize::from(pl.w < tc.planes[0].w && p > 0);
+        let sy = usize::from(pl.h < tc.planes[0].h && p > 0);
+        let (pr0, pr1) = (r0 >> sy, r1.div_ceil(1 << sy));
+        let (pc0, pc1) = (c0 >> sx, c1.div_ceil(1 << sx));
+        for r in pr0..pr1 {
+            let (a, b) = (r * st + pc0, r * st + pc1);
+            fs.lf_tx[p][a..b].copy_from_slice(&tf.lf_tx[p][a..b]);
+        }
+        let tp = &tc.planes[p];
+        let (y0, y1) = ((pr0 * 4).min(pl.alloc_h), (pr1 * 4).min(pl.alloc_h));
+        let (x0, x1) = ((pc0 * 4).min(pl.stride), (pc1 * 4).min(pl.stride));
+        for y in y0..y1 {
+            pl.data[y * pl.stride + x0..y * pl.stride + x1]
+                .copy_from_slice(&tp.data[y * tp.stride + x0..y * tp.stride + x1]);
+        }
+    }
+    let cs = fs.cdef_stride;
+    for r in r0 / 16..r1.div_ceil(16) {
+        let (a, b) = (r * cs + c0 / 16, r * cs + c1.div_ceil(16));
+        if b <= fs.cdef_idx.len() {
+            fs.cdef_idx[a..b].copy_from_slice(&tf.cdef_idx[a..b]);
+        }
+    }
+}
+
 /// Squared error over the visible area of every plane.
 fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
     let mut e = 0u64;
@@ -1121,4 +1251,45 @@ fn source_picture<P: Pixel>(
         }
     }
     pic
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Av1Enc, EncConfig, InputFrame, RateControl};
+
+    fn encode(threads: usize) -> Vec<u8> {
+        let (w, h) = (160usize, 96usize);
+        let mut cfg = EncConfig::new(w, h);
+        cfg.rc = RateControl::Qindex(90);
+        cfg.tile_cols_log2 = 1;
+        cfg.tile_rows_log2 = 1;
+        cfg.threads = threads;
+        cfg.gop = 4;
+        let mut enc = Av1Enc::new(cfg).expect("encoder");
+        let mut out = Vec::new();
+        for f in 0..5usize {
+            let y: Vec<u8> = (0..w * h)
+                .map(|i| ((i % w) * 3 + (i / w) * 2 + f * 5) as u8)
+                .collect();
+            let c = vec![100u8; (w / 2) * (h / 2)];
+            for u in enc
+                .encode(&InputFrame {
+                    planes: [&y, &c, &c],
+                    strides: [w, w / 2, w / 2],
+                })
+                .expect("encode")
+            {
+                out.extend(u.data);
+            }
+        }
+        for u in enc.flush::<u8>().expect("flush") {
+            out.extend(u.data);
+        }
+        out
+    }
+
+    #[test]
+    fn tile_threads_do_not_change_the_bitstream() {
+        assert_eq!(encode(1), encode(3));
+    }
 }

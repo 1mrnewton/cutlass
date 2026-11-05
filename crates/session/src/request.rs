@@ -271,6 +271,15 @@ pub enum Request {
         material_id: MaterialId,
         mode: String,
     },
+    /// Set the adjust slider `key`, its reference name such as
+    /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
+    /// grain. Zero takes it off. `material_id` names a new slider material.
+    SetAdjust {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        key: String,
+        value: f64,
+    },
     /// Store `value`, from 0 to 1, as the strength of the effect, filter,
     /// or adjustment the clip uses. When another clip uses that material too,
     /// a copy named `material_id` takes its place on this clip only.

@@ -1,3 +1,4 @@
+mod adjust;
 mod animation;
 mod beat;
 mod blend;
@@ -362,6 +363,12 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             material_id,
             mode,
         } => blend::set_blend(draft, segment_id, material_id, mode),
+        Request::SetAdjust {
+            segment_id,
+            material_id,
+            key,
+            value,
+        } => adjust::set_adjust(draft, segment_id, material_id, key, *value),
         Request::SetEffectStrength {
             segment_id,
             material_id,

@@ -1526,11 +1526,10 @@ impl Av1Enc {
                         }
                     }
                 }
-                // Below speed 4 every 64-row area is measured for luma,
-                // else every other one (of at least 4); chroma strengths
-                // are chosen on their own (the chroma filter does not touch
-                // luma) over the whole frame. The choice does not depend on
-                // the thread count.
+                // Below speed 4 every 64-row area is measured, else every
+                // other one (of at least 4); chroma strengths are chosen on
+                // their own (the chroma filter does not touch luma). The
+                // choice does not depend on the thread count.
                 let sb_rows = fs.mi_rows.div_ceil(16);
                 let step = if full || sb_rows < 4 { 1 } else { 2 };
                 let rows: Vec<usize> = (0..sb_rows).step_by(step).collect();
@@ -1541,7 +1540,7 @@ impl Av1Enc {
                     }
                 }
                 let (dl, dc) = super::cdef_search::strength_deltas(
-                    &seq, &hdr, &fs, deblocked, src, &combos, &rows, &uv_combos, threads,
+                    &seq, &hdr, &fs, deblocked, src, &combos, &uv_combos, &rows, threads,
                 );
                 let mut best_c = (0i64, None::<(u8, u8)>);
                 for (&c, &e) in combos.iter().zip(&dl) {

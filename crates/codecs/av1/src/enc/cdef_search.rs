@@ -153,12 +153,12 @@ pub fn search<P: Pixel>(
 }
 
 /// How much one frame-wide CDEF strength changes the squared error, for
-/// each of `luma` (luma primary, secondary; measured in the 64-row areas
-/// `luma_rows`) and each of `chroma` (chroma primary, secondary; every
-/// row), as [`crate::dec::postfilter::cdef`] would filter `deblocked`
-/// with every coded 64x64 block at that strength. Each 8x8 block's
-/// direction is found once for all candidates, and only the blocks a
-/// candidate changes are measured. The sums do not depend on `threads`.
+/// each of `luma` (luma primary, secondary) and each of `chroma` (chroma
+/// primary, secondary), measured in the 64-row areas `rows`, as
+/// [`crate::dec::postfilter::cdef`] would filter `deblocked` with every
+/// coded 64x64 block at that strength. Each 8x8 block's direction is found
+/// once for all candidates, and only the blocks a candidate changes are
+/// measured. The sums do not depend on `threads`.
 #[allow(clippy::too_many_arguments)]
 pub fn strength_deltas<P: Pixel>(
     seq: &SequenceHeader,
@@ -167,23 +167,12 @@ pub fn strength_deltas<P: Pixel>(
     deblocked: &Picture<P>,
     src: &Picture<P>,
     luma: &[Strength],
-    luma_rows: &[usize],
     chroma: &[Strength],
+    rows: &[usize],
     threads: usize,
 ) -> (Vec<i64>, Vec<i64>) {
-    let sb_rows = fs.mi_rows.div_ceil(16);
     let chroma = if seq.num_planes() > 1 { chroma } else { &[] };
-    let mut do_luma = vec![false; sb_rows];
-    for &r in luma_rows {
-        if let Some(d) = do_luma.get_mut(r) {
-            *d = true;
-        }
-    }
-    let rows: Vec<usize> = (0..sb_rows)
-        .filter(|&r| do_luma[r] || !chroma.is_empty())
-        .collect();
     let job = |i: usize, acc: &mut (Vec<i64>, Vec<i64>), pads: &mut [Vec<u16>; 3]| {
-        let lu = if do_luma[i] { luma } else { &[] };
         let rw = RowWork {
             seq,
             hdr,
@@ -191,14 +180,14 @@ pub fn strength_deltas<P: Pixel>(
             deblocked,
             src,
         };
-        rw.deltas(lu, chroma, i, acc, pads);
+        rw.deltas(luma, chroma, i, acc, pads);
     };
     let t = threads.clamp(1, rows.len().max(1));
     let zero = || (vec![0i64; luma.len()], vec![0i64; chroma.len()]);
     let parts: Vec<(Vec<i64>, Vec<i64>)> = if t <= 1 {
         let mut acc = zero();
         let mut pads = crate::dec::postfilter::cdef_pads();
-        for &i in &rows {
+        for &i in rows {
             job(i, &mut acc, &mut pads);
         }
         vec![acc]

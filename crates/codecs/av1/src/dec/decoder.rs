@@ -1239,8 +1239,8 @@ fn recon_worker<P: Pixel>(
     let mut row_blocks = Vec::new();
     for (m, mut log) in rx {
         // Replay stores the mode info of each block as parsing did.
-        td.replay(&log)?;
         add_mi_blocks(&mut row_blocks, td.fs, &log);
+        td.replay(&mut log)?;
         log.clear();
         // The log of part of a row goes straight back; a row's message
         // comes with the last part.

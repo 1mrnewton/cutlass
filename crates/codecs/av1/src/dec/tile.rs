@@ -3523,8 +3523,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     }
 
     /// Predicts and reconstructs the blocks of `log`, recorded by a tile
-    /// decoder of the same frame whose mode info `self.fs` holds.
-    pub fn replay(&mut self, log: &ReconLog) -> R<()> {
+    /// decoder of the same frame whose mode info `self.fs` holds. The
+    /// blocks are swapped out of the log (it is spent afterwards).
+    pub fn replay(&mut self, log: &mut ReconLog) -> R<()> {
         let mut bi = 0;
         for (si, sb) in log.sbs.iter().enumerate() {
             [
@@ -3539,8 +3540,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 .get(si + 1)
                 .map_or(log.blocks.len(), |n| n.first_block);
             while bi < end {
+                std::mem::swap(&mut self.b, &mut log.blocks[bi].b);
                 let rec = &log.blocks[bi];
-                self.b = rec.b.clone();
                 self.write_mode_info(&rec.mi);
                 if let Some(at) = rec.color_maps {
                     let ny = self.color_map_y.len();

@@ -134,3 +134,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.cutlass-vorbis]
 opt-level = 3
+
+# A debug build still plays and exports VP8 at 1080p, and the export test
+# encodes 960x480 through the desktop shell; unoptimised, that test takes
+# 90 s on an M5 and risks the CI runner's job limit. Overflow checks and
+# debug assertions stay on.
+[profile.dev.package.cutlass-vp8]
+opt-level = 3

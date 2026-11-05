@@ -541,3 +541,101 @@ fn full_scale_square_waves_and_clicks_stay_in_range() {
         );
     }
 }
+
+fn tool(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg(if name == "afinfo" { "-h" } else { "--version" })
+        .output()
+        .is_ok()
+}
+
+/// A real recording through demux, decode, encode and mux, reopened by this
+/// crate, ffprobe and ffmpeg, lame, and afinfo.
+#[test]
+fn a_local_mp3_reencodes_and_reopens_in_every_reader() {
+    use std::process::Command;
+
+    use crate::common::{decode_packets, demux, local_mp3s};
+    let Some(files) = local_mp3s(1 << 20) else {
+        return;
+    };
+    let dir = crate::common::temp_dir("reencode");
+    for path in files {
+        let source = demux(&std::fs::read(&path).expect("read"));
+        let pcm = decode_packets(&source, true).pcm;
+        let config = config(source.rate, source.channels, Mp3Rate::Variable(2));
+        let packets = encode(config, &pcm, 4096);
+        let bytes = mux(config, &packets);
+        let label = path.display().to_string();
+        let frames = pcm.len() / source.channels;
+        let coded: i64 = packets.iter().map(|packet| packet.duration).sum();
+
+        // This crate, through the LAME tag.
+        let back = decode_packets(&demux(&bytes), true).pcm;
+        assert_eq!(back.len(), pcm.len(), "{label}");
+        let snr = snr(&pcm, &back);
+        eprintln!(
+            "{label}: {} Hz x{}, {frames} samples, {snr:.1} dB",
+            source.rate, source.channels
+        );
+        assert!(snr > 12.0, "{label}: {snr}");
+
+        let out = dir.join("reencoded.mp3");
+        std::fs::write(&out, &bytes).expect("write");
+        if tool("ffprobe") {
+            let probe = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_name,sample_rate,channels",
+                ])
+                .args(["-of", "csv=p=0"])
+                .arg(&out)
+                .output()
+                .expect("ffprobe");
+            let text = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+            assert_eq!(
+                text,
+                format!("mp3,{},{}", source.rate, source.channels),
+                "{label}"
+            );
+        }
+        if tool("ffmpeg") {
+            // Every coded sample: ffmpeg trims only behind a LAME-named tag.
+            let decoded = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&out)
+                .args(["-f", "f32le", "-"])
+                .output()
+                .expect("ffmpeg");
+            assert_eq!(
+                decoded.stdout.len(),
+                coded as usize * source.channels * 4,
+                "{label}"
+            );
+        }
+        if tool("lame") {
+            let raw = dir.join("lame.raw");
+            let status = Command::new("lame")
+                .args(["--quiet", "--decode", "-t"])
+                .arg(&out)
+                .arg(&raw)
+                .status()
+                .expect("lame");
+            assert!(status.success());
+            let len = std::fs::metadata(&raw).expect("raw").len() as usize;
+            assert_eq!(len, frames * source.channels * 2, "{label}");
+        }
+        if tool("afinfo") {
+            let info = Command::new("afinfo").arg(&out).output().expect("afinfo");
+            let text = String::from_utf8_lossy(&info.stdout);
+            let padding = padding(&packets);
+            let line = format!(
+                "audio {frames} valid frames + {ENCODER_DELAY} priming + {padding} remainder"
+            );
+            assert!(text.contains(&line), "{label}: {text}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

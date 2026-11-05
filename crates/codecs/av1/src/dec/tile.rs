@@ -97,7 +97,10 @@ pub struct BlockRec {
 /// A transform block of a [`ReconLog`]: the arguments of transform_block(),
 /// and, when it has coefficients, their type and nonzero region, and its
 /// nonzero coefficients: `ncoef` entries at `coef`, each `pos | value << 10`
-/// with `pos` the index in a block of rows of `min(width, 32)`.
+/// with `pos` the index in a block of rows of `min(width, 32)`. With `raw`,
+/// `value` is the signed level, dequantized on replay with `deq` (DC and
+/// AC quantizers, log2 of the denominator), and the nonzero region is
+/// found then.
 #[derive(Clone, Copy)]
 pub struct TxOp {
     pub plane: u8,
@@ -112,6 +115,8 @@ pub struct TxOp {
     pub base_y: u32,
     pub coef: u32,
     pub ncoef: u16,
+    pub raw: bool,
+    pub deq: (i32, i32, u8),
 }
 
 pub fn malformed(what: &'static str) -> CodecError {
@@ -3535,17 +3540,18 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         fill_rect(&mut self.fs.lf_tx[plane], st, at, step_x, step_y, tx);
         if let Some(log) = self.rec.as_deref_mut() {
             let sc = &mut self.scratch;
-            let (nz_rows, nz_cols) = if coded {
+            let (nz_rows, nz_cols) = if coded && sc.logged {
+                // Found when replayed.
+                (0, 0)
+            } else if coded {
                 let tw = tx_w(tx).min(32);
                 let (nr, nc) = (sc.nz_rows.clamp(1, 32), sc.nz_cols.clamp(1, tw));
-                if !sc.logged {
-                    // The coefficients are in `coefs`: log the nonzero ones.
-                    for i in 0..nr {
-                        for (j, v) in sc.coefs[i * tw..][..nc].iter_mut().enumerate() {
-                            if *v != 0 {
-                                log.coefs.push((*v << 10) | (i * tw + j) as i32);
-                                *v = 0;
-                            }
+                // The coefficients are in `coefs`: log the nonzero ones.
+                for i in 0..nr {
+                    for (j, v) in sc.coefs[i * tw..][..nc].iter_mut().enumerate() {
+                        if *v != 0 {
+                            log.coefs.push((*v << 10) | (i * tw + j) as i32);
+                            *v = 0;
                         }
                     }
                 }
@@ -3566,6 +3572,8 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 base_y: base_y as u32,
                 coef: coef as u32,
                 ncoef: (log.coefs.len() - coef) as u16,
+                raw: coded && sc.logged,
+                deq: sc.deq,
             });
         }
         // Also while recording: mode info prediction asks whether the 4x4s
@@ -3712,10 +3720,27 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let start_y = op.base_y as usize + 4 * y;
         self.tx_predict(plane, start_x, start_y, x, y, op.tx);
         if op.coded {
-            let (nr, nc) = (usize::from(op.nz_rows), usize::from(op.nz_cols));
+            let (mut nr, mut nc) = (usize::from(op.nz_rows), usize::from(op.nz_cols));
             let dq = &mut self.scratch.coefs;
-            for &e in &coefs[op.coef as usize..][..usize::from(op.ncoef)] {
-                dq[(e & 1023) as usize] = e >> 10;
+            let ops = &coefs[op.coef as usize..][..usize::from(op.ncoef)];
+            if op.raw {
+                let (dc, ac, shift) = op.deq;
+                let lim = 1i64 << (7 + self.bd);
+                let cbwl = tx_w(op.tx).min(32).trailing_zeros();
+                let (mut rows, mut cols) = (0, 0);
+                for &e in ops {
+                    let pos = (e & 1023) as usize;
+                    let q = e >> 10;
+                    let qv = if pos == 0 { dc } else { ac };
+                    dq[pos] = dequant_level(q.abs(), qv, q < 0, u32::from(shift), lim);
+                    rows = rows.max(pos >> cbwl);
+                    cols = cols.max(pos & ((1 << cbwl) - 1));
+                }
+                (nr, nc) = (rows + 1, cols + 1);
+            } else {
+                for &e in ops {
+                    dq[(e & 1023) as usize] = e >> 10;
+                }
             }
             self.scratch.tx_type = op.tx_type;
             self.scratch.nz_rows = nr;
@@ -4109,6 +4134,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                         };
                         let (dq, dc_cdf) = (&mut scratch.coefs, &mut cdf.dc_sign[ptype]);
                         let logged = &mut scratch.logged;
+                        scratch.deq = (qinfo.dc, qinfo.ac, dshift as u8);
                         msac.decoder(|m| {
                             if let Some(log) = rec {
                                 // Recording: the coefficients go straight
@@ -4116,7 +4142,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                                 let out = &mut log.coefs;
                                 out.reserve(nz.len());
                                 *logged = true;
-                                Some(signs_dec(
+                                Some(signs_dec::<true>(
                                     m,
                                     nz,
                                     levels,
@@ -4128,7 +4154,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                                 ))
                             } else {
                                 let dq = dq.first_chunk_mut::<1024>()?;
-                                Some(signs_dec(
+                                Some(signs_dec::<false>(
                                     m,
                                     nz,
                                     levels,
@@ -4491,6 +4517,15 @@ fn read_levels_dec<const CLASS: usize, const LS: usize>(
     n + usize::from(level != 0)
 }
 
+/// Dequantizes level `q` (7.12.3 step 1) with quantizer `qv`: `shift` is
+/// log2 of the denominator, the result is clamped to `-lim..lim`.
+#[inline(always)]
+fn dequant_level(q: i32, qv: i32, sign: bool, shift: u32, lim: i64) -> i32 {
+    let dqv = ((i64::from(q) * i64::from(qv)) & 0xFF_FFFF) >> shift;
+    let v = if sign { -dqv } else { dqv };
+    v.max(-lim).min(lim - 1) as i32
+}
+
 /// Dequantization of one transform block without a quantizer matrix.
 struct Dequant {
     dc: i32,
@@ -4508,8 +4543,11 @@ struct Dequant {
 /// each dequantized coefficient to `put(k, pos, value)`, `k` counting them
 /// in scan order, and clears their levels. Returns the cumulative level,
 /// the DC category and the rows and columns holding nonzero coefficients.
+///
+/// With `RAW`, `value` is the signed level instead (see [`dequant_level`])
+/// and the rows and columns are not tracked (both 0).
 #[inline(never)]
-fn signs_dec(
+fn signs_dec<const RAW: bool>(
     m: &mut Msac<'_>,
     nz: &[u32],
     levels: &mut [u16; LEVELS_LEN],
@@ -4519,9 +4557,11 @@ fn signs_dec(
     mut put: impl FnMut(usize, usize, i32),
 ) -> (u32, u8, usize, usize) {
     let dequant = |q: i32, qv: i32, sign: bool| {
-        let dqv = ((i64::from(q) * i64::from(qv)) & 0xFF_FFFF) >> d.shift;
-        let v = if sign { -dqv } else { dqv };
-        v.max(-d.lim).min(d.lim - 1) as i32
+        if RAW {
+            if sign { -q } else { q }
+        } else {
+            dequant_level(q, qv, sign, d.shift, d.lim)
+        }
     };
     let mut cul = 0u32;
     let mut dc_category = 0u8;
@@ -4541,7 +4581,9 @@ fn signs_dec(
         cul += q as u32;
         dc_category = if sign { 1 } else { 2 };
         put(0, 0, dequant(q, d.dc, sign));
-        (rows, cols) = (1, 1);
+        if !RAW {
+            (rows, cols) = (1, 1);
+        }
         k = 1;
     }
     let cmask = (1usize << d.cbwl) - 1;
@@ -4559,8 +4601,10 @@ fn signs_dec(
         cul += q as u32;
         put(k, pos, dequant(q, d.ac, sign));
         k += 1;
-        rows = rows.max((pos >> d.cbwl) + 1);
-        cols = cols.max((pos & cmask) + 1);
+        if !RAW {
+            rows = rows.max((pos >> d.cbwl) + 1);
+            cols = cols.max((pos & cmask) + 1);
+        }
     }
     h.done();
     (cul, dc_category, rows, cols)

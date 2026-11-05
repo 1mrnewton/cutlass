@@ -28,6 +28,8 @@ pub struct Scratch<P> {
     /// Whether `coeffs` put the coefficients of the transform block in the
     /// reconstruction log itself (see `TxOp`) rather than in `coefs`.
     pub logged: bool,
+    /// The dequantization of a block `coeffs` logged (see `TxOp::deq`).
+    pub deq: (i32, i32, u8),
     pub tx_type: u8,
     pub above: [P; EDGE_LEN],
     pub left: [P; EDGE_LEN],
@@ -53,6 +55,7 @@ impl<P: Pixel> Scratch<P> {
             nz_rows: 0,
             nz_cols: 0,
             logged: false,
+            deq: (0, 0, 0),
             tx_type: 0,
             above: [P::default(); EDGE_LEN],
             left: [P::default(); EDGE_LEN],
@@ -80,6 +83,7 @@ impl<P: Pixel> Scratch<P> {
             nz_rows: 0,
             nz_cols: 0,
             logged: false,
+            deq: (0, 0, 0),
             tx_type: 0,
             above: [P::default(); EDGE_LEN],
             left: [P::default(); EDGE_LEN],

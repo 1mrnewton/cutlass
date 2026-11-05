@@ -403,6 +403,24 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 ..MeParams::default()
             };
             let cost_fn = |r: i32, c: i32| -> u32 { (lam * (2.0 + bits(r) + bits(c))) as u32 };
+            // Also start from the motion of the enclosing area and of the
+            // left and above neighbours of the same size.
+            let mut cands = [(0, 0), self.est_hint, (0, 0), (0, 0), (0, 0)];
+            let memo = &self.me_scratch.est_memo;
+            if let Some(e) = memo.iter().rev().find(|e| {
+                let [ex, ey, ew, eh] = e.0;
+                ex <= x && ey <= y && ex + ew >= x + w && ey + eh >= y + h && ew * eh > w * h
+            }) {
+                cands[2] = e.2;
+            }
+            for (i, key) in [[x.wrapping_sub(w), y, w, h], [x, y.wrapping_sub(h), w, h]]
+                .iter()
+                .enumerate()
+            {
+                if let Some(e) = memo.iter().find(|e| e.0 == *key) {
+                    cands[3 + i] = e.2;
+                }
+            }
             let me = motion_search(
                 &mut self.me_scratch,
                 &sp.data,
@@ -415,7 +433,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 rp.stride,
                 rp.w,
                 rp.h,
-                &[(0, 0), self.est_hint],
+                &cands,
                 &params,
                 &cost_fn,
                 bd,
@@ -439,7 +457,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         cost * scale
     }
 
+    /// The partition estimate of an area, computed once per superblock.
     fn est_block(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
+        let key = [x, y, w, h];
+        if let Some(&(_, v, _)) = self.me_scratch.est_memo.iter().find(|e| e.0 == key) {
+            return v;
+        }
+        let v = self.est_block_uncached(x, y, w, h);
+        self.me_scratch.est_memo.push((key, v, self.est_hint));
+        v
+    }
+
+    fn est_block_uncached(&mut self, x: usize, y: usize, w: usize, h: usize) -> f64 {
         if self.mode.rd_partition {
             return self.est_block_rd(x, y, w, h);
         }
@@ -491,6 +520,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let x = c * 4;
         let y = r * 4;
         let force_split = n > self.mode.max_block;
+        if n >= self.sb_size4 * 4 {
+            self.me_scratch.est_memo.clear();
+        }
         if !has_rows && !has_cols {
             return PARTITION_SPLIT;
         }

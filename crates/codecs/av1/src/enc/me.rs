@@ -532,6 +532,9 @@ pub struct MeScratch<P: Pixel> {
     pred: Vec<P>,
     /// Edge-emulated reference footprint.
     edge: Vec<P>,
+    /// Partition estimates of the current superblock: `[x, y, w, h]`, cost
+    /// and motion (kept here for the mode decision, which owns this scratch).
+    pub est_memo: Vec<([usize; 4], f64, (i32, i32))>,
 }
 
 impl<P: Pixel> MeScratch<P> {
@@ -539,6 +542,7 @@ impl<P: Pixel> MeScratch<P> {
         Self {
             pred: vec![P::default(); MAX_BLOCK * MAX_BLOCK],
             edge: vec![P::default(); EDGE_SIDE * EDGE_SIDE],
+            est_memo: Vec::with_capacity(128),
         }
     }
 }
@@ -784,7 +788,7 @@ pub fn motion_search<P: Pixel>(
             filter
         },
     };
-    let MeScratch { pred, edge } = scratch;
+    let MeScratch { pred, edge, .. } = scratch;
 
     // Full-sample window (offsets in samples).
     let full_max = MV_MAX >> 3;

@@ -400,4 +400,41 @@ mod tests {
         assert!(assistant.entries.is_empty());
         let _ = std::fs::remove_dir_all(&path);
     }
+
+    /// A real model on this machine, named by `CUTLASS_LOCAL_MODEL`, reads
+    /// the project and answers. Run by hand with Ollama up:
+    /// `CUTLASS_LOCAL_MODEL=gemma4 cargo test -p cutlass real_local -- --ignored`.
+    #[test]
+    #[ignore = "needs a model running on this machine"]
+    fn a_real_local_model_reads_the_project_and_answers() {
+        let (mut shell, path) = shell_with_project("real");
+        let mut settings = cutlass_settings::Settings::default();
+        if let Ok(name) = std::env::var("CUTLASS_LOCAL_MODEL") {
+            settings.model.local_name = name;
+        }
+        let mut assistant = Assistant::default();
+        assistant.draft =
+            "How many clips are on the main track? Read the project first.".to_owned();
+        assistant.send(&settings);
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while assistant.poll(&mut shell) {
+            assert!(Instant::now() < deadline, "the model did not answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        eprintln!("{:#?}", assistant.entries);
+        assert!(
+            assistant
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Step { tool, failed: false, .. } if tool == "draft.query")),
+            "{:?}",
+            assistant.entries
+        );
+        assert!(
+            matches!(assistant.entries.last(), Some(Entry::Said(_))),
+            "{:?}",
+            assistant.entries
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }

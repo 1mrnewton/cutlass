@@ -769,6 +769,8 @@ fn parse_query(arguments: &str) -> Result<Invocation, ToolError> {
         return Ok(Invocation::DraftQuery(DraftQuery::Full));
     }
     if let Some(id) = headed(arguments, "track") {
+        // An older project's main track has no id; it is written `""`.
+        let id = if id == "\"\"" { "" } else { id };
         return Ok(Invocation::DraftQuery(DraftQuery::Track {
             track_id: TrackId::new(id),
         }));
@@ -1299,6 +1301,21 @@ mod tests {
     }
 
     #[test]
+    fn an_older_projects_unnamed_track_is_written_and_read_as_two_quotes() {
+        let temp = Temp::new();
+        let mut registry = open(&temp, Gate::refuse());
+        let mut draft = Draft::empty("D");
+        draft.tracks[0].id = TrackId::new("");
+        registry.draft = DraftTools::new(Session::open(draft));
+        let project = registry.parse("draft.query", "project").unwrap();
+        let text = registry.invoke(project).unwrap();
+        assert!(text.contains(r#" tracks="":video:0"#), "{text}");
+        let track = registry.parse("draft.query", r#"track """#).unwrap();
+        let text = registry.invoke(track).unwrap();
+        assert!(text.contains("kind=video"), "{text}");
+    }
+
+    #[test]
     fn draft_query_and_apply_round_trip() {
         let temp = Temp::new();
         let mut registry = open(&temp, Gate::refuse());
@@ -1338,7 +1355,11 @@ mod tests {
         let track = registry
             .invoke(registry.parse("draft.query", "track main").unwrap())
             .unwrap();
-        assert!(track.split_whitespace().any(|word| word == "a"));
+        assert!(
+            track
+                .split_whitespace()
+                .any(|word| word.starts_with("a@0+"))
+        );
         assert!(track.contains("track=main"));
         let segment = registry
             .invoke(registry.parse("draft.query", "segment a").unwrap())

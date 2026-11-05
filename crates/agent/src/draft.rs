@@ -57,6 +57,10 @@ pub struct ProjectSnapshot {
     pub background: Option<String>,
     /// The stored color space.
     pub color_space: i32,
+    /// Where the last clip on the timeline ends.
+    pub end: Micros,
+    /// Each track's id, kind word and how many segments it holds, in order.
+    pub tracks: Vec<(TrackId, String, usize)>,
 }
 
 /// One segment at one revision.
@@ -145,6 +149,17 @@ impl fmt::Display for QueryView {
                 if let Some(background) = &project.background {
                     write!(formatter, " background={background}")?;
                 }
+                write!(formatter, " end={} tracks=", project.end.0)?;
+                for (index, (id, kind, count)) in project.tracks.iter().enumerate() {
+                    let comma = if index == 0 { "" } else { "," };
+                    // A track without an id, from an older project, is `""`.
+                    let id = if id.as_str().is_empty() {
+                        "\"\""
+                    } else {
+                        id.as_str()
+                    };
+                    write!(formatter, "{comma}{id}:{kind}:{count}")?;
+                }
                 Ok(())
             }
             Self::Track(track) => {
@@ -154,7 +169,11 @@ impl fmt::Display for QueryView {
                     track.revision, track.id, track.kind, track.name
                 )?;
                 for segment in &track.segments {
-                    write!(formatter, " {}", segment.id)?;
+                    write!(
+                        formatter,
+                        " {}@{}+{}",
+                        segment.id, segment.start.0, segment.duration.0
+                    )?;
                 }
                 Ok(())
             }
@@ -514,6 +533,32 @@ fn project_view(revision: u64, draft: &Draft) -> QueryView {
         ratio: draft.canvas_config.ratio.clone(),
         background: draft.canvas_config.background.clone(),
         color_space: draft.color_space,
+        end: Micros(
+            draft
+                .tracks
+                .iter()
+                .flat_map(|track| &track.segments)
+                .map(|segment| {
+                    segment
+                        .target
+                        .start
+                        .0
+                        .saturating_add(segment.target.duration.0)
+                })
+                .max()
+                .unwrap_or_default(),
+        ),
+        tracks: draft
+            .tracks
+            .iter()
+            .map(|track| {
+                (
+                    track.id.clone(),
+                    track.kind.as_str().to_owned(),
+                    track.segments.len(),
+                )
+            })
+            .collect(),
     })
 }
 
@@ -793,6 +838,10 @@ mod tests {
         assert_eq!(project.revision, 1);
         assert_eq!(project.duration, Micros(1_000_000));
         assert!(!view.to_string().contains("only-in-full"));
+        // Each track's id, kind and size, so a model can name them.
+        let text = view.to_string();
+        assert!(text.contains(" end=1000000"), "{text}");
+        assert!(text.contains(" tracks=main:video:1"), "{text}");
         assert_eq!(tools.session().revision(), 1);
     }
 

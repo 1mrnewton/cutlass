@@ -5,6 +5,8 @@
 //! the mix format the open parameters ask for (see `pcm.rs`).
 
 mod frame;
+#[cfg(test)]
+mod tests;
 
 pub use frame::Frame;
 

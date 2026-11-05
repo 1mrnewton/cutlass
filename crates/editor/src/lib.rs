@@ -8,6 +8,7 @@
 mod act;
 mod animation;
 mod append;
+mod clipboard;
 mod controls;
 mod effect_shelf;
 mod filmstrip;
@@ -34,6 +35,7 @@ mod zoom;
 pub use act::{can_cut_at, clip_under, delete_side, frame_margin};
 pub use animation::{ClipAnimation, ClipAnimations, clip_animations};
 pub use append::{Append, AppendLane, append_placement, free_row, material_span};
+pub use clipboard::{ClipboardMiss, CopiedClip, copy_clips, paste_requests};
 pub use controls::{MAX_VOLUME, SPEED_MARKS, speed_at, speed_position, volume_at, volume_position};
 pub use effect_shelf::{
     EFFECT_CARD_PREFIX, EFFECT_LENGTH, EffectCard, EffectPlace, effect_cards, effect_of_card,

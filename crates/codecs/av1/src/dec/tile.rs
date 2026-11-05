@@ -2418,6 +2418,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let Some(prev) = &self.fs.prev_segment_ids else {
             return 0;
         };
+        let prev = &prev.segment_ids;
         let xm = (self.fs.mi_cols - b.mi_col).min(bw4(b.bsize));
         let ym = (self.fs.mi_rows - b.mi_row).min(bh4(b.bsize));
         let mut seg = 7;

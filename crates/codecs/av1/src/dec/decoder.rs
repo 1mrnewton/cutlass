@@ -466,6 +466,11 @@ struct RefFill {
     have: usize,
     /// Every read waits for the whole picture (scaled reference).
     whole: bool,
+    /// The size and planes of the reference (the copy is taken from the
+    /// pool when the first rows are copied).
+    width: usize,
+    height: usize,
+    num_planes: usize,
 }
 
 impl RefFill {
@@ -476,6 +481,7 @@ impl RefFill {
         &mut self,
         m: &mut Picture<P>,
         need: usize,
+        spares: &Mutex<Spares<P>>,
     ) -> R<Option<Arc<AnyPicture>>> {
         if self.have >= need {
             return Ok(None);
@@ -495,6 +501,17 @@ impl RefFill {
         };
         prof::add(prof::WAIT_REFS, t);
         let _copy = prof::Span(prof::MIRROR, std::time::Instant::now());
+        if m.planes.is_empty() && !bands.is_empty() {
+            *m = take_picture::<P>(
+                &mut lock(spares).pics,
+                self.width,
+                self.height,
+                self.num_planes,
+                m.sub_x,
+                m.sub_y,
+                m.bd,
+            );
+        }
         for b in &bands {
             if b.y0 != self.have || !copy_band(m, b) {
                 // Not the layout of the copy: take the whole picture.
@@ -629,6 +646,8 @@ struct Spares<P> {
     states: Vec<FrameState>,
     /// Buffers of [`Band`]s.
     bands: Vec<[Vec<P>; 3]>,
+    /// Reconstruction scratch of the backends.
+    scratch: Vec<Scratch<P>>,
 }
 
 /// Band buffers kept for reuse, at most.
@@ -651,6 +670,7 @@ impl<P> Default for PixState<P> {
                 lr: Vec::new(),
                 states: Vec::new(),
                 bands: Vec::new(),
+                scratch: Vec::new(),
             })),
         }
     }
@@ -663,6 +683,7 @@ impl<P: Pixel> PixState<P> {
         sp.shells.truncate(8);
         sp.lr.truncate(4);
         sp.states.truncate(8);
+        sp.scratch.truncate(8);
     }
 }
 
@@ -1511,7 +1532,7 @@ impl<P: PicturePixel> FrameTask<P> {
                 && rd.mi_rows == fs.mi_rows
                 && rd.mi_cols == fs.mi_cols
             {
-                fs.prev_segment_ids = Some(rd.segment_ids.clone());
+                fs.prev_segment_ids = Some(rd.clone());
             }
         }
         let saved = decode_frame::<P>(
@@ -2001,11 +2022,12 @@ fn recon_worker<'r, P: PicturePixel>(
     refs: [Option<RefView<'r, P>>; 8],
     mirrors: Vec<Picture<P>>,
     finals: &'r [OnceLock<Arc<AnyPicture>>],
+    scratch: Scratch<P>,
     mut fills: Vec<RefFill>,
     rx: Receiver<(Option<RowMsg>, ReconLog)>,
     filt: &mut InlineFilter<'_, P>,
     rows: &Mutex<RowPools>,
-) -> R<Vec<Picture<P>>> {
+) -> R<(Vec<Picture<P>>, Scratch<P>)> {
     // References read through a warp or a scale may need any row.
     let scaled = std::array::from_fn::<bool, 8, _>(|i| {
         refs[i].as_ref().is_some_and(|rv| {
@@ -2071,7 +2093,7 @@ fn recon_worker<'r, P: PicturePixel>(
         plan_delta_lf: [0; 4],
         color_map_y: vec![0u8; 128 * 128],
         color_map_uv: vec![0u8; 128 * 128],
-        scratch: Scratch::new(),
+        scratch,
         rec: None,
     };
     for (m, mut log) in rx {
@@ -2099,7 +2121,7 @@ fn recon_worker<'r, P: PicturePixel>(
                 let need = bottom + (max_down.max(0) as usize).div_ceil(8) + 16;
                 for f in &mut fills {
                     let need = if warp || f.whole { usize::MAX } else { need };
-                    let Some(pic) = f.fill(&mut td.mirrors[f.mirror], need)? else {
+                    let Some(pic) = f.fill(&mut td.mirrors[f.mirror], need, filt.spares)? else {
                         continue;
                     };
                     // The reference is done: read it in place from now on.
@@ -2136,7 +2158,10 @@ fn recon_worker<'r, P: PicturePixel>(
         pool.msgs.push(m);
         pool.logs.push(log);
     }
-    Ok(std::mem::take(&mut td.mirrors))
+    Ok((
+        std::mem::take(&mut td.mirrors),
+        std::mem::replace(&mut td.scratch, Scratch::empty()),
+    ))
 }
 
 /// The in-loop filters of a frame, run by its reconstruction thread on
@@ -2378,7 +2403,8 @@ fn decode_frame_async<P: PicturePixel>(
     // The motion field is computed band by band on a thread of its own
     // while the tiles are parsed (see MfFeed).
     if let Some(p) = mf {
-        fs.motion_field = vec![MfEntry::default(); p.w8 * p.h8];
+        fs.motion_field.clear();
+        fs.motion_field.resize(p.w8 * p.h8, MfEntry::default());
     }
     let (rtx, rrx) = std::sync::mpsc::channel::<(Option<RowMsg>, ReconLog)>();
     let backend = Backend {
@@ -2533,15 +2559,13 @@ impl<P: PicturePixel> Backend<P> {
                         continue;
                     }
                     let slot = hdr.ref_frame_idx[i - 1] as usize;
-                    let m = take_picture::<P>(
-                        &mut lock(&spares).pics,
-                        ref_hdr[slot].upscaled_width as usize,
-                        ref_hdr[slot].frame_height as usize,
-                        seq.num_planes(),
-                        seq.subsampling_x,
-                        seq.subsampling_y,
-                        seq.bit_depth,
-                    );
+                    // The copy comes from the pool once rows are copied.
+                    let m = Picture::<P> {
+                        planes: Vec::new(),
+                        bd: seq.bit_depth,
+                        sub_x: seq.subsampling_x,
+                        sub_y: seq.subsampling_y,
+                    };
                     mirror_of[i] = Some(mirrors.len());
                     fills.push(RefFill {
                         job: j.clone(),
@@ -2550,6 +2574,9 @@ impl<P: PicturePixel> Backend<P> {
                         used: 0,
                         have: 0,
                         whole: false,
+                        width: ref_hdr[slot].upscaled_width as usize,
+                        height: ref_hdr[slot].frame_height as usize,
+                        num_planes: seq.num_planes(),
                     });
                     mirrors.push(m);
                 }
@@ -2596,17 +2623,21 @@ impl<P: PicturePixel> Backend<P> {
                 to_filter: None,
                 published: 0,
             };
+            let scratch = lock(&spares).scratch.pop().unwrap_or_else(Scratch::new);
             recon_worker(
-                &seq, &hdr, &mut rc_fs, &mut cur, refs, mirrors, &finals, fills, rx, &mut filt,
-                &rows,
+                &seq, &hdr, &mut rc_fs, &mut cur, refs, mirrors, &finals, scratch, fills, rx,
+                &mut filt, &rows,
             )
         };
         drop(held);
-        let res = res.map(|mirrors| {
+        let res = res.map(|(mirrors, scratch)| {
             let mut sp = lock(&spares);
             for m in mirrors {
-                recycle(&mut sp.pics, m);
+                if !m.planes.is_empty() {
+                    recycle(&mut sp.pics, m);
+                }
             }
+            sp.scratch.push(scratch);
         });
         let mut fin = cur;
         set_visible_size(&seq, &hdr, &mut fin);

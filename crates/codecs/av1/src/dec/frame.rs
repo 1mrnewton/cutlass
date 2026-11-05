@@ -129,7 +129,9 @@ pub struct FrameState {
     /// LoopfilterTxSizes per plane, indexed in that plane's 4x4 units with `mi_stride`.
     pub lf_tx: [Vec<u8>; 3],
     pub segment_ids: Vec<u8>,
-    pub prev_segment_ids: Option<Vec<u8>>,
+    /// The data of the primary reference frame, when it has the size of
+    /// this frame (its segment ids predict this frame's).
+    pub prev_segment_ids: Option<std::sync::Arc<RefData>>,
     /// cdef_idx per 64x64 block, -1 = unset.
     pub cdef_idx: Vec<i8>,
     pub cdef_stride: usize,
@@ -186,7 +188,7 @@ impl FrameState {
                 fs.lr_cols = lr_cols;
                 fs.lr_rows = lr_rows;
                 fs.prev_segment_ids = None;
-                fs.motion_field = Vec::new();
+                fs.motion_field.clear();
                 fs
             }
             _ => Self::new(seq, hdr),

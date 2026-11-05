@@ -1076,29 +1076,85 @@ impl Av1Enc {
                 && seq.enable_cdef
             {
                 let p0 = intent.cdef.y_pri[0];
-                let mut best_c = (lf_sse, None::<(u8, u8)>);
-                let mut out = deblocked.clone();
                 let pris: &[u8] = if full {
                     &[p0 / 2, p0, (p0 * 3 / 2).min(15), (p0 * 2).min(15)]
                 } else {
                     &[p0 / 2, p0, (p0 * 3 / 2).min(15)]
                 };
                 let secs: &[u8] = if full { &[0, 1, 2, 4] } else { &[0, 2] };
+                let mut combos = Vec::new();
                 for &pri in pris {
                     for &sec in secs {
-                        if pri == 0 && sec == 0 {
-                            continue;
+                        if pri != 0 || sec != 0 {
+                            combos.push((pri, sec));
                         }
-                        let mut h2 = hdr.clone();
-                        h2.cdef.y_pri = [pri; 8];
-                        h2.cdef.y_sec = [sec; 8];
-                        h2.cdef.uv_pri = [pri / 2; 8];
-                        h2.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
-                        crate::dec::postfilter::cdef(&seq, &h2, &fs, &deblocked, &mut out, threads);
-                        let e = picture_sse(&out, src);
-                        if e < best_c.0 {
-                            best_c = (e, Some((pri, sec)));
-                        }
+                    }
+                }
+                // Below speed 4 every 64-row area is measured, else every
+                // other one (of at least 4). The strengths are tried in
+                // parallel; the choice does not depend on the thread count.
+                let sb_rows = fs.mi_rows.div_ceil(16);
+                let step = if full || sb_rows < 4 { 1 } else { 2 };
+                let rows: Vec<usize> = (0..sb_rows).step_by(step).collect();
+                let sy = usize::from(seq.subsampling_y);
+                let mut best_c = if step == 1 {
+                    (lf_sse, None::<(u8, u8)>)
+                } else {
+                    (sb_rows_sse(&deblocked, src, &rows, sy), None)
+                };
+                let eval = |&(pri, sec): &(u8, u8), out: &mut Picture<P>| -> u64 {
+                    let mut h2 = hdr.clone();
+                    h2.cdef.y_pri = [pri; 8];
+                    h2.cdef.y_sec = [sec; 8];
+                    h2.cdef.uv_pri = [pri / 2; 8];
+                    h2.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
+                    let mut pads = crate::dec::postfilter::cdef_pads();
+                    copy_sb_rows(out, &deblocked, &rows, sy);
+                    for &i in &rows {
+                        crate::dec::postfilter::cdef_sb_rows(
+                            &seq,
+                            &h2,
+                            &fs,
+                            &deblocked,
+                            out,
+                            i * 16,
+                            (i + 1) * 16,
+                            &mut pads,
+                        );
+                    }
+                    sb_rows_sse(out, src, &rows, sy)
+                };
+                let nt = threads.min(combos.len()).max(1);
+                let errs: Vec<u64> = if nt <= 1 {
+                    let mut out = deblocked.clone();
+                    combos.iter().map(|c| eval(c, &mut out)).collect()
+                } else {
+                    let parts: Vec<Vec<(usize, u64)>> = std::thread::scope(|sc| {
+                        let hs: Vec<_> = (0..nt)
+                            .map(|t| {
+                                let (eval, combos, deblocked) = (&eval, &combos, &deblocked);
+                                sc.spawn(move || {
+                                    let mut out = deblocked.clone();
+                                    (t..combos.len())
+                                        .step_by(nt)
+                                        .map(|k| (k, eval(&combos[k], &mut out)))
+                                        .collect()
+                                })
+                            })
+                            .collect();
+                        hs.into_iter()
+                            .map(|h| h.join().unwrap_or_default())
+                            .collect()
+                    });
+                    let mut e = vec![u64::MAX; combos.len()];
+                    for (k, v) in parts.into_iter().flatten() {
+                        e[k] = v;
+                    }
+                    e
+                };
+                for (&c, &e) in combos.iter().zip(&errs) {
+                    if e < best_c.0 {
+                        best_c = (e, Some(c));
                     }
                 }
                 match best_c.1 {
@@ -1195,18 +1251,65 @@ fn merge_tile<P: Pixel>(
 
 /// Squared error over the visible area of every plane.
 fn picture_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
+    a.planes
+        .iter()
+        .zip(&b.planes)
+        .map(|(pa, pb)| plane_rows_sse(pa, pb, 0, pa.h))
+        .sum()
+}
+
+/// SSE of rows `y0..y1` of two planes.
+fn plane_rows_sse<P: Pixel>(
+    pa: &crate::dec::frame::Plane<P>,
+    pb: &crate::dec::frame::Plane<P>,
+    y0: usize,
+    y1: usize,
+) -> u64 {
+    let y1 = y1.min(pa.h);
+    if y0 >= y1 {
+        return 0;
+    }
     let mut e = 0u64;
-    for (pa, pb) in a.planes.iter().zip(&b.planes) {
-        for y in 0..pa.h {
-            let ra = &pa.data[y * pa.stride..][..pa.w];
-            let rb = &pb.data[y * pb.stride..][..pa.w];
-            for (x, z) in ra.iter().zip(rb) {
-                let d = i64::from(x.to_i32() - z.to_i32());
-                e += (d * d) as u64;
-            }
+    let mut x = 0;
+    while x < pa.w {
+        let w = (pa.w - x).min(128);
+        e += super::me::sse(
+            &pa.data[y0 * pa.stride + x..],
+            pa.stride,
+            &pb.data[y0 * pb.stride + x..],
+            pb.stride,
+            w,
+            y1 - y0,
+        );
+        x += w;
+    }
+    e
+}
+
+/// SSE of the 64-row luma areas `rows` (and the chroma rows under them,
+/// `sy` the vertical chroma subsampling).
+fn sb_rows_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>, rows: &[usize], sy: usize) -> u64 {
+    let mut e = 0;
+    for (p, (pa, pb)) in a.planes.iter().zip(&b.planes).enumerate() {
+        let s = if p > 0 { sy } else { 0 };
+        for &i in rows {
+            e += plane_rows_sse(pa, pb, (i * 64) >> s, ((i + 1) * 64) >> s);
         }
     }
     e
+}
+
+/// Copies the 64-row luma areas `rows` (and the chroma rows under them).
+fn copy_sb_rows<P: Pixel>(dst: &mut Picture<P>, src: &Picture<P>, rows: &[usize], sy: usize) {
+    for (p, (pd, ps)) in dst.planes.iter_mut().zip(&src.planes).enumerate() {
+        let s = if p > 0 { sy } else { 0 };
+        for &i in rows {
+            let y0 = ((i * 64) >> s).min(ps.alloc_h);
+            let y1 = (((i + 1) * 64) >> s).min(ps.alloc_h);
+            let (a, b) = (y0 * ps.stride, y1 * ps.stride);
+            pd.data[a..b].copy_from_slice(&ps.data[a..b]);
+        }
+    }
 }
 
 /// Screen content (text, graphics) has many blocks of few, contrasting

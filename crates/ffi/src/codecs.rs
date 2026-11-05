@@ -1,9 +1,9 @@
 //! The containers and codecs a phone opens.
 //!
 //! The Apple decoders go first on an Apple phone. A codec they decline falls
-//! through to the Rust decoder of the same id. FLAC is the exception: the
-//! Rust decoder goes first everywhere, so a FLAC file decodes bit-exactly
-//! and the same on every platform.
+//! through to the Rust decoder of the same id. FLAC and MP3 are the
+//! exceptions: their Rust decoders go first everywhere, so a FLAC file
+//! decodes bit-exactly and an MP3 file decodes the same on every platform.
 
 use std::fs::File;
 use std::path::Path;
@@ -15,7 +15,7 @@ use cutlass_eval::ReaderFactory;
 use cutlass_isobmff::IsoBmffFile;
 use cutlass_still::{StillDemux, still_limits};
 
-/// ISOBMFF, WAV, AIFF, FLAC, and stills, decoded with [`decoders`].
+/// ISOBMFF, WAV, AIFF, FLAC, MP3, and stills, decoded with [`decoders`].
 #[must_use]
 pub fn readers() -> ReaderFactory {
     let mut readers = ReaderFactory::new();
@@ -24,16 +24,20 @@ pub fn readers() -> ReaderFactory {
     readers.register_container(cutlass_aiff::probe, open_aiff);
     readers.register_container(cutlass_flac_container::probe, open_flac);
     readers.register_container(cutlass_still::probe, open_still);
+    readers.register_container(probe_mp3, open_mp3);
     *readers.decoders_mut() = decoders();
     readers
 }
 
-/// FLAC, the platform decoders for this OS, then PNG, JPEG, AAC, H.264,
-/// and PCM.
+/// FLAC and MP3, the platform decoders for this OS, then PNG, JPEG, AAC,
+/// H.264, and PCM.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
+    // Ahead of the platform decoders, so FLAC and MP3 decode the same
+    // everywhere.
     cutlass_flac::register_decoders(&mut decoders);
+    cutlass_mp3::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
@@ -42,6 +46,41 @@ pub fn decoders() -> DecodeFactory {
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
     decoders
+}
+
+/// An ID3v2 tag longer than the header window, which cover art often makes,
+/// is taken as MP3: the demuxer skips the tag and refuses the file when no
+/// Layer III frame follows it. MP3 is registered last, so a family that
+/// names the header itself still wins.
+fn probe_mp3(header: &[u8]) -> ProbeResult {
+    let accept = ProbeResult::Accept {
+        family: ContainerId::Mp3,
+        examined: header.len(),
+    };
+    match cutlass_mp3_container::probe(header) {
+        cutlass_mp3_container::Probe::Matched => accept,
+        cutlass_mp3_container::Probe::NeedMore { .. } if header.starts_with(b"ID3") => accept,
+        cutlass_mp3_container::Probe::NeedMore { minimum } => ProbeResult::NeedBytes {
+            have: header.len(),
+            need: usize::try_from(minimum).unwrap_or(usize::MAX),
+        },
+        cutlass_mp3_container::Probe::Reject => ProbeResult::Refuse {
+            examined: header.len(),
+        },
+    }
+}
+
+fn open_mp3(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
+    let file = File::open(path).map_err(|error| OpenError::Source {
+        message: error.to_string(),
+    })?;
+    let demux =
+        cutlass_mp3_container::Mp3Demux::open(std::io::BufReader::new(file)).map_err(|error| {
+            OpenError::Source {
+                message: error.to_string(),
+            }
+        })?;
+    Ok(Box::new(demux))
 }
 
 fn probe_isobmff(header: &[u8]) -> ProbeResult {
@@ -167,6 +206,75 @@ mod tests {
         for (index, value) in got.iter().enumerate() {
             let expected = source[index] as f32 / 32_767.0;
             assert!((value - expected).abs() < 1e-6, "sample {index}");
+        }
+    }
+
+    #[test]
+    fn a_phone_opens_and_hears_an_mp3() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codecs/mp3/tests/fixtures/sweep_22050_mono64.mp3");
+        let mut media = super::readers().open(&path).expect("open");
+        let ready = media.pull_audio().expect("pull").expect("pcm");
+        assert_eq!(ready.pcm.rate, 22_050);
+        assert_eq!(ready.pcm.layout.len(), 1);
+    }
+
+    /// Every sample `decoders` makes of the fixture's frames.
+    fn decode_mp3(decoders: &cutlass_decode::DecodeFactory) -> Vec<f32> {
+        use cutlass_mp3_container::{Demux, Mp3Demux};
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codecs/mp3/tests/fixtures/sine_44100_j128_crc.mp3");
+        let bytes = std::fs::read(path).expect("fixture");
+        let mut demux = Mp3Demux::open(std::io::Cursor::new(bytes)).expect("demux");
+        let stream = &demux.streams()[0].params;
+        let rate = stream.sample_rate;
+        let layout = if stream.channels == 1 {
+            cutlass_decode::ChannelLayout::mono()
+        } else {
+            cutlass_decode::ChannelLayout::stereo()
+        };
+        let params = cutlass_decode::CodecParams::audio(CodecId::Mp3, rate, layout);
+        let mut decoder = decoders.open(&params).expect("decoder");
+        let mut pcm = Vec::new();
+        let mut keep = |outputs: Vec<cutlass_decode::Output>| {
+            for output in outputs {
+                if let cutlass_decode::Output::Audio(audio) = output {
+                    pcm.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        };
+        while let Some(packet) = demux.next_packet().expect("packet") {
+            let packet =
+                cutlass_decode::Packet::audio(packet.data, packet.pts, packet.duration, rate);
+            keep(decoder.push(&packet).expect("decode"));
+        }
+        keep(decoder.drain().expect("drain"));
+        pcm
+    }
+
+    #[test]
+    fn mp3_is_decoded_by_the_rust_decoder_ahead_of_the_platform() {
+        let mut rust = cutlass_decode::DecodeFactory::new();
+        cutlass_mp3::register_decoders(&mut rust);
+        let expected = decode_mp3(&rust);
+        assert!(!expected.is_empty());
+        assert!(
+            decode_mp3(&super::decoders()) == expected,
+            "the Rust decoder decodes MP3"
+        );
+
+        // With the platform first, an Apple phone decodes MP3 itself, and
+        // differently: the check above would fail if the order were reversed.
+        #[cfg(target_vendor = "apple")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_decoders(&mut reversed);
+            cutlass_mp3::register_decoders(&mut reversed);
+            assert!(
+                decode_mp3(&reversed) != expected,
+                "the platform decoder was not picked"
+            );
         }
     }
 }

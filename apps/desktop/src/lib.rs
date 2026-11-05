@@ -21,7 +21,8 @@ pub mod widgets;
 pub mod window;
 
 /// Platform openers go first. A codec they decline falls through to the
-/// software opener registered after them. Hardware decode and encode are on.
+/// software opener registered after them. MP3 is the exception: its Rust
+/// codec goes ahead of the platform. Hardware decode and encode are on.
 pub fn register_codecs() -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     register_codecs_with(&cutlass_settings::Hardware::default())
 }
@@ -37,11 +38,14 @@ pub fn register_codecs_with(
     // Rust audio codecs go ahead of the platform ones, so a file decodes
     // and encodes the same on every platform. FLAC's encoder hands the muxer
     // the STREAMINFO (sample count and MD5) a FLAC file is finished with;
-    // ALAC's hands it the final cookie.
+    // ALAC's hands it the final cookie; MP3's hands it the delay and padding
+    // its LAME tag needs.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_flac::register_encoders(&mut encoders);
     cutlass_alac::register_decoders(&mut decoders);
     cutlass_alac::register_encoders(&mut encoders);
+    cutlass_mp3::register_decoders(&mut decoders);
+    cutlass_mp3::register_encoders(&mut encoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -157,6 +161,82 @@ mod tests {
         encoders
             .open(&picture(CodecId::H264, 64, 64))
             .expect("hardware encode stays on");
+    }
+
+    /// A second of stereo tones, MP3 packets from the Rust encoder, and
+    /// what `decoders` makes of them.
+    fn mp3_round_trip(
+        encoders: &cutlass_encode::EncodeFactory,
+        decoders: &cutlass_decode::DecodeFactory,
+    ) -> (Vec<Vec<u8>>, Vec<f32>) {
+        use cutlass_decode::{ChannelLayout, Output, Packet, Pcm};
+        use cutlass_encode::AudioInput;
+
+        let rate = 44_100;
+        let mut params = CodecParams::audio(CodecId::Mp3, rate, ChannelLayout::stereo());
+        params.bitrate = 128_000;
+        params.constant_rate = true;
+        let mut encoder = encoders.open(&params).expect("mp3 encoder");
+        let samples: Vec<f32> = (0..rate as usize)
+            .flat_map(|i| {
+                let t = i as f32 / rate as f32;
+                [
+                    0.3 * (t * 440.0 * std::f32::consts::TAU).sin(),
+                    0.2 * (t * 660.0 * std::f32::consts::TAU).sin(),
+                ]
+            })
+            .collect();
+        let pcm = Pcm::from_f32(rate, ChannelLayout::stereo(), samples).expect("pcm");
+        let mut packets = encoder.push(&AudioInput { pcm }).expect("encode");
+        packets.extend(encoder.drain().expect("drain"));
+        let mut decoder = decoders
+            .open(&CodecParams::audio(
+                CodecId::Mp3,
+                rate,
+                ChannelLayout::stereo(),
+            ))
+            .expect("mp3 decoder");
+        let mut decoded = Vec::new();
+        for packet in &packets {
+            let packet = Packet::audio(packet.data.clone(), packet.pts, packet.duration, rate);
+            for output in decoder.push(&packet).expect("decode") {
+                if let Output::Audio(audio) = output {
+                    decoded.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        }
+        for output in decoder.drain().expect("drain") {
+            if let Output::Audio(audio) = output {
+                decoded.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+            }
+        }
+        let bytes = packets.into_iter().map(|packet| packet.data).collect();
+        (bytes, decoded)
+    }
+
+    #[test]
+    fn mp3_is_coded_by_the_rust_codec_ahead_of_the_platform() {
+        let (decoders, encoders) = super::register_codecs();
+        let mut rust_decoders = cutlass_decode::DecodeFactory::new();
+        let mut rust_encoders = cutlass_encode::EncodeFactory::new();
+        cutlass_mp3::register_decoders(&mut rust_decoders);
+        cutlass_mp3::register_encoders(&mut rust_encoders);
+        let app = mp3_round_trip(&encoders, &decoders);
+        let rust = mp3_round_trip(&rust_encoders, &rust_decoders);
+        assert!(!rust.0.is_empty() && !rust.1.is_empty());
+        assert!(app.0 == rust.0, "the app encodes MP3 with the Rust encoder");
+        assert!(app.1 == rust.1, "the app decodes MP3 with the Rust decoder");
+
+        // With the platform first, macOS decodes MP3 itself, and differently:
+        // the check above would fail if the order were reversed.
+        #[cfg(target_os = "macos")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_surface_decoders_with(&mut reversed, true);
+            cutlass_mp3::register_decoders(&mut reversed);
+            let platform = mp3_round_trip(&rust_encoders, &reversed);
+            assert!(platform.1 != rust.1, "the platform decoder was not picked");
+        }
     }
 
     #[test]

@@ -5950,14 +5950,12 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
         });
     }
     ui.checkbox(&mut export.sound, "Audio");
-    // PCM goes in a MOV or a WAV, never an MP4.
+    // PCM goes in a MOV or a WAV, never an MP4. FLAC and MP3 are sound
+    // alone, each in a file of its own.
     let pcm_fits = view.export_mov || !export.picture;
-    if !pcm_fits && export.audio.codec == CodecId::Pcm {
-        export.audio.codec = CodecId::Aac;
-    }
-    // FLAC is written alone, in a FLAC file.
-    let flac_fits = !export.picture;
-    if !flac_fits && export.audio.codec == CodecId::Flac {
+    let alone_fits = !export.picture;
+    let alone = matches!(export.audio.codec, CodecId::Flac | CodecId::Mp3);
+    if (!pcm_fits && export.audio.codec == CodecId::Pcm) || (!alone_fits && alone) {
         export.audio.codec = CodecId::Aac;
     }
     if export.sound {
@@ -5968,6 +5966,10 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 .clicked()
             {
                 audio.codec = CodecId::Aac;
+            }
+            let mp3 = egui::Button::selectable(audio.codec == CodecId::Mp3, "MP3");
+            if ui.add_enabled(alone_fits, mp3).clicked() {
+                audio.codec = CodecId::Mp3;
             }
             if ui
                 .selectable_label(audio.codec == CodecId::Alac, "ALAC")
@@ -5980,7 +5982,7 @@ fn export_choices(shell: &Shell, ui: &mut Ui, view: &mut ViewState) {
                 audio.codec = CodecId::Pcm;
             }
             let flac = egui::Button::selectable(audio.codec == CodecId::Flac, "FLAC");
-            if ui.add_enabled(flac_fits, flac).clicked() {
+            if ui.add_enabled(alone_fits, flac).clicked() {
                 audio.codec = CodecId::Flac;
             }
         });

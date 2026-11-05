@@ -18,7 +18,7 @@ use cutlass_codec::{CodecId, ContainerId, FrameSize, StreamCodec, Timescale};
 use cutlass_container::{Demux, DisplayQuarter, OpenError, ProbeResult, ReadError, SeekTo};
 use cutlass_decode::{
     AudioOutput, CodecError, DecodeFactory, Decoder, Output, Packet as AccessPacket, PictureOutput,
-    PictureSamples, StillImage, Surface,
+    PictureSamples, SideData, StillImage, Surface,
 };
 use cutlass_model::{Micros, TimeRange};
 
@@ -206,6 +206,10 @@ struct Pipe {
     heard: VecDeque<AudioOutput>,
     /// Stream ticks before the stream's time zero, from its edit list.
     lead: i64,
+    /// The container's encoder delay and padding, as decoder side data.
+    gapless: Option<SideData>,
+    /// No packet has been pushed since open or the last reset.
+    fresh: bool,
 }
 
 impl Pipe {
@@ -219,7 +223,22 @@ impl Pipe {
             last_duration: 0,
             heard: VecDeque::new(),
             lead,
+            gapless: None,
+            fresh: true,
         }
+    }
+
+    /// The access packet for `packet`. The first packet after open or a
+    /// reset carries the container's trim, so a decoder that knows its own
+    /// delay can mark the priming and padding as skipped.
+    fn access(&mut self, packet: &cutlass_codec::Packet) -> AccessPacket {
+        let mut access = access_packet(packet);
+        if std::mem::take(&mut self.fresh)
+            && let Some(gapless) = &self.gapless
+        {
+            access.side.push(gapless.clone());
+        }
+        access
     }
 
     /// `lead` in `timescale` ticks per second.
@@ -233,6 +252,7 @@ impl Pipe {
         self.ready.clear();
         self.heard.clear();
         self.drained = false;
+        self.fresh = true;
     }
 }
 
@@ -887,10 +907,10 @@ impl Media {
                 continue;
             }
             taken = taken.saturating_add(1);
-            let access = access_packet(&packet);
             let Some(pipe) = self.audio.as_mut() else {
                 return Ok(None);
             };
+            let access = pipe.access(&packet);
             let outputs = pipe.decoder.push(&access)?;
             pipe.heard
                 .extend(outputs.into_iter().filter_map(|output| match output {
@@ -1112,12 +1132,27 @@ fn open_pipe(
         }
         Err(error) => return Err(EngineError::Codec(error)),
     };
-    Ok(Pipe::new(
+    let mut pipe = Pipe::new(
         stream.id().get(),
         stream.timescale(),
         decoder,
         edit_lead(stream.edits()),
-    ))
+    );
+    pipe.gapless = gapless_of(stream);
+    Ok(pipe)
+}
+
+/// The stream's encoder delay and padding as [`SideData::Gapless`], when the
+/// container stored both and they fit.
+fn gapless_of(stream: &cutlass_container::Stream) -> Option<SideData> {
+    let trim = stream.trim();
+    let encoder_delay = u32::try_from(trim.encoder_delay()?).ok()?;
+    let trailing_padding = u32::try_from(trim.trailing_padding()?).ok()?;
+    Some(SideData::Gapless {
+        encoder_delay,
+        trailing_padding,
+        sample_rate: stream.params().sample_rate()?,
+    })
 }
 
 /// `ticks` at `from` ticks per second, counted at `to`. Rounds toward zero;

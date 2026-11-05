@@ -15,6 +15,7 @@ use cutlass_eval::{Fonts, ReaderFactory};
 use cutlass_flac_container::FlacMux;
 use cutlass_isobmff::{FileBrand, Mp4Mux};
 use cutlass_model::Draft;
+use cutlass_mp3_container::Mp3Mux;
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_riff::WavMux;
@@ -135,8 +136,8 @@ fn write_part(
 }
 
 /// Write only the timeline's sound over `request.range` to `destination`:
-/// AAC or ALAC in an M4A file, PCM in a WAV file, or FLAC in a FLAC file,
-/// as `request.audio` names.
+/// AAC or ALAC in an M4A file, PCM in a WAV file, FLAC in a FLAC file, or
+/// MP3 in an MP3 file, as `request.audio` names.
 /// The file is written beside its destination and moved there when done.
 pub fn write_sound(
     sources: &MovieSources<'_>,
@@ -189,6 +190,19 @@ pub fn write_sound(
                     Some(progress),
                 )?;
                 mux.into_inner()
+            }
+            (CodecId::Mp3, ContainerId::Mp3) => {
+                let mut mux = Mp3Mux::new(out);
+                export_sound(
+                    sources.draft,
+                    request,
+                    sources.encoders,
+                    &mut mux,
+                    audio,
+                    Some(progress),
+                )?;
+                mux.into_inner()
+                    .map_err(|error| ExportError::File(error.to_string()))?
             }
             _ => return Err(ExportError::Container),
         };
@@ -316,6 +330,7 @@ mod tests {
         cutlass_alac::register_encoders(&mut encoders);
         cutlass_pcm::register_encoders(&mut encoders);
         cutlass_flac::register_encoders(&mut encoders);
+        cutlass_mp3::register_encoders(&mut encoders);
         let draft = Draft::empty("D");
         let readers = ReaderFactory::new();
         let sources = MovieSources {
@@ -346,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn sound_alone_writes_an_m4a_a_wav_or_a_flac() {
+    fn sound_alone_writes_an_m4a_a_wav_a_flac_or_an_mp3() {
         let (_, m4a) = written(CodecId::Aac, ContainerId::Isobmff, "cut.m4a");
         assert_eq!(&m4a[4..12], b"ftypM4A ");
         let (_, wav) = written(CodecId::Pcm, ContainerId::Riff, "cut.wav");
@@ -361,6 +376,23 @@ mod tests {
         assert_eq!((info.bits, info.channels), (16, 2));
         assert!(info.total_samples > 0, "streaminfo written back at finish");
         assert_ne!(info.md5, [0; 16]);
+        let (_, mp3) = written(CodecId::Mp3, ContainerId::Mp3, "cut.mp3");
+        // Apple's gapless comment in an ID3v2 tag, then the first frame:
+        // the Info tag (constant bitrate) with the LAME delay and padding.
+        assert_eq!(&mp3[..3], b"ID3");
+        let size = mp3[6..10]
+            .iter()
+            .fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+        let frame = 10 + size;
+        assert_eq!(&mp3[frame..frame + 2], &[0xFF, 0xFB], "MPEG-1 Layer III");
+        let at = frame + 4 + 32;
+        assert_eq!(&mp3[at..at + 4], b"Info");
+        let packed = u32::from_be_bytes([0, mp3[at + 141], mp3[at + 142], mp3[at + 143]]);
+        assert_eq!(packed >> 12, cutlass_mp3::ENCODER_DELAY);
+        let padding = packed & 0xFFF;
+        let frames = u32::from_be_bytes([mp3[at + 8], mp3[at + 9], mp3[at + 10], mp3[at + 11]]);
+        // Half a second at 44.1 kHz.
+        assert_eq!(frames * 1152 - cutlass_mp3::ENCODER_DELAY - padding, 22_050);
     }
 
     #[test]

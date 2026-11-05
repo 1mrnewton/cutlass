@@ -830,6 +830,8 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-isobmff",
  "cutlass-model",
+ "cutlass-mp3",
+ "cutlass-mp3-container",
  "cutlass-pcm",
  "cutlass-playback",
  "cutlass-render",
@@ -862,6 +864,8 @@ dependencies = [
  "cutlass-jpeg",
  "cutlass-logger",
  "cutlass-model",
+ "cutlass-mp3",
+ "cutlass-mp3-container",
  "cutlass-pcm",
  "cutlass-platform-apple",
  "cutlass-playback",
@@ -1004,6 +1008,7 @@ version = "0.1.0"
 dependencies = [
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-mp3-container",
 ]
 
 [[package]]

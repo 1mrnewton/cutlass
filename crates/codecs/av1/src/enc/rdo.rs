@@ -109,6 +109,8 @@ pub struct ModeParams {
     pub screen_est: bool,
     /// Compound modes beyond NEAREST_NEARESTMV and NEW_NEWMV.
     pub compound_modes: bool,
+    /// Palette colours the neighbours' palettes offer are charged as cached.
+    pub palette_cache: bool,
 }
 
 impl Default for ModeParams {
@@ -155,6 +157,7 @@ impl Default for ModeParams {
             exact_intra_rates: true,
             screen_est: true,
             compound_modes: true,
+            palette_cache: true,
         }
     }
 }

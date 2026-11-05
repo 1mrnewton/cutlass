@@ -150,6 +150,11 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let mut best: Option<(u8, [u16; 8], f64, f64)> = None;
         let mut best_map = vec![0u8; bw * bh];
         let mut worse = 0;
+        let cache = if self.mode.palette_cache {
+            self.palette_cache_at(x, y)
+        } else {
+            Vec::new()
+        };
         for k in 2..=hist.len().min(8) {
             // The cost is about convex in the size: stop once it rose twice.
             if worse >= 2 {
@@ -188,8 +193,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 on_w & !3,
                 on_h & !3,
             ));
-            let bits =
-                4.0 + n as f64 * f64::from(self.bd) * 0.8 + map_bits(&map, bw, on_w, on_h, n);
+            // A colour the neighbours' palettes offer costs a flag, not a literal.
+            let fresh = colors.iter().filter(|c| !cache.contains(c)).count();
+            let color_bits = if self.mode.palette_cache {
+                cache.len().min(8) as f64 + fresh as f64 * f64::from(self.bd) * 0.8
+            } else {
+                n as f64 * f64::from(self.bd) * 0.8
+            };
+            let bits = 4.0 + color_bits + map_bits(&map, bw, on_w, on_h, n);
             let cost = d + lam * bits;
             if best.is_some_and(|b| cost >= b.2) {
                 worse += 1;
@@ -203,6 +214,27 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         }
         self.color_map_y[..bw * bh].copy_from_slice(&best_map);
         best
+    }
+
+    /// The luma palette colours of the blocks above and to the left of the
+    /// block at luma (`x`, `y`), as the palette cache will offer them.
+    fn palette_cache_at(&self, x: usize, y: usize) -> Vec<u16> {
+        let (r, c) = (y >> 2, x >> 2);
+        let mut out: Vec<u16> = Vec::with_capacity(16);
+        if r > self.mi_row_start && !y.is_multiple_of(64) {
+            let n = usize::from(self.mi(r - 1, c).palette_size[0]);
+            if let Some(p) = self.above_palette[0].get(c) {
+                out.extend_from_slice(&p[..n.min(8)]);
+            }
+        }
+        if c > self.mi_col_start {
+            let n = usize::from(self.mi(r, c - 1).palette_size[0]);
+            let ly = (r & (self.sb_size4 - 1)) & 31;
+            out.extend_from_slice(&self.left_palette[0][ly][..n.min(8)]);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// Joint U/V palette of an intra block: (size, U colors ascending, V

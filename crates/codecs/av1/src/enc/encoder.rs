@@ -1201,6 +1201,7 @@ impl Av1Enc {
             exact_intra_rates: ev("AV1_XRI", 1.0) > 0.0,
             screen_est: ev("AV1_SCE", 1.0) > 0.0,
             compound_modes: ev("AV1_CMM", 1.0) > 0.0,
+            palette_cache: ev("AV1_PCACHE", 1.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 7 {

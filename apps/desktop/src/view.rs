@@ -1257,6 +1257,27 @@ fn assistant_settings(
     use cutlass_settings::McpServer;
     settings_heading(ui, "Model");
     ui.checkbox(&mut settings.model.local, "Local model");
+    if settings.model.local {
+        choice_row(ui, "Address", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut settings.model.local_url)
+                    .hint_text(cutlass_settings::DEFAULT_LOCAL_URL)
+                    .desired_width(300.0),
+            );
+        });
+        choice_row(ui, "Model", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut settings.model.local_name)
+                    .hint_text(cutlass_settings::DEFAULT_LOCAL_NAME)
+                    .desired_width(180.0),
+            );
+        });
+        ui.label(
+            RichText::new("A chat server on this computer, such as Ollama or llama.cpp.")
+                .size(11.0)
+                .color(tokens::FAINT),
+        );
+    }
     ui.checkbox(
         &mut settings.model.cloud,
         "Cloud model (sends messages off this computer)",
@@ -7870,7 +7891,15 @@ mod tests {
             vec![egui::Event::PointerMoved(pos), event(true), event(false)]
         };
         let painted = painted_text(&run(&mut shell, &mut view, Vec::new()));
-        for text in ["Model", "Cloud model", "MCP servers", "Skill folders"] {
+        for text in [
+            "Model",
+            "Address",
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "qwen2.5:7b",
+            "Cloud model",
+            "MCP servers",
+            "Skill folders",
+        ] {
             assert!(painted.contains(text), "{text} in {painted}");
         }
         view.dialogs.finish_for_test(

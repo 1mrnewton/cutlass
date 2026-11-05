@@ -13,6 +13,7 @@
 mod config;
 mod movie;
 mod prerender;
+mod proxy;
 mod run;
 mod sidecars;
 mod sound;
@@ -28,6 +29,7 @@ pub use movie::{
 pub use prerender::{
     PREVIEW_SIDE, read_render_name, render_key, render_name, render_request, render_side, stand_in,
 };
+pub use proxy::{PROXY_SIDE, proxy_draft, proxy_name, proxy_request, wants_proxy};
 pub use run::{
     ExportResult, ExportRun, ExportedFrame, export, export_sound, frame_indexes,
     same_software_pixels,

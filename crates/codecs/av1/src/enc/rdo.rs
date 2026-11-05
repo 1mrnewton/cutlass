@@ -145,6 +145,25 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         has_rows: bool,
         has_cols: bool,
     ) -> usize {
+        let p = self.enc_partition_pick(r, c, bsize, has_rows, has_cols);
+        // A partition whose blocks have no chroma size in this subsampling is not allowed.
+        let sub = PARTITION_SUBSIZE[p][bsize as usize];
+        if self.num_planes > 1
+            && plane_residual_size(sub, self.sub_x, self.sub_y) == crate::dec::types::BLOCK_INVALID
+        {
+            return PARTITION_SPLIT;
+        }
+        p
+    }
+
+    fn enc_partition_pick(
+        &mut self,
+        r: usize,
+        c: usize,
+        bsize: u8,
+        has_rows: bool,
+        has_cols: bool,
+    ) -> usize {
         let n = bw4(bsize) * 4;
         let half = n / 2;
         let x = c * 4;

@@ -699,10 +699,14 @@ pub struct MfEntry {
 /// Motion field estimation (7.9). Instead of the spec's per-reference
 /// MotionFieldMvs, one entry per 8x8 position keeps the projected source
 /// motion vector; `MotionFieldMvs[ref]` is `mv_projection(mv, refToDst, offset)`.
+///
+/// A projection never leaves its source's group of 8 rows of 8x8 units, so
+/// the groups are computed independently, on up to `threads` threads.
 pub fn motion_field_estimation(
     seq: &SequenceHeader,
     hdr: &FrameHeader,
     refs: &[Option<std::sync::Arc<RefData>>; 8],
+    threads: usize,
 ) -> Vec<MfEntry> {
     let mi_cols = hdr.mi_cols as usize;
     let mi_rows = hdr.mi_rows as usize;
@@ -714,9 +718,12 @@ pub fn motion_field_estimation(
     let last_alt = refs[last_idx]
         .as_ref()
         .map_or(0, |r| r.saved_order_hints[7]);
-    let project = |src: usize, dst_sign: i32, field: &mut Vec<MfEntry>| -> bool {
+    // The projections to run, in order. `project` returns false when the
+    // reference cannot be projected (the spec's early return 0).
+    let mut passes: Vec<Projection<'_>> = Vec::new();
+    let mut project = |src: usize, dst_sign: i32| -> bool {
         let src_idx = hdr.ref_frame_idx[src - 1] as usize;
-        let Some(rd) = refs[src_idx].as_ref() else {
+        let Some(rd) = refs[src_idx].as_deref() else {
             return false;
         };
         if rd.mi_rows != mi_rows
@@ -733,7 +740,77 @@ pub fn motion_field_estimation(
         let offsets: [i32; 8] = std::array::from_fn(|r| {
             relative_dist(seq, hdr.order_hints[src], rd.saved_order_hints[r])
         });
-        for y8 in 0..h8 {
+        passes.push(Projection {
+            rd,
+            dst_sign,
+            ref_to_cur,
+            offsets,
+        });
+        true
+    };
+    if last_alt != cur_gold {
+        project(1, -1);
+    }
+    let mut ref_stamp = 3 - 2;
+    if relative_dist(seq, hdr.order_hints[5], hdr.order_hint) > 0 && project(5, 1) {
+        ref_stamp -= 1;
+    }
+    if relative_dist(seq, hdr.order_hints[6], hdr.order_hint) > 0 && project(6, 1) {
+        ref_stamp -= 1;
+    }
+    if relative_dist(seq, hdr.order_hints[7], hdr.order_hint) > 0 && ref_stamp >= 0 && project(7, 1)
+    {
+        ref_stamp -= 1;
+    }
+    if ref_stamp >= 0 {
+        project(2, -1);
+    }
+    if passes.is_empty() || w8 == 0 {
+        return field;
+    }
+    let groups = h8.div_ceil(8);
+    let t = threads.clamp(1, groups);
+    let per = groups.div_ceil(t) * 8 * w8;
+    let passes = &passes;
+    let run = |y0: usize, band: &mut [MfEntry]| {
+        for pass in passes {
+            pass.run(band, y0, w8, h8);
+        }
+    };
+    if t == 1 {
+        run(0, &mut field);
+    } else {
+        std::thread::scope(|s| {
+            let mut chunks = field.chunks_mut(per).enumerate();
+            let first = chunks.next();
+            for (i, band) in chunks {
+                s.spawn(move || run(i * per / w8, band));
+            }
+            if let Some((_, band)) = first {
+                run(0, band);
+            }
+        });
+    }
+    field
+}
+
+/// One reference's projection in [`motion_field_estimation`].
+struct Projection<'a> {
+    rd: &'a RefData,
+    dst_sign: i32,
+    ref_to_cur: i32,
+    offsets: [i32; 8],
+}
+
+impl Projection<'_> {
+    /// Projects the source rows of `band`, which holds the field rows from
+    /// `y0` on (whole groups of 8 rows).
+    fn run(&self, band: &mut [MfEntry], y0: usize, w8: usize, h8: usize) {
+        let rows = band.len() / w8;
+        let rd = self.rd;
+        let dst_sign = self.dst_sign;
+        let num = self.ref_to_cur * dst_sign;
+        for y8 in y0..y0 + rows {
             let row_ref = &rd.mf_ref[y8 * w8..y8 * w8 + w8];
             let row_mv = &rd.mf_mv[y8 * w8..y8 * w8 + w8];
             for x8 in 0..w8 {
@@ -741,44 +818,23 @@ pub fn motion_field_estimation(
                 if src_ref <= INTRA_FRAME {
                     continue;
                 }
-                let ref_offset = offsets[src_ref as usize];
+                let ref_offset = self.offsets[src_ref as usize];
                 if ref_offset <= 0 || ref_offset > 31 {
                     continue;
                 }
                 let mv = row_mv[x8];
-                let proj = mv_projection(mv, ref_to_cur * dst_sign, ref_offset);
+                let proj = mv_projection(mv, num, ref_offset);
                 let proj_y = project_pos(y8 as i32, i32::from(proj.row), dst_sign, h8 as i32, 0);
                 let proj_x = project_pos(x8 as i32, i32::from(proj.col), dst_sign, w8 as i32, 8);
                 if let (Some(py), Some(px)) = (proj_y, proj_x) {
-                    field[py as usize * w8 + px as usize] = MfEntry {
+                    band[(py as usize - y0) * w8 + px as usize] = MfEntry {
                         mv,
                         offset: ref_offset as i8,
                     };
                 }
             }
         }
-        true
-    };
-    if last_alt != cur_gold {
-        project(1, -1, &mut field);
     }
-    let mut ref_stamp = 3 - 2;
-    if relative_dist(seq, hdr.order_hints[5], hdr.order_hint) > 0 && project(5, 1, &mut field) {
-        ref_stamp -= 1;
-    }
-    if relative_dist(seq, hdr.order_hints[6], hdr.order_hint) > 0 && project(6, 1, &mut field) {
-        ref_stamp -= 1;
-    }
-    if relative_dist(seq, hdr.order_hints[7], hdr.order_hint) > 0
-        && ref_stamp >= 0
-        && project(7, 1, &mut field)
-    {
-        ref_stamp -= 1;
-    }
-    if ref_stamp >= 0 {
-        project(2, -1, &mut field);
-    }
-    field
 }
 
 /// MotionFieldMvs[ ref ] at one entry.

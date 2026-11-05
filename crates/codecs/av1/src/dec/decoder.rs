@@ -451,7 +451,7 @@ impl Av1Core {
             std::array::from_fn(|i| self.slots[i].as_ref().map(|s| s.data.clone()));
         let mut fs = FrameState::new(seq, &hdr);
         if hdr.use_ref_frame_mvs {
-            fs.motion_field = motion_field_estimation(seq, &hdr, &refs_data);
+            fs.motion_field = motion_field_estimation(seq, &hdr, &refs_data, self.threads);
         }
         if hdr.primary_ref_frame != PRIMARY_REF_NONE {
             let slot_idx = hdr.ref_frame_idx[hdr.primary_ref_frame as usize] as usize;

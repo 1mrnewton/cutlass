@@ -18,6 +18,7 @@ mod linkage;
 mod lut;
 mod magnet;
 mod mark;
+mod mask;
 mod mirror;
 mod move_segment;
 mod name;
@@ -152,6 +153,8 @@ pub enum EditError {
     UnknownEffect,
     /// The `.cube` file is not a 3D table, or the clip has no LUT to change.
     Lut,
+    /// A mask number is out of its range.
+    Mask,
     /// The clip is not an effect, a filter, or an adjustment.
     NotEffect,
     /// An effect binds to a picture clip, and only an effect clip binds.
@@ -445,6 +448,11 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             strength,
             shadow,
         } => chroma::set_chroma(draft, segment_id, material_id, color, *strength, *shadow),
+        Request::SetMask {
+            segment_id,
+            material_id,
+            mask,
+        } => mask::set_mask(draft, segment_id, material_id, mask.as_ref()),
         Request::SetAdjust {
             segment_id,
             material_id,

@@ -157,6 +157,7 @@ impl std::fmt::Display for ShellError {
                 formatter.write_str("that effect is not in this version")
             }
             Self::Edit(EditError::Lut) => formatter.write_str("that file is not a 3D .cube table"),
+            Self::Edit(EditError::Mask) => formatter.write_str("a mask number is out of its range"),
             Self::Edit(EditError::NotEffect) => {
                 formatter.write_str("a strength belongs on an effect, filter, or adjustment")
             }

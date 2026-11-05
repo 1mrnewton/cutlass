@@ -341,6 +341,13 @@ pub enum Request {
         strength: f64,
         shadow: f64,
     },
+    /// Mask the clip with `mask`, in the clip's own frame, or take its mask
+    /// off with `None`.
+    SetMask {
+        segment_id: SegmentId,
+        material_id: MaterialId,
+        mask: Option<cutlass_effects::Mask>,
+    },
     /// Set the adjust slider `key`, its reference name such as
     /// `temperature`, to `value`: -1 to 1, or 0 to 1 for fade, sharpen and
     /// grain. Zero takes it off. `material_id` names a new slider material.

@@ -29,8 +29,8 @@ pub struct PhoneExport {
     pub height: u32,
 }
 
-/// Opus in Rust, the platform encoders for this OS, then H.264 and AAC in
-/// Rust.
+/// Opus in Rust, the platform encoders for this OS, then H.264, AAC and
+/// ProRes in Rust.
 #[must_use]
 pub fn encoders() -> EncodeFactory {
     let mut encoders = EncodeFactory::new();
@@ -41,6 +41,7 @@ pub fn encoders() -> EncodeFactory {
     cutlass_platform_apple::register_encoders(&mut encoders);
     cutlass_h264::register_encoders(&mut encoders);
     cutlass_aac::register_encoders(&mut encoders);
+    cutlass_prores::register_encoders(&mut encoders);
     encoders
 }
 

@@ -875,6 +875,7 @@ dependencies = [
  "cutlass-playback",
  "cutlass-png",
  "cutlass-probe",
+ "cutlass-prores",
  "cutlass-render",
  "cutlass-renderer-software",
  "cutlass-riff",
@@ -1173,8 +1174,12 @@ dependencies = [
 name = "cutlass-prores"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-isobmff",
+ "cutlass-pool",
 ]
 
 [[package]]

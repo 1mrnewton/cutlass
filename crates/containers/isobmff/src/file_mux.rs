@@ -17,7 +17,9 @@ use cutlass_container::{
     TrackDuration, TrackId,
 };
 
-use crate::legacy::{self, CodecId, Error, SampleFormat, StreamParams, Timescale as BoxScale};
+use crate::legacy::{
+    self, CodecId, ColorTags, Error, SampleFormat, StreamParams, Timescale as BoxScale,
+};
 use crate::mux::{FileBrand, IsoBmffMux, MuxOptions};
 
 /// One track: the id handed out, the box writer's id, and the next decode
@@ -29,6 +31,8 @@ struct Track {
     timescale: Timescale,
     codec: CodecId,
     next: i64,
+    /// A ProRes track whose `colr` box still waits for its first frame.
+    color_from_frame: bool,
 }
 
 /// An MP4 file written as packets arrive, with its index at the end.
@@ -105,9 +109,30 @@ fn rejected(message: &str) -> MuxError {
     }
 }
 
+/// The color code points a ProRes frame header carries (SMPTE RDD 36,
+/// bytes 14 to 16 of the header), for the track's `colr` box. A frame
+/// that names none of them gives `None`; 0, "unknown", becomes 2,
+/// "unspecified".
+fn prores_color(frame: &[u8]) -> Option<ColorTags> {
+    if frame.get(4..8) != Some(b"icpf".as_slice()) {
+        return None;
+    }
+    let codes = frame.get(22..25)?;
+    if codes.iter().all(|&code| code == 0 || code == 2) {
+        return None;
+    }
+    let code = |byte: u8| if byte == 0 { 2 } else { u16::from(byte) };
+    Some(ColorTags {
+        primaries: code(codes[0]),
+        transfer: code(codes[1]),
+        matrix: code(codes[2]),
+        full_range: false,
+    })
+}
+
 /// ProRes profiles a picture track may name in its extradata: Proxy, LT,
-/// 422 and HQ, by their sample entry.
-const PRORES_ENTRIES: [[u8; 4]; 4] = [*b"apco", *b"apcs", *b"apcn", *b"apch"];
+/// 422, HQ, 4444 and 4444 XQ, by their sample entry.
+const PRORES_ENTRIES: [[u8; 4]; 6] = [*b"apco", *b"apcs", *b"apcn", *b"apch", *b"ap4h", *b"ap4x"];
 
 /// The box writer's parameters for `stream`: H.264, HEVC or ProRes
 /// pictures, or AAC, Opus, or 16-bit PCM sound. A ProRes track whose extradata is
@@ -261,6 +286,7 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
             timescale: stream.timescale,
             codec,
             next: 0,
+            color_from_frame: codec == CodecId::ProRes,
         });
         Ok(id)
     }
@@ -286,6 +312,14 @@ impl<W: Write + Seek> Mux for Mp4Mux<W> {
         let Ok(span) = u32::try_from(duration) else {
             return Err(self.fail(MuxError::NegativeDuration));
         };
+        if track.color_from_frame {
+            self.tracks[index].color_from_frame = false;
+            if let Some(color) = prores_color(packet.bytes()) {
+                self.inner
+                    .set_color(track.boxed, color)
+                    .map_err(|error| self.fail(boxed(error)))?;
+            }
+        }
         legacy::Mux::write_packet(
             &mut self.inner,
             &legacy::Packet {
@@ -570,6 +604,78 @@ mod tests {
             }])
             .is_err()
         );
+    }
+
+    #[test]
+    fn every_prores_profile_survives_a_movie_round_trip() {
+        for code in [b"apco", b"apcs", b"apcn", b"apch", b"ap4h", b"ap4x"] {
+            let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::Mov);
+            let picture = mux
+                .add_stream(NewStream {
+                    params: StreamParams::video(
+                        StreamCodec::Known(Id::Prores),
+                        FrameSize::try_new(32, 16).unwrap(),
+                        code.to_vec(),
+                    ),
+                    timescale: Timescale::new(25),
+                    language: None,
+                })
+                .unwrap();
+            mux.write_packet(&packet(picture.get(), vec![3; 40], 0, 1, 25))
+                .unwrap();
+            mux.finish(&[TrackDuration {
+                track: picture,
+                timescale: Timescale::new(25),
+                ticks: 1,
+            }])
+            .unwrap();
+            let bytes = mux.into_writer().unwrap().into_inner();
+            assert!(bytes.windows(4).any(|w| w == code.as_slice()));
+            let file = crate::IsoBmffFile::open(Cursor::new(bytes)).unwrap();
+            let streams = cutlass_container::Demux::streams(&file);
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].params().codec(), &StreamCodec::Known(Id::Prores));
+            assert_eq!(streams[0].params().extradata(), code.as_slice());
+        }
+    }
+
+    #[test]
+    fn a_prores_frame_header_names_the_movie_color() {
+        let movie = |codes: [u8; 3]| {
+            let mut frame = vec![0u8; 40];
+            frame[4..8].copy_from_slice(b"icpf");
+            frame[22..25].copy_from_slice(&codes);
+            let mut mux = Mp4Mux::with_brand(Cursor::new(Vec::new()), FileBrand::Mov);
+            let picture = mux
+                .add_stream(NewStream {
+                    params: StreamParams::video(
+                        StreamCodec::Known(Id::Prores),
+                        FrameSize::try_new(32, 16).unwrap(),
+                        b"apch".to_vec(),
+                    ),
+                    timescale: Timescale::new(25),
+                    language: None,
+                })
+                .unwrap();
+            mux.write_packet(&packet(picture.get(), frame, 0, 1, 25))
+                .unwrap();
+            mux.finish(&[TrackDuration {
+                track: picture,
+                timescale: Timescale::new(25),
+                ticks: 1,
+            }])
+            .unwrap();
+            mux.into_writer().unwrap().into_inner()
+        };
+        // BT.2020 primaries, HLG, BT.2020 non-constant luminance.
+        let tagged = movie([9, 18, 9]);
+        let colr = [
+            b'c', b'o', b'l', b'r', b'n', b'c', b'l', b'x', 0, 9, 0, 18, 0, 9, 0,
+        ];
+        assert!(tagged.windows(colr.len()).any(|w| w == colr));
+        // Unknown and unspecified codes write no box.
+        let untagged = movie([0, 2, 0]);
+        assert!(!untagged.windows(4).any(|w| w == b"colr"));
     }
 
     #[test]

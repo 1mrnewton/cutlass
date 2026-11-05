@@ -11,7 +11,9 @@
 //! sets it, and the least common multiple of the track timescales otherwise.
 
 use crate::alac;
-use crate::legacy::{CodecId, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams};
+use crate::legacy::{
+    CodecId, ColorTags, Edit, Error, MediaKind, Mux, Packet, SampleFormat, StreamParams,
+};
 use crate::limits::{
     DEFAULT_SAMPLES_PER_FRAGMENT, MAX_BUFFERED_MUX_BYTES, MAX_PACKET_BYTES, MAX_TRACKS,
 };
@@ -147,6 +149,23 @@ impl<W: Write + Seek> IsoBmffMux<W> {
             return Err(Error::Missing { what: "track" });
         };
         track.params.extradata = extradata;
+        Ok(())
+    }
+
+    /// Sets a track's color code points, written as a `colr` box in its
+    /// sample description at finish.
+    pub fn set_color(&mut self, track_id: u32, color: ColorTags) -> Result<(), Error> {
+        if self.finished {
+            return Err(Error::Incomplete);
+        }
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|track| track.params.track_id == track_id)
+        else {
+            return Err(Error::Missing { what: "track" });
+        };
+        track.params.color = Some(color);
         Ok(())
     }
 

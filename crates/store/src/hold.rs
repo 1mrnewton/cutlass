@@ -1,8 +1,10 @@
 //! The exclusive hold on `.locked`.
 //!
 //! Open reads the folder. This hold is the separate step that keeps a second
-//! process out. The file stores a socket address. The socket framing is not
-//! open yet, so the address is null. The exclusive lock is what "held" means.
+//! process out. The file stores the loopback socket address the holder
+//! listens on, with the token a caller must send, once the holder opens one
+//! ([`Hold::set_address`]); until then the address is null. The exclusive
+//! lock is what "held" means.
 //! While held the file also says `"open":true`; dropping the hold writes it
 //! without, releases the lock and leaves the file in place. A file still
 //! saying open when the next hold takes it was left by a process that did
@@ -34,6 +36,16 @@ impl Hold {
         &self.path
     }
 
+    /// Name the loopback socket the holder listens on, and the token a
+    /// caller must send, for a second host to find with [`held_address`].
+    pub fn set_address(&mut self, address: &str, token: &str) -> Result<(), StoreError> {
+        let line = serde_json::json!({"address": address, "token": token, "open": true});
+        rewrite(&mut self.file, format!("{line}\n").as_bytes()).map_err(|error| StoreError::Io {
+            path: self.path.clone(),
+            message: error.to_string(),
+        })
+    }
+
     /// The last process to hold this folder did not let go of it: it
     /// stopped without closing, and the folder is as its last save left it.
     #[must_use]
@@ -54,6 +66,17 @@ fn rewrite(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
     file.write_all(bytes)?;
     file.flush()
+}
+
+/// The socket address and token the holder of the project at `path` named,
+/// when one holds it and listens.
+#[must_use]
+pub fn held_address(path: &Path) -> Option<(String, String)> {
+    let bytes = std::fs::read(path.join(LOCK_FILE)).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let address = value.get("address")?.as_str()?.to_owned();
+    let token = value.get("token")?.as_str()?.to_owned();
+    Some((address, token))
 }
 
 /// Take `.locked` in `path`. A folder that is already held is refused.
@@ -172,9 +195,19 @@ mod tests {
             fs::read(root.join(".locked")).unwrap(),
             b"{\"address\":null}\n"
         );
-        let second = hold(&root).unwrap();
+        let mut second = hold(&root).unwrap();
         assert!(!second.unclean(), "a hold let go is a clean close");
         assert_eq!(fs::read(second.path()).unwrap(), HELD_OPEN);
+        assert_eq!(held_address(&root), None);
+        second.set_address("127.0.0.1:4321", "secret").unwrap();
+        assert_eq!(
+            held_address(&root),
+            Some(("127.0.0.1:4321".to_owned(), "secret".to_owned()))
+        );
+        drop(second);
+        assert_eq!(held_address(&root), None, "let go, it names no socket");
+        let third = hold(&root).unwrap();
+        assert!(!third.unclean());
     }
 
     #[test]

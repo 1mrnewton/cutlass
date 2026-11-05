@@ -171,6 +171,104 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         f64::from(res.cost)
     }
 
+    /// Best luma palette for the block at (x, y): (size, ascending colors,
+    /// SATD cost including an estimate of the palette and map bits). The
+    /// color map is left in `self.color_map_y` (stride = block width).
+    fn pick_palette_y(
+        &mut self,
+        x: usize,
+        y: usize,
+        bw: usize,
+        bh: usize,
+    ) -> Option<(u8, [u16; 8], f64)> {
+        let src = self.src?;
+        let sp = &src.planes[0];
+        let fw = self.fs.mi_cols * 4;
+        let fh = self.fs.mi_rows * 4;
+        let on_w = bw.min(fw - x);
+        let on_h = bh.min(fh - y);
+        let mut vals: Vec<u16> = Vec::with_capacity(on_w * on_h);
+        for i in 0..on_h {
+            for j in 0..on_w {
+                vals.push(sp.data[(y + i) * sp.stride + x + j].to_i32() as u16);
+            }
+        }
+        let mut sorted = vals.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        if sorted.len() < 2 {
+            return None;
+        }
+        let mut colors: Vec<u16> = if sorted.len() <= 8 {
+            sorted
+        } else {
+            // k-means over the values, started from evenly spread quantiles.
+            let mut all = vals.clone();
+            all.sort_unstable();
+            let k = 8;
+            let mut c: Vec<f64> = (0..k)
+                .map(|i| f64::from(all[(2 * i + 1) * all.len() / (2 * k)]))
+                .collect();
+            for _ in 0..6 {
+                let mut sum = vec![0f64; k];
+                let mut cnt = vec![0u32; k];
+                for &v in &vals {
+                    let v = f64::from(v);
+                    let mut bi = 0;
+                    for i in 1..k {
+                        if (v - c[i]).abs() < (v - c[bi]).abs() {
+                            bi = i;
+                        }
+                    }
+                    sum[bi] += v;
+                    cnt[bi] += 1;
+                }
+                for i in 0..k {
+                    if cnt[i] > 0 {
+                        c[i] = sum[i] / f64::from(cnt[i]);
+                    }
+                }
+            }
+            let mut cc: Vec<u16> = c.iter().map(|v| v.round() as u16).collect();
+            cc.sort_unstable();
+            cc.dedup();
+            cc
+        };
+        colors.truncate(8);
+        if colors.len() < 2 {
+            return None;
+        }
+        let n = colors.len();
+        // Map every sample (outside the frame: the nearest edge sample).
+        let mut pred = vec![P::default(); bw * bh];
+        for i in 0..bh {
+            for j in 0..bw {
+                let v = i32::from(vals[i.min(on_h - 1) * on_w + j.min(on_w - 1)]);
+                let mut bi = 0;
+                for k in 1..n {
+                    if (v - i32::from(colors[k])).abs() < (v - i32::from(colors[bi])).abs() {
+                        bi = k;
+                    }
+                }
+                self.color_map_y[i * bw + j] = bi as u8;
+                pred[i * bw + j] = P::from_i32(i32::from(colors[bi]));
+            }
+        }
+        let d = f64::from(satd(
+            &sp.data[y * sp.stride + x..],
+            sp.stride,
+            &pred,
+            bw,
+            on_w & !3,
+            on_h & !3,
+        ));
+        let map_bits = (on_w * on_h) as f64 * (n as f64).log2() * 0.45;
+        let bits = 4.0 + n as f64 * f64::from(self.bd) * 0.8 + map_bits;
+        let mut out = [0u16; 8];
+        out[..n].copy_from_slice(&colors);
+        Some((n as u8, out, d + self.mode.lambda_satd * bits))
+    }
+
     /// Rate-distortion estimate (squared error + lambda * bits) of coding
     /// a `w`x`h` luma area with the best of a few intra predictions formed
     /// from the source neighbors, and, in inter frames, with full-sample
@@ -450,6 +548,22 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         pb.angle_delta_y = angle;
         pb.use_filter_intra = fi.is_some();
         pb.filter_intra_mode = fi.unwrap_or(0);
+        let mut intra_cost = intra_cost;
+        let (bw, bh) = (block_width(bs), block_height(bs));
+        if self.hdr.allow_screen_content_tools && bw.min(bh) >= 8 && bw.max(bh) <= 64 {
+            // The mode cost was measured on the first transform block only.
+            let whole = intra_cost * ((bw * bh) as f64 / (w * h) as f64);
+            if let Some((n, colors, cost)) = self.pick_palette_y(x, y, bw, bh)
+                && cost < whole
+            {
+                pb.y_mode = DC_PRED;
+                pb.angle_delta_y = 0;
+                pb.use_filter_intra = false;
+                pb.palette_size_y = n;
+                pb.palette_y = colors;
+                intra_cost = cost * ((w * h) as f64 / (bw * bh) as f64);
+            }
+        }
         pb.tx_size = tx;
         let mut best_cost = intra_cost
             + if self.mode.inter_frame {
@@ -461,7 +575,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         if self.mode.inter_frame
             && let Some(c) = self.pick_inter(x, y, block_width(bs), block_height(bs))
         {
-            if self.mode.rd_inter_intra {
+            if self.mode.rd_inter_intra && pb.palette_size_y == 0 {
                 // Transform-coded RD on the first transform block's area.
                 let fw = self.fs.mi_cols * 4;
                 let fh = self.fs.mi_rows * 4;
@@ -528,6 +642,8 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let _ = best_cost;
         if let Some(c) = inter_choice {
             pb.is_inter = true;
+            pb.palette_size_y = 0;
+            pb.use_filter_intra = false;
             pb.ref_frame = c.refs;
             pb.y_mode = c.mode;
             pb.mv = c.mv;
@@ -536,7 +652,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             pb.uv_mode = DC_PRED;
             pb.tx_size = self.pick_inter_tx(&pb, tx);
         } else {
-            pb.tx_size = self.pick_intra_tx(&pb, tx, max_tx);
+            if pb.palette_size_y == 0 {
+                pb.tx_size = self.pick_intra_tx(&pb, tx, max_tx);
+            }
             pb.uv_mode = if pb.has_chroma {
                 self.pick_intra_chroma(&pb)
             } else {

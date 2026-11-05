@@ -255,7 +255,7 @@ impl Av1Enc {
             enable_intra_edge_filter: true,
             enable_order_hint: true,
             order_hint_bits: 7,
-            seq_force_screen_content_tools: 0,
+            seq_force_screen_content_tools: 2,
             seq_force_integer_mv: 2,
             enable_cdef: true,
             bit_depth: cfg.bit_depth,
@@ -712,7 +712,9 @@ impl Av1Enc {
         let seq = self.seq.clone();
         let key = spec.key;
         let q = spec.q;
-        let intent = self.frame_header(spec);
+        let mut intent = self.frame_header(spec);
+        intent.allow_screen_content_tools =
+            self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
         let refs_hdr = self.core.ref_headers().clone();
         let ctx = HeaderContext {
             seq: &seq,
@@ -890,6 +892,40 @@ impl Av1Enc {
         ));
         Ok(payload)
     }
+}
+
+/// Screen content (text, graphics) has many blocks of few, contrasting
+/// colors; palette coding pays off there.
+fn is_screen_content<P: Pixel>(src: &Picture<P>, bd: u32) -> bool {
+    let p = &src.planes[0];
+    let thr = 32 << (bd - 8);
+    let (mut few, mut total) = (0u32, 0u32);
+    let mut vals = [0i32; 256];
+    for by in (0..p.h.saturating_sub(15)).step_by(16) {
+        for bx in (0..p.w.saturating_sub(15)).step_by(16) {
+            let mut n = 0;
+            for i in 0..16 {
+                for j in 0..16 {
+                    vals[n] = p.data[(by + i) * p.stride + bx + j].to_i32();
+                    n += 1;
+                }
+            }
+            let v = &mut vals[..n];
+            v.sort_unstable();
+            let (lo, hi) = (v[0], v[n - 1]);
+            let mut distinct = 1;
+            for k in 1..n {
+                if v[k] != v[k - 1] {
+                    distinct += 1;
+                }
+            }
+            total += 1;
+            if (2..=8).contains(&distinct) && hi - lo >= thr {
+                few += 1;
+            }
+        }
+    }
+    total > 0 && few * 100 >= total * 8
 }
 
 /// Copies the input into a picture padded by edge replication to whole superblocks.

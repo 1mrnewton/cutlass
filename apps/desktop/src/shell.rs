@@ -2998,6 +2998,25 @@ impl Shell {
         })
     }
 
+    /// The settings the project dialog opens with.
+    pub fn project_settings(&self) -> Option<cutlass_editor::ProjectSettings> {
+        self.draft().map(cutlass_editor::project_settings)
+    }
+
+    /// Save the project dialog: what changed is one undo step, and nothing
+    /// changed is no step.
+    pub fn save_project_settings(
+        &mut self,
+        settings: &cutlass_editor::ProjectSettings,
+    ) -> Result<(), ShellError> {
+        let requests = cutlass_editor::project_requests(self.session_draft()?, settings)
+            .map_err(ShellError::Edit)?;
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
+    }
+
     /// Turn the drop-frame timecode label on or off. The frame rate stays.
     /// One undo restores the label.
     pub fn toggle_drop_frame(&mut self) -> Result<(), ShellError> {

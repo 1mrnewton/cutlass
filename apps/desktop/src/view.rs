@@ -134,6 +134,8 @@ enum LibraryTarget {
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
     export_open: bool,
+    /// The project dialog's unsaved choices while it is open.
+    project_dialog: Option<cutlass_editor::ProjectSettings>,
     /// The dialog's choices; its path is `export_path`.
     export: ExportRequest,
     /// Write a MOV rather than an MP4.
@@ -209,6 +211,7 @@ impl Default for ViewState {
         Self {
             preview: None,
             export_open: false,
+            project_dialog: None,
             export: ExportRequest::default(),
             export_mov: false,
             export_mbps: None,
@@ -307,6 +310,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
         paint_library_ghost(shell, ui);
         if view.export_open {
             export_dialog(shell, ui, view, parent);
+        }
+        if view.project_dialog.is_some() {
+            project_dialog(shell, ui, view);
         }
         job_strip(shell, ui, full);
         shortcuts(shell, ui);
@@ -2113,6 +2119,9 @@ fn section_title(ui: &mut Ui, title: &str) {
 }
 
 fn project_facts(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, width: f32) {
+    if ui.button("Modify").clicked() {
+        view.project_dialog = shell.project_settings();
+    }
     if let Some(stored) = shell.draft().map(|draft| draft.name.clone()) {
         if let Some(name) = name_field(ui, &mut view.name_buffer, &stored)
             && let Err(error) = shell.set_project_name(&name)
@@ -5279,6 +5288,87 @@ fn export_extension(view: &ViewState) -> &'static str {
     }
 }
 
+/// Name, canvas, frame rate and color space, saved together.
+fn project_dialog(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
+    let Some(settings) = view.project_dialog.as_mut() else {
+        return;
+    };
+    let mut save = false;
+    let ((), closed) = widgets::dialog(ui, "Project", |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                choice_row(ui, "Name", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut settings.name).desired_width(220.0));
+                });
+                choice_row(ui, "Ratio", |ui| {
+                    for (ratio, name) in cutlass_editor::PROJECT_RATIOS {
+                        if ui.selectable_label(settings.ratio == ratio, name).clicked() {
+                            settings.ratio = ratio.to_owned();
+                        }
+                    }
+                });
+                choice_row(ui, "Resolution", |ui| {
+                    for (side, name) in cutlass_editor::PROJECT_RESOLUTIONS {
+                        if ui
+                            .selectable_label(settings.short_side == side, name)
+                            .clicked()
+                        {
+                            settings.short_side = side;
+                        }
+                    }
+                });
+                choice_row(ui, "Frame rate", |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for rate in cutlass_editor::PROJECT_RATES {
+                            let label = cutlass_editor::rate_label(rate);
+                            let name = label.trim_end_matches(" fps");
+                            if ui.selectable_label(settings.rate == rate, name).clicked() {
+                                settings.rate = rate;
+                            }
+                        }
+                    });
+                });
+                let drop = cutlass_editor::is_drop_rate(settings.rate);
+                choice_row(ui, "Drop frame", |ui| {
+                    let mut on = settings.drop_frame && drop;
+                    if ui
+                        .add_enabled(drop, egui::Checkbox::without_text(&mut on))
+                        .changed()
+                    {
+                        settings.drop_frame = on;
+                    }
+                });
+                choice_row(ui, "Color space", |ui| {
+                    for (space, name) in cutlass_editor::COLOR_SPACES {
+                        if space < 0 {
+                            continue;
+                        }
+                        if ui
+                            .selectable_label(settings.color_space == space, name)
+                            .clicked()
+                        {
+                            settings.color_space = space;
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                save = ui.button("Save").clicked();
+            });
+        });
+    });
+    if save && let Some(settings) = view.project_dialog.take() {
+        if let Err(error) = shell.save_project_settings(&settings) {
+            shell.set_notice(error.to_string());
+            view.project_dialog = Some(settings);
+        } else {
+            view.name_buffer.clear();
+        }
+    } else if closed {
+        view.project_dialog = None;
+    }
+}
+
 /// A dim label and its choices on one line.
 fn choice_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
@@ -8341,6 +8431,87 @@ mod tests {
             .rev()
             .find_map(|clipped| shape_pos(&clipped.shape, wanted))
             .map(|pos| pos + Vec2::new(4.0, 4.0))
+    }
+
+    #[test]
+    fn modify_opens_the_project_dialog_and_save_is_one_undo_step() {
+        let (mut shell, _temp) = open_span("project", 1_000_000);
+        let mut view = ViewState::new();
+        let ctx = egui::Context::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0)));
+        let frame = |shell: &mut Shell, view: &mut ViewState, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: screen,
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(shell, ui, view, None),
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let click = |pos: Pos2| {
+            [
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            ]
+        };
+        shell.select(None);
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let modify = last_text_pos(&output, "Modify").expect("a Modify button");
+        for events in click(modify) {
+            frame(&mut shell, &mut view, events);
+        }
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let text = painted_text(&output);
+        for label in [
+            "Ratio",
+            "Resolution",
+            "Frame rate",
+            "Drop frame",
+            "Color space",
+            "Save",
+        ] {
+            assert!(text.contains(label), "the dialog has no {label}");
+        }
+        for name in ["9:16", "720p", "29.97", "HLG"] {
+            let output = frame(&mut shell, &mut view, Vec::new());
+            let at = last_text_pos(&output, name).expect(name);
+            for events in click(at) {
+                frame(&mut shell, &mut view, events);
+            }
+        }
+        let output = frame(&mut shell, &mut view, Vec::new());
+        let save = last_text_pos(&output, "Save").expect("Save");
+        for events in click(save) {
+            frame(&mut shell, &mut view, events);
+        }
+        assert!(view.project_dialog.is_none(), "{}", shell.notice());
+        let draft = shell.draft().unwrap();
+        assert_eq!(
+            (draft.canvas_config.width, draft.canvas_config.height),
+            (720, 1280)
+        );
+        assert_eq!(draft.frame_rate(), Some(FrameRate::FPS_29_97));
+        assert_eq!(draft.color_space, 67);
+        shell.undo().unwrap();
+        let draft = shell.draft().unwrap();
+        assert_eq!(draft.color_space, 0);
+        assert_ne!(draft.canvas_config.height, 1280);
     }
 
     #[test]

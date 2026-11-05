@@ -1658,6 +1658,55 @@ impl Shell {
         imported
     }
 
+    /// Play the file at `path` in the selected clip in place of its media,
+    /// keeping the clip's edits. Like an import it is read and copied as a
+    /// job; the new media joins the library and the clip takes it in one
+    /// undo step.
+    pub fn start_replace(&mut self, path: &Path) -> Result<(), ShellError> {
+        let project = self.path.clone().ok_or(ShellError::NoProject)?;
+        let segment_id = self.selected().cloned().ok_or(ShellError::NoProject)?;
+        self.refuse_locked(&segment_id)?;
+        self.refuse_busy()?;
+        let source = path.to_path_buf();
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| ShellError::Io("the file has no name".to_owned()))?;
+        self.start_job("Replace", move |progress| {
+            progress.stage(&format!("Reading {name}"));
+            let placed = probe::probe(&source)
+                .map_err(|error| ShellError::Probe(error.to_string()))
+                .and_then(|probed| {
+                    progress.stage(&format!("Copying {name}"));
+                    let (stored, copied) = place_in_project(&project, &source, Some(progress))?;
+                    Ok((probed, stored, CopyGuard(copied)))
+                });
+            Box::new(move |shell: &mut Shell| {
+                let (probed, stored, mut copy) = placed?;
+                let import = shell.medium_request(probed, stored);
+                let material_id = match &import {
+                    Request::Import {
+                        medium: ImportedMedium::Video(video),
+                    } => video.id.clone(),
+                    Request::Import {
+                        medium: ImportedMedium::Audio(audio),
+                    } => audio.id.clone(),
+                    _ => return Err(ShellError::NoProject),
+                };
+                shell.apply_requests(&[
+                    import,
+                    Request::ReplaceMedia {
+                        segment_id,
+                        material_id,
+                    },
+                ])?;
+                copy.keep();
+                shell.set_notice(format!("Replaced with {name}"));
+                Ok(())
+            })
+        })
+    }
+
     /// Import `path` as a job: read it, copy it into the project with a
     /// progress bar, then add it to the library when the job lands. A
     /// cancelled import leaves no copy behind.
@@ -6125,6 +6174,12 @@ impl Shell {
     }
 
     fn import_medium(&mut self, probed: Probed, stored: String) -> Result<(), ShellError> {
+        let request = self.medium_request(probed, stored);
+        self.apply(request)
+    }
+
+    /// The request that adds `probed`, stored at `stored`, to the library.
+    fn medium_request(&mut self, probed: Probed, stored: String) -> Request {
         match probed {
             Probed::Video {
                 meta,
@@ -6139,9 +6194,9 @@ impl Shell {
                 material.duration = Micros(duration);
                 material.width = width;
                 material.height = height;
-                self.apply(Request::Import {
+                Request::Import {
                     medium: ImportedMedium::Video(Box::new(material)),
-                })
+                }
             }
             Probed::Audio { duration } => {
                 let material_id = self.fresh("mat");
@@ -6152,9 +6207,9 @@ impl Shell {
                     duration: Micros(duration),
                     ..MaterialAudio::default()
                 };
-                self.apply(Request::Import {
+                Request::Import {
                     medium: ImportedMedium::Audio(Box::new(material)),
-                })
+                }
             }
         }
     }

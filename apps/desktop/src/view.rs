@@ -150,6 +150,8 @@ struct Approval {
 
 pub struct ViewState {
     preview: Option<egui::TextureHandle>,
+    /// The clip menu asked for a file to replace the clip's media with.
+    wants_replace: bool,
     export_open: bool,
     /// The project dialog's unsaved choices while it is open.
     project_dialog: Option<cutlass_editor::ProjectSettings>,
@@ -239,6 +241,7 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             preview: None,
+            wants_replace: false,
             export_open: false,
             project_dialog: None,
             licenses: None,
@@ -299,6 +302,9 @@ pub fn show(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Option
     }
     if std::mem::take(&mut view.inspector.wants_lut) {
         view.dialogs.lut(parent);
+    }
+    if std::mem::take(&mut view.wants_replace) {
+        view.dialogs.replace(parent);
     }
     style(ui);
     shell.hold_edits(ui.input(|input| input.pointer.any_down()));
@@ -3522,6 +3528,10 @@ fn paint_clip_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState) {
             "flip" => shell.toggle_mirror(),
             "deactivate" => shell.toggle_active(),
             "open-file" => shell.reveal_selected_file(),
+            "replace" => {
+                view.wants_replace = true;
+                Ok(())
+            }
             "range-in" => shell.mark_clip_in(),
             "range-out" => shell.mark_clip_out(),
             "beat" => {
@@ -6058,6 +6068,7 @@ fn apply_dialog(shell: &mut Shell, view: &mut ViewState, finished: Finished) {
             Ok(())
         }
         Picker::Lut => shell.load_lut(&path),
+        Picker::Replace => shell.start_replace(&path),
         Picker::SaveLog => Shell::export_log(&path).map(|()| {
             shell.set_notice(format!("Saved the log to {}", path.display()));
         }),
@@ -7869,6 +7880,48 @@ mod tests {
         assert_eq!(filters[0].name, "Warm");
         assert_eq!(filters[0].look, CardLook::Picture(None));
         assert_eq!(top_cards(&draft, Shelf::Filters, "noir").len(), 1);
+    }
+
+    #[test]
+    fn a_replace_dialog_swaps_the_clips_media_and_keeps_its_edits_in_one_step() {
+        let temp = std::env::temp_dir().join(format!("cutlass-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut draft = cutlass_model::Draft::empty("draft");
+        let mut old = cutlass_model::MaterialVideo::new("old");
+        old.kind = "photo".to_owned();
+        old.path = "gone.png".to_owned();
+        draft.materials.videos.push(old);
+        let mut clip =
+            cutlass_model::Segment::new("main", "old", cutlass_model::TimeRange::new(0, 3_000_000));
+        clip.source_range = Some(cutlass_model::TimeRange::new(0, 3_000_000));
+        clip.clip.alpha = 0.5;
+        draft.tracks[0].segments.push(clip);
+        cutlass_store::Folder::new(draft).save(&temp).unwrap();
+        let (decoders, encoders) = crate::register_codecs();
+        let mut shell = Shell::new(decoders, encoders, Settings::default());
+        shell.open_folder(&temp).unwrap();
+        shell.select(Some(SegmentId::new("main")));
+        let before = shell.draft().unwrap().clone();
+        let mut view = ViewState::new();
+        let picture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/engine/fixtures/pattern.jpg");
+        view.dialogs.finish_for_test(Picker::Replace, Some(picture));
+        land_import(&mut shell, &mut view);
+        let draft = shell.draft().unwrap();
+        let segment = &draft.tracks[0].segments[0];
+        let material = draft
+            .materials
+            .videos
+            .iter()
+            .find(|video| video.id == segment.material_id)
+            .unwrap();
+        assert!(material.path.ends_with("pattern.jpg"), "{}", material.path);
+        assert_eq!(segment.target, cutlass_model::TimeRange::new(0, 3_000_000));
+        assert_eq!(segment.clip.alpha, 0.5);
+        assert!(temp.join("Resources").join("pattern.jpg").is_file());
+        shell.undo().unwrap();
+        assert_eq!(shell.draft().unwrap(), &before);
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]

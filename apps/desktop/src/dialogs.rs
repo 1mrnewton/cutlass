@@ -20,6 +20,7 @@ pub(crate) enum Picker {
     SaveLog,
     SkillFolder,
     Lut,
+    Replace,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +66,16 @@ impl Dialogs {
     pub(crate) fn lut(&mut self, parent: Option<&eframe::Frame>) {
         let dialog = dialog(parent).add_filter("LUT", &["cube", "CUBE"]);
         self.start(Picker::Lut, async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        });
+    }
+
+    pub(crate) fn replace(&mut self, parent: Option<&eframe::Frame>) {
+        let dialog = dialog(parent);
+        self.start(Picker::Replace, async move {
             dialog
                 .pick_file()
                 .await

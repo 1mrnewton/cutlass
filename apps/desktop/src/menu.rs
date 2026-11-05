@@ -76,6 +76,7 @@ const CUT: Entry = done("cut", "Cut", "⌘X");
 const DELETE: Entry = done("delete", "Delete", "⌫");
 const DEACTIVATE: Entry = done("deactivate", "Deactivate", "");
 const REPLACE: Entry = todo("replace", "Replace", "");
+const REPLACE_SOUND: Entry = done("replace", "Replace", "");
 
 const VIDEO: &[Entry] = &[
     COPY,
@@ -113,7 +114,7 @@ const VIDEO: &[Entry] = &[
     done("export", "Export selected clips", ""),
     done("deactivate", "Deactivate clip", "V"),
     done("trim", "Trim clip", ""),
-    todo("replace", "Replace clip", ""),
+    done("replace", "Replace clip", ""),
     done("link-media", "Link to media", ""),
     done("open-file", "Open file location", ""),
     SEP,
@@ -148,7 +149,7 @@ const AUDIO: &[Entry] = &[
     done("beat", "Beat", ""),
     SEP,
     DEACTIVATE,
-    REPLACE,
+    REPLACE_SOUND,
 ];
 
 const TEXT: &[Entry] = &[
@@ -775,11 +776,11 @@ mod tests {
     fn a_click_on_a_todo_row_picks_it_as_not_built() {
         let ctx = Context::default();
         let (_, output) = frame(&ctx, 1000.0, Vec::new());
-        let row =
-            label_at(&output, "Replace clip").expect("the Replace clip row") + Vec2::new(4.0, 6.0);
+        let row = label_at(&output, "Create compound clip").expect("the compound row")
+            + Vec2::new(4.0, 6.0);
         let (shown, _) = frame(&ctx, 1000.0, click(row));
         let picked = shown.picked.expect("a pick");
-        assert_eq!((picked.id, picked.built), ("replace", false));
+        assert_eq!((picked.id, picked.built), ("compound", false));
     }
 
     #[test]

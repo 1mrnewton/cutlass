@@ -275,7 +275,7 @@ impl Av1Enc {
             RateControl::Bitrate { bps, fps } => {
                 // Starting point from the bits per sample (fitted on natural video).
                 let bpp = bps as f64 / fps.max(1.0) / (cfg.width * cfg.height) as f64;
-                (140.0 - 36.0 * (bpp.max(1e-4) / 0.14).log2()).clamp(20.0, 240.0)
+                (157.0 - 58.0 * (bpp.max(1e-4) / 0.14).log2()).clamp(20.0, 240.0)
             }
         };
         Ok(Self {
@@ -508,19 +508,25 @@ impl Av1Enc {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d)
         };
-        let off = if key {
-            ev("AV1_QK", -40.0)
+        // Better anchors pay off in every frame predicted from them: q drops
+        // by a fraction that grows toward the top of the pyramid.
+        let frac = if key {
+            ev("AV1_QK", 0.40)
         } else if level == u32::MAX {
             0.0
         } else {
             match level {
-                0 => ev("AV1_Q0", -30.0),
-                1 => ev("AV1_Q1", -20.0),
-                2 => ev("AV1_Q2", -12.0),
-                _ => ev("AV1_Q3", -6.0),
+                0 => ev("AV1_Q0", 0.33),
+                1 => ev("AV1_Q1", 0.22),
+                2 => ev("AV1_Q2", 0.12),
+                _ => ev("AV1_Q3", 0.05),
             }
         };
-        let q = if self.cfg.gop > 1 { base + off } else { base };
+        let q = if self.cfg.gop > 1 || key {
+            base * (1.0 - frac)
+        } else {
+            base
+        };
         let q = q.round().clamp(1.0, 255.0) as u8;
         if key {
             return FrameSpec {

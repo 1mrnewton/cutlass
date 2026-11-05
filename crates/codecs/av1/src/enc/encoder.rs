@@ -822,7 +822,7 @@ impl Av1Enc {
         let qstep = ac / 8.0;
         let speed = self.cfg.speed;
         let mode = ModeParams {
-            lambda_satd: ev("AV1_LS", 0.9) * qstep,
+            lambda_satd: ev("AV1_LS", 0.6) * qstep,
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 64.0) as usize,
             skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep,
@@ -881,7 +881,7 @@ impl Av1Enc {
         };
         let qp = QuantParams {
             // Per bit; inter frames trade residual for rate more readily.
-            lambda: ev("AV1_QL", if key { 0.15 } else { 0.1 }) * qstep * qstep,
+            lambda: ev("AV1_QL", 0.07) * qstep * qstep,
             round_intra: ev("AV1_RI", 56.0) as i32,
             round_inter: ev("AV1_RN", 44.0) as i32,
             tx_type_search: u8::from(speed < 9),

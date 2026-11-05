@@ -1,4 +1,7 @@
-//! GIF89a pictures from RGBA frames.
+//! GIF89a pictures to and from RGBA frames.
+//!
+//! [`GifDecoder`] paints each image of a GIF onto its screen and gives the
+//! whole screen per frame, transparency and disposal kept.
 //!
 //! Each frame gets its own palette of at most 256 colors, cut from the
 //! frame's colors by median cut, and its own local color table. The
@@ -11,17 +14,28 @@
 
 #![forbid(unsafe_code)]
 
+mod decode;
 mod encode;
 mod lzw;
 mod quant;
 
-use cutlass_decode::{CodecError, CodecId, CodecParams};
+use cutlass_decode::{CodecError, CodecId, CodecParams, DecodeFactory, Decoder};
 use cutlass_encode::{EncodeFactory, Encoder};
 
+pub use decode::GifDecoder;
 pub use encode::GifEncoder;
 
 /// The GIF clock: a frame delay is stored in hundredths of a second.
 pub const GIF_TICKS_PER_SECOND: i64 = 100;
+
+/// Register this crate as the software GIF decoder.
+pub fn register_decoders(factory: &mut DecodeFactory) {
+    factory.register(CodecId::Gif, open_decoder);
+}
+
+fn open_decoder(params: &CodecParams) -> Result<Box<dyn Decoder>, CodecError> {
+    Ok(Box::new(GifDecoder::open(params)?))
+}
 
 pub fn register_encoders(factory: &mut EncodeFactory) {
     factory.register(CodecId::Gif, open_encoder);

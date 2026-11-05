@@ -469,11 +469,18 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             );
             let (dy, dx) = (me.mv.0 >> 3, me.mv.1 >> 3);
             self.est_hint = me.mv;
+            let x0 = x as i32 + dx;
+            let inside = x0 >= 0 && x0 as usize + pw <= rp.w;
             for i in 0..ph {
                 let ry = (y as i32 + i as i32 + dy).clamp(0, rp.h as i32 - 1) as usize;
-                for j in 0..pw {
-                    let rx = (x as i32 + j as i32 + dx).clamp(0, rp.w as i32 - 1) as usize;
-                    pred[i * pw + j] = rp.data[ry * rp.stride + rx];
+                let row = &rp.data[ry * rp.stride..];
+                let out = &mut pred[i * pw..][..pw];
+                if inside {
+                    out.copy_from_slice(&row[x0 as usize..][..pw]);
+                } else {
+                    for (j, o) in out.iter_mut().enumerate() {
+                        *o = row[(x0 + j as i32).clamp(0, rp.w as i32 - 1) as usize];
+                    }
                 }
             }
             let mvb = 2.0 + bits(me.mv.0) + bits(me.mv.1);
@@ -965,9 +972,10 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let Some(src) = self.src else { return };
         let sp = &src.planes[0];
         for i in 0..h {
-            for j in 0..w {
-                out[i * w + j] = sp.data[(y + i) * sp.stride + x + j].to_i32()
-                    - pred[i * pred_stride + j].to_i32();
+            let s = &sp.data[(y + i) * sp.stride + x..][..w];
+            let p = &pred[i * pred_stride..][..w];
+            for ((o, &a), &b) in out[i * w..][..w].iter_mut().zip(s).zip(p) {
+                *o = a.to_i32() - b.to_i32();
             }
         }
     }

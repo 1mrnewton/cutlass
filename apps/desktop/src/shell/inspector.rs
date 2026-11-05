@@ -270,6 +270,27 @@ impl Shell {
         })
     }
 
+    /// Shape the selected title's background as the bubble keyed `bubble`.
+    /// An empty key takes the bubble off with the background it stands
+    /// on. One undo restores it.
+    pub fn set_text_bubble(&mut self, bubble: &str) -> Result<(), ShellError> {
+        let segment_id = self.text_segment()?;
+        self.refuse_locked(&segment_id)?;
+        let mut requests = vec![Request::SetTextBubble {
+            segment_id: segment_id.clone(),
+            bubble: bubble.to_owned(),
+        }];
+        if bubble.is_empty() {
+            requests.push(Request::SetTextBackground {
+                segment_id,
+                color: String::new(),
+                alpha: 1.0,
+                round: 0.0,
+            });
+        }
+        self.apply_requests(&requests)
+    }
+
     /// Make the selected title glow in `color`. A split clip's halves glow
     /// on their own once one changes. One undo restores it.
     pub fn set_text_glow(
@@ -936,6 +957,24 @@ mod tests {
         assert!(desktop.set_text_glow("#00FF00", 2.0, 0.5).is_err());
         assert!(desktop.set_text_background("nope", 1.0, 0.0).is_err());
         assert_eq!(desktop.draft().unwrap(), &before);
+
+        // A bubble shapes a background it brings; None takes both off in
+        // one step.
+        desktop.set_text_bubble("thought").unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(
+            (look.bubble.as_str(), look.background_color.as_str()),
+            ("thought", "#FFFFFF")
+        );
+        desktop.set_text_bubble("").unwrap();
+        let look = desktop.text_look().unwrap();
+        assert_eq!(
+            (look.bubble.as_str(), look.background_color.as_str()),
+            ("", "")
+        );
+        desktop.undo().unwrap();
+        assert_eq!(desktop.text_look().unwrap().bubble, "thought");
+        assert!(desktop.set_text_bubble("cloud").is_err());
 
         pick(&mut desktop, "main");
         assert_eq!(desktop.text_look(), None);

@@ -242,7 +242,7 @@ fn text_panel(
                     text_basic(shell, ui, state, inspection, caption);
                     footer(ui, &["Save as preset"]);
                 }
-                1 => later_tiles(ui, &["None", "Round", "Box", "Thought"]),
+                1 => bubble_page(shell, ui),
                 _ => later_tiles(ui, &["None", "Shadow", "Glow", "Outline"]),
             }
         }
@@ -2046,6 +2046,42 @@ fn footer(ui: &mut Ui, labels: &[&str]) {
             .on_disabled_hover_text(LATER);
         }
     });
+}
+
+/// The Bubble page: None, then each bubble, the title's own outlined. A
+/// pick shapes its background; None takes the bubble and its background
+/// off.
+fn bubble_page(shell: &mut Shell, ui: &mut Ui) {
+    let Some(look) = shell.text_look() else {
+        return;
+    };
+    let mut picked = None;
+    ui.add_space(8.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+        let tiles = std::iter::once(("None", "")).chain(
+            cutlass_model::Bubble::ALL
+                .iter()
+                .map(|bubble| (bubble.label(), bubble.key())),
+        );
+        for (name, key) in tiles {
+            let on = look.bubble == key;
+            let stroke = if on {
+                Stroke::new(tokens::SELECTED_EDGE * 2.0, tokens::EXPORT)
+            } else {
+                Stroke::NONE
+            };
+            let tile = egui::Button::new(RichText::new(name).size(11.0))
+                .fill(BOX)
+                .stroke(stroke);
+            if ui.add_sized([64.0, 48.0], tile).clicked() && !on {
+                picked = Some(key);
+            }
+        }
+    });
+    if let Some(key) = picked {
+        send(shell, |shell| shell.set_text_bubble(key));
+    }
 }
 
 fn later_tiles(ui: &mut Ui, names: &[&str]) {

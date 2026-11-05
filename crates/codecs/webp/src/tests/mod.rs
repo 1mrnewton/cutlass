@@ -11,6 +11,7 @@ mod alpha;
 mod animation;
 mod encoder;
 mod end_to_end;
+mod fuzz;
 mod lifecycle;
 mod lossless_encode;
 mod lossy;

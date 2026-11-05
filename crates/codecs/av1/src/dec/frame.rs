@@ -168,7 +168,7 @@ impl FrameState {
             mi_rows: self.mi_rows,
             mi_stride: self.mi_stride,
             mi: vec![MiInfo::default(); self.mi.len()],
-            uv_modes: Vec::new(),
+            uv_modes: vec![0; self.uv_modes.len()],
             tx_types: Vec::new(),
             inter_tx_sizes: Vec::new(),
             lf_tx: std::array::from_fn(|p| vec![0; self.lf_tx[p].len()]),
@@ -188,6 +188,7 @@ impl FrameState {
     pub fn fits_filter_shell(&self, fs: &FrameState) -> bool {
         self.mi_stride == fs.mi_stride
             && self.mi.len() == fs.mi.len()
+            && self.uv_modes.len() == fs.uv_modes.len()
             && self.cdef_idx.len() == fs.cdef_idx.len()
             && self
                 .lf_tx

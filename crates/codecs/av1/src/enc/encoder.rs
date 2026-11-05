@@ -928,6 +928,7 @@ impl Av1Enc {
                 color_map_y: vec![0u8; 128 * 128],
                 color_map_uv: vec![0u8; 128 * 128],
                 scratch: Default::default(),
+                rec: None,
             };
             td.decode_tile()?;
             let TileDec { msac, .. } = td;

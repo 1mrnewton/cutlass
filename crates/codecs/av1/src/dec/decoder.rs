@@ -20,7 +20,7 @@ use super::obu::{
 };
 use super::postfilter;
 use super::recon::Scratch;
-use super::tile::{RefView, RowHook, TileDec, malformed};
+use super::tile::{ReconLog, RefView, RowHook, TileDec, malformed};
 use super::types::{INTRA_FRAME, MiInfo, Mv};
 
 type R<T> = Result<T, CodecError>;
@@ -95,8 +95,8 @@ pub struct Av1Core {
     /// Frame in progress (header seen, tiles pending).
     pending: Option<Pending>,
     lr_scratch: LrScratch,
-    /// The in-loop filter thread's copy of the frame state, kept for reuse.
-    filter_fs: Option<FrameState>,
+    /// Copies of the frame state the worker threads use, kept for reuse.
+    shells: Vec<FrameState>,
     /// Apply film grain to shown pictures.
     pub apply_grain: bool,
     pool8: Vec<Picture<u8>>,
@@ -132,7 +132,7 @@ impl Av1Core {
             slots: Default::default(),
             pending: None,
             lr_scratch: LrScratch::new(),
-            filter_fs: None,
+            shells: Vec::new(),
             apply_grain: true,
             pool8: Vec::new(),
             pool16: Vec::new(),
@@ -482,7 +482,7 @@ impl Av1Core {
                 refs,
                 &self.ref_hdr,
                 &mut self.lr_scratch,
-                &mut self.filter_fs,
+                &mut self.shells,
                 &mut self.pool8,
                 self.threads,
             )?;
@@ -507,7 +507,7 @@ impl Av1Core {
                 refs,
                 &self.ref_hdr,
                 &mut self.lr_scratch,
-                &mut self.filter_fs,
+                &mut self.shells,
                 &mut self.pool16,
                 self.threads,
             )?;
@@ -833,6 +833,7 @@ fn decode_tiles<P: Pixel>(
     refs: &[Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     cur: &mut Picture<P>,
+    record: bool,
     on_row: &mut RowHook<'_, P>,
 ) -> R<Box<CdfContext>> {
     let num_planes = seq.num_planes();
@@ -911,6 +912,7 @@ fn decode_tiles<P: Pixel>(
             color_map_y: std::mem::take(&mut color_map_y),
             color_map_uv: std::mem::take(&mut color_map_uv),
             scratch: std::mem::replace(&mut scratch, Scratch::empty()),
+            rec: if record { Some(Box::default()) } else { None },
         };
         let res = td.decode_tile_rows(&mut *on_row);
         above_level = std::mem::take(&mut td.above_level);
@@ -943,6 +945,7 @@ struct RowMsg<P> {
     /// last row reaches the end of the arrays).
     mi_row0: usize,
     mi: Vec<MiInfo>,
+    uv_modes: Vec<u8>,
     lf_tx: [Vec<u8>; 3],
     cdef_row0: usize,
     cdef: Vec<i8>,
@@ -951,10 +954,11 @@ struct RowMsg<P> {
 }
 
 impl<P: Pixel> RowMsg<P> {
-    fn fill(
+    /// Copies the mode info, transform sizes, CDEF indices and loop
+    /// restoration units of luma 4x4 rows `r0..r1`.
+    fn fill_meta(
         &mut self,
         fs: &FrameState,
-        cur: &Picture<P>,
         sb4: usize,
         r0: usize,
         r1: usize,
@@ -964,24 +968,13 @@ impl<P: Pixel> RowMsg<P> {
         self.r0 = r0;
         self.r1 = r1;
         self.last = last;
-        for (p, pl) in cur.planes.iter().enumerate().take(3) {
-            let sy = usize::from(p > 0 && sub_y);
-            let y0 = (4 * r0) >> sy;
-            let y1 = if last {
-                pl.alloc_h
-            } else {
-                ((4 * r1) >> sy).min(pl.alloc_h)
-            };
-            let (row0, v) = &mut self.px[p];
-            *row0 = y0;
-            v.clear();
-            v.extend_from_slice(&pl.data[y0 * pl.stride..y1 * pl.stride]);
-        }
         let st = fs.mi_stride;
         let end = if last { fs.mi.len() } else { r1 * st };
         self.mi_row0 = r0;
         self.mi.clear();
         self.mi.extend_from_slice(&fs.mi[r0 * st..end]);
+        self.uv_modes.clear();
+        self.uv_modes.extend_from_slice(&fs.uv_modes[r0 * st..end]);
         // The transform size maps are indexed in each plane's 4x4 units.
         for (p, (d, s)) in self.lf_tx.iter_mut().zip(&fs.lf_tx).enumerate() {
             let sy = usize::from(p > 0 && sub_y);
@@ -1004,6 +997,30 @@ impl<P: Pixel> RowMsg<P> {
             d.clear();
             d.extend_from_slice(s);
         }
+    }
+
+    /// Copies the samples of the rows (after [`Self::fill_meta`]).
+    fn fill_px(&mut self, cur: &Picture<P>, sub_y: bool) {
+        for (p, pl) in cur.planes.iter().enumerate().take(3) {
+            let sy = usize::from(p > 0 && sub_y);
+            let y0 = (4 * self.r0) >> sy;
+            let y1 = if self.last {
+                pl.alloc_h
+            } else {
+                ((4 * self.r1) >> sy).min(pl.alloc_h)
+            };
+            let (row0, v) = &mut self.px[p];
+            *row0 = y0;
+            v.clear();
+            v.extend_from_slice(&pl.data[y0 * pl.stride..y1 * pl.stride]);
+        }
+    }
+
+    /// Writes the copied mode info into `fs` (for reconstruction).
+    fn apply_mode_info(&self, fs: &mut FrameState) {
+        let o = self.mi_row0 * fs.mi_stride;
+        fs.mi[o..o + self.mi.len()].copy_from_slice(&self.mi);
+        fs.uv_modes[o..o + self.uv_modes.len()].copy_from_slice(&self.uv_modes);
     }
 
     /// Writes the copied rows into `fs` and `pic`.
@@ -1048,6 +1065,110 @@ fn copy_rows<P: Pixel>(
         let r = y0 * s.stride..y1 * s.stride;
         d.data[r.clone()].copy_from_slice(&s.data[r]);
     }
+}
+
+/// A [`FrameState::filter_shell`] of `fs`, from `shells` when one fits.
+fn take_shell(shells: &mut Vec<FrameState>, fs: &FrameState) -> FrameState {
+    match shells.iter().position(|f| f.fits_filter_shell(fs)) {
+        Some(i) => shells.swap_remove(i).reshape_filter_shell(fs),
+        None => fs.filter_shell(),
+    }
+}
+
+/// Predicts and reconstructs the superblock rows parsed on another thread
+/// (arriving on `rx` with their mode info) into `cur`, then passes each row
+/// with its samples on to `fwd` (the filter thread). Spent logs go back on
+/// `log_back` for reuse.
+fn recon_worker<P: Pixel>(
+    seq: &SequenceHeader,
+    hdr: &FrameHeader,
+    fs: &mut FrameState,
+    cur: &mut Picture<P>,
+    refs: &[Option<&Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+    rx: std::sync::mpsc::Receiver<(RowMsg<P>, ReconLog)>,
+    fwd: std::sync::mpsc::Sender<RowMsg<P>>,
+    log_back: std::sync::mpsc::Sender<ReconLog>,
+) -> R<()> {
+    let mut cdf = CdfContext::new(hdr.quant.base_q_idx);
+    let sb128 = seq.use_128x128_superblock;
+    let mut td = TileDec {
+        seq,
+        hdr,
+        fs,
+        cur,
+        refs: ref_views(hdr, refs, ref_hdr),
+        msac: Msac::new(&[], true),
+        cdf: &mut cdf,
+        mi_row_start: 0,
+        mi_row_end: 0,
+        mi_col_start: 0,
+        mi_col_end: 0,
+        sb_size: if sb128 { 15 } else { 12 },
+        sb_size4: if sb128 { 32 } else { 16 },
+        bd: seq.bit_depth,
+        sub_x: seq.subsampling_x,
+        sub_y: seq.subsampling_y,
+        num_planes: seq.num_planes(),
+        above_level: Default::default(),
+        above_dc: Default::default(),
+        above_seg_pred: Vec::new(),
+        left_level: [[0; 32]; 3],
+        left_dc: [[0; 32]; 3],
+        left_seg_pred: [0; 32],
+        above_palette: Default::default(),
+        left_palette: [[[0; 8]; 32]; 2],
+        delta_lf: [0; 4],
+        current_q_index: i32::from(hdr.quant.base_q_idx),
+        read_deltas: false,
+        ref_lr_wiener: [[[0; 3]; 2]; 3],
+        ref_sgr_xqd: [[0; 2]; 3],
+        block_decoded: [[[false; 35]; 35]; 3],
+        b: Default::default(),
+        pb: Default::default(),
+        plan: Default::default(),
+        src: None,
+        enc: Default::default(),
+        mode: Default::default(),
+        me_scratch: Default::default(),
+        plan_q: 0,
+        cfl_choice: (0, 0),
+        intra_choice: (0, None),
+        plan_delta_lf: [0; 4],
+        color_map_y: vec![0u8; 128 * 128],
+        color_map_uv: vec![0u8; 128 * 128],
+        scratch: Scratch::new(),
+        rec: None,
+    };
+    for (mut m, mut log) in rx {
+        m.apply_mode_info(td.fs);
+        td.replay(&log)?;
+        m.fill_px(td.cur, seq.subsampling_y);
+        let _ = fwd.send(m);
+        log.clear();
+        let _ = log_back.send(log);
+    }
+    Ok(())
+}
+
+/// The reference frames as a tile decoder sees them.
+fn ref_views<'a, P: Pixel>(
+    hdr: &FrameHeader,
+    refs: &[Option<&'a Picture<P>>; 8],
+    ref_hdr: &[RefHeaderState; 8],
+) -> [Option<RefView<'a, P>>; 8] {
+    std::array::from_fn(|i| {
+        if i == 0 {
+            return None;
+        }
+        let slot = hdr.ref_frame_idx[i - 1] as usize;
+        refs[i].map(|pic| RefView {
+            pic,
+            upscaled_width: ref_hdr[slot].upscaled_width as usize,
+            frame_height: ref_hdr[slot].frame_height as usize,
+            frame_width: ref_hdr[slot].frame_width as usize,
+        })
+    })
 }
 
 /// Where [`filter_rows_worker`] writes: the deblocked picture, and the CDEF
@@ -1139,7 +1260,7 @@ fn decode_frame<P: Pixel>(
     refs: [Option<&Picture<P>>; 8],
     ref_hdr: &[RefHeaderState; 8],
     lr_scratch: &mut LrScratch,
-    filter_fs: &mut Option<FrameState>,
+    shells: &mut Vec<FrameState>,
     pool: &mut Vec<Picture<P>>,
     threads: usize,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
@@ -1180,9 +1301,15 @@ fn decode_frame<P: Pixel>(
         } else {
             None
         };
-        let mut pf_fs = match filter_fs.take() {
-            Some(f) if f.fits_filter_shell(fs) => f.reshape_filter_shell(fs),
-            _ => fs.filter_shell(),
+        let mut pf_fs = take_shell(shells, fs);
+        // With three or more threads, parsing and reconstruction split too:
+        // this thread parses (recording what reconstruction needs), a second
+        // predicts and reconstructs a superblock row behind, a third filters.
+        let split = threads > 2;
+        let mut rc_fs = if split {
+            Some(take_shell(shells, fs))
+        } else {
+            None
         };
         let saved = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel::<RowMsg<P>>();
@@ -1198,33 +1325,93 @@ fn decode_frame<P: Pixel>(
                 filter_rows_worker(seq, hdr, pf_fs, out, lf_on, rx, back_tx);
             });
             let sb4 = if seq.use_128x128_superblock { 32 } else { 16 };
-            let res = decode_tiles(
-                seq,
-                hdr,
-                fs,
-                tiles,
-                cdf,
-                &refs,
-                ref_hdr,
-                &mut cur,
-                &mut |fs: &FrameState, cur: &Picture<P>, r0: usize, r1: usize| {
-                    let mut m = back_rx.try_recv().unwrap_or_default();
-                    m.fill(fs, cur, sb4, r0, r1, r1 >= fs.mi_rows, seq.subsampling_y);
-                    // A send only fails once the worker is gone (it panicked):
-                    // the join below reports that.
-                    let _ = tx.send(m);
-                },
-            );
+            let sub_y = seq.subsampling_y;
+            let (res, recon_res) = if let Some(rc_fs) = rc_fs.as_mut() {
+                let (rtx, rrx) = std::sync::mpsc::channel::<(RowMsg<P>, ReconLog)>();
+                let (log_tx, log_rx) = std::sync::mpsc::channel::<ReconLog>();
+                let cur = &mut cur;
+                let refs = &refs;
+                let fwd = tx.clone();
+                let recon = s.spawn(move || {
+                    recon_worker(seq, hdr, rc_fs, cur, refs, ref_hdr, rrx, fwd, log_tx)
+                });
+                let mut no_pixels = Picture::<P> {
+                    planes: Vec::new(),
+                    bd: seq.bit_depth,
+                    sub_x: seq.subsampling_x,
+                    sub_y,
+                };
+                let res = decode_tiles(
+                    seq,
+                    hdr,
+                    fs,
+                    tiles,
+                    cdf,
+                    refs,
+                    ref_hdr,
+                    &mut no_pixels,
+                    true,
+                    &mut |fs: &FrameState,
+                          _: &Picture<P>,
+                          log: Option<&mut ReconLog>,
+                          r0: usize,
+                          r1: usize| {
+                        let mut m = back_rx.try_recv().unwrap_or_default();
+                        m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
+                        let spare = log_rx.try_recv().unwrap_or_default();
+                        let log =
+                            log.map_or_else(ReconLog::default, |l| std::mem::replace(l, spare));
+                        // A send only fails once the worker is gone (it
+                        // failed or panicked): its result reports that.
+                        let _ = rtx.send((m, log));
+                    },
+                );
+                drop(rtx);
+                let recon_res = match recon.join() {
+                    Ok(r) => r,
+                    Err(_) => Err(malformed("reconstruction thread")),
+                };
+                (res, recon_res)
+            } else {
+                let res = decode_tiles(
+                    seq,
+                    hdr,
+                    fs,
+                    tiles,
+                    cdf,
+                    &refs,
+                    ref_hdr,
+                    &mut cur,
+                    false,
+                    &mut |fs: &FrameState,
+                          cur: &Picture<P>,
+                          _: Option<&mut ReconLog>,
+                          r0: usize,
+                          r1: usize| {
+                        let mut m = back_rx.try_recv().unwrap_or_default();
+                        let last = r1 >= fs.mi_rows;
+                        m.fill_meta(fs, sb4, r0, r1, last, sub_y);
+                        m.fill_px(cur, sub_y);
+                        // A send only fails once the worker is gone (it
+                        // panicked): the join below reports that.
+                        let _ = tx.send(m);
+                    },
+                );
+                (res, Ok(()))
+            };
             drop(tx);
             let joined = worker.join();
-            match (res, joined) {
-                (Err(e), _) => Err(e),
-                (Ok(_), Err(_)) => Err(malformed("in-loop filter thread")),
-                (Ok(c), Ok(())) => Ok(c),
+            match (res, recon_res, joined) {
+                (Err(e), _, _) | (Ok(_), Err(e), _) => Err(e),
+                (Ok(_), Ok(()), Err(_)) => Err(malformed("in-loop filter thread")),
+                (Ok(c), Ok(()), Ok(())) => Ok(c),
             }
         })?;
+        shells.push(pf_fs);
+        if let Some(f) = rc_fs {
+            shells.push(f);
+        }
         recycle(pool, cur);
-        *filter_fs = Some(pf_fs);
         lr_pic = lr_dst;
         (saved, deb, cdef_dst)
     } else {
@@ -1237,7 +1424,8 @@ fn decode_frame<P: Pixel>(
             &refs,
             ref_hdr,
             &mut cur,
-            &mut |_: &FrameState, _: &Picture<P>, _: usize, _: usize| {},
+            false,
+            &mut |_: &FrameState, _: &Picture<P>, _: Option<&mut ReconLog>, _: usize, _: usize| {},
         )?;
         // decode_frame_wrapup: in-loop filters.
         postfilter::loop_filter(seq, hdr, fs, &mut cur, threads);

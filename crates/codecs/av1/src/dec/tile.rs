@@ -43,8 +43,68 @@ use super::types::{
 pub type R<T> = Result<T, CodecError>;
 
 /// Called after each superblock row a tile decodes, with the frame state,
-/// the picture and the luma 4x4 rows `r0..r1` of the row.
-pub type RowHook<'h, P> = dyn FnMut(&FrameState, &Picture<P>, usize, usize) + 'h;
+/// the picture, the reconstruction log (when the tile records one) and the
+/// luma 4x4 rows `r0..r1` of the row.
+pub type RowHook<'h, P> =
+    dyn FnMut(&FrameState, &Picture<P>, Option<&mut ReconLog>, usize, usize) + 'h;
+
+/// What reconstruction needs of the blocks a tile decoder parsed while
+/// recording (see [`TileDec::rec`]): the superblocks, blocks and transform
+/// blocks in decoding order, with the dequantized coefficients.
+#[derive(Default)]
+pub struct ReconLog {
+    pub sbs: Vec<SbRec>,
+    pub blocks: Vec<BlockRec>,
+    pub ops: Vec<TxOp>,
+    pub coefs: Vec<i32>,
+    pub color_maps: Vec<u8>,
+}
+
+impl ReconLog {
+    pub fn clear(&mut self) {
+        self.sbs.clear();
+        self.blocks.clear();
+        self.ops.clear();
+        self.coefs.clear();
+        self.color_maps.clear();
+    }
+}
+
+/// A superblock of a [`ReconLog`]: its position, its tile's bounds and its
+/// first block.
+#[derive(Clone, Copy)]
+pub struct SbRec {
+    pub r: usize,
+    pub c: usize,
+    pub tile: [usize; 4],
+    pub first_block: usize,
+}
+
+/// A block of a [`ReconLog`]: its state when prediction starts, its first
+/// transform block and (palette blocks) its color maps.
+pub struct BlockRec {
+    pub b: Block,
+    pub first_op: usize,
+    pub color_maps: Option<usize>,
+}
+
+/// A transform block of a [`ReconLog`]: the arguments of transform_block(),
+/// and, when it has coefficients, their type and nonzero region, stored at
+/// `coef` row by row (`nz_cols` per row).
+#[derive(Clone, Copy)]
+pub struct TxOp {
+    pub plane: u8,
+    pub tx: u8,
+    pub tx_type: u8,
+    pub coded: bool,
+    pub nz_rows: u8,
+    pub nz_cols: u8,
+    pub x: u16,
+    pub y: u16,
+    pub base_x: u32,
+    pub base_y: u32,
+    pub coef: u32,
+}
 
 pub fn malformed(what: &'static str) -> CodecError {
     CodecError::Malformed { at_bit: 0, what }
@@ -338,6 +398,9 @@ pub struct TileDec<'a, P: Pixel, C: Coder = Msac<'a>> {
     pub color_map_y: Vec<u8>,
     pub color_map_uv: Vec<u8>,
     pub scratch: super::recon::Scratch<P>,
+    /// When set, blocks are parsed but not predicted or reconstructed: what
+    /// reconstruction needs is appended here for [`TileDec::replay`].
+    pub rec: Option<Box<ReconLog>>,
 }
 
 #[inline]
@@ -533,7 +596,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 c += sb4;
             }
             let r1 = (r + sb4).min(self.mi_row_end);
-            on_row(self.fs, self.cur, r, r1);
+            on_row(self.fs, self.cur, self.rec.as_deref_mut(), r, r1);
             r += sb4;
         }
         Ok(())
@@ -573,7 +636,21 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     pub fn code_superblock(&mut self, r: usize, c: usize) -> R<()> {
         self.read_deltas = self.hdr.delta_q_present;
         self.clear_cdef(r, c);
-        self.clear_block_decoded_flags(r, c);
+        if let Some(log) = self.rec.as_deref_mut() {
+            log.sbs.push(SbRec {
+                r,
+                c,
+                tile: [
+                    self.mi_row_start,
+                    self.mi_row_end,
+                    self.mi_col_start,
+                    self.mi_col_end,
+                ],
+                first_block: log.blocks.len(),
+            });
+        } else {
+            self.clear_block_decoded_flags(r, c);
+        }
         self.read_lr(r, c, self.sb_size)?;
         self.decode_partition(r, c, self.sb_size)
     }
@@ -1023,7 +1100,24 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         self.store_mode_info_pre();
         #[cfg(feature = "stats")]
         self.count_tools();
-        self.compute_prediction()?;
+        if let Some(log) = self.rec.as_deref_mut() {
+            let b = &self.b;
+            let color_maps = if b.palette_size_y != 0 || b.palette_size_uv != 0 {
+                let at = log.color_maps.len();
+                log.color_maps.extend_from_slice(&self.color_map_y);
+                log.color_maps.extend_from_slice(&self.color_map_uv);
+                Some(at)
+            } else {
+                None
+            };
+            log.blocks.push(BlockRec {
+                b: b.clone(),
+                first_op: log.ops.len(),
+                color_maps,
+            });
+        } else {
+            self.compute_prediction()?;
+        }
         self.residual()?;
         self.store_mode_info_post();
         Ok(())
@@ -3203,6 +3297,81 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let start_x = base_x + 4 * x;
         let start_y = base_y + 4 * y;
         let (sx, sy) = self.plane_sub(plane);
+        let max_x = (self.fs.mi_cols * 4) >> sx;
+        let max_y = (self.fs.mi_rows * 4) >> sy;
+        if start_x >= max_x || start_y >= max_y {
+            return Ok(());
+        }
+        let recording = self.rec.is_some();
+        if !recording {
+            self.tx_predict(plane, start_x, start_y, x, y, tx);
+        }
+        let mut coded = false;
+        if !self.b.skip {
+            let eob = self.coeffs(plane, start_x, start_y, tx)?;
+            if eob > 0 {
+                if recording {
+                    coded = true;
+                } else {
+                    self.reconstruct(plane, start_x, start_y, tx);
+                }
+            }
+        }
+        let row = (start_y << sy) >> 2;
+        let col = (start_x << sx) >> 2;
+        let step_x = tx_w(tx) >> 2;
+        let step_y = tx_h(tx) >> 2;
+        let st = self.fs.mi_stride;
+        let lf = &mut self.fs.lf_tx[plane];
+        for i in 0..step_y {
+            let r = (row >> sy) + i;
+            fill_small(&mut lf[r * st + (col >> sx)..][..step_x], tx);
+        }
+        if let Some(log) = self.rec.as_deref_mut() {
+            let coef = log.coefs.len();
+            let sc = &mut self.scratch;
+            let (nz_rows, nz_cols) = if coded {
+                let tw = tx_w(tx).min(32);
+                let (nr, nc) = (sc.nz_rows.clamp(1, 32), sc.nz_cols.clamp(1, tw));
+                for i in 0..nr {
+                    let row = &mut sc.coefs[i * tw..][..nc];
+                    log.coefs.extend_from_slice(row);
+                    row.fill(0);
+                }
+                (nr, nc)
+            } else {
+                (0, 0)
+            };
+            log.ops.push(TxOp {
+                plane: plane as u8,
+                tx,
+                tx_type: sc.tx_type,
+                coded,
+                nz_rows: nz_rows as u8,
+                nz_cols: nz_cols as u8,
+                x: x as u16,
+                y: y as u16,
+                base_x: base_x as u32,
+                base_y: base_y as u32,
+                coef: coef as u32,
+            });
+        } else {
+            self.tx_mark_decoded(plane, start_x, start_y, tx);
+        }
+        Ok(())
+    }
+
+    /// Prediction of transform_block() (intra and palette blocks).
+    fn tx_predict(
+        &mut self,
+        plane: usize,
+        start_x: usize,
+        start_y: usize,
+        x: usize,
+        y: usize,
+        tx: u8,
+    ) {
+        let (sx, sy) = self.plane_sub(plane);
         let row = (start_y << sy) >> 2;
         let col = (start_x << sx) >> 2;
         let sb_mask = self.sb_size4 - 1;
@@ -3210,11 +3379,6 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let sub_col = col & sb_mask;
         let step_x = tx_w(tx) >> 2;
         let step_y = tx_h(tx) >> 2;
-        let max_x = (self.fs.mi_cols * 4) >> sx;
-        let max_y = (self.fs.mi_rows * 4) >> sy;
-        if start_x >= max_x || start_y >= max_y {
-            return Ok(());
-        }
         if !self.b.is_inter {
             let palette = if plane == 0 {
                 self.b.palette_size_y
@@ -3266,18 +3430,16 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 self.b.max_luma_h = start_y + step_y * 4;
             }
         }
-        if !self.b.skip {
-            let eob = self.coeffs(plane, start_x, start_y, tx)?;
-            if eob > 0 {
-                self.reconstruct(plane, start_x, start_y, tx);
-            }
-        }
-        let st = self.fs.mi_stride;
-        let lf = &mut self.fs.lf_tx[plane];
-        for i in 0..step_y {
-            let r = (row >> sy) + i;
-            fill_small(&mut lf[r * st + (col >> sx)..][..step_x], tx);
-        }
+    }
+
+    /// Marks the transform block decoded (BlockDecoded).
+    fn tx_mark_decoded(&mut self, plane: usize, start_x: usize, start_y: usize, tx: u8) {
+        let (sx, sy) = self.plane_sub(plane);
+        let sb_mask = self.sb_size4 - 1;
+        let sub_row = ((start_y << sy) >> 2) & sb_mask;
+        let sub_col = ((start_x << sx) >> 2) & sb_mask;
+        let step_x = tx_w(tx) >> 2;
+        let step_y = tx_h(tx) >> 2;
         let bdf = &mut self.block_decoded[plane];
         let x0 = ((sub_col >> sx) + 1).min(35);
         let x1 = (x0 + step_x).min(35);
@@ -3286,7 +3448,65 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         for r in &mut bdf[y0..y1] {
             fill_small(&mut r[x0..x1], true);
         }
+    }
+
+    /// Predicts and reconstructs the blocks of `log`, recorded by a tile
+    /// decoder of the same frame whose mode info `self.fs` holds.
+    pub fn replay(&mut self, log: &ReconLog) -> R<()> {
+        let mut bi = 0;
+        for (si, sb) in log.sbs.iter().enumerate() {
+            [
+                self.mi_row_start,
+                self.mi_row_end,
+                self.mi_col_start,
+                self.mi_col_end,
+            ] = sb.tile;
+            self.clear_block_decoded_flags(sb.r, sb.c);
+            let end = log
+                .sbs
+                .get(si + 1)
+                .map_or(log.blocks.len(), |n| n.first_block);
+            while bi < end {
+                let rec = &log.blocks[bi];
+                self.b = rec.b.clone();
+                if let Some(at) = rec.color_maps {
+                    let ny = self.color_map_y.len();
+                    let nuv = self.color_map_uv.len();
+                    self.color_map_y
+                        .copy_from_slice(&log.color_maps[at..at + ny]);
+                    self.color_map_uv
+                        .copy_from_slice(&log.color_maps[at + ny..at + ny + nuv]);
+                }
+                self.compute_prediction()?;
+                let op_end = log.blocks.get(bi + 1).map_or(log.ops.len(), |n| n.first_op);
+                for op in &log.ops[rec.first_op..op_end] {
+                    self.replay_tx(op, &log.coefs);
+                }
+                bi += 1;
+            }
+        }
         Ok(())
+    }
+
+    fn replay_tx(&mut self, op: &TxOp, coefs: &[i32]) {
+        let plane = usize::from(op.plane);
+        let (x, y) = (usize::from(op.x), usize::from(op.y));
+        let start_x = op.base_x as usize + 4 * x;
+        let start_y = op.base_y as usize + 4 * y;
+        self.tx_predict(plane, start_x, start_y, x, y, op.tx);
+        if op.coded {
+            let tw = tx_w(op.tx).min(32);
+            let (nr, nc) = (usize::from(op.nz_rows), usize::from(op.nz_cols));
+            let src = &coefs[op.coef as usize..][..nr * nc];
+            for (i, s) in src.chunks_exact(nc).enumerate() {
+                self.scratch.coefs[i * tw..][..nc].copy_from_slice(s);
+            }
+            self.scratch.tx_type = op.tx_type;
+            self.scratch.nz_rows = nr;
+            self.scratch.nz_cols = nc;
+            self.reconstruct(plane, start_x, start_y, op.tx);
+        }
+        self.tx_mark_decoded(plane, start_x, start_y, op.tx);
     }
 
     pub fn tx_set_for(&self, tx: u8) -> usize {

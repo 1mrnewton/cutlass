@@ -591,10 +591,11 @@ const RATES: [(Version, u8, &str); 9] = [
     (Version::Mpeg25, 2, "8000"),
 ];
 
-const MODES: [(Mode, &str); 3] = [
+const MODES: [(Mode, &str); 4] = [
     (Mode::JointStereo, "joint"),
     (Mode::Stereo, "stereo"),
     (Mode::Mono, "mono"),
+    (Mode::DualChannel, "dual"),
 ];
 
 fn seed(rate: usize, mode: usize) -> u64 {

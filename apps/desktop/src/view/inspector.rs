@@ -905,7 +905,21 @@ fn adjust_tab(shell: &mut Shell, ui: &mut Ui, state: &mut InspectorState, inspec
     if colour_page(shell, ui, state, inspection) {
         return;
     }
-    for label in ["Auto adjust", "Color match", "Color correction"] {
+    ui.horizontal(|ui| {
+        ui.set_min_height(40.0);
+        ui.label(RichText::new("Auto adjust").size(13.0).color(tokens::TEXT));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .button(RichText::new("Apply").size(12.0))
+                .on_hover_text("Even out exposure, contrast and colour cast")
+                .clicked()
+            {
+                send(shell, Shell::auto_adjust);
+            }
+        });
+    });
+    divider(ui);
+    for label in ["Color match", "Color correction"] {
         later_row(ui, label);
     }
     lut_section(shell, ui, state, inspection);

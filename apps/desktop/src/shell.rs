@@ -4614,6 +4614,87 @@ impl Shell {
         self.apply_requests(&requests)
     }
 
+    /// Look at the selected picture at the playhead, drawn alone and
+    /// without its colour work, and set exposure, contrast, temperature,
+    /// tint and saturation to even it out. One undo step.
+    pub fn auto_adjust(&mut self) -> Result<(), ShellError> {
+        let segment_id = self.picture_segment("auto adjust looks at a picture")?;
+        self.refuse_locked(&segment_id)?;
+        let mut draft = self.session_draft()?.clone();
+        let mut span = None;
+        for track in &mut draft.tracks {
+            track.segments.retain(|segment| segment.id == segment_id);
+            if let Some(segment) = track.segments.first() {
+                span = Some(segment.target.clone());
+            }
+        }
+        let Some(span) = span else {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        };
+        let colour: Vec<MaterialId> = draft
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .flat_map(|segment| &segment.extra_material_refs)
+            .filter(|id| {
+                draft
+                    .materials
+                    .get(id.as_str())
+                    .is_some_and(cutlass_effects::is_colour_work)
+            })
+            .cloned()
+            .collect();
+        for segment in draft
+            .tracks
+            .iter_mut()
+            .flat_map(|track| &mut track.segments)
+        {
+            segment
+                .extra_material_refs
+                .retain(|id| !colour.contains(id));
+        }
+        draft.canvas_config.background = None;
+        let end = span.start.0.saturating_add(span.duration.0.max(1) - 1);
+        let time = Micros(self.sample_time().0.clamp(span.start.0, end));
+        let alone = Session::open(draft);
+        let root = self.path.clone();
+        let picture = FrameCache::new()
+            .frame(
+                &alone,
+                &mut SoftwareDevice::new(),
+                time,
+                &self.readers,
+                root.as_deref(),
+                &*self.face,
+            )
+            .map_err(|error| ShellError::Eval(error.to_string()))?;
+        let adjust = cutlass_effects::auto_adjust(&picture.rgba);
+        let current = self
+            .inspection()
+            .map(|inspection| inspection.adjust)
+            .unwrap_or_default();
+        let mut requests = Vec::new();
+        for key in cutlass_effects::AUTO_KEYS {
+            let value = adjust.get(key);
+            if value == current.get(key) {
+                continue;
+            }
+            let material_id = MaterialId::new(self.fresh("adjust"));
+            requests.push(Request::SetAdjust {
+                segment_id: segment_id.clone(),
+                material_id,
+                key: key.kind().to_owned(),
+                value: f64::from(value),
+            });
+        }
+        if requests.is_empty() {
+            return Ok(());
+        }
+        self.apply_requests(&requests)
+    }
+
     pub fn set_opacity(&mut self, opacity: f64) -> Result<(), ShellError> {
         let segment_id = self.picture_segment("an opacity belongs on a picture")?;
         self.refuse_locked(&segment_id)?;
@@ -10688,6 +10769,51 @@ mod tests {
                 .abs()
                 < 1e-6
         );
+    }
+
+    #[test]
+    fn auto_adjust_evens_out_a_dark_blue_picture_in_one_undo_step() {
+        use cutlass_effects::AdjustKey;
+        let temp = Temp::new();
+        let png = temp.path.join("dark.png");
+        image::RgbaImage::from_fn(8, 4, |x, _| {
+            let lift = u8::try_from(x * 4).unwrap();
+            image::Rgba([0x20 + lift, 0x30 + lift, 0x60 + lift, 0xFF])
+        })
+        .save(&png)
+        .unwrap();
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 4;
+        draft.canvas_config.background = Some("#ffffff".to_owned());
+        let mut photo = MaterialVideo::new("photo");
+        photo.kind = "photo".to_owned();
+        photo.path = png.display().to_string();
+        photo.width = 8;
+        photo.height = 4;
+        draft.materials.videos.push(photo);
+        let mut segment = Segment::new("color", "photo", TimeRange::new(0, 1_000_000));
+        segment.source_range = Some(TimeRange::new(0, 1_000_000));
+        draft.tracks[0].segments.push(segment);
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.select(Some(SegmentId::new("color")));
+        // The clip's own colour work is not what auto adjust looks at.
+        desktop.set_adjust(AdjustKey::Exposure, -0.8).unwrap();
+        desktop.auto_adjust().unwrap();
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!(adjust.get(AdjustKey::Exposure) > 0.3, "{adjust:?}");
+        assert!(adjust.get(AdjustKey::Temperature) > 0.2, "{adjust:?}");
+        // Again, it lands on the same values and adds no step.
+        desktop.auto_adjust().unwrap();
+        assert_eq!(desktop.inspection().unwrap().adjust, adjust);
+        desktop.undo().unwrap();
+        let adjust = desktop.inspection().unwrap().adjust;
+        assert!((adjust.get(AdjustKey::Exposure) + 0.8).abs() < 1e-6);
+        assert_eq!(adjust.get(AdjustKey::Temperature), 0.0);
+        desktop.select(None);
+        assert!(desktop.auto_adjust().is_err());
     }
 
     #[test]

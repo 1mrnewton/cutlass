@@ -52,14 +52,18 @@ including process start, best of 3; same machine and load for both.
 
 | Threads | cutlass-av1 | libdav1d (FFmpeg) |
 | --- | --- | --- |
-| 1 | 0.77-0.79 s | 0.39-0.43 s |
-| 2 | 0.73 s | 0.31 s |
-| 3 | 0.48 s | 0.30 s |
-| 4 | 0.48-0.49 s | 0.30 s |
+| 1 | 0.75 s | 0.39 s |
+| 2 | 0.48 s | 0.30 s |
+| 3 | 0.46 s | 0.28 s |
+| 4 | 0.47 s | 0.30 s |
 
-Single threaded the decoder takes about 1.9x the time of libdav1d, which
-uses hand-written assembly for its kernels; this crate relies on
-autovectorization only. With 4 threads the gap is about 1.6x.
+(Best of 8, interleaved, measured while other jobs kept the machine's
+load average at 4-6; the previous version, with one frame finished
+before the next started, measured 0.71 / 0.50 / 0.54 s at 2 / 3 / 4
+threads in the same runs.) Single threaded the decoder takes about 1.9x
+the time of libdav1d, which uses hand-written assembly for its kernels;
+this crate relies on autovectorization only. With 2-4 threads the gap is
+about 1.6x, set by the parsing thread.
 Threading (2+ threads, frames with one tile column): the calling thread
 parses, and each frame gets a thread that reconstructs it a superblock
 row behind and runs deblocking (in place, one row behind) and CDEF and

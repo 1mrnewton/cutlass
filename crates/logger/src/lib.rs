@@ -125,6 +125,16 @@ pub fn init(directory: &Path) -> Result<PathBuf, InitError> {
     result
 }
 
+/// The folder the installed log writes to, or `None` before [`init`] or
+/// when the file did not open.
+#[must_use]
+pub fn directory() -> Option<PathBuf> {
+    lock()
+        .as_ref()
+        .and_then(|logger| logger.file.as_ref())
+        .and_then(|file| file.path.parent().map(Path::to_path_buf))
+}
+
 /// Copy the log in `directory`, the previous file first, into one file at
 /// `destination`. The logger is held meanwhile, so no record is cut in half
 /// and a rotation cannot move a file away mid-copy. The copy is written
@@ -545,7 +555,7 @@ mod tests {
 
     use super::{
         FILE_NAME, InitError, Level, MAX_FILE_BYTES, MAX_MESSAGE_BYTES, PREVIOUS_NAME,
-        console_bytes, console_enabled, console_kind, export, init, init_capture,
+        console_bytes, console_enabled, console_kind, directory, export, init, init_capture,
         installed_max_bytes, record, reset,
     };
 
@@ -656,7 +666,9 @@ mod tests {
     #[test]
     fn export_joins_the_previous_file_and_the_current_one() {
         let env = Env::new();
+        assert_eq!(directory(), None);
         let path = init_capture(&env.temp.path, MAX_FILE_BYTES).unwrap();
+        assert_eq!(directory().as_deref(), path.parent());
         fs::write(env.temp.path.join(PREVIOUS_NAME), "older\n").unwrap();
         info!("newer-token");
         let out = env.temp.path.join("export").join("all.log");

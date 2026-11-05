@@ -814,7 +814,7 @@ impl Shell {
         {
             return Some(Arc::clone(&kept.levels));
         }
-        let levels: Arc<[f32]> = spread_peaks(&peaks, duration, columns).into();
+        let levels: Arc<[f32]> = peaks.spread(duration, columns).into();
         self.card_waves.insert(
             id.to_owned(),
             CardWave {
@@ -2801,20 +2801,9 @@ impl Shell {
     ///
     /// A locked main lane refuses the switch. One undo restores the clips and the switch.
     pub fn toggle_magnet(&mut self) -> Result<(), ShellError> {
-        let Some(session) = self.session.as_ref() else {
-            return Err(ShellError::NoProject);
-        };
-        if session
-            .draft()
-            .main_track()
-            .is_some_and(|track| track.attribute.contains(TrackAttribute::LOCK))
-        {
-            return Err(ShellError::Unavailable(
-                "the main track is locked".to_owned(),
-            ));
-        }
-        let on = !session.draft().config.maintrack_adsorb;
-        self.apply(Request::SetMagnet { on })
+        let request = cutlass_editor::magnet_request(self.session_draft()?)
+            .ok_or_else(|| ShellError::Unavailable("the main track is locked".to_owned()))?;
+        self.apply(request)
     }
 
     /// Store the color under every layer. An empty string clears it.
@@ -3275,7 +3264,7 @@ impl Shell {
                     "the clip is not on the timeline".to_owned(),
                 ));
             };
-            if !can_turn(draft, segment, kind) {
+            if !cutlass_editor::can_turn(draft, segment, kind) {
                 return Err(ShellError::Unavailable(
                     "a mirror belongs on a picture".to_owned(),
                 ));
@@ -3345,7 +3334,7 @@ impl Shell {
                     "the clip is not on the timeline".to_owned(),
                 ));
             };
-            if !can_turn(draft, segment, kind) {
+            if !cutlass_editor::can_turn(draft, segment, kind) {
                 return Err(ShellError::Unavailable(
                     "a rotate belongs on a picture".to_owned(),
                 ));
@@ -3912,7 +3901,7 @@ impl Shell {
         let Some((segment, kind)) = placed(draft, id) else {
             return false;
         };
-        can_turn(draft, segment, kind)
+        cutlass_editor::can_turn(draft, segment, kind)
     }
 
     fn selected_segment(&self) -> Option<&Segment> {
@@ -4146,7 +4135,7 @@ impl Shell {
                 "the clip is not on the timeline".to_owned(),
             ));
         };
-        if !can_turn(draft, segment, kind) {
+        if !cutlass_editor::can_turn(draft, segment, kind) {
             return Err(ShellError::Unavailable(refusal.to_owned()));
         }
         Ok(segment_id)
@@ -5811,29 +5800,6 @@ fn fade_micros(seconds: f64) -> Result<Micros, ShellError> {
     Ok(Micros(microseconds as i64))
 }
 
-fn can_turn(draft: &Draft, segment: &Segment, kind: &TrackType) -> bool {
-    match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(_) | MaterialRef::Text(_) | MaterialRef::Draft(_)) => true,
-        Some(MaterialRef::Other(_))
-            if draft
-                .materials
-                .stickers
-                .iter()
-                .any(|item| item.id == segment.material_id) =>
-        {
-            true
-        }
-        Some(_) => false,
-        None => matches!(
-            kind,
-            TrackType::Text
-                | TrackType::TextToVideoText
-                | TrackType::Sticker
-                | TrackType::Composition
-        ),
-    }
-}
-
 /// One clockwise quarter turn. The preview's positive angle is the other way.
 fn stored_crop(draft: &Draft, segment: &Segment) -> Option<Crop> {
     match draft.materials.get(segment.material_id.as_str()) {
@@ -6074,22 +6040,6 @@ struct CardWave {
     duration: i64,
     columns: usize,
     levels: Arc<[f32]>,
-}
-
-fn spread_peaks(peaks: &cutlass_engine::Peaks, duration: i64, columns: usize) -> Vec<f32> {
-    let length = if duration > 0 {
-        duration
-    } else {
-        peaks.levels.len() as i64 * 1_000_000 / i64::from(cutlass_engine::BUCKETS_PER_SECOND)
-    };
-    let count = columns.max(1) as i64;
-    (0..count)
-        .map(|column| {
-            let from = Micros(length * column / count);
-            let to = Micros((length * (column + 1) / count - 1).max(from.0));
-            peaks.level(from, to)
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -7031,18 +6981,6 @@ mod tests {
         let again = desktop.material_wave("song", 64).unwrap();
         assert!(std::sync::Arc::ptr_eq(&card, &again));
         assert_eq!(desktop.material_wave("song", 32).unwrap().len(), 32);
-    }
-
-    #[test]
-    fn a_library_waveform_takes_the_loudest_level_in_each_column() {
-        let peaks = cutlass_engine::Peaks {
-            levels: vec![0.1, 0.9, 0.2, 0.3, 0.0, 0.5],
-            complete: true,
-        };
-        // 60 ms of sound across three columns, 20 ms each.
-        assert_eq!(super::spread_peaks(&peaks, 60_000, 3), [0.9, 0.3, 0.5]);
-        // Without a stored length, the peaks say how long the file is.
-        assert_eq!(super::spread_peaks(&peaks, 0, 2), [0.9, 0.5]);
     }
 
     #[test]

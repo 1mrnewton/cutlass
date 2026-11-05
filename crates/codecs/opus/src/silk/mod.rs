@@ -5,6 +5,7 @@ mod fixed;
 mod indices;
 mod nlsf;
 mod pulses;
+mod stereo;
 mod tables;
 
 use crate::range::RangeDecoder;

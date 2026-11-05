@@ -51,7 +51,7 @@ prints decode and encode throughput beside `cwebp` and `dwebp` on one 1920×1080
 ## Gaps
 
 - No trellis quantization, so lossy methods 5 and 6 are a second pass with fitted costs and not libwebp's trellis. The quality gates pass without it.
-- Lossless efforts 3 and above are three to five times slower than `cwebp -z` at the same effort, and 1.5 to 3 percent larger.
+- Lossless efforts 3 and above are three to five times slower than `cwebp -z` at the same effort (eleven at effort 8), and 1.5 to 3 percent larger.
 - Lossy encoding is several times slower than `cwebp` (see STATUS.md). One thread; no SIMD.
 - `EXIF` and `XMP ` are skipped on decode and not written. ICC is passed through, not applied.
 - No incremental decoding: a packet is a whole still or a whole frame.

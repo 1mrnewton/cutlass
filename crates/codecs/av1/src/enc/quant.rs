@@ -308,6 +308,9 @@ pub struct QuantScratch {
     /// Dequantized levels of the candidate being reconstructed.
     dqbuf: [i32; 32 * 32],
     dist: Dist,
+    /// Coefficients of each transform type the quick estimate ranked (up
+    /// to 16x16, which every type with more than DCT_DCT allows).
+    ranked: [i32; 15 * 16 * 16],
 }
 
 impl QuantScratch {
@@ -320,6 +323,7 @@ impl QuantScratch {
             lv: [0; 32 * 32],
             rec: [Rec::default(); 32 * 32],
             dqbuf: [0; 32 * 32],
+            ranked: [0; 15 * 16 * 16],
             dist: Dist {
                 ac: [0; 32 * 32],
                 q2: [0; 32 * 32],
@@ -716,6 +720,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             rec,
             dqbuf,
             dist,
+            ranked,
         } = &mut *qs;
         let sp = &src.planes[plane];
         let cp = &self.cur.planes[plane];
@@ -783,12 +788,17 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         dist.lim = 1i64 << (7 + bd);
         dist.g2 = g2;
         let keep = self.enc.tx_type_keep as usize;
-        if keep > 0 && nc > keep && !lossless {
+        // Where the full search finds each candidate's coefficients
+        // computed already (index into `ranked`).
+        let mut done = [None::<usize>; 16];
+        let n = tw * th;
+        if keep > 0 && nc > keep && !lossless && n <= 16 * 16 {
             // Rank the other types by a quick estimate (rounded levels, a
             // rate proxy) and run the full search on the best few only.
-            let mut est = [(0f64, 0u8); 16];
+            let mut est = [(0f64, 0u8, 0usize); 16];
             for (k, &t) in cands[1..nc].iter().enumerate() {
-                fwd_txfm(&res[..], w, &mut coefs[..], tx as usize, t as usize, bd);
+                let coefs = &mut ranked[k * n..(k + 1) * n];
+                fwd_txfm(&res[..], w, coefs, tx as usize, t as usize, bd);
                 let qi = self.dequant_info(plane, t, tx);
                 let den = i64::from(qi.denom);
                 let (mut d, mut bits) = (0f64, 0f64);
@@ -819,18 +829,21 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     .map_or(0, |e| e + 1);
                 bits += 0.5 * eob as f64;
                 let rate = bits * f64::from(BIT) + f64::from(self.tx_type_cost(tx, t));
-                est[k] = (d * g2 + lam * rate, t);
+                est[k] = (d * g2 + lam * rate, t, k);
             }
             let est = &mut est[..nc - 1];
             est.sort_by(|a, b| a.0.total_cmp(&b.0));
             for k in 0..keep - 1 {
                 cands[1 + k] = est[k].1;
+                done[1 + k] = Some(est[k].2);
             }
             nc = keep;
         }
-        for &t in &cands[..nc] {
+        for (i, &t) in cands[..nc].iter().enumerate() {
             if lossless {
                 fwd_wht4x4(&res[..], w, &mut coefs[..]);
+            } else if let Some(k) = done[i] {
+                coefs[..n].copy_from_slice(&ranked[k * n..(k + 1) * n]);
             } else {
                 fwd_txfm(&res[..], w, &mut coefs[..], tx as usize, t as usize, bd);
             }

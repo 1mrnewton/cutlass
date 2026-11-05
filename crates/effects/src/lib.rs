@@ -27,7 +27,9 @@ pub mod package;
 pub mod recipe;
 pub mod source;
 
-pub use adjust::{ADJUSTMENT, Adjust, AdjustKey, adjust_rgba, segment_adjust};
+pub use adjust::{
+    ADJUSTMENT, AUTO_KEYS, Adjust, AdjustKey, adjust_rgba, auto_adjust, segment_adjust,
+};
 pub use blend::{BLEND_WGSL, blend_pixel, blend_unit, segment_blend};
 pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,
@@ -37,8 +39,8 @@ pub use catalog::{
 pub use chroma::{CHROMA, Chroma, parse_hex, segment_chroma};
 pub use grade::{
     COLOR_CURVES, COLOR_WHEELS, Colour, CurveChannel, Grade, HSL, HSL_COLORS, MAX_CURVE_POINTS,
-    Wheel, WheelSetting, curve_table, points_json, segment_colour, segment_grade, tidy_points,
-    wheel_json,
+    Wheel, WheelSetting, curve_table, is_colour_work, points_json, segment_colour, segment_grade,
+    tidy_points, wheel_json,
 };
 pub use look::{FILTER, LOOK_PREFIX, LOOKS, Look, bundled_look, look_poster, segment_look};
 pub use lut::{ClipLut, KEPT_SIZE, LUT, Lut, LutError, MAX_CUBE_SIZE, segment_lut};

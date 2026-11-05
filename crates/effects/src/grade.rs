@@ -287,6 +287,25 @@ impl Colour {
     }
 }
 
+/// `material` is colour work: an adjust slider, a LUT, an HSL colour,
+/// curves, wheels, or a colour mask. A chroma key and a mask are not.
+#[must_use]
+pub fn is_colour_work(material: MaterialRef<'_>) -> bool {
+    match material {
+        MaterialRef::Effect(effect) => {
+            crate::adjust::AdjustKey::from_kind(&effect.kind).is_some()
+                || effect.kind == crate::lut::LUT
+        }
+        MaterialRef::Hsl(_) => true,
+        MaterialRef::Other(raw) => {
+            raw.kind == COLOR_CURVES
+                || raw.kind == COLOR_WHEELS
+                || raw.kind == crate::mask::COLOR_MASK
+        }
+        _ => false,
+    }
+}
+
 /// The colour work `segment` lists among its extra materials.
 #[must_use]
 pub fn segment_colour(draft: &Draft, segment: &Segment) -> Colour {

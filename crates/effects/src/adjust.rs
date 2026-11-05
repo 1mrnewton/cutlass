@@ -386,11 +386,96 @@ fn box_blur(colour: &[[f32; 3]], width: usize, height: usize, radius: usize) -> 
     pass(&pass(colour, true), false)
 }
 
+/// The sliders auto adjust sets; it leaves the others as they are.
+pub const AUTO_KEYS: [AdjustKey; 5] = [
+    AdjustKey::Exposure,
+    AdjustKey::Contrast,
+    AdjustKey::Temperature,
+    AdjustKey::Tint,
+    AdjustKey::Saturation,
+];
+
+/// Slider values that even out a picture, premultiplied RGBA: its middle
+/// brightness toward mid grey, a flat range stretched, a colour cast
+/// toward neutral, and dull colour lifted a little. Clear pixels do not
+/// count. Each value is gentle and rounded to hundredths; a picture that
+/// needs nothing gets zeros.
+#[must_use]
+pub fn auto_adjust(rgba: &[u8]) -> Adjust {
+    let mut levels = [0_u32; 256];
+    let mut sums = [0.0_f64; 3];
+    let mut chroma = 0.0_f64;
+    let mut count = 0_u32;
+    for pixel in rgba.as_chunks::<4>().0 {
+        if pixel[3] < 128 {
+            continue;
+        }
+        let alpha = f32::from(pixel[3]) / 255.0;
+        let colour = [0, 1, 2].map(|index| (f32::from(pixel[index]) / 255.0 / alpha).min(1.0));
+        let level = luma(colour);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bin = (level * 255.0).round().clamp(0.0, 255.0) as usize;
+        levels[bin] += 1;
+        for (sum, value) in sums.iter_mut().zip(colour) {
+            *sum += f64::from(value);
+        }
+        let high = colour[0].max(colour[1]).max(colour[2]);
+        let low = colour[0].min(colour[1]).min(colour[2]);
+        chroma += f64::from(high - low);
+        count += 1;
+    }
+    let mut adjust = Adjust::default();
+    if count == 0 {
+        return adjust;
+    }
+    let at = |share: f64| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let wanted = (f64::from(count) * share).ceil().max(1.0) as u32;
+        let mut seen = 0;
+        for (bin, &many) in levels.iter().enumerate() {
+            seen += many;
+            if seen >= wanted {
+                #[allow(clippy::cast_precision_loss)]
+                return bin as f32 / 255.0;
+            }
+        }
+        1.0
+    };
+    let (low, middle, high) = (at(0.01), at(0.5), at(0.99));
+    #[allow(clippy::cast_possible_truncation)]
+    let [r, g, b] = sums.map(|sum| (sum / f64::from(count)) as f32);
+    #[allow(clippy::cast_possible_truncation)]
+    let chroma = (chroma / f64::from(count)) as f32;
+    let tidy = |value: f32, reach: f32| {
+        let value = (value.clamp(-reach, reach) * 100.0).round() / 100.0;
+        if value.abs() < 0.05 { 0.0 } else { value }
+    };
+    // Exposure doubles the light at 0.5.
+    let gain = 0.47 / middle.max(0.02);
+    adjust.set(AdjustKey::Exposure, tidy(gain.log2() / 2.0, 0.6));
+    let range = (high - low).max(0.02);
+    if range < 0.8 {
+        adjust.set(AdjustKey::Contrast, tidy(0.9 / range - 1.0, 0.4));
+    }
+    // Temperature scales red up and blue down by a fifth at 1; tint
+    // scales green down.
+    if r + b > 0.02 {
+        adjust.set(AdjustKey::Temperature, tidy((b - r) / (r + b) / 0.2, 1.0));
+    }
+    if g > 0.02 {
+        adjust.set(AdjustKey::Tint, tidy((1.0 - (r + b) / 2.0 / g) / 0.2, 0.5));
+    }
+    if chroma < 0.2 && chroma > 0.02 {
+        adjust.set(AdjustKey::Saturation, tidy((0.2 - chroma) * 1.5, 0.25));
+    }
+    adjust
+}
+
 #[cfg(test)]
 mod tests {
     use cutlass_model::{Draft, MaterialEffect, MaterialId, Segment, TimeRange};
 
-    use super::{Adjust, AdjustKey, adjust_rgba, segment_adjust};
+    use super::{AUTO_KEYS, Adjust, AdjustKey, adjust_rgba, auto_adjust, segment_adjust};
 
     fn grey(level: u8, alpha: u8) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -525,5 +610,48 @@ mod tests {
         let read = segment_adjust(&draft, &segment);
         assert!((read.get(AdjustKey::Temperature) - 0.4).abs() < 1e-6);
         assert_eq!(read.get(AdjustKey::Exposure), 0.0);
+    }
+
+    fn mean(rgba: &[u8]) -> [f32; 3] {
+        let pixels = rgba.as_chunks::<4>().0;
+        #[allow(clippy::cast_precision_loss)]
+        let many = pixels.len() as f32;
+        [0, 1, 2].map(|index| pixels.iter().map(|p| f32::from(p[index])).sum::<f32>() / many)
+    }
+
+    #[test]
+    fn auto_adjust_evens_out_a_dark_picture_and_a_blue_cast() {
+        // A full ramp of greys needs nothing.
+        let ramp: Vec<u8> = (0..=255_u8).flat_map(|v| [v, v, v, 255]).collect();
+        let none = auto_adjust(&ramp);
+        for key in AUTO_KEYS {
+            assert_eq!(none.get(key), 0.0, "{key:?}");
+        }
+        assert!(auto_adjust(&[0, 0, 0, 0].repeat(4)).is_identity());
+
+        // A dark, flat picture is brightened and stretched.
+        let dark: Vec<u8> = (20..60_u8).flat_map(|v| [v, v, v, 255]).collect();
+        let lift = auto_adjust(&dark);
+        assert!(lift.get(AdjustKey::Exposure) > 0.3, "{lift:?}");
+        assert!(lift.get(AdjustKey::Contrast) > 0.0, "{lift:?}");
+        let mut fixed = dark.clone();
+        adjust_rgba(&lift, &mut fixed, 40, 1, 0);
+        assert!(
+            mean(&fixed)[0] > mean(&dark)[0] + 30.0,
+            "{:?}",
+            mean(&fixed)
+        );
+
+        // A blue cast is warmed toward grey.
+        let blue: Vec<u8> = (0..64_u8)
+            .flat_map(|v| [80 + v, 100 + v, 150 + v, 255])
+            .collect();
+        let warm = auto_adjust(&blue);
+        assert!(warm.get(AdjustKey::Temperature) > 0.2, "{warm:?}");
+        let mut fixed = blue.clone();
+        adjust_rgba(&warm, &mut fixed, 64, 1, 0);
+        let [r, _, b] = mean(&fixed);
+        let [r0, _, b0] = mean(&blue);
+        assert!((b - r).abs() < (b0 - r0).abs() / 2.0, "{r} {b}");
     }
 }

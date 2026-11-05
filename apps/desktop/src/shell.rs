@@ -364,7 +364,7 @@ pub struct SoundFormat {
     pub codec: CodecId,
     pub sample_rate: u32,
     pub channels: u16,
-    /// Bits a second; PCM ignores it.
+    /// Bits a second; the lossless codecs, ALAC and PCM, ignore it.
     pub bitrate: u32,
 }
 
@@ -386,10 +386,10 @@ impl SoundFormat {
     fn export(self) -> cutlass_export::AudioExport {
         cutlass_export::AudioExport {
             codec: self.codec,
-            bitrate: if self.codec == CodecId::Pcm {
-                0
-            } else {
+            bitrate: if self.codec == CodecId::Aac {
                 self.bitrate
+            } else {
+                0
             },
             sample_rate: self.sample_rate,
             channels: self.channels,

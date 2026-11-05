@@ -56,6 +56,8 @@ pub fn register_codecs_with(
     cutlass_av1::register_encoders(&mut encoders);
     cutlass_pcm::register_decoders(&mut decoders);
     cutlass_pcm::register_encoders(&mut encoders);
+    cutlass_alac::register_decoders(&mut decoders);
+    cutlass_alac::register_encoders(&mut encoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_h264::register_encoders(&mut encoders);
     (decoders, encoders)
@@ -228,6 +230,27 @@ mod tests {
         let packets = encoder.push(&AudioInput { pcm }).expect("encode");
         assert_eq!(packets.len(), 1);
         assert!(!packets[0].data.is_empty());
+    }
+
+    #[test]
+    fn alac_opens_for_import_and_export() {
+        use cutlass_decode::{ChannelLayout, SampleFormat};
+
+        let (decoders, encoders) = super::register_codecs();
+        let mut spec = CodecParams::audio(CodecId::Alac, 48_000, ChannelLayout::stereo());
+        spec.sample_format = Some(SampleFormat::F32);
+        let encoder = encoders.open(&spec).expect("alac encoder");
+        assert_eq!(
+            cutlass_encode::Encoder::codec(encoder.as_ref()),
+            CodecId::Alac
+        );
+        spec.extra = cutlass_alac::Cookie::new(cutlass_alac::AlacConfig::new(48_000, 2, 24, 4096))
+            .to_bytes();
+        let decoder = decoders.open(&spec).expect("alac decoder");
+        assert_eq!(
+            cutlass_decode::Decoder::codec(decoder.as_ref()),
+            CodecId::Alac
+        );
     }
 
     #[test]

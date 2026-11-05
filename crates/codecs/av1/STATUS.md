@@ -48,23 +48,26 @@ from the specification text.
 ### Speed
 
 `bench1080.ivf`: 1920x1080, 60 frames, 8-bit 4:2:0 (libaom). Wall time
-including process start, best of 3; same machine and load for both.
+including process start, median of 7 interleaved runs; same machine and
+load for both (load average 7-9 on the 4 processors). CPU is user plus
+system time.
 
-| Threads | cutlass-av1 | libdav1d (FFmpeg) |
-| --- | --- | --- |
-| 1 | 0.64 s | 0.40 s |
-| 2 | 0.56 s | 0.41 s |
-| 3 | 0.60 s | 0.39 s |
-| 4 | 0.52 s | 0.37 s |
+| Threads | cutlass-av1 | libdav1d (FFmpeg) | cutlass-av1 CPU | libdav1d CPU |
+| --- | --- | --- | --- | --- |
+| 1 | 0.74 s | 0.45 s | 0.70 s | 0.43 s |
+| 2 | 0.44 s | 0.31 s | 0.85 s | 0.49 s |
+| 3 | 0.49 s | 0.32 s | 0.89 s | 0.52 s |
+| 4 | 0.41 s | 0.32 s | 0.93 s | 0.54 s |
 
-(Best of 6, interleaved, load average 8-9 on the 4 processors; processor
-time at 4 threads 0.93 s against libdav1d's 0.51 s, single threaded
-0.68 s against 0.40 s. Single threaded, callgrind counts 4.77G
-instructions against libdav1d's 2.3G; its coefficient decoding is about
-as costly as ours (1.2G), the rest is its assembly kernels. In earlier runs at a similar load the
-previous design, which parsed every frame on the calling thread, took
-0.85 s, 0.71 s and 0.85 s at 2, 3 and 4 threads. With the load average
-at 4-6 this decoder took 0.36-0.39 s at 4 threads.) Single
+(Best runs: 0.69, 0.41, 0.45 and 0.34 s against libdav1d's 0.40, 0.31,
+0.30 and 0.30 s. In the same interleaved runs the previous round's
+decoder took 0.75, 0.45, 0.49 and 0.40 s (medians); an 11-run comparison
+at 4 threads gave 0.53 s against its 0.56 s and libdav1d's 0.40 s.
+Single threaded, callgrind counts 4.72G instructions (4.77G before)
+against libdav1d's 2.3G; its coefficient decoding is about as costly as
+ours (1.2G), the rest is its assembly kernels. The previous design,
+which parsed every frame on the calling thread, took 0.85 s, 0.71 s and
+0.85 s at 2, 3 and 4 threads at a similar load.) Single
 threaded the decoder takes about 1.7x the time of libdav1d, which uses
 hand-written assembly for its kernels; this crate relies on
 autovectorization only (baseline x86-64: SSE2). With 2-4 threads the gap
@@ -79,12 +82,16 @@ end). Frames no later frame depends on (half of bench1080) are parsed
 beside the chain of referenced ones. With one tile column, a frame's
 task hands each chunk of parsed blocks to a backend thread that
 reconstructs it a superblock row behind and runs deblocking (in place,
-one row behind) and CDEF and loop restoration (two rows behind). A
-reconstruction that reads a reference still being decoded copies the
-rows that reference publishes as final (only frames something waits for
-publish them), waiting per chunk of blocks for the rows the chunk's
-motion may reach (warped blocks and scaled references wait for the whole
-picture), and reads the finished picture in place once it is done.
+as soon as a row is reconstructed: the row below predicts from a saved
+copy of its unfiltered bottom row, as in libdav1d) and CDEF and loop
+restoration (one row behind). A reconstruction that reads a reference
+still being decoded reads the bands of rows that reference publishes as
+final (only frames something waits for publish them; the bands are
+shared, not copied): a block whose rows lie in one band is predicted
+from it in place, others go through the edge-emulation copy. It waits
+per chunk of blocks for the rows the chunk's motion may reach (warped
+blocks and scaled references wait for the whole picture), and reads the
+finished picture in place once it is done.
 Multi-tile and super-resolved frames are decoded whole by their task
 once the references are done. Up to as many frames as threads decode at
 once; `Av1Core::decode_delayed`/`drain` return the shown frames with a
@@ -96,17 +103,25 @@ parallel yet. The parse is no longer the critical path: on this file the
 referenced frames' parses take about 0.2 s of processor time, the others
 0.13 s, reconstruction and filters 0.55 s. Threaded decoding costs about
 1.3x the processor time of single-threaded decoding (the parse records
-blocks, about 70 bytes each, that reconstruction replays; page faults
-of the larger working set: about 39k against 14k, mostly pictures,
-copies of references still decoding and published bands), so on a loaded machine the threaded times
-suffer more than libdav1d's (0.57 s of processor time at 4 threads,
-against 0.9-1.0 s). The `prof` feature prints the stage times, the
+blocks, about 70 bytes each, that reconstruction replays, and writes
+the mode info a second time; callgrind counts 6% more instructions at 4
+threads; page faults of the larger working set: about 38-40k against
+14k, mostly pictures, published bands and block logs, with a resident
+peak near 155 MB against 58 MB), so on a loaded machine the threaded
+times suffer more than libdav1d's (libdav1d's processor time grows by
+about a quarter from 1 to 4 threads, about as much as ours, so most of
+the growth is the shared cores and caches). Frames others depend on get
+no priority over the others yet: every frame task has a thread of its
+own. The `prof` feature prints the stage times, the
 processor time of each kind of thread and the page faults from
 `av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
-4.77G instructions single threaded, and the parsing thread at 2.14G with
-4 threads. CDEF filters fixed-stride padded blocks one 8-lane vector at a
+4.72G instructions single threaded. The largest kernels: CDEF 0.75G
+(filter 0.46G, direction search 0.16G, which stays scalar: attempts to
+vectorize its weighted squares with 16-bit products made the compiler
+scalarize the partial sums instead), motion compensation 0.55G, loop
+filter 0.27G, inverse transforms about 0.3G. CDEF filters fixed-stride padded blocks one 8-lane vector at a
 time (0.46G of the total), and the motion field projection is shared by
 runs of equal motion vectors. CDEF and loop restoration filter the
 deblocked picture in place: CDEF keeps the pre-CDEF rows next to each

@@ -63,7 +63,8 @@ system time.
 0.30 and 0.30 s. In the same interleaved runs the previous round's
 decoder took 0.75, 0.45, 0.49 and 0.40 s (medians); an 11-run comparison
 at 4 threads gave 0.53 s against its 0.56 s and libdav1d's 0.40 s.
-Single threaded, callgrind counts 4.72G instructions (4.77G before)
+Single threaded, callgrind counts 4.60G instructions (4.72G before
+the MC pass rework below, 4.77G before that)
 against libdav1d's 2.3G; its coefficient decoding is about as costly as
 ours (1.2G), the rest is its assembly kernels. The previous design,
 which parsed every frame on the calling thread, took 0.85 s, 0.71 s and
@@ -117,10 +118,15 @@ processor time of each kind of thread and the page faults from
 `av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
-4.72G instructions single threaded. The largest kernels: CDEF 0.75G
+4.60G instructions single threaded. The largest kernels: CDEF 0.75G
 (filter 0.46G, direction search 0.16G, which stays scalar: attempts to
 vectorize its weighted squares with 16-bit products made the compiler
-scalarize the partial sums instead), motion compensation 0.55G, loop
+scalarize the partial sums instead), motion compensation 0.43G (the
+vertical passes read a window of row slices checked once per row, and
+the 2D path for widths 2-16 filters 1-4 rows of the intermediate as one
+8/16-lane step with pre-splat taps: the compound hv kernel went from
+0.25G to 0.17G; whole-sample copies of constant widths no longer call
+memcpy per row), loop
 filter 0.27G, inverse transforms about 0.3G. CDEF filters fixed-stride padded blocks one 8-lane vector at a
 time (0.46G of the total), and the motion field projection is shared by
 runs of equal motion vectors. CDEF and loop restoration filter the

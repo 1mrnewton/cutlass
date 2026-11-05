@@ -9046,6 +9046,38 @@ mod tests {
     }
 
     #[test]
+    fn an_imported_animated_webp_plays_its_frames_and_loops() {
+        let temp = Temp::new();
+        empty_project(&temp.path);
+        // Six frames: 100, 70, 90, 60, 50, and 40 ms; lossy and lossless,
+        // blended and not, disposed and not.
+        let webp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/codecs/webp/tests/fixtures/anim-mux.webp");
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.import_file(&webp).unwrap();
+        let id = desktop.draft().unwrap().materials.videos[0]
+            .id
+            .as_str()
+            .to_owned();
+        desktop.pixel_size = 0.001;
+        desktop
+            .drop_medium(&id, 0.0, crate::tokens::LANE_HEIGHT / 2.0)
+            .unwrap();
+        let mut seen = |time: i64| {
+            desktop.seek(Micros(time));
+            digest(&desktop.preview_bytes().unwrap().rgba)
+        };
+        let first = seen(50_000);
+        let third = seen(200_000);
+        let last = seen(390_000);
+        assert_ne!(first, third, "the third frame differs from the first");
+        assert_ne!(third, last);
+        // One round is 410 ms; 460 ms is the first frame again.
+        assert_eq!(seen(460_000), first);
+    }
+
+    #[test]
     fn align_puts_the_pictures_edge_on_the_canvas_edge() {
         use cutlass_editor::{NoText, StageAlign, stage_box};
         let temp = Temp::new();

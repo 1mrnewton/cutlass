@@ -35,6 +35,9 @@ pub fn register_codecs_with(
 ) -> (cutlass_decode::DecodeFactory, cutlass_encode::EncodeFactory) {
     let mut decoders = cutlass_decode::DecodeFactory::new();
     let mut encoders = cutlass_encode::EncodeFactory::new();
+    // WebP decodes in Rust ahead of the platform codecs, so a file decodes
+    // the same on every platform and an animated one keeps its canvas.
+    cutlass_webp::register_decoders(&mut decoders);
     #[cfg(target_os = "macos")]
     {
         // Pictures stay in their IOSurface; the preview samples them in place.
@@ -183,6 +186,54 @@ mod tests {
         encoders
             .open(&picture(CodecId::Jpeg, 8, 8))
             .expect("jpeg encoder");
+    }
+
+    /// The app's WebP decoder is the Rust one, ahead of ImageIO: an
+    /// animation's later packets paint onto the canvas the first packet
+    /// started, which only `cutlass-webp` keeps.
+    #[test]
+    fn the_desktop_decodes_webp_in_rust_ahead_of_the_platform() {
+        use cutlass_decode::{Decoder, Output, Packet, PictureSamples};
+
+        let file = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/codecs/webp/tests/fixtures/anim-mux.webp"),
+        )
+        .unwrap();
+        // The first frame's packet ends where the second `ANMF` starts.
+        let second = file
+            .windows(4)
+            .enumerate()
+            .filter(|(_, word)| *word == b"ANMF")
+            .nth(1)
+            .unwrap()
+            .0;
+        let packets = [file[..second].to_vec(), file[second..].to_vec()];
+        let samples = |decoder: &mut dyn Decoder| -> Vec<Vec<u8>> {
+            let mut out = Vec::new();
+            for data in &packets {
+                for output in decoder
+                    .push(&Packet::audio(data.clone(), 0, 0, 1000))
+                    .unwrap()
+                {
+                    let Output::Picture(picture) = output else {
+                        panic!("picture");
+                    };
+                    let PictureSamples::Cpu(bytes) = picture.samples() else {
+                        panic!("the platform decoder answered");
+                    };
+                    out.push(bytes.to_vec());
+                }
+            }
+            out
+        };
+        let (decoders, _) = super::register_codecs();
+        let mut app = decoders.open(&picture(CodecId::Webp, 40, 30)).unwrap();
+        assert_eq!(Decoder::codec(app.as_ref()), CodecId::Webp);
+        let mut rust = cutlass_webp::WebpDecoder::open(&picture(CodecId::Webp, 40, 30)).unwrap();
+        let from_app = samples(app.as_mut());
+        assert_eq!(from_app.len(), 6);
+        assert_eq!(from_app, samples(&mut rust));
     }
 
     #[test]

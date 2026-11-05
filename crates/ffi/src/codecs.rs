@@ -1,7 +1,9 @@
 //! The containers and codecs a phone opens.
 //!
-//! The Apple decoders go first on an Apple phone. A codec they decline falls
-//! through to the Rust decoder of the same id.
+//! The Apple decoders go first on an Apple phone, except WebP: its Rust
+//! decoder goes ahead of them so a WebP decodes the same everywhere and an
+//! animated one plays. A codec the Apple decoders decline falls through to
+//! the Rust decoder of the same id.
 
 use std::fs::File;
 use std::path::Path;
@@ -25,10 +27,14 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// The platform decoders for this OS, then PNG, GIF, JPEG, AAC, H.264, and PCM.
+/// WebP, the platform decoders for this OS, then PNG, GIF, JPEG, AAC,
+/// H.264, and PCM.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
+    // Ahead of the platform: ImageIO gives one picture per packet and does
+    // not keep an animation's canvas.
+    cutlass_webp::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
@@ -88,4 +94,48 @@ fn open_still(path: &Path) -> Result<Box<dyn Demux>, OpenError> {
         length,
         still_limits(),
     ))?))
+}
+
+#[cfg(test)]
+mod tests {
+    use cutlass_decode::{
+        CodecId, CodecParams, Decoder, Output, Packet, PictureSamples, PixelFormat,
+    };
+
+    /// A phone decodes WebP with the Rust decoder even where ImageIO is
+    /// registered: the canvas an animation's first packet starts is kept
+    /// for the frames in the next packet.
+    #[test]
+    fn a_phone_decodes_webp_in_rust_ahead_of_the_platform() {
+        let file = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../codecs/webp/tests/fixtures/anim-mux.webp"),
+        )
+        .expect("fixture");
+        let second = file
+            .windows(4)
+            .enumerate()
+            .filter(|(_, word)| *word == b"ANMF")
+            .nth(1)
+            .map(|(at, _)| at)
+            .expect("two frames");
+        let params = CodecParams::with_format(CodecId::Webp, 40, 30, PixelFormat::Rgba8);
+        let mut decoder = super::decoders().open(&params).expect("webp");
+        assert_eq!(Decoder::codec(decoder.as_ref()), CodecId::Webp);
+        let mut frames = 0;
+        for data in [&file[..second], &file[second..]] {
+            for output in decoder
+                .push(&Packet::audio(data.to_vec(), 0, 0, 1000))
+                .expect("packet")
+            {
+                let Output::Picture(picture) = output else {
+                    panic!("picture");
+                };
+                assert!(matches!(picture.samples(), PictureSamples::Cpu(_)));
+                assert_eq!((picture.info().width, picture.info().height), (40, 30));
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 6);
+    }
 }

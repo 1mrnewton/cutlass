@@ -1,22 +1,27 @@
 //! Inverse transforms (RFC 6386 section 14) and the loop filter (section
 //! 15), in the integer arithmetic of the reference decoder.
 
-fn mul1(a: i32) -> i32 {
-    ((a * 20_091) >> 16) + a
+use std::num::Wrapping;
+
+// The arithmetic wraps in 32 bits, as it does in libwebp's C on the
+// machines it runs on. A legal stream never gets there; a hostile one must
+// not panic, and still decodes the way `dwebp` decodes it.
+fn mul1(a: Wrapping<i32>) -> Wrapping<i32> {
+    ((a * Wrapping(20_091)) >> 16) + a
 }
 
-fn mul2(a: i32) -> i32 {
-    (a * 35_468) >> 16
+fn mul2(a: Wrapping<i32>) -> Wrapping<i32> {
+    (a * Wrapping(35_468)) >> 16
 }
 
 /// Section 14.3: add the inverse DCT of `coeffs` to the 4x4 block at `at`.
 pub(crate) fn add_idct(coeffs: &[i16; 16], buf: &mut [u8], at: usize, stride: usize) {
-    let mut tmp = [0i32; 16];
+    let mut tmp = [Wrapping(0i32); 16];
     for col in 0..4 {
-        let c0 = i32::from(coeffs[col]);
-        let c1 = i32::from(coeffs[4 + col]);
-        let c2 = i32::from(coeffs[8 + col]);
-        let c3 = i32::from(coeffs[12 + col]);
+        let c0 = Wrapping(i32::from(coeffs[col]));
+        let c1 = Wrapping(i32::from(coeffs[4 + col]));
+        let c2 = Wrapping(i32::from(coeffs[8 + col]));
+        let c3 = Wrapping(i32::from(coeffs[12 + col]));
         let a = c0 + c2;
         let b = c0 - c2;
         let c = mul2(c1) - mul1(c3);
@@ -27,14 +32,14 @@ pub(crate) fn add_idct(coeffs: &[i16; 16], buf: &mut [u8], at: usize, stride: us
         tmp[col * 4 + 3] = a - d;
     }
     for row in 0..4 {
-        let dc = tmp[row] + 4;
+        let dc = tmp[row] + Wrapping(4);
         let a = dc + tmp[8 + row];
         let b = dc - tmp[8 + row];
         let c = mul2(tmp[4 + row]) - mul1(tmp[12 + row]);
         let d = mul1(tmp[4 + row]) + mul2(tmp[12 + row]);
         let line = &mut buf[at + row * stride..at + row * stride + 4];
         for (pixel, value) in line.iter_mut().zip([a + d, b + c, b - c, a - d]) {
-            *pixel = (i32::from(*pixel) + (value >> 3)).clamp(0, 255) as u8;
+            *pixel = (i32::from(*pixel) + (value.0 >> 3)).clamp(0, 255) as u8;
         }
     }
 }
@@ -234,6 +239,22 @@ pub(crate) fn normal(
 #[cfg(test)]
 mod tests {
     use super::{add_idct, inverse_wht};
+
+    #[test]
+    fn coefficients_at_the_sixteen_bit_edges_wrap_and_do_not_panic() {
+        for value in [i16::MAX, i16::MIN] {
+            let mut buf = [128u8; 16];
+            add_idct(&[value; 16], &mut buf, 0, 4);
+            let mut alternating = [value; 16];
+            for (index, c) in alternating.iter_mut().enumerate() {
+                if index % 3 == 0 {
+                    *c = c.wrapping_neg();
+                }
+            }
+            add_idct(&alternating, &mut buf, 0, 4);
+            let _ = inverse_wht(&[value; 16]);
+        }
+    }
 
     #[test]
     fn a_lone_dc_adds_a_flat_offset() {

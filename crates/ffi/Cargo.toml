@@ -43,6 +43,7 @@ cutlass-flac = { path = "../codecs/flac", version = "0.1.0" }
 cutlass-mp3 = { path = "../codecs/mp3", version = "0.1.0" }
 cutlass-opus = { path = "../codecs/opus", version = "0.1.0" }
 cutlass-prores = { path = "../codecs/prores", version = "0.1.0" }
+cutlass-webp = { path = "../codecs/webp", version = "0.1.0" }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 cutlass-platform-apple = { path = "../platform-apple", version = "0.1.0" }

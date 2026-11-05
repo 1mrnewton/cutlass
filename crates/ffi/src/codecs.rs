@@ -1,9 +1,10 @@
 //! The containers and codecs a phone opens.
 //!
 //! Rust audio decoders (FLAC, MP3 and Opus) go first, so a file decodes the
-//! same on every platform, and a FLAC file bit-exactly. The Apple decoders
-//! come next on an Apple phone; a codec they decline falls through to the
-//! Rust decoder of the same id.
+//! same on every platform, and a FLAC file bit-exactly. WebP goes first too,
+//! because an animated file's later packets are bare frames that only its
+//! Rust decoder composes. The Apple decoders come next on an Apple phone; a
+//! codec they decline falls through to the Rust decoder of the same id.
 
 use std::fs::File;
 use std::path::Path;
@@ -31,16 +32,18 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// FLAC, MP3 and Opus, the platform decoders for this OS, then PNG, JPEG,
-/// AAC, H.264, PCM and ProRes.
+/// FLAC, MP3, Opus and WebP, the platform decoders for this OS, then PNG,
+/// JPEG, AAC, H.264, PCM and ProRes.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
     // Rust audio codecs go ahead of the platform ones, so FLAC, MP3 and Opus
-    // decode the same on the phone as on the desktop.
+    // decode the same on the phone as on the desktop; WebP follows the same
+    // rule.
     cutlass_flac::register_decoders(&mut decoders);
     cutlass_mp3::register_decoders(&mut decoders);
     cutlass_opus::register_decoders(&mut decoders);
+    cutlass_webp::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
@@ -344,5 +347,23 @@ mod tests {
             let mut platform = reversed.open(&spec).expect("platform encoder");
             assert_ne!(encode(platform.as_mut()), packets);
         }
+    }
+
+    /// A lossless 1x1 WebP of one opaque red pixel, as `cwebp -lossless` 1.6.0
+    /// wrote it.
+    const RED: [u8; 36] = [
+        0x52, 0x49, 0x46, 0x46, 0x1c, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x4c, 0x0f, 0x00, 0x00, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x07, 0x10, 0xfd, 0x8f, 0xfe,
+        0x07, 0x22, 0xa2, 0xff, 0x01, 0x00,
+    ];
+
+    #[test]
+    fn the_phone_decodes_webp_in_rust() {
+        let mut decoder = super::decoders()
+            .open(&CodecParams::video(CodecId::Webp, 1, 1))
+            .expect("webp decoder");
+        let packet = cutlass_decode::Packet::video(RED.to_vec(), 0, 0, 0, true);
+        let pictures = decoder.decode_picture(&packet).expect("decode");
+        assert_eq!(pictures[0].image.samples[..3], [255, 0, 0]);
     }
 }

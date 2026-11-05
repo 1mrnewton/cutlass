@@ -23,7 +23,7 @@ pub use config::{
     SidecarKind, SidecarRequest, VIDEO_SHORT_SIDES, coded_size, output_size, validate,
 };
 pub use movie::{
-    MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_gif, write_movie, write_sound,
+    MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_animation, write_movie, write_sound,
 };
 pub use prerender::{
     PREVIEW_SIDE, read_render_name, render_key, render_name, render_request, render_side, stand_in,

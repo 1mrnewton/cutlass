@@ -229,17 +229,17 @@ pub fn write_sound(
     written
 }
 
-/// Write `request` to `destination` as an animated GIF. `looped` plays it
-/// over and over; otherwise it plays once. The picture codec must be GIF,
-/// the container the still one, and there is no sound.
-pub fn write_gif(
+/// Write `request` to `destination` as an animated GIF or WebP. `looped`
+/// plays it over and over; otherwise it plays once. The picture codec must
+/// be GIF or WebP, the container the still one, and there is no sound.
+pub fn write_animation(
     sources: &MovieSources<'_>,
     request: &ExportRequest,
     looped: bool,
     destination: &Path,
     progress: &mut dyn FnMut(u64, u64) -> bool,
 ) -> Result<ExportResult, ExportError> {
-    if request.codec != CodecId::Gif
+    if !matches!(request.codec, CodecId::Gif | CodecId::Webp)
         || request.container != ContainerId::Still
         || request.audio.is_some()
     {
@@ -311,7 +311,7 @@ mod tests {
     use cutlass_eval::{NoFonts, ReaderFactory};
     use cutlass_model::{Draft, FrameRate, TimeRange};
 
-    use super::{MovieSources, is_mov, part_path, write_gif, write_sound};
+    use super::{MovieSources, is_mov, part_path, write_animation, write_sound};
     use crate::{AudioExport, ExportRequest};
 
     fn sound_request(codec: CodecId, container: ContainerId) -> ExportRequest {
@@ -485,7 +485,7 @@ mod tests {
             prores: crate::ProresProfile::Standard,
         };
         let path = dir.join("cut.gif");
-        let result = write_gif(&sources, &request, true, &path, &mut |_, _| true).unwrap();
+        let result = write_animation(&sources, &request, true, &path, &mut |_, _| true).unwrap();
         assert_eq!(result.frames.len(), 4);
         let bytes = std::fs::read(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -494,7 +494,78 @@ mod tests {
         assert_eq!(bytes.last(), Some(&0x3B));
         let mut sound = request.clone();
         sound.audio = Some(crate::MOVIE_SOUND);
-        assert!(write_gif(&sources, &sound, false, &path, &mut |_, _| true).is_err());
+        assert!(write_animation(&sources, &sound, false, &path, &mut |_, _| true).is_err());
+    }
+
+    #[test]
+    fn a_webp_export_writes_an_animation_the_still_container_reopens() {
+        use cutlass_container::{Demux, Input};
+        use cutlass_decode::Decoder;
+
+        let dir = std::env::temp_dir().join(format!("cutlass-webp-anim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut encoders = EncodeFactory::new();
+        cutlass_webp::register_encoders(&mut encoders);
+        let mut draft = Draft::empty("D");
+        draft.duration = cutlass_model::Micros(1_000_000);
+        let readers = ReaderFactory::new();
+        let sources = MovieSources {
+            draft: &draft,
+            root: None,
+            readers: &readers,
+            fonts: &NoFonts,
+            renderer: None,
+            encoders: &encoders,
+        };
+        let request = ExportRequest {
+            range: TimeRange::new(0, 400_000),
+            short_side: 240,
+            codec: CodecId::Webp,
+            bitrate: 0,
+            frame_rate: FrameRate {
+                numerator: 10,
+                denominator: 1,
+            },
+            container: ContainerId::Still,
+            audio: None,
+            sidecar: None,
+            late_by: 0,
+            constant_rate: false,
+            prores: crate::ProresProfile::Standard,
+        };
+        let path = dir.join("cut.webp");
+        let result = write_animation(&sources, &request, true, &path, &mut |_, _| true).unwrap();
+        assert_eq!(result.frames.len(), 4);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            (&bytes[..4], &bytes[8..16]),
+            (&b"RIFF"[..], &b"WEBPVP8X"[..])
+        );
+        let riff = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        assert_eq!(riff + 8, bytes.len());
+        assert_eq!(bytes.windows(4).filter(|w| w == b"ANMF").count(), 4);
+
+        // Reopened through the still container, every frame decodes to
+        // the whole canvas.
+        let length = bytes.len() as u64;
+        let mut demux = cutlass_still::StillDemux::open(Input::random(
+            std::io::Cursor::new(bytes),
+            length,
+            cutlass_still::still_limits(),
+        ))
+        .unwrap();
+        let params = cutlass_decode::CodecParams::video(CodecId::Webp, 0, 0);
+        let mut decoder = cutlass_webp::WebpDecoder::open(&params).unwrap();
+        let mut frames = 0;
+        while let Some(packet) = demux.read_packet().unwrap() {
+            let packet = cutlass_decode::Packet::video(packet.into_bytes(), 0, 0, 0, true);
+            for picture in decoder.decode_picture(&packet).unwrap() {
+                assert_eq!(picture.image.height, 240);
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 4);
     }
 
     #[test]

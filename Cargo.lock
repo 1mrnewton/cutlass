@@ -822,6 +822,7 @@ dependencies = [
  "cutlass-alac",
  "cutlass-codec",
  "cutlass-container",
+ "cutlass-decode",
  "cutlass-encode",
  "cutlass-eval",
  "cutlass-flac",
@@ -841,6 +842,7 @@ dependencies = [
  "cutlass-riff",
  "cutlass-session",
  "cutlass-still",
+ "cutlass-webp",
  "image",
  "serde_json",
 ]
@@ -883,6 +885,7 @@ dependencies = [
  "cutlass-still",
  "cutlass-storage",
  "cutlass-store",
+ "cutlass-webp",
 ]
 
 [[package]]
@@ -1312,8 +1315,12 @@ dependencies = [
 name = "cutlass-webp"
 version = "0.1.0"
 dependencies = [
+ "cutlass-codec",
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-png",
+ "cutlass-still",
 ]
 
 [[package]]

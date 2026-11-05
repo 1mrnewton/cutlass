@@ -33,6 +33,8 @@ use crate::spec::tables::{
     TX_TYPE_INTER_INV_SET2, TX_TYPE_INTER_INV_SET3, TX_TYPE_INTRA_INV_SET1, TX_TYPE_INTRA_INV_SET2,
 };
 
+use std::cell::Cell;
+
 use super::fwd_txfm::{fwd_txfm, fwd_wht4x4};
 use super::msac_enc::{COST_SHIFT, bool_cost, symbol_cost};
 
@@ -200,9 +202,44 @@ struct Costs<'a> {
     base_eob: &'a [[u16; 3]; 4],
     /// dc_sign cost for the sign of the DC coefficient of the candidate.
     dc_sign: u32,
+    /// Symbol costs computed so far (`u16::MAX`: not yet): coeff_base,
+    /// then coeff_br, then coeff_base_eob.
+    memo: [Cell<u16>; MEMO_LEN],
 }
 
-impl Costs<'_> {
+const MEMO_BR: usize = 42 * 4;
+const MEMO_EOB: usize = MEMO_BR + 21 * 4;
+const MEMO_LEN: usize = MEMO_EOB + 4 * 3;
+
+impl<'a> Costs<'a> {
+    fn new(
+        base: &'a [[u16; 4]; 42],
+        br: &'a [[u16; 4]; 21],
+        base_eob: &'a [[u16; 3]; 4],
+        dc_sign: u32,
+    ) -> Self {
+        Self {
+            base,
+            br,
+            base_eob,
+            dc_sign,
+            memo: std::array::from_fn(|_| Cell::new(u16::MAX)),
+        }
+    }
+
+    /// `symbol_cost(cdf, s)`, remembered at `memo[i]`.
+    #[inline(always)]
+    fn cached(&self, i: usize, cdf: &[u16], s: usize) -> u32 {
+        let m = &self.memo[i];
+        let v = m.get();
+        if v != u16::MAX {
+            return u32::from(v);
+        }
+        let c = symbol_cost(cdf, s);
+        m.set(c as u16);
+        c
+    }
+
     /// Cost of the coeff_br symbols and the Golomb remainder of level `l` (> 2).
     #[inline]
     fn tail(&self, br_ctx: usize, l: u32) -> u32 {
@@ -212,7 +249,7 @@ impl Costs<'_> {
         for _ in 0..4 {
             let wb = rem.min(3);
             rem -= wb;
-            cost += symbol_cost(cdf, wb as usize);
+            cost += self.cached(MEMO_BR + br_ctx * 4 + wb as usize, cdf, wb as usize);
             if wb < 3 {
                 break;
             }
@@ -231,7 +268,8 @@ impl Costs<'_> {
     /// Cost of level `l` at a non-eob scan index `c`.
     #[inline]
     fn level(&self, c: usize, base_ctx: usize, br_ctx: usize, l: u32) -> u32 {
-        let mut cost = symbol_cost(&self.base[base_ctx], l.min(3) as usize);
+        let s = l.min(3) as usize;
+        let mut cost = self.cached(base_ctx * 4 + s, &self.base[base_ctx], s);
         if l > 0 {
             cost += self.sign(c);
         }
@@ -244,7 +282,9 @@ impl Costs<'_> {
     /// Cost of level `l` (>= 1) as the eob coefficient at scan index `c`.
     #[inline]
     fn last(&self, c: usize, eob_ctx: usize, br_ctx: usize, l: u32) -> u32 {
-        let mut cost = symbol_cost(&self.base_eob[eob_ctx], (l.min(3) - 1) as usize) + self.sign(c);
+        let s = (l.min(3) - 1) as usize;
+        let mut cost =
+            self.cached(MEMO_EOB + eob_ctx * 3 + s, &self.base_eob[eob_ctx], s) + self.sign(c);
         if l > 2 {
             cost += self.tail(br_ctx, l);
         }
@@ -822,12 +862,12 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 continue;
             }
             let ptype = env.ptype;
-            let costs = Costs {
-                base: &self.cdf.coeff_base[env.tx_sz_ctx][ptype],
-                br: &self.cdf.coeff_br[env.tx_sz_ctx.min(3)][ptype],
-                base_eob: &self.cdf.coeff_base_eob[env.tx_sz_ctx][ptype],
-                dc_sign: bool_cost(self.cdf.dc_sign[ptype][env.dc_ctx][0], coefs[0] < 0),
-            };
+            let costs = Costs::new(
+                &self.cdf.coeff_base[env.tx_sz_ctx][ptype],
+                &self.cdf.coeff_br[env.tx_sz_ctx.min(3)][ptype],
+                &self.cdf.coeff_base_eob[env.tx_sz_ctx][ptype],
+                bool_cost(self.cdf.dc_sign[ptype][env.dc_ctx][0], coefs[0] < 0),
+            );
             // The rate of the last RDOQ pass, when it is the rate of the final
             // levels: each level's contexts come from positions later in the
             // scan, which that pass has already settled.

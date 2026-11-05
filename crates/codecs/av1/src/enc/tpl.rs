@@ -10,6 +10,8 @@
 //! is predicted then has a large `(intra + flow) / intra` ratio, its
 //! *importance*: spending bits on it pays off in every frame that follows.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::dec::frame::Picture;
 use crate::dsp::Pixel;
 
@@ -170,9 +172,126 @@ fn intra_cost<P: Pixel>(p: &Half<P>, x: usize, y: usize, bd: u32, pred: &mut [P]
     best
 }
 
+/// The intra cost of every block of a frame.
+fn intra_pass<P: Pixel>(y: &Half<P>, cols: usize, rows: usize, bd: u32) -> Vec<f64> {
+    let mut pred = vec![P::default(); HB * HB];
+    let mut out = Vec::with_capacity(cols * rows);
+    for br in 0..rows {
+        for bc in 0..cols {
+            let ic = intra_cost(y, bc * HB, br * HB, bd, &mut pred);
+            out.push(f64::from(ic).max(1.0));
+        }
+    }
+    out
+}
+
+/// Motion search of every block of `y` in `rp` (references `dist` frames
+/// apart), each block starting from the motion of its left and upper
+/// neighbours. Returns `(dist, mv)` per block.
+fn inter_pass<P: Pixel>(
+    y: &Half<P>,
+    rp: &Half<P>,
+    dist: i32,
+    cols: usize,
+    rows: usize,
+    bd: u32,
+) -> Vec<(u32, (i32, i32))> {
+    let params = MeParams {
+        max_range: (2 * dist).clamp(4, 16),
+        subpel: 1,
+        border: 0,
+        ..MeParams::default()
+    };
+    let cost = |r: i32, c: i32| -> u32 { (r.unsigned_abs() + c.unsigned_abs()) >> 3 };
+    let mut scratch = MeScratch::<P>::default();
+    let mut out: Vec<(u32, (i32, i32))> = Vec::with_capacity(cols * rows);
+    for br in 0..rows {
+        for bc in 0..cols {
+            let (x0, y0) = (bc * HB, br * HB);
+            let mut cands = [(0i32, 0i32); 3];
+            let mut nc = 1;
+            if bc > 0 {
+                cands[nc] = out[br * cols + bc - 1].1;
+                nc += 1;
+            }
+            if br > 0 {
+                cands[nc] = out[(br - 1) * cols + bc].1;
+                nc += 1;
+            }
+            let res = motion_search(
+                &mut scratch,
+                &y.data,
+                y.stride,
+                x0,
+                y0,
+                HB,
+                HB,
+                &rp.data,
+                rp.stride,
+                rp.w,
+                rp.h,
+                &cands[..nc],
+                &params,
+                &cost,
+                bd,
+            );
+            out.push((res.dist, res.mv));
+        }
+    }
+    out
+}
+
+/// Runs `job(i)` for `i` in `0..n` on up to `threads` threads (taking the
+/// next job in turn) and returns the results in job order (`None` for a
+/// job whose thread failed).
+fn par_jobs<T: Send>(n: usize, threads: usize, job: impl Fn(usize) -> T + Sync) -> Vec<Option<T>> {
+    let t = threads.clamp(1, n.max(1));
+    if t <= 1 {
+        return (0..n).map(|i| Some(job(i))).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, T)>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..t)
+            .map(|_| {
+                let (job, next) = (&job, &next);
+                sc.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n {
+                            break done;
+                        }
+                        done.push((i, job(i)));
+                    }
+                })
+            })
+            .collect();
+        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    let mut out: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    for (i, v) in parts.into_iter().flatten() {
+        out[i] = Some(v);
+    }
+    out
+}
+
+/// What [`analyze`] measures of one frame: its intra costs or its motion
+/// in one reference.
+enum Pass {
+    Intra(usize),
+    Inter(usize, usize),
+}
+
 /// Runs the model over `frames`; `order` lists the frames to analyze in
-/// coding order.
-pub fn analyze<P: Pixel>(frames: &[TplFrame<'_, P>], order: &[usize], bd: u32) -> TplStats {
+/// coding order. The passes over the frames (intra costs, motion search
+/// in each reference) are independent and run on up to `threads` threads;
+/// the result does not depend on `threads`.
+pub fn analyze<P: Pixel>(
+    frames: &[TplFrame<'_, P>],
+    order: &[usize],
+    bd: u32,
+    threads: usize,
+) -> TplStats {
     let (w, h) = frames
         .first()
         .map_or((0, 0), |f| (f.pic.planes[0].w, f.pic.planes[0].h));
@@ -188,83 +307,60 @@ pub fn analyze<P: Pixel>(frames: &[TplFrame<'_, P>], order: &[usize], bd: u32) -
     };
     // Per analyzed frame and block: inter cost, reference and motion (1/8 samples).
     let mut best: Vec<Vec<(f64, usize, i32, i32)>> = vec![Vec::new(); n];
-    let mut scratch = MeScratch::<P>::default();
-    let mut pred = vec![P::default(); HB * HB];
-    let half: Vec<Option<Half<P>>> = frames
-        .iter()
-        .map(|f| (f.pic.planes[0].w > 1 && f.pic.planes[0].h > 1).then(|| Half::new(f.pic)))
-        .collect();
-    let mut mvs: Vec<(i32, i32)> = vec![(0, 0); cols * rows];
+    let half: Vec<Option<Half<P>>> = par_jobs(n, threads, |i| {
+        let f = &frames[i];
+        (f.pic.planes[0].w > 1 && f.pic.planes[0].h > 1).then(|| Half::new(f.pic))
+    })
+    .into_iter()
+    .map(Option::flatten)
+    .collect();
+    let mut passes = Vec::new();
     for &f in order {
-        let fr = &frames[f];
-        if !fr.analyze {
+        if !frames[f].analyze || half[f].is_none() {
             continue;
         }
-        let Some(y) = half[f].as_ref() else {
-            continue;
-        };
-        let mut fb = vec![(f64::MAX, usize::MAX, 0, 0); cols * rows];
-        for br in 0..rows {
-            for bc in 0..cols {
-                let (x0, y0) = (bc * HB, br * HB);
-                let ic = f64::from(intra_cost(y, x0, y0, bd, &mut pred)).max(1.0);
-                stats.intra[f][br * cols + bc] = ic;
-                fb[br * cols + bc].0 = ic;
+        passes.push(Pass::Intra(f));
+        for &r in &frames[f].refs {
+            if half[r].is_some() {
+                passes.push(Pass::Inter(f, r));
             }
         }
-        for &r in &fr.refs {
-            let Some(rp) = half[r].as_ref() else {
-                continue;
-            };
-            let dist = (fr.disp - frames[r].disp).unsigned_abs().max(1) as i32;
-            let params = MeParams {
-                max_range: (2 * dist).clamp(4, 16),
-                subpel: 1,
-                border: 0,
-                ..MeParams::default()
-            };
-            let cost = |r: i32, c: i32| -> u32 { (r.unsigned_abs() + c.unsigned_abs()) >> 3 };
-            for br in 0..rows {
-                for bc in 0..cols {
-                    let (x0, y0) = (bc * HB, br * HB);
-                    let mut cands = [(0i32, 0i32); 3];
-                    let mut nc = 1;
-                    if bc > 0 {
-                        cands[nc] = mvs[br * cols + bc - 1];
-                        nc += 1;
-                    }
-                    if br > 0 {
-                        cands[nc] = mvs[(br - 1) * cols + bc];
-                        nc += 1;
-                    }
-                    let res = motion_search(
-                        &mut scratch,
-                        &y.data,
-                        y.stride,
-                        x0,
-                        y0,
-                        HB,
-                        HB,
-                        &rp.data,
-                        rp.stride,
-                        rp.w,
-                        rp.h,
-                        &cands[..nc],
-                        &params,
-                        &cost,
-                        bd,
-                    );
-                    mvs[br * cols + bc] = res.mv;
-                    let ic = f64::from(res.dist);
-                    let b = &mut fb[br * cols + bc];
+    }
+    let results = par_jobs(passes.len(), threads, |i| match passes[i] {
+        Pass::Intra(f) => half[f]
+            .as_ref()
+            .map(|y| (intra_pass(y, cols, rows, bd), Vec::new())),
+        Pass::Inter(f, r) => half[f].as_ref().zip(half[r].as_ref()).map(|(y, rp)| {
+            let dist = (frames[f].disp - frames[r].disp).unsigned_abs().max(1) as i32;
+            (Vec::new(), inter_pass(y, rp, dist, cols, rows, bd))
+        }),
+    });
+    let mut fb = Vec::new();
+    for (pass, res) in passes.iter().zip(results) {
+        let (intra, inter) = res.flatten().unwrap_or_default();
+        match *pass {
+            Pass::Intra(f) => {
+                fb = vec![(f64::MAX, usize::MAX, 0, 0); cols * rows];
+                for (k, ic) in intra.into_iter().enumerate() {
+                    stats.intra[f][k] = ic;
+                    fb[k].0 = ic;
+                }
+            }
+            Pass::Inter(_, r) => {
+                for (b, (d, mv)) in fb.iter_mut().zip(inter) {
+                    let ic = f64::from(d);
                     if ic < b.0 {
-                        *b = (ic, r, res.mv.0, res.mv.1);
+                        *b = (ic, r, mv.0, mv.1);
                     }
                 }
             }
         }
+        // A frame's passes end before the next frame's intra pass.
+        let f = match *pass {
+            Pass::Intra(f) | Pass::Inter(f, _) => f,
+        };
         stats.best_cost[f] = fb.iter().map(|b| b.0).sum();
-        best[f] = fb;
+        best[f].clone_from(&fb);
     }
     // Propagate backwards in coding order.
     for &f in order.iter().rev() {

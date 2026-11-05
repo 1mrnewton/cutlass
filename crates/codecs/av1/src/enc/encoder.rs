@@ -530,7 +530,7 @@ impl Av1Enc {
                 analyze: true,
             },
         ];
-        let stats = super::tpl::analyze(&frames, &[1], self.cfg.bit_depth);
+        let stats = super::tpl::analyze(&frames, &[1], self.cfg.bit_depth, self.cfg.threads);
         let r = stats.inter_ratio(1);
         r < ev("AV1_GOPT", 0.5)
     }
@@ -741,7 +741,7 @@ impl Av1Enc {
                 analyze: true,
             });
         }
-        let stats = super::tpl::analyze(&frames, &order, self.cfg.bit_depth);
+        let stats = super::tpl::analyze(&frames, &order, self.cfg.bit_depth, self.cfg.threads);
         let imp = order
             .iter()
             .map(|&f| (frames[f].disp as u64, stats.frame_importance(f)))

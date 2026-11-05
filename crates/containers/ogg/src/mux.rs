@@ -66,11 +66,11 @@ struct Track {
     sum: i64,
     /// Start of the first packet.
     first: Option<i64>,
-    /// Audio pages written.
-    audio_pages: u32,
-    /// Where the last packet started on the page being filled: lacing
-    /// index, body offset, and the page's granule and samples before it.
-    last_packet: Option<(usize, usize, i64, i64)>,
+    /// Audio pages written with a completed packet.
+    completed_pages: u32,
+    /// Where the last packet started: page sequence, lacing index, body
+    /// offset, and that page's granule and samples before it.
+    last_packet: Option<(u32, usize, usize, i64, i64)>,
 }
 
 impl Track {
@@ -215,7 +215,9 @@ impl<W: Write> OggMux<W> {
             &track.body,
         );
         track.sequence = track.sequence.wrapping_add(1);
-        track.audio_pages = track.audio_pages.saturating_add(1);
+        if track.granule != -1 {
+            track.completed_pages = track.completed_pages.saturating_add(1);
+        }
         track.continued = track.lacing.last() == Some(&255);
         track.lacing.clear();
         track.body.clear();
@@ -224,21 +226,24 @@ impl<W: Write> OggMux<W> {
         self.emit(&page)
     }
 
-    /// RFC 7845 section 4.5 reads a first audio page that is also the last
-    /// as starting at its granule minus its samples, or at 0 when the
-    /// granule is smaller. A stream that starts after 0 and trims its end
-    /// cannot say both on that one page, so the packets before the trimmed
-    /// one go on a page of their own. One trimmed packet alone, starting
-    /// after 0, cannot be written.
+    /// RFC 7845 section 4.5 reads the first audio page with a completed
+    /// packet, when it is also the last page, as starting at its granule
+    /// minus its samples, or at 0 when the granule is smaller. A stream
+    /// that starts after 0 and trims its end cannot say both on that one
+    /// page, so the packets before the trimmed one go on a page of their
+    /// own. One trimmed packet alone, starting after 0, cannot be written.
     fn separate_trim_from_start(&mut self, index: usize) -> Result<(), MuxError> {
         let track = &mut self.tracks[index];
-        if track.audio_pages > 0 || !track.trimmed || track.first.is_none_or(|first| first == 0) {
+        if track.completed_pages > 0 || !track.trimmed || track.first.is_none_or(|first| first == 0)
+        {
             return Ok(());
         }
-        let Some((lacing_at, body_at, granule, samples)) = track.last_packet else {
+        let Some((sequence, lacing_at, body_at, granule, samples)) = track.last_packet else {
             return Ok(());
         };
-        if lacing_at == 0 {
+        // Only the last packet completes here when it began on an earlier
+        // page or opens this one.
+        if sequence != track.sequence || lacing_at == 0 {
             return Err(rejected(format!(
                 "Opus stream {} is one trimmed packet starting at {}; Ogg reads that as starting at 0",
                 track.id.get(),
@@ -276,6 +281,7 @@ impl<W: Write> OggMux<W> {
             let track = &mut self.tracks[index];
             if starting {
                 track.last_packet = Some((
+                    track.sequence,
                     track.lacing.len(),
                     track.body.len(),
                     track.granule,
@@ -507,7 +513,7 @@ impl<W: Write> Mux for OggMux<W> {
             trimmed: false,
             sum: 0,
             first: None,
-            audio_pages: 0,
+            completed_pages: 0,
             last_packet: None,
         });
         let index = self.tracks.len() - 1;

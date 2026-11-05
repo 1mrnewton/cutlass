@@ -293,6 +293,19 @@ fn a_cropped_start_and_an_end_trim_do_not_share_the_first_page() {
     }]);
     assert!(refused.is_err());
     assert_eq!(mux.status(), MuxStatus::Failed);
+
+    // Nor one that spans pages: the first page with a completed packet is
+    // still the last page.
+    let mut mux = OggMux::new(Cursor::new(Vec::new()));
+    let track = mux.add_stream(opus_stream(4, head(4, 0))).expect("stream");
+    mux.write_packet(&packet(track.get(), payload(90_000, 0), 960, 480))
+        .expect("write");
+    let refused = mux.finish(&[TrackDuration {
+        track,
+        timescale: Timescale::new(48_000),
+        ticks: 480,
+    }]);
+    assert!(refused.is_err());
 }
 
 #[test]

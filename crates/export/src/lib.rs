@@ -21,7 +21,9 @@ pub use config::{
     AudioExport, ExportError, ExportRequest, GIF_SHORT_SIDES, MAX_EDGE, MAX_FRAMES, SidecarKind,
     SidecarRequest, VIDEO_SHORT_SIDES, coded_size, output_size, validate,
 };
-pub use movie::{MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_movie, write_sound};
+pub use movie::{
+    MOVIE_SOUND, MovieSources, part_path, video_bitrate, write_gif, write_movie, write_sound,
+};
 pub use run::{
     ExportResult, ExportRun, ExportedFrame, export, export_sound, frame_indexes,
     same_software_pixels,

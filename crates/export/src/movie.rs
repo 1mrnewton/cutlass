@@ -17,6 +17,7 @@ use cutlass_model::Draft;
 use cutlass_render::Renderer;
 use cutlass_renderer_software::SoftwareDevice;
 use cutlass_riff::WavMux;
+use cutlass_still::StillMux;
 
 use cutlass_codec::CodecId;
 
@@ -184,6 +185,58 @@ pub fn write_sound(
     written
 }
 
+/// Write `request` to `destination` as an animated GIF. `looped` plays it
+/// over and over; otherwise it plays once. The picture codec must be GIF,
+/// the container the still one, and there is no sound.
+pub fn write_gif(
+    sources: &MovieSources<'_>,
+    request: &ExportRequest,
+    looped: bool,
+    destination: &Path,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<ExportResult, ExportError> {
+    if request.codec != CodecId::Gif
+        || request.container != ContainerId::Still
+        || request.audio.is_some()
+    {
+        return Err(ExportError::Container);
+    }
+    let part = part_path(destination).ok_or(ExportError::Path)?;
+    let mut mux = StillMux::new();
+    if looped {
+        mux.set_loop_count(0);
+    }
+    let mut device = SoftwareDevice::new();
+    let written = export(
+        ExportRun {
+            draft: sources.draft,
+            device: &mut device,
+            request,
+            factory: sources.encoders,
+            readers: sources.readers,
+            mux: &mut mux,
+            destination: None,
+            root: sources.root,
+            fonts: sources.fonts,
+            renderer: sources.renderer,
+            progress: Some(progress),
+        },
+        file_audio(sources.readers, sources.draft, sources.root),
+    )
+    .and_then(|result| {
+        let bytes = mux.bytes().ok_or(ExportError::Container)?;
+        let mut out = BufWriter::new(File::create(&part).map_err(file)?);
+        out.write_all(bytes).map_err(file)?;
+        finish(out)?;
+        fs::rename(&part, destination).map_err(file)?;
+        Ok(result)
+    });
+    if written.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    written
+}
+
 fn finish(mut writer: BufWriter<File>) -> Result<(), ExportError> {
     writer.flush().map_err(file)?;
     writer
@@ -214,7 +267,7 @@ mod tests {
     use cutlass_eval::{NoFonts, ReaderFactory};
     use cutlass_model::{Draft, FrameRate, TimeRange};
 
-    use super::{MovieSources, is_mov, part_path, write_sound};
+    use super::{MovieSources, is_mov, part_path, write_gif, write_sound};
     use crate::{AudioExport, ExportRequest};
 
     fn sound_request(codec: CodecId, container: ContainerId) -> ExportRequest {
@@ -280,6 +333,51 @@ mod tests {
         let (_, wav) = written(CodecId::Pcm, ContainerId::Riff, "cut.wav");
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn a_gif_export_writes_a_looping_animation() {
+        let dir = std::env::temp_dir().join(format!("cutlass-gif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut encoders = EncodeFactory::new();
+        cutlass_gif::register_encoders(&mut encoders);
+        let mut draft = Draft::empty("D");
+        draft.duration = cutlass_model::Micros(1_000_000);
+        let readers = ReaderFactory::new();
+        let sources = MovieSources {
+            draft: &draft,
+            root: None,
+            readers: &readers,
+            fonts: &NoFonts,
+            renderer: None,
+            encoders: &encoders,
+        };
+        let request = ExportRequest {
+            range: TimeRange::new(0, 400_000),
+            short_side: 240,
+            codec: CodecId::Gif,
+            bitrate: 0,
+            frame_rate: FrameRate {
+                numerator: 10,
+                denominator: 1,
+            },
+            container: ContainerId::Still,
+            audio: None,
+            sidecar: None,
+            late_by: 0,
+            constant_rate: false,
+        };
+        let path = dir.join("cut.gif");
+        let result = write_gif(&sources, &request, true, &path, &mut |_, _| true).unwrap();
+        assert_eq!(result.frames.len(), 4);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(&bytes[..6], b"GIF89a");
+        assert!(bytes.windows(11).any(|w| w == b"NETSCAPE2.0"));
+        assert_eq!(bytes.last(), Some(&0x3B));
+        let mut sound = request.clone();
+        sound.audio = Some(crate::MOVIE_SOUND);
+        assert!(write_gif(&sources, &sound, false, &path, &mut |_, _| true).is_err());
     }
 
     #[test]

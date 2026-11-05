@@ -385,7 +385,6 @@ impl<'m, 'a> Hot<'m, 'a> {
         if b2 {
             (u, vv) = (v2, 0);
         }
-        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         // As in `Msac::symbol_small`, on one word stored at once. The
         // counter (at most 32) picks the rate: `k = count >> 4`.
         let k = (w >> 52) as usize & 3;
@@ -397,6 +396,7 @@ impl<'m, 'a> Hot<'m, 'a> {
         for (i, v) in cdf.iter_mut().enumerate() {
             *v = (y >> (16 * i)) as u16;
         }
+        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         val
     }
 }

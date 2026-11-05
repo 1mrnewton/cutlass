@@ -175,7 +175,7 @@ pub struct Import {
 /// Preview can play audio while the playhead is dragged. That switch is
 /// separate from normal playback. A seek while playing follows
 /// [`Playback::seek_during_playback`].
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Playback {
     /// Start again at the beginning when playback reaches the end.
     #[serde(default)]
@@ -186,9 +186,25 @@ pub struct Playback {
     /// Keep playing or pause when the playhead is seeked during playback.
     #[serde(default)]
     pub seek_during_playback: SeekDuringPlayback,
+    /// Play a clip's proxy in the preview when it has one. Export always
+    /// reads the source.
+    #[serde(default = "default_on")]
+    pub proxies: bool,
     /// Keys this record does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            loop_playback: false,
+            scrub_audio: false,
+            seek_during_playback: SeekDuringPlayback::default(),
+            proxies: true,
+            rest: Map::new(),
+        }
+    }
 }
 
 /// Whether the platform codecs may run.
@@ -387,6 +403,7 @@ mod tests {
             settings.playback.seek_during_playback,
             SeekDuringPlayback::KeepPlaying
         );
+        assert!(settings.playback.proxies, "proxies play by default");
         assert!(settings.hardware.decode);
         assert!(settings.hardware.encode);
         assert!(!settings.import.link, "imports copy by default");
@@ -396,6 +413,9 @@ mod tests {
         assert_eq!(parsed, settings);
         let linked: Settings = serde_json::from_str(r#"{"import":{"link":true}}"#).unwrap();
         assert!(linked.import.link);
+        let without: Settings =
+            serde_json::from_str(r#"{"playback":{"loop_playback":true}}"#).unwrap();
+        assert!(without.playback.proxies && without.playback.loop_playback);
         assert_eq!(parsed.model, ModelChoice::default());
         assert_eq!(parsed.sandbox, SandboxChoice::default());
     }

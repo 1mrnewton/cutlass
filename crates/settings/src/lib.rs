@@ -1,5 +1,6 @@
 //! The user's settings: shortcuts, panels, playback preferences, hardware
-//! codecs, model choice, sandbox choice, MCP servers, and skill folders.
+//! codecs, model choice, sandbox choice, MCP servers, skill folders, and
+//! the update check.
 //!
 //! Hardware decode and hardware encode are on.
 //! The local model switch is on. The cloud model switch is off. The local
@@ -70,6 +71,8 @@ pub struct Settings {
     /// [`RECENT_LIMIT`].
     #[serde(default)]
     pub recent_projects: Vec<std::path::PathBuf>,
+    #[serde(default)]
+    pub updates: Updates,
     /// Keys this file does not name.
     #[serde(flatten, default)]
     pub rest: Map<String, Value>,
@@ -90,6 +93,33 @@ impl Default for Settings {
             step_cap: DEFAULT_STEP_CAP,
             memory: true,
             recent_projects: Vec::new(),
+            updates: Updates::default(),
+            rest: Map::new(),
+        }
+    }
+}
+
+/// Whether Cutlass looks for a newer release, and when it last looked.
+///
+/// Off, nothing asks the release feed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Updates {
+    /// Look for a newer release at launch, at most once a day.
+    #[serde(default = "default_on")]
+    pub check: bool,
+    /// When the last check started, in seconds since 1970; 0 is never.
+    #[serde(default)]
+    pub last_check: u64,
+    /// Keys this record does not name.
+    #[serde(flatten, default)]
+    pub rest: Map<String, Value>,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            last_check: 0,
             rest: Map::new(),
         }
     }
@@ -409,6 +439,8 @@ mod tests {
         assert!(!settings.import.link, "imports copy by default");
         assert!(settings.mcp_servers.is_empty());
         assert!(settings.skill_folders.is_empty());
+        assert!(settings.updates.check, "updates are checked by default");
+        assert_eq!(settings.updates.last_check, 0);
         let parsed: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, settings);
         let linked: Settings = serde_json::from_str(r#"{"import":{"link":true}}"#).unwrap();
@@ -544,6 +576,23 @@ mod tests {
         assert!(server.url.is_empty());
         assert_eq!(McpServer::default().kind, McpServer::STDIO);
         assert!(!McpServer::default().enabled);
+    }
+
+    #[test]
+    fn the_update_switch_and_last_check_are_stored() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"updates":{"check":false,"future_update":1}}"#).unwrap();
+        assert!(!settings.updates.check);
+        assert_eq!(settings.updates.last_check, 0);
+        let mut settings = settings;
+        settings.updates.last_check = 1_800_000_000;
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["updates"]["check"], false);
+        assert_eq!(written["updates"]["last_check"], 1_800_000_000u64);
+        assert_eq!(written["updates"]["future_update"], 1);
+        let read: Settings = serde_json::from_value(written).unwrap();
+        assert_eq!(read, settings);
+        assert!(serde_json::from_str::<Settings>(r#"{"updates":{"last_check":-1}}"#).is_err());
     }
 
     #[test]

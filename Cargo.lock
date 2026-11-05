@@ -986,6 +986,13 @@ name = "cutlass-logger"
 version = "0.1.0"
 
 [[package]]
+name = "cutlass-lottie"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "cutlass-matroska"
 version = "0.1.0"
 dependencies = [

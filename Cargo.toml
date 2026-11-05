@@ -58,6 +58,7 @@ members = [
     "crates/icons",
     "crates/licenses",
     "crates/logger",
+    "crates/lottie",
     "crates/model",
     "crates/picture",
     "crates/platform-android",

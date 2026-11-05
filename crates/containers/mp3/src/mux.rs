@@ -5,6 +5,11 @@
 //! is not one of the caller's packets. `finish` fills the frame count, the
 //! byte count, and the TOC. Until then the count in the file is zero, so a
 //! failed finish does not advertise a complete duration.
+//!
+//! A stream that has a trim when its first packet arrives also gets an
+//! ID3v2.3 tag ahead of that frame with an `iTunSMPB` comment, the gapless
+//! record Apple's decoders read; the LAME tag in the Info frame is the one
+//! LAME and mpg123 read. Both are filled at finish.
 
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 
@@ -32,6 +37,8 @@ pub struct Mp3Mux<W: Write + Seek> {
     params: Option<CodecParams>,
     stream: Option<StreamLock>,
     xing_pos: u64,
+    /// Where the `iTunSMPB` text starts, when the tag was written.
+    smpb_pos: Option<u64>,
     xing_frame: Vec<u8>,
     xing_at: usize,
     frames: u32,
@@ -61,6 +68,7 @@ impl<W: Write + Seek> Mp3Mux<W> {
             params: None,
             stream: None,
             xing_pos: 0,
+            smpb_pos: None,
             xing_frame: Vec::new(),
             xing_at: 0,
             frames: 0,
@@ -176,6 +184,17 @@ impl<W: Write + Seek> Mp3Mux<W> {
         self.xing_frame[at + 142] = be[2];
         self.xing_frame[at + 143] = be[3];
         let end = self.writer.stream_position()?;
+        if let Some(at) = self.smpb_pos {
+            let total = u64::try_from(self.next_pts).unwrap_or(0);
+            let trim = u64::from(params.encoder_delay) + u64::from(params.trailing_padding);
+            let text = smpb_text(
+                params.encoder_delay,
+                params.trailing_padding,
+                total.saturating_sub(trim),
+            );
+            self.writer.seek(SeekFrom::Start(at))?;
+            self.writer.write_all(text.as_bytes())?;
+        }
         self.writer.seek(SeekFrom::Start(self.xing_pos))?;
         self.writer.write_all(&self.xing_frame)?;
         self.writer.seek(SeekFrom::Start(end))?;
@@ -284,6 +303,15 @@ impl<W: Write + Seek> Mux for Mp3Mux<W> {
         }
 
         if self.stream.is_none() {
+            if params.encoder_delay > 0 || params.trailing_padding > 0 {
+                let (tag, text_at) = smpb_tag();
+                let start = self.writer.stream_position()?;
+                self.write_all(&tag)?;
+                self.smpb_pos = Some(start + text_at);
+            }
+            let params = self.params.as_ref().ok_or(ContainerError::InvalidApi {
+                what: "write before add_stream",
+            })?;
             let frame = build_xing_frame(&header, params)?;
             self.xing_at = 4 + side_info_len(&header);
             self.xing_pos = self.writer.stream_position()?;
@@ -341,6 +369,44 @@ impl<W: Write + Seek> Mux for Mp3Mux<W> {
     fn cancel(&mut self) {
         self.cancelled = true;
     }
+}
+
+/// Apple's gapless comment: priming, padding and the sample count in hex,
+/// fixed width so finish can rewrite it in place.
+fn smpb_text(delay: u32, padding: u32, samples: u64) -> String {
+    format!(
+        " 00000000 {delay:08X} {padding:08X} {samples:016X} 00000000 00000000 00000000 \
+         00000000 00000000 00000000 00000000 00000000"
+    )
+}
+
+/// An ID3v2.3 tag holding one `COMM` frame, description `iTunSMPB`, and
+/// where in the tag its text starts.
+fn smpb_tag() -> (Vec<u8>, u64) {
+    let text = smpb_text(0, 0, 0);
+    let mut body = vec![0u8]; // ISO-8859-1
+    body.extend_from_slice(b"eng");
+    body.extend_from_slice(b"iTunSMPB\0");
+    let text_in_body = body.len();
+    body.extend_from_slice(text.as_bytes());
+    let body_len = u32::try_from(body.len()).unwrap_or(0);
+    let mut frame = b"COMM".to_vec();
+    frame.extend_from_slice(&body_len.to_be_bytes());
+    frame.extend_from_slice(&[0, 0]);
+    let text_in_frame = frame.len() + text_in_body;
+    frame.extend_from_slice(&body);
+    let size = u32::try_from(frame.len()).unwrap_or(0);
+    let mut tag = b"ID3\x03\x00\x00".to_vec();
+    // Syncsafe: seven bits a byte.
+    tag.extend_from_slice(&[
+        ((size >> 21) & 0x7F) as u8,
+        ((size >> 14) & 0x7F) as u8,
+        ((size >> 7) & 0x7F) as u8,
+        (size & 0x7F) as u8,
+    ]);
+    let text_at = (tag.len() + text_in_frame) as u64;
+    tag.extend_from_slice(&frame);
+    (tag, text_at)
 }
 
 fn single_track() -> Limits {
@@ -551,12 +617,13 @@ mod tests {
                 Timestamp::try_new(Some(pts), Some(pts), Some(1152)).expect("timestamp");
             let packet = SharedPacket::try_new(0, frame, timestamp, Timescale::new(48_000), true)
                 .expect("packet");
-            shared.write_packet(&packet).expect("write");
-            // As an encoder hands it over: padding on the last packet only.
+            // As export hands it over, ahead of each packet: padding on the
+            // last packet only.
             let padding = if index == 3 { 1000 } else { 0 };
             shared
                 .set_trim(track, Trim::new(Some(576), Some(padding)))
                 .expect("trim");
+            shared.write_packet(&packet).expect("write");
         }
         assert!(shared.set_trim(TrackId::new(1), Trim::default()).is_err());
         let done = shared
@@ -569,6 +636,17 @@ mod tests {
         assert_eq!(done.durations()[0].ticks, 4 * 1152);
         assert_eq!(shared.status(), MuxStatus::Finished);
         let bytes = mux.into_inner().expect("inner").into_inner();
+        assert_eq!(&bytes[..4], b"ID3\x03");
+        let at = bytes
+            .windows(9)
+            .position(|w| w == b"iTunSMPB\0")
+            .expect("iTunSMPB")
+            + 9;
+        let text = std::str::from_utf8(&bytes[at..at + 44]).expect("text");
+        assert_eq!(
+            text,
+            format!(" 00000000 00000240 000003E8 {:016X}", 4 * 1152 - 576 - 1000)
+        );
         let demux = Mp3Demux::open(Cursor::new(bytes)).expect("open");
         let trim = demux.streams()[0].trim.expect("trim");
         assert_eq!((trim.encoder_delay, trim.trailing_padding), (576, 1000));

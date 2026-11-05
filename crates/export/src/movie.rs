@@ -352,10 +352,15 @@ mod tests {
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         let (_, mp3) = written(CodecId::Mp3, ContainerId::Mp3, "cut.mp3");
-        assert_eq!(&mp3[..2], &[0xFF, 0xFB], "an MPEG-1 Layer III frame");
-        // The first frame is the Info tag (constant bitrate) with the LAME
-        // delay and padding of what was coded.
-        let at = 4 + 32;
+        // Apple's gapless comment in an ID3v2 tag, then the first frame:
+        // the Info tag (constant bitrate) with the LAME delay and padding.
+        assert_eq!(&mp3[..3], b"ID3");
+        let size = mp3[6..10]
+            .iter()
+            .fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+        let frame = 10 + size;
+        assert_eq!(&mp3[frame..frame + 2], &[0xFF, 0xFB], "MPEG-1 Layer III");
+        let at = frame + 4 + 32;
         assert_eq!(&mp3[at..at + 4], b"Info");
         let packed = u32::from_be_bytes([0, mp3[at + 141], mp3[at + 142], mp3[at + 143]]);
         assert_eq!(packed >> 12, cutlass_mp3::ENCODER_DELAY);

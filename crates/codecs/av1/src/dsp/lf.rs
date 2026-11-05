@@ -126,15 +126,13 @@ fn edge<P: Pixel, const FS: usize, const HORZ: bool>(
     bd: u32,
 ) {
     let mut i = 0;
-    if HORZ {
-        while i + 8 <= n {
-            lanes::<P, FS, HORZ, 8>(buf, stride, x, y, i, lim, bd);
-            i += 8;
-        }
-        while i + 4 <= n {
-            lanes::<P, FS, HORZ, 4>(buf, stride, x, y, i, lim, bd);
-            i += 4;
-        }
+    while i + 8 <= n {
+        lanes::<P, FS, HORZ, 8>(buf, stride, x, y, i, lim, bd);
+        i += 8;
+    }
+    while i + 4 <= n {
+        lanes::<P, FS, HORZ, 4>(buf, stride, x, y, i, lim, bd);
+        i += 4;
     }
     while i < n {
         lanes::<P, FS, HORZ, 1>(buf, stride, x, y, i, lim, bd);
@@ -142,7 +140,9 @@ fn edge<P: Pixel, const FS: usize, const HORZ: bool>(
     }
 }
 
-/// Loads `L` lines starting at line `first`, filters them, stores them back.
+/// Loads `L` lines starting at line `first` (lane `l` holds line
+/// `first + l`; a vertical edge's lines are rows, transposed into lanes),
+/// filters them, stores them back.
 #[inline(always)]
 fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
     buf: &mut [P],
@@ -154,13 +154,14 @@ fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
     bd: u32,
 ) {
     let (lo, hi) = tap_range(FS);
-    let mut v = [[0i32; L]; 14];
+    // Samples have at most 12 bits.
+    let mut v = [[0i16; L]; 14];
     if HORZ {
         for k in lo..hi {
             let row = (y + k - 7) * stride + x + first;
             let src = &buf[row..row + L];
             for l in 0..L {
-                v[k][l] = src[l].to_i32();
+                v[k][l] = src[l].to_i32() as i16;
             }
         }
     } else {
@@ -168,11 +169,11 @@ fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
             let base = (y + first + l) * stride + x - 7;
             let src = &buf[base + lo..base + hi];
             for k in lo..hi {
-                v[k][l] = src[k - lo].to_i32();
+                v[k][l] = src[k - lo].to_i32() as i16;
             }
         }
     }
-    let changed = if HORZ && L > 1 {
+    let changed = if L > 1 {
         filter_vec::<FS, L>(&mut v, lim, bd)
     } else {
         filter_lanes::<FS, L>(&mut v, lim, bd)
@@ -188,7 +189,7 @@ fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
             let row = (y + k - 7) * stride + x + first;
             let dst = &mut buf[row..row + L];
             for l in 0..L {
-                dst[l] = P::from_i32(v[k][l]);
+                dst[l] = P::from_i32(i32::from(v[k][l]));
             }
         }
     } else {
@@ -196,7 +197,7 @@ fn lanes<P: Pixel, const FS: usize, const HORZ: bool, const L: usize>(
             let base = (y + first + l) * stride + x - 7;
             let dst = &mut buf[base + wlo..base + whi];
             for k in wlo..whi {
-                dst[k - wlo] = P::from_i32(v[k][l]);
+                dst[k - wlo] = P::from_i32(i32::from(v[k][l]));
             }
         }
     }
@@ -221,11 +222,11 @@ fn wide<const N: i32, const N2: i32, const LOG2: u32>(px: &[i32; 14], out: &mut 
     }
 }
 
-/// Applies the filter mask and filters to `L` lines. Returns whether any
-/// sample may have changed.
+/// Applies the filter mask and filters to `L` lines, one at a time.
+/// Returns whether any sample may have changed.
 #[inline(always)]
 fn filter_lanes<const FS: usize, const L: usize>(
-    v: &mut [[i32; L]; 14],
+    v: &mut [[i16; L]; 14],
     lim: LfLimits,
     bd: u32,
 ) -> bool {
@@ -242,7 +243,7 @@ fn filter_lanes<const FS: usize, const L: usize>(
     for l in 0..L {
         let mut px = [0i32; 14];
         for k in lo..hi {
-            px[k] = v[k][l];
+            px[k] = i32::from(v[k][l]);
         }
         let (p1, p0, q0, q1) = (px[5], px[6], px[7], px[8]);
         let hev = (p1 - p0).abs() > thresh_bd || (q1 - q0).abs() > thresh_bd;
@@ -304,129 +305,128 @@ fn filter_lanes<const FS: usize, const L: usize>(
             wide::<6, 1, 4>(&px, &mut out);
         }
         for k in lo..hi {
-            v[k][l] = out[k];
+            v[k][l] = out[k] as i16;
         }
     }
     any
 }
 
-/// Wide filter on `L` lanes at once; see [`wide`].
+/// Wide filter on `L` lanes at once; see [`wide`]. The sums of at most 16
+/// samples of 12 bits fit in `u16`.
 #[inline(always)]
 fn wide_vec<const N: i32, const N2: i32, const LOG2: u32, const L: usize>(
-    v: &[[i32; L]; 14],
-    out: &mut [[i32; L]; 14],
+    v: &[[i16; L]; 14],
+    out: &mut [[i16; L]; 14],
 ) {
     let mut i = -N;
     while i < N {
-        let mut t = [1i32 << (LOG2 - 1); L];
+        let mut t = [1u16 << (LOG2 - 1); L];
         let mut j = -N;
         while j <= N {
             let p = (i + j).clamp(-(N + 1), N);
             let tap = if j.abs() <= N2 { 2 } else { 1 };
             let row = &v[(7 + p) as usize];
             for l in 0..L {
-                t[l] += row[l] * tap;
+                t[l] = t[l].wrapping_add((row[l] as u16).wrapping_mul(tap));
             }
             j += 1;
         }
         let o = &mut out[(7 + i) as usize];
         for l in 0..L {
-            o[l] = t[l] >> LOG2;
+            o[l] = (t[l] >> LOG2) as i16;
         }
         i += 1;
     }
 }
 
-/// Branch-free version of [`filter_lanes`] for `L` adjacent columns of a
-/// horizontal edge: every per-sample step is a straight loop over the lanes.
+/// Branch-free version of [`filter_lanes`] for `L` lines: every per-sample
+/// step is a straight loop over the lanes, on 16 bits (samples of 12 bits,
+/// their differences and the narrow filter's terms all fit). Conditions
+/// are lane masks (0 or -1).
 #[inline(always)]
 fn filter_vec<const FS: usize, const L: usize>(
-    v: &mut [[i32; L]; 14],
+    v: &mut [[i16; L]; 14],
     lim: LfLimits,
     bd: u32,
 ) -> bool {
     let sh = bd - 8;
-    let limit_bd = lim.limit << sh;
-    let blimit_bd = lim.blimit << sh;
-    let thresh_bd = lim.thresh << sh;
-    let one = 1i32 << sh;
-    let half = 0x80i32 << sh;
-    let lo4 = -(1i32 << (bd - 1));
-    let hi4 = (1i32 << (bd - 1)) - 1;
-    let mut fm = [false; L];
-    let mut hev = [false; L];
-    let mut flat = [false; L];
-    let mut flat2 = [false; L];
+    let limit_bd = (lim.limit << sh) as i16;
+    let blimit_bd = (lim.blimit << sh) as i16;
+    let thresh_bd = (lim.thresh << sh) as i16;
+    let one = 1i16 << sh;
+    let half = 0x80i16 << sh;
+    let lo4 = -(1i16 << (bd - 1));
+    let hi4 = ((1i32 << (bd - 1)) - 1) as i16;
+    let ad = |a: i16, b: i16| (a - b).abs();
+    let mask = |c: bool| i16::from(c).wrapping_neg();
+    let sel = |m: i16, a: i16, b: i16| (a & m) | (b & !m);
+    let mut fm = [0i16; L];
+    let mut hev = [0i16; L];
+    let mut flat = [0i16; L];
+    let mut flat2 = [0i16; L];
     for l in 0..L {
         let (p1, p0, q0, q1) = (v[5][l], v[6][l], v[7][l], v[8][l]);
-        let d10 = (p1 - p0).abs();
-        let e10 = (q1 - q0).abs();
-        hev[l] = (d10 > thresh_bd) | (e10 > thresh_bd);
-        let mut m = (d10 > limit_bd)
-            | (e10 > limit_bd)
-            | ((p0 - q0).abs() * 2 + (p1 - q1).abs() / 2 > blimit_bd);
+        let d10 = ad(p1, p0);
+        let e10 = ad(q1, q0);
+        hev[l] = mask(d10 > thresh_bd) | mask(e10 > thresh_bd);
+        let mut m = mask(d10 > limit_bd)
+            | mask(e10 > limit_bd)
+            | mask(ad(p0, q0) * 2 + ad(p1, q1) / 2 > blimit_bd);
         if FS >= 6 {
-            m |= ((v[4][l] - p1).abs() > limit_bd) | ((v[9][l] - q1).abs() > limit_bd);
+            m |= mask(ad(v[4][l], p1) > limit_bd) | mask(ad(v[9][l], q1) > limit_bd);
         }
         if FS >= 8 {
-            m |= ((v[3][l] - v[4][l]).abs() > limit_bd) | ((v[10][l] - v[9][l]).abs() > limit_bd);
+            m |= mask(ad(v[3][l], v[4][l]) > limit_bd) | mask(ad(v[10][l], v[9][l]) > limit_bd);
         }
         fm[l] = !m;
         if FS >= 6 {
-            let mut f = (d10 <= one)
-                & (e10 <= one)
-                & ((v[4][l] - p0).abs() <= one)
-                & ((v[9][l] - q0).abs() <= one);
+            let mut f = mask(d10 <= one)
+                & mask(e10 <= one)
+                & mask(ad(v[4][l], p0) <= one)
+                & mask(ad(v[9][l], q0) <= one);
             if FS >= 8 {
-                f &= ((v[3][l] - p0).abs() <= one) & ((v[10][l] - q0).abs() <= one);
+                f &= mask(ad(v[3][l], p0) <= one) & mask(ad(v[10][l], q0) <= one);
             }
             flat[l] = f & !m;
         }
         if FS == 16 {
             flat2[l] = flat[l]
-                & ((v[0][l] - p0).abs() <= one)
-                & ((v[13][l] - q0).abs() <= one)
-                & ((v[1][l] - p0).abs() <= one)
-                & ((v[12][l] - q0).abs() <= one)
-                & ((v[2][l] - p0).abs() <= one)
-                & ((v[11][l] - q0).abs() <= one);
+                & mask(ad(v[0][l], p0) <= one)
+                & mask(ad(v[13][l], q0) <= one)
+                & mask(ad(v[1][l], p0) <= one)
+                & mask(ad(v[12][l], q0) <= one)
+                & mask(ad(v[2][l], p0) <= one)
+                & mask(ad(v[11][l], q0) <= one);
         }
     }
-    if !fm.iter().any(|&b| b) {
+    if fm.iter().fold(0, |a, &b| a | b) == 0 {
         return false;
     }
     // Narrow filter on every lane; selected below.
-    let mut nar = [[0i32; L]; 4];
+    let mut nar = [[0i16; L]; 4];
     for l in 0..L {
-        let c4 = |x: i32| x.clamp(lo4, hi4);
+        let c4 = |x: i16| x.clamp(lo4, hi4);
         let ps1 = v[5][l] - half;
         let ps0 = v[6][l] - half;
         let qs0 = v[7][l] - half;
         let qs1 = v[8][l] - half;
         let h = hev[l];
-        let f = if h { c4(ps1 - qs1) } else { 0 };
+        let f = c4(ps1 - qs1) & h;
         let f = c4(f + 3 * (qs0 - ps0));
         let f1 = c4(f + 4) >> 3;
         let f2 = c4(f + 3) >> 3;
         let f3 = (f1 + 1) >> 1;
-        let keep = !fm[l];
-        nar[0][l] = if keep || h {
-            v[5][l]
-        } else {
-            c4(ps1 + f3) + half
-        };
-        nar[1][l] = if keep { v[6][l] } else { c4(ps0 + f2) + half };
-        nar[2][l] = if keep { v[7][l] } else { c4(qs0 - f1) + half };
-        nar[3][l] = if keep || h {
-            v[8][l]
-        } else {
-            c4(qs1 - f3) + half
-        };
+        let on = fm[l];
+        let outer = on & !h;
+        nar[0][l] = sel(outer, c4(ps1 + f3) + half, v[5][l]);
+        nar[1][l] = sel(on, c4(ps0 + f2) + half, v[6][l]);
+        nar[2][l] = sel(on, c4(qs0 - f1) + half, v[7][l]);
+        nar[3][l] = sel(outer, c4(qs1 - f3) + half, v[8][l]);
     }
-    let any_flat = FS >= 6 && flat.iter().any(|&b| b);
-    let any_flat2 = FS == 16 && flat2.iter().any(|&b| b);
-    let mut w8 = [[0i32; L]; 14];
-    let mut w16 = [[0i32; L]; 14];
+    let any_flat = FS >= 6 && flat.iter().fold(0, |a, &b| a | b) != 0;
+    let any_flat2 = FS == 16 && flat2.iter().fold(0, |a, &b| a | b) != 0;
+    let mut w8 = [[0i16; L]; 14];
+    let mut w16 = [[0i16; L]; 14];
     if any_flat {
         if FS == 6 {
             wide_vec::<2, 1, 3, L>(v, &mut w8);
@@ -438,26 +438,20 @@ fn filter_vec<const FS: usize, const L: usize>(
         wide_vec::<6, 1, 4, L>(v, &mut w16);
     }
     for (k, nk) in (5..9).zip(0..4) {
-        for l in 0..L {
-            v[k][l] = nar[nk][l];
-        }
+        v[k] = nar[nk];
     }
     if any_flat {
         let (a, b) = if FS == 6 { (5, 9) } else { (4, 10) };
         for k in a..b {
             for l in 0..L {
-                if flat[l] {
-                    v[k][l] = w8[k][l];
-                }
+                v[k][l] = sel(flat[l], w8[k][l], v[k][l]);
             }
         }
     }
     if any_flat2 {
         for k in 1..13 {
             for l in 0..L {
-                if flat2[l] {
-                    v[k][l] = w16[k][l];
-                }
+                v[k][l] = sel(flat2[l], w16[k][l], v[k][l]);
             }
         }
     }

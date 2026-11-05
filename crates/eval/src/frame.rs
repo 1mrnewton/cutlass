@@ -893,6 +893,48 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_clip_shows_the_canvas_outside_its_mask_and_the_mask_moves_with_it() {
+        let mut draft = color_clip("0xFFFF0000", false);
+        draft.canvas_config.width = 8;
+        draft.canvas_config.height = 8;
+        draft.canvas_config.background = Some("#808080".to_owned());
+        let mut session = cutlass_session::Session::open(draft);
+        session
+            .apply(
+                0,
+                &[cutlass_session::Request::SetMask {
+                    segment_id: cutlass_model::SegmentId::new("segment"),
+                    material_id: "mask".into(),
+                    mask: Some(cutlass_effects::Mask::new(
+                        cutlass_effects::MaskShape::Circle,
+                    )),
+                }],
+            )
+            .unwrap();
+        let at = |frame: &[u8], x: usize, y: usize| {
+            let index = (y * 8 + x) * 4;
+            [
+                frame[index],
+                frame[index + 1],
+                frame[index + 2],
+                frame[index + 3],
+            ]
+        };
+        let frame = pixels(session.draft(), 0);
+        assert_eq!(at(&frame, 4, 4), [255, 0, 0, 255]);
+        assert_eq!(at(&frame, 0, 0), [128, 128, 128, 255]);
+        assert_eq!(at(&frame, 7, 3), [128, 128, 128, 255]);
+        assert_eq!(at(&frame, 6, 4), [128, 128, 128, 255]);
+
+        // Moved a quarter of the canvas right, the circle goes with it.
+        let mut moved = session.draft().clone();
+        moved.tracks[0].segments[0].clip.transform.x = 0.5;
+        let frame = pixels(&moved, 0);
+        assert_eq!(at(&frame, 6, 4), [255, 0, 0, 255]);
+        assert_eq!(at(&frame, 3, 4), [128, 128, 128, 255]);
+    }
+
+    #[test]
     fn the_project_canvas_color_is_under_every_layer() {
         let mut draft = Draft::empty("draft");
         draft.canvas_config.width = 2;

@@ -843,6 +843,37 @@ pub(crate) fn gpu_place(
     Some(Affine([su[0], su[1], su[2], sv[0], sv[1], sv[2]]))
 }
 
+/// Canvas pixel centre to the clip's own frame at `time`: -1 to 1 across
+/// and up, so a mask follows the clip as it moves, turns and flips. The
+/// clip's media size gives its shape; without one it fills the canvas.
+pub(crate) fn clip_frame(
+    draft: &Draft,
+    segment: &Segment,
+    time: Micros,
+    canvas: (u32, u32),
+) -> Option<Affine> {
+    let (clip, uniform) = cutlass_model::animated_at(draft, segment, time)?;
+    let transform = picture_transform(&clip, &uniform, canvas.0, canvas.1)?;
+    let picture = match draft.materials.get(segment.material_id.as_str()) {
+        Some(MaterialRef::Video(video)) => u32::try_from(video.width)
+            .ok()
+            .zip(u32::try_from(video.height).ok())
+            .filter(|&(width, height)| width > 0 && height > 0),
+        _ => None,
+    }
+    .unwrap_or(canvas);
+    let [a, b, c, d, e, f] = gpu_place(transform, picture, canvas)?.0;
+    let (kx, ky) = (2.0 / f64::from(picture.0), 2.0 / f64::from(picture.1));
+    Some(Affine([
+        a * kx,
+        b * kx,
+        c * kx - 1.0,
+        -d * ky,
+        -e * ky,
+        1.0 - f * ky,
+    ]))
+}
+
 impl PictureTransform {
     /// Keep the picture's own size at scale 1: a title, whose raster is cut
     /// tight around its glyphs. A picture larger than the canvas still

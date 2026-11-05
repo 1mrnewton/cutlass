@@ -110,7 +110,17 @@ impl<'a> Msac<'a> {
     /// Adaptive boolean on a 2-entry inverted CDF.
     #[inline(always)]
     pub fn bool_adapt(&mut self, cdf: &mut [u16; 2]) -> bool {
-        let bit = self.bool_prob(u32::from(cdf[0]));
+        // `bool_prob` with the adaptation before the renormalization.
+        let r = self.rng;
+        let mut dif = self.dif;
+        let mut v = (((r >> 8) * (u32::from(cdf[0]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT)) + MIN_PROB;
+        let vw = u64::from(v) << (WIN - 16);
+        let ret = dif >= vw;
+        if ret {
+            dif -= vw;
+            v = r - v;
+        }
+        let bit = !ret;
         if self.allow_update {
             let count = cdf[1];
             let rate = 4 + (count >> 4);
@@ -121,6 +131,7 @@ impl<'a> Msac<'a> {
             }
             cdf[1] = count + u16::from(count < 32);
         }
+        self.norm(dif, v);
         bit
     }
 
@@ -155,7 +166,6 @@ impl<'a> Msac<'a> {
             u32::from(v[val.saturating_sub(1)])
         };
         let vv = u32::from(v[val.min(n)]);
-        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         if self.allow_update {
             let count = cdf[n];
             let rate = 4 + (count >> 4) + u16::from(n > 2);
@@ -167,6 +177,7 @@ impl<'a> Msac<'a> {
             }
             cdf[n] = count + u16::from(count < 32);
         }
+        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         val
     }
 
@@ -199,7 +210,7 @@ impl<'a> Msac<'a> {
             u = prev;
             vv = 0;
         }
-        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
+        // The adaptation goes first (see `Hot::sym4`).
         if self.allow_update {
             // All N lanes, the counter included, in one word.
             let mut w = 0u64;
@@ -224,6 +235,7 @@ impl<'a> Msac<'a> {
                 *v = (y >> (16 * i)) as u16;
             }
         }
+        self.norm(self.dif - (u64::from(vv) << (WIN - 16)), u - vv);
         val
     }
 

@@ -84,6 +84,8 @@ pub struct SbRec {
 /// transform block and (palette blocks) its color maps.
 pub struct BlockRec {
     pub b: Block,
+    /// The mode info stored for the block (see [`TileDec::write_mode_info`]).
+    pub mi: MiInfo,
     pub first_op: usize,
     pub color_maps: Option<usize>,
 }
@@ -1097,7 +1099,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         if self.b.skip {
             self.reset_block_context();
         }
-        self.store_mode_info_pre();
+        let mi = self.store_mode_info_pre();
         #[cfg(feature = "stats")]
         self.count_tools();
         if let Some(log) = self.rec.as_deref_mut() {
@@ -1112,6 +1114,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             };
             log.blocks.push(BlockRec {
                 b: b.clone(),
+                mi,
                 first_op: log.ops.len(),
                 color_maps,
             });
@@ -1144,11 +1147,10 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
     }
 
-    /// The part of the block's mode info that prediction needs (spec stores it before compute_prediction).
-    fn store_mode_info_pre(&mut self) {
+    /// The part of the block's mode info that prediction needs (spec stores
+    /// it before compute_prediction). Returns the mode info stored.
+    fn store_mode_info_pre(&mut self) -> MiInfo {
         let b = &self.b;
-        let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
-        let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
         let info = MiInfo {
             ref_frame: b.ref_frame,
             mv: if b.ref_frame[1] > INTRA_FRAME {
@@ -1170,24 +1172,14 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             motion_mode: b.motion_mode,
             delta_lf: self.delta_lf,
         };
-        let stride = self.fs.mi_stride;
-        let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
         // Kept in memory so each store is a plain 28-byte copy (field by
         // field stores of the scalarized value cost several times more).
         let info = std::hint::black_box(info);
-        let o0 = b.mi_row * stride + b.mi_col;
-        for m in &mut self.fs.mi[o0..o0 + w4] {
-            *m = info;
-        }
-        for y in 0..h4 {
-            let o = (b.mi_row + y) * stride + b.mi_col;
-            if y > 0 {
-                self.fs.mi.copy_within(o0..o0 + w4, o);
-            }
-            if set_uv {
-                self.fs.uv_modes[o..o + w4].fill(b.uv_mode);
-            }
-        }
+        self.write_mode_info(&info);
+        let b = &self.b;
+        let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
+        let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
+        let stride = self.fs.mi_stride;
         for y in 0..h4 {
             self.fs.segment_ids[(b.mi_row + y) * stride + b.mi_col..][..w4].fill(b.segment_id);
         }
@@ -1204,6 +1196,30 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
                 let ly = ((b.mi_row & sb_mask) + y) & 31;
                 self.left_palette[0][ly] = b.palette_y;
                 self.left_palette[1][ly] = b.palette_u;
+            }
+        }
+        info
+    }
+
+    /// Stores `info` as the mode info of every 4x4 of the block `self.b`
+    /// (and its uv_mode for intra blocks with chroma).
+    pub fn write_mode_info(&mut self, info: &MiInfo) {
+        let b = &self.b;
+        let w4 = bw4(b.bsize).min(self.fs.mi_cols - b.mi_col);
+        let h4 = bh4(b.bsize).min(self.fs.mi_rows - b.mi_row);
+        let stride = self.fs.mi_stride;
+        let set_uv = b.ref_frame[0] == INTRA_FRAME && b.has_chroma;
+        let o0 = b.mi_row * stride + b.mi_col;
+        for m in &mut self.fs.mi[o0..o0 + w4] {
+            *m = *info;
+        }
+        for y in 0..h4 {
+            let o = (b.mi_row + y) * stride + b.mi_col;
+            if y > 0 {
+                self.fs.mi.copy_within(o0..o0 + w4, o);
+            }
+            if set_uv {
+                self.fs.uv_modes[o..o + w4].fill(b.uv_mode);
             }
         }
     }
@@ -3478,6 +3494,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
             while bi < end {
                 let rec = &log.blocks[bi];
                 self.b = rec.b.clone();
+                self.write_mode_info(&rec.mi);
                 if let Some(at) = rec.color_maps {
                     let ny = self.color_map_y.len();
                     let nuv = self.color_map_uv.len();

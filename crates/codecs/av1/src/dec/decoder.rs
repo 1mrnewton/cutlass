@@ -97,6 +97,10 @@ pub struct Av1Core {
     lr_scratch: LrScratch,
     /// Copies of the frame state the worker threads use, kept for reuse.
     shells: Vec<FrameState>,
+    /// Row messages and reconstruction logs of the threaded pipeline, kept
+    /// with their buffers for the next frames.
+    rows8: RowPools<u8>,
+    rows16: RowPools<u16>,
     /// Apply film grain to shown pictures.
     pub apply_grain: bool,
     pool8: Vec<Picture<u8>>,
@@ -133,6 +137,8 @@ impl Av1Core {
             pending: None,
             lr_scratch: LrScratch::new(),
             shells: Vec::new(),
+            rows8: RowPools::default(),
+            rows16: RowPools::default(),
             apply_grain: true,
             pool8: Vec::new(),
             pool16: Vec::new(),
@@ -483,6 +489,7 @@ impl Av1Core {
                 &self.ref_hdr,
                 &mut self.lr_scratch,
                 &mut self.shells,
+                &mut self.rows8,
                 &mut self.pool8,
                 self.threads,
             )?;
@@ -508,6 +515,7 @@ impl Av1Core {
                 &self.ref_hdr,
                 &mut self.lr_scratch,
                 &mut self.shells,
+                &mut self.rows16,
                 &mut self.pool16,
                 self.threads,
             )?;
@@ -953,9 +961,26 @@ struct RowMsg<P> {
     lr: [Vec<LrUnitParams>; 3],
 }
 
+/// Spare [`RowMsg`]s and [`ReconLog`]s, with their buffers.
+pub(crate) struct RowPools<P> {
+    msgs: Vec<RowMsg<P>>,
+    logs: Vec<ReconLog>,
+}
+
+impl<P> Default for RowPools<P> {
+    fn default() -> Self {
+        Self {
+            msgs: Vec::new(),
+            logs: Vec::new(),
+        }
+    }
+}
+
 impl<P: Pixel> RowMsg<P> {
-    /// Copies the mode info, transform sizes, CDEF indices and loop
-    /// restoration units of luma 4x4 rows `r0..r1`.
+    /// Copies the transform sizes, CDEF indices and loop restoration units
+    /// of luma 4x4 rows `r0..r1`, and their mode info when `with_mi`
+    /// (else [`Self::fill_mi`] adds it later).
+    #[allow(clippy::too_many_arguments)]
     fn fill_meta(
         &mut self,
         fs: &FrameState,
@@ -964,6 +989,7 @@ impl<P: Pixel> RowMsg<P> {
         r1: usize,
         last: bool,
         sub_y: bool,
+        with_mi: bool,
     ) {
         self.r0 = r0;
         self.r1 = r1;
@@ -972,9 +998,11 @@ impl<P: Pixel> RowMsg<P> {
         let end = if last { fs.mi.len() } else { r1 * st };
         self.mi_row0 = r0;
         self.mi.clear();
-        self.mi.extend_from_slice(&fs.mi[r0 * st..end]);
         self.uv_modes.clear();
-        self.uv_modes.extend_from_slice(&fs.uv_modes[r0 * st..end]);
+        if with_mi {
+            self.mi.extend_from_slice(&fs.mi[r0 * st..end]);
+            self.uv_modes.extend_from_slice(&fs.uv_modes[r0 * st..end]);
+        }
         // The transform size maps are indexed in each plane's 4x4 units.
         for (p, (d, s)) in self.lf_tx.iter_mut().zip(&fs.lf_tx).enumerate() {
             let sy = usize::from(p > 0 && sub_y);
@@ -999,6 +1027,14 @@ impl<P: Pixel> RowMsg<P> {
         }
     }
 
+    /// Copies the mode info of the rows (after [`Self::fill_meta`]).
+    fn fill_mi(&mut self, fs: &FrameState) {
+        let st = fs.mi_stride;
+        let end = if self.last { fs.mi.len() } else { self.r1 * st };
+        self.mi.clear();
+        self.mi.extend_from_slice(&fs.mi[self.r0 * st..end]);
+    }
+
     /// Copies the samples of the rows (after [`Self::fill_meta`]).
     fn fill_px(&mut self, cur: &Picture<P>, sub_y: bool) {
         for (p, pl) in cur.planes.iter().enumerate().take(3) {
@@ -1014,13 +1050,6 @@ impl<P: Pixel> RowMsg<P> {
             v.clear();
             v.extend_from_slice(&pl.data[y0 * pl.stride..y1 * pl.stride]);
         }
-    }
-
-    /// Writes the copied mode info into `fs` (for reconstruction).
-    fn apply_mode_info(&self, fs: &mut FrameState) {
-        let o = self.mi_row0 * fs.mi_stride;
-        fs.mi[o..o + self.mi.len()].copy_from_slice(&self.mi);
-        fs.uv_modes[o..o + self.uv_modes.len()].copy_from_slice(&self.uv_modes);
     }
 
     /// Writes the copied rows into `fs` and `pic`.
@@ -1143,8 +1172,9 @@ fn recon_worker<P: Pixel>(
         rec: None,
     };
     for (mut m, mut log) in rx {
-        m.apply_mode_info(td.fs);
+        // Replay stores the mode info of each block as parsing did.
         td.replay(&log)?;
+        m.fill_mi(td.fs);
         m.fill_px(td.cur, seq.subsampling_y);
         let _ = fwd.send(m);
         log.clear();
@@ -1263,6 +1293,7 @@ fn decode_frame<P: Pixel>(
     ref_hdr: &[RefHeaderState; 8],
     lr_scratch: &mut LrScratch,
     shells: &mut Vec<FrameState>,
+    rows: &mut RowPools<P>,
     pool: &mut Vec<Picture<P>>,
     threads: usize,
 ) -> R<(Picture<P>, Box<CdfContext>)> {
@@ -1313,6 +1344,8 @@ fn decode_frame<P: Pixel>(
         } else {
             None
         };
+        let msg_pool = &mut rows.msgs;
+        let log_pool = &mut rows.logs;
         let saved = std::thread::scope(|s| {
             let (tx, rx) = std::sync::mpsc::channel::<RowMsg<P>>();
             let (back_tx, back_rx) = std::sync::mpsc::channel::<RowMsg<P>>();
@@ -1358,9 +1391,17 @@ fn decode_frame<P: Pixel>(
                           log: Option<&mut ReconLog>,
                           r0: usize,
                           r1: usize| {
-                        let mut m = back_rx.try_recv().unwrap_or_default();
-                        m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
-                        let spare = log_rx.try_recv().unwrap_or_default();
+                        let mut m = back_rx
+                            .try_recv()
+                            .ok()
+                            .or_else(|| msg_pool.pop())
+                            .unwrap_or_default();
+                        m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y, false);
+                        let spare = log_rx
+                            .try_recv()
+                            .ok()
+                            .or_else(|| log_pool.pop())
+                            .unwrap_or_default();
                         let log =
                             log.map_or_else(ReconLog::default, |l| std::mem::replace(l, spare));
                         // A send only fails once the worker is gone (it
@@ -1373,6 +1414,7 @@ fn decode_frame<P: Pixel>(
                     Ok(r) => r,
                     Err(_) => Err(malformed("reconstruction thread")),
                 };
+                log_pool.extend(log_rx.try_iter());
                 (res, recon_res)
             } else {
                 let res = decode_tiles(
@@ -1390,9 +1432,13 @@ fn decode_frame<P: Pixel>(
                           _: Option<&mut ReconLog>,
                           r0: usize,
                           r1: usize| {
-                        let mut m = back_rx.try_recv().unwrap_or_default();
+                        let mut m = back_rx
+                            .try_recv()
+                            .ok()
+                            .or_else(|| msg_pool.pop())
+                            .unwrap_or_default();
                         let last = r1 >= fs.mi_rows;
-                        m.fill_meta(fs, sb4, r0, r1, last, sub_y);
+                        m.fill_meta(fs, sb4, r0, r1, last, sub_y, true);
                         m.fill_px(cur, sub_y);
                         // A send only fails once the worker is gone (it
                         // panicked): the join below reports that.
@@ -1403,6 +1449,7 @@ fn decode_frame<P: Pixel>(
             };
             drop(tx);
             let joined = worker.join();
+            msg_pool.extend(back_rx.try_iter());
             match (res, recon_res, joined) {
                 (Err(e), _, _) | (Ok(_), Err(e), _) => Err(e),
                 (Ok(_), Ok(()), Err(_)) => Err(malformed("in-loop filter thread")),

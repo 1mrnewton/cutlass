@@ -18,6 +18,10 @@ pub const EFFECT_LENGTH: Micros = Micros(3_000_000);
 /// A card's id starts with this, so a drop can tell an effect from a file.
 pub const EFFECT_CARD_PREFIX: &str = "effect:";
 
+/// The one card on the adjustments shelf: an adjustment layer, its sliders
+/// at zero, that runs over every picture below it.
+pub const ADJUSTMENT_CARD: &str = "adjustment:basic";
+
 /// One card on the effects shelf.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectCard {

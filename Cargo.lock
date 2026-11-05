@@ -815,6 +815,7 @@ dependencies = [
  "cutlass-container",
  "cutlass-encode",
  "cutlass-eval",
+ "cutlass-gif",
  "cutlass-gpu",
  "cutlass-isobmff",
  "cutlass-model",
@@ -824,6 +825,7 @@ dependencies = [
  "cutlass-renderer-software",
  "cutlass-riff",
  "cutlass-session",
+ "cutlass-still",
  "image",
 ]
 

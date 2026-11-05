@@ -17,6 +17,8 @@ mod mcp;
 mod mcp_server;
 mod model;
 mod sandbox;
+#[cfg(feature = "script")]
+mod script;
 mod settings_tool;
 mod skill;
 mod subagent;
@@ -37,9 +39,11 @@ pub use model::{
     ToolDefinition,
 };
 pub use sandbox::{
-    LocalSandbox, OnlineSandbox, Sandbox, SandboxError, SandboxExecutor, SandboxPolicy,
-    SandboxRoute, route_for,
+    LocalSandbox, OnlineSandbox, ProcessExecutor, Sandbox, SandboxError, SandboxExecutor,
+    SandboxPolicy, SandboxRoute, route_for,
 };
+#[cfg(feature = "script")]
+pub use script::{run_script, serve_script};
 pub use settings_tool::{SettingsTool, SettingsToolError, SettingsView};
 pub use skill::{Skill, SkillError, SkillLibrary, SkillPlan, parse_skill_md};
 pub use subagent::{Subagent, SubagentError, SubagentResult, allowed_tools, parent_apply};

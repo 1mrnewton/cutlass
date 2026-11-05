@@ -100,7 +100,7 @@ impl<S: ToolSink> McpServer<S> {
             return Err((-32602, format!("unknown tool {name}")));
         };
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-        let arguments = if tool == "draft.apply" {
+        let arguments = if takes_object(tool) {
             arguments.to_string()
         } else {
             arguments
@@ -152,7 +152,26 @@ fn tool_list() -> Vec<Value> {
         .collect()
 }
 
+/// Tools whose arguments are a JSON object rather than one `input` text.
+pub(crate) fn takes_object(tool: &str) -> bool {
+    matches!(tool, "draft.apply" | "sandbox.run")
+}
+
 pub(crate) fn input_schema(tool: &str) -> Value {
+    if tool == "sandbox.run" {
+        return json!({
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "A Rhai script. `input` holds the input; the last \
+                        expression is the answer, such as #{ gaps: [] }.",
+                },
+                "input": { "description": "Any JSON value the script reads as `input`." },
+            },
+            "required": ["source"],
+        });
+    }
     if tool == "draft.apply" {
         return json!({
             "type": "object",
@@ -196,7 +215,6 @@ fn input_hint(tool: &str) -> &'static str {
         "catalog.search" => "Words to search for.",
         "package.ensure" => "A package id.",
         "export.start" => "new <path> | replace <path>",
-        "sandbox.run" => "Source on the first line, then the input JSON.",
         "skill.load" => "A skill name, or what the skill is for.",
         "mcp.call" => "The server, the tool and the arguments, one to a line.",
         "settings.set" => "Settings change only in the app.",

@@ -569,7 +569,11 @@ fn description(name: &str) -> &'static str {
         "catalog.search" => "Search bundled effect and animation ids.",
         "package.ensure" => "Ask the host to make one package available.",
         "export.start" => "Start an export. Replacing a file asks the user.",
-        "sandbox.run" => "Run source in the injected sandbox and return JSON.",
+        "sandbox.run" => {
+            "Run a Rhai script on the machine and return its last value as JSON. \
+            The script sees `input`, has no files or network, and cannot edit the project: \
+            apply what it computes with draft.apply."
+        }
         "skill.load" => "Return the one skill whose description matches the ask.",
         "mcp.call" => "Call a tool on a server the user enabled.",
         _ => "",
@@ -853,6 +857,24 @@ fn parse_export(arguments: &str) -> Result<Invocation, ToolError> {
 }
 
 fn parse_sandbox(arguments: &str) -> Invocation {
+    // The object form: `{"source": "...", "input": <any JSON>}`.
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(arguments)
+        && let Some(source) = map.get("source").and_then(serde_json::Value::as_str)
+    {
+        let input_json = match map.get("input") {
+            None | Some(serde_json::Value::Null) => "{}".to_owned(),
+            Some(serde_json::Value::String(text))
+                if serde_json::from_str::<serde_json::Value>(text).is_ok() =>
+            {
+                text.clone()
+            }
+            Some(other) => other.to_string(),
+        };
+        return Invocation::SandboxRun {
+            source: source.to_owned(),
+            input_json,
+        };
+    }
     match arguments.split_once('\n') {
         Some((source, input_json)) => Invocation::SandboxRun {
             source: source.to_owned(),

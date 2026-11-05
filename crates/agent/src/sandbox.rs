@@ -1,6 +1,11 @@
 //! Local and online code runners take source and JSON and do not open the project folder.
 
+use std::ffi::OsString;
 use std::fmt;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use cutlass_settings::Settings;
 
@@ -101,6 +106,121 @@ impl<E: SandboxExecutor> Sandbox for LocalSandbox<E> {
     }
 }
 
+/// What one call to the runner process carries on its stdin.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ScriptCall {
+    pub source: String,
+    pub input: String,
+}
+
+/// Runs each call in a fresh child process: `program` with `args`, an
+/// empty environment, and an empty scratch folder as its working folder.
+/// The call goes in on stdin as `{"source","input"}`; the child answers
+/// `{"ok": <json>}` or `{"error": "<message>"}`. A child still running at
+/// `limit` is killed.
+#[derive(Clone, Debug)]
+pub struct ProcessExecutor {
+    program: PathBuf,
+    args: Vec<OsString>,
+    limit: Duration,
+}
+
+impl ProcessExecutor {
+    /// A runner that starts `program args…` for each call.
+    #[must_use]
+    pub fn new(program: PathBuf, args: Vec<OsString>, limit: Duration) -> Self {
+        Self {
+            program,
+            args,
+            limit,
+        }
+    }
+}
+
+impl SandboxExecutor for ProcessExecutor {
+    fn execute(&mut self, source: &str, input_json: &str) -> Result<String, SandboxError> {
+        let failed = |message: String| SandboxError::Executor(message);
+        let scratch = std::env::temp_dir().join(format!(
+            "cutlass-sandbox-{}-{}",
+            std::process::id(),
+            next_call()
+        ));
+        std::fs::create_dir_all(&scratch).map_err(|error| failed(error.to_string()))?;
+        let result = (|| {
+            let mut child = Command::new(&self.program)
+                .args(&self.args)
+                .env_clear()
+                .current_dir(&scratch)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| failed(format!("{}: {error}", self.program.display())))?;
+            let call = serde_json::to_string(&ScriptCall {
+                source: source.to_owned(),
+                input: input_json.to_owned(),
+            })
+            .map_err(|error| failed(error.to_string()))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(call.as_bytes())
+                    .map_err(|error| failed(error.to_string()))?;
+            }
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| failed("no stdout".to_owned()))?;
+            let reader = std::thread::spawn(move || {
+                let mut text = String::new();
+                stdout.read_to_string(&mut text).map(|_| text)
+            });
+            let deadline = Instant::now() + self.limit;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(failed(format!(
+                            "the script ran past {} s and was stopped",
+                            self.limit.as_secs_f32()
+                        )));
+                    }
+                    Err(error) => return Err(failed(error.to_string())),
+                }
+            }
+            let text = reader
+                .join()
+                .map_err(|_| failed("the reader stopped".to_owned()))?
+                .map_err(|error| failed(error.to_string()))?;
+            let answer: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| failed("the runner did not answer".to_owned()))?;
+            if let Some(ok) = answer.get("ok") {
+                return Ok(ok.to_string());
+            }
+            Err(failed(
+                answer
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("the runner failed")
+                    .to_owned(),
+            ))
+        })();
+        let _ = std::fs::remove_dir_all(&scratch);
+        result
+    }
+}
+
+/// A different scratch folder for each call in this process.
+fn next_call() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// The online runner stays off until settings enable it and does not follow
 /// the cloud model switch.
 #[derive(Debug)]
@@ -194,8 +314,17 @@ fn screen(source: &str, input_json: &str, policy: &SandboxPolicy) -> Result<(), 
     Ok(())
 }
 
+/// A path named as is, or as JSON writes it (a Windows path's backslashes
+/// are doubled inside a JSON string).
 fn path_hit(path: &str, source: &str, input_json: &str) -> bool {
-    !path.is_empty() && (source.contains(path) || input_json.contains(path))
+    if path.is_empty() {
+        return false;
+    }
+    let quoted = serde_json::to_string(path).unwrap_or_default();
+    let escaped = quoted.trim_matches('"');
+    [path, escaped]
+        .iter()
+        .any(|form| source.contains(form) || input_json.contains(form))
 }
 
 const MAX_JSON_DEPTH: u32 = 64;
@@ -667,5 +796,21 @@ mod tests {
             route_for(&settings, SandboxRoute::Online),
             SandboxRoute::Online
         );
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::path_hit;
+
+    #[test]
+    fn a_windows_path_is_found_inside_json_too() {
+        let path = r"C:\Users\me\Project";
+        let input = serde_json::json!({ "p": path }).to_string();
+        assert!(!input.contains(path));
+        assert!(path_hit(path, "1", &input));
+        assert!(path_hit(path, &format!("let p = `{path}`;"), "{}"));
+        assert!(!path_hit(path, "1", "{}"));
+        assert!(!path_hit("", "1", &input));
     }
 }

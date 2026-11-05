@@ -1,4 +1,7 @@
 //! Which lanes take which clips, and where a clip may start.
+//!
+//! A still picture (a sticker, a GIF, a photo or an image) may also sit on a
+//! sticker lane.
 
 use cutlass_model::{Draft, MaterialRef, Micros, Segment, Track, TrackType};
 
@@ -17,7 +20,12 @@ pub(super) fn check(
         return Err(EditError::BeforeZero);
     }
     let fits = match draft.materials.get(segment.material_id.as_str()) {
-        Some(MaterialRef::Video(_) | MaterialRef::Draft(_)) => {
+        Some(MaterialRef::Video(video)) => {
+            matches!(track.kind, TrackType::Video | TrackType::Composition)
+                || (track.kind == TrackType::Sticker
+                    && matches!(video.kind.as_str(), "sticker" | "gif" | "photo" | "image"))
+        }
+        Some(MaterialRef::Draft(_)) => {
             matches!(track.kind, TrackType::Video | TrackType::Composition)
         }
         Some(MaterialRef::Audio(_)) => track.kind == TrackType::Audio,
@@ -45,6 +53,35 @@ mod tests {
     use crate::edit::EditError;
     use crate::request::Request;
     use crate::session::Session;
+
+    #[test]
+    fn a_still_may_sit_on_a_sticker_lane_and_a_movie_may_not() {
+        use cutlass_model::MaterialVideo;
+
+        let mut draft = Draft::empty("D");
+        draft.config.maintrack_adsorb = false;
+        let mut stickers = Track::main("stickers");
+        stickers.kind = TrackType::Sticker;
+        draft.tracks.push(stickers);
+        for (id, kind) in [("heart", "sticker"), ("loop", "gif"), ("movie", "video")] {
+            let mut video = MaterialVideo::new(id);
+            video.kind = kind.to_owned();
+            draft.materials.videos.push(video);
+        }
+        let mut session = Session::open(draft);
+        let place = |id: &str, start: i64| Request::Place {
+            track_id: "stickers".into(),
+            segment: Box::new(Segment::new(id, id, TimeRange::new(start, 1_000_000))),
+        };
+        session.apply(0, &[place("heart", 0)]).unwrap();
+        session
+            .apply(session.revision(), &[place("loop", 1_000_000)])
+            .unwrap();
+        assert_eq!(
+            session.apply(session.revision(), &[place("movie", 2_000_000)]),
+            Err(EditError::LaneKind)
+        );
+    }
 
     #[test]
     fn a_clip_keeps_to_its_kind_of_lane_and_after_zero() {

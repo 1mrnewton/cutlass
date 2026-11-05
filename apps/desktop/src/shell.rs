@@ -624,6 +624,28 @@ pub const STICKER_CARD_PREFIX: &str = "sticker:";
 /// How long a sticker lasts when it is placed.
 const STICKER_LENGTH: Micros = Micros(3_000_000);
 
+/// The sticker shelf's `card_id`.
+fn shelf_sticker(card_id: &str) -> Result<&'static cutlass_stickers::Sticker, ShellError> {
+    card_id
+        .strip_prefix(STICKER_CARD_PREFIX)
+        .and_then(cutlass_stickers::sticker)
+        .ok_or_else(|| {
+            ShellError::Unavailable("the sticker is not on the sticker shelf".to_owned())
+        })
+}
+
+/// How long `sticker` lasts when it is placed: an animation plays as many
+/// whole rounds as fit in [`STICKER_LENGTH`], at least one, so its clip
+/// ends where a round ends; a still lasts [`STICKER_LENGTH`].
+pub fn sticker_length(sticker: &cutlass_stickers::Sticker) -> Micros {
+    let Some(seconds) = sticker.seconds().filter(|seconds| *seconds > 0.0) else {
+        return STICKER_LENGTH;
+    };
+    let round = (seconds * 1_000_000.0).round();
+    let rounds = (STICKER_LENGTH.0 as f64 / round).floor().max(1.0);
+    Micros((round * rounds) as i64)
+}
+
 /// A placed sticker's size against the canvas it would fill.
 const STICKER_SCALE: f64 = 0.4;
 
@@ -2874,23 +2896,22 @@ impl Shell {
     /// Add the sticker shelf's `card_id` at the playhead, on the first
     /// sticker row with room, else on a new one. The new sticker is picked.
     pub fn add_sticker(&mut self, card_id: &str) -> Result<(), ShellError> {
+        let sticker = shelf_sticker(card_id)?;
+        let length = sticker_length(sticker);
         let start = self.playhead;
-        let track_id = free_row(
-            self.session_draft()?,
-            TrackType::Sticker,
-            start,
-            STICKER_LENGTH,
-        );
-        self.place_sticker(card_id, track_id, start)
+        let track_id = free_row(self.session_draft()?, TrackType::Sticker, start, length);
+        self.place_sticker(sticker, length, track_id, start)
     }
 
     /// Place the sticker shelf's `card_id` where it was dropped on the lanes.
     pub fn drop_sticker(&mut self, card_id: &str, x: f64, y: f64) -> Result<(), ShellError> {
+        let sticker = shelf_sticker(card_id)?;
+        let length = sticker_length(sticker);
         let x = self.time_zero_x(x);
         let outcome = {
             let gesture = DropGesture {
                 kind: TrackType::Sticker,
-                duration: STICKER_LENGTH,
+                duration: length,
                 pointer: Pointer { x, y },
                 scale: self.scale(),
                 playhead: self.playhead,
@@ -2905,28 +2926,23 @@ impl Shell {
                 "the drag missed the lanes".to_owned(),
             )),
             DropOutcome::Place { track_id, start } => {
-                self.place_sticker(card_id, Some(track_id), start)
+                self.place_sticker(sticker, length, Some(track_id), start)
             }
-            DropOutcome::NewLane { start, .. } => self.place_sticker(card_id, None, start),
+            DropOutcome::NewLane { start, .. } => self.place_sticker(sticker, length, None, start),
         }
     }
 
-    /// Place a sticker on `track_id`, or on a new sticker row. The picture is
-    /// written into the project the first time and its library item is
-    /// shared after that; adding it, the row, the clip and its size are one
-    /// undo step.
+    /// Place a sticker `length` long on `track_id`, or on a new sticker row.
+    /// Its file (a picture, or a Lottie animation) is written into the
+    /// project the first time and its library item is shared after that;
+    /// adding it, the row, the clip and its size are one undo step.
     fn place_sticker(
         &mut self,
-        card_id: &str,
+        sticker: &cutlass_stickers::Sticker,
+        length: Micros,
         track_id: Option<TrackId>,
         start: Micros,
     ) -> Result<(), ShellError> {
-        let sticker = card_id
-            .strip_prefix(STICKER_CARD_PREFIX)
-            .and_then(cutlass_stickers::sticker)
-            .ok_or_else(|| {
-                ShellError::Unavailable("the sticker is not on the sticker shelf".to_owned())
-            })?;
         let project = self.path.clone().ok_or(ShellError::NoProject)?;
         let stored = format!("Resources/{}", sticker.file_name());
         let mut requests = Vec::new();
@@ -2942,22 +2958,24 @@ impl Shell {
             None => {
                 let file = project.join(&stored);
                 if !file.is_file() {
-                    let png = sticker.png().map_err(ShellError::Io)?;
+                    let bytes = sticker.bytes().map_err(ShellError::Io)?;
                     if let Some(folder) = file.parent() {
                         std::fs::create_dir_all(folder)
                             .map_err(|error| ShellError::Io(error.to_string()))?;
                     }
-                    std::fs::write(&file, png)
+                    std::fs::write(&file, bytes)
                         .map_err(|error| ShellError::Io(error.to_string()))?;
                 }
                 let material_id = self.fresh("mat");
                 let mut material = MaterialVideo::new(material_id.as_str());
                 material.kind = MetaType::Sticker.as_str().to_owned();
                 material.path = stored;
-                material.duration = MaterialVideo::MAPPING_DURATION;
-                let side = i32::try_from(cutlass_stickers::STICKER_SIDE).unwrap_or(0);
-                material.width = side;
-                material.height = side;
+                // A picture has no length of its own; an animation plays
+                // round for as long as its clip lasts.
+                material.duration = MaterialVideo::MAPPING_DURATION.max(length);
+                let (width, height) = sticker.size().map_err(ShellError::Io)?;
+                material.width = i32::try_from(width).unwrap_or(0);
+                material.height = i32::try_from(height).unwrap_or(0);
                 requests.push(Request::Import {
                     medium: ImportedMedium::Video(Box::new(material)),
                 });
@@ -2970,7 +2988,7 @@ impl Shell {
             segment_id: SegmentId::new(self.fresh("seg")),
             material_id,
             start,
-            duration: STICKER_LENGTH,
+            duration: length,
             new_lane,
         };
         requests.extend(media_requests(
@@ -9770,6 +9788,132 @@ mod tests {
             desktop
                 .drop_sticker("title:nope", 0.0, sticker_row)
                 .is_err()
+        );
+    }
+
+    /// A 64 by 64 project, open, with nothing on it.
+    fn sticker_project(temp: &Temp) -> Shell {
+        let mut draft = Draft::empty("draft");
+        draft.canvas_config.width = 64;
+        draft.canvas_config.height = 64;
+        Folder::new(draft).save(&temp.path).unwrap();
+        let mut desktop = shell();
+        desktop.open_folder(&temp.path).unwrap();
+        desktop.pixel_size = 0.001;
+        desktop
+    }
+
+    fn picked_segment(desktop: &Shell) -> Segment {
+        let picked = desktop.selected().cloned().unwrap();
+        desktop
+            .draft()
+            .unwrap()
+            .tracks
+            .iter()
+            .flat_map(|track| &track.segments)
+            .find(|segment| segment.id == picked)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bundled_picture_sticker_is_written_as_shipped_and_placed() {
+        let temp = Temp::new();
+        let mut desktop = sticker_project(&temp);
+        let clear = digest(&desktop.preview_bytes().unwrap().rgba);
+        desktop.add_sticker("sticker:noto-1f525").unwrap();
+        let file = temp.path.join("Resources/sticker-noto-1f525.png");
+        let shipped = cutlass_stickers::sticker("noto-1f525")
+            .unwrap()
+            .bytes()
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), shipped);
+        let draft = desktop.draft().unwrap();
+        let material = &draft.materials.videos[0];
+        assert_eq!(material.kind, "sticker");
+        assert_eq!((material.width, material.height), (512, 512));
+        let segment = picked_segment(&desktop);
+        assert_eq!(segment.target, TimeRange::new(0, 3_000_000));
+        assert_eq!(
+            draft
+                .tracks
+                .iter()
+                .find(|track| track.segments.contains(&segment))
+                .unwrap()
+                .kind,
+            TrackType::Sticker
+        );
+        let picture = desktop.preview_bytes().unwrap();
+        assert_ne!(digest(&picture.rgba), clear);
+        // The flame's orange is in the middle of the canvas.
+        let at = ((picture.height / 2) * picture.width + picture.width / 2) as usize * 4;
+        let middle = &picture.rgba[at..at + 3];
+        assert!(middle[0] > 200 && middle[2] < 150, "{middle:?}");
+        // Dropped later on, it shares the file and its library item.
+        desktop
+            .drop_sticker(
+                "sticker:noto-1f525",
+                lane_time(&desktop, 4_000_000.0),
+                crate::tokens::LANE_HEIGHT / 2.0,
+            )
+            .unwrap();
+        assert_eq!(desktop.draft().unwrap().materials.videos.len(), 1);
+    }
+
+    #[test]
+    fn a_bundled_lottie_sticker_plays_whole_rounds_and_loops() {
+        let temp = Temp::new();
+        let mut desktop = sticker_project(&temp);
+        let sticker = cutlass_stickers::sticker("noto-anim-1f525").unwrap();
+        let clear = digest(&desktop.preview_bytes().unwrap().rgba);
+        desktop.add_sticker("sticker:noto-anim-1f525").unwrap();
+        let file = temp.path.join("Resources/sticker-noto-anim-1f525.json");
+        assert_eq!(std::fs::read(&file).unwrap(), sticker.bytes().unwrap());
+        let material = desktop.draft().unwrap().materials.videos[0].clone();
+        assert_eq!((material.width, material.height), (1024, 1024));
+        // One round is 65 frames at 60 a second; two whole rounds fit in
+        // three seconds.
+        let round = 65.0 / 60.0;
+        assert!((sticker.seconds().unwrap() - round).abs() < 1e-9);
+        let segment = picked_segment(&desktop);
+        let length = (round * 1_000_000.0).round() as i64 * 2;
+        assert_eq!(segment.target, TimeRange::new(0, length));
+        assert!(material.duration.0 >= length);
+
+        let mut seen = |time: i64| {
+            desktop.seek(Micros(time));
+            desktop.preview_bytes().unwrap().rgba
+        };
+        let early = seen(100_000);
+        let later = seen(500_000);
+        assert_ne!(digest(&early), digest(&later), "the flame moves");
+        assert_ne!(digest(&early), clear);
+        // A round later it is the same picture again.
+        let again = seen(100_000 + (round * 1_000_000.0).round() as i64);
+        let off = early
+            .iter()
+            .zip(&again)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(off <= 2, "{off}");
+        // After the clip, nothing.
+        assert_eq!(digest(&seen(length + 10_000)), clear);
+    }
+
+    #[test]
+    fn a_sticker_lasts_whole_rounds_of_its_animation() {
+        use super::{STICKER_LENGTH, sticker_length};
+        let fire = cutlass_stickers::sticker("noto-anim-1f525").unwrap();
+        assert_eq!(sticker_length(fire), Micros(2_166_666));
+        // 2.25 s: one round, the most that fits.
+        let hundred = cutlass_stickers::sticker("noto-anim-1f4af").unwrap();
+        assert_eq!(sticker_length(hundred), Micros(2_250_000));
+        let still = cutlass_stickers::sticker("noto-1f525").unwrap();
+        assert_eq!(sticker_length(still), STICKER_LENGTH);
+        assert_eq!(
+            sticker_length(&cutlass_stickers::STICKERS[0]),
+            STICKER_LENGTH
         );
     }
 

@@ -1264,8 +1264,11 @@ dependencies = [
 name = "cutlass-stickers"
 version = "0.1.0"
 dependencies = [
+ "cutlass-decode",
  "cutlass-encode",
+ "cutlass-lottie",
  "cutlass-png",
+ "serde_json",
 ]
 
 [[package]]

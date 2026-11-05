@@ -4,11 +4,14 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "The sticker catalog and Cutlass's own sticker pack."
+description = "The sticker catalog: Cutlass's own pack and the open sets it ships."
 
 [dependencies]
+cutlass-decode = { path = "../decode", version = "0.1.0" }
 cutlass-encode = { path = "../encode", version = "0.1.0" }
+cutlass-lottie = { path = "../lottie", version = "0.1.0" }
 cutlass-png = { path = "../codecs/png", version = "0.1.0" }
+serde_json = "1.0.154"
 
 [lints]
 workspace = true

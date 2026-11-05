@@ -1087,6 +1087,8 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
                     .color(tokens::MUTED),
                 );
                 ui.add_space(8.0);
+                sticker_credits(ui);
+                ui.add_space(8.0);
                 for krate in &notices.crates {
                     egui::CollapsingHeader::new(format!("{} {}", krate.name, krate.version))
                         .id_salt(("license", &krate.name, &krate.version))
@@ -1106,6 +1108,24 @@ fn licenses_window(ui: &mut Ui, view: &mut ViewState) {
     });
     if closed || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         view.licenses = None;
+    }
+}
+
+/// The open sticker sets the app ships: each set, who made it, its license
+/// and its home, and the license text under it.
+fn sticker_credits(ui: &mut Ui) {
+    ui.label(RichText::new("Stickers").strong());
+    for credit in cutlass_stickers::CREDITS {
+        ui.label(format!(
+            "{} by {}, licensed {}.",
+            credit.set, credit.author, credit.license
+        ));
+        ui.label(RichText::new(credit.link).color(tokens::FAINT));
+        egui::CollapsingHeader::new(format!("{} license", credit.set))
+            .id_salt(("sticker license", credit.set))
+            .show(ui, |ui| {
+                ui.label(RichText::new(credit.text).monospace().size(10.0));
+            });
     }
 }
 
@@ -2229,10 +2249,13 @@ fn fill_looks(shell: &mut Shell, ctx: &egui::Context, cards: &mut [BinCard]) {
                         entry.1 = textures.frame;
                         entry.0.id()
                     } else {
+                        let Ok(rgba) = sticker_poster(sticker, width, height) else {
+                            continue;
+                        };
                         let thumb = cutlass_engine::Thumb {
                             width,
                             height,
-                            rgba: sticker_poster(sticker, width, height),
+                            rgba,
                         };
                         film_texture(ctx, textures, key, &thumb)
                     };
@@ -2482,7 +2505,7 @@ fn bin_cards(
                 cards.push(BinCard {
                     id: format!("{}{}", crate::shell::STICKER_CARD_PREFIX, sticker.id),
                     name: sticker.name.to_owned(),
-                    meta: card_meta(3_000_000),
+                    meta: card_meta(crate::shell::sticker_length(sticker).0),
                     on_timeline: false,
                     look: CardLook::Picture(None),
                 });
@@ -2522,9 +2545,13 @@ fn effect_card(effect: cutlass_editor::EffectCard) -> BinCard {
 
 /// A sticker on a clear card `width` by `height`, as tall as the card and
 /// in the middle, so the card's cover crop keeps all of it.
-fn sticker_poster(sticker: &cutlass_stickers::Sticker, width: u32, height: u32) -> Vec<u8> {
+fn sticker_poster(
+    sticker: &cutlass_stickers::Sticker,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
     let side = height.min(width);
-    let drawn = sticker.rgba(side);
+    let drawn = sticker.rgba(side)?;
     let mut rgba = vec![0_u8; (width * height * 4) as usize];
     let left = (width - side) / 2;
     let top = (height - side) / 2;
@@ -2534,7 +2561,7 @@ fn sticker_poster(sticker: &cutlass_stickers::Sticker, width: u32, height: u32) 
         let span = (side * 4) as usize;
         rgba[to..to + span].copy_from_slice(&drawn[from..from + span]);
     }
-    rgba
+    Ok(rgba)
 }
 
 fn title_card(style: &cutlass_editor::TitleStyle) -> BinCard {
@@ -8784,6 +8811,20 @@ mod tests {
             "{painted}"
         );
         assert!(painted.contains("accesskit "), "{painted}");
+        // The open sticker sets are credited, CC BY ones by name and link.
+        assert!(painted.contains("Stickers"), "{painted}");
+        assert!(
+            painted.contains("Noto Emoji by Google, licensed Apache-2.0."),
+            "{painted}"
+        );
+        assert!(
+            painted.contains("Noto Animated Emoji by Google, licensed CC-BY-4.0."),
+            "{painted}"
+        );
+        assert!(
+            painted.contains("https://googlefonts.github.io/noto-emoji-animation/"),
+            "{painted}"
+        );
         run(
             &mut shell,
             &mut view,

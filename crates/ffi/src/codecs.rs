@@ -1,7 +1,9 @@
 //! The containers and codecs a phone opens.
 //!
 //! The Apple decoders go first on an Apple phone. A codec they decline falls
-//! through to the Rust decoder of the same id.
+//! through to the Rust decoder of the same id. MP3 is the exception: the
+//! Rust decoder goes first everywhere, so an MP3 file decodes the same on
+//! every platform.
 
 use std::fs::File;
 use std::path::Path;
@@ -26,10 +28,13 @@ pub fn readers() -> ReaderFactory {
     readers
 }
 
-/// The platform decoders for this OS, then PNG, JPEG, AAC, H.264, PCM, and MP3.
+/// MP3, the platform decoders for this OS, then PNG, JPEG, AAC, H.264, and
+/// PCM.
 #[must_use]
 pub fn decoders() -> DecodeFactory {
     let mut decoders = DecodeFactory::new();
+    // Ahead of the platform decoders, so MP3 decodes the same everywhere.
+    cutlass_mp3::register_decoders(&mut decoders);
     #[cfg(target_vendor = "apple")]
     cutlass_platform_apple::register_decoders(&mut decoders);
     cutlass_png::register_decoders(&mut decoders);
@@ -37,7 +42,6 @@ pub fn decoders() -> DecodeFactory {
     cutlass_aac::register_decoders(&mut decoders);
     cutlass_h264::register_decoders(&mut decoders);
     cutlass_pcm::register_decoders(&mut decoders);
-    cutlass_mp3::register_decoders(&mut decoders);
     decoders
 }
 
@@ -136,5 +140,64 @@ mod tests {
         let ready = media.pull_audio().expect("pull").expect("pcm");
         assert_eq!(ready.pcm.rate, 22_050);
         assert_eq!(ready.pcm.layout.len(), 1);
+    }
+
+    /// Every sample `decoders` makes of the fixture's frames.
+    fn decode_mp3(decoders: &cutlass_decode::DecodeFactory) -> Vec<f32> {
+        use cutlass_mp3_container::{Demux, Mp3Demux};
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../codecs/mp3/tests/fixtures/sine_44100_j128_crc.mp3");
+        let bytes = std::fs::read(path).expect("fixture");
+        let mut demux = Mp3Demux::open(std::io::Cursor::new(bytes)).expect("demux");
+        let stream = &demux.streams()[0].params;
+        let rate = stream.sample_rate;
+        let layout = if stream.channels == 1 {
+            cutlass_decode::ChannelLayout::mono()
+        } else {
+            cutlass_decode::ChannelLayout::stereo()
+        };
+        let params = cutlass_decode::CodecParams::audio(cutlass_decode::CodecId::Mp3, rate, layout);
+        let mut decoder = decoders.open(&params).expect("decoder");
+        let mut pcm = Vec::new();
+        let mut keep = |outputs: Vec<cutlass_decode::Output>| {
+            for output in outputs {
+                if let cutlass_decode::Output::Audio(audio) = output {
+                    pcm.extend_from_slice(audio.pcm.as_f32().expect("f32"));
+                }
+            }
+        };
+        while let Some(packet) = demux.next_packet().expect("packet") {
+            let packet =
+                cutlass_decode::Packet::audio(packet.data, packet.pts, packet.duration, rate);
+            keep(decoder.push(&packet).expect("decode"));
+        }
+        keep(decoder.drain().expect("drain"));
+        pcm
+    }
+
+    #[test]
+    fn mp3_is_decoded_by_the_rust_decoder_ahead_of_the_platform() {
+        let mut rust = cutlass_decode::DecodeFactory::new();
+        cutlass_mp3::register_decoders(&mut rust);
+        let expected = decode_mp3(&rust);
+        assert!(!expected.is_empty());
+        assert!(
+            decode_mp3(&super::decoders()) == expected,
+            "the Rust decoder decodes MP3"
+        );
+
+        // With the platform first, an Apple phone decodes MP3 itself, and
+        // differently: the check above would fail if the order were reversed.
+        #[cfg(target_vendor = "apple")]
+        {
+            let mut reversed = cutlass_decode::DecodeFactory::new();
+            cutlass_platform_apple::register_decoders(&mut reversed);
+            cutlass_mp3::register_decoders(&mut reversed);
+            assert!(
+                decode_mp3(&reversed) != expected,
+                "the platform decoder was not picked"
+            );
+        }
     }
 }

@@ -27,6 +27,8 @@ mod profile;
 mod tables;
 
 #[cfg(test)]
+mod hardening;
+#[cfg(test)]
 mod tests;
 
 pub use convert::to_yuv420p;

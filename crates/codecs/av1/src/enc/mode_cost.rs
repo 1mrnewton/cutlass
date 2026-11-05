@@ -7,10 +7,10 @@ use crate::dec::tile::TileDec;
 use crate::dec::types::{
     ALTREF_FRAME, ALTREF2_FRAME, BWDREF_FRAME, GLOBALMV, GOLDEN_FRAME, INTRA_FRAME, LAST_FRAME,
     LAST2_FRAME, LAST3_FRAME, NEAR_NEARMV, NEAR_NEWMV, NEAREST_NEARESTMV, NEARMV, NEW_NEARMV,
-    NEW_NEWMV, NEWMV, NONE, bh4, bw4,
+    NEW_NEWMV, NEWMV, NONE, bh4, block_height, block_width, bw4, is_directional,
 };
 use crate::dsp::Pixel;
-use crate::spec::tables::COMPOUND_MODE_CTX_MAP;
+use crate::spec::tables::{COMPOUND_MODE_CTX_MAP, INTRA_MODE_CONTEXT, SIZE_GROUP};
 
 use super::msac_enc::{bool_cost, symbol_cost};
 
@@ -321,6 +321,108 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 }
             };
             bits += int_bits;
+        }
+        bits
+    }
+
+    /// Bits of an intra block's luma mode (with angle delta 0 and, for
+    /// DC_PRED, filter intra off) in the current frame type.
+    pub(crate) fn y_mode_bits(&self, mode: u8) -> f64 {
+        let b = &self.b;
+        let cdf = &self.cdf;
+        let mut bits = if self.hdr.frame_is_intra {
+            let above = if b.avail_u {
+                self.mi(b.mi_row - 1, b.mi_col).y_mode
+            } else {
+                0
+            };
+            let left = if b.avail_l {
+                self.mi(b.mi_row, b.mi_col - 1).y_mode
+            } else {
+                0
+            };
+            let a = INTRA_MODE_CONTEXT[usize::from(above).min(12)] as usize;
+            let l = INTRA_MODE_CONTEXT[usize::from(left).min(12)] as usize;
+            sb(&cdf.intra_frame_y_mode[a][l], usize::from(mode))
+        } else {
+            sb(
+                &cdf.y_mode[SIZE_GROUP[b.bsize as usize] as usize],
+                usize::from(mode),
+            )
+        };
+        bits += self.angle_bits(mode, 0);
+        if mode == 0 {
+            bits += self.filter_intra_bits(None);
+        }
+        bits
+    }
+
+    /// Bits of the angle delta of a directional mode (0 otherwise).
+    pub(crate) fn angle_bits(&self, mode: u8, delta: i8) -> f64 {
+        if self.b.bsize >= crate::dec::types::BLOCK_8X8 && is_directional(mode) {
+            sb(
+                &self.cdf.angle_delta[usize::from(mode) - 1],
+                (delta + 3) as usize,
+            )
+        } else {
+            0.0
+        }
+    }
+
+    /// Bits of the filter intra syntax of a DC_PRED block without palette.
+    pub(crate) fn filter_intra_bits(&self, fi: Option<u8>) -> f64 {
+        let bs = self.b.bsize;
+        if !self.seq.enable_filter_intra || block_width(bs).max(block_height(bs)) > 32 {
+            return 0.0;
+        }
+        let f = &self.cdf.filter_intra[bs as usize];
+        match fi {
+            None => bb(f, false),
+            Some(m) => bb(f, true) + sb(&self.cdf.filter_intra_mode, usize::from(m)),
+        }
+    }
+
+    /// Bits of the chroma mode `uv` after luma mode `y` (angle delta 0).
+    pub(crate) fn uv_mode_bits(&self, y: u8, uv: u8) -> f64 {
+        let bs = self.b.bsize;
+        let cfl_allowed = !self.b.lossless && block_width(bs).max(block_height(bs)) <= 32;
+        let y = usize::from(y).min(12);
+        let bits = if cfl_allowed {
+            sb(&self.cdf.uv_mode_cfl_allowed[y], usize::from(uv))
+        } else {
+            sb(
+                &self.cdf.uv_mode_cfl_not_allowed[y],
+                usize::from(uv).min(12),
+            )
+        };
+        bits + self.angle_bits(uv, 0)
+    }
+
+    /// Bits of the CFL alphas.
+    pub(crate) fn cfl_bits(&self, au: i8, av: i8) -> f64 {
+        let sgn = |a: i8| -> usize {
+            match a.signum() {
+                0 => 0,
+                -1 => 1,
+                _ => 2,
+            }
+        };
+        let (su, sv) = (sgn(au), sgn(av));
+        let joint = (su * 3 + sv).saturating_sub(1);
+        let mut bits = sb(&self.cdf.cfl_sign, joint);
+        if su != 0 {
+            let ctx = (su - 1) * 3 + sv;
+            bits += sb(
+                &self.cdf.cfl_alpha[ctx],
+                (au.unsigned_abs().max(1) - 1) as usize,
+            );
+        }
+        if sv != 0 {
+            let ctx = (sv - 1) * 3 + su;
+            bits += sb(
+                &self.cdf.cfl_alpha[ctx],
+                (av.unsigned_abs().max(1) - 1) as usize,
+            );
         }
         bits
     }

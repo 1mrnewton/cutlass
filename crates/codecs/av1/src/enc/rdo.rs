@@ -101,6 +101,9 @@ pub struct ModeParams {
     pub intra_split_pred: bool,
     /// The intra/inter comparison charges the is_inter flag from its CDF.
     pub inter_flag_bits: bool,
+    /// Intra mode decisions charge mode, angle, filter intra and CFL bits
+    /// from the CDFs.
+    pub exact_intra_rates: bool,
 }
 
 impl Default for ModeParams {
@@ -144,6 +147,7 @@ impl Default for ModeParams {
             inter_rd_modes: 1,
             intra_split_pred: true,
             inter_flag_bits: true,
+            exact_intra_rates: true,
         }
     }
 }
@@ -1161,10 +1165,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 w,
                 h,
             );
-            let rate = match mode {
-                DC_PRED => 1.0,
-                SMOOTH_PRED | PAETH_PRED => 2.5,
-                _ => 3.5,
+            let rate = if self.mode.exact_intra_rates {
+                self.y_mode_bits(mode)
+            } else {
+                match mode {
+                    DC_PRED => 1.0,
+                    SMOOTH_PRED | PAETH_PRED => 2.5,
+                    _ => 3.5,
+                }
             };
             let cost = f64::from(d) + lam * rate;
             cands.push((cost, mode, rate));
@@ -1215,10 +1223,16 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let refine = best.1 <= refine_limit;
         if refine && self.mode.angle_deltas && (1..=8).contains(&best.0) && bs >= BLOCK_8X8 {
             let base = best.0;
+            let base_bits = self.y_mode_bits(base) - self.angle_bits(base, 0);
             for d in [-3i8, -2, -1, 1, 2, 3] {
                 self.b.angle_delta_y = d;
                 self.predict_intra(0, x, y, al, au, have_ar, have_bl, base, lw, lh);
-                let cost = sat(self) + lam * (3.5 + 1.0 + 0.5 * f64::from(d.unsigned_abs()));
+                let r = if self.mode.exact_intra_rates {
+                    base_bits + self.angle_bits(base, d)
+                } else {
+                    3.5 + 1.0 + 0.5 * f64::from(d.unsigned_abs())
+                };
+                let cost = sat(self) + lam * r;
                 if cost < best.1 {
                     best = (base, cost);
                     angle = d;
@@ -1233,10 +1247,16 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             && block_width(bs).max(block_height(bs)) <= 32
         {
             self.b.use_filter_intra = true;
+            let dc_bits = self.y_mode_bits(DC_PRED) - self.filter_intra_bits(None);
             for m in 0..5u8 {
                 self.b.filter_intra_mode = m;
                 self.predict_intra(0, x, y, al, au, have_ar, have_bl, DC_PRED, lw, lh);
-                let cost = sat(self) + lam * 4.5;
+                let r = if self.mode.exact_intra_rates {
+                    dc_bits + self.filter_intra_bits(Some(m))
+                } else {
+                    4.5
+                };
+                let cost = sat(self) + lam * r;
                 if cost < best.1 {
                     best = (DC_PRED, cost);
                     angle = 0;
@@ -1293,7 +1313,14 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                     h,
                 );
             }
-            let cost = f64::from(d) + lam * if mode == DC_PRED { 1.0 } else { 3.0 };
+            let r = if self.mode.exact_intra_rates {
+                self.uv_mode_bits(pb.y_mode, mode)
+            } else if mode == DC_PRED {
+                1.0
+            } else {
+                3.0
+            };
+            let cost = f64::from(d) + lam * r;
             if cost < best.1 {
                 best = (mode, cost);
             }
@@ -1380,7 +1407,26 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 alphas[plane - 1] = bp.1 as i8;
             }
             if alphas != [0, 0] {
-                let cost = f64::from(d) + lam * 3.0;
+                let cost = if self.mode.exact_intra_rates {
+                    // Replace the per-plane alpha guesses with the exact cost.
+                    let guess: f64 = alphas
+                        .iter()
+                        .map(|&a| {
+                            if a == 0 {
+                                0.5
+                            } else {
+                                2.0 + 0.3 * f64::from(a.unsigned_abs())
+                            }
+                        })
+                        .sum();
+                    f64::from(d)
+                        + lam
+                            * (self.uv_mode_bits(pb.y_mode, UV_CFL_PRED)
+                                + self.cfl_bits(alphas[0], alphas[1])
+                                - guess)
+                } else {
+                    f64::from(d) + lam * 3.0
+                };
                 if cost < best.1 {
                     best = (UV_CFL_PRED, cost);
                     cfl = (alphas[0], alphas[1]);

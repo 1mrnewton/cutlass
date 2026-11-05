@@ -1171,10 +1171,14 @@ impl Av1Enc {
             inter_rd_modes: ev("AV1_IRM", 1.0) as usize,
             intra_split_pred: ev("AV1_ITXP", 1.0) > 0.0,
             inter_flag_bits: ev("AV1_IIB", 1.0) > 0.0,
+            exact_intra_rates: ev("AV1_XRI", 1.0) > 0.0,
             intra_rd_cands: ev(
                 "AV1_IRD",
-                if speed >= 6 {
+                if speed >= 7 {
                     1.0
+                } else if speed >= 6 {
+                    // Key frames are few: their modes get the RD check.
+                    if key { 2.0 } else { 1.0 }
                 } else if speed >= 4 {
                     3.0
                 } else {

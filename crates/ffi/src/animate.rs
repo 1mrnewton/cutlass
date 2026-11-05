@@ -1,6 +1,6 @@
 //! The Animations panel: a clip's in and out animation and the presets.
 
-use cutlass_model::{ANIMATION_PRESETS, AnimType};
+use cutlass_model::{ANIMATION_PRESETS, AnimType, Motion};
 use cutlass_session::Micros;
 
 /// One side of a clip's animations: the preset's resource id and length.
@@ -19,11 +19,13 @@ pub struct PhoneAnimationPreset {
     pub duration: Micros,
 }
 
-/// The presets, in the panel's order after None.
+/// The presets, in the panel's order after None. A title's letter
+/// animations are left out until the phone panel tells titles apart.
 #[must_use]
 pub fn animation_presets() -> Vec<PhoneAnimationPreset> {
     ANIMATION_PRESETS
         .iter()
+        .filter(|preset| !matches!(preset.motion, Motion::Letters(_)))
         .map(|preset| PhoneAnimationPreset {
             name: preset.name.to_owned(),
             enter: preset.kind == AnimType::In,

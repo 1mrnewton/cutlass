@@ -1,6 +1,6 @@
 use cutlass_model::{
-    ANIMATION_PRESETS, AnimType, Draft, MaterialAnimations, MaterialId, Micros, SegmentId,
-    StickerAnimation,
+    ANIMATION_PRESETS, AnimType, Draft, MaterialAnimations, MaterialId, MaterialRef, Micros,
+    Motion, SegmentId, StickerAnimation,
 };
 
 use super::speed::locate;
@@ -15,7 +15,7 @@ pub const SHORTEST: Micros = Micros(100_000);
 /// animation. The row is the reference editor's: one `sticker_animation`
 /// in `material_animations` that the segment's `extra_material_refs` name,
 /// dropped when it empties. An out animation starts where it must to end
-/// with the clip.
+/// with the clip. A letter animation goes only on a title.
 pub fn set_animation(
     draft: &mut Draft,
     segment_id: &SegmentId,
@@ -37,6 +37,15 @@ pub fn set_animation(
     };
     let (track_index, segment_index) = locate(draft, segment_id)?;
     ensure_unlocked(draft.tracks[track_index].attribute)?;
+    if preset.is_some_and(|preset| matches!(preset.motion, Motion::Letters(_))) {
+        let material_id = &draft.tracks[track_index].segments[segment_index].material_id;
+        if !matches!(
+            draft.materials.get(material_id.as_str()),
+            Some(MaterialRef::Text(_))
+        ) {
+            return Err(EditError::Animation);
+        }
+    }
     let length = draft.tracks[track_index].segments[segment_index]
         .target
         .duration;
@@ -261,5 +270,44 @@ mod tests {
             session.apply(1, &[set(AnimType::Loop, None, 500_000)]),
             Err(EditError::Animation)
         );
+        // A letter animation is a title's; "media" is not one.
+        assert_eq!(
+            session.apply(
+                1,
+                &[set(
+                    AnimType::In,
+                    Some("cutlass-anim-in-typewriter"),
+                    500_000
+                )]
+            ),
+            Err(EditError::Animation)
+        );
+    }
+
+    #[test]
+    fn a_title_takes_a_letter_animation_that_moves_its_letters_only() {
+        let mut draft = open().draft().clone();
+        draft
+            .materials
+            .texts
+            .push(cutlass_model::MaterialText::new("media"));
+        let mut session = Session::open(draft);
+        session
+            .apply(
+                0,
+                &[set(
+                    AnimType::In,
+                    Some("cutlass-anim-in-typewriter"),
+                    500_000,
+                )],
+            )
+            .unwrap();
+        let draft = session.draft();
+        let segment = &draft.tracks[0].segments[0];
+        let steps = cutlass_model::letters_at(draft, segment, Micros(250_000));
+        assert_eq!(steps.len(), 1);
+        assert!((steps[0].along - 0.5).abs() < 1e-9);
+        // The clip itself stays whole while its letters type in.
+        assert_eq!(alpha(&session, 0), 1.0);
     }
 }

@@ -27,6 +27,154 @@ pub enum Motion {
     Slide(f64, f64),
     /// Size away from rest, faded at the far end.
     Zoom(f64),
+    /// A title's letters or words move one after another; the clip stays.
+    Letters(LetterMotion),
+}
+
+/// How a title's letters arrive one after another, or leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LetterMotion {
+    /// Each letter appears whole, in turn.
+    Typewriter,
+    /// Each letter fades up, overlapping the next.
+    Fade,
+    /// Each letter grows from nothing past its size and settles.
+    Pop,
+    /// Each word rises into place as it fades up.
+    Rise,
+}
+
+/// How one letter is drawn at a moment of a letter animation: its opacity,
+/// its shift in ems (y down), and its size around its own middle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LetterPose {
+    pub alpha: f64,
+    pub dx: f64,
+    pub dy: f64,
+    pub scale: f64,
+}
+
+impl LetterPose {
+    /// Where every letter rests.
+    pub const REST: Self = Self {
+        alpha: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+        scale: 1.0,
+    };
+
+    /// This pose and then `other` on top of it.
+    #[must_use]
+    pub fn then(self, other: Self) -> Self {
+        Self {
+            alpha: self.alpha * other.alpha,
+            dx: self.dx + other.dx,
+            dy: self.dy + other.dy,
+            scale: self.scale * other.scale,
+        }
+    }
+}
+
+/// Which letter of a title one is: its place among the drawn letters and
+/// the word it is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Letter {
+    pub index: usize,
+    pub count: usize,
+    pub word: usize,
+    pub words: usize,
+}
+
+/// One letter animation of a title at a moment: how it moves and how far
+/// along it is, from 0 to 1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LetterStep {
+    pub motion: LetterMotion,
+    pub kind: AnimType,
+    pub along: f64,
+}
+
+impl LetterStep {
+    /// How `letter` is drawn at this step. An in animation brings the
+    /// letters in first to last; an out one takes them away last to first.
+    #[must_use]
+    pub fn pose(&self, letter: Letter) -> LetterPose {
+        let at = match self.kind {
+            AnimType::Out => 1.0 - self.along,
+            _ => self.along,
+        };
+        let (unit, units) = if self.motion == LetterMotion::Rise {
+            (letter.word, letter.words)
+        } else {
+            (letter.index, letter.count)
+        };
+        let units = units.max(1);
+        if self.motion == LetterMotion::Typewriter {
+            let shown = (at * units as f64).floor() as usize > unit || at >= 1.0;
+            let alpha = if shown { 1.0 } else { 0.0 };
+            return LetterPose {
+                alpha,
+                ..LetterPose::REST
+            };
+        }
+        // Each unit takes a window of the animation; the windows overlap so
+        // the next starts before this one settles.
+        let window = (3.0 / (units as f64 + 2.0)).min(1.0);
+        let start = if units > 1 {
+            unit.min(units - 1) as f64 * (1.0 - window) / (units - 1) as f64
+        } else {
+            0.0
+        };
+        let t = ((at - start) / window).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        match self.motion {
+            LetterMotion::Typewriter | LetterMotion::Fade => LetterPose {
+                alpha: eased,
+                ..LetterPose::REST
+            },
+            LetterMotion::Pop => {
+                // Grows past its size and settles back.
+                let back = 1.701_58;
+                let u = t - 1.0;
+                LetterPose {
+                    alpha: (t * 3.0).min(1.0),
+                    scale: (1.0 + (back + 1.0) * u.powi(3) + back * u.powi(2)).max(0.0),
+                    ..LetterPose::REST
+                }
+            }
+            LetterMotion::Rise => LetterPose {
+                alpha: eased,
+                dy: 0.6 * (1.0 - eased),
+                ..LetterPose::REST
+            },
+        }
+    }
+}
+
+/// The letter animations of a title at `time`, in the order stored.
+#[must_use]
+pub fn letters_at(draft: &Draft, segment: &Segment, time: Micros) -> Vec<LetterStep> {
+    let Some(group) = segment_animations(draft, segment) else {
+        return Vec::new();
+    };
+    let offset = time.0.saturating_sub(segment.target.start.0);
+    let length = segment.target.duration.0;
+    group
+        .animations
+        .iter()
+        .filter_map(|animation| {
+            let preset = animation_preset(animation)?;
+            let Motion::Letters(motion) = preset.motion else {
+                return None;
+            };
+            let along = progress(preset, animation, offset, length)?;
+            Some(LetterStep {
+                motion,
+                kind: preset.kind,
+                along,
+            })
+        })
+        .collect()
 }
 
 /// One animation the panel offers.
@@ -95,6 +243,34 @@ pub const ANIMATION_PRESETS: &[AnimationPreset] = &[
         duration: HALF,
     },
     AnimationPreset {
+        name: "Typewriter",
+        kind: AnimType::In,
+        resource_id: "cutlass-anim-in-typewriter",
+        motion: Motion::Letters(LetterMotion::Typewriter),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Letter Fade",
+        kind: AnimType::In,
+        resource_id: "cutlass-anim-in-letter-fade",
+        motion: Motion::Letters(LetterMotion::Fade),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Pop",
+        kind: AnimType::In,
+        resource_id: "cutlass-anim-in-pop",
+        motion: Motion::Letters(LetterMotion::Pop),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Word Rise",
+        kind: AnimType::In,
+        resource_id: "cutlass-anim-in-word-rise",
+        motion: Motion::Letters(LetterMotion::Rise),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
         name: "Fade Out",
         kind: AnimType::Out,
         resource_id: "6798320902548230669",
@@ -142,6 +318,34 @@ pub const ANIMATION_PRESETS: &[AnimationPreset] = &[
         resource_id: "cutlass-anim-out-zoom-out",
         motion: Motion::Zoom(0.5),
         duration: HALF,
+    },
+    AnimationPreset {
+        name: "Erase",
+        kind: AnimType::Out,
+        resource_id: "cutlass-anim-out-erase",
+        motion: Motion::Letters(LetterMotion::Typewriter),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Letter Fade",
+        kind: AnimType::Out,
+        resource_id: "cutlass-anim-out-letter-fade",
+        motion: Motion::Letters(LetterMotion::Fade),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Pop",
+        kind: AnimType::Out,
+        resource_id: "cutlass-anim-out-pop",
+        motion: Motion::Letters(LetterMotion::Pop),
+        duration: Micros(1_000_000),
+    },
+    AnimationPreset {
+        name: "Word Sink",
+        kind: AnimType::Out,
+        resource_id: "cutlass-anim-out-word-sink",
+        motion: Motion::Letters(LetterMotion::Rise),
+        duration: Micros(1_000_000),
     },
 ];
 
@@ -197,15 +401,9 @@ fn animate(
     let Some(preset) = animation_preset(animation) else {
         return;
     };
-    let Some(duration) = animation.duration.map(|d| d.0).filter(|d| *d > 0) else {
+    let Some(along) = progress(preset, animation, offset, length) else {
         return;
     };
-    let start = if preset.kind == AnimType::Out {
-        length - duration
-    } else {
-        animation.start.0
-    };
-    let along = ((offset - start) as f64 / duration as f64).clamp(0.0, 1.0);
     // How far from rest, 1 being all the way away: an in eases out of its
     // far end, an out eases into it.
     let away = match preset.kind {
@@ -238,6 +436,7 @@ fn animate(
             clip.transform.x += dx * sign * away;
             clip.transform.y += dy * sign * away;
         }
+        Motion::Letters(_) => {}
         Motion::Zoom(far) => {
             let factor = 1.0 + (far - 1.0) * away;
             if uniform.on {
@@ -249,6 +448,24 @@ fn animate(
             clip.alpha *= 1.0 - away;
         }
     }
+}
+
+/// How far along one animation is at `offset` from the segment's start,
+/// from 0 to 1. An out animation ends with the segment, `length` long,
+/// whatever its stored `start` says, so a trim keeps it on the end.
+fn progress(
+    preset: &AnimationPreset,
+    animation: &StickerAnimation,
+    offset: i64,
+    length: i64,
+) -> Option<f64> {
+    let duration = animation.duration.map(|d| d.0).filter(|d| *d > 0)?;
+    let start = if preset.kind == AnimType::Out {
+        length - duration
+    } else {
+        animation.start.0
+    };
+    Some(((offset - start) as f64 / duration as f64).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -336,6 +553,72 @@ mod tests {
         assert_eq!(uniform.value, 1.0);
         assert_eq!(clip.scale.x, 1.0);
         assert_eq!(clip.alpha, 0.0);
+    }
+
+    fn letter(index: usize, count: usize) -> Letter {
+        Letter {
+            index,
+            count,
+            word: index / 2,
+            words: count.div_ceil(2),
+        }
+    }
+
+    #[test]
+    fn a_typewriter_shows_letters_in_turn_and_an_erase_takes_them_from_the_end() {
+        let step = |kind, along| LetterStep {
+            motion: LetterMotion::Typewriter,
+            kind,
+            along,
+        };
+        let shown = |s: LetterStep| {
+            (0..4)
+                .map(|i| s.pose(letter(i, 4)).alpha > 0.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(step(AnimType::In, 0.0)), [false; 4]);
+        assert_eq!(shown(step(AnimType::In, 0.5)), [true, true, false, false]);
+        assert_eq!(shown(step(AnimType::In, 1.0)), [true; 4]);
+        assert_eq!(shown(step(AnimType::Out, 0.25)), [true, true, true, false]);
+        assert_eq!(shown(step(AnimType::Out, 1.0)), [false; 4]);
+    }
+
+    #[test]
+    fn letters_fade_pop_and_rise_one_after_another_to_rest() {
+        for motion in [LetterMotion::Fade, LetterMotion::Pop, LetterMotion::Rise] {
+            let at = |along| LetterStep {
+                motion,
+                kind: AnimType::In,
+                along,
+            };
+            assert_eq!(at(1.0).pose(letter(5, 6)), LetterPose::REST, "{motion:?}");
+            assert_eq!(at(0.0).pose(letter(0, 6)).alpha, 0.0, "{motion:?}");
+            // Partway, the first is further in than the last.
+            let first = at(0.3).pose(letter(0, 6));
+            let last = at(0.3).pose(letter(5, 6));
+            assert!(first.alpha > last.alpha, "{motion:?}");
+        }
+        let pop = LetterStep {
+            motion: LetterMotion::Pop,
+            kind: AnimType::In,
+            along: 0.7,
+        };
+        assert!(pop.pose(letter(0, 1)).scale > 1.0);
+        let rise = LetterStep {
+            motion: LetterMotion::Rise,
+            kind: AnimType::In,
+            along: 0.1,
+        };
+        assert!(rise.pose(letter(0, 4)).dy > 0.0);
+    }
+
+    #[test]
+    fn a_letter_animation_moves_letters_not_the_clip() {
+        let mut uniform = UniformScale::default();
+        let mut clip = Clip::default();
+        let pop = stored(by("Pop", AnimType::In), 0, 1_000);
+        animate(&mut clip, &mut uniform, &pop, 0, 10_000);
+        assert_eq!(clip, Clip::default());
     }
 
     #[test]

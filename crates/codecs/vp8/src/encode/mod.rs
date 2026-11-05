@@ -1,10 +1,12 @@
-//! VP8 encoder, version 0.
+//! VP8 encoder, versions 0 to 3.
 //!
 //! Key frames code every macroblock intra (16×16 or B_PRED). Inter frames
-//! choose per macroblock between intra and NEAREST, NEAR, ZERO, or a
-//! searched NEWMV on the last or golden picture, by rate and distortion.
+//! choose per macroblock between intra and NEAREST, NEAR, ZERO, NEWMV, or
+//! SPLITMV on the last, golden, or altref picture, by rate and distortion.
 //! The golden picture is refreshed every `golden_interval` frames with a
-//! finer quantizer. Coefficient, mode, and flag probabilities follow each
+//! finer quantizer, and the old golden moves to altref. With
+//! `hidden_altref`, each golden group instead starts with a hidden altref
+//! of the group's last frame. Coefficient, mode, and flag probabilities follow each
 //! frame's counts. The loop-filter level is searched against the source.
 //! A bitrate of zero keeps the quantizer fixed; a positive one steers it.
 
@@ -14,6 +16,7 @@ mod residual;
 mod search;
 mod write;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -27,6 +30,7 @@ use crate::header::{
     self, FilterDeltas, FrameHeader, FrameTag, HeaderWriter, MAX_EDGE, Persist, Probs,
     QuantIndices, Segmentation,
 };
+use crate::inter::Filter;
 use crate::modes::{GOLDEN, INTRA, LAST};
 use crate::predict::B_PRED;
 use crate::tables::{AC_Q, UV_MODE_TREE, Y_MODE_TREE};
@@ -58,6 +62,22 @@ pub struct Vp8Options {
     /// and busy areas a coarser one. Off by default; it trades PSNR for
     /// detail in smooth areas.
     pub segments: bool,
+    /// Bitstream version 0..3 (RFC 6386 Section 9.1). 0 is six-tap
+    /// interpolation and the normal loop filter; 1 is bilinear and the
+    /// simple filter; 2 is bilinear without a loop filter; 3 is bilinear
+    /// with whole-pixel chroma vectors and no loop filter.
+    pub version: u8,
+    /// Look `golden_interval` frames ahead and code the frame that ends
+    /// each golden group first, as a hidden altref (`show_frame = 0`, its
+    /// probability changes kept for that frame only). The frames before
+    /// it predict from it with the altref sign bias set, and the frame it
+    /// shows copies it into golden. `push` then returns packets up to
+    /// `golden_interval` frames late, and `drain` returns the rest.
+    pub hidden_altref: bool,
+    /// Every frame's probability changes last for that frame only
+    /// (`refresh_entropy_probs = 0`), so a lost frame does not corrupt the
+    /// probabilities of the frames after it.
+    pub error_resilient: bool,
 }
 
 impl Default for Vp8Options {
@@ -70,6 +90,9 @@ impl Default for Vp8Options {
             partitions: 1,
             speed: 1,
             segments: false,
+            version: 0,
+            hidden_altref: false,
+            error_resilient: false,
         }
     }
 }
@@ -82,7 +105,7 @@ const DELTAS: FilterDeltas = FilterDeltas {
     mode: [4, -2, 2, 4],
 };
 
-/// Version-0 VP8 encoder on the video codec contract.
+/// VP8 encoder on the video codec contract.
 pub struct Vp8Encoder {
     width: u32,
     height: u32,
@@ -90,17 +113,26 @@ pub struct Vp8Encoder {
     persist: Persist,
     last: Option<Arc<Frame>>,
     golden: Option<Arc<Frame>>,
-    frame_index: u64,
+    altref: Option<Arc<Frame>>,
+    /// Shown frames coded so far.
+    shown: u64,
     since_key: u32,
     since_golden: u32,
     /// Flag probabilities of the last frame, as cost estimates.
-    prob_skip: u8,
     prob_intra: u8,
     prob_last: u8,
     prob_golden: u8,
     rate: RateControl,
     /// Segment of each macroblock, kept between map updates.
     segment_map: Vec<u8>,
+    /// Frames waiting for the hidden altref lookahead.
+    queue: VecDeque<VideoInput>,
+    /// The shown-frame number the hidden altref holds, until that frame
+    /// is coded.
+    altref_target: Option<u64>,
+    config_sent: bool,
+    #[cfg(test)]
+    pub(crate) shown_recon: Vec<Arc<Frame>>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -116,6 +148,20 @@ struct RateControl {
 const KIND_KEY: usize = 0;
 const KIND_GOLDEN: usize = 1;
 const KIND_INTER: usize = 2;
+
+/// What one coded frame does to the references.
+#[derive(Clone, Copy, Debug, Default)]
+struct Plan {
+    key: bool,
+    show: bool,
+    kind: usize,
+    refresh_last: bool,
+    refresh_golden: bool,
+    refresh_altref: bool,
+    copy_to_golden: u8,
+    copy_to_altref: u8,
+    sign_bias_altref: bool,
+}
 
 impl Vp8Encoder {
     /// Opens with the codec parameters: a zero bitrate is a fixed quantizer.
@@ -158,6 +204,16 @@ impl Vp8Encoder {
                 what: "vp8 quantizer",
             });
         }
+        if opts.version > 3 {
+            return Err(CodecError::InvalidApi {
+                what: "vp8 version",
+            });
+        }
+        if opts.hidden_altref && !(2..=MAX_LOOKAHEAD).contains(&opts.golden_interval) {
+            return Err(CodecError::InvalidApi {
+                what: "vp8 altref lookahead",
+            });
+        }
         Ok(Self {
             width,
             height,
@@ -165,33 +221,51 @@ impl Vp8Encoder {
             persist: Persist::default(),
             last: None,
             golden: None,
-            frame_index: 0,
+            altref: None,
+            shown: 0,
             since_key: 0,
             since_golden: 0,
-            prob_skip: 128,
             prob_intra: 64,
             prob_last: 200,
             prob_golden: 128,
             rate: RateControl::default(),
             segment_map: Vec::new(),
+            queue: VecDeque::new(),
+            altref_target: None,
+            config_sent: false,
+            #[cfg(test)]
+            shown_recon: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
     /// The `vpcC` payload (version 1, after the box header) an ISOBMFF
-    /// track of this stream carries: profile 0, 8-bit 4:2:0, limited
-    /// range, BT.601 matrix. The first packet after open or reset also
-    /// carries it as [`SideData::Config`].
+    /// track of this stream carries: the profile is the bitstream version,
+    /// 8-bit 4:2:0, limited range, BT.601 matrix. The first packet after
+    /// open or reset also carries it as [`SideData::Config`].
     #[must_use]
-    pub fn vpcc_record() -> Vec<u8> {
+    pub fn vpcc_record(&self) -> Vec<u8> {
         // Version 1 and flags; profile; level (none for VP8); bit depth 8,
         // chroma 4:2:0 co-located, limited range; primaries and transfer
         // unspecified, matrix BT.601; no initialization data.
-        vec![1, 0, 0, 0, 0, 0, (8 << 4) | (1 << 1), 2, 2, 6, 0, 0]
+        vec![
+            1,
+            0,
+            0,
+            0,
+            self.opts.version,
+            0,
+            (8 << 4) | (1 << 1),
+            2,
+            2,
+            6,
+            0,
+            0,
+        ]
     }
 
-    /// The reconstruction a decoder holds after the last frame, at the
-    /// macroblock-aligned size.
+    /// The reconstruction a decoder shows after the last shown frame, at
+    /// the macroblock-aligned size.
     #[must_use]
     pub fn reconstruction(&self) -> Option<&Frame> {
         self.last.as_deref()
@@ -238,7 +312,99 @@ impl Vp8Encoder {
         best
     }
 
-    fn encode(&mut self, input: &VideoInput) -> Result<Packet, CodecError> {
+    /// The plan for the next shown frame.
+    fn plan_shown(&self) -> Plan {
+        let shown = Plan {
+            show: true,
+            refresh_last: true,
+            kind: KIND_INTER,
+            ..Plan::default()
+        };
+        if self.last.is_none() || self.since_key >= self.opts.keyframe_interval.max(1) {
+            return Plan {
+                key: true,
+                kind: KIND_KEY,
+                refresh_golden: true,
+                refresh_altref: true,
+                ..shown
+            };
+        }
+        if let Some(target) = self.altref_target {
+            if target == self.shown {
+                // The frame the hidden altref holds: golden takes the
+                // altref, coded at the finer quantizer.
+                return Plan {
+                    copy_to_golden: 2,
+                    ..shown
+                };
+            }
+            return Plan {
+                sign_bias_altref: true,
+                ..shown
+            };
+        }
+        if self.opts.golden_interval > 0 && self.since_golden >= self.opts.golden_interval {
+            // The old golden moves to altref, a longer-term reference.
+            return Plan {
+                kind: KIND_GOLDEN,
+                refresh_golden: true,
+                copy_to_altref: 2,
+                ..shown
+            };
+        }
+        shown
+    }
+
+    /// Codes the queued frames down to `keep`, putting a hidden altref
+    /// before each golden group.
+    fn flush_queue(&mut self, keep: usize) -> Result<Vec<Packet>, CodecError> {
+        let mut out = Vec::new();
+        while self.queue.len() > keep {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err(CodecError::Cancelled);
+            }
+            let plan = self.plan_shown();
+            if !plan.key && self.altref_target.is_none() {
+                // Frames to the next key frame, counting this one.
+                let to_key = u64::from(
+                    self.opts
+                        .keyframe_interval
+                        .max(1)
+                        .saturating_sub(self.since_key),
+                );
+                let ahead = (self.opts.golden_interval as usize)
+                    .min(self.queue.len())
+                    .min(usize::try_from(to_key).unwrap_or(usize::MAX));
+                if ahead >= 2
+                    && let Some(source) = self.queue.get(ahead - 1).cloned()
+                    && let Some(front) = self.queue.front()
+                {
+                    let hidden = Plan {
+                        show: false,
+                        kind: KIND_GOLDEN,
+                        refresh_altref: true,
+                        ..Plan::default()
+                    };
+                    let (pts, timescale) = (front.pts, front.timescale);
+                    let mut packet = self.encode(&source, hidden)?;
+                    packet.pts = pts;
+                    packet.duration = 0;
+                    packet.timescale = timescale;
+                    out.push(packet);
+                    self.altref_target = Some(self.shown + ahead as u64 - 1);
+                    continue;
+                }
+            }
+            let Some(input) = self.queue.pop_front() else {
+                break;
+            };
+            let plan = self.plan_shown();
+            out.push(self.encode(&input, plan)?);
+        }
+        Ok(out)
+    }
+
+    fn encode(&mut self, input: &VideoInput, plan: Plan) -> Result<Packet, CodecError> {
         let frame = &input.frame;
         let src = Source::padded(
             &frame.y.samples,
@@ -250,16 +416,8 @@ impl Vp8Encoder {
             self.width as usize,
             self.height as usize,
         );
-        let key = self.last.is_none() || self.since_key >= self.opts.keyframe_interval.max(1);
-        let golden_refresh =
-            !key && self.opts.golden_interval > 0 && self.since_golden >= self.opts.golden_interval;
-        let kind = if key {
-            KIND_KEY
-        } else if golden_refresh {
-            KIND_GOLDEN
-        } else {
-            KIND_INTER
-        };
+        let key = plan.key;
+        let kind = plan.kind;
         let per_frame = target_bytes(self.opts.bitrate, input.duration, input.timescale);
         let target = match kind {
             KIND_KEY => per_frame * 5,
@@ -277,7 +435,7 @@ impl Vp8Encoder {
         // Segments: a new map on key and golden frames, the quantizer
         // offsets on every frame so each stays inside 0..127.
         let update_map = self.opts.segments
-            && (key || golden_refresh || self.segment_map.len() != src.mbw * src.mbh);
+            && (key || plan.kind == KIND_GOLDEN || self.segment_map.len() != src.mbw * src.mbh);
         if update_map {
             self.segment_map = activity_segments(&src);
         }
@@ -289,10 +447,13 @@ impl Vp8Encoder {
         let coeff_costs = Costs::new(&base.coeff);
         let mode_costs = ModeCosts::new(key, &base.y_mode, &base.uv_mode);
         let mv_costs = MvCosts::new(&base.mv);
-        let golden_differs = match (&self.golden, &self.last) {
-            (Some(g), Some(l)) => !Arc::ptr_eq(g, l),
-            _ => false,
+        let same = |a: &Option<Arc<Frame>>, b: &Option<Arc<Frame>>| match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => true,
         };
+        let golden_differs = !same(&self.golden, &self.last);
+        let altref_differs = !same(&self.altref, &self.last) && !same(&self.altref, &self.golden);
+        let version = self.opts.version;
         let setup = Setup {
             key,
             dq,
@@ -309,14 +470,26 @@ impl Vp8Encoder {
             } else {
                 self.golden.as_deref()
             },
+            altref: if key || !altref_differs {
+                None
+            } else {
+                self.altref.as_deref()
+            },
             speed: self.opts.speed,
+            filter: if version == 0 {
+                Filter::SixTap
+            } else {
+                Filter::Bilinear
+            },
+            full_pixel: version == 3,
+            sign_bias: [false, false, false, plan.sign_bias_altref],
             segments: self.opts.segments.then_some(self.segment_map.as_slice()),
             seg_dq: seg_q.map(|sq| Dequant::new(i32::from(sq), &QuantIndices::default())),
             seg_lambda16: seg_q.map(lambda_for),
         };
         let mut coded = code_frame(&src, &setup);
         let (mbw, mbh) = (src.mbw, src.mbh);
-        let mut h = self.header(key, golden_refresh, q, &base, &coded, mbw, mbh);
+        let mut h = self.header(&plan, q, &base, &coded, mbw, mbh);
         if self.opts.segments {
             let mut counts = [0u32; 4];
             for &seg in &self.segment_map {
@@ -340,7 +513,12 @@ impl Vp8Encoder {
                 },
             };
         }
-        h.filter_level = search_filter(&src, &coded, &h, q);
+        // Versions 2 and 3 have no loop filter (RFC 6386 Section 9.1).
+        h.filter_level = if version >= 2 {
+            0
+        } else {
+            search_filter(&src, &coded, &h, q)
+        };
         if h.filter_level > 0 {
             let filters: Vec<_> = coded
                 .mbs
@@ -356,7 +534,7 @@ impl Vp8Encoder {
                 mbw,
                 mbh,
             };
-            filter::filter_frame(&mut planes, &filters, false);
+            filter::filter_frame(&mut planes, &filters, h.filter_simple);
         }
         if !key {
             // A dry run counts the vector branches the frame codes.
@@ -378,27 +556,35 @@ impl Vp8Encoder {
         // Keep the decoder's view of the state.
         let parsed = header::parse(&data, &self.persist)?;
         self.persist = parsed.next;
-        self.prob_skip = h.prob_skip;
         if !key {
             self.prob_intra = h.prob_intra;
             self.prob_last = h.prob_last;
             self.prob_golden = h.prob_golden;
         }
-        let current = Arc::new(coded.recon);
-        if key || golden_refresh {
-            self.golden = Some(Arc::clone(&current));
-            self.since_golden = 0;
+        self.update_references(&plan, Arc::new(coded.recon));
+        if plan.show {
+            if key {
+                self.since_key = 0;
+                self.since_golden = 0;
+                self.altref_target = None;
+            }
+            if plan.refresh_golden || plan.copy_to_golden != 0 {
+                self.since_golden = 0;
+            }
+            if plan.copy_to_golden != 0 {
+                self.altref_target = None;
+            }
+            self.since_key = self.since_key.saturating_add(1);
+            self.since_golden = self.since_golden.saturating_add(1);
+            self.shown = self.shown.saturating_add(1);
+            #[cfg(test)]
+            if let Some(last) = &self.last {
+                self.shown_recon.push(Arc::clone(last));
+            }
         }
-        self.last = Some(current);
-        if key {
-            self.since_key = 0;
-        }
-        self.since_key = self.since_key.saturating_add(1);
-        self.since_golden = self.since_golden.saturating_add(1);
-        self.frame_index = self.frame_index.saturating_add(1);
         if self.opts.bitrate > 0 {
             let bytes = data.len() as i64;
-            self.rate.debt += bytes - per_frame;
+            self.rate.debt += bytes - if plan.show { per_frame } else { 0 };
             let step = f64::from(AC_Q[usize::from(q)]);
             let sample = bytes as f64 * step;
             let slot = &mut self.rate.model[kind];
@@ -408,23 +594,53 @@ impl Vp8Encoder {
             }
         }
         let mut packet = Packet::video(data, input.pts, input.duration, input.timescale, key);
-        if self.frame_index == 1 {
-            packet.side.push(SideData::Config(Self::vpcc_record()));
+        if !self.config_sent {
+            packet.side.push(SideData::Config(self.vpcc_record()));
+            self.config_sent = true;
         }
         Ok(packet)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// The reference update a decoder makes after this frame (RFC 6386
+    /// Section 9.7): copies first, altref before golden, then refreshes.
+    fn update_references(&mut self, plan: &Plan, current: Arc<Frame>) {
+        if plan.key {
+            self.last = Some(Arc::clone(&current));
+            self.golden = Some(Arc::clone(&current));
+            self.altref = Some(current);
+            return;
+        }
+        match plan.copy_to_altref {
+            1 => self.altref.clone_from(&self.last),
+            2 => self.altref.clone_from(&self.golden),
+            _ => {}
+        }
+        match plan.copy_to_golden {
+            1 => self.golden.clone_from(&self.last),
+            2 => self.golden.clone_from(&self.altref),
+            _ => {}
+        }
+        if plan.refresh_golden {
+            self.golden = Some(Arc::clone(&current));
+        }
+        if plan.refresh_altref {
+            self.altref = Some(Arc::clone(&current));
+        }
+        if plan.refresh_last {
+            self.last = Some(current);
+        }
+    }
+
     fn header(
         &self,
-        key: bool,
-        golden_refresh: bool,
+        plan: &Plan,
         q: u8,
         base: &Probs,
         coded: &Coded,
         mbw: usize,
         mbh: usize,
     ) -> FrameHeader {
+        let key = plan.key;
         let counts = count_tokens(coded, mbw, mbh);
         let mut probs = base.clone();
         probs.coeff = choose_coeff_probs(&base.coeff, &counts);
@@ -458,8 +674,8 @@ impl Vp8Encoder {
         FrameHeader {
             tag: FrameTag {
                 key,
-                version: 0,
-                show: true,
+                version: self.opts.version,
+                show: plan.show,
                 first_size: 0,
                 width: if key { self.width } else { 0 },
                 height: if key { self.height } else { 0 },
@@ -469,7 +685,7 @@ impl Vp8Encoder {
             color_space: false,
             clamping: false,
             segmentation: Segmentation::default(),
-            filter_simple: false,
+            filter_simple: self.opts.version != 0,
             filter_level: 0,
             sharpness: 0,
             deltas: DELTAS,
@@ -478,14 +694,15 @@ impl Vp8Encoder {
                 y_ac: q,
                 ..QuantIndices::default()
             },
-            refresh_golden: key || golden_refresh,
-            refresh_altref: key,
-            copy_to_golden: 0,
-            copy_to_altref: 0,
+            refresh_golden: plan.refresh_golden,
+            refresh_altref: plan.refresh_altref,
+            copy_to_golden: plan.copy_to_golden,
+            copy_to_altref: plan.copy_to_altref,
             sign_bias_golden: false,
-            sign_bias_altref: false,
-            refresh_entropy: true,
-            refresh_last: true,
+            sign_bias_altref: plan.sign_bias_altref,
+            // A hidden frame's probabilities stay with it.
+            refresh_entropy: plan.show && !self.opts.error_resilient,
+            refresh_last: plan.refresh_last,
             probs,
             skip_enabled: true,
             prob_skip: flag_prob(skips[0], skips[1]),
@@ -499,6 +716,9 @@ impl Vp8Encoder {
         }
     }
 }
+
+/// The longest hidden-altref lookahead, in frames.
+const MAX_LOOKAHEAD: u32 = 64;
 
 /// Quantizer offsets of the four activity segments, flattest first.
 const SEGMENT_OFFSETS: [i8; 4] = [-8, -3, 2, 6];
@@ -630,11 +850,16 @@ impl VideoEncoder for Vp8Encoder {
                 what: "frame clock",
             });
         }
-        Ok(vec![self.encode(input)?])
+        if !self.opts.hidden_altref {
+            let plan = self.plan_shown();
+            return Ok(vec![self.encode(input, plan)?]);
+        }
+        self.queue.push_back(input.clone());
+        self.flush_queue(self.opts.golden_interval as usize)
     }
 
     fn drain(&mut self) -> Result<Vec<Packet>, CodecError> {
-        Ok(Vec::new())
+        self.flush_queue(0)
     }
 
     fn reset(&mut self) {

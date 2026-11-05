@@ -108,7 +108,7 @@ fn an_mp4_vp08_track_round_trips() {
         }
     }
     let config = config.expect("the first packet carries vpcC");
-    assert_eq!(config, Vp8Encoder::vpcc_record());
+    assert_eq!(config, encoder.vpcc_record());
 
     let mut params = StreamParams::video(BoxCodec::Vp8, Timescale(30), W, H);
     params.extradata = config.clone();

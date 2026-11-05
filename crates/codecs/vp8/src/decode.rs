@@ -107,6 +107,9 @@ pub struct Decoder {
     /// Macroblocks decoded per luma mode, for tests that check coverage.
     #[cfg(test)]
     pub(crate) mode_counts: [u64; 10],
+    /// Macroblocks decoded per reference: intra, last, golden, altref.
+    #[cfg(test)]
+    pub(crate) ref_counts: [u64; 4],
 }
 
 /// Work for one frame, kept apart so a frame's results commit at once.
@@ -209,6 +212,7 @@ impl Decoder {
         #[cfg(test)]
         for mb in &work.mbs {
             self.mode_counts[usize::from(mb.y_mode).min(9)] += 1;
+            self.ref_counts[usize::from(mb.ref_frame & 3)] += 1;
         }
 
         // Commit.
@@ -673,6 +677,11 @@ impl Vp8Decoder {
     #[cfg(test)]
     pub(crate) fn mode_counts(&self) -> [u64; 10] {
         self.inner.mode_counts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ref_counts(&self) -> [u64; 4] {
+        self.inner.ref_counts
     }
 
     /// The horizontal and vertical upscaling the stream asks for

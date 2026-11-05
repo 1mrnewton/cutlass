@@ -6,8 +6,8 @@ use crate::decode::{Frame, chroma_mvs};
 use crate::inter::RefPlane;
 use crate::inter::{self, Filter};
 use crate::modes::{
-    Bounds, GOLDEN, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEARMV, NEWMV, SPLITMV, SubInfo, ZEROMV,
-    find_near, implied_b_mode,
+    ALTREF, Bounds, GOLDEN, INTRA, LAST, MbInfo, Mv, NEARESTMV, NEARMV, NEWMV, SPLITMV, SubInfo,
+    ZEROMV, find_near, implied_b_mode,
 };
 use crate::predict::{self, B_PRED, CHROMA_BUF, CHROMA_STRIDE, LUMA_BUF, LUMA_STRIDE};
 use crate::tables::{MV_PARTITIONS, SPLIT_COUNTS};
@@ -82,14 +82,36 @@ pub struct Setup<'a> {
     pub prob_last: u8,
     pub prob_golden: u8,
     pub last: Option<&'a Frame>,
+    /// The golden and altref pictures, when they differ from the ones
+    /// before them in this list.
     pub golden: Option<&'a Frame>,
+    pub altref: Option<&'a Frame>,
     /// 0 is the most thorough.
     pub speed: u8,
+    /// Interpolation of the bitstream version: six-tap for 0, bilinear
+    /// otherwise.
+    pub filter: Filter,
+    /// Version 3 rounds chroma vectors to whole pixels.
+    pub full_pixel: bool,
+    /// Sign bias of each reference (intra, last, golden, altref).
+    pub sign_bias: [bool; 4],
     /// Segment of each macroblock, when segmentation is on, with each
     /// segment's quantizer and multiplier.
     pub segments: Option<&'a [u8]>,
     pub seg_dq: [Dequant; 4],
     pub seg_lambda16: [u64; 4],
+}
+
+impl Setup<'_> {
+    /// The picture a reference index names, when it is searched.
+    fn reference(&self, ref_frame: u8) -> Option<&Frame> {
+        match ref_frame {
+            LAST => self.last,
+            GOLDEN => self.golden,
+            ALTREF => self.altref,
+            _ => None,
+        }
+    }
 }
 
 /// The coded frame before entropy coding.
@@ -593,24 +615,23 @@ fn inter_candidates(
     let mbw = s.last.map_or(1, |f| f.mbw);
     let mbh = s.last.map_or(1, |f| f.mbh);
     let bounds = Bounds::new(m.mbx, m.mby, mbw, mbh);
-    let sign_bias = [false; 4];
     let inter_flag = cost(s.prob_intra, true);
-    let refs: [(u8, Option<&Frame>); 2] = [(LAST, s.last), (GOLDEN, s.golden)];
+    let refs: [(u8, Option<&Frame>); 3] = [(LAST, s.last), (GOLDEN, s.golden), (ALTREF, s.altref)];
     for (ref_frame, frame) in refs {
         let Some(frame) = frame else { continue };
         let near = find_near(
             m.above_mb,
             m.left_mb,
             m.above_left_mb,
-            &sign_bias,
+            &s.sign_bias,
             ref_frame,
         );
         let modes = inter_mode_costs(&near.probs);
         let ref_cost = inter_flag
-            + if ref_frame == LAST {
-                cost(s.prob_last, false)
-            } else {
-                cost(s.prob_last, true) + cost(s.prob_golden, false)
+            + match ref_frame {
+                LAST => cost(s.prob_last, false),
+                GOLDEN => cost(s.prob_last, true) + cost(s.prob_golden, false),
+                _ => cost(s.prob_last, true) + cost(s.prob_golden, true),
             };
         let best = near.best.clamp(&bounds);
         let nearest = near.nearest.clamp(&bounds);
@@ -624,7 +645,7 @@ fn inter_candidates(
                 return;
             }
             let mut pred = [0u8; 256];
-            search::predict16(plane, m.mbx, m.mby, mv, Filter::SixTap, &mut pred);
+            search::predict16(plane, m.mbx, m.mby, mv, s.filter, &mut pred);
             let score = rd(search::sse16(&pred, &m.src_y), rate, s.lambda16);
             out.push(Candidate {
                 ref_frame,
@@ -663,7 +684,6 @@ fn inter_candidates(
             let bits = mv_costs.cost(mv.row - best.row, mv.col - best.col);
             (sad_per_bit * f64::from(bits) / 256.0) as u32
         };
-        let golden_extra = ref_frame == GOLDEN;
         let search = Search {
             plane,
             src: &m.src_y,
@@ -671,13 +691,12 @@ fn inter_candidates(
             mby: m.mby,
             window,
             penalty: &penalty,
-            filter: Filter::SixTap,
-            range: if golden_extra {
-                2
-            } else if s.speed == 0 {
-                16
-            } else {
-                8
+            filter: s.filter,
+            range: match ref_frame {
+                LAST if s.speed == 0 => 16,
+                LAST => 8,
+                GOLDEN => 2,
+                _ => 4,
             },
             subpel: true,
         };
@@ -697,7 +716,13 @@ fn inter_candidates(
     }
 }
 
-fn inter_chroma_pred(frame: &Frame, mbx: usize, mby: usize, mv: Mv) -> [[u8; 64]; 2] {
+fn inter_chroma_pred(
+    frame: &Frame,
+    mbx: usize,
+    mby: usize,
+    mv: Mv,
+    filter: Filter,
+) -> [[u8; 64]; 2] {
     let mut out = [[0u8; 64]; 2];
     for (p, plane) in out.iter_mut().enumerate() {
         inter::predict(
@@ -708,7 +733,7 @@ fn inter_chroma_pred(frame: &Frame, mbx: usize, mby: usize, mv: Mv) -> [[u8; 64]
             (mv.row & 7) as usize,
             8,
             8,
-            Filter::SixTap,
+            filter,
             plane,
             8,
         );
@@ -726,12 +751,9 @@ fn decide_inter(m: &MbCtx<'_>, s: &Setup<'_>) -> Option<Decision> {
     let mut best: Option<Decision> = None;
     for cand in cands.iter().take(keep) {
         let luma = code_luma_y2(&m.src_y, &cand.pred, s, &m.left, &m.above, round);
-        let frame = if cand.ref_frame == GOLDEN {
-            s.golden
-        } else {
-            s.last
+        let Some(frame) = s.reference(cand.ref_frame) else {
+            continue;
         };
-        let Some(frame) = frame else { continue };
         let mb = MbInfo {
             y_mode: cand.mode,
             uv_mode: 0,
@@ -743,8 +765,8 @@ fn decide_inter(m: &MbCtx<'_>, s: &Setup<'_>) -> Option<Decision> {
             b_modes: [0; 16],
             mvs: [cand.mv; 16],
         };
-        let cmv = chroma_mvs(&mb, &sub, false)[0];
-        let cpred = inter_chroma_pred(frame, m.mbx, m.mby, cmv);
+        let cmv = chroma_mvs(&mb, &sub, s.full_pixel)[0];
+        let cpred = inter_chroma_pred(frame, m.mbx, m.mby, cmv, s.filter);
         let chroma = code_chroma(&m.src_c, &cpred, s, &m.left, &m.above, round);
         let j = rd(
             luma.sse + chroma.sse,
@@ -816,6 +838,7 @@ fn predict_rect(
     mby: usize,
     rect: (usize, usize, usize, usize),
     mv: Mv,
+    filter: Filter,
     out: &mut [u8; 256],
 ) {
     let (x, y, w, h) = rect;
@@ -827,7 +850,7 @@ fn predict_rect(
         ((mv.row & 3) * 2) as usize,
         w,
         h,
-        Filter::SixTap,
+        filter,
         &mut out[y * 16 + x..],
         16,
     );
@@ -857,11 +880,7 @@ fn decide_split(
     refine: bool,
     seeds: &[Mv],
 ) -> Option<Decision> {
-    let frame = if info.ref_frame == GOLDEN {
-        s.golden
-    } else {
-        s.last
-    }?;
+    let frame = s.reference(info.ref_frame)?;
     let plane = frame.luma();
     let map = &MV_PARTITIONS[usize::from(partition)];
     let mut sub = SubInfo {
@@ -898,7 +917,7 @@ fn decide_split(
                     .mv_costs
                     .cost(mv.row - info.best.row, mv.col - info.best.col);
             }
-            predict_rect(plane, m.mbx, m.mby, rect, mv, &mut trial);
+            predict_rect(plane, m.mbx, m.mby, rect, mv, s.filter, &mut trial);
             (rd(rect_sse(&trial, &m.src_y, rect), bits, s.lambda16), bits)
         };
         let mut best_mv = Mv::ZERO;
@@ -974,7 +993,7 @@ fn decide_split(
                 *slot = best_mv;
             }
         }
-        predict_rect(plane, m.mbx, m.mby, rect, best_mv, &mut pred);
+        predict_rect(plane, m.mbx, m.mby, rect, best_mv, s.filter, &mut pred);
     }
     let mb = MbInfo {
         y_mode: SPLITMV,
@@ -986,7 +1005,7 @@ fn decide_split(
     };
     let round = rounding(false);
     let luma = code_luma_plain(&m.src_y, &pred, s, &m.left, &m.above, round);
-    let cmv = chroma_mvs(&mb, &sub, false);
+    let cmv = chroma_mvs(&mb, &sub, s.full_pixel);
     let mut cpred = [[0u8; 64]; 2];
     for (p, out) in cpred.iter_mut().enumerate() {
         for (k, mv) in cmv.iter().enumerate() {
@@ -999,7 +1018,7 @@ fn decide_split(
                 (mv.row & 7) as usize,
                 4,
                 4,
-                Filter::SixTap,
+                s.filter,
                 &mut out[4 * r * 8 + 4 * c..],
                 8,
             );

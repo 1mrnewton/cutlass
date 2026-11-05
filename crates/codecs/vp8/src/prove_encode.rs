@@ -86,16 +86,29 @@ pub(crate) fn encode_synthetic(
             timescale: 30,
         };
         let out = encoder.push(&input).expect("push");
-        assert_eq!(out.len(), 1);
-        packets.push(out[0].data.clone());
-        crop(
-            encoder.reconstruction().expect("recon"),
-            width,
-            height,
-            &mut recon,
-        );
+        if !opts.hidden_altref {
+            assert_eq!(out.len(), 1);
+        }
+        packets.extend(out.into_iter().map(|p| p.data));
+    }
+    packets.extend(encoder.drain().expect("drain").into_iter().map(|p| p.data));
+    assert_eq!(encoder.shown_recon.len(), count as usize, "shown frames");
+    for frame in &encoder.shown_recon {
+        crop(frame, width, height, &mut recon);
     }
     (packets, recon)
+}
+
+/// Macroblocks per reference (intra, last, golden, altref) in our decoder.
+fn reference_counts(width: u32, height: u32, packets: &[Vec<u8>]) -> [u64; 4] {
+    use cutlass_decode::{CodecId, CodecParams, Packet, video::VideoDecoder};
+    let params = CodecParams::video(CodecId::Vp8, width, height);
+    let mut decoder = crate::Vp8Decoder::open(&params).expect("open");
+    for (i, data) in packets.iter().enumerate() {
+        let packet = Packet::video(data.clone(), i as i64, 1, 30, i == 0);
+        decoder.push(&packet).expect("decode");
+    }
+    decoder.ref_counts()
 }
 
 /// Encodes, checks all three decoders against the reconstruction, and
@@ -312,14 +325,12 @@ pub(crate) fn compare_with_libvpx(
         };
         let out = encoder.push(&input).expect("push");
         packets.extend(out.into_iter().map(|p| p.data));
-        crop(
-            encoder.reconstruction().expect("recon"),
-            width,
-            height,
-            &mut recon,
-        );
     }
+    packets.extend(encoder.drain().expect("drain").into_iter().map(|p| p.data));
     let seconds = start.elapsed().as_secs_f64();
+    for frame in &encoder.shown_recon {
+        crop(frame, width, height, &mut recon);
+    }
     let ours_bytes: usize = packets.iter().map(Vec::len).sum();
     let ivf = dir.join("ours.ivf");
     write_ivf(&ivf, width, height, &packets);
@@ -430,6 +441,31 @@ fn gate_quality_and_rate_against_libvpx() {
         bitrate,
         segmented,
     );
+    // Hidden altrefs with a 16-frame lookahead, against the same bounds.
+    let hidden = Vp8Options {
+        hidden_altref: true,
+        ..Vp8Options::default()
+    };
+    for name in [
+        "16929689_1920_1080_30fps.mp4",
+        "7688387224072670472.mp4",
+        "IMG_8144.MP4",
+    ] {
+        let Some((ours, bytes, _, theirs, _)) =
+            compare_with_libvpx(name, width, height, frames, bitrate, hidden)
+        else {
+            continue;
+        };
+        let rate = bytes as f64 / target;
+        assert!(
+            (0.85..=1.15).contains(&rate),
+            "{name} hidden altref: rate {rate:.3} of target"
+        );
+        assert!(
+            ours >= theirs - 2.0,
+            "{name} hidden altref: {ours:.2} dB against libvpx {theirs:.2} dB"
+        );
+    }
 }
 
 /// Moving content makes the encoder send new vector probabilities, and the
@@ -484,4 +520,122 @@ fn segments_decode_identically() {
         assert!(maps >= 3, "{name}: {maps} map updates");
         check(name, 176, 144, 10, opts);
     }
+}
+
+/// Versions 1 to 3: bilinear interpolation, the simple loop filter for
+/// version 1, no loop filter for 2 and 3, whole-pixel chroma for 3.
+#[test]
+fn versions_decode_identically() {
+    for version in 1..=3u8 {
+        for (name, quantizer) in [("fine", 16u8), ("coarse", 70)] {
+            let opts = Vp8Options {
+                version,
+                quantizer,
+                golden_interval: 4,
+                ..Vp8Options::default()
+            };
+            let (packets, _) = encode_synthetic(160, 96, 8, opts);
+            let stream = Ivf {
+                width: 160,
+                height: 96,
+                frames: packets,
+            };
+            let c = crate::prove::coverage(&stream);
+            assert_eq!(c.versions[usize::from(version)], 8, "v{version} {c:?}");
+            assert_eq!(c.simple_filter, 8, "v{version}");
+            if version >= 2 {
+                let mut state = crate::header::Persist::default();
+                for frame in &stream.frames {
+                    let parsed = crate::header::parse(frame, &state).expect("parse");
+                    assert_eq!(parsed.header.filter_level, 0, "v{version} filter");
+                    state = parsed.next;
+                }
+            }
+            let modes = check(&format!("v{version}_{name}"), 160, 96, 8, opts);
+            assert!(
+                modes[5..].iter().sum::<u64>() > 0,
+                "v{version}: inter modes"
+            );
+        }
+    }
+}
+
+/// The old golden moves to altref (`copy_buffer_to_alternate = 2`) and
+/// macroblocks predict from it.
+#[test]
+fn altref_copies_decode_identically() {
+    let opts = Vp8Options {
+        golden_interval: 3,
+        quantizer: 30,
+        ..Vp8Options::default()
+    };
+    let (packets, _) = encode_synthetic(160, 96, 12, opts);
+    let mut state = crate::header::Persist::default();
+    let mut copies = 0;
+    for frame in &packets {
+        let parsed = crate::header::parse(frame, &state).expect("parse");
+        copies += usize::from(parsed.header.copy_to_altref == 2);
+        state = parsed.next;
+    }
+    assert!(copies >= 3, "{copies} copies");
+    let refs = reference_counts(160, 96, &packets);
+    assert!(refs[3] > 0, "altref macroblocks {refs:?}");
+    check("altref_copy", 160, 96, 12, opts);
+}
+
+/// Hidden altrefs: each golden group starts with a hidden frame of its
+/// last picture, coded with `refresh_entropy_probs = 0`; the frames before
+/// that picture use the altref with its sign bias set; the picture itself
+/// copies the altref into golden (`copy_buffer_to_golden = 2`).
+#[test]
+fn hidden_altrefs_decode_identically() {
+    for (name, bitrate, version) in [
+        ("arf_q", 0, 0u8),
+        ("arf_rate", 300_000, 0),
+        ("arf_v1", 0, 1),
+    ] {
+        let opts = Vp8Options {
+            hidden_altref: true,
+            golden_interval: 5,
+            keyframe_interval: 13,
+            quantizer: 28,
+            bitrate,
+            version,
+            ..Vp8Options::default()
+        };
+        let count = 20;
+        let (packets, _) = encode_synthetic(176, 112, count, opts);
+        let stream = Ivf {
+            width: 176,
+            height: 112,
+            frames: packets,
+        };
+        let c = crate::prove::coverage(&stream);
+        assert_eq!(c.frames, count as usize + c.hidden, "{name} {c:?}");
+        assert!(c.hidden >= 3, "{name} {c:?}");
+        assert!(c.no_entropy_refresh >= c.hidden, "{name} {c:?}");
+        assert!(c.sign_bias > 0 && c.copies >= 3, "{name} {c:?}");
+        let refs = reference_counts(176, 112, &stream.frames);
+        assert!(refs[3] > 0, "{name}: altref macroblocks {refs:?}");
+        check(name, 176, 112, count, opts);
+    }
+}
+
+/// Error-resilient mode never keeps a frame's probability changes.
+#[test]
+fn error_resilient_streams_decode_identically() {
+    let opts = Vp8Options {
+        error_resilient: true,
+        quantizer: 30,
+        ..Vp8Options::default()
+    };
+    let (packets, _) = encode_synthetic(160, 96, 8, opts);
+    let stream = Ivf {
+        width: 160,
+        height: 96,
+        frames: packets,
+    };
+    let c = crate::prove::coverage(&stream);
+    assert_eq!(c.no_entropy_refresh, 8, "{c:?}");
+    check("resilient_enc", 160, 96, 8, opts);
 }

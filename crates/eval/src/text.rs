@@ -6,8 +6,8 @@
 //! placed with the segment clip, including its line keyframes.
 //!
 //! Word columns replace `content`. Those glyphs are the caption sample.
-//! An identity style keeps the material color. A sampled color replaces it.
-//! Style position is a pixel shift. Scale and rotation are not applied.
+//! The caption's style pages the words and sets each word's color, box,
+//! size and lift; rotation is not applied.
 
 use cutlass_captions::{CaptionQuery, PageLimits, RangeStyles, Rgba, sample_caption};
 use cutlass_engine::DisplayQuarter;
@@ -294,31 +294,58 @@ fn columns_present(columns: &WordColumns) -> bool {
     !columns.start_time.is_empty() || !columns.end_time.is_empty() || !columns.text.is_empty()
 }
 
-/// Word columns replace `content`. An empty style keeps the material color.
-/// A sampled color that is not opaque white replaces it. Position is a pixel
-/// shift, right and down. Scale and rotation on the style are not applied.
+/// Word columns replace `content`. The caption's style, when it names one,
+/// pages the words and gives the curves; otherwise every word is drawn
+/// plain. An empty style keeps the material color. A sampled color that is
+/// not opaque white replaces it. Position is a pixel shift, right and down;
+/// scale sizes a word about its middle, and a background is a box behind
+/// it. Rotation on the style is not applied.
 fn caption_picture(
     face: &[u8],
     material: &MaterialText,
     placed_at: Micros,
     time: Micros,
 ) -> Option<CpuBytes> {
-    let styles = RangeStyles::identity();
+    let style = cutlass_captions::caption_style(&material.caption_style);
+    let styles = style.map_or_else(RangeStyles::identity, |style| {
+        style.styles(material.font_size)
+    });
+    let limits = style.map_or(
+        PageLimits {
+            words_per_line: 0,
+            lines_per_page: 0,
+        },
+        |style| style.limits,
+    );
     let frame = sample_caption(&CaptionQuery {
         material,
         font: face,
         timeline: time,
         placed_at,
-        limits: PageLimits {
-            words_per_line: 0,
-            lines_per_page: 0,
-        },
+        limits,
         keywords: &[],
         styles: &styles,
         stagger_shift_ms: 0,
     })
     .ok()?;
     let base = text_fill(material).ok()?;
+    // Each word's middle, so a word sized up grows about it.
+    let mut spans: HashMap<usize, (f32, f32)> = HashMap::new();
+    for letter in &frame.letters.letters {
+        if let Some(word) = letter.word {
+            let span = spans.entry(word).or_insert((f32::MAX, f32::MIN));
+            span.0 = span.0.min(letter.glyph.x);
+            span.1 = span.1.max(letter.glyph.x);
+        }
+    }
+    let word_of = |glyph: &PlacedGlyph| {
+        frame
+            .letters
+            .letters
+            .iter()
+            .find(|letter| letter.source == glyph.source && letter.glyph.x == glyph.x)
+            .and_then(|letter| letter.word)
+    };
     let mut drawn = Vec::new();
     for batch in &frame.batches {
         for sample in &batch.glyphs {
@@ -334,12 +361,25 @@ fn caption_picture(
             let Some(fill) = ink_color(base, sample.style.color) else {
                 continue;
             };
+            let Some(back) = back_color(sample.style.background) else {
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let scale = sample.style.scale_x as f32;
+            if !scale.is_finite() || scale <= 0.0 {
+                continue;
+            }
+            let middle = word_of(&sample.glyph)
+                .and_then(|word| spans.get(&word))
+                .map_or(sample.glyph.x, |(left, right)| (left + right) / 2.0);
             drawn.push(HeldGlyph {
                 placed: sample.glyph.clone(),
                 baseline,
                 fill,
-                shift_x,
+                shift_x: shift_x + (sample.glyph.x - middle) * (scale - 1.0),
                 shift_y,
+                scale,
+                back,
             });
         }
     }
@@ -351,6 +391,8 @@ fn caption_picture(
             fill: glyph.fill,
             shift_x: glyph.shift_x,
             shift_y: glyph.shift_y,
+            scale: glyph.scale,
+            back: glyph.back,
         })
         .collect();
     match paint_glyphs(face, frame.letters.layout.font_size, &borrowed) {
@@ -365,6 +407,21 @@ struct HeldGlyph {
     fill: [u8; 4],
     shift_x: f32,
     shift_y: f32,
+    scale: f32,
+    back: [u8; 4],
+}
+
+/// A box color from a sampled background: clear when it has no opacity.
+fn back_color(color: Rgba) -> Option<[u8; 4]> {
+    if color.alpha <= 0.0 {
+        return Some([0, 0, 0, 0]);
+    }
+    Some([
+        unit_byte(color.red)?,
+        unit_byte(color.green)?,
+        unit_byte(color.blue)?,
+        unit_byte(color.alpha)?,
+    ])
 }
 
 fn baseline_of(layout: &Layout, glyph: &PlacedGlyph) -> Option<f32> {
@@ -790,5 +847,61 @@ mod tests {
                 .chunks(4)
                 .any(|pixel| pixel == [255, 0, 0, 255])
         );
+    }
+
+    #[test]
+    fn a_caption_style_pages_colors_sizes_and_boxes_the_spoken_word() {
+        let mut draft = text_segment("", false);
+        draft.materials.texts[0].font_size = 32.0;
+        // Milliseconds: AB, then BA, then AA, then BB.
+        draft.materials.texts[0].words = words(&[
+            ("AB", 0, 200),
+            ("BA", 200, 400),
+            ("AA", 400, 600),
+            ("BB", 600, 800),
+        ]);
+        let plain = pixels(&draft, 100_000);
+        let width = 256;
+        let wide = |rgba: &[u8]| inked_span(rgba, width).0;
+        let yellow = |rgba: &[u8]| {
+            rgba.chunks(4)
+                .filter(|pixel| {
+                    pixel[0] > 200 && pixel[1] > 180 && pixel[2] < 120 && pixel[3] == 255
+                })
+                .count()
+        };
+        // One word a page shows the spoken word alone.
+        draft.materials.texts[0].caption_style = "one-word".to_owned();
+        let one = pixels(&draft, 100_000);
+        assert!(
+            wide(&one) < wide(&plain) / 2,
+            "{} {}",
+            wide(&one),
+            wide(&plain)
+        );
+        // Karaoke turns the spoken and read words yellow, the rest stay.
+        draft.materials.texts[0].caption_style = "karaoke".to_owned();
+        let early = pixels(&draft, 100_000);
+        let later = pixels(&draft, 500_000);
+        assert!(yellow(&early) > 0 && yellow(&later) > yellow(&early));
+        assert!(ink(&early));
+        // Highlight puts a yellow box behind the spoken word.
+        draft.materials.texts[0].caption_style = "highlight".to_owned();
+        let boxed = pixels(&draft, 100_000);
+        assert!(yellow(&boxed) > yellow(&early) * 2);
+        // Word by word hides the words not yet spoken.
+        draft.materials.texts[0].caption_style = "word-by-word".to_owned();
+        let first = pixels(&draft, 100_000);
+        let all = pixels(&draft, 700_000);
+        assert!(wide(&first) < wide(&all));
+        // Pop grows the spoken word.
+        draft.materials.texts[0].caption_style = "classic".to_owned();
+        let classic = pixels(&draft, 100_000);
+        draft.materials.texts[0].caption_style = "pop".to_owned();
+        let pop = pixels(&draft, 100_000);
+        assert_ne!(pop, classic);
+        // An unknown style draws the words plain.
+        draft.materials.texts[0].caption_style = "loud".to_owned();
+        assert_eq!(pixels(&draft, 100_000), plain);
     }
 }

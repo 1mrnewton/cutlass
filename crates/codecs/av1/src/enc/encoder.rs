@@ -74,15 +74,24 @@ impl Coder for MsacEnc {
     }
     fn checkpoint(
         &self,
-        base: Option<&super::msac_enc::MsacState>,
-    ) -> Option<super::msac_enc::MsacState> {
-        Some(MsacEnc::checkpoint(self, base))
+        base: Option<&super::msac_enc::CoderMark>,
+    ) -> Option<super::msac_enc::CoderMark> {
+        let base = match base {
+            Some(super::msac_enc::CoderMark::Enc(b)) => Some(b),
+            Some(_) => return None,
+            None => None,
+        };
+        Some(super::msac_enc::CoderMark::Enc(MsacEnc::checkpoint(
+            self, base,
+        )))
     }
-    fn restore(&mut self, s: &super::msac_enc::MsacState) {
-        MsacEnc::restore(self, s);
+    fn restore(&mut self, s: &super::msac_enc::CoderMark) {
+        if let super::msac_enc::CoderMark::Enc(s) = s {
+            MsacEnc::restore(self, s);
+        }
     }
-    fn bits_written(&self) -> u64 {
-        self.tell_bits()
+    fn bits_written(&self) -> f64 {
+        self.tell_bits() as f64
     }
 }
 
@@ -1275,6 +1284,8 @@ impl Av1Enc {
                 _ => ev("AV1_PRDI", 0.0) as usize,
             },
             merge_none_first: ev("AV1_PRDN", 0.0) > 0.0,
+            merge_accept: ev("AV1_PRDA", 0.0),
+            merge_tx_search: ev("AV1_PRDL", 3.0) as u8,
             // Flat 16x16 areas are not split, busy 32x32 ones and 64x64
             // ones are not coded whole (by the estimate per sample).
             intra_split_skip: [
@@ -1309,9 +1320,20 @@ impl Av1Enc {
             tx_type_search: if speed >= 9 {
                 0
             } else {
-                ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 }) as u8
+                (if key {
+                    ev(
+                        "AV1_TXSK",
+                        ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 }),
+                    )
+                } else {
+                    ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 })
+                }) as u8
             },
-            tx_type_keep: ev("AV1_TXK", 3.0) as u8,
+            tx_type_keep: (if key {
+                ev("AV1_TXKK", ev("AV1_TXK", 3.0))
+            } else {
+                ev("AV1_TXK", 3.0)
+            }) as u8,
             rdoq: if speed >= 9 {
                 0
             } else if speed >= 7 {

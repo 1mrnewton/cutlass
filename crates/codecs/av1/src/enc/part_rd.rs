@@ -10,7 +10,7 @@ use crate::dec::tile::{Block, TileDec};
 use crate::dec::types::{BLOCK_8X8, MiInfo, bw4};
 use crate::dsp::Pixel;
 
-use super::msac_enc::MsacState;
+use super::msac_enc::CoderMark;
 
 const PARTITION_NONE: usize = 0;
 const PARTITION_SPLIT: usize = 3;
@@ -18,7 +18,7 @@ const PARTITION_SPLIT: usize = 3;
 /// What coding a node changes, saved to code it again another way.
 pub struct NodeState<P> {
     cdf: Box<CdfContext>,
-    msac: MsacState,
+    msac: CoderMark,
     mi: Vec<MiInfo>,
     bytes: [Vec<u8>; 4],
     lf_tx: [Vec<u8>; 3],
@@ -68,7 +68,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         (nd.r >> sy, nd.c >> sx, w, h)
     }
 
-    fn node_save(&self, nd: Node, base: Option<&MsacState>) -> Option<NodeState<P>> {
+    fn node_save(&self, nd: Node, base: Option<&CoderMark>) -> Option<NodeState<P>> {
         let msac = self.msac.checkpoint(base)?;
         let st = self.fs.mi_stride;
         let n = nd.n4;
@@ -205,7 +205,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         let b0 = self.msac.bits_written();
         self.me_scratch.force_part = Some((nd.r, nd.c, bsize, p));
         self.decode_partition(nd.r, nd.c, bsize)?;
-        let bits = self.msac.bits_written().saturating_sub(b0) as f64;
+        let bits = self.msac.bits_written() - b0;
         Ok(self.node_sse(nd) + self.enc.lambda * bits)
     }
 
@@ -283,12 +283,28 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
         } else {
             (PARTITION_SPLIT, PARTITION_NONE)
         };
-        let first = self.node_try(nd, bsize, pa)?;
+        let saved_q = self.enc;
+        if self.mode.inter_frame && pa == PARTITION_NONE {
+            // The whole block's trial searches fewer transform types.
+            self.enc.tx_type_search = self.enc.tx_type_search.min(self.mode.merge_tx_search);
+        }
+        let first = self.node_try(nd, bsize, pa);
+        self.enc = saved_q;
+        let first = first?;
         if pa == PARTITION_NONE
             && self.mode.inter_frame
-            && self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip
+            && (self.fs.mi[nd.r * self.fs.mi_stride + nd.c].skip
+                || (self.mode.merge_accept > 0.0 && {
+                    let h = n / 2;
+                    let es = self.est_block(x, y, h, h)
+                        + self.est_block(x + h, y, h, h)
+                        + self.est_block(x, y + h, h, h)
+                        + self.est_block(x + h, y + h, h, h);
+                    first < self.mode.merge_accept * es
+                }))
         {
-            // The whole block codes no residual: keep it.
+            // The whole block codes no residual, or costs well below the
+            // split's estimate: keep it.
             return Ok(true);
         }
         let Some(s_first) = self.node_save(nd, Some(&s0.msac)) else {

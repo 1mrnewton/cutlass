@@ -28,7 +28,9 @@ use crate::dec::tile::{EncPlan, RefView, TileDec};
 use crate::dec::types::MiInfo;
 use crate::dsp::Pixel;
 
-use super::msac_enc::{MsacEnc, adapt_bool, adapt_symbol};
+use super::msac_enc::{
+    COST_SHIFT, CoderMark, MsacEnc, adapt_bool, adapt_symbol, bool_cost, symbol_cost,
+};
 use super::quant::QuantParams;
 use super::rdo::ModeParams;
 
@@ -162,7 +164,7 @@ impl CdfLayout {
 /// One coded syntax element, by value. CDFs are named by array index and
 /// element offset in [`cdf_arrays`].
 #[derive(Clone, Copy, Debug)]
-enum SymOp {
+pub enum SymOp {
     Symbol {
         a: u8,
         at: u16,
@@ -214,6 +216,17 @@ pub struct SymLog<'l> {
     ops: Vec<SymOp>,
     /// Set when a CDF outside the context was used.
     bad: bool,
+    /// The cost of the elements so far, in bits (for closed-loop trials).
+    bits: f64,
+}
+
+/// A saved [`SymLog`] state: the elements logged after `from` and the cost.
+#[derive(Clone)]
+pub struct LogMark {
+    from: usize,
+    tail: Vec<SymOp>,
+    bits: f64,
+    bad: bool,
 }
 
 impl<'l> SymLog<'l> {
@@ -224,6 +237,7 @@ impl<'l> SymLog<'l> {
             allow_update,
             ops: Vec::new(),
             bad: false,
+            bits: 0.0,
         }
     }
 
@@ -246,6 +260,7 @@ impl Coder for SymLog<'_> {
     fn bool_adapt(&mut self, cdf: &mut [u16; 2], v: bool) -> bool {
         let (a, at) = self.locate(cdf.as_ptr(), 2, false);
         self.ops.push(SymOp::BoolAdapt { a, at, v });
+        self.cost(bool_cost(cdf[0], v));
         if self.allow_update {
             adapt_bool(cdf, v);
         }
@@ -254,6 +269,7 @@ impl Coder for SymLog<'_> {
     #[inline(always)]
     fn bool_prob(&mut self, f: u32, v: bool) -> bool {
         self.ops.push(SymOp::Prob { f, v });
+        self.cost(bool_cost(f as u16, v));
         v
     }
     #[inline(always)]
@@ -266,6 +282,7 @@ impl Coder for SymLog<'_> {
             mask,
             v,
         });
+        self.cost(bool_cost(masked_prob(cdf, mask) as u16, v));
         v
     }
     #[inline(always)]
@@ -278,6 +295,7 @@ impl Coder for SymLog<'_> {
             n: N as u8,
             v: v as u8,
         });
+        self.cost(symbol_cost(cdf, v));
         if self.allow_update {
             adapt_symbol(cdf, v);
         }
@@ -288,8 +306,9 @@ impl Coder for SymLog<'_> {
         let v = v.min(3);
         let (a, at) = self.locate(std::ptr::from_mut(cdf).cast_const(), 1, true);
         self.ops.push(SymOp::Packed { a, at, v: v as u8 });
+        let mut c = unpack4(*cdf);
+        self.cost(symbol_cost(&c, v));
         if self.allow_update {
-            let mut c = unpack4(*cdf);
             adapt_symbol(&mut c, v);
             *cdf = pack4(c);
         }
@@ -299,22 +318,56 @@ impl Coder for SymLog<'_> {
     fn literal(&mut self, n: u32, v: u32) -> u32 {
         let v = if n >= 32 { v } else { v & ((1u32 << n) - 1) };
         self.ops.push(SymOp::Literal { n: n as u8, v });
+        self.bits += f64::from(n);
         v
     }
     #[inline(always)]
     fn golomb(&mut self, v: u32) -> u32 {
         self.ops.push(SymOp::Golomb { v });
+        self.bits += f64::from(2 * (32 - (v + 1).leading_zeros()) - 1);
         v
     }
     #[inline(always)]
     fn ns(&mut self, n: u32, v: u32) -> u32 {
         let v = if n == 0 { 0 } else { v.min(n - 1) };
         self.ops.push(SymOp::Ns { n, v });
+        self.bits += f64::from(32 - n.leading_zeros());
         v
     }
     #[inline(always)]
     fn mark(&mut self, tag: u32) {
         self.ops.push(SymOp::Mark(tag));
+    }
+    fn checkpoint(&self, base: Option<&CoderMark>) -> Option<CoderMark> {
+        let from = match base {
+            Some(CoderMark::Log(b)) => b.from,
+            Some(_) => return None,
+            None => self.ops.len(),
+        };
+        Some(CoderMark::Log(LogMark {
+            from,
+            tail: self.ops[from.min(self.ops.len())..].to_vec(),
+            bits: self.bits,
+            bad: self.bad,
+        }))
+    }
+    fn restore(&mut self, s: &CoderMark) {
+        if let CoderMark::Log(s) = s {
+            self.ops.truncate(s.from);
+            self.ops.extend_from_slice(&s.tail);
+            self.bits = s.bits;
+            self.bad = s.bad;
+        }
+    }
+    fn bits_written(&self) -> f64 {
+        self.bits
+    }
+}
+
+impl SymLog<'_> {
+    #[inline(always)]
+    fn cost(&mut self, c: u32) {
+        self.bits += f64::from(c) / f64::from(1u32 << COST_SHIFT);
     }
 }
 

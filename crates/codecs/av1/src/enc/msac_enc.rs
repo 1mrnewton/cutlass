@@ -33,6 +33,13 @@ pub struct MsacEnc {
     marks: Vec<(usize, u32)>,
 }
 
+/// A saved state of an encoding coder (see `Coder::checkpoint`).
+#[derive(Clone)]
+pub enum CoderMark {
+    Enc(MsacState),
+    Log(super::rowmt::LogMark),
+}
+
 /// A saved coder state (see [`MsacEnc::checkpoint`]).
 #[derive(Clone, Default)]
 pub struct MsacState {

@@ -123,6 +123,12 @@ pub struct ModeParams {
     /// That check codes the whole block first and keeps it when it codes
     /// no residual.
     pub merge_none_first: bool,
+    /// Inter merge check coding the whole block first: it is kept without
+    /// trying the split when it costs below this multiple of the split's estimate.
+    pub merge_accept: f64,
+    /// ... and searches transform types up to this level (see
+    /// `QuantParams::tx_type_search`) when coding the whole block.
+    pub merge_tx_search: u8,
     /// Intra frames, per node size 16, 32 and 64: the split is not tried
     /// where the estimate of the whole block is below this many bits per
     /// sample, and the whole block is not tried where it is above this.
@@ -179,6 +185,8 @@ impl Default for ModeParams {
             part_rd: false,
             merge_check: 0,
             merge_none_first: false,
+            merge_accept: 0.0,
+            merge_tx_search: 3,
             intra_split_skip: [0.0; 3],
             intra_none_skip: [f64::MAX; 3],
         }

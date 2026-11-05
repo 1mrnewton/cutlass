@@ -1,5 +1,7 @@
 //! Our VP8 packets in an MP4 `vp08` track: muxed with `cutlass-isobmff`,
-//! read back, and decoded here and by ffmpeg to the same pictures.
+//! read back, and decoded here and by ffmpeg to the same pictures. The
+//! export path (RGBA through the engine factory into `Mp4Mux`) is checked
+//! the same way.
 //!
 //! `clippy.toml` allows `expect` and `panic` in `#[cfg(test)]` modules.
 //! This crate is the test harness, so the same exception is named here.
@@ -185,6 +187,176 @@ fn an_mp4_vp08_track_round_trips() {
         );
         let theirs = std::fs::read(&yuv).expect("yuv");
         assert!(theirs == ours, "{decoder} decodes the MP4 differently");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What export does: RGBA frames through the engine's encode factory, the
+/// packets and the `vpcC` into `Mp4Mux`. ffmpeg's `vp8` and libvpx decode
+/// the file to the pictures our engine decoder gives, and ffprobe reads
+/// BT.709 from the `vpcC`.
+#[test]
+fn the_export_path_writes_an_mp4_other_players_read() {
+    use cutlass_codec::{
+        CodecId as Id, FrameSize, Packet as MuxPacket, StreamCodec, StreamParams as Params,
+        Timescale as Scale, Timestamp,
+    };
+    use cutlass_container::{Mux as _, NewStream, TrackDuration};
+    use cutlass_decode::{DecodeFactory, Output, PictureSamples, PixelFormat};
+    use cutlass_encode::{CpuFrame, EncodeFactory, FrameInput, FrameTime};
+
+    let mut encoders = EncodeFactory::new();
+    cutlass_vp8::register_engine_encoders(&mut encoders);
+    let mut params = CodecParams::with_format(CodecId::Vp8, W, H, PixelFormat::Rgba8);
+    params.bitrate = 600_000;
+    let mut encoder = encoders.open(&params).expect("encoder");
+    let mut packets = Vec::new();
+    for t in 0..FRAMES {
+        let rgba: Vec<u8> = (0..(W * H) as usize)
+            .flat_map(|i| {
+                let (x, y) = (i as u32 % W, i as u32 / W);
+                [
+                    ((x * 5 + t * 7) % 256) as u8,
+                    ((y * 3) % 256) as u8,
+                    ((x + y + t) % 256) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        let time = FrameTime::new(i64::from(t), 1, 30).expect("time");
+        let frame = CpuFrame::new(W, H, PixelFormat::Rgba8, rgba, time).expect("frame");
+        packets.extend(encoder.push_frame(&FrameInput::Cpu(frame)).expect("push"));
+    }
+    packets.extend(encoder.drain().expect("drain"));
+    let config = packets[0]
+        .side
+        .iter()
+        .find_map(|side| match side {
+            SideData::Config(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
+        .expect("vpcC on the first packet");
+
+    let mut mux = cutlass_isobmff::Mp4Mux::new(Cursor::new(Vec::new()));
+    let track = mux
+        .add_stream(NewStream {
+            params: Params::video(
+                StreamCodec::Known(Id::Vp8),
+                FrameSize::try_new(W, H).expect("size"),
+                Vec::new(),
+            ),
+            timescale: Scale::new(30),
+            language: None,
+        })
+        .expect("track");
+    mux.set_config(track, &config).expect("config");
+    for packet in &packets {
+        let time = Timestamp::try_new(Some(packet.pts), Some(packet.pts), Some(packet.duration))
+            .expect("time");
+        let out = MuxPacket::try_new(
+            track.get(),
+            packet.data.clone(),
+            time,
+            Scale::new(30),
+            packet.keyframe,
+        )
+        .expect("packet");
+        mux.write_packet(&out).expect("write");
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: Scale::new(30),
+        ticks: i64::from(FRAMES),
+    }])
+    .expect("finish");
+    let file = mux.into_writer().expect("writer").into_inner();
+
+    // Our engine decoder, opened with the file's configuration.
+    let mut decoders = DecodeFactory::new();
+    cutlass_vp8::register_engine_decoders(&mut decoders);
+    let mut read = CodecParams::video(CodecId::Vp8, W, H);
+    read.extra = config.clone();
+    let mut decoder = decoders.open(&read).expect("decoder");
+    let mut ours = Vec::new();
+    for packet in &packets {
+        for output in cutlass_decode::Decoder::push(decoder.as_mut(), packet).expect("decode") {
+            let Output::Picture(picture) = output else {
+                panic!("audio");
+            };
+            let PictureSamples::Cpu(bytes) = picture.samples() else {
+                panic!("platform");
+            };
+            ours.extend_from_slice(bytes);
+        }
+    }
+    assert_eq!(ours.len(), (W * H * 3 / 2 * FRAMES) as usize);
+
+    let Some(ffmpeg) = ffmpeg_bin() else {
+        eprintln!("ffmpeg missing; the export MP4 was checked with our decoder only");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("cutlass-vp8-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let mp4 = dir.join("export.mp4");
+    std::fs::write(&mp4, &file).expect("mp4");
+    for decoder in ["vp8", "libvpx"] {
+        let yuv = dir.join(format!("{decoder}.yuv"));
+        let status = Command::new(&ffmpeg)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-c:v",
+                decoder,
+                "-i",
+            ])
+            .arg(&mp4)
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&yuv)
+            .output()
+            .expect("ffmpeg");
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let theirs = std::fs::read(&yuv).expect("yuv");
+        assert!(
+            theirs == ours,
+            "{decoder} decodes the export MP4 differently"
+        );
+    }
+    let ffprobe = ffmpeg.with_file_name("ffprobe");
+    if let Ok(probe) = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,color_primaries,color_space,color_transfer",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(&mp4)
+        .output()
+        && probe.status.success()
+    {
+        let text = String::from_utf8_lossy(&probe.stdout);
+        for line in [
+            "codec_name=vp8",
+            "color_primaries=bt709",
+            "color_space=bt709",
+            "color_transfer=bt709",
+        ] {
+            assert!(text.contains(line), "ffprobe: {text}");
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

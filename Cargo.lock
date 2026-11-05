@@ -823,6 +823,8 @@ dependencies = [
  "cutlass-gpu",
  "cutlass-isobmff",
  "cutlass-model",
+ "cutlass-ogg",
+ "cutlass-opus",
  "cutlass-pcm",
  "cutlass-playback",
  "cutlass-render",

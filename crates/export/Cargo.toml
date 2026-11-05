@@ -16,6 +16,7 @@ cutlass-gpu = { path = "../gpu", version = "0.1.0" }
 cutlass-render = { path = "../render", version = "0.1.0" }
 cutlass-isobmff = { path = "../containers/isobmff", version = "0.1.0" }
 cutlass-riff = { path = "../containers/riff", version = "0.1.0" }
+cutlass-ogg = { path = "../containers/ogg", version = "0.1.0" }
 cutlass-still = { path = "../containers/still", version = "0.1.0" }
 cutlass-renderer-software = { path = "../renderer-software", version = "0.1.0" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
@@ -23,6 +24,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 [dev-dependencies]
 cutlass-aac = { path = "../codecs/aac", version = "0.1.0" }
 cutlass-gif = { path = "../codecs/gif", version = "0.1.0" }
+cutlass-opus = { path = "../codecs/opus", version = "0.1.0" }
 cutlass-pcm = { path = "../codecs/pcm", version = "0.1.0" }
 cutlass-playback = { path = "../playback", version = "0.1.0" }
 cutlass-session = { path = "../session", version = "0.1.0" }

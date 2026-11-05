@@ -10,7 +10,9 @@
 //! saying open when the next hold takes it was left by a process that did
 //! not close: an app that crashed.
 
-use std::fs::{File, OpenOptions, TryLockError};
+#[cfg(not(windows))]
+use std::fs::TryLockError;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +22,9 @@ const LOCK_FILE: &str = ".locked";
 const ABSENT_ADDRESS: &[u8] = b"{\"address\":null}\n";
 const OPEN_MARK: &[u8] = b"\"open\":true";
 const HELD_OPEN: &[u8] = b"{\"address\":null,\"open\":true}\n";
+/// Another process has the file open for writing.
+#[cfg(windows)]
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 /// A process that currently holds `.locked`.
 #[derive(Debug)]
@@ -57,6 +62,7 @@ impl Hold {
 impl Drop for Hold {
     fn drop(&mut self) {
         let _ = rewrite(&mut self.file, ABSENT_ADDRESS);
+        #[cfg(not(windows))]
         let _ = self.file.unlock();
     }
 }
@@ -92,16 +98,31 @@ pub fn hold(path: &Path) -> Result<Hold, StoreError> {
         });
     }
     let lock_path = root.join(LOCK_FILE);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| StoreError::Io {
-            path: lock_path.clone(),
-            message: error.to_string(),
-        })?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // A Windows lock is mandatory: a second host could not read the
+        // address out of a locked `.locked`. Shared for reading only, the
+        // open file keeps every other writer out instead, and the system
+        // lets go of it when the process ends, as it does a lock.
+        const FILE_SHARE_READ: u32 = 1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    let mut file = match options.open(&lock_path) {
+        Ok(file) => file,
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+            return Err(StoreError::Held { path: root });
+        }
+        Err(error) => {
+            return Err(StoreError::Io {
+                path: lock_path,
+                message: error.to_string(),
+            });
+        }
+    };
     let canonical = lock_path.canonicalize().map_err(|error| StoreError::Io {
         path: lock_path.clone(),
         message: error.to_string(),
@@ -111,6 +132,7 @@ pub fn hold(path: &Path) -> Result<Hold, StoreError> {
             name: LOCK_FILE.to_owned(),
         });
     }
+    #[cfg(not(windows))]
     match file.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {

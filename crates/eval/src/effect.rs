@@ -303,8 +303,8 @@ fn global_marks<'a>(draft: &'a Draft, time: Micros, stack: &[StackLayer<'_>]) ->
         .filter_map(|(track_index, segment_index, segment, _)| {
             // A bundled filter is a look: adjust sliders, not a package.
             let adjust = cutlass_effects::segment_look(draft, segment).map(|adjust| Colour {
-                grade: cutlass_effects::segment_grade(draft, segment),
                 adjust,
+                ..cutlass_effects::segment_colour(draft, segment)
             });
             if adjust.as_ref().is_some_and(Colour::is_identity) {
                 return None;

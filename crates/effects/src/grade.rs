@@ -18,6 +18,7 @@ use cutlass_model::{Draft, MaterialRef, Segment};
 use serde_json::{Value, json};
 
 use crate::adjust::{Adjust, adjust_rgba, segment_adjust};
+use crate::lut::{ClipLut, segment_lut};
 
 /// The material `type` of a clip's curves.
 pub const COLOR_CURVES: &str = "color_curves";
@@ -252,23 +253,30 @@ impl Grade {
     }
 }
 
-/// A clip's grade and basic sliders, the whole of its colour work.
+/// A clip's grade, basic sliders and LUT, the whole of its colour work.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Colour {
     pub grade: Grade,
     pub adjust: Adjust,
+    pub lut: Option<ClipLut>,
 }
 
 impl Colour {
     #[must_use]
     pub fn is_identity(&self) -> bool {
-        self.grade.is_identity() && self.adjust.is_identity()
+        self.grade.is_identity()
+            && self.adjust.is_identity()
+            && self.lut.as_ref().is_none_or(|lut| lut.strength <= 0.0)
     }
 
-    /// Run the grade, then the sliders, over premultiplied RGBA.
+    /// Run the grade, then the sliders, then the LUT, over premultiplied
+    /// RGBA.
     pub fn apply(&self, rgba: &mut [u8], width: u32, height: u32, seed: u32) {
         self.grade.apply(rgba);
         adjust_rgba(&self.adjust, rgba, width, height, seed);
+        if let Some(lut) = &self.lut {
+            lut.apply(rgba);
+        }
     }
 }
 
@@ -278,6 +286,7 @@ pub fn segment_colour(draft: &Draft, segment: &Segment) -> Colour {
     Colour {
         grade: segment_grade(draft, segment),
         adjust: segment_adjust(draft, segment),
+        lut: segment_lut(draft, segment),
     }
 }
 

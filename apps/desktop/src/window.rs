@@ -56,10 +56,17 @@ pub fn run() -> eframe::Result {
             // Other hosts, such as `cutlass mcp`, reach the open project here.
             let ctx = creation.egui_ctx.clone();
             shell.listen(std::sync::Arc::new(move || ctx.request_repaint()));
+            #[cfg(target_os = "macos")]
+            let menu_bar = {
+                let ctx = creation.egui_ctx.clone();
+                crate::menubar::Native::install(move || ctx.request_repaint())
+            };
             Ok(Box::new(DesktopWindow {
                 shell,
                 view: ViewState::new(),
                 last_time: None,
+                #[cfg(target_os = "macos")]
+                menu_bar,
             }))
         }),
     )
@@ -121,12 +128,21 @@ struct DesktopWindow {
     shell: Shell,
     view: ViewState,
     last_time: Option<f64>,
+    /// The system menu bar, kept for as long as the window is up.
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<crate::menubar::Native>,
 }
 
 impl eframe::App for DesktopWindow {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let now = ui.input(|input| input.time);
         advance_if_playing(&mut self.shell, &mut self.last_time, now);
+        #[cfg(target_os = "macos")]
+        if let Some(bar) = self.menu_bar.as_ref() {
+            for id in bar.take() {
+                crate::view::run_menu(&mut self.shell, &mut self.view, Some(frame), &id);
+            }
+        }
         show(&mut self.shell, ui, &mut self.view, Some(frame));
         if let Some(wait) = self.shell.autosave() {
             ui.ctx().request_repaint_after(wait);

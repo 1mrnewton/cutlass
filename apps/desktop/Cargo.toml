@@ -81,6 +81,7 @@ cutlass-codec = { path = "../../crates/codec", version = "0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cutlass-platform-apple = { path = "../../crates/platform-apple", version = "0.1.0" }
+muda = { version = "0.21.2", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 cutlass-platform-windows = { path = "../../crates/platform-windows", version = "0.1.0" }

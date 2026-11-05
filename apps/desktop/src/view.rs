@@ -917,7 +917,7 @@ fn menus(
 ) {
     let menu = Rect::from_min_size(
         bar.min + Vec2::new(78.0, 0.0),
-        Vec2::new(280.0, bar.height()),
+        Vec2::new(400.0, bar.height()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
         ui.horizontal_centered(|ui| {
@@ -932,7 +932,13 @@ fn menus(
             });
             ui.menu_button(RichText::new("Edit").color(tokens::FAINT), |ui| {
                 edit_menu(shell, ui);
+                menu_items(shell, ui, view, parent, "Edit", &["undo", "redo"]);
             });
+            for title in ["Clip", "Playback"] {
+                ui.menu_button(RichText::new(title).color(tokens::FAINT), |ui| {
+                    menu_items(shell, ui, view, parent, title, &[]);
+                });
+            }
             ui.menu_button(RichText::new("Help").color(tokens::FAINT), |ui| {
                 help_menu(ui, view, parent);
             });
@@ -961,6 +967,89 @@ fn file_menu(shell: &mut Shell, ui: &mut Ui, view: &mut ViewState, parent: Optio
     if ui.button("Import…").clicked() {
         ui.close();
         view.dialogs.import(parent);
+    }
+}
+
+/// The items of the menu bar's `title` menu, but those in `skip`, each
+/// running its command. A separator stays between groups.
+fn menu_items(
+    shell: &mut Shell,
+    ui: &mut Ui,
+    view: &mut ViewState,
+    parent: Option<&eframe::Frame>,
+    title: &str,
+    skip: &[&str],
+) {
+    let Some(menu) = crate::menubar::MENUS
+        .iter()
+        .find(|menu| menu.title == title)
+    else {
+        return;
+    };
+    let mut chosen = None;
+    let mut drawn = false;
+    for entry in menu.items {
+        match entry {
+            Some(item) if skip.contains(&item.id) => {}
+            Some(item) => {
+                drawn = true;
+                if ui.button(item.label).clicked() {
+                    ui.close();
+                    chosen = Some(item.id);
+                }
+            }
+            None if drawn => {
+                ui.separator();
+                drawn = false;
+            }
+            None => {}
+        }
+    }
+    if let Some(id) = chosen {
+        run_menu(shell, view, parent, id);
+    }
+}
+
+/// Run the menu bar item `id`: a window command, or a shortcut action.
+pub fn run_menu(shell: &mut Shell, view: &mut ViewState, parent: Option<&eframe::Frame>, id: &str) {
+    use crate::menubar::{EXPORT, EXPORT_LOG, IMPORT, LICENSES, OPEN, PROJECTS, SAVE, SETTINGS};
+
+    let open = shell.draft().is_some();
+    let done = match id {
+        OPEN => {
+            view.dialogs.open_project(parent);
+            Ok(())
+        }
+        SETTINGS => {
+            view.settings_open = true;
+            Ok(())
+        }
+        LICENSES => {
+            view.licenses = Some(cutlass_licenses::notices());
+            Ok(())
+        }
+        EXPORT_LOG => {
+            view.dialogs.save_log(parent);
+            Ok(())
+        }
+        SAVE | IMPORT | EXPORT | PROJECTS if !open => Err(ShellError::NoProject),
+        SAVE => shell.save(),
+        IMPORT => {
+            view.dialogs.import(parent);
+            Ok(())
+        }
+        EXPORT => {
+            view.export_open = true;
+            Ok(())
+        }
+        PROJECTS => {
+            return_to_projects(shell, view);
+            Ok(())
+        }
+        action => shell.run_action(action),
+    };
+    if let Err(error) = done {
+        shell.set_notice(error.to_string());
     }
 }
 

@@ -10,6 +10,7 @@ pub mod icons;
 pub mod jobs;
 pub mod mcp;
 mod menu;
+pub mod menubar;
 mod readers;
 
 #[cfg(test)]

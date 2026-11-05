@@ -2209,7 +2209,16 @@ impl Shell {
 
     pub fn run_shortcut(&mut self, keys: &str) -> Result<(), ShellError> {
         let action = self.settings.action_for(keys).map(str::to_owned);
-        match action.as_deref() {
+        match action {
+            Some(action) => self.run_action(&action),
+            None => Err(ShellError::Unavailable(format!("{keys} is not available"))),
+        }
+    }
+
+    /// Run the shortcut action named `action`, as its keys or its menu
+    /// item do.
+    pub fn run_action(&mut self, action: &str) -> Result<(), ShellError> {
+        match Some(action) {
             Some("undo") => self.undo(),
             Some("redo" | "redo_y") => self.redo(),
             Some("play") => {
@@ -2258,7 +2267,9 @@ impl Shell {
                 self.clear_marks();
                 Ok(())
             }
-            _ => Err(ShellError::Unavailable(format!("{keys} is not available"))),
+            _ => Err(ShellError::Unavailable(format!(
+                "{action} is not available"
+            ))),
         }
     }
 

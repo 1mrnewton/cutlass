@@ -325,6 +325,75 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_beat_drops_it_and_its_empty_material_in_one_undo_step() {
+        let mut session = open();
+        session
+            .apply(2, &[beat(200_000, "beats"), beat(600_000, "beats")])
+            .unwrap();
+        let remove = |source: i64| Request::RemoveBeat {
+            segment_id: SegmentId::new("clip"),
+            source: Micros(source),
+        };
+        let revision = session.revision();
+        assert_eq!(
+            session.apply(revision, &[remove(300_000)]),
+            Err(EditError::MissingMaterial),
+            "no beat there"
+        );
+        assert_eq!(
+            session.apply(
+                revision,
+                &[Request::RemoveBeat {
+                    segment_id: SegmentId::new("nowhere"),
+                    source: Micros(200_000),
+                }]
+            ),
+            Err(EditError::MissingSegment)
+        );
+        session.apply(revision, &[remove(200_000)]).unwrap();
+        assert_eq!(
+            user_beats(&session.draft().materials.beats[0]),
+            vec![600_000]
+        );
+        session
+            .apply(session.revision(), &[remove(600_000)])
+            .unwrap();
+        let draft = session.draft();
+        assert!(draft.materials.beats.is_empty(), "the empty material goes");
+        assert!(draft.tracks[1].segments[0].extra_material_refs.is_empty());
+        assert!(segment_beats(&draft.materials, &draft.tracks[1].segments[0]).is_none());
+        assert_eq!(
+            session.apply(session.revision(), &[remove(600_000)]),
+            Err(EditError::MissingMaterial),
+            "a clip with no beats"
+        );
+        session.undo().unwrap();
+        assert_eq!(
+            user_beats(&session.draft().materials.beats[0]),
+            vec![600_000]
+        );
+        session.undo().unwrap();
+        assert_eq!(
+            user_beats(&session.draft().materials.beats[0]),
+            vec![200_000, 600_000]
+        );
+        session
+            .apply(
+                session.revision(),
+                &[Request::SetTrackAttribute {
+                    track_id: TrackId::new("audio"),
+                    bit: TrackAttribute::LOCK,
+                    on: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session.apply(session.revision(), &[remove(200_000)]),
+            Err(EditError::LockedTrack)
+        );
+    }
+
+    #[test]
     fn a_split_gives_each_piece_the_beats_on_its_side() {
         let mut session = open();
         session.apply(2, &[beat(200_000, "beats")]).unwrap();

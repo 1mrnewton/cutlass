@@ -9,6 +9,11 @@ description = "The webp codec."
 [dependencies]
 cutlass-decode = { path = "../../decode", version = "0.1.0" }
 cutlass-encode = { path = "../../encode", version = "0.1.0" }
+cutlass-vp8 = { path = "../vp8", version = "0.1.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+cutlass-container = { path = "../../container", version = "0.1.0" }
+cutlass-still = { path = "../../containers/still", version = "0.1.0" }

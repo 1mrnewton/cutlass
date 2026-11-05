@@ -1307,8 +1307,11 @@ dependencies = [
 name = "cutlass-webp"
 version = "0.1.0"
 dependencies = [
+ "cutlass-container",
  "cutlass-decode",
  "cutlass-encode",
+ "cutlass-still",
+ "cutlass-vp8",
 ]
 
 [[package]]

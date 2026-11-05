@@ -29,8 +29,10 @@ Request: a full VP8 decoder and encoder, end to end, built, tested, fixed, and b
 | --- | --- | --- | --- | --- |
 | Segment loop-filter level outside 0..63 before the ref/mode deltas | Clamped first | Clamped first | Not clamped | Decoder clamps first (Section 20). The encoder keeps every segment level inside 0..63, so all three decoders agree on its streams. |
 | Segment quantizer index outside 0..127 before the per-plane deltas | Not clamped | Clamped first | Not clamped | Decoder does not clamp (Section 20). The encoder never emits such an index. |
-| `copy_buffer_to_golden = 2` in the same frame as `copy_buffer_to_alternate` | Golden takes the new altref | Golden takes the new altref | Golden takes the old altref | Decoder: new altref (Section 20). The encoder never sets both copies in one frame. |
+| `copy_buffer_to_golden = 2` in the same frame as `copy_buffer_to_alternate` | Golden takes the new altref | Golden takes the new altref | Golden takes the old altref | Decoder: new altref (Section 20). The encoder never sets golden copy 2 together with an altref copy. With `copy_references` it sets golden copy 1 with altref copy 2, where every reading agrees: altref takes the old golden and golden takes the old last. |
 | Loop-filter delta whose update flag is clear | Set to 0 | Kept | Kept | Kept. The Section 19.2 prose says the flag marks whether the value is updated, and every shipping encoder relies on that. This is an interoperability choice. |
+| `clamping_type = 1` on a key frame | No clamping is needed | Output matched ours with the bit set, at q 0 and q 127 | Read as full-range video (`vp8.c`); output matched | The decoder clamps regardless. The encoder emits the bit only on request (option `clamping_type`) and does not check the promise. |
+| `color_space = 1` on a key frame | Reserved | Output matched | Warns "Unspecified colorspace" and leaves the colour space unset | Reported on the decoder; emitted only on request (option `color_space`). |
 | `mb_no_coeff_skip = 0` | Reuses a stale skip flag | Skip is 0 | Skip is 0 | Skip is 0. The encoder emits `mb_no_coeff_skip = 0` only when no macroblock skips, where all three readings agree. |
 
 ## Required target
@@ -55,26 +57,24 @@ Request: a full VP8 decoder and encoder, end to end, built, tested, fixed, and b
 - Intra 16×16 and B_PRED, chosen by rate and distortion.
 - Inter NEAREST, NEAR, ZERO, NEW, and SPLITMV with all four partitionings. Quarter-pel motion search runs on LAST, GOLDEN, and ALTREF.
 - Golden refreshes. The old golden is copied to ALTREF (`copy_buffer_to_alternate = 2`).
+- Optional reference copies (`copy_references`). At each golden interval GOLDEN takes the previous frame (`copy_buffer_to_golden = 1`) and ALTREF the old golden. Halfway through each interval ALTREF takes the previous frame (`copy_buffer_to_alternate = 1`).
 - Optional hidden altrefs with lookahead:
   - A `show_frame = 0` frame codes the end of each golden group first.
   - The frames before it set the altref sign bias.
   - The frame it stands for copies it into golden (`copy_buffer_to_golden = 2`).
+  - With `hidden_golden`, the hidden frame refreshes GOLDEN instead and moves the old golden to ALTREF. The frames before it set the GOLDEN sign bias, and the frame it stands for needs no copy.
 - Adaptive coefficient, MV, mode, skip, intra, and reference probability updates. `refresh_entropy_probs = 0` on hidden frames and in error-resilient mode.
 - The loop-filter level is searched per frame, with libvpx's default ref/mode deltas and sharpness 0..7.
-- Optional four-segment activity quantization, with segment filter offsets.
+- Optional four-segment activity quantization, with segment filter offsets, sent as deltas or as absolute values (`absolute_segments`).
 - One to eight token partitions.
-- The display scale bits.
+- The display scale bits, and the colour-space and clamping-type bits on request.
 - `mb_no_coeff_skip = 0` when nothing skips.
 - Constant quantizer and target bitrate modes.
 
 ### Out of scope, with reasons
 
-- Encoder choices the decoder accepts but this encoder does not make:
-  - Copy flag 1 (copy from LAST).
-  - GOLDEN sign bias.
-  - Absolute segment values.
-  - Colour-space and clamp bits other than 0. libvpx writes 0 too.
 - VP8 has no other bit depths or chroma formats.
+- Every header field a VP8 decoder reads can now be emitted by the encoder.
 
 ## Gates, declared before tuning
 
@@ -99,17 +99,17 @@ All numbers are from this machine (Apple M5 Pro, macOS 27): release builds, one 
 | --- | --- | --- | --- |
 | Decode libvpx streams | 27 libvpx encodes, every pixel identical in both oracles | `libvpx_*_match_both_decoders` | Pass |
 | Decode the 1080p WebM | 901 frames identical | `independent_webm_matches_ffmpeg` | Pass |
-| Our packets in other decoders | Every encoder test stream is identical in ffmpeg `vp8`, `libvpx`, and our decoder. The streams cover modes, quantizers, sizes, partitions, bitrate, segments, versions 1–3, altref copies, hidden altrefs, error resilience, header options, and scene cuts. | `prove_encode::*`, `an_mp4_vp08_track_round_trips`, `the_export_path_writes_an_mp4_other_players_read` | Pass |
+| Our packets in other decoders | Every encoder test stream is identical in ffmpeg `vp8`, `libvpx`, and our decoder. The streams cover modes, quantizers, sizes, partitions, bitrate, segments, versions 1–3, altref copies, copy flag 1, hidden altrefs, hidden golden frames with the golden sign bias, absolute segments, the colour-space and clamp bits, error resilience, header options, and scene cuts. | `prove_encode::*`, `an_mp4_vp08_track_round_trips`, `the_export_path_writes_an_mp4_other_players_read` | Pass |
 | PSNR-Y, default options and hidden altrefs | Ahead of libvpx on 5 of 6 runs; −0.18 dB on the 6th (see the quality table) | `gate_quality_and_rate_against_libvpx` | Pass |
 | PSNR-U and PSNR-V | Above libvpx on all three clips, in both modes | same | Pass |
 | Rate at 1 Mb/s | 1.003×–1.008× of 625,000 bytes on every clip and mode | same | Pass |
 | Decode 1080p, one thread | testsrc2 270.2 fps; the 901-frame WebM 284.9 fps. ffmpeg `vp8` 519.5 and 827.4 fps, `libvpx` 454.5 and 877.3 fps, so 0.34×–0.52× of ffmpeg `vp8` | `cargo bench -p cutlass-vp8` | Pass |
 | Encode 640×360, default preset | testsrc2 63.8 fps (59.6 fps with hidden altrefs); the three natural clips 44.8–48.9 fps in the gate test. libvpx good cpu-used 4: 877 fps | `cargo bench -p cutlass-vp8`, gate test | Pass |
 | Decoder fuzz | 1800 s, 2,927,272 inputs to the core and engine decoders, findings 0 | `decoder_fuzz_does_not_panic` | Pass |
-| Encoder fuzz | 1800 s on the final encoder: 41,235 rounds, 211,533 frames, findings 0 | `encoder_fuzz_does_not_panic` | Pass |
+| Encoder fuzz | 1800 s on the final encoder (`29e50b03`): 793,310 rounds, 4,062,694 frames, findings 0 | `encoder_fuzz_does_not_panic` | Pass |
 | `cargo fmt --all -- --check` | Clean for every file this branch touches. `crates/codecs/gif/src/quant.rs` already differs on `development` and is not touched here. | | Pass for this branch |
 | `cargo clippy` with the workspace lints | Clean for `cutlass-vp8`, `cutlass-isobmff`, and the desktop app on macOS. `cutlass-vp8` and `cutlass-isobmff` are also clean with `--target x86_64-unknown-linux-gnu`. | | Pass, except the desktop Linux cross-lint, which cannot run here (see Not done) |
-| `cargo test` | `cutlass-vp8`: 61 unit, oracle, and lifecycle tests and 2 integration tests pass in debug and in release; the gate is ignored by default and passes when run. `cutlass-isobmff`: 49 pass. Desktop `cutlass`: 250 pass, 2 ignored (a 4K HDR playback test and a test that needs `CUTLASS_MOVIE`, neither about VP8). | | Pass |
+| `cargo test` | `cutlass-vp8`: 65 unit, oracle, and lifecycle tests and 2 integration tests pass in debug and in release; the gate is ignored by default and passes when run. `cutlass-isobmff`: 49 pass. Desktop `cutlass`: 250 pass, 2 ignored (a 4K HDR playback test and a test that needs `CUTLASS_MOVIE`, neither about VP8). | | Pass |
 
 ### Quality at 1 Mb/s, 640×360, 150 frames
 
@@ -189,12 +189,12 @@ Per-frame processing time, from the quiet run on `f5e4ab9c`:
 | Intra 16×16 DC, V, H, TM; B_PRED with all ten sub-modes; chroma | Yes | Accept | Emit | `every_macroblock_mode_is_chosen`, `diagonal_modes_match_the_reference_formulas`, libvpx streams | Verified |
 | NEAREST, NEAR, ZERO, NEW, SPLITMV 16×8, 8×16, 8×8, 4×4 | Yes | Accept | Emit on LAST, GOLDEN, and ALTREF | `every_macroblock_mode_is_chosen` (all ten modes, identical in ffmpeg and libvpx) | Verified |
 | LAST, GOLDEN, ALTREF; refresh flags | Yes | Accept | Emit | `altref_copies_decode_identically` (macroblocks predicted from ALTREF are counted), `golden_keys_and_partitions_decode_identically` | Verified |
-| Copy flags | Yes | Accept 1 and 2 | Emit 2: golden to altref, and altref to golden | `altref_copies_decode_identically`, `hidden_altrefs_decode_identically`, libvpx `smooth_two_pass_altref` | Verified |
-| Sign bias | Yes | Accept | ALTREF sign bias with hidden altrefs | `hidden_altrefs_decode_identically` | Verified |
+| Copy flags | Yes | Accept 1 and 2 | Emit 1 (last to golden, last to altref) and 2 (golden to altref, altref to golden) | `copy_flag_one_decodes_identically`, `altref_copies_decode_identically`, `hidden_altrefs_decode_identically`, libvpx `smooth_two_pass_altref` | Verified |
+| Sign bias | Yes | Accept | ALTREF sign bias with hidden altrefs; GOLDEN sign bias with hidden golden frames | `hidden_altrefs_decode_identically`, `hidden_golden_decodes_identically` | Verified |
 | Hidden frames (`show_frame = 0`) | Yes | Accept, no picture | Emit as hidden altrefs, with lookahead | `hidden_altrefs_decode_identically` (fixed q, bitrate, version 1), `hidden_frames_produce_no_picture`, `playback_crops_odd_sizes_and_skips_hidden_frames` | Verified |
 | `refresh_entropy_probs = 0` | Yes | Accept, save and restore | Hidden frames and error-resilient mode | `error_resilient_streams_decode_identically`, `an_inter_header_keeps_unsent_deltas_and_restores_probs` | Verified |
 | Versions 1–3 (bilinear, simple filter, no filter, full-pixel chroma) | Yes | Accept | Emit | `versions_decode_identically`, `libvpx_versions_match_both_decoders` | Verified |
-| Segmentation: map, persistence, relative quantizer and filter | Yes | Accept, also absolute | Emit (option `segments`, off by default) | `segments_decode_identically` (filter offsets present and in range), libvpx `resilient` | Verified |
+| Segmentation: map, persistence, quantizer and filter as deltas or absolute values | Yes | Accept | Emit (options `segments` and `absolute_segments`, off by default) | `segments_decode_identically` (filter offsets present and in range), `absolute_segments_decode_identically` (same pictures as deltas), libvpx `resilient` | Verified |
 | Loop filter: normal, simple, sharpness, ref/mode deltas | Yes | Accept | Level searched per frame; deltas; sharpness 0..7 | `libvpx_filter_options_match_both_decoders`, `header_options_decode_identically` | Verified |
 | Probability updates for coefficients, modes, MV, skip, intra, and reference | Yes | Accept | Emit | `probability_updates_are_sent`, `an_inter_header_keeps_unsent_deltas_and_restores_probs` | Verified |
 | Skip on and off | Yes | Accept | Off when no macroblock skips | `header_options_decode_identically` | Verified |
@@ -202,7 +202,7 @@ Per-frame processing time, from the quiet run on `f5e4ab9c`:
 | Key frames by interval, on request, and at scene cuts | Yes | n/a | Emit | `scene_cuts_become_key_frames`, `export_and_playback_reach_vp8_through_the_engine_factories` (forced key) | Verified |
 | Odd sizes, size change at a key frame | Yes | Accept | Emit | `libvpx_odd_sizes_match_both_decoders` (1×1, 17×9, 33×301, 193×97), `odd_sizes_decode_identically`, `size_changes_at_key_frames` | Verified |
 | Constant quantizer and bitrate modes | Yes | n/a | Emit | `fixed_quantizers_decode_identically` (q 0, 10, 40, 80, 127), `bitrate_mode_decodes_identically`, gate test | Verified |
-| Colour-space and clamp bits | Yes for decode | Accept, reported | Always 0 | libvpx streams | Decode verified. Encode of non-zero values is out of scope. |
+| Colour-space and clamp bits | Yes | Accept, reported | 0 by default; 1 on request | `colour_space_and_clamp_bits_decode_identically` (q 0, 30, 127), libvpx streams | Verified |
 | MP4 `vp08` with `vpcC` | Yes | Read through `cutlass-isobmff` | `vpcC` on the first packet; `Mp4Mux` writes `vp08` | `an_mp4_vp08_track_round_trips`, `a_vp8_track_is_vp08_with_its_vpcc`, `the_export_path_writes_an_mp4_other_players_read` (ffprobe reads BT.709) | Verified |
 | Engine playback (`DecodeFactory`) | Yes | `EngineDecoder`: vpcC colour, odd sizes cropped to even, an empty packet is a dropped frame | n/a | `export_and_playback_reach_vp8_through_the_engine_factories`, `playback_crops_odd_sizes_and_skips_hidden_frames` | Verified |
 | Engine export (`EncodeFactory`) | Yes | n/a | `EngineEncoder`: RGBA or yuv420p, bitrate, forced key frames, BT.709 vpcC | same, plus `the_export_path_writes_an_mp4_other_players_read` | Verified |
@@ -251,7 +251,7 @@ Both fuzzers run in a debug build, so overflow checks are on.
 
 - **Settings:** `VP8_ENC_FUZZ_SECS`, and `VP8_ENC_FUZZ_SEED` (default `0x565038454e43`).
 - **Each round:**
-  - It picks options: bitrate, quantizer, key and golden intervals, partitions, speed, segments, version, hidden altref, error resilience, sharpness, scale, and scene cut.
+  - It picks options: bitrate, quantizer, key and golden intervals, partitions, speed, segments, version, hidden altref, hidden golden, error resilience, sharpness, scale, scene cut, reference copies, absolute segments, and the colour-space and clamp bits.
   - It picks a size from 1×1 to 80×64.
   - One round in eight breaks one setting or the size, and the encoder must refuse it.
   - It pushes up to 12 frames, each a moving picture, noise, or a flat picture, with random durations. Force-key, reset, and drain are mixed in, and sometimes a picture of the wrong size, which must be refused.
@@ -263,26 +263,27 @@ Both fuzzers run in a debug build, so overflow checks are on.
 | --- | --- | --- | --- | --- | --- |
 | Decoder (core and engine) | `f5e4ab9c` | `0x56503800f22d` | 1800 | 2,927,272 inputs, 1,906,848 pictures, 1,016,368 errors | 0 |
 | Encoder | `f5e4ab9c` | `0x565038454e43` | 1800 | 44,028 rounds, 5,477 refused, 224,474 frames, 168,754 packets | 0 |
+| Encoder, every option (final encoder) | `29e50b03` | `0x5650384b4559` | 1800 | 793,310 rounds, 99,073 refused, 4,062,694 frames, 3,048,947 packets | 0 |
 | Encoder, with scene cuts | `1ea865d9` | `0x565038454e43` | 1800 | 41,235 rounds, 5,124 refused, 211,533 frames, 157,883 packets | 0 |
 | Decoder (core only, before the engine adapter) | `d4414acf` | `0x56503800f22d` | 1800 | 5,922,430 inputs, 3,861,230 pictures, 2,053,099 errors | 0 |
 
 The recorded line of the run on the final encoder:
 
 ```text
-vp8 encoder fuzz seed 0x565038454e43 seconds 1800 rounds 41235 refused 5124 frames 211533 packets 157883 findings 0
+vp8 encoder fuzz seed 0x5650384b4559 seconds 1800 rounds 793310 refused 99073 frames 4062694 packets 3048947 findings 0
 test result: ok. 1 passed; 0 failed
 ```
 
 Notes on these runs:
 
-- **Final encoder.** Commits after `1ea865d9` change the quality report, the seed parser, the dev build profile, a GIF format fix, and this file, not the encoder.
+- **Final encoder.** `29e50b03` adds copy flag 1, hidden golden frames, absolute segments, and the colour-space and clamp bits; its run draws all of them. Later commits change only this file.
 - **Throughput.** The two runs on `f5e4ab9c` ran side by side, and the decoder run also drives the engine decoder, so it got through fewer inputs than the earlier core-only run.
 - **Seeds.**
-  - The third run was asked for seed `0x5650384b4559`. The seed parser then read only decimal, so it fell back to the default.
+  - The `1ea865d9` run was asked for seed `0x5650384b4559`. The seed parser then read only decimal, so it fell back to the default.
   - Its option draws still differ from the second run's, because scene cut is one more option.
   - Commit `133089fa` makes the seed variables accept `0x` hex and fail on a value that does not parse.
 - **Packet counts.** These count only what `push` returned. Packets from `drain` are not counted, and frames queued for a hidden altref when a reset comes are dropped by design.
-- **Build.** All four runs were debug builds at `opt-level = 0` with overflow checks. Commit `c3d73bc2` builds `cutlass-vp8` at `opt-level = 3` in dev, still with overflow checks. A 2-second run there covers 829 rounds.
+- **Build.** All runs had overflow checks on. The runs before `c3d73bc2` were at `opt-level = 0`; that commit builds `cutlass-vp8` at `opt-level = 3` in dev, so the `29e50b03` run covered about 19 times as many rounds in the same 30 minutes.
 
 ## Integration
 
@@ -303,11 +304,7 @@ Notes on these runs:
 
 - **No multithreading** in either direction. Decoding runs at a third to a half of ffmpeg's speed, and encoding at about a fourteenth of libvpx's.
 - **No WebM.** There is no WebM muxer or demuxer: `cutlass-matroska` is an empty scaffold. VP8 export goes to MP4 only, and `.webm` files do not open in the app. The 1080p WebM test reads its packets with ffmpeg.
-- **Encoder choices not made.** The decoder accepts all of these and is checked on libvpx streams that use them:
-  - Copy flag 1 (copy from LAST).
-  - GOLDEN sign bias.
-  - Absolute segment values.
-  - Colour-space and clamp bits other than 0.
+- **The clamping promise is not checked.** With `clamping_type`, the encoder tells decoders that no clamping is needed, but it does not verify that its reconstruction stays in range. Every decoder checked clamps anyway, so the output matches; a decoder that skipped clamping could differ.
 - **Worst-frame quality.** In default mode on 7688387224072670472, the worst frame is 2.4 dB below libvpx's worst frame. No gate was declared for this.
 - **Dev build profile.** `cutlass-vp8` builds at `opt-level = 3` in dev builds, like the sound codecs, with overflow checks still on. Without it, the desktop VP8 export test took 89 s on this machine, against a 300 s job limit in the test, and a debug app could not play 1080p VP8 in real time.
 - **Not in CI.** These need `../local-files` and ffmpeg, and skip without them:

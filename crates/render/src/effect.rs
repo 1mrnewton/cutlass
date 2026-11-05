@@ -103,12 +103,15 @@ fn blur(uv: vec2<f32>) -> vec4<f32> {
     if (fx.code.y == 1u) {
         direction = vec2<f32>(0.0, 1.0 / fx.size.y);
     }
-    let stride = direction * reach / 7.0;
+    // A tap a pixel or closer apart up to 32 pixels each side, so a wide
+    // blur has no gaps; past that the 65 taps spread out.
+    let half = min(i32(ceil(reach)), 32);
+    let stride = direction * reach / f32(half);
     var sum = vec4<f32>(0.0);
-    for (var k = -7; k <= 7; k = k + 1) {
+    for (var k = -half; k <= half; k = k + 1) {
         sum = sum + fetch(uv + stride * f32(k));
     }
-    return sum / 15.0;
+    return sum / f32(2 * half + 1);
 }
 
 fn grade(uv: vec2<f32>) -> vec4<f32> {
@@ -475,6 +478,41 @@ mod tests {
         }
         let white = draw(&renderer, &ROW, (4, 1), &[step(Block::Flash, &[(0, 1.0)])]);
         close(&white, &[255; 16]);
+    }
+
+    #[test]
+    fn a_blur_spreads_a_line_evenly_with_no_gaps() {
+        let Some(renderer) = renderer() else { return };
+        // One white column in the middle of 128 black ones.
+        let (width, height) = (128u32, 4u32);
+        let scene: Vec<u8> = (0..width * height)
+            .flat_map(|index| {
+                if index % width == 64 {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        // A reach of 40 pixels: ten times the 4 pixel short side.
+        let blur = step(Block::Blur, &[(0, 10.0)]);
+        let got = draw(&renderer, &scene, (width, height), &[blur]);
+        let row: Vec<u8> = got[..(width * 4) as usize]
+            .chunks(4)
+            .map(|pixel| pixel[0])
+            .collect();
+        // Every column the reach covers gets some of the line, the same
+        // amount either side, and the rest stays black.
+        for offset in 1..=38 {
+            let (left, right) = (row[64 - offset], row[64 + offset]);
+            assert!(
+                left > 0 && right > 0,
+                "a gap {offset} from the line: {row:?}"
+            );
+            assert!(left.abs_diff(right) <= 2, "lopsided at {offset}: {row:?}");
+        }
+        assert_eq!(row[64 - 44], 0, "{row:?}");
+        assert_eq!(row[64 + 44], 0, "{row:?}");
     }
 
     #[test]

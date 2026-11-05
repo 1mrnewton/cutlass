@@ -16,23 +16,22 @@ use std::time::{Duration, Instant};
 
 use cutlass_decode::{CodecId, CodecParams, DecodeFactory};
 use cutlass_editor::{
-    Append, AppendLane, ClipMove, DropGesture, DropOutcome, EFFECT_LENGTH, EffectPlace,
-    GestureError, MediaPlace, MoveGesture, MovePlan, Pointer, TITLE_LENGTH, TimelineScale,
-    TitlePlace, TransitionMiss, TrimGesture, TrimPlan, Zoom, ZoomBounds, append_placement,
-    drop_gesture, effect_of_card, effect_requests, effect_row_for, effect_target, fit_pixel_size,
-    free_row, hit_test, last_accuracy_step, material_span, media_requests, minimum_pixel_size,
-    move_requests, plan_move, title_requests, title_style, transition_of_card, transition_request,
-    trim_gesture,
+    Append, AppendLane, ClipMove, ClipboardMiss, CopiedClip, DropGesture, DropOutcome,
+    EFFECT_LENGTH, EffectPlace, GestureError, MediaPlace, MoveGesture, MovePlan, Pointer,
+    TITLE_LENGTH, TimelineScale, TitlePlace, TransitionMiss, TrimGesture, TrimPlan, Zoom,
+    ZoomBounds, append_placement, copy_clips, drop_gesture, effect_of_card, effect_requests,
+    effect_row_for, effect_target, fit_pixel_size, free_row, hit_test, last_accuracy_step,
+    material_span, media_requests, minimum_pixel_size, move_requests, paste_requests, plan_move,
+    title_requests, title_style, transition_of_card, transition_request, trim_gesture,
 };
 use cutlass_encode::EncodeFactory;
 use cutlass_engine::{Thumb, ThumbKey, Thumbnails, Waveforms};
 use cutlass_eval::{ReaderFactory, SceneError, scene_cuts, source_on_timeline};
 use cutlass_model::{
     Crop, Draft, FrameRate, MaterialAudio, MaterialId, MaterialRef, MaterialVideo, MetaType,
-    Micros, Segment, SegmentId, TimeMarkItem, TimeRange, TimecodeLabel, TrackAttribute, TrackId,
-    TrackType, WordColumns, beat_timeline_time, blend_window, linkage_from_biz, segment_beats,
-    segment_time_mark, source_time_at, time_mark_items, track_holds_beats, user_beats,
-    visible_beats, visible_marks,
+    Micros, Segment, SegmentId, TimeRange, TimecodeLabel, TrackAttribute, TrackId, TrackType,
+    WordColumns, blend_window, linkage_from_biz, source_time_at, track_holds_beats, visible_beats,
+    visible_marks,
 };
 use cutlass_playback::{
     AudioHost, FilmCell, FrameCache, PLAY_FRAMES, Program, Transport, film_cells, media_file,
@@ -399,17 +398,6 @@ struct PendingTrim {
 }
 
 /// A clip kept for paste. `offset` is its start relative to the earliest copied clip.
-#[derive(Clone)]
-struct CopiedClip {
-    track_id: TrackId,
-    offset: i64,
-    segment: Segment,
-    /// Offsets from the clip start. The paste stores them on a new material.
-    marks: Vec<TimeMarkItem>,
-    /// Source times. The paste stores them on a new material.
-    beats: Vec<i64>,
-}
-
 /// A beat the timeline draws. `source` is the stored source time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BeatView {
@@ -4483,51 +4471,11 @@ impl Shell {
         if self.selection.is_empty() {
             return Err(ShellError::Unavailable("nothing is selected".to_owned()));
         }
-        let draft = self.session_draft()?;
-        let mut copies = Vec::new();
-        for track in &draft.tracks {
-            for segment in &track.segments {
-                if !self.is_selected(&segment.id) {
-                    continue;
-                }
-                if bit(track.attribute, TrackAttribute::LOCK) {
-                    return Err(ShellError::Locked);
-                }
-                let owned = segment_time_mark(&draft.materials, segment).map(|raw| raw.id.clone());
-                let marks = segment_time_mark(&draft.materials, segment)
-                    .map(time_mark_items)
-                    .unwrap_or_default();
-                let beat_owned = segment_beats(&draft.materials, segment).map(|raw| raw.id.clone());
-                let beats = if track_holds_beats(&track.kind) {
-                    segment_beats(&draft.materials, segment)
-                        .map(user_beats)
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let mut segment = segment.clone();
-                if let Some(id) = owned {
-                    segment.extra_material_refs.retain(|ref_id| ref_id != &id);
-                }
-                if let Some(id) = beat_owned {
-                    segment.extra_material_refs.retain(|ref_id| ref_id != &id);
-                }
-                copies.push(CopiedClip {
-                    track_id: track.id.clone(),
-                    offset: segment.target.start.0,
-                    segment,
-                    marks,
-                    beats,
-                });
-            }
-        }
-        if copies.is_empty() {
-            return Err(ShellError::Unavailable("nothing is selected".to_owned()));
-        }
-        let earliest = copies.iter().map(|item| item.offset).min().unwrap_or(0);
-        for item in &mut copies {
-            item.offset = item.offset.saturating_sub(earliest);
-        }
+        let copies =
+            copy_clips(self.session_draft()?, &self.selection).map_err(|miss| match miss {
+                ClipboardMiss::Locked => ShellError::Locked,
+                _ => ShellError::Unavailable("nothing is selected".to_owned()),
+            })?;
         self.clipboard = copies;
         Ok(())
     }
@@ -4542,71 +4490,18 @@ impl Shell {
 
     /// Place the copied clips at the playhead, keeping the gaps between them.
     pub fn paste(&mut self) -> Result<(), ShellError> {
-        if self.clipboard.is_empty() {
-            return Err(ShellError::Unavailable("nothing to paste".to_owned()));
-        }
-        {
-            let draft = self.session_draft()?;
-            for item in &self.clipboard {
-                let Some(track) = draft.tracks.iter().find(|track| track.id == item.track_id)
-                else {
-                    return Err(ShellError::Unavailable("the lane is gone".to_owned()));
-                };
-                if bit(track.attribute, TrackAttribute::LOCK) {
-                    return Err(ShellError::Locked);
-                }
-            }
-        }
-        let playhead = self.playhead.0.max(0);
-        let copies = self.clipboard.clone();
-        let mut requests = Vec::new();
-        let mut ids = Vec::new();
-        let mut marks = Vec::new();
-        let mut beats = Vec::new();
-        for item in copies {
-            let mut segment = item.segment.clone();
-            let id = SegmentId::new(self.fresh("seg"));
-            segment.id = id.clone();
-            let start = playhead.saturating_add(item.offset);
-            segment.target = TimeRange::new(start, segment.target.duration.0);
-            let duration = segment.target.duration.0;
-            let beat_sources: Vec<i64> = item
-                .beats
-                .iter()
-                .copied()
-                .filter(|source| beat_timeline_time(&segment, *source).is_some())
-                .collect();
-            requests.push(Request::Place {
-                track_id: item.track_id.clone(),
-                segment: Box::new(segment),
-            });
-            for mark in item.marks {
-                if mark.start.0 < 0 || mark.start.0 >= duration {
-                    continue;
-                }
-                let at = start.saturating_add(mark.start.0);
-                marks.push((id.clone(), at, mark.color));
-            }
-            for source in beat_sources {
-                beats.push((id.clone(), source));
-            }
-            ids.push(id);
-        }
-        for (segment_id, at, color) in marks {
-            requests.push(Request::AddTimeMark {
-                segment_id: Some(segment_id),
-                at: Micros(at),
-                color,
-                material_id: MaterialId::new(self.fresh("time-mark")),
-            });
-        }
-        for (segment_id, source) in beats {
-            requests.push(Request::AddBeat {
-                segment_id,
-                source: Micros(source),
-                material_id: MaterialId::new(self.fresh("beats")),
-            });
-        }
+        let playhead = self.playhead;
+        let copies = std::mem::take(&mut self.clipboard);
+        let mut next_id = self.next_id;
+        let mut fresh = |prefix: &str| {
+            next_id = next_id.saturating_add(1);
+            format!("{prefix}-{next_id}")
+        };
+        let planned = paste_requests(self.session_draft()?, &copies, playhead, &mut fresh)
+            .map_err(clipboard_error);
+        self.next_id = next_id;
+        self.clipboard = copies;
+        let (requests, ids) = planned?;
         self.apply_requests(&requests)?;
         self.selection = ids;
         self.clip_menu = None;
@@ -5726,6 +5621,14 @@ fn ensure_shortcut(settings: &mut Settings, action: &str, keys: &str) {
 
 fn bit(attribute: TrackAttribute, flag: i32) -> bool {
     attribute.0 & flag != 0
+}
+
+fn clipboard_error(miss: ClipboardMiss) -> ShellError {
+    match miss {
+        ClipboardMiss::Empty => ShellError::Unavailable("nothing to paste".to_owned()),
+        ClipboardMiss::Locked => ShellError::Locked,
+        ClipboardMiss::LaneGone => ShellError::Unavailable("the lane is gone".to_owned()),
+    }
 }
 
 fn draft_has_linkage(draft: &Draft) -> bool {

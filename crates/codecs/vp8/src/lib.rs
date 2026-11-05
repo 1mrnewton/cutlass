@@ -1,13 +1,16 @@
 //! VP8 decoder and encoder (RFC 6386).
 //!
-//! The decoder accepts every VP8 bitstream version. The encoder emits
-//! version 0. A WebM container is outside this crate.
+//! The decoder accepts every VP8 bitstream version, and the encoder emits
+//! every version. [`register_engine_decoders`] and
+//! [`register_engine_encoders`] put them on the engine's factories for
+//! playback and export. A WebM container is outside this crate.
 
 #![forbid(unsafe_code)]
 
 mod bool_coder;
 mod decode;
 mod encode;
+mod engine;
 mod filter;
 mod header;
 mod inter;
@@ -26,6 +29,9 @@ mod prove_lifecycle;
 
 pub use decode::{Decoder, Picture, Vp8Decoder};
 pub use encode::{Vp8Encoder, Vp8Options};
+pub use engine::{
+    EngineDecoder, EngineEncoder, register_engine_decoders, register_engine_encoders,
+};
 
 use cutlass_decode::video::VideoDecoder;
 use cutlass_decode::{CodecError, CodecId, CodecParams, VideoDecodeFactory};

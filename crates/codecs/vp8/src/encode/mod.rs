@@ -140,6 +140,8 @@ pub struct Vp8Encoder {
     /// is coded.
     altref_target: Option<u64>,
     config_sent: bool,
+    /// The next shown frame is a key frame.
+    force_key: bool,
     #[cfg(test)]
     pub(crate) shown_recon: Vec<Arc<Frame>>,
     cancel: Arc<AtomicBool>,
@@ -247,6 +249,7 @@ impl Vp8Encoder {
             queue: VecDeque::new(),
             altref_target: None,
             config_sent: false,
+            force_key: false,
             #[cfg(test)]
             shown_recon: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -259,9 +262,18 @@ impl Vp8Encoder {
     /// open or reset also carries it as [`SideData::Config`].
     #[must_use]
     pub fn vpcc_record(&self) -> Vec<u8> {
-        // Version 1 and flags; profile; level (none for VP8); bit depth 8,
-        // chroma 4:2:0 co-located, limited range; primaries and transfer
-        // unspecified, matrix BT.601; no initialization data.
+        // Primaries and transfer unspecified, matrix BT.601.
+        self.vpcc_with_colour([2, 2, 6])
+    }
+
+    /// The `vpcC` payload with ISO/IEC 23091-2 colour primaries, transfer,
+    /// and matrix codes, for pictures converted from RGB with a known
+    /// matrix.
+    #[must_use]
+    pub fn vpcc_with_colour(&self, [primaries, transfer, matrix]: [u8; 3]) -> Vec<u8> {
+        // Version 1 and flags; profile (the bitstream version); level
+        // (none for VP8); bit depth 8, chroma 4:2:0 co-located, limited
+        // range; the colour codes; no initialization data.
         vec![
             1,
             0,
@@ -270,12 +282,17 @@ impl Vp8Encoder {
             self.opts.version,
             0,
             (8 << 4) | (1 << 1),
-            2,
-            2,
-            6,
+            primaries,
+            transfer,
+            matrix,
             0,
             0,
         ]
+    }
+
+    /// Makes the next shown frame a key frame.
+    pub fn force_keyframe(&mut self) {
+        self.force_key = true;
     }
 
     /// The reconstruction a decoder shows after the last shown frame, at
@@ -334,7 +351,10 @@ impl Vp8Encoder {
             kind: KIND_INTER,
             ..Plan::default()
         };
-        if self.last.is_none() || self.since_key >= self.opts.keyframe_interval.max(1) {
+        if self.last.is_none()
+            || self.force_key
+            || self.since_key >= self.opts.keyframe_interval.max(1)
+        {
             return Plan {
                 key: true,
                 kind: KIND_KEY,
@@ -582,6 +602,7 @@ impl Vp8Encoder {
                 self.since_key = 0;
                 self.since_golden = 0;
                 self.altref_target = None;
+                self.force_key = false;
             }
             if plan.refresh_golden || plan.copy_to_golden != 0 {
                 self.since_golden = 0;

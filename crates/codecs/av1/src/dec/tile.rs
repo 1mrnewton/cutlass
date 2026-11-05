@@ -267,6 +267,15 @@ pub struct EncPlan {
     pub txs: Vec<PlannedTx>,
     /// cdef_idx of each 64x64 inside the superblock, index (dr / 16) * 2 + dc / 16.
     pub cdef: [i8; 4],
+    /// Target q index of each superblock of the frame (row-major,
+    /// `sb_cols` per row) with its rate-distortion scale (squared quantizer
+    /// step relative to the frame's); empty without delta q.
+    pub sb_q: Vec<(i32, f64)>,
+    pub sb_cols: usize,
+    /// The frame's lambdas, which the superblock scale multiplies.
+    pub base_lambda: (f64, f64, f64),
+    /// The current superblock's target q index.
+    pub sb_target: Option<i32>,
 }
 
 impl EncPlan {
@@ -668,6 +677,17 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
     /// One superblock of decode_tile() (read_lr and decode_partition).
     pub fn code_superblock(&mut self, r: usize, c: usize) -> R<()> {
         self.read_deltas = self.hdr.delta_q_present;
+        if C::WRITE && self.hdr.delta_q_present && !self.plan.sb_q.is_empty() {
+            let sh = self.sb_size4.trailing_zeros();
+            let i = (r >> sh) * self.plan.sb_cols + (c >> sh);
+            if let Some(&(q, scale)) = self.plan.sb_q.get(i) {
+                self.plan.sb_target = Some(q);
+                let (l, ls, sk) = self.plan.base_lambda;
+                self.enc.lambda = l * scale;
+                self.mode.lambda_satd = ls * scale.sqrt();
+                self.mode.skip_sse_per_px = sk * scale;
+            }
+        }
         self.clear_cdef(r, c);
         if let Some(log) = self.rec.as_deref_mut() {
             log.sbs.push(SbRec {
@@ -1277,6 +1297,9 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let area = (bw4(b.bsize) * bh4(b.bsize)) as u64;
         add(&BSIZE, b.bsize as usize, area);
         add(&YMODE, b.y_mode as usize, area);
+        if !b.is_inter && b.has_chroma {
+            add(&super::stats::UVMODE, b.uv_mode as usize, area);
+        }
         add(&TXSIZE, b.tx_size as usize, area);
         if b.skip {
             SKIP.fetch_add(area, std::sync::atomic::Ordering::Relaxed);
@@ -1530,6 +1553,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         let c = self.b.mi_col & !15;
         let idx = (r >> 4) * st + (c >> 4);
         if self.fs.cdef_idx[idx] == -1 {
+            self.msac.mark(idx as u32);
             let want = if C::WRITE {
                 let i = ((r - self.plan.sb_row) >> 4) * 2 + ((c - self.plan.sb_col) >> 4);
                 self.plan.cdef[i.min(3)].max(0) as u32

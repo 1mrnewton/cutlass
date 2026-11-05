@@ -53,6 +53,7 @@ pub mod stats {
             v.push(s);
         }
     }
+    pub static UVMODE: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
     pub static SKIP: AtomicU64 = AtomicU64::new(0);
     pub static QIDX: AtomicU64 = AtomicU64::new(0);
     pub fn add(a: &[AtomicU64], i: usize, v: u64) {
@@ -79,6 +80,7 @@ pub mod stats {
         let mut s = String::new();
         s.push_str(&hist("bsize", &BSIZE));
         s.push_str(&hist("ymode", &YMODE));
+        s.push_str(&hist("uvmode", &UVMODE));
         s.push_str(&hist("txsize", &TXSIZE));
         s.push_str(&hist("txtype", &TXTYPE));
         if let Ok(v) = FRAMES.lock() {

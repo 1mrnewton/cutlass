@@ -68,6 +68,10 @@ impl Coder for MsacEnc {
         MsacEnc::ns(self, n, v);
         v
     }
+    #[inline(always)]
+    fn mark(&mut self, tag: u32) {
+        MsacEnc::mark(self, tag);
+    }
 }
 
 /// How the encoder chooses quantizers.
@@ -164,7 +168,16 @@ pub struct Av1Enc {
     /// Temporal importance of the frames of the current mini-GOP (display
     /// index, importance), from the TPL model.
     tpl_imp: Vec<(u64, f64)>,
+    /// The model's block statistics and the display index of each of its
+    /// frames, for per-superblock quantizers.
+    tpl: Option<TplGroup>,
 }
+
+/// log2 of the delta q step of per-superblock quantizers.
+const DELTA_Q_RES: u8 = 2;
+
+/// TPL block statistics and the display index of each frame they cover.
+type TplGroup = (super::tpl::TplStats, Vec<u64>);
 
 /// A global motion type and its parameters.
 type GmModel = (u8, [i32; 6]);
@@ -226,6 +239,8 @@ struct FrameSpec {
     ref_frame_idx: [u8; 7],
     refresh: u8,
     reference_select: bool,
+    /// Pyramid level (0 top, `u32::MAX` for frames nothing predicts from).
+    level: u32,
 }
 
 fn bits_for(v: usize) -> u32 {
@@ -331,6 +346,7 @@ impl Av1Enc {
             next_disp: 0,
             slot_disp: [None; 8],
             tpl_imp: Vec::new(),
+            tpl: None,
         })
     }
 
@@ -387,11 +403,11 @@ impl Av1Enc {
                     break;
                 }
                 let n = (want - 1).min(self.lookahead.len() as u64 - 1);
-                self.tpl_imp = if n > 0 && ev("AV1_TPLK", 1.0) > 0.0 {
+                (self.tpl_imp, self.tpl) = if n > 0 && ev("AV1_TPLK", 1.0) > 0.0 {
                     let steps = self.gop_steps(d, n);
                     self.run_tpl::<P>(d, &steps, true)
                 } else {
-                    Vec::new()
+                    (Vec::new(), None)
                 };
                 let mut tu = Vec::new();
                 let shown = self.code_step::<P>(
@@ -412,27 +428,32 @@ impl Av1Enc {
             let gop = u64::from(self.cfg.gop.max(1));
             let keyint = u64::from(self.cfg.keyint.max(1));
             let to_key = keyint - d % keyint;
-            // Static content takes a mini-GOP twice as long.
-            let long = if self.cfg.adaptive_gop && gop >= 4 {
-                2 * gop
+            // Static content takes mini-GOPs two or four times as long.
+            let longest = if self.cfg.adaptive_gop && gop >= 4 {
+                gop << ev("AV1_GOPL", 1.0) as u32
             } else {
                 gop
             };
-            if (self.lookahead.len() as u64) < long.min(to_key) && !flush {
+            if (self.lookahead.len() as u64) < longest.min(to_key) && !flush {
                 break;
             }
             let mut n = gop.min(to_key).min(self.lookahead.len() as u64);
-            let ln = long.min(to_key).min(self.lookahead.len() as u64);
-            if ln > gop && self.is_static::<P>(d - 1, ln) {
-                n = ln;
+            let mut long = longest;
+            while long > gop {
+                let ln = long.min(to_key).min(self.lookahead.len() as u64);
+                if ln > gop && self.is_static::<P>(d - 1, ln) {
+                    n = ln;
+                    break;
+                }
+                long /= 2;
             }
             // Frames d .. d + n - 1 follow the anchor d - 1.
             let lo = d - 1;
             let steps = self.gop_steps(lo, n);
-            self.tpl_imp = if ev("AV1_TPL", 1.0) > 0.0 {
+            (self.tpl_imp, self.tpl) = if ev("AV1_TPL", 1.0) > 0.0 {
                 self.run_tpl::<P>(lo, &steps, false)
             } else {
-                Vec::new()
+                (Vec::new(), None)
             };
             let mut tu = Vec::new();
             let first_unit = units.len();
@@ -618,7 +639,12 @@ impl Av1Enc {
     /// Runs the temporal dependency model over the mini-GOP `steps` that
     /// follows the anchor `lo` (the key frame still to be coded when `key`);
     /// returns the importance of each frame analyzed, in coding order.
-    fn run_tpl<P: PicturePixel>(&self, lo: u64, steps: &[GopStep], key: bool) -> Vec<(u64, f64)> {
+    fn run_tpl<P: PicturePixel>(
+        &self,
+        lo: u64,
+        steps: &[GopStep],
+        key: bool,
+    ) -> (Vec<(u64, f64)>, Option<TplGroup>) {
         let anchor = if key {
             self.lookahead.front().cloned()
         } else {
@@ -628,10 +654,10 @@ impl Av1Enc {
                 .and_then(|slot| self.core.slot_picture(slot))
         };
         let Some(anchor) = anchor else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let Some(apic) = P::view(&anchor) else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let mut frames = vec![super::tpl::TplFrame {
             pic: apic,
@@ -652,7 +678,7 @@ impl Av1Enc {
             }
             let idx = (disp - self.next_disp) as usize;
             let Some(pic) = self.lookahead.get(idx).and_then(|a| P::view(a)) else {
-                return Vec::new();
+                return (Vec::new(), None);
             };
             // Nearest past and nearest future frame coded so far.
             let d = disp as i64;
@@ -683,10 +709,57 @@ impl Av1Enc {
             });
         }
         let stats = super::tpl::analyze(&frames, &order, self.cfg.bit_depth);
-        order
+        let imp = order
             .iter()
             .map(|&f| (frames[f].disp as u64, stats.frame_importance(f)))
-            .collect()
+            .collect();
+        let disps = frames.iter().map(|f| f.disp as u64).collect();
+        (imp, Some((stats, disps)))
+    }
+
+    /// Per-superblock q index (and squared step ratio) for the frame at
+    /// `disp` coded at `q`: regions more of the group is predicted from get
+    /// a finer quantizer. Empty when the model has nothing for the frame.
+    fn sb_quantizers(&self, disp: u64, q: u8, sb_rows: usize, sb_cols: usize) -> Vec<(i32, f64)> {
+        let Some((stats, disps)) = &self.tpl else {
+            return Vec::new();
+        };
+        let Some(f) = disps.iter().position(|&d| d == disp) else {
+            return Vec::new();
+        };
+        if stats.intra[f].iter().all(|&v| v == 0.0) {
+            return Vec::new();
+        }
+        let beta = ev("AV1_DQB", 0.5);
+        let res = 1i32 << DELTA_Q_RES;
+        let maxd = ev("AV1_DQMAX", 24.0) as i32;
+        let fi = stats.frame_importance(f);
+        let bdi = ((self.cfg.bit_depth - 8) >> 1) as usize;
+        let step = |q: i32| f64::from(AC_QLOOKUP[bdi][q.clamp(0, 255) as usize]);
+        let q0 = i32::from(q);
+        let mut out = Vec::with_capacity(sb_rows * sb_cols);
+        for r in 0..sb_rows {
+            for c in 0..sb_cols {
+                let si = stats.region_importance(f, c * 64, r * 64, 64);
+                let target = step(q0) * (si / fi).powf(-beta);
+                // The q index whose step is nearest, in delta_q_res units.
+                let mut best = (f64::MAX, q0);
+                let mut d = -maxd;
+                while d <= maxd {
+                    let qq = q0 + d;
+                    if (1..=255).contains(&qq) {
+                        let e = (step(qq).ln() - target.ln()).abs();
+                        if e < best.0 {
+                            best = (e, qq);
+                        }
+                    }
+                    d += res;
+                }
+                let ratio = step(best.1) / step(q0);
+                out.push((best.1, ratio * ratio));
+            }
+        }
+        out
     }
 
     /// Chooses q, references and the slot to refresh for a frame.
@@ -747,6 +820,7 @@ impl Av1Enc {
                 ref_frame_idx: [0; 7],
                 refresh: 0xff,
                 reference_select: false,
+                level,
             };
         }
         // Past frames nearest first, future frames nearest first.
@@ -826,6 +900,7 @@ impl Av1Enc {
             ref_frame_idx: idx,
             refresh,
             reference_select: !fut.is_empty() && !past.is_empty(),
+            level,
         }
     }
 
@@ -906,6 +981,10 @@ impl Av1Enc {
             },
             quant: Quant {
                 base_q_idx: q,
+                delta_q_u_dc: ev("AV1_DUV", 0.0) as i8,
+                delta_q_u_ac: ev("AV1_DUV", 0.0) as i8,
+                delta_q_v_dc: ev("AV1_DUV", 0.0) as i8,
+                delta_q_v_ac: ev("AV1_DUV", 0.0) as i8,
                 ..Quant::default()
             },
             loop_filter: LoopFilter {
@@ -959,6 +1038,20 @@ impl Av1Enc {
         }
         intent.allow_screen_content_tools =
             self.cfg.speed < 10 && is_screen_content(src, self.cfg.bit_depth);
+        let sb_cols = self.cfg.width.div_ceil(64);
+        let sb_rows = self.cfg.height.div_ceil(64);
+        let sb_q = if ev("AV1_DQ", 0.0) > 0.0 && !seq.use_128x128_superblock {
+            self.sb_quantizers(spec.disp, q, sb_rows, sb_cols)
+        } else {
+            Vec::new()
+        };
+        let sb_q = if sb_q.iter().any(|&(v, _)| v != i32::from(q)) {
+            intent.delta_q_present = true;
+            intent.delta_q_res = DELTA_Q_RES;
+            sb_q
+        } else {
+            Vec::new()
+        };
         let refs_hdr = self.core.ref_headers().clone();
         let ctx = HeaderContext {
             seq: &seq,
@@ -1007,12 +1100,19 @@ impl Av1Enc {
         let ac = f64::from(AC_QLOOKUP[bdi][q as usize]);
         let dcq = f64::from(DC_QLOOKUP[bdi][q as usize]);
         let qstep = ac / 8.0;
+        // Frames no other frame predicts from trade quality for rate more
+        // readily.
+        let lscale = if spec.level == u32::MAX && !key {
+            ev("AV1_LLEAF", 1.0)
+        } else {
+            1.0
+        };
         let speed = self.cfg.speed;
         let mode = ModeParams {
-            lambda_satd: ev("AV1_LS", 0.6) * qstep,
+            lambda_satd: ev("AV1_LS", 0.6) * qstep * lscale.sqrt(),
             min_block: ev("AV1_MINB", if speed >= 8 { 16.0 } else { 8.0 }) as usize,
             max_block: ev("AV1_MAXB", 64.0) as usize,
-            skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep,
+            skip_sse_per_px: ev("AV1_SK", 4.0) * qstep * qstep * lscale,
             inter_frame: !key,
             me_range: ev("AV1_MER", if speed >= 8 { 16.0 } else { 48.0 }) as i32,
             subpel: ev(
@@ -1073,7 +1173,7 @@ impl Av1Enc {
         };
         let qp = QuantParams {
             // Per bit; inter frames trade residual for rate more readily.
-            lambda: ev("AV1_QL", 0.07) * qstep * qstep,
+            lambda: ev("AV1_QL", 0.07) * qstep * qstep * lscale,
             round_intra: ev("AV1_RI", 56.0) as i32,
             round_inter: ev("AV1_RN", 44.0) as i32,
             tx_type_search: if speed >= 9 {
@@ -1081,7 +1181,7 @@ impl Av1Enc {
             } else {
                 ev("AV1_TXS", if speed >= 7 { 1.0 } else { 3.0 }) as u8
             },
-            tx_type_keep: ev("AV1_TXK", 4.0) as u8,
+            tx_type_keep: ev("AV1_TXK", 3.0) as u8,
             rdoq: if speed >= 9 {
                 0
             } else if speed >= 7 {
@@ -1093,8 +1193,16 @@ impl Av1Enc {
         let _ = dcq;
         let ti = hdr.tile_info.clone();
         let n_above = fs.mi_stride + 64;
-        let mut tile_bytes: Vec<Vec<u8>> = Vec::with_capacity(ti.cols * ti.rows);
-        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<Vec<u8>> {
+        // Per-64x64 CDEF strengths are chosen after coding: the tiles log
+        // their symbols and are coded again with the cdef_idx values.
+        let cdef_fb = self.cfg.speed < 8
+            && seq.enable_cdef
+            && !seq.use_128x128_superblock
+            && !hdr.coded_lossless
+            && !hdr.allow_intrabc
+            && ev("AV1_CDEFB", 0.0) > 0.0;
+        let mut tile_bytes: Vec<MsacEnc> = Vec::with_capacity(ti.cols * ti.rows);
+        let run_tile = |tile: usize, fs: &mut FrameState, cur: &mut Picture<P>| -> R<MsacEnc> {
             let tile_row = tile / ti.cols;
             let tile_col = tile % ti.cols;
             let mut tile_cdf = Box::new((*cdf).clone());
@@ -1120,9 +1228,20 @@ impl Av1Enc {
                 cur,
                 refs: ref_views,
                 mirrors: Vec::new(),
-                msac: MsacEnc::new(!hdr.disable_cdf_update),
+                msac: {
+                    let mut m = MsacEnc::new(!hdr.disable_cdf_update);
+                    if cdef_fb {
+                        m.record();
+                    }
+                    m
+                },
                 pb: Default::default(),
-                plan: Default::default(),
+                plan: crate::dec::tile::EncPlan {
+                    sb_q: sb_q.clone(),
+                    sb_cols,
+                    base_lambda: (qp.lambda, mode.lambda_satd, mode.skip_sse_per_px),
+                    ..Default::default()
+                },
                 plan_q: 0,
                 cfl_choice: (0, 0),
                 intra_choice: (0, None),
@@ -1166,7 +1285,7 @@ impl Av1Enc {
             };
             td.decode_tile()?;
             let TileDec { msac, .. } = td;
-            Ok(msac.finish())
+            Ok(msac)
         };
         let n_tiles = ti.cols * ti.rows;
         let threads = self.cfg.threads.max(1).min(n_tiles);
@@ -1188,7 +1307,7 @@ impl Av1Enc {
                     seq.bit_depth,
                 )
             };
-            type TileOut<P> = (Vec<(usize, Vec<u8>)>, FrameState, Picture<P>);
+            type TileOut<P> = (Vec<(usize, MsacEnc)>, FrameState, Picture<P>);
             let outs: Vec<R<TileOut<P>>> = std::thread::scope(|sc| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
@@ -1216,7 +1335,7 @@ impl Av1Enc {
                     })
                     .collect()
             });
-            let mut bytes: Vec<Vec<u8>> = vec![Vec::new(); n_tiles];
+            let mut bytes: Vec<Option<MsacEnc>> = (0..n_tiles).map(|_| None).collect();
             for o in outs {
                 let (tiles, f, c) = o?;
                 for (tile, b) in tiles {
@@ -1225,16 +1344,17 @@ impl Av1Enc {
                     let c0 = ti.mi_col_starts[tile % ti.cols] as usize;
                     let c1 = ti.mi_col_starts[tile % ti.cols + 1] as usize;
                     merge_tile(&mut fs, &f, &mut cur, &c, r0, r1, c0, c1);
-                    bytes[tile] = b;
+                    bytes[tile] = Some(b);
                 }
             }
-            tile_bytes = bytes;
+            tile_bytes = bytes.into_iter().flatten().collect();
         }
         drop(cdf);
         // Choose the in-loop filter strengths on the reconstruction. Tile
         // syntax does not depend on them (one CDEF strength, no deltas), so
         // only the header is rewritten.
         let mut hdr_bytes = hdr_bytes;
+        let mut cdef_choice: Option<super::cdef_search::CdefChoice> = None;
         if self.cfg.speed < 8 && !hdr.coded_lossless && !hdr.allow_intrabc {
             let full = self.cfg.speed < 4;
             let threads = self.core.threads.max(1);
@@ -1262,9 +1382,40 @@ impl Av1Enc {
                     best_lf = Some((e, pic));
                 }
             }
-            if let Some((lf_sse, deblocked)) = best_lf
+            if let Some((_, deblocked)) = best_lf.as_ref()
+                && cdef_fb
+            {
+                let p0 = intent.cdef.y_pri[0];
+                let mut cands: Vec<(u8, u8)> = Vec::new();
+                let np = ev("AV1_CDEFNP", 3.0) as usize;
+                for pri in [p0 / 2, p0, p0 * 3 / 2, p0 * 2].into_iter().take(np) {
+                    for sec in [0u8, 2] {
+                        let c = (pri.min(15), sec);
+                        if c != (0, 0) && !cands.contains(&c) {
+                            cands.push(c);
+                        }
+                    }
+                }
+                let ch = super::cdef_search::search(
+                    &seq,
+                    &hdr,
+                    &fs,
+                    deblocked,
+                    src,
+                    &cands,
+                    qp.lambda * ev("AV1_CDEFL", 1.0),
+                    ev("AV1_CDEFB", 3.0) as u8,
+                    threads,
+                );
+                best_h.cdef.bits = ch.bits;
+                for (k, &st) in ch.strengths.iter().enumerate() {
+                    super::cdef_search::set_strength(&mut best_h, k, st);
+                }
+                cdef_choice = Some(ch);
+            } else if let Some((lf_sse, deblocked)) = best_lf
                 && seq.enable_cdef
             {
+                let uv_search = seq.num_planes() > 1 && ev("AV1_CDUV", 1.0) > 0.0;
                 let p0 = intent.cdef.y_pri[0];
                 let pris: &[u8] = if full {
                     &[p0 / 2, p0, (p0 * 3 / 2).min(15), (p0 * 2).min(15)]
@@ -1296,8 +1447,15 @@ impl Av1Enc {
                     let mut h2 = hdr.clone();
                     h2.cdef.y_pri = [pri; 8];
                     h2.cdef.y_sec = [sec; 8];
-                    h2.cdef.uv_pri = [pri / 2; 8];
-                    h2.cdef.uv_sec = [sec.min(2) / 2 * 2; 8];
+                    // With the separate chroma search, luma alone is
+                    // filtered here (chroma then adds a constant).
+                    let (up, us) = if uv_search {
+                        (0, 0)
+                    } else {
+                        (pri / 2, sec.min(2) / 2 * 2)
+                    };
+                    h2.cdef.uv_pri = [up; 8];
+                    h2.cdef.uv_sec = [us; 8];
                     let mut pads = crate::dec::postfilter::cdef_pads();
                     copy_sb_rows(out, &deblocked, &rows, sy);
                     for &i in &rows {
@@ -1361,9 +1519,49 @@ impl Av1Enc {
                         best_h.cdef.uv_sec = [0; 8];
                     }
                 }
+                if uv_search {
+                    // Chroma strengths on their own (the chroma filter does
+                    // not touch luma).
+                    let cur_uv = (best_h.cdef.uv_pri[0], best_h.cdef.uv_sec[0]);
+                    let mut h2 = hdr.clone();
+                    h2.cdef = best_h.cdef.clone();
+                    // Luma off: only chroma is measured.
+                    h2.cdef.y_pri = [0; 8];
+                    h2.cdef.y_sec = [0; 8];
+                    let mut best_uv = (u64::MAX, cur_uv);
+                    let mut out = deblocked.clone();
+                    for up in [0u8, 1, 2, 4, 6] {
+                        for us in [0u8, 2] {
+                            h2.cdef.uv_pri = [up; 8];
+                            h2.cdef.uv_sec = [us; 8];
+                            // Chroma still holds the deblocked samples for
+                            // (0, 0), which comes first; every later
+                            // candidate rewrites the same blocks.
+                            crate::dec::postfilter::cdef(
+                                &seq, &h2, &fs, &deblocked, &mut out, threads,
+                            );
+                            let e = chroma_sse(&out, src);
+                            if e < best_uv.0 {
+                                best_uv = (e, (up, us));
+                            }
+                        }
+                    }
+                    best_h.cdef.uv_pri = [best_uv.1.0; 8];
+                    best_h.cdef.uv_sec = [best_uv.1.1; 8];
+                }
             }
             hdr_bytes = write_frame_header(&best_h, &ctx, &opts);
         }
+        let tile_bytes: Vec<Vec<u8>> = tile_bytes
+            .into_iter()
+            .map(|m| match &cdef_choice {
+                Some(ch) => m.replay(&|tag: u32| {
+                    let v = ch.idx.get(tag as usize).copied().unwrap_or(0).max(0);
+                    (u32::from(ch.bits), v as u32)
+                }),
+                None => m.replay(&|_| (0, 0)),
+            })
+            .collect();
         // Frame OBU: header, then one tile group with every tile.
         let mut payload = hdr_bytes;
         payload.extend_from_slice(&write_tile_group(
@@ -1500,6 +1698,22 @@ fn copy_sb_rows<P: Pixel>(dst: &mut Picture<P>, src: &Picture<P>, rows: &[usize]
             pd.data[a..b].copy_from_slice(&ps.data[a..b]);
         }
     }
+}
+
+/// Squared error of the chroma planes.
+fn chroma_sse<P: Pixel>(a: &Picture<P>, b: &Picture<P>) -> u64 {
+    let mut e = 0u64;
+    for (pa, pb) in a.planes.iter().zip(&b.planes).skip(1) {
+        for y in 0..pa.h {
+            let ra = &pa.data[y * pa.stride..][..pa.w];
+            let rb = &pb.data[y * pb.stride..][..pa.w];
+            for (x, z) in ra.iter().zip(rb) {
+                let d = i64::from(x.to_i32() - z.to_i32());
+                e += (d * d) as u64;
+            }
+        }
+    }
+    e
 }
 
 /// Screen content (text, graphics) has many blocks of few, contrasting

@@ -17,6 +17,10 @@ pub trait Coder {
     fn literal(&mut self, n: u32, v: u32) -> u32;
     fn golomb(&mut self, v: u32) -> u32;
     fn ns(&mut self, n: u32, v: u32) -> u32;
+    /// Tags the current stream position (an encoder hook; see
+    /// `MsacEnc::mark`).
+    #[inline(always)]
+    fn mark(&mut self, _tag: u32) {}
     /// Runs `f` on the coder; the decoder runs it on a copy of its state
     /// held in a local, which a loop can keep in registers.
     #[inline(always)]

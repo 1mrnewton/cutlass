@@ -24,6 +24,37 @@ pub struct MsacEnc {
     rng: u32,
     pend: u32,
     pub allow_update: bool,
+    /// With [`MsacEnc::record`]: every coded interval, independent of the
+    /// coder state, so the stream can be coded again with insertions.
+    log: Option<Vec<Op>>,
+    /// Positions in `log` tagged by [`MsacEnc::mark`].
+    marks: Vec<(usize, u32)>,
+}
+
+/// One coded interval: `u` and `v` of [`MsacEnc::encode`] as functions of
+/// the range. Bit 32 set: `u` is the whole range; bit 33 set: `v` is 0.
+/// Otherwise `u` comes from bits 0..16 (probability) and 40..48 (count of
+/// `MIN_PROB`), `v` from bits 16..32 and 48..56.
+#[derive(Clone, Copy)]
+struct Op(u64);
+
+impl Op {
+    const U_FULL: u64 = 1 << 32;
+    const V_ZERO: u64 = 1 << 33;
+
+    #[inline(always)]
+    fn new(u: Option<(u16, u32)>, v: Option<(u16, u32)>) -> Self {
+        let mut x = 0u64;
+        match u {
+            Some((f, c)) => x |= u64::from(f) | (u64::from(c) << 40),
+            None => x |= Self::U_FULL,
+        }
+        match v {
+            Some((f, c)) => x |= (u64::from(f) << 16) | (u64::from(c) << 48),
+            None => x |= Self::V_ZERO,
+        }
+        Self(x)
+    }
 }
 
 impl MsacEnc {
@@ -38,6 +69,78 @@ impl MsacEnc {
             rng: 0x8000,
             pend: 0,
             allow_update,
+            log: None,
+            marks: Vec::new(),
+        }
+    }
+
+    /// Starts logging every coded interval (for [`MsacEnc::replay`]).
+    pub fn record(&mut self) {
+        self.log = Some(Vec::new());
+    }
+
+    /// Tags the current position of the log (no-op unless recording).
+    pub fn mark(&mut self, tag: u32) {
+        if let Some(l) = &self.log {
+            self.marks.push((l.len(), tag));
+        }
+    }
+
+    /// The tags in coding order.
+    pub fn marks(&self) -> impl Iterator<Item = u32> + '_ {
+        self.marks.iter().map(|m| m.1)
+    }
+
+    /// Codes the logged intervals again into a new stream, inserting before
+    /// each mark the literal `insert(tag) = (bits, value)`; returns the
+    /// finished stream. Without a log, finishes this one unchanged.
+    pub fn replay(self, insert: &dyn Fn(u32) -> (u32, u32)) -> Vec<u8> {
+        let Some(log) = self.log else {
+            return self.finish();
+        };
+        let mut e = MsacEnc::with_capacity(self.allow_update, self.out.len() + 64);
+        let mut marks = self.marks.iter().peekable();
+        for (i, op) in log.iter().enumerate() {
+            while let Some(&&(at, tag)) = marks.peek() {
+                if at != i {
+                    break;
+                }
+                let (n, v) = insert(tag);
+                e.literal(n, v);
+                marks.next();
+            }
+            e.encode_op(*op);
+        }
+        for &(_, tag) in marks {
+            let (n, v) = insert(tag);
+            e.literal(n, v);
+        }
+        e.finish()
+    }
+
+    #[inline(always)]
+    fn encode_op(&mut self, op: Op) {
+        let r = self.rng >> 8;
+        let x = op.0;
+        let u = if x & Op::U_FULL != 0 {
+            self.rng
+        } else {
+            ((r * ((x & 0xffff) as u32 >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
+                + MIN_PROB * ((x >> 40) & 0xff) as u32
+        };
+        let v = if x & Op::V_ZERO != 0 {
+            0
+        } else {
+            ((r * (((x >> 16) & 0xffff) as u32 >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
+                + MIN_PROB * ((x >> 48) & 0xff) as u32
+        };
+        self.encode(u, v);
+    }
+
+    #[inline(always)]
+    fn log_op(&mut self, u: Option<(u16, u32)>, v: Option<(u16, u32)>) {
+        if let Some(l) = &mut self.log {
+            l.push(Op::new(u, v));
         }
     }
 
@@ -95,6 +198,9 @@ impl MsacEnc {
     /// Boolean with probability one half (read_bool / read_literal bits).
     #[inline]
     pub fn bool_equi(&mut self, bit: bool) {
+        if self.log.is_some() {
+            self.bool_log(16384, bit);
+        }
         let v = ((self.rng >> 8) << 7) + MIN_PROB;
         if bit {
             self.encode(v, 0);
@@ -106,11 +212,23 @@ impl MsacEnc {
     /// Boolean with a fixed inverted probability `f` (no adaptation).
     #[inline]
     pub fn bool_prob(&mut self, f: u32, bit: bool) {
+        if self.log.is_some() {
+            self.bool_log(f, bit);
+        }
         let v = (((self.rng >> 8) * (f >> PROB_SHIFT)) >> (7 - PROB_SHIFT)) + MIN_PROB;
         if bit {
             self.encode(v, 0);
         } else {
             self.encode(self.rng, v);
+        }
+    }
+
+    #[inline(never)]
+    fn bool_log(&mut self, f: u32, bit: bool) {
+        if bit {
+            self.log_op(Some((f as u16, 1)), None);
+        } else {
+            self.log_op(None, Some((f as u16, 1)));
         }
     }
 
@@ -148,6 +266,11 @@ impl MsacEnc {
             ((r * (u32::from(cdf[s]) >> PROB_SHIFT)) >> (7 - PROB_SHIFT))
                 + MIN_PROB * (n - s) as u32
         };
+        if self.log.is_some() {
+            let lu = (s > 0).then(|| (cdf[s - 1], (n - s + 1) as u32));
+            let lv = (s < n).then(|| (cdf[s], (n - s) as u32));
+            self.log_op(lu, lv);
+        }
         self.encode(u, v);
         if self.allow_update {
             let count = cdf[n];
@@ -668,6 +791,74 @@ mod tests {
         assert_eq!(dbools, bools);
         if spec_check {
             assert!(spec.exit_ok(), "exit process padding (len {})", data.len());
+        }
+    }
+
+    #[test]
+    fn replay_reproduces_and_inserts() {
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        for round in 0..20 {
+            let mut e = MsacEnc::new(true);
+            e.record();
+            let mut plain = MsacEnc::new(true);
+            let mut cdf4 = [32768u16 - 8192, 32768 - 16384, 32768 - 24576, 0, 0];
+            let mut cdf4b = cdf4;
+            let mut cdf2 = [16384u16, 0];
+            let mut cdf2b = cdf2;
+            let mut ops = Vec::new();
+            for i in 0..2000 {
+                if i % 97 == 5 {
+                    e.mark(i as u32);
+                }
+                match rng.below(4) {
+                    0 => {
+                        let v = rng.below(5) as usize;
+                        e.symbol(&mut cdf4, v);
+                        plain.symbol(&mut cdf4b, v);
+                        ops.push((0, v as u32));
+                    }
+                    1 => {
+                        let v = rng.below(2) == 1;
+                        e.bool_adapt(&mut cdf2, v);
+                        plain.bool_adapt(&mut cdf2b, v);
+                        ops.push((1, u32::from(v)));
+                    }
+                    2 => {
+                        let v = rng.below(8) as u32;
+                        e.literal(3, v);
+                        plain.literal(3, v);
+                        ops.push((2, v));
+                    }
+                    _ => {
+                        let v = rng.below(2) == 1;
+                        e.bool_prob(30000, v);
+                        plain.bool_prob(30000, v);
+                        ops.push((3, u32::from(v)));
+                    }
+                }
+            }
+            let reference = plain.finish();
+            let bits = round % 4;
+            let ins = move |tag: u32| (bits, tag & ((1 << bits) - 1));
+            let data = e.replay(&ins);
+            if bits == 0 {
+                assert_eq!(data, reference);
+            }
+            let mut d = Msac::new(&data, false);
+            let mut cdf4 = [32768u16 - 8192, 32768 - 16384, 32768 - 24576, 0, 0];
+            let mut cdf2 = [16384u16, 0];
+            for (i, &(kind, v)) in ops.iter().enumerate() {
+                if i % 97 == 5 {
+                    assert_eq!(d.literal(bits), ins(i as u32).1);
+                }
+                let got = match kind {
+                    0 => d.symbol(&mut cdf4) as u32,
+                    1 => u32::from(d.bool_adapt(&mut cdf2)),
+                    2 => d.literal(3),
+                    _ => u32::from(d.bool_prob(30000)),
+                };
+                assert_eq!(got, v);
+            }
         }
     }
 

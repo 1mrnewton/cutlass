@@ -675,11 +675,21 @@ impl Av1Core {
                     #[cfg(feature = "stats")]
                     if !hdr.show_existing_frame {
                         super::stats::frame(format!(
-                            "{}{}:q{}:{}b",
+                            "{}{}:q{}:{}b:cdef{}:lr{}{}{}:dq{},{},{},{},{}:qm{}",
                             hdr.order_hint,
                             if hdr.show_frame { "" } else { "h" },
                             hdr.quant.base_q_idx,
-                            obu.payload.len()
+                            obu.payload.len(),
+                            hdr.cdef.bits,
+                            hdr.lr.frame_type[0],
+                            hdr.lr.frame_type[1],
+                            hdr.lr.frame_type[2],
+                            hdr.quant.delta_q_y_dc,
+                            hdr.quant.delta_q_u_dc,
+                            hdr.quant.delta_q_u_ac,
+                            hdr.quant.delta_q_v_dc,
+                            hdr.quant.delta_q_v_ac,
+                            u8::from(hdr.quant.using_qmatrix)
                         ));
                     }
                     if hdr.show_existing_frame {

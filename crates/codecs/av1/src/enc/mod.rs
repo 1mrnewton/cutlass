@@ -1,6 +1,7 @@
 //! The AV1 encoder.
 
 pub mod bitwriter;
+pub mod cdef_search;
 pub mod encoder;
 pub mod fwd_txfm;
 pub mod gm;

@@ -835,7 +835,7 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             self.try_skip_mode(&mut pb);
         }
         self.pb = pb;
-        self.plan_q = self.current_q_index;
+        self.plan_q = self.plan.sb_target.unwrap_or(self.current_q_index);
         self.plan_delta_lf = self.delta_lf;
     }
 

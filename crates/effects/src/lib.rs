@@ -15,11 +15,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blend;
 pub mod catalog;
 pub mod package;
 pub mod recipe;
 pub mod source;
 
+pub use blend::{BLEND_WGSL, blend_pixel, blend_unit};
 pub use catalog::{
     ADD, ANIM_IN, ANIM_LOOP, ANIM_OUT, BlendMode, CONTRAST, CatalogEntry, DIFFERENCE, Distort,
     INVERT, MULTIPLY, PIXELATE, PIXELATE_BLOCK, PackageKind, SCREEN, SOURCE_OVER, TRANSITION_FADE,

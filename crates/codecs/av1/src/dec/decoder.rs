@@ -1093,23 +1093,26 @@ fn ref_data(seq: &SequenceHeader, hdr: &FrameHeader, fs: &FrameState) -> RefData
     let mut mf_ref = vec![-1i8; w8 * h8];
     let mut mf_mv = vec![Mv::ZERO; w8 * h8];
     if !hdr.frame_is_intra {
+        // Whether each reference frame lies before this one.
+        let past: [bool; 8] = std::array::from_fn(|r| {
+            r > INTRA_FRAME as usize && {
+                let ref_idx = hdr.ref_frame_idx[r - 1] as usize;
+                relative_dist(seq, hdr.ref_order_hint[ref_idx], hdr.order_hint) < 0
+            }
+        });
         for y8 in 0..h8 {
             for x8 in 0..w8 {
                 let m = fs.mi_at(2 * y8 + 1, 2 * x8 + 1);
                 for list in 0..2 {
                     let r = m.ref_frame[list];
-                    if r > INTRA_FRAME {
-                        let ref_idx = hdr.ref_frame_idx[r as usize - 1] as usize;
-                        let dist = relative_dist(seq, hdr.ref_order_hint[ref_idx], hdr.order_hint);
-                        if dist < 0 {
-                            let mv = m.mv[list];
-                            if i32::from(mv.row).abs() < (1 << 12)
-                                && i32::from(mv.col).abs() < (1 << 12)
-                            {
-                                mf_ref[y8 * w8 + x8] = r;
-                                mf_mv[y8 * w8 + x8] = mv;
-                            }
-                        }
+                    let mv = m.mv[list];
+                    if r > INTRA_FRAME
+                        && past[r as usize & 7]
+                        && i32::from(mv.row).abs() < (1 << 12)
+                        && i32::from(mv.col).abs() < (1 << 12)
+                    {
+                        mf_ref[y8 * w8 + x8] = r;
+                        mf_mv[y8 * w8 + x8] = mv;
                     }
                 }
             }
@@ -1323,7 +1326,12 @@ fn decode_tiles<P: Pixel>(
     let mut saved: Option<Box<CdfContext>> = None;
     let sb128 = seq.use_128x128_superblock;
     let ti = &hdr.tile_info;
-    let mut scratch = Scratch::<P>::new();
+    // Recording tiles only parse: the prediction buffers stay empty.
+    let mut scratch = if logs.is_some() {
+        Scratch::<P>::parsing()
+    } else {
+        Scratch::<P>::new()
+    };
     let n_above = fs.mi_stride + 64;
     let mut above_level: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0u8; n_above]);
     let mut above_dc: [Vec<u8>; 3] = std::array::from_fn(|_| vec![0u8; n_above]);
@@ -1465,6 +1473,9 @@ impl MfFeed {
         }
     }
 }
+
+/// Blocks a reconstruction log has room for when the parser takes it.
+const LOG_RESERVE_BLOCKS: usize = 256;
 
 /// Spare [`RowMsg`]s and [`ReconLog`]s, with their buffers.
 #[derive(Default)]
@@ -2010,7 +2021,12 @@ fn decode_frame_async<P: PicturePixel>(
                     m.fill_meta(fs, sb4, r0, r1, r1 >= fs.mi_rows, sub_y);
                     m
                 });
-                let spare = lock(rows).logs.pop().unwrap_or_default();
+                let mut spare = lock(rows).logs.pop().unwrap_or_default();
+                // Room for a typical chunk, so that logs rarely grow while
+                // the parser fills them.
+                spare.blocks.reserve(LOG_RESERVE_BLOCKS);
+                spare.ops.reserve(4 * LOG_RESERVE_BLOCKS);
+                spare.coefs.reserve(32 * LOG_RESERVE_BLOCKS);
                 let log = log.map_or_else(ReconLog::default, |l| std::mem::replace(l, spare));
                 // A send only fails once reconstruction stopped (it failed):
                 // the job reports that.

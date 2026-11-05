@@ -96,6 +96,18 @@ impl<P: Pixel> Scratch<P> {
     }
 }
 
+impl<P: Pixel> Scratch<P> {
+    /// The buffers of a tile decoder that parses only (reconstruction runs
+    /// from its log elsewhere).
+    pub fn parsing() -> Self {
+        Self {
+            want: vec![0; 1024],
+            coefs: vec![0; 64 * 64],
+            ..Self::empty()
+        }
+    }
+}
+
 impl<P: Pixel> Default for Scratch<P> {
     fn default() -> Self {
         Self::new()

@@ -72,6 +72,8 @@ pub struct ExportRequest {
     pub audio: Option<AudioExport>,
     pub sidecar: Option<SidecarRequest>,
     pub late_by: i64,
+    /// Hold `bitrate` over each second instead of on average.
+    pub constant_rate: bool,
 }
 
 /// Why export did not write a file.
@@ -274,6 +276,7 @@ mod tests {
             audio: None,
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
         }
     }
 

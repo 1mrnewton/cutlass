@@ -234,6 +234,7 @@ mod tests {
             }),
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
         }
     }
 

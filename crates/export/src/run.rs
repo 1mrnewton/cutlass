@@ -381,6 +381,7 @@ fn open_video(
     let mut params =
         CodecParams::with_format(request.codec, output.0, output.1, PixelFormat::Rgba8);
     params.bitrate = request.bitrate;
+    params.constant_rate = request.constant_rate;
     factory.open(&params).map_err(ExportError::Encoder)
 }
 
@@ -1175,6 +1176,7 @@ mod tests {
             audio: None,
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
         }
     }
 

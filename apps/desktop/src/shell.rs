@@ -4880,6 +4880,7 @@ impl Shell {
             audio: None,
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
         };
         let mut encoders = EncodeFactory::new();
         cutlass_png::register_encoders(&mut encoders);
@@ -4944,6 +4945,7 @@ impl Shell {
             audio: request.sound.then_some(cutlass_export::MOVIE_SOUND),
             sidecar: None,
             late_by: 0,
+            constant_rate: false,
         };
         cutlass_export::validate(&movie).map_err(export_failure)?;
         let root = self.path.clone();

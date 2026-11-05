@@ -77,6 +77,7 @@ pub(crate) fn export_movie(
         audio: Some(cutlass_export::MOVIE_SOUND),
         sidecar: None,
         late_by: 0,
+        constant_rate: false,
     };
     let encoders = encoders();
     let result = cutlass_export::write_movie(

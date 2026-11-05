@@ -52,14 +52,16 @@ including process start, best of 3; same machine and load for both.
 
 | Threads | cutlass-av1 | libdav1d (FFmpeg) |
 | --- | --- | --- |
-| 1 | 0.71 s | 0.41 s |
-| 2 | 0.64 s | 0.37 s |
-| 3 | 0.66 s | 0.34 s |
-| 4 | 0.62 s | 0.37 s |
+| 1 | 0.64 s | 0.40 s |
+| 2 | 0.56 s | 0.41 s |
+| 3 | 0.60 s | 0.39 s |
+| 4 | 0.52 s | 0.37 s |
 
-(Best of 8, interleaved, measured while other jobs kept the machine's
-load average at about 8 on its 4 processors, so the threaded times mostly
-show how much processor time each decoder needs; in the same runs the
+(Best of 6, interleaved, load average 8-9 on the 4 processors; processor
+time at 4 threads 0.93 s against libdav1d's 0.51 s, single threaded
+0.68 s against 0.40 s. Single threaded, callgrind counts 4.77G
+instructions against libdav1d's 2.3G; its coefficient decoding is about
+as costly as ours (1.2G), the rest is its assembly kernels. In earlier runs at a similar load the
 previous design, which parsed every frame on the calling thread, took
 0.85 s, 0.71 s and 0.85 s at 2, 3 and 4 threads. With the load average
 at 4-6 this decoder took 0.36-0.39 s at 4 threads.) Single
@@ -94,15 +96,16 @@ parallel yet. The parse is no longer the critical path: on this file the
 referenced frames' parses take about 0.2 s of processor time, the others
 0.13 s, reconstruction and filters 0.55 s. Threaded decoding costs about
 1.3x the processor time of single-threaded decoding (the parse records
-blocks that reconstruction replays, page faults of the larger working
-set: about 50k against 15k), so on a loaded machine the threaded times
+blocks, about 70 bytes each, that reconstruction replays; page faults
+of the larger working set: about 39k against 14k, mostly pictures,
+copies of references still decoding and published bands), so on a loaded machine the threaded times
 suffer more than libdav1d's (0.57 s of processor time at 4 threads,
 against 0.9-1.0 s). The `prof` feature prints the stage times, the
 processor time of each kind of thread and the page faults from
 `av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
-5.07G instructions single threaded, and the parsing thread at 2.14G with
+4.77G instructions single threaded, and the parsing thread at 2.14G with
 4 threads. CDEF filters fixed-stride padded blocks one 8-lane vector at a
 time (0.46G of the total), and the motion field projection is shared by
 runs of equal motion vectors. CDEF and loop restoration filter the

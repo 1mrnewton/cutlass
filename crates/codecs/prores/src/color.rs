@@ -47,7 +47,6 @@ pub(crate) fn matrix(code: u8) -> MatrixCoefficients {
 }
 
 /// Code 2, "unspecified", for anything the frame does not name.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn primaries_code(value: ColorPrimaries) -> u8 {
     match value {
         ColorPrimaries::Bt709 => 1,
@@ -64,7 +63,6 @@ pub(crate) fn primaries_code(value: ColorPrimaries) -> u8 {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn transfer_code(value: Transfer) -> u8 {
     match value {
         Transfer::Bt709 => 1,
@@ -84,7 +82,6 @@ pub(crate) fn transfer_code(value: Transfer) -> u8 {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn matrix_code(value: MatrixCoefficients) -> u8 {
     match value {
         MatrixCoefficients::Bt709 => 1,

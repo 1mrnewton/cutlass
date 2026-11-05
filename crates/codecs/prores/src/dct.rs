@@ -71,7 +71,6 @@ pub(crate) fn idct(block: &mut [f32; 64]) {
 }
 
 /// Forward DCT of samples `[y * 8 + x]`, in place to coefficients `[v * 8 + u]`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fdct(block: &mut [f32; 64]) {
     let basis = &*BASIS;
     // Columns: c[v][x] = sum_y B[y][v] * f[y][x].

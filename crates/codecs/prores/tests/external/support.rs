@@ -211,3 +211,82 @@ impl std::fmt::Display for Diff {
         )
     }
 }
+
+/// Frames per second the tests code at: 30000/1001.
+pub const RATE: (u32, u32) = (30_000, 1_001);
+
+/// Writes ProRes frames into a QuickTime movie with this repository's muxer.
+pub fn mux_mov(frames: &[Vec<u8>], fourcc: &[u8; 4], width: u32, height: u32) -> Vec<u8> {
+    use cutlass_codec::{
+        CodecId, FrameSize, Packet, StreamCodec, StreamParams, Timescale, Timestamp,
+    };
+    use cutlass_container::{Mux, NewStream, TrackDuration};
+    use cutlass_isobmff::{FileBrand, Mp4Mux};
+    let mut mux = Mp4Mux::with_brand(std::io::Cursor::new(Vec::new()), FileBrand::Mov);
+    let scale = Timescale::new(RATE.0);
+    let track = mux
+        .add_stream(NewStream {
+            params: StreamParams::video(
+                StreamCodec::Known(CodecId::Prores),
+                FrameSize::try_new(width, height).expect("size"),
+                fourcc.to_vec(),
+            ),
+            timescale: scale,
+            language: None,
+        })
+        .expect("stream");
+    let step = i64::from(RATE.1);
+    for (index, frame) in frames.iter().enumerate() {
+        let pts = index as i64 * step;
+        let time = Timestamp::try_new(Some(pts), Some(pts), Some(step)).expect("time");
+        let packet =
+            Packet::try_new(track.get(), frame.clone(), time, scale, true).expect("packet");
+        mux.write_packet(&packet).expect("write");
+    }
+    mux.finish(&[TrackDuration {
+        track,
+        timescale: scale,
+        ticks: frames.len() as i64 * step,
+    }])
+    .expect("finish");
+    mux.into_writer().expect("writer").into_inner()
+}
+
+/// ffmpeg's SSIM of a movie against raw planes: (Y, all).
+pub fn ssim(
+    ffmpeg: &Path,
+    movie: &Path,
+    raw: &Path,
+    pix_fmt: &str,
+    width: u32,
+    height: u32,
+) -> (f64, f64) {
+    let size = format!("{width}x{height}");
+    let rate = format!("{}/{}", RATE.0, RATE.1);
+    let out = Command::new(ffmpeg)
+        .args(["-v", "info", "-i"])
+        .arg(movie)
+        .args([
+            "-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", &size, "-r", &rate, "-i",
+        ])
+        .arg(raw)
+        .args(["-lavfi", "[0:v][1:v]ssim", "-f", "null", "-"])
+        .output()
+        .expect("ssim");
+    let text = String::from_utf8_lossy(&out.stderr);
+    let line = text
+        .lines()
+        .rev()
+        .find(|l| l.contains("SSIM Y:"))
+        .expect("ssim line");
+    let field = |key: &str| -> f64 {
+        let at = line.find(key).expect("field") + key.len();
+        line[at..]
+            .split_whitespace()
+            .next()
+            .expect("value")
+            .parse()
+            .expect("number")
+    };
+    (field("Y:"), field("All:"))
+}

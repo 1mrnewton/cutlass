@@ -561,6 +561,14 @@ fn unpack_alpha(
     Ok(())
 }
 
+/// The alpha unpacker, for the encoder's tests.
+#[cfg(test)]
+pub(crate) fn unpack_alpha_for_tests(data: &[u8], sixteen: bool, count: usize, out: &mut Vec<u16>) {
+    if let Err(err) = unpack_alpha(data, 0, sixteen, count, out) {
+        panic!("alpha: {err}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{to_signed, unpack_alpha};

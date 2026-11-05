@@ -129,7 +129,6 @@ impl<'a> BitReader<'a> {
 }
 
 /// Writes bits MSB first.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Default)]
 pub(crate) struct BitWriter {
     bytes: Vec<u8>,
@@ -137,7 +136,6 @@ pub(crate) struct BitWriter {
     filled: u32,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl BitWriter {
     /// Writes the low `bits` bits of `value`, 0 to 32.
     #[inline]
@@ -165,6 +163,7 @@ impl BitWriter {
     }
 
     /// Bits written so far.
+    #[cfg(test)]
     pub(crate) fn len_bits(&self) -> usize {
         self.bytes.len() * 8 + self.filled as usize
     }
@@ -188,7 +187,6 @@ impl BitWriter {
 }
 
 /// The codeword for `value`: `zeros` leading zeros, then `bits` bits of `payload`.
-#[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 pub(crate) fn code_parts(codebook: u8, value: u32) -> (u32, u32, u32) {
     let switch = u32::from(codebook & 3);
@@ -208,7 +206,6 @@ pub(crate) fn code_parts(codebook: u8, value: u32) -> (u32, u32, u32) {
 }
 
 /// Length of a codeword in bits.
-#[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 pub(crate) fn code_len(codebook: u8, value: u32) -> u32 {
     let (bits, zeros, _) = code_parts(codebook, value);

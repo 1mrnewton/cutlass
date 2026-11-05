@@ -52,18 +52,17 @@ including process start, best of 3; same machine and load for both.
 
 | Threads | cutlass-av1 | libdav1d (FFmpeg) |
 | --- | --- | --- |
-| 1 | 0.75 s | 0.39 s |
-| 2 | 0.48 s | 0.30 s |
-| 3 | 0.46 s | 0.28 s |
-| 4 | 0.47 s | 0.30 s |
+| 1 | 0.71 s | 0.42 s |
+| 2 | 0.48 s | 0.32 s |
+| 3 | 0.48 s | 0.31 s |
+| 4 | 0.49 s | 0.33 s |
 
 (Best of 8, interleaved, measured while other jobs kept the machine's
-load average at 4-6; the previous version, with one frame finished
-before the next started, measured 0.71 / 0.50 / 0.54 s at 2 / 3 / 4
-threads in the same runs.) Single threaded the decoder takes about 1.9x
-the time of libdav1d, which uses hand-written assembly for its kernels;
-this crate relies on autovectorization only. With 2-4 threads the gap is
-about 1.6x, set by the parsing thread.
+load average at 5-8, which makes the threaded times noisy.) Single
+threaded the decoder takes about 1.7x the time of libdav1d, which uses
+hand-written assembly for its kernels; this crate relies on
+autovectorization only (baseline x86-64: SSE2). With 2-4 threads the gap
+is about 1.5x, set by the parsing thread.
 Threading (2+ threads, frames with one tile column): the calling thread
 parses, and each frame gets a thread that reconstructs it a superblock
 row behind and runs deblocking (in place, one row behind) and CDEF and
@@ -82,10 +81,14 @@ parallel yet. At 4 threads the parsing thread is the critical path (about
 times from `av1bench`.
 The coefficient reader keeps the arithmetic decoder state in registers and
 updates small CDFs as packed lanes; callgrind puts the whole decode at
-5.4G instructions single threaded, and the parsing thread at 2.17G with
+5.07G instructions single threaded, and the parsing thread at 2.14G with
 4 threads. CDEF filters fixed-stride padded blocks one 8-lane vector at a
 time (0.46G of the total), and the motion field projection is shared by
-runs of equal motion vectors.
+runs of equal motion vectors. CDEF and loop restoration filter the
+deblocked picture in place: CDEF keeps the pre-CDEF rows next to each
+64-row boundary, loop restoration the deblocked rows next to each stripe
+boundary (as libdav1d does), so no stage copies the picture. Deblocking
+and the 8-bit Wiener filter run on 16-bit lanes.
 
 ## Encoder
 

@@ -5,6 +5,7 @@ mod fixed;
 mod indices;
 mod nlsf;
 mod pulses;
+mod resampler;
 mod stereo;
 mod tables;
 

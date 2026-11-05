@@ -1999,14 +1999,29 @@ struct QuantEst {
 }
 
 fn quant_est(coefs: &[i32], q: i32, dlog: u32) -> QuantEst {
-    let mut s = QuantEst::default();
+    // A coefficient below `thr` quantizes to zero and its error is itself.
+    let thr = ((q - q * 48 / 128) as u32).div_ceil(1 << dlog);
+    let mut kept = 0u64;
+    let mut big = 0u32;
     for &c in coefs {
-        let l = quant_level(c, q, dlog);
-        let a = u64::from(c.unsigned_abs());
-        let v = u64::from((l * q as u32) >> dlog);
-        s.kept += a * a;
-        s.qerr += a.abs_diff(v) * a.abs_diff(v);
-        if l != 0 {
+        let a = c.unsigned_abs();
+        kept += u64::from(a) * u64::from(a);
+        big |= u32::from(a >= thr);
+    }
+    let mut s = QuantEst {
+        bits: 0,
+        kept,
+        qerr: kept,
+    };
+    if big == 0 {
+        return s;
+    }
+    for &c in coefs {
+        let a = c.unsigned_abs();
+        if a >= thr {
+            let l = quant_level(c, q, dlog);
+            let (a, v) = (u64::from(a), u64::from((l * q as u32) >> dlog));
+            s.qerr = s.qerr - a * a + a.abs_diff(v) * a.abs_diff(v);
             s.bits += 2 + 2 * (32 - l.leading_zeros());
         }
     }

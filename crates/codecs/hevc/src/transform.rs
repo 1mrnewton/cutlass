@@ -92,10 +92,8 @@ pub fn inverse(
         coeffs[..n * n].fill(value);
         return;
     }
-    let mut tmp = [0i32; 32 * 32];
-    let mut column = [0i32; 32];
-    let mut out = [0i32; 32];
     if dst {
+        let mut tmp = [0i32; 16];
         for x in 0..4 {
             for y in 0..4 {
                 let sum: i32 = (0..4).map(|k| DST[k][y] * coeffs[k * 4 + x]).sum();
@@ -110,55 +108,51 @@ pub fn inverse(
         }
         return;
     }
-    // Vertical: each column x, outputs y.
-    for x in 0..=max_x {
-        for (k, c) in column.iter_mut().enumerate().take(max_y + 1) {
-            *c = coeffs[k * n + x];
-        }
-        inverse_1d(&column, n, max_y + 1, &mut out);
-        for (y, &v) in out.iter().enumerate().take(n) {
-            tmp[y * n + x] = ((v + 64) >> 7).clamp(-32768, 32767);
-        }
-    }
-    // Horizontal: each row y.
-    for y in 0..n {
-        column[..=max_x].copy_from_slice(&tmp[y * n..y * n + max_x + 1]);
-        inverse_1d(&column, n, max_x + 1, &mut out);
-        for (dst, &v) in coeffs[y * n..y * n + n].iter_mut().zip(&out) {
-            *dst = (v + add2) >> shift2;
-        }
+    let block = (coeffs, max_x + 1, max_y + 1, add2, shift2);
+    match n {
+        4 => dct::<4>(block),
+        8 => dct::<8>(block),
+        16 => dct::<16>(block),
+        _ => dct::<32>(block),
     }
 }
 
-/// One `n`-point inverse DCT of `coef`, of which the first `count` may be
-/// nonzero, by the even/odd split of the matrix: even rows are the
-/// `n/2`-point transform and odd rows are antisymmetric. The sums are the
-/// same integers as the plain matrix product.
-fn inverse_1d(coef: &[i32; 32], n: usize, count: usize, out: &mut [i32; 32]) {
+/// The two passes of an `N`-point inverse DCT. Each adds one basis row of
+/// the matrix per nonzero input, scaled by it: runs of `N` multiply-adds.
+/// The sums are the same integers as the matrix products of clause 8.6.4.2.
+fn dct<const N: usize>((coeffs, cols, rows, add2, shift2): (&mut [i32], usize, usize, i32, u32)) {
     let m32 = dct32();
-    let step = 32 / n;
-    if n == 4 {
-        for (i, o) in out.iter_mut().enumerate().take(4) {
-            *o = (0..count.min(4)).map(|k| m32[k * 8][i] * coef[k]).sum();
+    let basis = |k: usize| -> &[i32] { &m32[k * (32 / N)][..N] };
+    // Vertical: input column x to intermediate row x.
+    let mut columns = [[0i32; N]; N];
+    for (x, column) in columns.iter_mut().enumerate().take(cols) {
+        let mut acc = [0i32; N];
+        for k in 0..rows {
+            let c = coeffs[k * N + x];
+            if c != 0 {
+                for (a, &m) in acc.iter_mut().zip(basis(k)) {
+                    *a += c * m;
+                }
+            }
         }
-        return;
-    }
-    let half = n / 2;
-    let mut even = [0i32; 32];
-    for (k, e) in even.iter_mut().enumerate().take(half) {
-        *e = coef[2 * k];
-    }
-    let mut e_out = [0i32; 32];
-    inverse_1d(&even, half, count.div_ceil(2), &mut e_out);
-    for i in 0..half {
-        let mut odd = 0;
-        let mut k = 1;
-        while k < count.min(n) {
-            odd += m32[k * step][i] * coef[k];
-            k += 2;
+        for (t, &a) in column.iter_mut().zip(&acc) {
+            *t = ((a + 64) >> 7).clamp(-32768, 32767);
         }
-        out[i] = e_out[i] + odd;
-        out[n - 1 - i] = e_out[i] - odd;
+    }
+    // Horizontal: output row y from the first `cols` intermediate values.
+    for (y, out) in coeffs.as_chunks_mut::<N>().0.iter_mut().take(N).enumerate() {
+        let mut acc = [0i32; N];
+        for (k, column) in columns.iter().enumerate().take(cols) {
+            let t = column[y];
+            if t != 0 {
+                for (a, &m) in acc.iter_mut().zip(basis(k)) {
+                    *a += t * m;
+                }
+            }
+        }
+        for (dst, &a) in out.iter_mut().zip(&acc) {
+            *dst = (a + add2) >> shift2;
+        }
     }
 }
 

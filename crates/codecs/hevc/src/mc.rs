@@ -80,88 +80,114 @@ fn filter<const T: usize>(
     let half = (T / 2 - 1) as isize;
     let shift1 = bit_depth.saturating_sub(8).min(4);
     let shift3 = 14u32.saturating_sub(bit_depth).max(2);
-    // The source window, edges repeated.
     let sw = w + T - 1;
     let sh = h + T - 1;
-    let win = &mut scratch.win[..sw * sh];
     let (pw, ph) = (plane.width as isize, plane.height as isize);
     let (x0, y0) = (x - half, y - half);
-    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph;
     if pw == 0 || ph == 0 || plane.samples.len() < plane.width * plane.height {
         out.iter_mut().for_each(|v| *v = 0);
         return;
     }
-    for j in 0..sh {
-        let row = &mut win[j * sw..j * sw + sw];
-        let sy = (y0 + j as isize).clamp(0, ph - 1) as usize * plane.width;
-        if inside {
-            let start = sy + x0 as usize;
-            row.copy_from_slice(&plane.samples[start..start + sw]);
-        } else {
+    let inside = x0 >= 0 && y0 >= 0 && x0 + sw as isize <= pw && y0 + sh as isize <= ph;
+    let Scratch { win, tmp } = scratch;
+    // The source rows: the reference itself, or a window with its edges
+    // repeated when the block reaches outside.
+    let (src, stride, base): (&[u16], usize, usize) = if inside {
+        (
+            plane.samples,
+            plane.width,
+            y0 as usize * plane.width + x0 as usize,
+        )
+    } else {
+        let win = &mut win[..sw * sh];
+        for j in 0..sh {
+            let row = &mut win[j * sw..j * sw + sw];
+            let sy = (y0 + j as isize).clamp(0, ph - 1) as usize * plane.width;
             for (i, v) in row.iter_mut().enumerate() {
                 let sx = (x0 + i as isize).clamp(0, pw - 1) as usize;
                 *v = plane.samples[sy + sx];
             }
         }
-    }
-    let win = &*win;
+        (&*win, sw, 0)
+    };
+    let row = |j: usize| -> &[u16] { &src[base + j * stride..][..sw] };
     let h0 = T / 2 - 1;
     let out = &mut out[..w * h];
-    let horizontal = |row: &[u16], i: usize| -> i32 {
-        let taps: &[u16; T] = row[i..i + T].try_into().unwrap_or(&[0; T]);
-        let mut sum = 0;
-        for k in 0..T {
-            sum += cx[k] * i32::from(taps[k]);
-        }
-        sum
-    };
+    let mut acc = [0i32; 64];
+    let acc = &mut acc[..w];
     match (fx != 0, fy != 0) {
         (false, false) => {
             for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                let row = &win[(j + h0) * sw + h0..][..w];
-                for (d, &s) in dst.iter_mut().zip(row) {
+                for (d, &s) in dst.iter_mut().zip(&row(j + h0)[h0..]) {
                     *d = (i32::from(s) << shift3) as i16;
                 }
             }
         }
         (true, false) => {
             for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                let row = &win[(j + h0) * sw..][..sw];
-                for (i, d) in dst.iter_mut().enumerate() {
-                    *d = (horizontal(row, i) >> shift1) as i16;
+                let line = row(j + h0);
+                taps(cx, std::array::from_fn(|k| &line[k..]), acc);
+                for (d, &a) in dst.iter_mut().zip(acc.iter()) {
+                    *d = (a >> shift1) as i16;
                 }
             }
         }
         (false, true) => {
             for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                for (i, d) in dst.iter_mut().enumerate() {
-                    let mut sum = 0;
-                    for k in 0..T {
-                        sum += cy[k] * i32::from(win[(j + k) * sw + h0 + i]);
-                    }
-                    *d = (sum >> shift1) as i16;
+                taps(cy, std::array::from_fn(|k| &row(j + k)[h0..]), acc);
+                for (d, &a) in dst.iter_mut().zip(acc.iter()) {
+                    *d = (a >> shift1) as i16;
                 }
             }
         }
         (true, true) => {
-            let tmp = &mut scratch.tmp[..sh * w];
-            for j in 0..sh {
-                let row = &win[j * sw..][..sw];
-                let dst = &mut tmp[j * w..][..w];
-                for (i, d) in dst.iter_mut().enumerate() {
-                    *d = (horizontal(row, i) >> shift1) as i16;
+            let tmp = &mut tmp[..sh * w];
+            for (j, dst) in tmp.chunks_exact_mut(w).enumerate() {
+                let line = row(j);
+                taps(cx, std::array::from_fn(|k| &line[k..]), acc);
+                for (d, &a) in dst.iter_mut().zip(acc.iter()) {
+                    *d = (a >> shift1) as i16;
                 }
             }
+            let tmp = &*tmp;
             for (j, dst) in out.chunks_exact_mut(w).enumerate() {
-                for (i, d) in dst.iter_mut().enumerate() {
-                    let mut sum = 0;
-                    for k in 0..T {
-                        sum += cy[k] * i32::from(tmp[(j + k) * w + i]);
-                    }
-                    *d = (sum >> 6) as i16;
+                taps(cy, std::array::from_fn(|k| &tmp[(j + k) * w..]), acc);
+                for (d, &a) in dst.iter_mut().zip(acc.iter()) {
+                    *d = (a >> 6) as i16;
                 }
             }
         }
+    }
+}
+
+/// `out[i]` = the sum over `k` of `c[k] · lines[k][i]`, four outputs at a
+/// time with two left over at most (block widths are even).
+#[inline(always)]
+fn taps<const T: usize, S: Copy>(c: &[i32; T], lines: [&[S]; T], out: &mut [i32])
+where
+    i32: From<S>,
+{
+    let (quads, rest) = out.as_chunks_mut::<4>();
+    let tail = quads.len() * 4;
+    for (q, quad) in quads.iter_mut().enumerate() {
+        let i = q * 4;
+        let mut acc = [0i32; 4];
+        for (&c, line) in c.iter().zip(&lines) {
+            let Some(src) = line.get(i..i + 4) else {
+                continue;
+            };
+            for (a, &s) in acc.iter_mut().zip(src) {
+                *a += c * i32::from(s);
+            }
+        }
+        *quad = acc;
+    }
+    for (n, o) in rest.iter_mut().enumerate() {
+        *o = c
+            .iter()
+            .zip(&lines)
+            .map(|(&c, line)| line.get(tail + n).map_or(0, |&s| c * i32::from(s)))
+            .sum();
     }
 }
 
@@ -199,14 +225,14 @@ pub fn store(
 ) {
     let max = (1i32 << bit_depth) - 1;
     let shift1 = 14 - bit_depth;
+    let rows = dst.chunks_mut(stride).take(h);
     match (pred, weights) {
         ([Some(a), Some(b)], None) => {
             let shift2 = 15 - bit_depth;
             let add = 1i32 << (shift2 - 1);
-            for j in 0..h {
-                let row = &mut dst[j * stride..j * stride + w];
-                for (i, out) in row.iter_mut().enumerate() {
-                    let v = (i32::from(a[j * w + i]) + i32::from(b[j * w + i]) + add) >> shift2;
+            for (row, (a, b)) in rows.zip(a.chunks_exact(w).zip(b.chunks_exact(w))) {
+                for (out, (&a, &b)) in row[..w].iter_mut().zip(a.iter().zip(b)) {
+                    let v = (i32::from(a) + i32::from(b) + add) >> shift2;
                     *out = v.clamp(0, max) as u16;
                 }
             }
@@ -214,33 +240,28 @@ pub fn store(
         ([Some(a), Some(b)], Some([w0, w1])) => {
             let log2wd = w0.log2_denom + shift1;
             let add = (w0.offset + w1.offset + 1) << log2wd;
-            for j in 0..h {
-                let row = &mut dst[j * stride..j * stride + w];
-                for (i, out) in row.iter_mut().enumerate() {
-                    let v = (i32::from(a[j * w + i]) * w0.weight
-                        + i32::from(b[j * w + i]) * w1.weight
-                        + add)
-                        >> (log2wd + 1);
+            for (row, (a, b)) in rows.zip(a.chunks_exact(w).zip(b.chunks_exact(w))) {
+                for (out, (&a, &b)) in row[..w].iter_mut().zip(a.iter().zip(b)) {
+                    let v =
+                        (i32::from(a) * w0.weight + i32::from(b) * w1.weight + add) >> (log2wd + 1);
                     *out = v.clamp(0, max) as u16;
                 }
             }
         }
         ([Some(a), None] | [None, Some(a)], None) => {
             let add = 1i32 << (shift1 - 1);
-            for j in 0..h {
-                let row = &mut dst[j * stride..j * stride + w];
-                for (i, out) in row.iter_mut().enumerate() {
-                    let v = (i32::from(a[j * w + i]) + add) >> shift1;
+            for (row, a) in rows.zip(a.chunks_exact(w)) {
+                for (out, &a) in row[..w].iter_mut().zip(a) {
+                    let v = (i32::from(a) + add) >> shift1;
                     *out = v.clamp(0, max) as u16;
                 }
             }
         }
         ([Some(a), None], Some([wp, _])) | ([None, Some(a)], Some([_, wp])) => {
             let log2wd = wp.log2_denom + shift1;
-            for j in 0..h {
-                let row = &mut dst[j * stride..j * stride + w];
-                for (i, out) in row.iter_mut().enumerate() {
-                    let p = i32::from(a[j * w + i]);
+            for (row, a) in rows.zip(a.chunks_exact(w)) {
+                for (out, &a) in row[..w].iter_mut().zip(a) {
+                    let p = i32::from(a);
                     let v = if log2wd >= 1 {
                         ((p * wp.weight + (1 << (log2wd - 1))) >> log2wd) + wp.offset
                     } else {

@@ -23,6 +23,16 @@ impl Filter {
             _ => Self::Gradient,
         }
     }
+
+    /// The two bits of the `ALPH` header.
+    pub(crate) fn bits(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Horizontal => 1,
+            Self::Vertical => 2,
+            Self::Gradient => 3,
+        }
+    }
 }
 
 /// The alpha plane, `width * height` bytes in raster order.
@@ -99,7 +109,6 @@ pub(crate) fn unfilter(plane: &mut [u8], width: usize, filter: Filter) {
 }
 
 /// Apply a prediction filter, the inverse of [`unfilter`].
-#[cfg(test)]
 pub(crate) fn filter(plane: &[u8], width: usize, filter: Filter) -> Vec<u8> {
     let mut out = plane.to_vec();
     if filter == Filter::None {

@@ -17,6 +17,25 @@ pub(crate) struct Quant {
     pub uv: [i32; 2],
 }
 
+impl Quant {
+    /// The steps of quantizer index `q` with the deltas `[y1 DC, y2 DC,
+    /// y2 AC, uv DC, uv AC]` (section 14.1).
+    pub(crate) fn new(q: i32, deltas: [i32; 5]) -> Self {
+        let [y1_dc, y2_dc, y2_ac, uv_dc, uv_ac] = deltas;
+        let step = |table: &[i16; 128], delta: i32, max: i32| {
+            i32::from(table[(q + delta).clamp(0, max).unsigned_abs() as usize])
+        };
+        Self {
+            y1: [step(&DC_Q, y1_dc, 127), step(&AC_Q, 0, 127)],
+            y2: [
+                step(&DC_Q, y2_dc, 127) * 2,
+                ((step(&AC_Q, y2_ac, 127) * 101_581) >> 16).max(8),
+            ],
+            uv: [step(&DC_Q, uv_dc, 117), step(&AC_Q, uv_ac, 127)],
+        }
+    }
+}
+
 /// Loop-filter settings of one segment and macroblock kind.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct FilterStrength {
@@ -184,15 +203,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<FrameHeader<'_>, CodecError> {
         } else {
             base
         };
-        let step = |table: &[i16; 128], delta: i32, max: i32| {
-            i32::from(table[(q + delta).clamp(0, max).unsigned_abs() as usize])
-        };
-        entry.y1 = [step(&DC_Q, y1_dc, 127), step(&AC_Q, 0, 127)];
-        entry.y2 = [
-            step(&DC_Q, y2_dc, 127) * 2,
-            ((step(&AC_Q, y2_ac, 127) * 101_581) >> 16).max(8),
-        ];
-        entry.uv = [step(&DC_Q, uv_dc, 117), step(&AC_Q, uv_ac, 127)];
+        *entry = Quant::new(q, [y1_dc, y2_dc, y2_ac, uv_dc, uv_ac]);
     }
 
     // Key frames always refresh the probabilities; the flag is unused.
@@ -251,7 +262,7 @@ pub(crate) fn parse(data: &[u8]) -> Result<FrameHeader<'_>, CodecError> {
 }
 
 /// Section 15.2: limits for one filter level.
-fn filter_strength(level: i32, sharpness: i32) -> FilterStrength {
+pub(crate) fn filter_strength(level: i32, sharpness: i32) -> FilterStrength {
     if level == 0 {
         return FilterStrength::default();
     }

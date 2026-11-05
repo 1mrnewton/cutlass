@@ -16,6 +16,7 @@ use cutlass_encode::{
 
 use crate::limits::{MAX_EDGE, MAX_FRAMES_PER_PACKET, picture_ok};
 use crate::lossless::encode::{self as lossless, Config};
+use crate::lossy::encode as lossy;
 use crate::riff::{
     Bitstream, FLAG_ALPHA, FLAG_ANIMATION, file, push_bitstream, put_chunk, vp8x, write_still,
 };
@@ -128,8 +129,16 @@ fn code(options: WebpOptions, rgba: &[u8], width: u32, height: u32) -> Result<Co
             lossless: true,
         })
     } else {
-        Err(CodecError::Unsupported {
-            what: "lossy webp encode",
+        let config = lossy::Config {
+            quality: options.quality,
+            method: options.effort,
+            exact: options.exact,
+        };
+        let (vp8, alpha) = lossy::encode(rgba, width, height, config)?;
+        Ok(Coded {
+            vp8,
+            alpha,
+            lossless: false,
         })
     }
 }

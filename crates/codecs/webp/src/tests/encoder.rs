@@ -284,3 +284,44 @@ fn frames_of_another_size_and_reset_behave() {
     push(&mut encoder, 5, 4).expect("after reset");
     assert_eq!(encoder.drain().expect("drain").len(), 1);
 }
+
+#[test]
+fn lossy_animations_and_stills_decode_like_libwebp() {
+    let (width, height) = (41u32, 23u32);
+    let source = frames(5, width, height);
+    let packets = encode_animation(WebpOptions::default(), &source, width, height);
+    let file: Vec<u8> = packets.iter().flat_map(|p| p.data.clone()).collect();
+    let dir = scratch("encoder-lossy-anim");
+    let path = dir.join("anim.webp");
+    std::fs::write(&path, &file).expect("write");
+    if let Some(webpinfo) = tool("webpinfo") {
+        assert!(webpinfo_ok(&webpinfo, &path));
+    }
+    check_animations(&dir, &[path]);
+
+    let rgba = synthetic_rgba(width, height);
+    let image = StillImage::from_samples(
+        width,
+        height,
+        ColorType::Rgba,
+        BitDepth::Eight,
+        rgba.iter().map(|&v| u16::from(v)).collect(),
+    );
+    let bytes = still(WebpOptions::default(), image);
+    let ours = decode_still(&bytes);
+    // Alpha stays exact through the lossless `ALPH` chunk.
+    for (a, b) in ours
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgba.as_chunks::<4>().0)
+    {
+        assert_eq!(a[3], b[3]);
+    }
+    if let Some(dwebp) = tool("dwebp") {
+        let path = dir.join("still.webp");
+        std::fs::write(&path, &bytes).expect("write");
+        assert!(dwebp_rgba(&dwebp, &path).2 == ours.rgba);
+    }
+}

@@ -336,12 +336,12 @@ fn residuals(
 
 /// Pitch of the luma work block: the left column, sixteen pixels, and
 /// four pixels above-right.
-const LUMA_PITCH: usize = 21;
-const CHROMA_PITCH: usize = 9;
+pub(crate) const LUMA_PITCH: usize = 21;
+pub(crate) const CHROMA_PITCH: usize = 9;
 
 /// Fill the edges of a work block from the frame: 127 above the picture,
 /// 129 left of it, and the corner from whichever applies.
-fn load_edges(
+pub(crate) fn load_edges(
     work: &mut [u8],
     pitch: usize,
     size: usize,
@@ -372,7 +372,7 @@ fn load_edges(
     }
 }
 
-fn store(
+pub(crate) fn store(
     work: &[u8],
     pitch: usize,
     size: usize,
@@ -491,7 +491,7 @@ fn reconstruct(
 
 /// Section 15: filter every macroblock in raster order, left edge, inner
 /// vertical edges, top edge, inner horizontal edges.
-fn loop_filter(
+pub(crate) fn loop_filter(
     planes: &mut Planes,
     mb_w: usize,
     kind: FilterKind,

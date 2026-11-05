@@ -120,68 +120,9 @@ impl<'a> BoolDecoder<'a> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::BoolDecoder;
-
-    /// The encoder of RFC 6386 section 7.3, to check the decoder against.
-    pub(crate) struct BoolEncoder {
-        out: Vec<u8>,
-        range: u32,
-        bottom: u32,
-        bit_count: i32,
-    }
-
-    impl BoolEncoder {
-        pub(crate) fn new() -> Self {
-            Self {
-                out: Vec::new(),
-                range: 255,
-                bottom: 0,
-                bit_count: 24,
-            }
-        }
-
-        fn add_one(&mut self) {
-            for byte in self.out.iter_mut().rev() {
-                if *byte == 255 {
-                    *byte = 0;
-                } else {
-                    *byte += 1;
-                    break;
-                }
-            }
-        }
-
-        pub(crate) fn bit(&mut self, prob: u8, bit: bool) {
-            let split = 1 + (((self.range - 1) * u32::from(prob)) >> 8);
-            if bit {
-                self.bottom += split;
-                self.range -= split;
-            } else {
-                self.range = split;
-            }
-            while self.range < 128 {
-                self.range <<= 1;
-                if self.bottom & (1 << 31) != 0 {
-                    self.add_one();
-                }
-                self.bottom <<= 1;
-                self.bit_count -= 1;
-                if self.bit_count == 0 {
-                    self.out.push((self.bottom >> 24) as u8);
-                    self.bottom &= (1 << 24) - 1;
-                    self.bit_count = 8;
-                }
-            }
-        }
-
-        pub(crate) fn finish(mut self) -> Vec<u8> {
-            for _ in 0..32 {
-                self.bit(128, false);
-            }
-            self.out
-        }
-    }
+    use crate::lossy::bool_encoder::BoolEncoder;
 
     #[test]
     fn bits_written_by_the_rfc_encoder_come_back() {
@@ -193,7 +134,7 @@ pub(crate) mod tests {
             let prob = ((seed >> 8) & 0xff) as u8;
             let prob = prob.max(1);
             let bit = (seed >> 20) % 256 >= u32::from(prob);
-            encoder.bit(prob, bit);
+            encoder.put(bit, prob);
             expected.push((prob, bit));
         }
         let bytes = encoder.finish();

@@ -2650,7 +2650,7 @@ impl<'a, P: Pixel, C: Coder> TileDec<'a, P, C> {
         }
     }
 
-    fn has_overlappable_candidates(&self) -> bool {
+    pub fn has_overlappable_candidates(&self) -> bool {
         let b = &self.b;
         if b.avail_u {
             let w4 = bw4(b.bsize);

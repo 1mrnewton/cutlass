@@ -63,6 +63,8 @@ pub struct ModeParams {
     pub filter_search: bool,
     /// Interpolation filter the sub-sample motion search evaluates with.
     pub me_filter: u8,
+    /// Try local warped motion for single-reference inter blocks.
+    pub local_warp: bool,
 }
 
 impl Default for ModeParams {
@@ -89,6 +91,7 @@ impl Default for ModeParams {
             split_bits_scale: 1.0,
             filter_search: true,
             me_filter: 0,
+            local_warp: true,
         }
     }
 }
@@ -666,6 +669,9 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
                 pb.interp_filter = self.pick_filter(&pb);
             }
             self.cur_filters = pb.interp_filter;
+            if self.mode.local_warp && c.refs[1] <= INTRA_FRAME {
+                pb.motion_mode = self.pick_motion_mode(&pb);
+            }
             pb.uv_mode = DC_PRED;
             pb.tx_size = self.pick_inter_tx(&pb, tx);
         } else {
@@ -1326,6 +1332,54 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
             }
         }
         true
+    }
+
+    /// SIMPLE or LOCALWARP, whichever predicts the luma with less SATD.
+    fn pick_motion_mode(&mut self, pb: &Block) -> u8 {
+        let Some(src) = self.src else { return 0 };
+        let x = pb.mi_col * 4;
+        let y = pb.mi_row * 4;
+        let w = block_width(pb.bsize);
+        let h = block_height(pb.bsize);
+        if x + w > self.fs.mi_cols * 4 || y + h > self.fs.mi_rows * 4 {
+            return 0;
+        }
+        if !self.pred_plane(0, pb.ref_frame, pb.mv, x, y, w, h) {
+            return 0;
+        }
+        let sp = &src.planes[0];
+        let simple = f64::from(satd(
+            &sp.data[y * sp.stride + x..],
+            sp.stride,
+            &self.scratch.obmc,
+            w,
+            w,
+            h,
+        ));
+        let saved = self.b.clone();
+        self.b.is_inter = true;
+        self.b.ref_frame = pb.ref_frame;
+        self.b.mv = pb.mv;
+        self.b.y_mode = pb.y_mode;
+        self.b.skip_mode = false;
+        let ok = self.predict_local_warp_into_scratch(x, y, w, h);
+        self.b = saved;
+        if !ok {
+            return 0;
+        }
+        let warp = f64::from(satd(
+            &sp.data[y * sp.stride + x..],
+            sp.stride,
+            &self.scratch.obmc,
+            w,
+            w,
+            h,
+        ));
+        if warp + self.mode.lambda_satd * 1.5 < simple {
+            crate::dec::types::LOCALWARP
+        } else {
+            0
+        }
     }
 
     /// Interpolation filter (same both directions) with the least SATD.

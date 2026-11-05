@@ -259,6 +259,7 @@ impl Av1Enc {
             seq_force_integer_mv: 2,
             enable_cdef: true,
             enable_ref_frame_mvs: true,
+            enable_warped_motion: true,
             enable_dual_filter: ev("AV1_DUAL", 0.0) > 0.0,
             bit_depth: cfg.bit_depth,
             mono_chrome: cfg.mono,
@@ -655,6 +656,8 @@ impl Av1Enc {
             refresh_frame_flags: spec.refresh,
             reference_select: spec.reference_select,
             use_ref_frame_mvs: !key && ev("AV1_RFMV", 1.0) > 0.0,
+            allow_warped_motion: !key && self.cfg.speed < 7 && ev("AV1_WARP", 1.0) > 0.0,
+            is_motion_mode_switchable: !key && self.cfg.speed < 7 && ev("AV1_WARP", 1.0) > 0.0,
             frame_width: self.cfg.width as u32,
             frame_height: self.cfg.height as u32,
             upscaled_width: self.cfg.width as u32,
@@ -796,6 +799,7 @@ impl Av1Enc {
             split_bits_scale: ev("AV1_SP", 1.0),
             filter_search: speed < 8,
             me_filter: ev("AV1_MEF", 0.0) as u8,
+            local_warp: hdr.allow_warped_motion,
             intra_rd_cands: ev(
                 "AV1_IRD",
                 if speed >= 8 {

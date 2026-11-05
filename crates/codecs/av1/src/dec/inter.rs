@@ -691,6 +691,59 @@ impl<P: Pixel, C: Coder> TileDec<'_, P, C> {
     }
 
     /// Warp estimation (7.11.3.8).
+    /// Encoder: when `self.b` (a single-reference inter block with its
+    /// motion vector) may use local warped motion, writes that prediction of
+    /// the luma block at (x, y) into `scratch.obmc` (stride w) and returns
+    /// true. Leaves `self.b.motion_mode` as SIMPLE.
+    pub fn predict_local_warp_into_scratch(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+    ) -> bool {
+        let bs = self.b.bsize;
+        let rf = self.b.ref_frame[0];
+        if !self.hdr.is_motion_mode_switchable
+            || !self.hdr.allow_warped_motion
+            || self.hdr.force_integer_mv
+            || self.b.ref_frame[1] > INTRA_FRAME
+            || block_width(bs).min(block_height(bs)) < 8
+            || w < 8
+            || h < 8
+            || ((self.b.y_mode == GLOBALMV || self.b.y_mode == GLOBAL_GLOBALMV)
+                && self.hdr.gm_type[rf.max(0) as usize] > TRANSLATION)
+            || self.is_scaled(rf)
+            || !self.has_overlappable_candidates()
+        {
+            return false;
+        }
+        self.find_warp_samples();
+        if self.b.num_samples == 0 {
+            return false;
+        }
+        self.b.motion_mode = LOCALWARP;
+        self.warp_estimation();
+        self.b.motion_mode = super::types::SIMPLE;
+        if !self.b.local_valid || mc::setup_shear(&self.b.local_warp).is_none() {
+            return false;
+        }
+        let mat = self.b.local_warp;
+        // The block is not coded yet, so its frame area is free to predict into.
+        if self
+            .warp_block(0, rf, &mat, x, y, w, h, &Dst::Frame)
+            .is_err()
+        {
+            return false;
+        }
+        let pl = &self.cur.planes[0];
+        for i in 0..h {
+            self.scratch.obmc[i * w..i * w + w]
+                .copy_from_slice(&pl.data[(y + i) * pl.stride + x..][..w]);
+        }
+        true
+    }
+
     fn warp_estimation(&mut self) {
         let b = &self.b;
         let mut a = [[0i64; 2]; 2];

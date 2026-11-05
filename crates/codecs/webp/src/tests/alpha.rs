@@ -111,7 +111,12 @@ fn every_alpha_filter_matches_dwebp() {
         .find(|(fourcc, _)| fourcc == b"VP8 ")
         .expect("vp8 chunk")
         .1;
-    let plane: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|pixel| pixel[3]).collect();
+    let plane: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|pixel| pixel[3])
+        .collect();
     for (bits, kind) in [
         (0, Filter::None),
         (1, Filter::Horizontal),
@@ -130,7 +135,13 @@ fn every_alpha_filter_matches_dwebp() {
             std::fs::write(&path, &data).expect("write");
             check(&dwebp, &path);
             let ours = decode_still(&data);
-            let alpha: Vec<u8> = ours.rgba.as_chunks::<4>().0.iter().map(|pixel| pixel[3]).collect();
+            let alpha: Vec<u8> = ours
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[3])
+                .collect();
             assert_eq!(alpha, plane, "{kind:?}");
         }
     }
@@ -176,9 +187,9 @@ fn icc_profiles_pass_through_and_alpha_sets_the_colour_type() {
             .arg(&plain)
             .arg("-o")
             .arg(&tagged)
-            .status()
+            .output()
             .expect("webpmux runs");
-        assert!(status.success());
+        assert!(status.status.success());
         let data = std::fs::read(&tagged).expect("tagged");
         let mut decoder =
             WebpDecoder::open(&CodecParams::video(CodecId::Webp, width, height)).expect("open");

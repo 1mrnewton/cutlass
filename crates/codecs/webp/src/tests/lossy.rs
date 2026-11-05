@@ -51,7 +51,9 @@ impl LossyPlanes {
 
 /// The planes of a lossy still, `None` for a lossless one.
 pub(crate) fn lossy_planes(bytes: &[u8]) -> Option<LossyPlanes> {
-    let still = riff::parse(bytes).expect("riff");
+    let riff::Layout::Still(still) = riff::parse(bytes).expect("riff") else {
+        return None;
+    };
     let Bitstream::Lossy { vp8, alpha } = still.bitstream else {
         return None;
     };

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod alpha;
+mod animation;
 mod decoder;
 mod limits;
 mod lossless;

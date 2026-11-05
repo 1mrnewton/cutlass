@@ -5,9 +5,17 @@ use cutlass_decode::{
     StillOutput,
 };
 
-use crate::limits::picture_ok;
+use crate::animation::{Canvas, Decoded};
+use crate::limits::{MAX_OUTPUT_PIXELS, picture_ok};
 use crate::picture::{self, Picture};
-use crate::riff::{self, Still};
+use crate::riff::{self, AnimationHeader, Frame, Layout, Still};
+
+/// Milliseconds: the unit of `ANMF` durations.
+const ANIMATION_TIMESCALE: u32 = 1000;
+
+/// The duration a player gives a frame stored with 0, as the `still`
+/// container does.
+const DEFAULT_FRAME_MS: u32 = 100;
 
 /// Software WebP decoder: lossless, lossy, alpha, and animation.
 ///
@@ -16,7 +24,13 @@ use crate::riff::{self, Still};
 /// `VP8X` and `ANIM`). A still decodes to one picture. An animation frame
 /// decodes to the whole canvas after that frame is composed.
 pub struct WebpDecoder {
-    _private: (),
+    /// The canvas of the animation being played, from its first packet.
+    animation: Option<Animation>,
+}
+
+struct Animation {
+    canvas: Canvas,
+    icc: Vec<u8>,
 }
 
 impl WebpDecoder {
@@ -24,7 +38,7 @@ impl WebpDecoder {
         if params.codec != CodecId::Webp {
             return Err(CodecError::Unsupported { what: "webp" });
         }
-        Ok(Self { _private: () })
+        Ok(Self { animation: None })
     }
 }
 
@@ -43,7 +57,9 @@ impl Decoder for WebpDecoder {
         Ok(Vec::new())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.animation = None;
+    }
 
     fn decode_picture(&mut self, packet: &Packet) -> Result<Vec<StillOutput>, CodecError> {
         if packet.data.is_empty() {
@@ -51,15 +67,103 @@ impl Decoder for WebpDecoder {
                 what: "empty packet",
             });
         }
-        let still = riff::parse(&packet.data)?;
-        let image = decode_still(&still)?;
-        Ok(vec![StillOutput {
-            image,
-            pts: packet.pts,
-            duration: packet.duration,
-            timescale: packet.timescale,
-        }])
+        match riff::parse(&packet.data)? {
+            Layout::Still(still) => Ok(vec![StillOutput {
+                image: decode_still(&still)?,
+                pts: packet.pts,
+                duration: packet.duration,
+                timescale: packet.timescale,
+            }]),
+            Layout::Animation { header, frames } => self.compose(packet, header, &frames),
+        }
     }
+}
+
+impl WebpDecoder {
+    /// Compose the frames of one packet. A packet that starts the file
+    /// starts a fresh canvas. Nothing changes unless every frame decodes.
+    fn compose(
+        &mut self,
+        packet: &Packet,
+        header: Option<AnimationHeader<'_>>,
+        frames: &[Frame<'_>],
+    ) -> Result<Vec<StillOutput>, CodecError> {
+        let starts_file = header.is_some();
+        let mut animation = match header {
+            Some(header) => Animation {
+                canvas: Canvas::new(header.width, header.height)?,
+                icc: header.icc.map(<[u8]>::to_vec).unwrap_or_default(),
+            },
+            None => self.animation.take().ok_or(CodecError::InvalidApi {
+                what: "webp frame before the packet that starts the file",
+            })?,
+        };
+        let decoded = decode_frames(&animation.canvas, frames);
+        let decoded = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                if !starts_file {
+                    self.animation = Some(animation);
+                }
+                return Err(error);
+            }
+        };
+        let (width, height) = (animation.canvas.width(), animation.canvas.height());
+        // One frame keeps the container's clock; a packet holding several
+        // frames times them from their stored milliseconds.
+        let single = frames.len() == 1;
+        let mut clock = if packet.timescale == ANIMATION_TIMESCALE {
+            packet.pts
+        } else {
+            0
+        };
+        let mut outputs = Vec::with_capacity(frames.len());
+        for (frame, decoded) in frames.iter().zip(&decoded) {
+            let rgba = animation.canvas.compose(decoded);
+            let mut image = StillImage::from_samples(
+                width,
+                height,
+                ColorType::Rgba,
+                BitDepth::Eight,
+                rgba.into_iter().map(u16::from).collect(),
+            );
+            image.icc_profile.clone_from(&animation.icc);
+            let duration = i64::from(if frame.duration == 0 {
+                DEFAULT_FRAME_MS
+            } else {
+                frame.duration
+            });
+            outputs.push(if single {
+                StillOutput {
+                    image,
+                    pts: packet.pts,
+                    duration: packet.duration,
+                    timescale: packet.timescale,
+                }
+            } else {
+                StillOutput {
+                    image,
+                    pts: clock,
+                    duration,
+                    timescale: ANIMATION_TIMESCALE,
+                }
+            });
+            clock += duration;
+        }
+        self.animation = Some(animation);
+        Ok(outputs)
+    }
+}
+
+/// Decode every frame of a packet before composing any.
+fn decode_frames(canvas: &Canvas, frames: &[Frame<'_>]) -> Result<Vec<Decoded>, CodecError> {
+    let pixels = u64::from(canvas.width()) * u64::from(canvas.height());
+    if pixels * frames.len() as u64 > MAX_OUTPUT_PIXELS {
+        return Err(CodecError::Limit {
+            what: "webp frames in one packet",
+        });
+    }
+    frames.iter().map(|frame| canvas.decode(frame)).collect()
 }
 
 fn decode_still(still: &Still<'_>) -> Result<StillImage, CodecError> {

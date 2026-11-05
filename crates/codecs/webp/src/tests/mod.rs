@@ -8,6 +8,7 @@
 //! when the crate is built as a library.
 
 mod alpha;
+mod animation;
 mod lossy;
 mod oracle;
 mod stills;

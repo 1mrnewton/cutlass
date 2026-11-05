@@ -21,6 +21,13 @@ pub(crate) const MAX_PIXELS: u64 = 1 << 26;
 /// together. Each entry is four bytes.
 pub(crate) const MAX_TABLE_ENTRIES: usize = 1 << 25;
 
+/// Most `ANMF` frames one packet may carry.
+pub(crate) const MAX_FRAMES_PER_PACKET: usize = 4096;
+
+/// Most canvas pixels one call may return, all frames together: a packet
+/// holding a whole animation returns every composed canvas.
+pub(crate) const MAX_OUTPUT_PIXELS: u64 = 1 << 26;
+
 /// Most chunks one packet may carry.
 pub(crate) const MAX_CHUNKS_PER_PACKET: usize = 16_384;
 
@@ -43,6 +50,12 @@ pub(crate) fn picture_ok(width: u32, height: u32) -> Result<(), CodecError> {
     pixels_ok(width, height)
 }
 
+/// Width and height of an animation canvas, or the reason it is refused.
+/// `VP8X` cannot store a zero edge; 2^24 fits, and the pixel cap decides.
+pub(crate) fn canvas_ok(width: u32, height: u32) -> Result<(), CodecError> {
+    pixels_ok(width, height)
+}
+
 fn pixels_ok(width: u32, height: u32) -> Result<(), CodecError> {
     if u64::from(width) * u64::from(height) > MAX_PIXELS {
         return Err(CodecError::Limit {
@@ -52,7 +65,8 @@ fn pixels_ok(width: u32, height: u32) -> Result<(), CodecError> {
     Ok(())
 }
 
-/// `width * height` as a buffer length. Call after [`picture_ok`].
+/// `width * height` as a buffer length. Call after [`picture_ok`] or
+/// [`canvas_ok`].
 pub(crate) fn pixel_count(width: u32, height: u32) -> Result<usize, CodecError> {
     usize::try_from(u64::from(width) * u64::from(height)).map_err(|_| CodecError::Limit {
         what: "webp picture pixels",

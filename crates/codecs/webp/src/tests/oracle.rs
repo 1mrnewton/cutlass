@@ -133,8 +133,12 @@ pub(crate) fn decode_still(bytes: &[u8]) -> Picture {
 }
 
 pub(crate) fn try_decode_still(bytes: &[u8]) -> Result<Picture, CodecError> {
-    let still = riff::parse(bytes)?;
-    picture::decode(still.bitstream)
+    match riff::parse(bytes)? {
+        riff::Layout::Still(still) => picture::decode(still.bitstream),
+        riff::Layout::Animation { .. } => Err(CodecError::Unsupported {
+            what: "animation in a still test",
+        }),
+    }
 }
 
 /// First differing pixel, for a readable failure.

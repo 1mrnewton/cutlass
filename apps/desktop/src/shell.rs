@@ -4932,22 +4932,16 @@ impl Shell {
     /// clip's new start, so the frame under it stays the same with the magnet on.
     pub fn delete_side(&mut self, edge: TrimEdge) -> Result<(), ShellError> {
         let at = self.playhead;
-        let refused = || ShellError::Unavailable("delete is not available".to_owned());
-        let segment_id = self.clip_under(at).ok_or_else(refused)?;
+        let request = cutlass_editor::delete_side(self.session_draft()?, &self.selection, at, edge)
+            .ok_or_else(|| ShellError::Unavailable("delete is not available".to_owned()))?;
+        let Request::Trim { segment_id, .. } = &request else {
+            return Err(ShellError::Unavailable(
+                "delete is not available".to_owned(),
+            ));
+        };
+        let segment_id = segment_id.clone();
         self.refuse_locked(&segment_id)?;
-        let draft = self.session_draft()?;
-        let (segment, _) = locate(draft, &segment_id).ok_or_else(refused)?;
-        let start = segment.target.start.0;
-        let end = start.saturating_add(segment.target.duration.0);
-        let margin = split_margin(draft);
-        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
-            return Err(refused());
-        }
-        self.apply(Request::Trim {
-            segment_id: segment_id.clone(),
-            edge,
-            time: at,
-        })?;
+        self.apply(request)?;
         if edge == TrimEdge::Start
             && let Some((segment, _)) = self.draft().and_then(|draft| locate(draft, &segment_id))
         {
@@ -4977,37 +4971,19 @@ impl Shell {
     }
 
     fn clip_under(&self, time: Micros) -> Option<SegmentId> {
-        let draft = self.draft()?;
-        if let Some(id) = self
-            .selection
-            .iter()
-            .rev()
-            .find(|id| locate(draft, id).is_some_and(|(segment, _)| covers(segment, time)))
-        {
-            return Some(id.clone());
-        }
-        if let Some(id) = draft
-            .main_track()
-            .and_then(|track| clip_on_track(track, time))
-        {
-            return Some(id);
-        }
-        draft
-            .tracks
-            .iter()
-            .find_map(|track| clip_on_track(track, time))
+        cutlass_editor::clip_under(self.draft()?, &self.selection, time)
     }
 
     /// Cut one clip. Each piece must keep at least one frame. The original id stays selected.
     pub fn split_clip(&mut self, segment_id: SegmentId, at: Micros) -> Result<(), ShellError> {
         self.refuse_locked(&segment_id)?;
         let draft = self.session_draft()?;
-        let (segment, _) = locate(draft, &segment_id)
-            .ok_or_else(|| ShellError::Unavailable("the clip is not on the timeline".to_owned()))?;
-        let start = segment.target.start.0;
-        let end = start.saturating_add(segment.target.duration.0);
-        let margin = split_margin(draft);
-        if at.0 < start.saturating_add(margin) || at.0 > end.saturating_sub(margin) {
+        if locate(draft, &segment_id).is_none() {
+            return Err(ShellError::Unavailable(
+                "the clip is not on the timeline".to_owned(),
+            ));
+        }
+        if !cutlass_editor::can_cut_at(draft, &segment_id, at) {
             return Err(ShellError::Unavailable("split is not available".to_owned()));
         }
         let right_id = SegmentId::new(self.fresh("seg"));
@@ -5785,14 +5761,6 @@ fn trim_is_current(draft: &Draft, plan: &TrimPlan) -> bool {
     }
 }
 
-fn split_margin(draft: &Draft) -> i64 {
-    draft
-        .frame_rate()
-        .and_then(|rate| rate.frame_start(1))
-        .map(|time| time.0.max(1))
-        .unwrap_or(1)
-}
-
 fn scene_message(error: SceneError) -> ShellError {
     let message = match error {
         SceneError::Missing | SceneError::NoPicture => "the clip has no picture",
@@ -5829,7 +5797,7 @@ fn proportional(target: &TimeRange, range: &TimeRange, source: i64) -> Option<i6
 fn kept_cuts(draft: &Draft, segment: &Segment, times: &[Micros]) -> Vec<Micros> {
     let start = segment.target.start.0;
     let end = start.saturating_add(segment.target.duration.0);
-    let margin = split_margin(draft);
+    let margin = cutlass_editor::frame_margin(draft).0;
     let mut ordered: Vec<i64> = times.iter().map(|time| time.0).collect();
     ordered.sort_unstable();
     ordered.dedup();
@@ -5886,20 +5854,6 @@ fn blend_blocks(draft: &Draft, segment_id: &SegmentId, at: i64) -> bool {
         }
     }
     false
-}
-
-fn covers(segment: &Segment, time: Micros) -> bool {
-    let start = segment.target.start.0;
-    let end = start.saturating_add(segment.target.duration.0);
-    time.0 >= start && time.0 < end
-}
-
-fn clip_on_track(track: &cutlass_model::Track, time: Micros) -> Option<SegmentId> {
-    track
-        .segments
-        .iter()
-        .find(|segment| covers(segment, time))
-        .map(|segment| segment.id.clone())
 }
 
 /// What the button that opens a file's folder says on this system.

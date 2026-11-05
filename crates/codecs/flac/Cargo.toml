@@ -16,3 +16,7 @@ workspace = true
 [[test]]
 name = "external"
 path = "tests/external/main.rs"
+
+[[bench]]
+name = "against_flac"
+harness = false

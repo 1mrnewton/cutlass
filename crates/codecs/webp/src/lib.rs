@@ -13,6 +13,7 @@
 mod decoder;
 mod limits;
 mod lossless;
+mod lossy;
 mod picture;
 mod riff;
 

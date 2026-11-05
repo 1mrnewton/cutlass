@@ -1,8 +1,10 @@
 //! Still decode against `dwebp`.
 
+use super::lossy::lossy_planes;
 use super::oracle::{
-    cwebp, decode_still, dwebp_rgba, first_difference, local_files, read_png, require_or_skip,
-    scratch, sips_rgba, synthetic_rgba, tool, video_frame, webp_files, write_png,
+    cwebp, decode_still, dwebp_rgba, dwebp_yuv, ffmpeg_yuv, first_difference, local_files,
+    read_png, require_or_skip, scratch, sips_rgba, synthetic_rgba, tool, try_decode_still,
+    video_frame, webp_files, write_png,
 };
 
 /// Every still under `WEBP_CORPUS_DIR` decodes to `dwebp`'s exact RGBA.
@@ -19,15 +21,27 @@ fn corpus_stills_match_dwebp_exactly() {
         require_or_skip("dwebp");
         return;
     };
+    let ffmpeg = tool("ffmpeg");
     let mut checked = 0;
+    let mut skipped = 0;
     let mut failures = Vec::new();
     for path in webp_files(std::path::Path::new(&dir)) {
         if path.components().any(|part| part.as_os_str() == "anim") {
             continue;
         }
         let bytes = std::fs::read(&path).expect("read");
+        let ours = match try_decode_still(&bytes) {
+            Ok(ours) => ours,
+            Err(cutlass_decode::CodecError::Unsupported { .. }) => {
+                skipped += 1;
+                continue;
+            }
+            Err(error) => {
+                failures.push(format!("{}: {error:?}", path.display()));
+                continue;
+            }
+        };
         let (width, height, theirs) = dwebp_rgba(&dwebp, &path);
-        let ours = decode_still(&bytes);
         checked += 1;
         if (ours.width, ours.height) != (width, height) || ours.rgba != theirs {
             failures.push(format!(
@@ -36,11 +50,22 @@ fn corpus_stills_match_dwebp_exactly() {
                 first_difference(&ours.rgba, &theirs, width)
             ));
         }
+        if let Some(planes) = lossy_planes(&bytes) {
+            if planes != dwebp_yuv(&dwebp, &path) {
+                failures.push(format!("{}: planes against dwebp", path.display()));
+            }
+            if let Some(ffmpeg) = &ffmpeg
+                && let Some(theirs) = ffmpeg_yuv(ffmpeg, &path)
+                && planes != theirs
+            {
+                failures.push(format!("{}: planes against ffmpeg", path.display()));
+            }
+        }
     }
     assert!(checked > 0, "empty corpus");
     assert!(
         failures.is_empty(),
-        "{} of {checked} differ:\n{}",
+        "{} of {checked} differ ({skipped} skipped):\n{}",
         failures.len(),
         failures.join("\n")
     );

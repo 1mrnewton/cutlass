@@ -15,6 +15,11 @@ use crate::limits::{MAX_CHUNKS_PER_PACKET, MAX_ICC_BYTES};
 /// The coded picture of a still.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Bitstream<'a> {
+    /// A `VP8 ` key frame and, for an extended file, its `ALPH` payload.
+    Lossy {
+        vp8: &'a [u8],
+        alpha: Option<&'a [u8]>,
+    },
     /// A `VP8L` bitstream, header included.
     Lossless(&'a [u8]),
 }
@@ -123,8 +128,15 @@ pub(crate) fn parse(data: &[u8]) -> Result<Still<'_>, CodecError> {
             canvas: None,
             icc: None,
         }),
+        b"VP8 " => Ok(Still {
+            bitstream: Bitstream::Lossy {
+                vp8: first.data,
+                alpha: None,
+            },
+            canvas: None,
+            icc: None,
+        }),
         b"VP8X" => extended(&chunks),
-        b"VP8 " => Err(CodecError::Unsupported { what: "vp8" }),
         _ => Err(CodecError::Malformed {
             at_bit: bit(first.at),
             what: "webp first chunk",
@@ -167,11 +179,20 @@ fn extended<'a>(chunks: &[Chunk<'a>]) -> Result<Still<'a>, CodecError> {
             what: "webp still has no bitstream",
         });
     };
-    if &picture.fourcc != b"VP8L" {
-        return Err(CodecError::Unsupported { what: "vp8" });
-    }
+    // `ALPH` belongs to a lossy picture only; `VP8L` carries its own.
+    let bitstream = if &picture.fourcc == b"VP8L" {
+        Bitstream::Lossless(picture.data)
+    } else {
+        Bitstream::Lossy {
+            vp8: picture.data,
+            alpha: chunks
+                .iter()
+                .find(|chunk| &chunk.fourcc == b"ALPH")
+                .map(|chunk| chunk.data),
+        }
+    };
     Ok(Still {
-        bitstream: Bitstream::Lossless(picture.data),
+        bitstream,
         canvas: Some((width, height)),
         icc,
     })

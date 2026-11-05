@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cutlass_decode::{BitDepth, CodecId, CodecParams, ColorType, Decoder, Packet, StillImage};
+use cutlass_decode::{
+    BitDepth, CodecError, CodecId, CodecParams, ColorType, Decoder, Packet, StillImage,
+};
 use cutlass_encode::{Encoder, PictureInput};
 use cutlass_png::{PngDecoder, PngEncoder};
 
@@ -84,6 +86,33 @@ pub(crate) fn dwebp_rgba(dwebp: &Path, webp: &Path) -> (u32, u32, Vec<u8>) {
     read_pam(&output.stdout)
 }
 
+/// `dwebp -yuv` of `webp`: the Y, U and V planes, each cropped and packed.
+pub(crate) fn dwebp_yuv(dwebp: &Path, webp: &Path) -> Vec<u8> {
+    let output = Command::new(dwebp)
+        .arg(webp)
+        .args(["-yuv", "-o", "-"])
+        .output()
+        .expect("dwebp runs");
+    assert!(
+        output.status.success(),
+        "dwebp -yuv failed on {}",
+        webp.display()
+    );
+    output.stdout
+}
+
+/// ffmpeg's own WebP decoder: packed 4:2:0 planes, or `None` when this
+/// ffmpeg has no such decoder or refuses the file.
+pub(crate) fn ffmpeg_yuv(ffmpeg: &Path, webp: &Path) -> Option<Vec<u8>> {
+    let output = Command::new(ffmpeg)
+        .args(["-v", "error", "-c:v", "webp", "-i"])
+        .arg(webp)
+        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p", "-"])
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
 /// `cwebp` of `source` with `args`.
 pub(crate) fn cwebp(cwebp: &Path, source: &Path, args: &[&str], out: &Path) -> Vec<u8> {
     let status = Command::new(cwebp)
@@ -100,8 +129,12 @@ pub(crate) fn cwebp(cwebp: &Path, source: &Path, args: &[&str], out: &Path) -> V
 
 /// This crate's still decode of a whole file.
 pub(crate) fn decode_still(bytes: &[u8]) -> Picture {
-    let still = riff::parse(bytes).expect("riff");
-    picture::decode(still.bitstream).expect("decode")
+    try_decode_still(bytes).expect("decode")
+}
+
+pub(crate) fn try_decode_still(bytes: &[u8]) -> Result<Picture, CodecError> {
+    let still = riff::parse(bytes)?;
+    picture::decode(still.bitstream)
 }
 
 /// First differing pixel, for a readable failure.

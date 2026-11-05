@@ -332,6 +332,9 @@ pub fn apply_request(draft: &mut Draft, request: &Request) -> Result<(), EditErr
             alpha,
             round,
         } => text::set_text_background(draft, segment_id, color, *alpha, *round),
+        Request::SetCaptionStyle { segment_id, style } => {
+            text::set_caption_style(draft, segment_id, style)
+        }
         Request::SetTextBubble { segment_id, bubble } => {
             text::set_text_bubble(draft, segment_id, bubble)
         }

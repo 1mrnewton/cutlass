@@ -245,6 +245,12 @@ pub enum Request {
         segment_id: SegmentId,
         bubble: String,
     },
+    /// Draw the caption in the style keyed `style` (one of
+    /// [`cutlass_model::CAPTION_STYLE_KEYS`]), or plain when it is empty.
+    SetCaptionStyle {
+        segment_id: SegmentId,
+        style: String,
+    },
     /// Place a new text clip saying `content` in `face`, from `start` for
     /// `duration`. `track_id` is created as a text row when it is missing.
     AddText {

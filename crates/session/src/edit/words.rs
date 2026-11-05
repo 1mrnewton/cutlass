@@ -7,13 +7,22 @@ use super::EditError;
 /// Join word text with single spaces. Empty pieces are skipped.
 fn caption_text(words: &[String]) -> String {
     let mut text = String::new();
+    let mut broken = false;
     for word in words {
         if word.is_empty() {
             continue;
         }
-        if !text.is_empty() {
+        // A line or page break marker breaks the line instead of a space.
+        if word.trim_matches('\n').is_empty() {
+            broken = !text.is_empty();
+            continue;
+        }
+        if broken {
+            text.push('\n');
+        } else if !text.is_empty() {
             text.push(' ');
         }
+        broken = false;
         text.push_str(word);
     }
     text

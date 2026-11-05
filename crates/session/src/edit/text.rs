@@ -311,6 +311,21 @@ pub fn set_text_background(
     Ok(())
 }
 
+/// Draw the caption in the style keyed `style`, or plain when it is empty.
+pub fn set_caption_style(
+    draft: &mut Draft,
+    segment_id: &SegmentId,
+    style: &str,
+) -> Result<(), EditError> {
+    let style = style.trim();
+    if !style.is_empty() && !cutlass_model::CAPTION_STYLE_KEYS.contains(&style) {
+        return Err(EditError::TextStyle);
+    }
+    let index = own_text(draft, segment_id)?;
+    style.clone_into(&mut draft.materials.texts[index].caption_style);
+    Ok(())
+}
+
 /// The room a bubble leaves around the letters, in ems, when it has none.
 const BUBBLE_PAD: (f64, f64) = (0.35, 0.3);
 
@@ -623,7 +638,19 @@ mod tests {
         // The box stays until the background is taken off.
         assert_eq!(text.background_style, 1);
 
+        let caption = |key: &str| Request::SetCaptionStyle {
+            segment_id: "a".into(),
+            style: key.to_owned(),
+        };
+        let revision = session.revision();
+        session.apply(revision, &[caption("karaoke")]).unwrap();
+        assert_eq!(session.draft().materials.texts[0].caption_style, "karaoke");
+        let revision = session.revision();
+        session.apply(revision, &[caption("")]).unwrap();
+        assert!(session.draft().materials.texts[0].caption_style.is_empty());
+
         for (request, error) in [
+            (caption("loud"), EditError::TextStyle),
             (bubble("cloud"), EditError::TextStyle),
             (outline("#000000", 1.0), EditError::TextStyle),
             (outline("black", 0.1), EditError::TextColor),

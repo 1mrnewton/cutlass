@@ -12,3 +12,7 @@ cutlass-encode = { path = "../../encode", version = "0.1.0" }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "against_ffmpeg"
+harness = false

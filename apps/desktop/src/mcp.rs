@@ -16,8 +16,7 @@ use std::rc::Rc;
 
 use cutlass_agent::{
     ApprovalAction, Approver, Catalog, DraftTools, Export, Forward, McpClient, McpError, McpServer,
-    McpTransport, Media, MediaInfo, Packages, Player, Registry, Sandbox, SandboxError,
-    SettingsTool, Speech, ToolSink,
+    McpTransport, Media, MediaInfo, Packages, Player, Registry, SettingsTool, Speech, ToolSink,
 };
 
 use crate::shell::{ExportRequest, Shell, ShellError};
@@ -73,7 +72,7 @@ pub fn serve(path: Option<&Path>, input: impl BufRead, output: impl Write) -> Re
         (
             Unbuilt(NOT_HERE),
             Headless(Rc::clone(&shell)),
-            NoSandbox,
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), Some(path)),
             Refuse,
             McpClient::new(NoServers),
         ),
@@ -246,16 +245,6 @@ impl Packages for Unbuilt {
 impl Export for Unbuilt {
     fn start(&mut self, _path: &str) -> Result<String, String> {
         Err(format!("export is {}", self.0))
-    }
-}
-
-pub(crate) struct NoSandbox;
-
-impl Sandbox for NoSandbox {
-    fn run(&mut self, _source: &str, _input_json: &str) -> Result<String, SandboxError> {
-        Err(SandboxError::Executor(
-            "no sandbox runner is installed".to_owned(),
-        ))
     }
 }
 

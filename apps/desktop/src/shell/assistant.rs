@@ -11,7 +11,7 @@ use cutlass_codec::CodecId;
 use cutlass_model::Micros;
 
 use super::{ExportRequest, Shell};
-use crate::mcp::{Bundled, NoSandbox, Probe, Unbuilt};
+use crate::mcp::{Bundled, Probe, Unbuilt};
 
 /// Where the tools this window does not hand the assistant yet are.
 const IN_THE_WINDOW: &str = "not open to the assistant yet; use the window for it";
@@ -138,6 +138,8 @@ impl Shell {
             .unwrap_or_else(|| (Shell::settings_path(), 0));
         let settings = SettingsTool::held(path, generation, self.settings.clone());
         let jobs = std::mem::take(&mut self.agent_speech_jobs);
+        let sandbox =
+            crate::sandbox::local_sandbox(crate::sandbox::this_program(), self.project_folder());
         let mut registry = Registry::new(
             DraftTools::new(session),
             settings,
@@ -148,7 +150,7 @@ impl Shell {
             (
                 Unbuilt(IN_THE_WINDOW),
                 Exports::default(),
-                NoSandbox,
+                sandbox,
                 Asked {
                     allowed,
                     wanted: None,

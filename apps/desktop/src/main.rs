@@ -3,9 +3,17 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let _opened = cutlass::boot(None);
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
+    if first.as_ref().is_some_and(|first| first == "sandbox") {
+        // One agent script, from `sandbox.run`: no log, no window, no
+        // project, only stdin and stdout.
+        return match cutlass::sandbox::serve() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
+    let _opened = cutlass::boot(None);
     if first.as_ref().is_some_and(|first| first == "mcp") {
         let path = args.next().map(std::path::PathBuf::from);
         return match cutlass::mcp::run(path.as_deref()) {

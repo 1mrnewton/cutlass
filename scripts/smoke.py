@@ -4,8 +4,8 @@ Usage: python3 scripts/smoke.py path/to/cutlass
 
 It points the Cutlass home at a temporary folder, makes a project with
 `cutlass new`, then drives it through `cutlass mcp` on stdio: it lists the
-tools, reads the draft, places a clip and checks the edit was saved and the
-lock let go. It runs the same on macOS, Windows and Linux.
+tools, reads the draft, places a clip, runs a sandbox script, and checks
+the edit was saved and the lock let go. It runs the same on macOS, Windows and Linux.
 """
 
 import json
@@ -52,6 +52,17 @@ def main() -> None:
                  "expected_revision": 0,
                  "requests": [{"op": "place", "track_id": "main", "segment": segment}],
              }}},
+            # The local sandbox: a Rhai script in a child process.
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+             "params": {"name": "sandbox_run", "arguments": {
+                 "source": "let t = 0; for c in input.clips { t += c } #{ total: t }",
+                 "input": {"clips": [1, 2, 3]},
+             }}},
+            # A script naming the project folder is refused before it runs.
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": "sandbox_run", "arguments": {
+                 "source": "1", "input": {"path": str(project)},
+             }}},
         ]
         served = subprocess.run(
             [binary, "mcp", project],
@@ -60,13 +71,17 @@ def main() -> None:
         )
         assert served.returncode == 0, served.stderr
         answers = [json.loads(line) for line in served.stdout.splitlines() if line.strip()]
-        assert len(answers) == 4, served.stdout
+        assert len(answers) == 6, served.stdout
         assert answers[0]["result"]["serverInfo"]["name"] == "cutlass", answers[0]
         assert len(answers[1]["result"]["tools"]) > 10, answers[1]
         read = answers[2]["result"]["content"][0]["text"]
         assert "revision=0" in read, read
         applied = answers[3]["result"]["content"][0]["text"]
         assert applied == "revision=1 committed=true", answers[3]
+        ran = answers[4]["result"]
+        assert not ran["isError"] and json.loads(ran["content"][0]["text"]) == {"total": 6}, ran
+        refused = answers[5]["result"]
+        assert refused["isError"] and "project" in refused["content"][0]["text"], refused
 
         draft = json.loads((project / "draft_info.json").read_text())
         placed = [segment["id"] for track in draft["tracks"] for segment in track["segments"]]

@@ -12,6 +12,7 @@ pub mod mcp;
 mod menu;
 pub mod menubar;
 mod readers;
+pub mod sandbox;
 
 #[cfg(test)]
 mod open_movie;

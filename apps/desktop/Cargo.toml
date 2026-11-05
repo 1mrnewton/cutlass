@@ -25,7 +25,7 @@ cutlass-engine = { path = "../../crates/engine", version = "0.1.0" }
 cutlass-transcription = { path = "../../crates/transcription", version = "0.1.0" }
 cutlass-font = { path = "../../crates/font", version = "0.1.0" }
 cutlass-icons = { path = "../../crates/icons", version = "0.1.0" }
-cutlass-agent = { path = "../../crates/agent", version = "0.1.0" }
+cutlass-agent = { path = "../../crates/agent", version = "0.1.0", features = ["script"] }
 cutlass-settings = { path = "../../crates/settings", version = "0.1.0" }
 cutlass-logger = { path = "../../crates/logger", version = "0.1.0" }
 cutlass-licenses = { path = "../../crates/licenses", version = "0.1.0" }
